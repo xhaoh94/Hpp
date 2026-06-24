@@ -13427,11 +13427,11 @@ function SettingsView() {
   }, []);
   const saveShortcuts = (s) => {
     setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters });
+    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
   };
   const saveFilters = (f) => {
     setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours } });
+    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents } });
   };
   const saveGeneral = () => {
     window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
