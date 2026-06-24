@@ -1,0 +1,255 @@
+.session-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.session-modal {
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  width: 520px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.session-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.session-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d4d4d4;
+}
+
+.session-modal-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.session-modal-close:hover {
+  color: #d4d4d4;
+}
+
+.session-modal-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #3c3c3c;
+  padding: 0 12px;
+}
+
+.session-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-size: 13px;
+  padding: 10px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.session-tab:hover {
+  color: #d4d4d4;
+}
+
+.session-tab.active {
+  color: #d4d4d4;
+  border-bottom-color: #0078d4;
+}
+
+.session-tab-count {
+  background: #3c3c3c;
+  color: #888;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.session-tab.active .session-tab-count {
+  background: #0078d4;
+  color: #fff;
+}
+
+.session-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.session-empty {
+  text-align: center;
+  color: #666;
+  font-size: 13px;
+  padding: 40px 16px;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: calc(200px + 100%) 0; }
+}
+
+.session-loading {
+  padding: 12px 16px;
+}
+
+.session-loading-item {
+  height: 48px;
+  background: linear-gradient(90deg, #2a2a2a 25%, #333 50%, #2a2a2a 75%);
+  background-size: 200px 100%;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.session-loading-item:last-child {
+  width: 60%;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.session-item {
+  padding: 10px 16px;
+  border-bottom: 1px solid #2d2d2d;
+  transition: background 0.1s;
+}
+
+.session-item:hover {
+  background: #2a2a2a;
+}
+
+.session-item:last-child {
+  border-bottom: none;
+}
+
+.session-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.session-time {
+  font-size: 12px;
+  color: #888;
+}
+
+.session-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.session-item:hover .session-actions {
+  opacity: 1;
+}
+
+.session-btn {
+  border: none;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.session-btn.resume {
+  background: #0078d4;
+  color: #fff;
+}
+
+.session-btn.resume:hover {
+  background: #106ebe;
+}
+
+.session-btn.delete {
+  background: #3c3c3c;
+  color: #ccc;
+}
+
+.session-btn.delete:hover {
+  background: #e04040;
+  color: #fff;
+}
+
+.session-preview {
+  font-size: 13px;
+  color: #aaa;
+  margin-top: 4px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-confirm-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 101;
+  border-radius: 8px;
+}
+
+.session-confirm {
+  background: #2d2d2d;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  padding: 20px;
+  width: 300px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.session-confirm-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d4d4d4;
+  margin-bottom: 4px;
+}
+
+.session-confirm-desc {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 16px;
+}
+
+.session-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.session-btn.cancel {
+  background: #3c3c3c;
+  color: #ccc;
+}
+
+.session-btn.cancel:hover {
+  background: #555;
+}
