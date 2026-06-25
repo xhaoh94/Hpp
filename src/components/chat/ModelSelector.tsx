@@ -19,7 +19,23 @@ export function ModelSelector() {
     window.electronAPI.agentGetModels().then((models) => {
       if (models && models.length > 0) {
         setAvailableModels(models);
-        if (!useChatStore.getState().currentModel) {
+        const currentState = useChatStore.getState();
+        const savedModel = currentState.currentModel;
+        
+        // Check if saved model is still available
+        if (savedModel) {
+          const isModelAvailable = models.some(
+            (m) => m.id === savedModel.id && m.provider === savedModel.provider
+          );
+          if (isModelAvailable) {
+            // Use saved model
+            setCurrentModel(savedModel);
+          } else {
+            // Saved model not available, use first model
+            setCurrentModel(models[0]);
+          }
+        } else {
+          // No saved model, use first model
           setCurrentModel(models[0]);
         }
       }

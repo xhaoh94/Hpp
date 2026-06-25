@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useProjectStore, type Project } from "@/stores/project-store";
-import { useChatStore, type ChatMessage } from "@/stores/chat-store";
+import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 
 interface PersistedData {
   projects: Project[];
@@ -10,6 +10,11 @@ interface PersistedData {
 
 interface PersistedMessages {
   sessionMessages: Record<string, ChatMessage[]>;
+}
+
+interface PersistedModel {
+  currentModel: ModelInfo | null;
+  thinkingLevel: string;
 }
 
 export function useDataPersistence() {
@@ -75,6 +80,36 @@ export function useDataPersistence() {
     const unsubscribe = useChatStore.subscribe((state) => {
       window.electronAPI.saveData("sessionMessages", {
         sessionMessages: state.sessionMessages,
+      });
+    });
+    return unsubscribe;
+  }, []);
+
+  // Load current model and thinking level on mount
+  useEffect(() => {
+    window.electronAPI.loadData("currentModel").then((data) => {
+      if (data && typeof data === "object" && "currentModel" in data) {
+        const d = data as PersistedModel;
+        const updates: Record<string, unknown> = {};
+        if (d.currentModel) {
+          updates.currentModel = d.currentModel;
+        }
+        if (d.thinkingLevel) {
+          updates.thinkingLevel = d.thinkingLevel;
+        }
+        if (Object.keys(updates).length > 0) {
+          useChatStore.setState(updates as any);
+        }
+      }
+    });
+  }, []);
+
+  // Save current model and thinking level when they change
+  useEffect(() => {
+    const unsubscribe = useChatStore.subscribe((state) => {
+      window.electronAPI.saveData("currentModel", {
+        currentModel: state.currentModel,
+        thinkingLevel: state.thinkingLevel,
       });
     });
     return unsubscribe;

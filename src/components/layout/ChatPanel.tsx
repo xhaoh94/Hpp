@@ -164,7 +164,23 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       const models = await window.electronAPI.agentGetModels();
       if (models && models.length > 0) {
         setAvailableModels(models);
-        if (!useChatStore.getState().currentModel) {
+        const currentState = useChatStore.getState();
+        const savedModel = currentState.currentModel;
+        
+        // Check if saved model is still available
+        if (savedModel) {
+          const isModelAvailable = models.some(
+            (m) => m.id === savedModel.id && m.provider === savedModel.provider
+          );
+          if (isModelAvailable) {
+            // Use saved model
+            setCurrentModel(savedModel);
+          } else {
+            // Saved model not available, use first model
+            setCurrentModel(models[0]);
+          }
+        } else {
+          // No saved model, use first model
           setCurrentModel(models[0]);
         }
         return;
@@ -181,7 +197,23 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         const parsed = parseModelJson(result.content);
         if (parsed.length > 0) {
           setAvailableModels(parsed);
-          if (!useChatStore.getState().currentModel) {
+          const currentState = useChatStore.getState();
+          const savedModel = currentState.currentModel;
+          
+          // Check if saved model is still available
+          if (savedModel) {
+            const isModelAvailable = parsed.some(
+              (m) => m.id === savedModel.id && m.provider === savedModel.provider
+            );
+            if (isModelAvailable) {
+              // Use saved model
+              setCurrentModel(savedModel);
+            } else {
+              // Saved model not available, use first model
+              setCurrentModel(parsed[0]);
+            }
+          } else {
+            // No saved model, use first model
             setCurrentModel(parsed[0]);
           }
         }
@@ -612,7 +644,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                     >
                       <span className="chat-user-history-text">{msg.content}</span>
                       <span className="chat-user-history-time">
-                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        {(() => {
+                          const d = new Date(msg.timestamp);
+                          const now = new Date();
+                          const isToday = d.toDateString() === now.toDateString();
+                          const time = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+                          if (isToday) return time;
+                          const mm = String(d.getMonth() + 1).padStart(2, "0");
+                          const dd = String(d.getDate()).padStart(2, "0");
+                          return `${mm}/${dd} ${time}`;
+                        })()}
                       </span>
                     </div>
                   ))}

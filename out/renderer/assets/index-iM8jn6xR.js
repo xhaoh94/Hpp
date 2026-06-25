@@ -13881,7 +13881,18 @@ function ChatPanel({ sendKey = "Enter" }) {
       const models = await window.electronAPI.agentGetModels();
       if (models && models.length > 0) {
         setAvailableModels(models);
-        if (!useChatStore.getState().currentModel) {
+        const currentState = useChatStore.getState();
+        const savedModel = currentState.currentModel;
+        if (savedModel) {
+          const isModelAvailable = models.some(
+            (m) => m.id === savedModel.id && m.provider === savedModel.provider
+          );
+          if (isModelAvailable) {
+            setCurrentModel(savedModel);
+          } else {
+            setCurrentModel(models[0]);
+          }
+        } else {
           setCurrentModel(models[0]);
         }
         return;
@@ -13895,7 +13906,18 @@ function ChatPanel({ sendKey = "Enter" }) {
         const parsed = parseModelJson(result.content);
         if (parsed.length > 0) {
           setAvailableModels(parsed);
-          if (!useChatStore.getState().currentModel) {
+          const currentState = useChatStore.getState();
+          const savedModel = currentState.currentModel;
+          if (savedModel) {
+            const isModelAvailable = parsed.some(
+              (m) => m.id === savedModel.id && m.provider === savedModel.provider
+            );
+            if (isModelAvailable) {
+              setCurrentModel(savedModel);
+            } else {
+              setCurrentModel(parsed[0]);
+            }
+          } else {
             setCurrentModel(parsed[0]);
           }
         }
@@ -14266,7 +14288,16 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
               onClick: () => scrollToMessage(msg.id),
               children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-user-history-text", children: msg.content }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-user-history-time", children: new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-user-history-time", children: (() => {
+                  const d = new Date(msg.timestamp);
+                  const now = /* @__PURE__ */ new Date();
+                  const isToday = d.toDateString() === now.toDateString();
+                  const time = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+                  if (isToday) return time;
+                  const mm = String(d.getMonth() + 1).padStart(2, "0");
+                  const dd = String(d.getDate()).padStart(2, "0");
+                  return `${mm}/${dd} ${time}`;
+                })() })
               ]
             },
             msg.id
@@ -14839,6 +14870,32 @@ function useDataPersistence() {
     const unsubscribe = useChatStore.subscribe((state) => {
       window.electronAPI.saveData("sessionMessages", {
         sessionMessages: state.sessionMessages
+      });
+    });
+    return unsubscribe;
+  }, []);
+  reactExports.useEffect(() => {
+    window.electronAPI.loadData("currentModel").then((data) => {
+      if (data && typeof data === "object" && "currentModel" in data) {
+        const d = data;
+        const updates = {};
+        if (d.currentModel) {
+          updates.currentModel = d.currentModel;
+        }
+        if (d.thinkingLevel) {
+          updates.thinkingLevel = d.thinkingLevel;
+        }
+        if (Object.keys(updates).length > 0) {
+          useChatStore.setState(updates);
+        }
+      }
+    });
+  }, []);
+  reactExports.useEffect(() => {
+    const unsubscribe = useChatStore.subscribe((state) => {
+      window.electronAPI.saveData("currentModel", {
+        currentModel: state.currentModel,
+        thinkingLevel: state.thinkingLevel
       });
     });
     return unsubscribe;
