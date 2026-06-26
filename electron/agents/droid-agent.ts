@@ -319,7 +319,14 @@ export class DroidAgent {
         // thinking done, no action needed
         break;
       case "tool_progress_update":
-        this.emitEvent({ type: "tool_start", toolName: notifData?.toolName || notifData?.name || "tool" });
+        this.emitEvent({
+          type: "tool_start",
+          toolName: notifData?.toolName || notifData?.name || "tool",
+          toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
+          args: notifData?.args || notifData?.input,
+          result: notifData?.result,
+          detail: notifData?.message || notifData?.status,
+        });
         // Extract diff/patch data if present in tool result
         if (notifData?.result?.details?.patch || notifData?.diff || notifData?.patch) {
           const patch = notifData.result?.details?.patch || notifData.patch || notifData.diff;

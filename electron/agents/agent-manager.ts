@@ -38,6 +38,8 @@ class PiAgent {
   private _sessionFilePath: string | null = null;
   private eventQueue: Array<{ type: string; data: unknown }> = [];
   private eventTimer: ReturnType<typeof setTimeout> | null = null;
+  private streamedText = false;
+  private pendingAssistantText = "";
 
   setWindow(win: BrowserWindow) {
     this.window = win;
@@ -223,12 +225,17 @@ class PiAgent {
     }
     switch (data.type) {
       case "agent_start":
+        this.streamedText = false;
+        this.pendingAssistantText = "";
         this.emitEvent({ type: "stream_start", role: "assistant" });
         break;
       case "message_update": {
         const aev = data.assistantMessageEvent;
         if (aev) {
-          if (aev.type === "text_delta") this.emitEventThrottled({ type: "stream_delta", delta: aev.delta });
+          if (aev.type === "text_delta") {
+            if (aev.delta) this.streamedText = true;
+            this.emitEventThrottled({ type: "stream_delta", delta: aev.delta });
+          }
           else if (aev.type === "thinking_delta") this.emitEventThrottled({ type: "thinking_delta", delta: aev.delta });
         }
         break;
@@ -236,13 +243,7 @@ class PiAgent {
       case "message_end":
         if (data.message?.role === "assistant") {
           const textParts = (data.message.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
-          // Flush any remaining queued streaming events before sending stream_end
-          while (this.eventQueue.length > 0) {
-            const item = this.eventQueue.shift()!;
-            this.window?.webContents.send("agent:event", item);
-          }
-          if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
-          this.emitEvent({ type: "stream_end", content: textParts });
+          if (textParts) this.pendingAssistantText = textParts;
         }
         break;
       case "agent_end":
@@ -252,13 +253,19 @@ class PiAgent {
           this.window?.webContents.send("agent:event", item);
         }
         if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+        if (!this.streamedText && this.pendingAssistantText) {
+          this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
+          this.streamedText = true;
+        }
+        this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
         this.emitEvent({ type: "agent_end" });
+        this.pendingAssistantText = "";
         break;
       case "tool_execution_start":
-        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId });
+        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: data.args });
         break;
       case "tool_execution_end":
-        this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError });
+        this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError, args: data.args, result: data.result, error: data.error });
         // Extract diff/patch data from tool result (edit tool provides details.patch and details.diff)
         if (data.result?.details?.patch) {
           const filePath = data.args?.filePath || data.args?.path || data.args?.file || "";

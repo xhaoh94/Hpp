@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { flushSync } from "react-dom";
-import { useChatStore, type ModelInfo, type FileDiff } from "@/stores/chat-store";
+import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName } from "@/lib/agents";
@@ -9,22 +9,236 @@ import "./ChatPanel.css";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 
-function PersistedThinkingBlock({ thinkingContent }: { thinkingContent: string }) {
-  const [expanded, setExpanded] = useState(false);
+const formatProcessDuration = (ms: number) => {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes > 0) return `${minutes}m ${rest}s`;
+  return `${rest}s`;
+};
+
+const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
+  if (entries.length === 0) return "等待事件";
+
+  const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "error").length;
+  const diffCount = entries.filter((entry) => entry.type === "diff").length;
+  const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
+
+  if (toolCount > 0 && diffCount > 0) return `${toolCount} 条命令, ${diffCount} 个文件变更`;
+  if (toolCount > 0) return `已运行 ${toolCount} 条命令`;
+  if (diffCount > 0) return `已编辑 ${diffCount} 个文件`;
+  if (isThinking) return "正在思考";
+
+  return `${entries.length} 条事件`;
+};
+
+const createProcessEntryId = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `process-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
+const stringifyProcessValue = (value: unknown) => {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") return value;
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const truncateProcessDetail = (value: string) => {
+  const maxLength = 1200;
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
+};
+
+const getToolKey = (event: any) => {
+  const raw = event.toolCallId || event.callId || event.id || event.toolName || event.name || "tool";
+  return String(raw);
+};
+
+const getToolName = (event: any) => {
+  return event.toolName || event.name || event.tool || "tool";
+};
+
+const getToolDetail = (event: any) => {
+  const lines: string[] = [];
+  const args = event.args || event.input || event.parameters;
+  const result = event.result || event.output;
+  const error = event.error || event.message;
+
+  if (args !== undefined) lines.push(`参数: ${stringifyProcessValue(args)}`);
+  if (result !== undefined) lines.push(`结果: ${stringifyProcessValue(result)}`);
+  if (event.isError && error) lines.push(`错误: ${stringifyProcessValue(error)}`);
+  if (!event.isError && event.detail) lines.push(stringifyProcessValue(event.detail));
+
+  return truncateProcessDetail(lines.filter(Boolean).join("\n"));
+};
+
+const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["type"] => {
+  if (value === "status" || value === "tool" || value === "diff" || value === "error" || value === "info" || value === "thinking") {
+    return value;
+  }
+  return "status";
+};
+
+const normalizeProcessEntryState = (value: unknown): AgentProcessEntry["state"] | undefined => {
+  if (value === "running" || value === "completed" || value === "error") return value;
+  return undefined;
+};
+
+function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; state?: AgentProcessEntry["state"] }) {
+  if (state === "running") {
+    return <span className="chat-process-entry-spinner" />;
+  }
+
+  if (type === "tool") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M8 9l3 3-3 3" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M13 15h4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (type === "diff") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" />
+        <path d="M14 2v5h5" />
+        <path d="M9 13h6M12 10v6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (type === "thinking") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M12 3a6 6 0 0 1 4 10.47V16a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.53A6 6 0 0 1 12 3z" />
+        <path d="M10 21h4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (type === "error" || state === "error") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5M12 16h.01" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
   return (
-    <div className="chat-thinking">
-      <button className="chat-thinking-toggle" onClick={() => setExpanded(!expanded)}>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v4l3 2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ProcessEntryRow({
+  messageId,
+  entry,
+  onToggleEntry,
+}: {
+  messageId: string;
+  entry: AgentProcessEntry;
+  onToggleEntry: (messageId: string, entryId: string) => void;
+}) {
+  const hasDetail = !!entry.detail;
+  const canExpand = hasDetail && entry.type !== "thinking";
+  const detailVisible = hasDetail && (!canExpand || entry.expanded);
+
+  return (
+    <div className={`chat-process-entry ${entry.state || ""} ${entry.type}`}>
+      <span className="chat-process-entry-icon">
+        <ProcessEntryIcon type={entry.type} state={entry.state} />
+      </span>
+      <div className="chat-process-entry-main">
+        <button
+          className={`chat-process-entry-header ${canExpand ? "expandable" : ""}`}
+          onClick={canExpand ? () => onToggleEntry(messageId, entry.id) : undefined}
+          disabled={!canExpand}
+        >
+          <span className="chat-process-entry-title">{entry.title}</span>
+          {canExpand && (
+            <svg
+              className="chat-process-entry-chevron"
+              width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+              style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
+            >
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          )}
+        </button>
+        {detailVisible && (
+          <pre className={`chat-process-entry-detail ${canExpand ? "panel" : ""}`}>{entry.detail}</pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProcessBlock({
+  messageId,
+  process,
+  onToggle,
+  onToggleEntry,
+}: {
+  messageId: string;
+  process: AgentProcess;
+  onToggle: (messageId: string) => void;
+  onToggleEntry: (messageId: string, entryId: string) => void;
+}) {
+  const nowTick = useProcessTicker(!process.endedAt);
+  const durationEnd = process.endedAt || nowTick;
+  const elapsed = formatProcessDuration(durationEnd - process.startedAt);
+  const expanded = !!process.expanded;
+
+  return (
+    <div className="chat-process">
+      <button className="chat-process-toggle" onClick={() => onToggle(messageId)}>
+        <span>已处理 {elapsed}</span>
+        <span className="chat-process-summary">{summarizeProcessEntries(process.entries)}</span>
         <svg
-          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
           style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
         >
           <path d="M9 18l6-6-6-6" />
         </svg>
-        <span>Thought</span>
       </button>
-      {expanded && <div className="chat-thinking-content">{thinkingContent}</div>}
+      {expanded && (
+        <div className="chat-process-content">
+          {process.entries.length === 0 ? (
+            <div className="chat-process-empty">等待 agent 事件...</div>
+          ) : process.entries.map((entry) => (
+            <ProcessEntryRow
+              key={entry.id}
+              messageId={messageId}
+              entry={entry}
+              onToggleEntry={onToggleEntry}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+function useProcessTicker(enabled: boolean) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+
+  return now;
 }
 
 function DiffBlock({ diffs }: { diffs: FileDiff[] }) {
@@ -102,8 +316,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     removePendingFile,
     clearPendingFiles,
     loadSessionMessages,
-    updateLastAssistantThinking,
     sessionMessages,
+    toggleAssistantProcess,
+    toggleAssistantProcessEntry,
   } = useChatStore();
 
   const { activeProjectId, projects, activeSessionId, agentStatuses, markSessionInitialized, isSessionInitialized } = useProjectStore();
@@ -113,12 +328,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
 
   const [input, setInput] = useState("");
-  const [thinkingContent, setThinkingContent] = useState("");
-  const [thinkingExpanded, setThinkingExpanded] = useState(true);
-  const [thinkingElapsed, setThinkingElapsed] = useState(0);
-  const thinkingStartTimeRef = useRef<number>(0);
-  const thinkingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [activeTool, setActiveTool] = useState<string | null>(null);
   const [modelOpen, setModelOpen] = useState(false);
   const [pendingImages, setPendingImages] = useState<{ id: string; src: string; name: string; file: File }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -133,7 +342,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const thinkingRef = useRef<HTMLDivElement>(null);
   const modelFetchRunIdRef = useRef(0);
   const streamBufferRef = useRef("");
+  const preFinalStreamBufferRef = useRef("");
   const thinkingBufferRef = useRef("");
+  const thinkingEntryIdRef = useRef<string | null>(null);
+  const processActiveRef = useRef(false);
+  const activeToolEntryRef = useRef<Record<string, string>>({});
   const isUserScrollingRef = useRef(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -287,7 +500,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (atBottom) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages, thinkingContent, activeTool]);
+  }, [messages]);
 
   // Instant scroll to bottom on session switch (no animation)
   // Also scroll when session initializes (messages become visible in DOM)
@@ -309,87 +522,193 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   // Subscribe to agent events
   useEffect(() => {
+    const appendProcessEntry = (entry: Omit<AgentProcessEntry, "id" | "timestamp"> & { id?: string; timestamp?: number }) => {
+      if (!processActiveRef.current) return;
+      useChatStore.getState().appendLastAssistantProcessEntry({
+        id: entry.id || createProcessEntryId(),
+        timestamp: entry.timestamp || Date.now(),
+        type: entry.type,
+        title: entry.title,
+        detail: entry.detail,
+        state: entry.state,
+        expanded: entry.expanded,
+      });
+    };
+
+    const finishThinkingEntry = () => {
+      if (!thinkingEntryIdRef.current) return;
+      useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+        state: "completed",
+      });
+      thinkingEntryIdRef.current = null;
+    };
+
     const unsubscribe = window.electronAPI.onAgentEvent((event: any) => {
       // Always read from store to avoid stale closure (useEffect deps=[])
       const currentSessionId = useProjectStore.getState().activeSessionId;
       switch (event.type) {
+        case "message_start":
+          processActiveRef.current = true;
+          appendProcessEntry({
+            type: "status",
+            title: "发送用户消息",
+            detail: event.content ? truncateProcessDetail(String(event.content)) : undefined,
+            state: "completed",
+          });
+          break;
         case "stream_start":
           flushSync(() => {
             streamBufferRef.current = "";
-            // Don't clear thinking content here - thinking_delta events arrive AFTER stream_start
-            // Thinking is cleared in handleSend when user sends a new message
-            setThinkingExpanded(true);
-            setThinkingElapsed(0);
-            thinkingStartTimeRef.current = 0;
-            if (thinkingTimerRef.current) { clearInterval(thinkingTimerRef.current); thinkingTimerRef.current = null; }
-            setActiveTool(null);
+            preFinalStreamBufferRef.current = "";
+            thinkingBufferRef.current = "";
+            thinkingEntryIdRef.current = null;
             setStreaming(true);
+            processActiveRef.current = true;
+            activeToolEntryRef.current = {};
+            useChatStore.getState().startAssistantProcess(Date.now());
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
-          // Don't create assistant message here - wait for first stream_delta
+          appendProcessEntry({ type: "status", title: "Agent 开始处理", state: "running" });
           break;
         case "stream_delta":
-          // Create assistant message on first text delta (not during thinking)
-          if (!streamBufferRef.current) {
-            flushSync(() => {
-              // Auto-collapse thinking when output starts
-              setThinkingExpanded(false);
-              addMessage({
-                id: crypto.randomUUID(),
-                role: "assistant",
-                content: "",
-                timestamp: Date.now(),
-                isStreaming: true,
-              });
-            });
-          }
-          streamBufferRef.current += event.delta;
-          useChatStore.getState().updateLastAssistant(streamBufferRef.current);
+          if (!event.delta) break;
+          preFinalStreamBufferRef.current += event.delta;
           break;
         case "thinking_delta":
           thinkingBufferRef.current += event.delta;
-          flushSync(() => {
-            setThinkingContent(thinkingBufferRef.current);
-          });
-          // Start timer on first thinking delta
-          if (!thinkingStartTimeRef.current) {
-            thinkingStartTimeRef.current = Date.now();
-            thinkingTimerRef.current = setInterval(() => {
-              setThinkingElapsed(Math.floor((Date.now() - thinkingStartTimeRef.current) / 1000));
-            }, 1000);
+          if (thinkingEntryIdRef.current) {
+            useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+              detail: thinkingBufferRef.current,
+              state: "running",
+            });
+          } else {
+            const entryId = createProcessEntryId();
+            thinkingEntryIdRef.current = entryId;
+            appendProcessEntry({
+              id: entryId,
+              type: "thinking",
+              title: "思考",
+              detail: thinkingBufferRef.current,
+              state: "running",
+            });
           }
           break;
         case "stream_end":
-        case "agent_end":
-        case "agent_disconnected":
-          if (thinkingTimerRef.current) { clearInterval(thinkingTimerRef.current); thinkingTimerRef.current = null; }
-          // Attach thinking content to the last assistant message for persistence
-          if (thinkingBufferRef.current) {
-            useChatStore.getState().updateLastAssistantThinking(thinkingBufferRef.current);
+          {
+            const eventContent = event.content ? String(event.content) : "";
+            const finalContent = eventContent || preFinalStreamBufferRef.current || streamBufferRef.current;
+            if (finalContent.trim().length > 0) {
+              streamBufferRef.current = finalContent;
+              useChatStore.getState().updateLastAssistant(finalContent);
+              useChatStore.getState().collapseLastAssistantProcess();
+            }
+            finishThinkingEntry();
           }
-          setActiveTool(null);
           setStreaming(false);
+          useChatStore.getState().finishLastAssistantProcess(Date.now());
+          processActiveRef.current = false;
+          activeToolEntryRef.current = {};
+          thinkingEntryIdRef.current = null;
+          if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "completed");
+          break;
+        case "agent_end":
+          // Some backends can emit agent_end before the assistant stream is
+          // actually complete. stream_end is the UI completion signal.
+          break;
+        case "agent_disconnected":
+          finishThinkingEntry();
+          setStreaming(false);
+          useChatStore.getState().finishLastAssistantProcess(Date.now());
+          processActiveRef.current = false;
+          activeToolEntryRef.current = {};
+          thinkingEntryIdRef.current = null;
           if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "completed");
           break;
         case "tool_start":
-          setActiveTool(event.toolName || "tool");
+          {
+            const toolName = getToolName(event);
+            const key = getToolKey(event);
+            const existingEntryId = activeToolEntryRef.current[key];
+            if (existingEntryId) {
+              useChatStore.getState().updateLastAssistantProcessEntry(existingEntryId, {
+                title: `运行 ${toolName}`,
+                detail: getToolDetail(event) || undefined,
+                state: "running",
+                expanded: true,
+              });
+            } else {
+              const entryId = createProcessEntryId();
+              activeToolEntryRef.current[key] = entryId;
+              appendProcessEntry({
+                id: entryId,
+                type: "tool",
+                title: `运行 ${toolName}`,
+                detail: getToolDetail(event) || undefined,
+                state: "running",
+                expanded: true,
+              });
+            }
+          }
           break;
         case "tool_end":
-          setActiveTool(null);
+          {
+            const key = getToolKey(event);
+            const entryId = activeToolEntryRef.current[key];
+            const toolName = getToolName(event);
+            const patch = {
+              title: `${event.isError ? "运行失败" : "已运行"} ${toolName}`,
+              detail: getToolDetail(event) || undefined,
+              state: event.isError ? "error" : "completed",
+              type: event.isError ? "error" : "tool",
+              expanded: !!event.isError,
+            } satisfies Partial<Omit<AgentProcessEntry, "id">>;
+
+            if (entryId) {
+              useChatStore.getState().updateLastAssistantProcessEntry(entryId, patch);
+              delete activeToolEntryRef.current[key];
+            } else {
+              appendProcessEntry({
+                type: event.isError ? "error" : "tool",
+                title: patch.title || `已运行 ${toolName}`,
+                detail: patch.detail,
+                state: patch.state,
+                expanded: patch.expanded,
+              });
+            }
+          }
           break;
         case "diff_update":
           if (event.diffs && event.diffs.length > 0) {
             useChatStore.getState().appendLastAssistantDiffs(event.diffs);
+            appendProcessEntry({
+              type: "diff",
+              title: `产生 ${event.diffs.length} 个文件变更`,
+              detail: event.diffs.map((diff: FileDiff) => diff.file).join("\n"),
+              state: "completed",
+              expanded: false,
+            });
           }
           break;
+        case "process_event":
+          appendProcessEntry({
+            type: normalizeProcessEntryType(event.entryType || event.kind),
+            title: String(event.title || "Agent 事件"),
+            detail: event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined,
+            state: normalizeProcessEntryState(event.state),
+          });
+          break;
         case "agent_ready":
+          appendProcessEntry({
+            type: "status",
+            title: `${getAgentName(String(event.agentId || activeAgentId))} 已就绪`,
+            state: "completed",
+          });
           // Models are fetched by the useEffect watching activeSessionId
           break;
       }
     });
     return () => {
       unsubscribe();
-      if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current);
     };
   }, []);
 
@@ -456,13 +775,15 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       setPendingImages([]);
       clearPendingFiles();
       setStreaming(true);
-      // Clear thinking from previous response
       thinkingBufferRef.current = "";
-      setThinkingContent("");
+      thinkingEntryIdRef.current = null;
     });
 
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages);
     if (!result.success) {
+      useChatStore.getState().finishLastAssistantProcess(Date.now());
+      processActiveRef.current = false;
+      setStreaming(false);
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
@@ -499,9 +820,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   const handleAbort = async () => {
     await window.electronAPI.agentAbort();
+    useChatStore.getState().finishLastAssistantProcess(Date.now());
+    processActiveRef.current = false;
+    activeToolEntryRef.current = {};
+    thinkingEntryIdRef.current = null;
     setStreaming(false);
-    setThinkingContent("");
-    setActiveTool(null);
   };
 
   // Image handling
@@ -737,59 +1060,30 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             <span>Agent 正在启动...</span>
           </div>
         ) : (<>
-        {messages.length === 0 && !thinkingContent && (
+        {messages.length === 0 && (
           <div className="chat-empty">发送消息开始对话</div>
         )}
-        {isStreaming && thinkingContent && messages.length === 0 && (
-          <div className="chat-thinking">
-            <button
-              className="chat-thinking-toggle"
-              onClick={() => setThinkingExpanded(!thinkingExpanded)}
-            >
-              <svg
-                width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                style={{ transform: thinkingExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
-              >
-                <path d="M9 18l6-6-6-6" />
-              </svg>
-              <span>Thought {thinkingElapsed}s</span>
-            </button>
-            {thinkingExpanded && (
-              <div className="chat-thinking-content">{thinkingContent}</div>
-            )}
-          </div>
-        )}
-        {messages.map((msg, idx) => {
-          const isLastMsg = idx === messages.length - 1;
-          const showLiveThinking = isLastMsg && (msg.role === "assistant" || msg.role === "user") && thinkingContent;
-          const showPersistedThinking = msg.role === "assistant" && msg.thinkingContent && !showLiveThinking;
+        {messages.map((msg) => {
+          const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
+          const hasImages = !!msg.images?.length;
+          const hasDiffs = !!msg.diffs?.length && !processRunning;
+          const hasContent = msg.content.trim().length > 0;
+          const hasVisibleBubble =
+            msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
+
           return (
             <div key={msg.id} data-msg-id={msg.id} className="chat-msg-wrapper">
-              {showPersistedThinking && (
-                <PersistedThinkingBlock thinkingContent={msg.thinkingContent} />
+              {msg.role === "assistant" && msg.process && (
+                <ProcessBlock
+                  messageId={msg.id}
+                  process={msg.process}
+                  onToggle={toggleAssistantProcess}
+                  onToggleEntry={toggleAssistantProcessEntry}
+                />
               )}
-              {/* Live thinking: ABOVE assistant bubble, BELOW user bubble */}
-              {showLiveThinking && msg.role === "assistant" && (
-                <div className="chat-thinking">
-                  <button
-                    className="chat-thinking-toggle"
-                    onClick={() => setThinkingExpanded(!thinkingExpanded)}
-                  >
-                    <svg
-                      width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                      style={{ transform: thinkingExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
-                    >
-                      <path d="M9 18l6-6-6-6" />
-                    </svg>
-                    <span>Thought {thinkingElapsed}s</span>
-                  </button>
-                  {thinkingExpanded && (
-                    <div className="chat-thinking-content">{thinkingContent}</div>
-                  )}
-                </div>
-              )}
+              {hasVisibleBubble && (
               <div className={`chat-msg ${msg.role}`}>
-                {msg.images && msg.images.length > 0 && (
+                {hasImages && msg.images && (
                   <div className="chat-images">
                     {msg.images.map((img) => (
                       <img
@@ -802,11 +1096,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                     ))}
                   </div>
                 )}
-                <div className="chat-bubble-row">
-                  {msg.content && (
+                {hasContent && (
+                  <div className="chat-bubble-row">
                     <div className={`chat-bubble ${msg.role}`}>{msg.content}</div>
-                  )}
-                  {msg.role === "user" && (
+                    {msg.role === "user" && (
                     <button
                       className="chat-copy-btn"
                       onClick={() => navigator.clipboard.writeText(msg.content)}
@@ -817,47 +1110,22 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                         <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                       </svg>
                     </button>
-                  )}
-                </div>
-                {msg.diffs && msg.diffs.length > 0 && (
+                    )}
+                  </div>
+                )}
+                {hasDiffs && msg.diffs && (
                   <DiffBlock diffs={msg.diffs} />
                 )}
               </div>
-              {/* Live thinking: BELOW user bubble */}
-              {showLiveThinking && msg.role === "user" && (
-                <div className="chat-thinking">
-                  <button
-                    className="chat-thinking-toggle"
-                    onClick={() => setThinkingExpanded(!thinkingExpanded)}
-                  >
-                    <svg
-                      width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                      style={{ transform: thinkingExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
-                    >
-                      <path d="M9 18l6-6-6-6" />
-                    </svg>
-                    <span>Thought {thinkingElapsed}s</span>
-                  </button>
-                  {thinkingExpanded && (
-                    <div className="chat-thinking-content">{thinkingContent}</div>
-                  )}
-                </div>
               )}
             </div>
           );
         })}
 
-        {/* Working indicator: shown during gap between user message and thinking start */}
-        {isStreaming && !thinkingContent && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+        {isStreaming && messages.length > 0 && messages[messages.length - 1].role === "user" && (
           <div className="chat-working">
             <div className="chat-working-spinner" />
             <span>working...</span>
-          </div>
-        )}
-        {isStreaming && activeTool && (
-          <div className="chat-tool">
-            <div className="chat-tool-spinner" />
-            <span className="chat-tool-name">正在执行: {activeTool}</span>
           </div>
         )}
         </>)}

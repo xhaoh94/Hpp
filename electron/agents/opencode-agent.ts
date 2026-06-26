@@ -9,6 +9,49 @@ interface AgentModel {
   reasoning: boolean;
 }
 
+function formatProcessDetail(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "string") return value;
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function summarizeToolPart(props: any) {
+  const part = props.part || props;
+  const toolName =
+    part.tool || part.toolName || part.name || part.type || props.tool || props.toolName || "tool";
+  const toolCallId = part.id || part.callID || part.callId || props.partID || props.partId || props.id || toolName;
+  const args = part.input || part.args || props.input || props.args;
+  const output = part.output || part.result || props.output || props.result;
+  const error = part.error || props.error;
+
+  return {
+    toolName,
+    toolCallId: String(toolCallId),
+    detail: formatProcessDetail(error ? { args, error } : output !== undefined ? { args, output } : args),
+    isError: !!error,
+  };
+}
+
+function isToolPartComplete(props: any) {
+  const part = props.part || props;
+  const state = part.state?.status || part.state || part.status || props.status;
+  const normalizedState = typeof state === "string" ? state.toLowerCase() : "";
+  return (
+    part.output !== undefined ||
+    part.result !== undefined ||
+    part.error !== undefined ||
+    props.output !== undefined ||
+    props.result !== undefined ||
+    props.error !== undefined ||
+    ["done", "completed", "complete", "success", "error", "failed"].includes(normalizedState)
+  );
+}
+
 // ============================================================
 // OpenCode Agent - communicates with opencode serve via HTTP/SSE
 // ============================================================
@@ -26,6 +69,8 @@ export class OpenCodeAgent {
   private eventBuffer = "";
   private streamedContent = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private runningToolParts = new Set<string>();
+  private completedToolParts = new Set<string>();
 
   setWindow(win: BrowserWindow) {
     this.window = win;
@@ -164,6 +209,8 @@ export class OpenCodeAgent {
     this.stopSSEListener();
     this.eventBuffer = "";
     this.streamedContent = false;
+    this.runningToolParts.clear();
+    this.completedToolParts.clear();
 
     const req = http.get(
       `http://${this.host}:${this.port}/event`,
@@ -205,6 +252,63 @@ export class OpenCodeAgent {
     const props = data.properties || data;
 
     switch (eventType) {
+      case "message.part.added":
+      case "message.part.updated": {
+        const partType = props.part?.type || props.type;
+        if (partType && String(partType).startsWith("tool")) {
+          const tool = summarizeToolPart(props);
+          if (this.completedToolParts.has(tool.toolCallId)) break;
+
+          if (!this.runningToolParts.has(tool.toolCallId)) {
+            this.runningToolParts.add(tool.toolCallId);
+            this.emitEvent({
+              type: "tool_start",
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              detail: tool.detail,
+            });
+          } else if (tool.detail) {
+            this.emitEvent({
+              type: "tool_start",
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              detail: tool.detail,
+            });
+          }
+
+          if (isToolPartComplete(props)) {
+            this.emitEvent({
+              type: "tool_end",
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              detail: tool.detail,
+              isError: tool.isError,
+            });
+            this.runningToolParts.delete(tool.toolCallId);
+            this.completedToolParts.add(tool.toolCallId);
+          }
+        }
+        break;
+      }
+      case "message.part.done":
+      case "message.part.removed": {
+        const partType = props.part?.type || props.type;
+        if (partType && String(partType).startsWith("tool")) {
+          const tool = summarizeToolPart(props);
+          if (this.completedToolParts.has(tool.toolCallId)) break;
+
+          this.emitEvent({
+            type: "tool_end",
+            toolName: tool.toolName,
+            toolCallId: tool.toolCallId,
+            detail: tool.detail,
+            isError: tool.isError,
+          });
+          this.runningToolParts.delete(tool.toolCallId);
+          this.completedToolParts.add(tool.toolCallId);
+        }
+        break;
+      }
       case "message.part.delta": {
         // Cancel any pending idle - main agent may still be processing
         this.cancelIdleTimer();
@@ -220,9 +324,21 @@ export class OpenCodeAgent {
       case "session.status": {
         const statusType = props.status?.type || props.status;
         if (statusType === "busy") {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "status",
+            title: "OpenCode 正在处理",
+            state: "running",
+          });
           // Session is busy - cancel any pending idle timer (sub-agent done but main agent continues)
           this.cancelIdleTimer();
         } else if (statusType === "idle") {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "status",
+            title: "OpenCode 处理完成",
+            state: "completed",
+          });
           // Session is truly idle - schedule stream end with a small delay
           // to catch any trailing message.part.delta events
           this.scheduleIdleEnd();
@@ -232,6 +348,13 @@ export class OpenCodeAgent {
       case "session.error": {
         this.cancelIdleTimer();
         const err = props.error;
+        this.emitEvent({
+          type: "process_event",
+          entryType: "error",
+          title: "OpenCode 错误",
+          detail: err?.data?.message || err?.message || "OpenCode request failed",
+          state: "error",
+        });
         const msg = err?.data?.message || err?.message || "未知错误";
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${msg}` });
         this.emitEvent({ type: "stream_end" });
@@ -247,6 +370,12 @@ export class OpenCodeAgent {
         break;
       }
       case "session.idle": {
+        this.emitEvent({
+          type: "process_event",
+          entryType: "status",
+          title: "OpenCode 空闲",
+          state: "completed",
+        });
         // Don't end immediately - sub-agent may have finished but main agent continues
         // Schedule a delayed end; if session.status becomes "busy" again, the timer is cancelled
         this.scheduleIdleEnd();

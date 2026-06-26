@@ -156,6 +156,35 @@ function registerStoreHandlers() {
     }
   );
 }
+function formatProcessDetail(value) {
+  if (value === void 0 || value === null || value === "") return void 0;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+function summarizeToolPart(props) {
+  const part = props.part || props;
+  const toolName = part.tool || part.toolName || part.name || part.type || props.tool || props.toolName || "tool";
+  const toolCallId = part.id || part.callID || part.callId || props.partID || props.partId || props.id || toolName;
+  const args = part.input || part.args || props.input || props.args;
+  const output = part.output || part.result || props.output || props.result;
+  const error = part.error || props.error;
+  return {
+    toolName,
+    toolCallId: String(toolCallId),
+    detail: formatProcessDetail(error ? { args, error } : output !== void 0 ? { args, output } : args),
+    isError: !!error
+  };
+}
+function isToolPartComplete(props) {
+  const part = props.part || props;
+  const state = part.state?.status || part.state || part.status || props.status;
+  const normalizedState = typeof state === "string" ? state.toLowerCase() : "";
+  return part.output !== void 0 || part.result !== void 0 || part.error !== void 0 || props.output !== void 0 || props.result !== void 0 || props.error !== void 0 || ["done", "completed", "complete", "success", "error", "failed"].includes(normalizedState);
+}
 class OpenCodeAgent {
   process = null;
   window = null;
@@ -170,6 +199,8 @@ class OpenCodeAgent {
   eventBuffer = "";
   streamedContent = false;
   idleTimer = null;
+  runningToolParts = /* @__PURE__ */ new Set();
+  completedToolParts = /* @__PURE__ */ new Set();
   setWindow(win) {
     this.window = win;
   }
@@ -287,6 +318,8 @@ class OpenCodeAgent {
     this.stopSSEListener();
     this.eventBuffer = "";
     this.streamedContent = false;
+    this.runningToolParts.clear();
+    this.completedToolParts.clear();
     const req = http__namespace.get(
       `http://${this.host}:${this.port}/event`,
       (res) => {
@@ -324,6 +357,60 @@ class OpenCodeAgent {
   handleSSEEvent(eventType, data) {
     const props = data.properties || data;
     switch (eventType) {
+      case "message.part.added":
+      case "message.part.updated": {
+        const partType = props.part?.type || props.type;
+        if (partType && String(partType).startsWith("tool")) {
+          const tool = summarizeToolPart(props);
+          if (this.completedToolParts.has(tool.toolCallId)) break;
+          if (!this.runningToolParts.has(tool.toolCallId)) {
+            this.runningToolParts.add(tool.toolCallId);
+            this.emitEvent({
+              type: "tool_start",
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              detail: tool.detail
+            });
+          } else if (tool.detail) {
+            this.emitEvent({
+              type: "tool_start",
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              detail: tool.detail
+            });
+          }
+          if (isToolPartComplete(props)) {
+            this.emitEvent({
+              type: "tool_end",
+              toolName: tool.toolName,
+              toolCallId: tool.toolCallId,
+              detail: tool.detail,
+              isError: tool.isError
+            });
+            this.runningToolParts.delete(tool.toolCallId);
+            this.completedToolParts.add(tool.toolCallId);
+          }
+        }
+        break;
+      }
+      case "message.part.done":
+      case "message.part.removed": {
+        const partType = props.part?.type || props.type;
+        if (partType && String(partType).startsWith("tool")) {
+          const tool = summarizeToolPart(props);
+          if (this.completedToolParts.has(tool.toolCallId)) break;
+          this.emitEvent({
+            type: "tool_end",
+            toolName: tool.toolName,
+            toolCallId: tool.toolCallId,
+            detail: tool.detail,
+            isError: tool.isError
+          });
+          this.runningToolParts.delete(tool.toolCallId);
+          this.completedToolParts.add(tool.toolCallId);
+        }
+        break;
+      }
       case "message.part.delta": {
         this.cancelIdleTimer();
         if (props.field === "text" && props.delta) {
@@ -338,8 +425,20 @@ class OpenCodeAgent {
       case "session.status": {
         const statusType = props.status?.type || props.status;
         if (statusType === "busy") {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "status",
+            title: "OpenCode 正在处理",
+            state: "running"
+          });
           this.cancelIdleTimer();
         } else if (statusType === "idle") {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "status",
+            title: "OpenCode 处理完成",
+            state: "completed"
+          });
           this.scheduleIdleEnd();
         }
         break;
@@ -347,6 +446,13 @@ class OpenCodeAgent {
       case "session.error": {
         this.cancelIdleTimer();
         const err = props.error;
+        this.emitEvent({
+          type: "process_event",
+          entryType: "error",
+          title: "OpenCode 错误",
+          detail: err?.data?.message || err?.message || "OpenCode request failed",
+          state: "error"
+        });
         const msg = err?.data?.message || err?.message || "未知错误";
         this.emitEvent({ type: "stream_delta", delta: `
 
@@ -364,6 +470,12 @@ class OpenCodeAgent {
         break;
       }
       case "session.idle": {
+        this.emitEvent({
+          type: "process_event",
+          entryType: "status",
+          title: "OpenCode 空闲",
+          state: "completed"
+        });
         this.scheduleIdleEnd();
         break;
       }
@@ -883,7 +995,14 @@ class DroidAgent {
       case "thinking_text_complete":
         break;
       case "tool_progress_update":
-        this.emitEvent({ type: "tool_start", toolName: notifData?.toolName || notifData?.name || "tool" });
+        this.emitEvent({
+          type: "tool_start",
+          toolName: notifData?.toolName || notifData?.name || "tool",
+          toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
+          args: notifData?.args || notifData?.input,
+          result: notifData?.result,
+          detail: notifData?.message || notifData?.status
+        });
         if (notifData?.result?.details?.patch || notifData?.diff || notifData?.patch) {
           const patch = notifData.result?.details?.patch || notifData.patch || notifData.diff;
           const filePath = notifData.args?.filePath || notifData.args?.path || notifData.file || notifData.fileName || "";
@@ -932,6 +1051,8 @@ class PiAgent {
   _sessionFilePath = null;
   eventQueue = [];
   eventTimer = null;
+  streamedText = false;
+  pendingAssistantText = "";
   setWindow(win) {
     this.window = win;
   }
@@ -1119,28 +1240,24 @@ class PiAgent {
     }
     switch (data.type) {
       case "agent_start":
+        this.streamedText = false;
+        this.pendingAssistantText = "";
         this.emitEvent({ type: "stream_start", role: "assistant" });
         break;
       case "message_update": {
         const aev = data.assistantMessageEvent;
         if (aev) {
-          if (aev.type === "text_delta") this.emitEventThrottled({ type: "stream_delta", delta: aev.delta });
-          else if (aev.type === "thinking_delta") this.emitEventThrottled({ type: "thinking_delta", delta: aev.delta });
+          if (aev.type === "text_delta") {
+            if (aev.delta) this.streamedText = true;
+            this.emitEventThrottled({ type: "stream_delta", delta: aev.delta });
+          } else if (aev.type === "thinking_delta") this.emitEventThrottled({ type: "thinking_delta", delta: aev.delta });
         }
         break;
       }
       case "message_end":
         if (data.message?.role === "assistant") {
           const textParts = (data.message.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
-          while (this.eventQueue.length > 0) {
-            const item = this.eventQueue.shift();
-            this.window?.webContents.send("agent:event", item);
-          }
-          if (this.eventTimer) {
-            clearTimeout(this.eventTimer);
-            this.eventTimer = null;
-          }
-          this.emitEvent({ type: "stream_end", content: textParts });
+          if (textParts) this.pendingAssistantText = textParts;
         }
         break;
       case "agent_end":
@@ -1152,13 +1269,19 @@ class PiAgent {
           clearTimeout(this.eventTimer);
           this.eventTimer = null;
         }
+        if (!this.streamedText && this.pendingAssistantText) {
+          this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
+          this.streamedText = true;
+        }
+        this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
         this.emitEvent({ type: "agent_end" });
+        this.pendingAssistantText = "";
         break;
       case "tool_execution_start":
-        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId });
+        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: data.args });
         break;
       case "tool_execution_end":
-        this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError });
+        this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError, args: data.args, result: data.result, error: data.error });
         if (data.result?.details?.patch) {
           const filePath = data.args?.filePath || data.args?.path || data.args?.file || "";
           const patch = data.result.details.patch;
