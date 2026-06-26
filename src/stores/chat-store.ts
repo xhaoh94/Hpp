@@ -1,5 +1,13 @@
 import { create } from "zustand";
 
+export interface FileDiff {
+  file: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+  status?: "added" | "deleted" | "modified";
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -8,6 +16,7 @@ export interface ChatMessage {
   isStreaming?: boolean;
   thinkingContent?: string;
   images?: Array<{ id: string; src: string; name: string }>;
+  diffs?: FileDiff[];
 }
 
 export interface PendingFile {
@@ -40,6 +49,7 @@ interface ChatState {
   addMessage: (msg: ChatMessage) => void;
   updateLastAssistant: (content: string) => void;
   updateLastAssistantThinking: (thinkingContent: string) => void;
+  appendLastAssistantDiffs: (diffs: FileDiff[]) => void;
   setStreaming: (v: boolean) => void;
   setCurrentModel: (m: ModelInfo) => void;
   setThinkingLevel: (level: string) => void;
@@ -85,6 +95,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const last = msgs[msgs.length - 1];
       if (last && last.role === "assistant") {
         msgs[msgs.length - 1] = { ...last, thinkingContent };
+      }
+      return { messages: msgs };
+    }),
+
+  appendLastAssistantDiffs: (diffs) =>
+    set((s) => {
+      const msgs = [...s.messages];
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === "assistant") {
+        const existing = last.diffs || [];
+        msgs[msgs.length - 1] = { ...last, diffs: [...existing, ...diffs] };
       }
       return { messages: msgs };
     }),

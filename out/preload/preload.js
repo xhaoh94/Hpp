@@ -14,6 +14,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   searchFiles: (dirPath, query) => electron.ipcRenderer.invoke("fs:searchFiles", dirPath, query),
   openDirectory: () => electron.ipcRenderer.invoke("fs:openDirectory"),
   getHomeDir: () => electron.ipcRenderer.invoke("fs:getHomeDir"),
+  isCommandAvailable: (command) => electron.ipcRenderer.invoke("fs:isCommandAvailable", command),
   // Data persistence
   loadData: (key) => electron.ipcRenderer.invoke("store:load", key),
   saveData: (key, data) => electron.ipcRenderer.invoke("store:save", key, data),
@@ -23,7 +24,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   agentRemoveSession: (sessionId) => electron.ipcRenderer.invoke("agent:removeSession", sessionId),
   agentSendMessage: (message, images) => electron.ipcRenderer.invoke("agent:sendMessage", message, images),
   agentAbort: () => electron.ipcRenderer.invoke("agent:abort"),
-  agentGetModels: () => electron.ipcRenderer.invoke("agent:getModels"),
+  agentGetModels: (sessionId) => electron.ipcRenderer.invoke("agent:getModels", sessionId),
   agentSetModel: (provider, modelId) => electron.ipcRenderer.invoke("agent:setModel", provider, modelId),
   agentSetThinkingLevel: (level) => electron.ipcRenderer.invoke("agent:setThinkingLevel", level),
   // Agent events

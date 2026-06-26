@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
-import { useChatStore } from "@/stores/chat-store";
+import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
-import { AVAILABLE_AGENTS } from "@/lib/agents";
+import { AVAILABLE_AGENTS, getAgentName, getInstallHint } from "@/lib/agents";
+import { applySessionModels, getSessionModel, getSessionThinking } from "@/hooks/useDataPersistence";
 
 // Braille Spinner
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -21,10 +22,11 @@ interface Props {
 }
 
 export function ProjectCard({ project }: Props) {
-  const { removeProject, addSession, removeSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, setAgentStatus } = useProjectStore();
-  const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession } = useChatStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
+  const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [showAddAgent, setShowAddAgent] = useState(false);
 
   // Load enabled agents from settings
@@ -34,6 +36,15 @@ export function ProjectCard({ project }: Props) {
         setEnabledAgents(data.general.enabledAgents);
       }
     });
+  }, []);
+
+  // Check which agents are installed
+  useEffect(() => {
+    for (const agent of AVAILABLE_AGENTS) {
+      window.electronAPI.isCommandAvailable(agent.command).then((ok) => {
+        setInstalledAgents((prev) => ({ ...prev, [agent.id]: ok }));
+      });
+    }
   }, []);
 
   // Close add agent popup on outside click
@@ -50,12 +61,19 @@ export function ProjectCard({ project }: Props) {
   }, [showAddAgent]);
 
   const handleStartAgent = async (agentId: string) => {
+    // Check if agent is installed before starting
+    if (installedAgents[agentId] === false) {
+      const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
+      const name = agent?.name || agentId;
+      const cmd = agent?.command || agentId;
+      alert(`${name} 未安装，请先安装：\n\n${getInstallHint(cmd)}`);
+      return;
+    }
+
     setActiveProject(project.id);
 
-    // Create session - must await so agent is ready before user sends messages
+    // Create session object immediately so UI is responsive
     const sessionId = crypto.randomUUID();
-    const result = await window.electronAPI.agentCreateSession(agentId, project.path, sessionId);
-
     const session = {
       id: sessionId,
       agentId,
@@ -63,21 +81,42 @@ export function ProjectCard({ project }: Props) {
       title: `新会话 - ${new Date().toLocaleString("zh-CN")}`,
       createdAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
-      sessionFilePath: result.sessionFilePath || undefined,
     };
     addSession(project.id, session);
 
     // Switch chat to the new (empty) session
+    setActiveAgent(agentId);
     switchSession(sessionId);
 
-    if (!result.success) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `Agent 启动失败: ${result.error}`,
-        timestamp: Date.now(),
-      });
-    }
+    // Start agent in background (non-blocking)
+    window.electronAPI.agentCreateSession(agentId, project.path, sessionId).then(async (result) => {
+      markSessionInitialized(sessionId);
+      // Save sessionFilePath back to store so it can be resumed later.
+      if (result.sessionFilePath) {
+        useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
+      }
+      applySessionModels(sessionId, result.models);
+      // Re-fetch models now that agent backend is ready
+      try {
+        const models = await window.electronAPI.agentGetModels(sessionId);
+        if (models && models.length > 0) {
+          useChatStore.getState().setAvailableModels(models);
+          // New session: always use first model for the agent
+          useChatStore.getState().setCurrentModel(models[0]);
+        }
+      } catch { /* ignore */ }
+      // New session: default thinking level to "medium"
+      useChatStore.getState().setThinkingLevel("medium");
+      window.electronAPI.agentSetThinkingLevel("medium");
+      if (!result.success) {
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "system",
+          content: `Agent 启动失败: ${result.error}`,
+          timestamp: Date.now(),
+        });
+      }
+    });
   };
 
   const handleSelectSession = async (session: ProjectSession) => {
@@ -88,21 +127,51 @@ export function ProjectCard({ project }: Props) {
       loadSessionMessages(prevSessionId, currentMessages);
     }
 
-    // Tell the main process to switch the agent session and wait for it
-    await window.electronAPI.agentSwitchSession(session.id);
-
-    // Then update UI state
+    // Switch UI immediately for responsiveness
     setActiveSession(session.id);
     setActiveProject(project.id);
+    setActiveAgent(session.agentId);
     switchSession(session.id);
+
+    // Create and switch agent session in background (non-blocking)
+    window.electronAPI.agentCreateSession(
+      session.agentId, project.path, session.id, session.sessionFilePath
+    ).then(async (result) => {
+      if (result.sessionFilePath) {
+        useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
+      }
+      if (useProjectStore.getState().activeSessionId === session.id) {
+        applySessionModels(session.id, result.models);
+      }
+      markSessionInitialized(session.id);
+      // Only update if this session is still the active one
+      if (useProjectStore.getState().activeSessionId === session.id) {
+        await window.electronAPI.agentSwitchSession(session.id);
+        try {
+          const models = await window.electronAPI.agentGetModels(session.id);
+          if (models && models.length > 0) {
+            useChatStore.getState().setAvailableModels(models);
+            // Restore per-session persisted model if available, otherwise use first
+            const persisted = getSessionModel(session.id);
+            const match = persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider);
+            useChatStore.getState().setCurrentModel(match ? persisted : models[0]);
+          }
+          // Restore per-session thinking level (default to "medium" if none persisted)
+          const persistedThinking = getSessionThinking(session.id);
+          const thinkingToSet = persistedThinking || "medium";
+          useChatStore.getState().setThinkingLevel(thinkingToSet);
+          window.electronAPI.agentSetThinkingLevel(thinkingToSet);
+        } catch { /* ignore */ }
+      }
+    });
   };
 
-  const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
+  const handleCloseSession = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
-    removeSession(project.id, sessionId);
+    closeSession(project.id, sessionId);
     // Tell the main process to dispose this session's agent
     window.electronAPI.agentRemoveSession(sessionId);
-    // Clear messages if deleting active session
+    // Clear messages if closing active session
     if (sessionId === activeSessionId) {
       clearMessages();
       setActiveSession(null);
@@ -110,7 +179,8 @@ export function ProjectCard({ project }: Props) {
   };
 
   const handleResumeSession = (session: ProjectSession) => {
-    handleStartAgent(session.agentId);
+    reopenSession(project.id, session.id);
+    handleSelectSession(session);
     setShowHistory(false);
   };
 
@@ -118,7 +188,9 @@ export function ProjectCard({ project }: Props) {
     removeSession(project.id, sessionId);
   };
 
-  const uncheckedAgents = AVAILABLE_AGENTS.filter((a) => !enabledAgents.includes(a.id));
+  const uncheckedAgents = AVAILABLE_AGENTS.filter(
+    (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] !== false
+  );
 
   return (
     <>
@@ -131,7 +203,7 @@ export function ProjectCard({ project }: Props) {
           >
             ×
           </button>
-          {project.sessions.length > 0 && (
+          {project.sessions.some(s => s.closed) && (
             <button
               className="project-history-btn"
               onClick={() => setShowHistory(true)}
@@ -150,18 +222,18 @@ export function ProjectCard({ project }: Props) {
           <div className="project-name">{project.name}</div>
           <div className="project-path" title={project.path}>{project.path}</div>
           <div className="project-terminals">
-            {project.agents.filter((agentId) => enabledAgents.includes(agentId)).map((agentId) => (
+            {AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] !== false).map((a) => (
               <div
-                key={agentId}
+                key={a.id}
                 className="project-terminal-btn"
-                onClick={() => handleStartAgent(agentId)}
+                onClick={() => handleStartAgent(a.id)}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                   <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
                   <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                   <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                 </svg>
-                <span>{agentId === "pi" ? "PI" : agentId}</span>
+                <span>{a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id}</span>
               </div>
             ))}
             {/* Add agent button - only show when there are unchecked agents */}
@@ -196,10 +268,10 @@ export function ProjectCard({ project }: Props) {
         </div>
       </div>
 
-      {/* Session tabs - tree child nodes (newest at bottom) */}
-      {project.sessions.length > 0 && (
+      {/* Session tabs - tree child nodes (newest at bottom), filtered to non-closed sessions */}
+      {project.sessions.filter(s => !s.closed).length > 0 && (
         <div className="project-terminal-children">
-          {project.sessions.map((session) => {
+          {project.sessions.filter(s => !s.closed).map((session) => {
             const status = agentStatuses[session.id];
             return (
               <div
@@ -233,7 +305,7 @@ export function ProjectCard({ project }: Props) {
                 </span>
                 <button
                   className="terminal-child-close"
-                  onClick={(e) => handleDeleteSession(e, session.id)}
+                  onClick={(e) => handleCloseSession(e, session.id)}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                     <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
@@ -248,7 +320,7 @@ export function ProjectCard({ project }: Props) {
       <SessionHistoryModal
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}
-        sessions={project.sessions}
+        sessions={project.sessions.filter(s => s.closed)}
         sessionMessages={sessionMessages}
         onResume={handleResumeSession}
         onDelete={handleDeleteHistorySession}

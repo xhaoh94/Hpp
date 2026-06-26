@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { AVAILABLE_AGENTS } from "@/lib/agents";
 
 export interface ProjectSession {
   id: string;
@@ -8,6 +9,7 @@ export interface ProjectSession {
   createdAt: string;
   lastActiveAt: string;
   sessionFilePath?: string;
+  closed?: boolean;
 }
 
 export interface Project {
@@ -26,20 +28,27 @@ interface ProjectState {
   activeProjectId: string | null;
   activeSessionId: string | null;
   agentStatuses: Record<string, AgentStatus>; // sessionId -> status
+  initializedSessionIds: Set<string>; // session IDs with agent backend created
   addProject: (name: string, path: string) => void;
   removeProject: (id: string) => void;
   setActiveProject: (id: string | null) => void;
   addSession: (projectId: string, session: ProjectSession) => void;
   removeSession: (projectId: string, sessionId: string) => void;
+  closeSession: (projectId: string, sessionId: string) => void;
+  reopenSession: (projectId: string, sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
+  setSessionFilePath: (projectId: string, sessionId: string, sessionFilePath: string) => void;
   setAgentStatus: (sessionId: string, status: AgentStatus) => void;
+  markSessionInitialized: (sessionId: string) => void;
+  isSessionInitialized: (sessionId: string) => boolean;
 }
 
-export const useProjectStore = create<ProjectState>((set) => ({
+export const useProjectStore = create<ProjectState>((set, get) => ({
   projects: [],
   activeProjectId: null,
   activeSessionId: null,
   agentStatuses: {},
+  initializedSessionIds: new Set<string>(),
 
   addProject: (name, path) =>
     set((s) => {
@@ -52,7 +61,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
             name,
             path,
             createdAt: new Date().toISOString(),
-            agents: ["pi"],
+            agents: AVAILABLE_AGENTS.map((a) => a.id),
             sessions: [],
           },
         ],
@@ -86,10 +95,64 @@ export const useProjectStore = create<ProjectState>((set) => ({
       activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
     })),
 
+  closeSession: (projectId, sessionId) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((se) =>
+                se.id === sessionId ? { ...se, closed: true } : se
+              ),
+            }
+          : p
+      ),
+      activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
+    })),
+
+  reopenSession: (projectId, sessionId) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((se) =>
+                se.id === sessionId ? { ...se, closed: false } : se
+              ),
+            }
+          : p
+      ),
+    })),
+
   setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
+
+  setSessionFilePath: (projectId, sessionId, sessionFilePath) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((se) =>
+                se.id === sessionId && se.sessionFilePath !== sessionFilePath
+                  ? { ...se, sessionFilePath }
+                  : se
+              ),
+            }
+          : p
+      ),
+    })),
 
   setAgentStatus: (sessionId, status) =>
     set((s) => ({
       agentStatuses: { ...s.agentStatuses, [sessionId]: status },
     })),
+
+  markSessionInitialized: (sessionId) =>
+    set((s) => {
+      const next = new Set(s.initializedSessionIds);
+      next.add(sessionId);
+      return { initializedSessionIds: next };
+    }),
+
+  isSessionInitialized: (sessionId) => get().initializedSessionIds.has(sessionId),
 }));

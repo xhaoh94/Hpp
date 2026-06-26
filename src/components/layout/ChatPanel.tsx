@@ -1,9 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { flushSync } from "react-dom";
-import { useChatStore, type ModelInfo } from "@/stores/chat-store";
+import { useChatStore, type ModelInfo, type FileDiff } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
+import { getAgentName } from "@/lib/agents";
+import { applySessionModels, getSessionModel, saveSessionModel, getSessionThinking, saveSessionThinking } from "@/hooks/useDataPersistence";
 import "./ChatPanel.css";
+
+const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 
 function PersistedThinkingBlock({ thinkingContent }: { thinkingContent: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -19,6 +23,62 @@ function PersistedThinkingBlock({ thinkingContent }: { thinkingContent: string }
         <span>Thought</span>
       </button>
       {expanded && <div className="chat-thinking-content">{thinkingContent}</div>}
+    </div>
+  );
+}
+
+function DiffBlock({ diffs }: { diffs: FileDiff[] }) {
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  const toggleFile = (file: string) => {
+    setExpandedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(file)) next.delete(file);
+      else next.add(file);
+      return next;
+    });
+  };
+
+  return (
+    <div className="chat-diffs">
+      {diffs.map((diff, i) => {
+        const isExpanded = expandedFiles.has(diff.file);
+        const fileName = diff.file.split(/[/\\]/).pop() || diff.file;
+        return (
+          <div key={`${diff.file}-${i}`} className="chat-diff-file">
+            <button className="chat-diff-file-header" onClick={() => toggleFile(diff.file)}>
+              <svg
+                width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
+              >
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+              <span className="chat-diff-file-icon">
+                {diff.status === "added" ? "+" : diff.status === "deleted" ? "-" : "~"}
+              </span>
+              <span className="chat-diff-file-name">{diff.file}</span>
+              <span className="chat-diff-file-stats">
+                {diff.additions > 0 && <span className="chat-diff-add">+{diff.additions}</span>}
+                {diff.deletions > 0 && <span className="chat-diff-del">-{diff.deletions}</span>}
+              </span>
+            </button>
+            {isExpanded && (
+              <pre className="chat-diff-content">
+                {diff.patch.split("\n").map((line, j) => {
+                  let cls = "chat-diff-line";
+                  if (line.startsWith("+")) cls += " chat-diff-add-line";
+                  else if (line.startsWith("-")) cls += " chat-diff-del-line";
+                  else if (line.startsWith("@@")) cls += " chat-diff-header-line";
+                  return (
+                    <span key={j} className={cls}>
+                      {line}
+                    </span>
+                  );
+                })}
+              </pre>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -46,10 +106,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     sessionMessages,
   } = useChatStore();
 
-  const { activeProjectId, projects, activeSessionId, setAgentStatus } = useProjectStore();
+  const { activeProjectId, projects, activeSessionId, agentStatuses, markSessionInitialized, isSessionInitialized } = useProjectStore();
   const { triggerAddProject } = useAppStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+  const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
 
   const [input, setInput] = useState("");
   const [thinkingContent, setThinkingContent] = useState("");
@@ -70,9 +131,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
   const thinkingRef = useRef<HTMLDivElement>(null);
+  const modelFetchRunIdRef = useRef(0);
   const streamBufferRef = useRef("");
   const thinkingBufferRef = useRef("");
-  const fetchModelsRef = useRef<() => Promise<void>>();
   const isUserScrollingRef = useRef(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -130,117 +191,82 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setUserMsgHistoryOpen(false);
   }, []);
 
-  // Core: parse Pi agent models.json content into ModelInfo array
-  const parseModelJson = (content: string): ModelInfo[] => {
-    try {
-      const config = JSON.parse(content);
-      const parsed: ModelInfo[] = [];
-
-      // Pi agent format: { providers: { "name": { models: [...] } } }
-      if (config.providers) {
-        for (const [provider, pc] of Object.entries(config.providers as any)) {
-          if (Array.isArray(pc.models)) {
-            for (const m of pc.models) {
-              parsed.push({
-                id: m.id || m.name,
-                name: m.name || m.id,
-                provider,
-                reasoning: m.reasoning ?? false,
-              });
-            }
-          }
-        }
+  // Fetch models for the active session. No local config fallback is used; an
+  // empty list should stay visible so backend/model discovery issues are clear.
+  const fetchModels = async (sessionId: string, fetchRunId: number) => {
+    for (const delay of MODEL_FETCH_RETRY_DELAYS) {
+      if (delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
 
-      return parsed;
-    } catch {
-      return [];
-    }
-  };
+      const stillCurrent =
+        modelFetchRunIdRef.current === fetchRunId &&
+        useProjectStore.getState().activeSessionId === sessionId;
+      if (!stillCurrent) return;
 
-  // Fetch models: try agent RPC, then fallback to ~/.pi/agent/models.json
-  const fetchModels = async (projectPath?: string) => {
-    try {
-      const models = await window.electronAPI.agentGetModels();
-      if (models && models.length > 0) {
-        setAvailableModels(models);
-        const currentState = useChatStore.getState();
-        const savedModel = currentState.currentModel;
-        
-        // Check if saved model is still available
-        if (savedModel) {
-          const isModelAvailable = models.some(
-            (m) => m.id === savedModel.id && m.provider === savedModel.provider
-          );
-          if (isModelAvailable) {
-            // Use saved model
-            setCurrentModel(savedModel);
-          } else {
-            // Saved model not available, use first model
-            setCurrentModel(models[0]);
-          }
-        } else {
-          // No saved model, use first model
-          setCurrentModel(models[0]);
-        }
-        return;
-      }
-    } catch {
-      // ignore
-    }
+      try {
+        const models = await window.electronAPI.agentGetModels(sessionId);
+        const stillCurrentAfterFetch =
+          modelFetchRunIdRef.current === fetchRunId &&
+          useProjectStore.getState().activeSessionId === sessionId;
+        if (!stillCurrentAfterFetch) return;
 
-    // Fallback: read ~/.pi/agent/models.json
-    try {
-      const homeDir = await window.electronAPI.getHomeDir();
-      const result = await window.electronAPI.readFile(`${homeDir}/.pi/agent/models.json`);
-      if (result.success && result.content) {
-        const parsed = parseModelJson(result.content);
-        if (parsed.length > 0) {
-          setAvailableModels(parsed);
+        if (models && models.length > 0) {
+          setAvailableModels(models);
           const currentState = useChatStore.getState();
           const savedModel = currentState.currentModel;
-          
-          // Check if saved model is still available
-          if (savedModel) {
-            const isModelAvailable = parsed.some(
-              (m) => m.id === savedModel.id && m.provider === savedModel.provider
-            );
-            if (isModelAvailable) {
-              // Use saved model
-              setCurrentModel(savedModel);
-            } else {
-              // Saved model not available, use first model
-              setCurrentModel(parsed[0]);
-            }
+
+          // Keep current model if available in the new list, otherwise use first
+          if (savedModel && models.some(m => m.id === savedModel.id && m.provider === savedModel.provider)) {
+            setCurrentModel(savedModel);
           } else {
-            // No saved model, use first model
-            setCurrentModel(parsed[0]);
+            // Try to restore per-session persisted model from cache
+            const persisted = getSessionModel(sessionId);
+            if (persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider)) {
+              setCurrentModel(persisted);
+            } else {
+              setCurrentModel(models[0]);
+            }
           }
+          return;
         }
+      } catch {
+        // Retry below; final empty state is handled after all attempts.
       }
-    } catch {
-      // ignore
+    }
+
+    if (
+      modelFetchRunIdRef.current === fetchRunId &&
+      useProjectStore.getState().activeSessionId === sessionId
+    ) {
+      setAvailableModels([]);
+      useChatStore.setState({ currentModel: null });
     }
   };
-  fetchModelsRef.current = fetchModels;
 
-  // Initial fetch on mount
+  // Re-fetch models and restore thinking level when the active session backend is ready.
   useEffect(() => {
-    fetchModels();
-  }, []);
+    const fetchRunId = ++modelFetchRunIdRef.current;
 
-  // Re-fetch when project changes - use activeProject directly in deps
-  useEffect(() => {
-    if (!activeProject) return;
-    const p = activeProject.path;
-    // Multiple attempts to catch async agent_ready
-    const timers = [
-      setTimeout(() => fetchModels(p), 500),
-      setTimeout(() => fetchModels(p), 2000),
-      setTimeout(() => fetchModels(p), 5000),
-    ];
-    return () => timers.forEach(clearTimeout);
-  }, [activeProject?.id]);
+    if (!activeSessionId || !activeSession) {
+      setAvailableModels([]);
+      useChatStore.setState({ currentModel: null });
+      return;
+    }
+
+    if (!activeSessionInitialized) {
+      setAvailableModels([]);
+      useChatStore.setState({ currentModel: null });
+      return;
+    }
+
+    fetchModels(activeSessionId, fetchRunId);
+    // Restore per-session thinking level (default to "medium" if none persisted)
+    const persistedThinking = getSessionThinking(activeSessionId);
+    const thinkingToSet = persistedThinking || "medium";
+    setThinkingLevel(thinkingToSet);
+    window.electronAPI.agentSetThinkingLevel(thinkingToSet);
+  }, [activeSessionId, activeSession?.agentId, activeSessionInitialized]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -259,11 +285,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     // Check if already near bottom (within 100px)
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     if (atBottom) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages, thinkingContent, activeTool]);
 
   // Instant scroll to bottom on session switch (no animation)
+  // Also scroll when session initializes (messages become visible in DOM)
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -271,7 +298,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
-  }, [activeSessionId]);
+  }, [activeSessionId, activeSessionInitialized]);
 
   // Persist messages to sessionMessages whenever messages change (for restart survival)
   useEffect(() => {
@@ -283,6 +310,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   // Subscribe to agent events
   useEffect(() => {
     const unsubscribe = window.electronAPI.onAgentEvent((event: any) => {
+      // Always read from store to avoid stale closure (useEffect deps=[])
+      const currentSessionId = useProjectStore.getState().activeSessionId;
       switch (event.type) {
         case "stream_start":
           flushSync(() => {
@@ -295,7 +324,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             if (thinkingTimerRef.current) { clearInterval(thinkingTimerRef.current); thinkingTimerRef.current = null; }
             setActiveTool(null);
             setStreaming(true);
-            if (activeSessionId) setAgentStatus(activeSessionId, "running");
+            if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
           // Don't create assistant message here - wait for first stream_delta
           break;
@@ -340,7 +369,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           }
           setActiveTool(null);
           setStreaming(false);
-          if (activeSessionId) setAgentStatus(activeSessionId, "completed");
+          if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "completed");
           break;
         case "tool_start":
           setActiveTool(event.toolName || "tool");
@@ -348,9 +377,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "tool_end":
           setActiveTool(null);
           break;
+        case "diff_update":
+          if (event.diffs && event.diffs.length > 0) {
+            useChatStore.getState().appendLastAssistantDiffs(event.diffs);
+          }
+          break;
         case "agent_ready":
-          // Re-fetch models when agent becomes ready
-          fetchModelsRef.current?.(activeProject?.path);
+          // Models are fetched by the useEffect watching activeSessionId
           break;
       }
     });
@@ -516,12 +549,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const handleSelectModel = async (model: ModelInfo) => {
     setCurrentModel(model);
     setModelOpen(false);
+    // Save model selection for this session
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) saveSessionModel(sessionId, model);
     await window.electronAPI.agentSetModel(model.provider, model.id);
   };
 
   const handleSelectThinking = async (levelId: string) => {
     setThinkingLevel(levelId);
     setThinkingOpen(false);
+    // Save thinking level for this session
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) saveSessionThinking(sessionId, levelId);
     await window.electronAPI.agentSetThinkingLevel(levelId);
   };
 
@@ -587,9 +626,35 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                     key={session.id}
                     className="chat-session-item"
                     onClick={async () => {
-                      await window.electronAPI.agentSwitchSession(session.id);
+                      // Switch UI immediately
                       useProjectStore.getState().setActiveSession(session.id);
+                      useChatStore.getState().setActiveAgent(session.agentId);
                       useChatStore.getState().switchSession(session.id);
+
+                      // Create and switch agent session in background
+                      if (activeProject) {
+                        window.electronAPI.agentCreateSession(
+                          session.agentId, activeProject.path, session.id, session.sessionFilePath
+                        ).then(async (result) => {
+                          if (result.sessionFilePath) {
+                            useProjectStore.getState().setSessionFilePath(activeProject.id, session.id, result.sessionFilePath);
+                          }
+                          if (useProjectStore.getState().activeSessionId === session.id) {
+                            applySessionModels(session.id, result.models);
+                          }
+                          useProjectStore.getState().markSessionInitialized(session.id);
+                          if (useProjectStore.getState().activeSessionId === session.id) {
+                            await window.electronAPI.agentSwitchSession(session.id);
+                            // Update model list only; model selection is handled by ChatPanel useEffect
+                            try {
+                              const models = await window.electronAPI.agentGetModels(session.id);
+                              if (models && models.length > 0) {
+                                useChatStore.getState().setAvailableModels(models);
+                              }
+                            } catch { /* ignore */ }
+                          }
+                        });
+                      }
                     }}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -614,7 +679,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       <div className="chat-header">
         <div className="chat-agent-dot" />
         <span className="chat-agent-name">{activeProject.name}</span>
-        <span className="chat-agent-tag">{activeAgentId === "pi" ? "Pi Agent" : activeAgentId}</span>
+        <span className="chat-agent-tag">{getAgentName(activeAgentId)}</span>
         <div style={{ flex: 1 }} />
         <div ref={userMsgHistoryRef} className="relative">
           <button
@@ -666,15 +731,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
       {/* Messages */}
       <div ref={scrollRef} className="chat-messages">
+        {activeSessionId && !isSessionInitialized(activeSessionId) ? (
+          <div className="chat-loading-agent">
+            <div className="chat-working-spinner" />
+            <span>Agent 正在启动...</span>
+          </div>
+        ) : (<>
         {messages.length === 0 && !thinkingContent && (
           <div className="chat-empty">发送消息开始对话</div>
-        )}
-        {/* Working indicator: shown during gap between user message and thinking start */}
-        {isStreaming && !thinkingContent && messages.length > 0 && messages[messages.length - 1].role === "user" && (
-          <div className="chat-working">
-            <div className="chat-working-spinner" />
-            <span>working...</span>
-          </div>
         )}
         {isStreaming && thinkingContent && messages.length === 0 && (
           <div className="chat-thinking">
@@ -755,6 +819,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                     </button>
                   )}
                 </div>
+                {msg.diffs && msg.diffs.length > 0 && (
+                  <DiffBlock diffs={msg.diffs} />
+                )}
               </div>
               {/* Live thinking: BELOW user bubble */}
               {showLiveThinking && msg.role === "user" && (
@@ -780,12 +847,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           );
         })}
 
+        {/* Working indicator: shown during gap between user message and thinking start */}
+        {isStreaming && !thinkingContent && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+          <div className="chat-working">
+            <div className="chat-working-spinner" />
+            <span>working...</span>
+          </div>
+        )}
         {isStreaming && activeTool && (
           <div className="chat-tool">
             <div className="chat-tool-spinner" />
             <span className="chat-tool-name">正在执行: {activeTool}</span>
           </div>
         )}
+        </>)}
       </div>
 
       {/* Input area */}

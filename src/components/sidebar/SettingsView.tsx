@@ -72,6 +72,7 @@ export function SettingsView() {
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
+  const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
@@ -93,6 +94,15 @@ export function SettingsView() {
         }
       }
     });
+  }, []);
+
+  // Check which agents are installed
+  useEffect(() => {
+    for (const agent of AVAILABLE_AGENTS) {
+      window.electronAPI.isCommandAvailable(agent.command).then((installed) => {
+        setInstalledAgents((prev) => ({ ...prev, [agent.id]: installed }));
+      });
+    }
   }, []);
 
   // Save shortcuts when changed
@@ -340,12 +350,15 @@ export function SettingsView() {
                   选择启用的 Agent，未启用的不会显示在项目卡片上
                 </p>
                 <div className="filter-group">
-                  {AVAILABLE_AGENTS.map((agent) => (
-                    <div key={agent.id} className="filter-row" style={{ alignItems: "center" }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flex: 1 }}>
+                  {AVAILABLE_AGENTS.map((agent) => {
+                    const isInstalled = installedAgents[agent.id] !== false;
+                    return (
+                    <div key={agent.id} className="filter-row" style={{ alignItems: "center", opacity: isInstalled ? 1 : 0.5 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: isInstalled ? "pointer" : "not-allowed", flex: 1 }}>
                         <input
                           type="checkbox"
                           checked={enabledAgents.includes(agent.id)}
+                          disabled={!isInstalled}
                           onChange={(e) => {
                             if (e.target.checked) {
                               setEnabledAgents([...enabledAgents, agent.id]);
@@ -357,9 +370,22 @@ export function SettingsView() {
                         />
                         <span style={{ fontSize: 13 }}>{agent.name}</span>
                         <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{agent.desc}</span>
+                        {!isInstalled && (
+                          <span style={{
+                            fontSize: 10,
+                            color: "#e5a100",
+                            background: "rgba(229,161,0,0.12)",
+                            padding: "1px 6px",
+                            borderRadius: 4,
+                            whiteSpace: "nowrap",
+                          }}>
+                            未安装
+                          </span>
+                        )}
                       </label>
                     </div>
-                  ))}
+                  );
+                  })}
                   {AVAILABLE_AGENTS.length === 0 && (
                     <p style={{ fontSize: 12, color: "var(--text-secondary)" }}>暂无可用 Agent</p>
                   )}

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("fs:searchFiles", dirPath, query),
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),
   getHomeDir: () => ipcRenderer.invoke("fs:getHomeDir"),
+  isCommandAvailable: (command: string) => ipcRenderer.invoke("fs:isCommandAvailable", command),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),
@@ -35,7 +36,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>) =>
     ipcRenderer.invoke("agent:sendMessage", message, images),
   agentAbort: () => ipcRenderer.invoke("agent:abort"),
-  agentGetModels: () => ipcRenderer.invoke("agent:getModels"),
+  agentGetModels: (sessionId?: string) => ipcRenderer.invoke("agent:getModels", sessionId),
   agentSetModel: (provider: string, modelId: string) =>
     ipcRenderer.invoke("agent:setModel", provider, modelId),
   agentSetThinkingLevel: (level: string) =>

@@ -1,13 +1,27 @@
 import { ipcMain, BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
-import { readFile } from "fs/promises";
+import { OpenCodeAgent } from "./opencode-agent";
+import { DroidAgent } from "./droid-agent";
 
 interface AgentModel {
   id: string;
   name: string;
   provider: string;
   reasoning: boolean;
+}
+
+/** Common interface for all agent backends */
+interface AgentBackend {
+  setWindow(win: BrowserWindow): void;
+  init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
+  sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void>;
+  abort(): Promise<void>;
+  getModels(): Promise<AgentModel[]>;
+  setModel(provider: string, modelId: string): Promise<void>;
+  setThinkingLevel(level: string): Promise<void>;
+  dispose(): void;
+  readonly sessionFilePath: string | null;
 }
 
 // ============================================================
@@ -185,24 +199,6 @@ class PiAgent {
       });
       if (rpcModels.length > 0) { this.models = rpcModels; return this.models; }
     } catch { /* ignore */ }
-    try {
-      const { join } = await import("path");
-      const { homedir } = await import("os");
-      const configPath = join(homedir(), ".pi/agent/models.json");
-      const content = await readFile(configPath, "utf-8");
-      const config = JSON.parse(content);
-      const models: AgentModel[] = [];
-      if (config.providers) {
-        for (const [provider, pc] of Object.entries(config.providers as any)) {
-          if (Array.isArray(pc.models)) {
-            for (const m of pc.models) {
-              models.push({ id: m.id || m.name, name: m.name || m.id, provider, reasoning: m.reasoning ?? false });
-            }
-          }
-        }
-      }
-      if (models.length > 0) { this.models = models; return this.models; }
-    } catch { /* ignore */ }
     return this.models;
   }
 
@@ -263,6 +259,23 @@ class PiAgent {
         break;
       case "tool_execution_end":
         this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError });
+        // Extract diff/patch data from tool result (edit tool provides details.patch and details.diff)
+        if (data.result?.details?.patch) {
+          const filePath = data.args?.filePath || data.args?.path || data.args?.file || "";
+          const patch = data.result.details.patch;
+          const addCount = (patch.match(/^\+[^+]/gm) || []).length;
+          const delCount = (patch.match(/^-[^-]/gm) || []).length;
+          this.emitEvent({
+            type: "diff_update",
+            diffs: [{
+              file: filePath,
+              patch,
+              additions: addCount,
+              deletions: delCount,
+              status: "modified",
+            }],
+          });
+        }
         break;
     }
   }
@@ -306,58 +319,76 @@ class PiAgent {
 }
 
 // ============================================================
-// Agent Manager - one PiAgent per session for context preservation
+// Agent Manager - supports PiAgent and OpenCodeAgent per session
 // ============================================================
 class AgentManager {
-  private sessionAgents = new Map<string, PiAgent>(); // sessionId -> PiAgent
-  private sessionFilePaths = new Map<string, string>(); // sessionId -> sessionFile path
+  private sessionAgents = new Map<string, AgentBackend>();
+  private sessionAgentTypes = new Map<string, string>(); // sessionId -> agentId ("pi" | "opencode")
+  private sessionFilePaths = new Map<string, string>();
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
 
   setWindow(win: BrowserWindow) { this.window = win; }
 
-  /** Create or resume a session. If existingSessionFilePath is given, switch to it after init. */
+  private createAgentBackend(agentId: string): AgentBackend {
+    if (agentId === "opencode") return new OpenCodeAgent();
+    if (agentId === "droid") return new DroidAgent();
+    return new PiAgent(); // default
+  }
+
+  /** Create or resume a session */
   async createSession(
     sessionId: string, agentId: string, projectPath: string,
     existingSessionFilePath?: string
   ): Promise<void> {
+    console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
     let agent = this.sessionAgents.get(sessionId);
     if (!agent) {
-      agent = new PiAgent();
+      agent = this.createAgentBackend(agentId);
       this.sessionAgents.set(sessionId, agent);
+      this.sessionAgentTypes.set(sessionId, agentId);
+      console.log("[agent-manager] Created new agent:", agent.constructor.name);
+    } else {
+      console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
     }
     if (this.window) agent.setWindow(this.window);
     await agent.init(projectPath, existingSessionFilePath);
 
-    // Store the session file path
     const fp = agent.sessionFilePath;
+    console.log("[agent-manager] After init, sessionFilePath:", fp);
     if (fp) this.sessionFilePaths.set(sessionId, fp);
 
     this.activeSessionId = sessionId;
   }
 
-  /** Get stored session file path for a session */
   getSessionFilePath(sessionId: string): string | undefined {
     return this.sessionFilePaths.get(sessionId);
   }
 
-  /** Switch active session */
   switchSession(sessionId: string) {
     if (this.sessionAgents.has(sessionId)) {
       this.activeSessionId = sessionId;
     }
   }
 
-  /** Get the active agent */
-  getActiveAgent(): PiAgent | null {
+  getActiveAgent(): AgentBackend | null {
     if (!this.activeSessionId) return null;
     return this.sessionAgents.get(this.activeSessionId) || null;
   }
+  getAgentBySessionId(sessionId: string): AgentBackend | null {
+    return this.sessionAgents.get(sessionId) || null;
+  }
 
-  /** Remove a session's agent */
+  async getModelsBySessionId(sessionId: string): Promise<AgentModel[]> {
+    const agent = this.sessionAgents.get(sessionId);
+    if (!agent) return [];
+    return agent.getModels();
+  }
+
   removeSession(sessionId: string) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) { agent.dispose(); this.sessionAgents.delete(sessionId); }
+    this.sessionAgentTypes.delete(sessionId);
     this.sessionFilePaths.delete(sessionId);
     if (this.activeSessionId === sessionId) this.activeSessionId = null;
   }
@@ -375,7 +406,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       const win = getWindow();
       if (win) agentManager.setWindow(win);
       await agentManager.createSession(sid, agentId, projectPath, sessionFilePath);
-      return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid) };
+      const models = await agentManager.getModelsBySessionId(sid);
+      return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid), models };
     } catch (err: any) {
       return { success: false, error: err.message };
     }
@@ -409,8 +441,11 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle("agent:getModels", async () => {
-    const agent = agentManager.getActiveAgent();
+  ipcMain.handle("agent:getModels", async (_event, sessionId?: string) => {
+    const agent = sessionId
+      ? agentManager.getAgentBySessionId(sessionId)
+      : agentManager.getActiveAgent();
+    console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
     if (!agent) return [];
     return agent.getModels();
   });

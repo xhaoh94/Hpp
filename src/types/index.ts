@@ -31,18 +31,19 @@ export interface ElectronAPI {
   searchFiles: (dirPath: string, query: string) => Promise<FileEntry[]>;
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
   getHomeDir: () => Promise<string>;
+  isCommandAvailable: (command: string) => Promise<boolean>;
 
   // Data persistence
   loadData: (key: string) => Promise<unknown>;
   saveData: (key: string, data: unknown) => Promise<{ success: boolean; error?: string }>;
 
   // Agent
-  agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string }>;
+  agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>) => Promise<{ success: boolean; error?: string }>;
   agentAbort: () => Promise<{ success: boolean }>;
-  agentGetModels: () => Promise<AgentModel[]>;
+  agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
   agentSetModel: (provider: string, modelId: string) => Promise<{ success: boolean }>;
   agentSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;
 

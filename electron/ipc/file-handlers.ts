@@ -2,6 +2,7 @@ import { ipcMain, dialog, BrowserWindow } from "electron";
 import { readdir, readFile, stat, access } from "fs/promises";
 import { join, extname } from "path";
 import { homedir } from "os";
+import { execSync } from "child_process";
 
 interface FileEntry {
   name: string;
@@ -122,5 +123,15 @@ export function registerFileHandlers() {
 
   ipcMain.handle("fs:getHomeDir", () => {
     return homedir();
+  });
+
+  ipcMain.handle("fs:isCommandAvailable", (_event, command: string) => {
+    try {
+      const cmd = process.platform === "win32" ? `where ${command}` : `which ${command}`;
+      execSync(cmd, { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
   });
 }

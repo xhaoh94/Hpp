@@ -12608,11 +12608,32 @@ function Sidebar() {
     )
   ] }) });
 }
-const useProjectStore = create((set) => ({
+const AVAILABLE_AGENTS = [
+  { id: "pi", name: "Pi Agent", desc: "AI 编程助手", command: "pi" },
+  { id: "opencode", name: "OpenCode", desc: "开源 AI 编程助手", command: "opencode" },
+  { id: "droid", name: "Factory Droid", desc: "Factory AI 编程助手", command: "droid" }
+];
+function getAgentName(id) {
+  return AVAILABLE_AGENTS.find((a) => a.id === id)?.name || id;
+}
+function getInstallHint(command) {
+  switch (command) {
+    case "pi":
+      return "npm install -g @anthropic-ai/pi";
+    case "opencode":
+      return "npm install -g opencode-ai";
+    case "droid":
+      return "curl -fsSL https://app.factory.ai/cli | sh";
+    default:
+      return `请安装 ${command}`;
+  }
+}
+const useProjectStore = create((set, get) => ({
   projects: [],
   activeProjectId: null,
   activeSessionId: null,
   agentStatuses: {},
+  initializedSessionIds: /* @__PURE__ */ new Set(),
   addProject: (name, path) => set((s) => {
     const newId = crypto.randomUUID();
     return {
@@ -12623,7 +12644,7 @@ const useProjectStore = create((set) => ({
           name,
           path,
           createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-          agents: ["pi"],
+          agents: AVAILABLE_AGENTS.map((a) => a.id),
           sessions: []
         }
       ],
@@ -12647,10 +12668,47 @@ const useProjectStore = create((set) => ({
     ),
     activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId
   })),
+  closeSession: (projectId, sessionId) => set((s) => ({
+    projects: s.projects.map(
+      (p) => p.id === projectId ? {
+        ...p,
+        sessions: p.sessions.map(
+          (se) => se.id === sessionId ? { ...se, closed: true } : se
+        )
+      } : p
+    ),
+    activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId
+  })),
+  reopenSession: (projectId, sessionId) => set((s) => ({
+    projects: s.projects.map(
+      (p) => p.id === projectId ? {
+        ...p,
+        sessions: p.sessions.map(
+          (se) => se.id === sessionId ? { ...se, closed: false } : se
+        )
+      } : p
+    )
+  })),
   setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
+  setSessionFilePath: (projectId, sessionId, sessionFilePath) => set((s) => ({
+    projects: s.projects.map(
+      (p) => p.id === projectId ? {
+        ...p,
+        sessions: p.sessions.map(
+          (se) => se.id === sessionId && se.sessionFilePath !== sessionFilePath ? { ...se, sessionFilePath } : se
+        )
+      } : p
+    )
+  })),
   setAgentStatus: (sessionId, status) => set((s) => ({
     agentStatuses: { ...s.agentStatuses, [sessionId]: status }
-  }))
+  })),
+  markSessionInitialized: (sessionId) => set((s) => {
+    const next = new Set(s.initializedSessionIds);
+    next.add(sessionId);
+    return { initializedSessionIds: next };
+  }),
+  isSessionInitialized: (sessionId) => get().initializedSessionIds.has(sessionId)
 }));
 const useChatStore = create((set, get) => ({
   messages: [],
@@ -12677,6 +12735,15 @@ const useChatStore = create((set, get) => ({
     const last = msgs[msgs.length - 1];
     if (last && last.role === "assistant") {
       msgs[msgs.length - 1] = { ...last, thinkingContent };
+    }
+    return { messages: msgs };
+  }),
+  appendLastAssistantDiffs: (diffs) => set((s) => {
+    const msgs = [...s.messages];
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === "assistant") {
+      const existing = last.diffs || [];
+      msgs[msgs.length - 1] = { ...last, diffs: [...existing, ...diffs] };
     }
     return { messages: msgs };
   }),
@@ -12780,9 +12847,144 @@ function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onRes
     ] }) })
   ] }) });
 }
-const AVAILABLE_AGENTS = [
-  { id: "pi", name: "Pi Agent", desc: "AI 编程助手" }
-];
+let _sessionModelsCache = {};
+let _sessionThinkingCache = {};
+let _saveTimeout = null;
+function flushModelsToDisk() {
+  window.electronAPI.saveData("currentModel", {
+    models: { ..._sessionModelsCache },
+    thinkingLevels: { ..._sessionThinkingCache },
+    modelVersion: 5
+  });
+}
+function saveSessionModel(sessionId, model) {
+  _sessionModelsCache[sessionId] = model;
+  if (_saveTimeout) clearTimeout(_saveTimeout);
+  _saveTimeout = setTimeout(flushModelsToDisk, 500);
+}
+function getSessionModel(sessionId) {
+  return _sessionModelsCache[sessionId] || null;
+}
+function saveSessionThinking(sessionId, level) {
+  _sessionThinkingCache[sessionId] = level;
+  if (_saveTimeout) clearTimeout(_saveTimeout);
+  _saveTimeout = setTimeout(flushModelsToDisk, 500);
+}
+function getSessionThinking(sessionId) {
+  return _sessionThinkingCache[sessionId] || null;
+}
+function applySessionModels(sessionId, models) {
+  if (!models || models.length === 0) return;
+  const chatState = useChatStore.getState();
+  chatState.setAvailableModels(models);
+  const currentModel = chatState.currentModel;
+  if (currentModel && models.some((m) => m.id === currentModel.id && m.provider === currentModel.provider)) {
+    return;
+  }
+  const persisted = getSessionModel(sessionId);
+  if (persisted && models.some((m) => m.id === persisted.id && m.provider === persisted.provider)) {
+    chatState.setCurrentModel(persisted);
+  } else {
+    chatState.setCurrentModel(models[0]);
+  }
+}
+function useDataPersistence() {
+  reactExports.useEffect(() => {
+    Promise.all([
+      window.electronAPI.loadData("projects"),
+      window.electronAPI.loadData("sessionMessages"),
+      window.electronAPI.loadData("currentModel")
+    ]).then(([projectData, msgData, modelData]) => {
+      let activeSessionId = null;
+      let activeAgentId = null;
+      let activeProject;
+      let activeSession = void 0;
+      if (projectData && typeof projectData === "object" && "projects" in projectData) {
+        const d = projectData;
+        activeSessionId = d.activeSessionId || null;
+        useProjectStore.setState({
+          projects: d.projects,
+          activeProjectId: d.activeProjectId || (d.projects.length > 0 ? d.projects[0].id : null),
+          activeSessionId
+        });
+        if (activeSessionId) {
+          activeProject = d.projects.find((p) => p.sessions.some((s) => s.id === activeSessionId));
+          activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+          if (activeSession) {
+            activeAgentId = activeSession.agentId;
+            useChatStore.setState({ activeAgentId });
+          }
+        }
+      }
+      if (msgData && typeof msgData === "object" && "sessionMessages" in msgData) {
+        const md = msgData;
+        useChatStore.setState({ sessionMessages: md.sessionMessages });
+        if (activeSessionId && md.sessionMessages[activeSessionId]) {
+          useChatStore.setState({ messages: md.sessionMessages[activeSessionId] });
+        }
+      }
+      if (modelData && typeof modelData === "object") {
+        const md = modelData;
+        if (!modelData.modelVersion || modelData.modelVersion < 5) {
+          _sessionModelsCache = {};
+          _sessionThinkingCache = {};
+          if (md.thinkingLevel) {
+            _sessionThinkingCache = {};
+          }
+          window.electronAPI.saveData("currentModel", {
+            models: {},
+            thinkingLevels: {},
+            modelVersion: 5
+          });
+        } else {
+          if (md.models) _sessionModelsCache = { ...md.models };
+          if (md.thinkingLevels) _sessionThinkingCache = { ...md.thinkingLevels };
+        }
+        if (activeSessionId && _sessionModelsCache[activeSessionId]) {
+          useChatStore.setState({ currentModel: _sessionModelsCache[activeSessionId] });
+        }
+        if (activeSessionId && _sessionThinkingCache[activeSessionId]) {
+          useChatStore.setState({ thinkingLevel: _sessionThinkingCache[activeSessionId] });
+        }
+      }
+      if (activeSessionId && activeProject && activeSession) {
+        window.electronAPI.agentCreateSession(
+          activeSession.agentId,
+          activeProject.path,
+          activeSession.id,
+          activeSession.sessionFilePath
+        ).then((result) => {
+          const projectState = useProjectStore.getState();
+          if (result.sessionFilePath) {
+            projectState.setSessionFilePath(activeProject.id, activeSessionId, result.sessionFilePath);
+          }
+          if (useProjectStore.getState().activeSessionId === activeSessionId) {
+            applySessionModels(activeSessionId, result.models);
+          }
+          projectState.markSessionInitialized(activeSessionId);
+        });
+      }
+    });
+  }, []);
+  reactExports.useEffect(() => {
+    const unsubscribe = useProjectStore.subscribe((state) => {
+      window.electronAPI.saveData("projects", {
+        projects: state.projects,
+        activeProjectId: state.activeProjectId,
+        activeSessionId: state.activeSessionId
+      });
+    });
+    return unsubscribe;
+  }, []);
+  reactExports.useEffect(() => {
+    const unsubscribe = useChatStore.subscribe((state) => {
+      window.electronAPI.saveData("sessionMessages", {
+        sessionMessages: state.sessionMessages
+      });
+    });
+    return unsubscribe;
+  }, []);
+}
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 function BrailleSpinner() {
   const [index, setIndex] = reactExports.useState(0);
@@ -12793,10 +12995,11 @@ function BrailleSpinner() {
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "braille-spinner", children: BRAILLE_CHARS[index] });
 }
 function ProjectCard({ project }) {
-  const { removeProject, addSession, removeSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, setAgentStatus } = useProjectStore();
-  const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession } = useChatStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = reactExports.useState(false);
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
+  const [installedAgents, setInstalledAgents] = reactExports.useState({});
   const [showAddAgent, setShowAddAgent] = reactExports.useState(false);
   reactExports.useEffect(() => {
     window.electronAPI.loadData("settings").then((data) => {
@@ -12804,6 +13007,13 @@ function ProjectCard({ project }) {
         setEnabledAgents(data.general.enabledAgents);
       }
     });
+  }, []);
+  reactExports.useEffect(() => {
+    for (const agent of AVAILABLE_AGENTS) {
+      window.electronAPI.isCommandAvailable(agent.command).then((ok) => {
+        setInstalledAgents((prev) => ({ ...prev, [agent.id]: ok }));
+      });
+    }
   }, []);
   reactExports.useEffect(() => {
     if (!showAddAgent) return;
@@ -12817,28 +13027,53 @@ function ProjectCard({ project }) {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [showAddAgent]);
   const handleStartAgent = async (agentId) => {
+    if (installedAgents[agentId] === false) {
+      const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
+      const name = agent?.name || agentId;
+      const cmd = agent?.command || agentId;
+      alert(`${name} 未安装，请先安装：
+
+${getInstallHint(cmd)}`);
+      return;
+    }
     setActiveProject(project.id);
     const sessionId = crypto.randomUUID();
-    const result = await window.electronAPI.agentCreateSession(agentId, project.path, sessionId);
     const session = {
       id: sessionId,
       agentId,
       agentSessionId: sessionId,
       title: `新会话 - ${(/* @__PURE__ */ new Date()).toLocaleString("zh-CN")}`,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      lastActiveAt: (/* @__PURE__ */ new Date()).toISOString(),
-      sessionFilePath: result.sessionFilePath || void 0
+      lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     addSession(project.id, session);
+    setActiveAgent(agentId);
     switchSession(sessionId);
-    if (!result.success) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `Agent 启动失败: ${result.error}`,
-        timestamp: Date.now()
-      });
-    }
+    window.electronAPI.agentCreateSession(agentId, project.path, sessionId).then(async (result) => {
+      markSessionInitialized(sessionId);
+      if (result.sessionFilePath) {
+        useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
+      }
+      applySessionModels(sessionId, result.models);
+      try {
+        const models = await window.electronAPI.agentGetModels(sessionId);
+        if (models && models.length > 0) {
+          useChatStore.getState().setAvailableModels(models);
+          useChatStore.getState().setCurrentModel(models[0]);
+        }
+      } catch {
+      }
+      useChatStore.getState().setThinkingLevel("medium");
+      window.electronAPI.agentSetThinkingLevel("medium");
+      if (!result.success) {
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "system",
+          content: `Agent 启动失败: ${result.error}`,
+          timestamp: Date.now()
+        });
+      }
+    });
   };
   const handleSelectSession = async (session) => {
     const prevSessionId = activeSessionId;
@@ -12846,14 +13081,45 @@ function ProjectCard({ project }) {
       const currentMessages = useChatStore.getState().messages;
       loadSessionMessages(prevSessionId, currentMessages);
     }
-    await window.electronAPI.agentSwitchSession(session.id);
     setActiveSession(session.id);
     setActiveProject(project.id);
+    setActiveAgent(session.agentId);
     switchSession(session.id);
+    window.electronAPI.agentCreateSession(
+      session.agentId,
+      project.path,
+      session.id,
+      session.sessionFilePath
+    ).then(async (result) => {
+      if (result.sessionFilePath) {
+        useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
+      }
+      if (useProjectStore.getState().activeSessionId === session.id) {
+        applySessionModels(session.id, result.models);
+      }
+      markSessionInitialized(session.id);
+      if (useProjectStore.getState().activeSessionId === session.id) {
+        await window.electronAPI.agentSwitchSession(session.id);
+        try {
+          const models = await window.electronAPI.agentGetModels(session.id);
+          if (models && models.length > 0) {
+            useChatStore.getState().setAvailableModels(models);
+            const persisted = getSessionModel(session.id);
+            const match = persisted && models.some((m) => m.id === persisted.id && m.provider === persisted.provider);
+            useChatStore.getState().setCurrentModel(match ? persisted : models[0]);
+          }
+          const persistedThinking = getSessionThinking(session.id);
+          const thinkingToSet = persistedThinking || "medium";
+          useChatStore.getState().setThinkingLevel(thinkingToSet);
+          window.electronAPI.agentSetThinkingLevel(thinkingToSet);
+        } catch {
+        }
+      }
+    });
   };
-  const handleDeleteSession = (e, sessionId) => {
+  const handleCloseSession = (e, sessionId) => {
     e.stopPropagation();
-    removeSession(project.id, sessionId);
+    closeSession(project.id, sessionId);
     window.electronAPI.agentRemoveSession(sessionId);
     if (sessionId === activeSessionId) {
       clearMessages();
@@ -12861,13 +13127,16 @@ function ProjectCard({ project }) {
     }
   };
   const handleResumeSession = (session) => {
-    handleStartAgent(session.agentId);
+    reopenSession(project.id, session.id);
+    handleSelectSession(session);
     setShowHistory(false);
   };
   const handleDeleteHistorySession = (sessionId) => {
     removeSession(project.id, sessionId);
   };
-  const uncheckedAgents = AVAILABLE_AGENTS.filter((a) => !enabledAgents.includes(a.id));
+  const uncheckedAgents = AVAILABLE_AGENTS.filter(
+    (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] !== false
+  );
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-item always-active", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "project-info", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -12879,7 +13148,7 @@ function ProjectCard({ project }) {
           children: "×"
         }
       ),
-      project.sessions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      project.sessions.some((s) => s.closed) && /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
           className: "project-history-btn",
@@ -12899,21 +13168,21 @@ function ProjectCard({ project }) {
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-name", children: project.name }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-path", title: project.path, children: project.path }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "project-terminals", children: [
-        project.agents.filter((agentId) => enabledAgents.includes(agentId)).map((agentId) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] !== false).map((a) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "div",
           {
             className: "project-terminal-btn",
-            onClick: () => handleStartAgent(agentId),
+            onClick: () => handleStartAgent(a.id),
             children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "2", y: "3", width: "20", height: "18", rx: "2", stroke: "currentColor", strokeWidth: "1.5" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 8L10 11L7 14", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 14H17", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round" })
               ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: agentId === "pi" ? "PI" : agentId })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id })
             ]
           },
-          agentId
+          a.id
         )),
         uncheckedAgents.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -12943,7 +13212,7 @@ function ProjectCard({ project }) {
         ] })
       ] })
     ] }) }),
-    project.sessions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-terminal-children", children: project.sessions.map((session) => {
+    project.sessions.filter((s) => !s.closed).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-terminal-children", children: project.sessions.filter((s) => !s.closed).map((session) => {
       const status = agentStatuses[session.id];
       return /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
@@ -12965,7 +13234,7 @@ function ProjectCard({ project }) {
               "button",
               {
                 className: "terminal-child-close",
-                onClick: (e) => handleDeleteSession(e, session.id),
+                onClick: (e) => handleCloseSession(e, session.id),
                 children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M18 6L6 18M6 6L18 18", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round" }) })
               }
             )
@@ -12979,7 +13248,7 @@ function ProjectCard({ project }) {
       {
         isOpen: showHistory,
         onClose: () => setShowHistory(false),
-        sessions: project.sessions,
+        sessions: project.sessions.filter((s) => s.closed),
         sessionMessages,
         onResume: handleResumeSession,
         onDelete: handleDeleteHistorySession
@@ -13406,6 +13675,7 @@ function SettingsView() {
   const [tempImagePath, setTempImagePath] = reactExports.useState("");
   const [imageRetentionHours, setImageRetentionHours] = reactExports.useState(12);
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
+  const [installedAgents, setInstalledAgents] = reactExports.useState({});
   const [newFolder, setNewFolder] = reactExports.useState("");
   const [newExt, setNewExt] = reactExports.useState("");
   const [newFile, setNewFile] = reactExports.useState("");
@@ -13424,6 +13694,13 @@ function SettingsView() {
         }
       }
     });
+  }, []);
+  reactExports.useEffect(() => {
+    for (const agent of AVAILABLE_AGENTS) {
+      window.electronAPI.isCommandAvailable(agent.command).then((installed) => {
+        setInstalledAgents((prev) => ({ ...prev, [agent.id]: installed }));
+      });
+    }
   }, []);
   const saveShortcuts = (s) => {
     setShortcuts(s);
@@ -13636,25 +13913,37 @@ function SettingsView() {
           /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Agent 设置" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "选择启用的 Agent，未启用的不会显示在项目卡片上" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
-            AVAILABLE_AGENTS.map((agent) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-row", style: { alignItems: "center" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flex: 1 }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "input",
-                {
-                  type: "checkbox",
-                  checked: enabledAgents.includes(agent.id),
-                  onChange: (e) => {
-                    if (e.target.checked) {
-                      setEnabledAgents([...enabledAgents, agent.id]);
-                    } else {
-                      setEnabledAgents(enabledAgents.filter((id) => id !== agent.id));
-                    }
-                  },
-                  style: { width: 16, height: 16, accentColor: "var(--accent-color)" }
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13 }, children: agent.name }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-secondary)" }, children: agent.desc })
-            ] }) }, agent.id)),
+            AVAILABLE_AGENTS.map((agent) => {
+              const isInstalled = installedAgents[agent.id] !== false;
+              return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-row", style: { alignItems: "center", opacity: isInstalled ? 1 : 0.5 }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: isInstalled ? "pointer" : "not-allowed", flex: 1 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    type: "checkbox",
+                    checked: enabledAgents.includes(agent.id),
+                    disabled: !isInstalled,
+                    onChange: (e) => {
+                      if (e.target.checked) {
+                        setEnabledAgents([...enabledAgents, agent.id]);
+                      } else {
+                        setEnabledAgents(enabledAgents.filter((id) => id !== agent.id));
+                      }
+                    },
+                    style: { width: 16, height: 16, accentColor: "var(--accent-color)" }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13 }, children: agent.name }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-secondary)" }, children: agent.desc }),
+                !isInstalled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+                  fontSize: 10,
+                  color: "#e5a100",
+                  background: "rgba(229,161,0,0.12)",
+                  padding: "1px 6px",
+                  borderRadius: 4,
+                  whiteSpace: "nowrap"
+                }, children: "未安装" })
+              ] }) }, agent.id);
+            }),
             AVAILABLE_AGENTS.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "暂无可用 Agent" })
           ] })
         ] }),
@@ -13736,6 +14025,7 @@ function ContentArea() {
   ] });
 }
 var reactDomExports = requireReactDom();
+const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
 function PersistedThinkingBlock({ thinkingContent }) {
   const [expanded, setExpanded] = reactExports.useState(false);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-thinking", children: [
@@ -13757,6 +14047,57 @@ function PersistedThinkingBlock({ thinkingContent }) {
     ] }),
     expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-thinking-content", children: thinkingContent })
   ] });
+}
+function DiffBlock({ diffs }) {
+  const [expandedFiles, setExpandedFiles] = reactExports.useState(/* @__PURE__ */ new Set());
+  const toggleFile = (file) => {
+    setExpandedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(file)) next.delete(file);
+      else next.add(file);
+      return next;
+    });
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-diffs", children: diffs.map((diff, i) => {
+    const isExpanded = expandedFiles.has(diff.file);
+    diff.file.split(/[/\\]/).pop() || diff.file;
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-diff-file", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-diff-file-header", onClick: () => toggleFile(diff.file), children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "svg",
+          {
+            width: "10",
+            height: "10",
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            strokeWidth: "2.5",
+            style: { transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" },
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-diff-file-icon", children: diff.status === "added" ? "+" : diff.status === "deleted" ? "-" : "~" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-diff-file-name", children: diff.file }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-diff-file-stats", children: [
+          diff.additions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-diff-add", children: [
+            "+",
+            diff.additions
+          ] }),
+          diff.deletions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-diff-del", children: [
+            "-",
+            diff.deletions
+          ] })
+        ] })
+      ] }),
+      isExpanded && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "chat-diff-content", children: diff.patch.split("\n").map((line, j) => {
+        let cls = "chat-diff-line";
+        if (line.startsWith("+")) cls += " chat-diff-add-line";
+        else if (line.startsWith("-")) cls += " chat-diff-del-line";
+        else if (line.startsWith("@@")) cls += " chat-diff-header-line";
+        return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: cls, children: line }, j);
+      }) })
+    ] }, `${diff.file}-${i}`);
+  }) });
 }
 function ChatPanel({ sendKey = "Enter" }) {
   const {
@@ -13780,10 +14121,11 @@ function ChatPanel({ sendKey = "Enter" }) {
     updateLastAssistantThinking,
     sessionMessages
   } = useChatStore();
-  const { activeProjectId, projects, activeSessionId, setAgentStatus } = useProjectStore();
+  const { activeProjectId, projects, activeSessionId, agentStatuses, markSessionInitialized, isSessionInitialized } = useProjectStore();
   const { triggerAddProject } = useAppStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+  const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
   const [input, setInput] = reactExports.useState("");
   const [thinkingContent, setThinkingContent] = reactExports.useState("");
   const [thinkingExpanded, setThinkingExpanded] = reactExports.useState(true);
@@ -13803,9 +14145,9 @@ function ChatPanel({ sendKey = "Enter" }) {
   const textareaRef = reactExports.useRef(null);
   const modelRef = reactExports.useRef(null);
   const thinkingRef = reactExports.useRef(null);
+  const modelFetchRunIdRef = reactExports.useRef(0);
   const streamBufferRef = reactExports.useRef("");
   const thinkingBufferRef = reactExports.useRef("");
-  const fetchModelsRef = reactExports.useRef();
   const isUserScrollingRef = reactExports.useRef(false);
   reactExports.useRef(null);
   reactExports.useEffect(() => {
@@ -13853,92 +14195,59 @@ function ChatPanel({ sendKey = "Enter" }) {
     }
     setUserMsgHistoryOpen(false);
   }, []);
-  const parseModelJson = (content) => {
-    try {
-      const config = JSON.parse(content);
-      const parsed = [];
-      if (config.providers) {
-        for (const [provider, pc] of Object.entries(config.providers)) {
-          if (Array.isArray(pc.models)) {
-            for (const m of pc.models) {
-              parsed.push({
-                id: m.id || m.name,
-                name: m.name || m.id,
-                provider,
-                reasoning: m.reasoning ?? false
-              });
-            }
-          }
-        }
+  const fetchModels = async (sessionId, fetchRunId) => {
+    for (const delay of MODEL_FETCH_RETRY_DELAYS) {
+      if (delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
-      return parsed;
-    } catch {
-      return [];
-    }
-  };
-  const fetchModels = async (projectPath) => {
-    try {
-      const models = await window.electronAPI.agentGetModels();
-      if (models && models.length > 0) {
-        setAvailableModels(models);
-        const currentState = useChatStore.getState();
-        const savedModel = currentState.currentModel;
-        if (savedModel) {
-          const isModelAvailable = models.some(
-            (m) => m.id === savedModel.id && m.provider === savedModel.provider
-          );
-          if (isModelAvailable) {
-            setCurrentModel(savedModel);
-          } else {
-            setCurrentModel(models[0]);
-          }
-        } else {
-          setCurrentModel(models[0]);
-        }
-        return;
-      }
-    } catch {
-    }
-    try {
-      const homeDir = await window.electronAPI.getHomeDir();
-      const result = await window.electronAPI.readFile(`${homeDir}/.pi/agent/models.json`);
-      if (result.success && result.content) {
-        const parsed = parseModelJson(result.content);
-        if (parsed.length > 0) {
-          setAvailableModels(parsed);
+      const stillCurrent = modelFetchRunIdRef.current === fetchRunId && useProjectStore.getState().activeSessionId === sessionId;
+      if (!stillCurrent) return;
+      try {
+        const models = await window.electronAPI.agentGetModels(sessionId);
+        const stillCurrentAfterFetch = modelFetchRunIdRef.current === fetchRunId && useProjectStore.getState().activeSessionId === sessionId;
+        if (!stillCurrentAfterFetch) return;
+        if (models && models.length > 0) {
+          setAvailableModels(models);
           const currentState = useChatStore.getState();
           const savedModel = currentState.currentModel;
-          if (savedModel) {
-            const isModelAvailable = parsed.some(
-              (m) => m.id === savedModel.id && m.provider === savedModel.provider
-            );
-            if (isModelAvailable) {
-              setCurrentModel(savedModel);
-            } else {
-              setCurrentModel(parsed[0]);
-            }
+          if (savedModel && models.some((m) => m.id === savedModel.id && m.provider === savedModel.provider)) {
+            setCurrentModel(savedModel);
           } else {
-            setCurrentModel(parsed[0]);
+            const persisted = getSessionModel(sessionId);
+            if (persisted && models.some((m) => m.id === persisted.id && m.provider === persisted.provider)) {
+              setCurrentModel(persisted);
+            } else {
+              setCurrentModel(models[0]);
+            }
           }
+          return;
         }
+      } catch {
       }
-    } catch {
+    }
+    if (modelFetchRunIdRef.current === fetchRunId && useProjectStore.getState().activeSessionId === sessionId) {
+      setAvailableModels([]);
+      useChatStore.setState({ currentModel: null });
     }
   };
-  fetchModelsRef.current = fetchModels;
   reactExports.useEffect(() => {
-    fetchModels();
-  }, []);
-  reactExports.useEffect(() => {
-    if (!activeProject) return;
-    activeProject.path;
-    const timers = [
-      setTimeout(() => fetchModels(), 500),
-      setTimeout(() => fetchModels(), 2e3),
-      setTimeout(() => fetchModels(), 5e3)
-    ];
-    return () => timers.forEach(clearTimeout);
-  }, [activeProject?.id]);
+    const fetchRunId = ++modelFetchRunIdRef.current;
+    if (!activeSessionId || !activeSession) {
+      setAvailableModels([]);
+      useChatStore.setState({ currentModel: null });
+      return;
+    }
+    if (!activeSessionInitialized) {
+      setAvailableModels([]);
+      useChatStore.setState({ currentModel: null });
+      return;
+    }
+    fetchModels(activeSessionId, fetchRunId);
+    const persistedThinking = getSessionThinking(activeSessionId);
+    const thinkingToSet = persistedThinking || "medium";
+    setThinkingLevel(thinkingToSet);
+    window.electronAPI.agentSetThinkingLevel(thinkingToSet);
+  }, [activeSessionId, activeSession?.agentId, activeSessionInitialized]);
   reactExports.useEffect(() => {
     const handler = (e) => {
       if (modelRef.current && !modelRef.current.contains(e.target)) setModelOpen(false);
@@ -13952,7 +14261,7 @@ function ChatPanel({ sendKey = "Enter" }) {
     if (!el || isUserScrollingRef.current) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     if (atBottom) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages, thinkingContent, activeTool]);
   reactExports.useEffect(() => {
@@ -13970,6 +14279,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   }, [messages, activeSessionId]);
   reactExports.useEffect(() => {
     const unsubscribe = window.electronAPI.onAgentEvent((event) => {
+      const currentSessionId = useProjectStore.getState().activeSessionId;
       switch (event.type) {
         case "stream_start":
           reactDomExports.flushSync(() => {
@@ -13983,7 +14293,7 @@ function ChatPanel({ sendKey = "Enter" }) {
             }
             setActiveTool(null);
             setStreaming(true);
-            if (activeSessionId) setAgentStatus(activeSessionId, "running");
+            if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
           break;
         case "stream_delta":
@@ -14026,7 +14336,7 @@ function ChatPanel({ sendKey = "Enter" }) {
           }
           setActiveTool(null);
           setStreaming(false);
-          if (activeSessionId) setAgentStatus(activeSessionId, "completed");
+          if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "completed");
           break;
         case "tool_start":
           setActiveTool(event.toolName || "tool");
@@ -14034,8 +14344,10 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "tool_end":
           setActiveTool(null);
           break;
-        case "agent_ready":
-          fetchModelsRef.current?.(activeProject?.path);
+        case "diff_update":
+          if (event.diffs && event.diffs.length > 0) {
+            useChatStore.getState().appendLastAssistantDiffs(event.diffs);
+          }
           break;
       }
     });
@@ -14179,11 +14491,15 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
   const handleSelectModel = async (model) => {
     setCurrentModel(model);
     setModelOpen(false);
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) saveSessionModel(sessionId, model);
     await window.electronAPI.agentSetModel(model.provider, model.id);
   };
   const handleSelectThinking = async (levelId) => {
     setThinkingLevel(levelId);
     setThinkingOpen(false);
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) saveSessionThinking(sessionId, levelId);
     await window.electronAPI.agentSetThinkingLevel(levelId);
   };
   const thinkingLevels = [
@@ -14239,9 +14555,35 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
             {
               className: "chat-session-item",
               onClick: async () => {
-                await window.electronAPI.agentSwitchSession(session.id);
                 useProjectStore.getState().setActiveSession(session.id);
+                useChatStore.getState().setActiveAgent(session.agentId);
                 useChatStore.getState().switchSession(session.id);
+                if (activeProject) {
+                  window.electronAPI.agentCreateSession(
+                    session.agentId,
+                    activeProject.path,
+                    session.id,
+                    session.sessionFilePath
+                  ).then(async (result) => {
+                    if (result.sessionFilePath) {
+                      useProjectStore.getState().setSessionFilePath(activeProject.id, session.id, result.sessionFilePath);
+                    }
+                    if (useProjectStore.getState().activeSessionId === session.id) {
+                      applySessionModels(session.id, result.models);
+                    }
+                    useProjectStore.getState().markSessionInitialized(session.id);
+                    if (useProjectStore.getState().activeSessionId === session.id) {
+                      await window.electronAPI.agentSwitchSession(session.id);
+                      try {
+                        const models = await window.electronAPI.agentGetModels(session.id);
+                        if (models && models.length > 0) {
+                          useChatStore.getState().setAvailableModels(models);
+                        }
+                      } catch {
+                      }
+                    }
+                  });
+                }
               },
               children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
@@ -14262,7 +14604,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-header", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-agent-dot" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-agent-name", children: activeProject.name }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-agent-tag", children: activeAgentId === "pi" ? "Pi Agent" : activeAgentId }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-agent-tag", children: getAgentName(activeAgentId) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: userMsgHistoryRef, className: "relative", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -14305,12 +14647,11 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         ] })
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: scrollRef, className: "chat-messages", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: scrollRef, className: "chat-messages", children: activeSessionId && !isSessionInitialized(activeSessionId) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-loading-agent", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Agent 正在启动..." })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
       messages.length === 0 && !thinkingContent && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-empty", children: "发送消息开始对话" }),
-      isStreaming && !thinkingContent && messages.length > 0 && messages[messages.length - 1].role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-working", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "working..." })
-      ] }),
       isStreaming && thinkingContent && messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-thinking", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
@@ -14402,7 +14743,8 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
                   ] })
                 }
               )
-            ] })
+            ] }),
+            msg.diffs && msg.diffs.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(DiffBlock, { diffs: msg.diffs })
           ] }),
           showLiveThinking && msg.role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-thinking", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs(
@@ -14436,6 +14778,10 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
           ] })
         ] }, msg.id);
       }),
+      isStreaming && !thinkingContent && messages.length > 0 && messages[messages.length - 1].role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-working", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "working..." })
+      ] }),
       isStreaming && activeTool && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-tool", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-tool-spinner" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-tool-name", children: [
@@ -14443,7 +14789,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
           activeTool
         ] })
       ] })
-    ] }),
+    ] }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-area", children: [
       (pendingFiles.length > 0 || pendingImages.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-preview-bar", children: [
         pendingFiles.map((pf) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-file-card", children: [
@@ -14813,93 +15159,6 @@ function FileSearch({ isOpen, onClose, onSelect }) {
       ] })
     ] })
   ] }) });
-}
-function useDataPersistence() {
-  reactExports.useEffect(() => {
-    window.electronAPI.loadData("projects").then((data) => {
-      if (data && typeof data === "object" && "projects" in data) {
-        const d = data;
-        useProjectStore.setState({
-          projects: d.projects,
-          activeProjectId: d.activeProjectId || (d.projects.length > 0 ? d.projects[0].id : null),
-          activeSessionId: d.activeSessionId || null
-        });
-        const sid = d.activeSessionId;
-        if (sid) {
-          const sm = useChatStore.getState().sessionMessages[sid];
-          if (sm && sm.length > 0) {
-            useChatStore.setState({ messages: sm });
-          }
-          const project = d.projects.find((p) => p.sessions.some((s) => s.id === sid));
-          const session = project?.sessions.find((s) => s.id === sid);
-          if (project && session) {
-            window.electronAPI.agentCreateSession(
-              session.agentId,
-              project.path,
-              session.id,
-              session.sessionFilePath
-            );
-          }
-        }
-      }
-    });
-  }, []);
-  reactExports.useEffect(() => {
-    window.electronAPI.loadData("sessionMessages").then((data) => {
-      if (data && typeof data === "object" && "sessionMessages" in data) {
-        const d = data;
-        useChatStore.setState({ sessionMessages: d.sessionMessages });
-        const sid = useProjectStore.getState().activeSessionId;
-        if (sid && d.sessionMessages[sid]) {
-          useChatStore.setState({ messages: d.sessionMessages[sid] });
-        }
-      }
-    });
-  }, []);
-  reactExports.useEffect(() => {
-    const unsubscribe = useProjectStore.subscribe((state) => {
-      window.electronAPI.saveData("projects", {
-        projects: state.projects,
-        activeProjectId: state.activeProjectId,
-        activeSessionId: state.activeSessionId
-      });
-    });
-    return unsubscribe;
-  }, []);
-  reactExports.useEffect(() => {
-    const unsubscribe = useChatStore.subscribe((state) => {
-      window.electronAPI.saveData("sessionMessages", {
-        sessionMessages: state.sessionMessages
-      });
-    });
-    return unsubscribe;
-  }, []);
-  reactExports.useEffect(() => {
-    window.electronAPI.loadData("currentModel").then((data) => {
-      if (data && typeof data === "object" && "currentModel" in data) {
-        const d = data;
-        const updates = {};
-        if (d.currentModel) {
-          updates.currentModel = d.currentModel;
-        }
-        if (d.thinkingLevel) {
-          updates.thinkingLevel = d.thinkingLevel;
-        }
-        if (Object.keys(updates).length > 0) {
-          useChatStore.setState(updates);
-        }
-      }
-    });
-  }, []);
-  reactExports.useEffect(() => {
-    const unsubscribe = useChatStore.subscribe((state) => {
-      window.electronAPI.saveData("currentModel", {
-        currentModel: state.currentModel,
-        thinkingLevel: state.thinkingLevel
-      });
-    });
-    return unsubscribe;
-  }, []);
 }
 const TitleBar = ({ title = "Hpp" }) => {
   const [maximized, setMaximized] = reactExports.useState(false);

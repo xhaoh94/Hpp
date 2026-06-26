@@ -1,26 +1,4 @@
 "use strict";
-var __create = Object.create;
-var __defProp = Object.defineProperty;
-var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __copyProps = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames(from))
-      if (!__hasOwnProp.call(to, key) && key !== except)
-        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
 const electron = require("electron");
 const path = require("path");
 const utils = require("@electron-toolkit/utils");
@@ -28,6 +6,24 @@ const promises = require("fs/promises");
 const os = require("os");
 const child_process = require("child_process");
 const string_decoder = require("string_decoder");
+const http = require("http");
+function _interopNamespaceDefault(e) {
+  const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
+  if (e) {
+    for (const k in e) {
+      if (k !== "default") {
+        const d = Object.getOwnPropertyDescriptor(e, k);
+        Object.defineProperty(n, k, d.get ? d : {
+          enumerable: true,
+          get: () => e[k]
+        });
+      }
+    }
+  }
+  n.default = e;
+  return Object.freeze(n);
+}
+const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 function registerFileHandlers() {
   electron.ipcMain.handle("fs:readDirectory", async (_event, dirPath) => {
     try {
@@ -118,6 +114,15 @@ function registerFileHandlers() {
   electron.ipcMain.handle("fs:getHomeDir", () => {
     return os.homedir();
   });
+  electron.ipcMain.handle("fs:isCommandAvailable", (_event, command) => {
+    try {
+      const cmd = process.platform === "win32" ? `where ${command}` : `which ${command}`;
+      child_process.execSync(cmd, { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 const dataDir = path.join(electron.app.getPath("userData"), "hpp-data");
 async function ensureDataDir() {
@@ -150,6 +155,771 @@ function registerStoreHandlers() {
       }
     }
   );
+}
+class OpenCodeAgent {
+  process = null;
+  window = null;
+  port = 0;
+  host = "127.0.0.1";
+  projectPath = "";
+  sessionId = null;
+  models = [];
+  currentModelId = null;
+  currentProviderId = null;
+  eventSource = null;
+  eventBuffer = "";
+  streamedContent = false;
+  idleTimer = null;
+  setWindow(win) {
+    this.window = win;
+  }
+  /** Start opencode serve and wait for it to be ready */
+  async init(projectPath, existingSessionId) {
+    if (this.process && this.projectPath === projectPath) {
+      if (existingSessionId) this.sessionId = existingSessionId;
+      return;
+    }
+    this.projectPath = projectPath;
+    this.killProcess();
+    this.port = 1e4 + Math.floor(Math.random() * 55e3);
+    this.sessionId = null;
+    this.emitEvent({ type: "agent_init", agentId: "opencode" });
+    this.process = child_process.spawn("opencode", ["serve", "--port", String(this.port), "--hostname", this.host], {
+      cwd: projectPath,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: true,
+      env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "true" }
+    });
+    this.process.stderr?.on("data", (chunk) => {
+      console.log("[opencode]", chunk.toString().trim());
+    });
+    this.process.on("exit", () => {
+      this.process = null;
+      this.emitEvent({ type: "agent_disconnected" });
+    });
+    await this.waitForReady();
+    if (existingSessionId) {
+      const valid = await this.verifySession(existingSessionId);
+      if (valid) {
+        this.sessionId = existingSessionId;
+        console.log("[opencode] Resumed session:", existingSessionId);
+      } else {
+        console.log("[opencode] Session", existingSessionId, "not found on server, will create new");
+      }
+    }
+    if (!this.sessionId) {
+      const createdSessionId = await this.createSession();
+      if (createdSessionId) {
+        console.log("[opencode] Created session:", createdSessionId);
+      }
+    }
+  }
+  /** Verify a session exists on the server */
+  async verifySession(sessionId) {
+    try {
+      const result = await this.httpGet(`/session/${sessionId}`);
+      return !!(result && result.id);
+    } catch {
+      return false;
+    }
+  }
+  async waitForReady() {
+    const maxAttempts = 60;
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const result = await this.httpGet("/global/health");
+        if (result && result.healthy) {
+          this.emitEvent({ type: "agent_ready", agentId: "opencode", mock: false });
+          return;
+        }
+      } catch {
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    this.emitEvent({ type: "agent_ready", agentId: "opencode", mock: true });
+  }
+  /** Create a new opencode session, or reuse existing if session ID is already set */
+  async createSession() {
+    if (this.sessionId) return this.sessionId;
+    try {
+      const result = await this.httpPost("/session", {});
+      if (result && result.id) {
+        this.sessionId = result.id;
+        return this.sessionId;
+      }
+    } catch (e) {
+      console.error("[opencode] createSession failed:", e);
+    }
+    return null;
+  }
+  /** Send a message to the opencode session */
+  async sendMessage(message) {
+    if (!this.sessionId) {
+      await this.createSession();
+    }
+    if (!this.sessionId) {
+      this.emitEvent({ type: "stream_start", role: "assistant" });
+      this.emitEvent({ type: "stream_delta", delta: "无法创建会话，请检查 opencode 是否已安装。" });
+      this.emitEvent({ type: "stream_end" });
+      this.emitEvent({ type: "agent_end" });
+      return;
+    }
+    this.emitEvent({ type: "stream_start", role: "assistant" });
+    this.startSSEListener();
+    try {
+      const body = { parts: [{ type: "text", text: message }] };
+      if (this.currentModelId && this.currentProviderId) {
+        body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };
+      }
+      await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
+    } catch (e) {
+      console.error("[opencode] sendMessage failed:", e);
+      this.emitEvent({ type: "stream_delta", delta: `
+
+发送失败: ${e}` });
+      this.emitEvent({ type: "stream_end" });
+      this.emitEvent({ type: "agent_end" });
+      this.stopSSEListener();
+    }
+  }
+  /** Listen to SSE events for streaming responses */
+  startSSEListener() {
+    this.stopSSEListener();
+    this.eventBuffer = "";
+    this.streamedContent = false;
+    const req = http__namespace.get(
+      `http://${this.host}:${this.port}/event`,
+      (res) => {
+        res.setEncoding("utf-8");
+        res.on("data", (chunk) => {
+          this.eventBuffer += chunk;
+          this.processSSEBuffer();
+        });
+        res.on("end", () => this.stopSSEListener());
+        res.on("error", () => this.stopSSEListener());
+      }
+    );
+    req.on("error", () => this.stopSSEListener());
+    this.eventSource = req;
+  }
+  processSSEBuffer() {
+    const lines = this.eventBuffer.split("\n");
+    this.eventBuffer = lines.pop() || "";
+    for (const line of lines) {
+      if (line.startsWith("data: ")) {
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch {
+          continue;
+        }
+        if (parsed.type) {
+          this.handleSSEEvent(parsed.type, parsed);
+        }
+      }
+    }
+  }
+  handleSSEEvent(eventType, data) {
+    const props = data.properties || data;
+    switch (eventType) {
+      case "message.part.delta": {
+        this.cancelIdleTimer();
+        if (props.field === "text" && props.delta) {
+          this.streamedContent = true;
+          this.emitEvent({ type: "stream_delta", delta: props.delta });
+        } else if (props.field === "thinking" && props.delta) {
+          this.streamedContent = true;
+          this.emitEvent({ type: "thinking_delta", delta: props.delta });
+        }
+        break;
+      }
+      case "session.status": {
+        const statusType = props.status?.type || props.status;
+        if (statusType === "busy") {
+          this.cancelIdleTimer();
+        } else if (statusType === "idle") {
+          this.scheduleIdleEnd();
+        }
+        break;
+      }
+      case "session.error": {
+        this.cancelIdleTimer();
+        const err = props.error;
+        const msg = err?.data?.message || err?.message || "未知错误";
+        this.emitEvent({ type: "stream_delta", delta: `
+
+错误: ${msg}` });
+        this.emitEvent({ type: "stream_end" });
+        this.emitEvent({ type: "agent_end" });
+        this.stopSSEListener();
+        break;
+      }
+      case "session.diff": {
+        const diffs = props.diff;
+        if (Array.isArray(diffs) && diffs.length > 0) {
+          this.emitEvent({ type: "diff_update", diffs });
+        }
+        break;
+      }
+      case "session.idle": {
+        this.scheduleIdleEnd();
+        break;
+      }
+    }
+  }
+  cancelIdleTimer() {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+  scheduleIdleEnd() {
+    this.cancelIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.streamedContent) {
+        this.emitEvent({ type: "stream_end" });
+        this.emitEvent({ type: "agent_end" });
+        this.stopSSEListener();
+      } else {
+        this.fetchAssistantMessage();
+      }
+    }, 800);
+  }
+  /** Fetch the latest assistant message content via REST after session.idle */
+  async fetchAssistantMessage() {
+    if (!this.sessionId) {
+      this.emitEvent({ type: "stream_end" });
+      this.emitEvent({ type: "agent_end" });
+      this.stopSSEListener();
+      return;
+    }
+    try {
+      const messages = await this.httpGet(`/session/${this.sessionId}/message`);
+      if (Array.isArray(messages)) {
+        const assistantMsg = [...messages].reverse().find((m) => m.info?.role === "assistant");
+        if (assistantMsg && assistantMsg.parts && assistantMsg.parts.length > 0) {
+          for (const part of assistantMsg.parts) {
+            if (part.type === "text" && part.text) {
+              this.emitEvent({ type: "stream_delta", delta: part.text });
+            } else if (part.type === "thinking" && part.text) {
+              this.emitEvent({ type: "thinking_delta", delta: part.text });
+            }
+          }
+        } else if (assistantMsg?.info?.error) {
+          const errMsg = assistantMsg.info.error.data?.message || assistantMsg.info.error.message || "请求失败";
+          this.emitEvent({ type: "stream_delta", delta: `
+
+错误: ${errMsg}` });
+        } else {
+          this.emitEvent({ type: "stream_delta", delta: "\n\n(无响应内容)" });
+        }
+      }
+    } catch (e) {
+      this.emitEvent({ type: "stream_delta", delta: `
+
+获取响应失败: ${e}` });
+    }
+    this.emitEvent({ type: "stream_end" });
+    this.emitEvent({ type: "agent_end" });
+    this.stopSSEListener();
+  }
+  stopSSEListener() {
+    this.cancelIdleTimer();
+    if (this.eventSource) {
+      this.eventSource.destroy();
+      this.eventSource = null;
+    }
+  }
+  /** Abort the current response */
+  async abort() {
+    if (this.sessionId) {
+      try {
+        await this.httpPost(`/session/${this.sessionId}/abort`, {});
+      } catch {
+      }
+    }
+    this.stopSSEListener();
+  }
+  /** Get available models from providers */
+  async getModels() {
+    console.log("[opencode] getModels called, cached:", this.models.length, "port:", this.port);
+    if (this.models.length > 0) return this.models;
+    try {
+      const result = await this.httpGet("/config/providers");
+      if (result && result.providers) {
+        const models = [];
+        for (const provider of result.providers) {
+          const providerId = provider.id || provider.name;
+          if (Array.isArray(provider.models)) {
+            for (const m of provider.models) {
+              models.push({
+                id: m.id || m.name,
+                name: m.name || m.id,
+                provider: providerId,
+                reasoning: m.reasoning ?? false
+              });
+            }
+          } else if (provider.models && typeof provider.models === "object") {
+            for (const [modelId, modelInfo] of Object.entries(provider.models)) {
+              models.push({
+                id: modelId,
+                name: modelInfo?.name || modelId,
+                provider: providerId,
+                reasoning: modelInfo?.reasoning ?? false
+              });
+            }
+          } else if (result.default?.[providerId]) {
+            models.push({
+              id: result.default[providerId],
+              name: result.default[providerId],
+              provider: providerId,
+              reasoning: false
+            });
+          }
+        }
+        if (models.length > 0) {
+          this.models = models;
+          return this.models;
+        }
+      }
+    } catch (e) {
+      console.error("[opencode] getModels failed:", e);
+    }
+    return this.models;
+  }
+  /** Set model for the session - stored and applied per-message */
+  async setModel(provider, modelId) {
+    this.currentModelId = modelId;
+    this.currentProviderId = provider;
+    this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
+  }
+  /** Set thinking level - opencode does not have a direct equivalent */
+  async setThinkingLevel(_level) {
+    this.emitEvent({ type: "thinking_level_changed", level: _level });
+  }
+  /** For OpenCode, the session ID serves as the session file path equivalent */
+  get sessionFilePath() {
+    return this.sessionId;
+  }
+  /** Dispose and clean up */
+  dispose() {
+    this.cancelIdleTimer();
+    this.stopSSEListener();
+    this.killProcess();
+  }
+  killProcess() {
+    if (this.process) {
+      this.process.stdin?.end();
+      this.process.kill();
+      this.process = null;
+    }
+    this.sessionId = null;
+  }
+  // ---- HTTP helpers ----
+  httpGet(path2) {
+    return new Promise((resolve, reject) => {
+      const req = http__namespace.get(
+        `http://${this.host}:${this.port}${path2}`,
+        { timeout: 1e4 },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk) => body += chunk);
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch {
+              resolve(body);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("timeout"));
+      });
+    });
+  }
+  httpPost(path2, data) {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify(data);
+      const req = http__namespace.request(
+        `http://${this.host}:${this.port}${path2}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+          timeout: 3e4
+        },
+        (res) => {
+          let resBody = "";
+          res.on("data", (chunk) => resBody += chunk);
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(resBody));
+            } catch {
+              resolve(resBody);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("timeout"));
+      });
+      req.write(body);
+      req.end();
+    });
+  }
+  httpPatch(path2, data) {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify(data);
+      const req = http__namespace.request(
+        `http://${this.host}:${this.port}${path2}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+          timeout: 1e4
+        },
+        (res) => {
+          let resBody = "";
+          res.on("data", (chunk) => resBody += chunk);
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(resBody));
+            } catch {
+              resolve(resBody);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("timeout"));
+      });
+      req.write(body);
+      req.end();
+    });
+  }
+  emitEvent(data) {
+    this.window?.webContents.send("agent:event", data);
+  }
+}
+class DroidAgent {
+  process = null;
+  window = null;
+  projectPath = "";
+  sessionId = null;
+  models = [];
+  rpcId = 0;
+  pendingResponses = /* @__PURE__ */ new Map();
+  isReady = false;
+  autonomyLevel = "medium";
+  setWindow(win) {
+    this.window = win;
+  }
+  /** Start droid exec in stream-jsonrpc mode */
+  async init(projectPath, existingSessionId) {
+    if (this.process && this.projectPath === projectPath) return;
+    this.projectPath = projectPath;
+    this.killProcess();
+    this.isReady = false;
+    this.emitEvent({ type: "agent_init", agentId: "droid" });
+    const args = [
+      "exec",
+      "--input-format",
+      "stream-jsonrpc",
+      "--output-format",
+      "stream-jsonrpc",
+      "--auto",
+      this.autonomyLevel,
+      "--cwd",
+      projectPath
+    ];
+    if (existingSessionId) {
+      args.push("--session-id", existingSessionId);
+    }
+    this.process = child_process.spawn("droid", args, {
+      cwd: projectPath,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: true,
+      env: { ...process.env }
+    });
+    const decoder = new string_decoder.StringDecoder("utf8");
+    let buffer = "";
+    let initResolved = false;
+    this.process.on("exit", () => {
+      if (!initResolved) {
+        initResolved = true;
+        this.process = null;
+        this.emitEvent({ type: "agent_ready", agentId: "droid", mock: true });
+      }
+    });
+    this.process.stdout?.on("data", (chunk) => {
+      buffer += decoder.write(chunk);
+      while (true) {
+        const newlineIndex = buffer.indexOf("\n");
+        if (newlineIndex === -1) break;
+        let line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line.length > 0) {
+          try {
+            const data = JSON.parse(line);
+            this.handleMessage(data);
+            if (!initResolved && data.type === "response" && data.id === "init-1" && data.result) {
+              initResolved = true;
+              this.isReady = true;
+              if (data.result?.sessionId) {
+                this.sessionId = data.result.sessionId;
+              }
+              this.emitEvent({ type: "agent_ready", agentId: "droid", mock: false });
+            }
+          } catch {
+          }
+        }
+      }
+    });
+    this.process.stderr?.on("data", (chunk) => {
+      console.log("[droid]", chunk.toString().trim());
+    });
+    this.sendRpc("droid.initialize_session", {
+      machineId: "default",
+      cwd: projectPath,
+      autonomyLevel: this.autonomyLevel
+    });
+    await new Promise((resolve) => {
+      const check = setInterval(() => {
+        if (initResolved) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+      setTimeout(() => {
+        clearInterval(check);
+        if (!initResolved) {
+          initResolved = true;
+          this.isReady = false;
+          this.killProcess();
+          this.emitEvent({ type: "agent_ready", agentId: "droid", mock: true });
+        }
+        resolve();
+      }, 15e3);
+    });
+  }
+  /** Send a user message */
+  async sendMessage(message, images) {
+    if (!this.process || !this.isReady) {
+      this.mockResponse(message);
+      return;
+    }
+    this.emitEvent({ type: "stream_start", role: "assistant" });
+    const msgParams = { text: message };
+    if (images && images.length > 0) {
+      msgParams.images = images.map((img) => ({
+        type: "image",
+        mediaType: img.mimeType,
+        data: img.data
+      }));
+    }
+    this.sendRpc("droid.add_user_message", msgParams);
+  }
+  async mockResponse(message) {
+    this.emitEvent({ type: "stream_start", role: "assistant" });
+    const response = `收到消息: "${message}"
+
+这是离线模拟回复。如需使用 Factory Droid，请安装 droid CLI 并设置 FACTORY_API_KEY 环境变量。
+
+安装: curl -fsSL https://app.factory.ai/cli | sh`;
+    for (let i = 0; i < response.length; i += 4) {
+      await new Promise((r) => setTimeout(r, 8));
+      this.emitEvent({ type: "stream_delta", delta: response.slice(i, i + 4) });
+    }
+    this.emitEvent({ type: "stream_end" });
+    this.emitEvent({ type: "agent_end" });
+  }
+  /** Abort current response */
+  async abort() {
+    if (this.process) {
+      this.sendRpc("droid.interrupt_session", {});
+    }
+  }
+  /** Get available models - Factory provides a curated set + local custom models */
+  async getModels() {
+    if (this.models.length > 0) return this.models;
+    this.models = [
+      { id: "claude-opus-4-7", name: "Claude Opus 4", provider: "factory", reasoning: true },
+      { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "factory", reasoning: true },
+      { id: "claude-sonnet-4-6-20250514", name: "Claude Sonnet 4.6", provider: "factory", reasoning: true },
+      { id: "gpt-5-codex", name: "GPT-5 Codex", provider: "factory", reasoning: true },
+      { id: "gpt-5.1-codex", name: "GPT-5.1 Codex", provider: "factory", reasoning: true },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "factory", reasoning: true },
+      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "factory", reasoning: false }
+    ];
+    try {
+      const configPath = path.join(os.homedir(), ".factory", "settings.json");
+      const content = await promises.readFile(configPath, "utf-8");
+      const config = JSON.parse(content);
+      if (Array.isArray(config.customModels)) {
+        for (const m of config.customModels) {
+          this.models.push({
+            id: m.id || m.model || m.displayName,
+            name: m.displayName || m.model || m.id,
+            provider: m.provider || "factory-custom",
+            reasoning: false
+          });
+        }
+      }
+    } catch {
+    }
+    return this.models;
+  }
+  /** Set model - sends setting update via RPC */
+  async setModel(_provider, modelId) {
+    if (this.process && this.isReady) {
+      this.sendRpc("droid.update_settings", { modelId });
+      this.emitEvent({ type: "model_changed", model: { id: modelId, provider: _provider } });
+    }
+  }
+  /** Set reasoning effort */
+  async setThinkingLevel(level) {
+    const effortMap = {
+      off: "off",
+      none: "none",
+      low: "low",
+      medium: "medium",
+      high: "high"
+    };
+    if (this.process && this.isReady) {
+      this.sendRpc("droid.update_settings", { reasoningEffort: effortMap[level] || level });
+    }
+    this.emitEvent({ type: "thinking_level_changed", level });
+  }
+  /** Dispose and clean up */
+  dispose() {
+    this.killProcess();
+  }
+  killProcess() {
+    if (this.process) {
+      this.process.stdin?.end();
+      this.process.kill();
+      this.process = null;
+    }
+    this.isReady = false;
+    this.sessionId = null;
+    this.pendingResponses.clear();
+  }
+  // ---- JSON-RPC (Factory protocol) ----
+  sendRpc(method, params, onResponse) {
+    const id = `rpc-${++this.rpcId}`;
+    const msg = {
+      jsonrpc: "2.0",
+      factoryApiVersion: "1.0.0",
+      factoryProtocolVersion: "1.87.0",
+      type: "request",
+      id,
+      method,
+      params
+    };
+    if (onResponse) this.pendingResponses.set(id, onResponse);
+    this.process?.stdin?.write(JSON.stringify(msg) + "\n");
+    return id;
+  }
+  sendRpcResponse(requestId, result) {
+    const msg = {
+      jsonrpc: "2.0",
+      factoryApiVersion: "1.0.0",
+      factoryProtocolVersion: "1.87.0",
+      type: "response",
+      id: requestId,
+      result
+    };
+    this.process?.stdin?.write(JSON.stringify(msg) + "\n");
+  }
+  handleMessage(data) {
+    const msgType = data.type;
+    if (msgType === "response") {
+      if (data.id && this.pendingResponses.has(data.id)) {
+        const handler = this.pendingResponses.get(data.id);
+        handler(data);
+        this.pendingResponses.delete(data.id);
+      }
+    } else if (msgType === "notification") {
+      const method = data.method || data.params?.notification?.type;
+      this.handleNotification(method, data.params || data);
+    } else if (msgType === "request") {
+      this.handleServerRequest(data.method, data.id, data.params);
+    }
+  }
+  handleServerRequest(method, requestId, params) {
+    switch (method) {
+      case "droid.request_permission":
+        this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+        break;
+      case "droid.ask_user":
+        this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
+        break;
+    }
+  }
+  handleNotification(method, params) {
+    const notification = params?.notification || params;
+    const notifType = notification?.type || method;
+    const notifData = notification?.data || notification;
+    switch (notifType) {
+      case "assistant_text_delta":
+        this.emitEvent({ type: "stream_delta", delta: notifData?.delta || notifData?.text || "" });
+        break;
+      case "assistant_text_complete":
+        this.emitEvent({ type: "stream_end" });
+        this.emitEvent({ type: "agent_end" });
+        break;
+      case "thinking_text_delta":
+        this.emitEvent({ type: "thinking_delta", delta: notifData?.delta || notifData?.text || "" });
+        break;
+      case "thinking_text_complete":
+        break;
+      case "tool_progress_update":
+        this.emitEvent({ type: "tool_start", toolName: notifData?.toolName || notifData?.name || "tool" });
+        if (notifData?.result?.details?.patch || notifData?.diff || notifData?.patch) {
+          const patch = notifData.result?.details?.patch || notifData.patch || notifData.diff;
+          const filePath = notifData.args?.filePath || notifData.args?.path || notifData.file || notifData.fileName || "";
+          if (patch) {
+            const addCount = (patch.match(/^\+[^+]/gm) || []).length;
+            const delCount = (patch.match(/^-[^-]/gm) || []).length;
+            this.emitEvent({
+              type: "diff_update",
+              diffs: [{
+                file: filePath,
+                patch,
+                additions: addCount,
+                deletions: delCount,
+                status: "modified"
+              }]
+            });
+          }
+        }
+        break;
+      case "droid_working_state_changed":
+        if (notifData?.state === "idle") {
+          this.emitEvent({ type: "tool_end", toolName: "" });
+        }
+        break;
+      case "error":
+        this.emitEvent({ type: "stream_delta", delta: `
+
+错误: ${notifData?.message || "未知错误"}` });
+        this.emitEvent({ type: "stream_end" });
+        this.emitEvent({ type: "agent_end" });
+        break;
+    }
+  }
+  emitEvent(data) {
+    this.window?.webContents.send("agent:event", data);
+  }
 }
 class PiAgent {
   process = null;
@@ -324,28 +1094,6 @@ class PiAgent {
       }
     } catch {
     }
-    try {
-      const { join } = await import("path");
-      const { homedir } = await import("os");
-      const configPath = join(homedir(), ".pi/agent/models.json");
-      const content = await promises.readFile(configPath, "utf-8");
-      const config = JSON.parse(content);
-      const models = [];
-      if (config.providers) {
-        for (const [provider, pc] of Object.entries(config.providers)) {
-          if (Array.isArray(pc.models)) {
-            for (const m of pc.models) {
-              models.push({ id: m.id || m.name, name: m.name || m.id, provider, reasoning: m.reasoning ?? false });
-            }
-          }
-        }
-      }
-      if (models.length > 0) {
-        this.models = models;
-        return this.models;
-      }
-    } catch {
-    }
     return this.models;
   }
   async setModel(provider, modelId) {
@@ -411,6 +1159,22 @@ class PiAgent {
         break;
       case "tool_execution_end":
         this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError });
+        if (data.result?.details?.patch) {
+          const filePath = data.args?.filePath || data.args?.path || data.args?.file || "";
+          const patch = data.result.details.patch;
+          const addCount = (patch.match(/^\+[^+]/gm) || []).length;
+          const delCount = (patch.match(/^-[^-]/gm) || []).length;
+          this.emitEvent({
+            type: "diff_update",
+            diffs: [{
+              file: filePath,
+              patch,
+              additions: addCount,
+              deletions: delCount,
+              status: "modified"
+            }]
+          });
+        }
         break;
     }
   }
@@ -449,49 +1213,65 @@ class PiAgent {
 }
 class AgentManager {
   sessionAgents = /* @__PURE__ */ new Map();
-  // sessionId -> PiAgent
+  sessionAgentTypes = /* @__PURE__ */ new Map();
+  // sessionId -> agentId ("pi" | "opencode")
   sessionFilePaths = /* @__PURE__ */ new Map();
-  // sessionId -> sessionFile path
   activeSessionId = null;
   window = null;
   setWindow(win) {
     this.window = win;
   }
-  /** Create or resume a session. If existingSessionFilePath is given, switch to it after init. */
+  createAgentBackend(agentId) {
+    if (agentId === "opencode") return new OpenCodeAgent();
+    if (agentId === "droid") return new DroidAgent();
+    return new PiAgent();
+  }
+  /** Create or resume a session */
   async createSession(sessionId, agentId, projectPath, existingSessionFilePath) {
+    console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
     let agent = this.sessionAgents.get(sessionId);
     if (!agent) {
-      agent = new PiAgent();
+      agent = this.createAgentBackend(agentId);
       this.sessionAgents.set(sessionId, agent);
+      this.sessionAgentTypes.set(sessionId, agentId);
+      console.log("[agent-manager] Created new agent:", agent.constructor.name);
+    } else {
+      console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
     }
     if (this.window) agent.setWindow(this.window);
     await agent.init(projectPath, existingSessionFilePath);
     const fp = agent.sessionFilePath;
+    console.log("[agent-manager] After init, sessionFilePath:", fp);
     if (fp) this.sessionFilePaths.set(sessionId, fp);
     this.activeSessionId = sessionId;
   }
-  /** Get stored session file path for a session */
   getSessionFilePath(sessionId) {
     return this.sessionFilePaths.get(sessionId);
   }
-  /** Switch active session */
   switchSession(sessionId) {
     if (this.sessionAgents.has(sessionId)) {
       this.activeSessionId = sessionId;
     }
   }
-  /** Get the active agent */
   getActiveAgent() {
     if (!this.activeSessionId) return null;
     return this.sessionAgents.get(this.activeSessionId) || null;
   }
-  /** Remove a session's agent */
+  getAgentBySessionId(sessionId) {
+    return this.sessionAgents.get(sessionId) || null;
+  }
+  async getModelsBySessionId(sessionId) {
+    const agent = this.sessionAgents.get(sessionId);
+    if (!agent) return [];
+    return agent.getModels();
+  }
   removeSession(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) {
       agent.dispose();
       this.sessionAgents.delete(sessionId);
     }
+    this.sessionAgentTypes.delete(sessionId);
     this.sessionFilePaths.delete(sessionId);
     if (this.activeSessionId === sessionId) this.activeSessionId = null;
   }
@@ -504,7 +1284,8 @@ function registerAgentHandlers(getWindow) {
       const win = getWindow();
       if (win) agentManager.setWindow(win);
       await agentManager.createSession(sid, agentId, projectPath, sessionFilePath);
-      return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid) };
+      const models = await agentManager.getModelsBySessionId(sid);
+      return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid), models };
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -533,8 +1314,9 @@ function registerAgentHandlers(getWindow) {
     await agent.abort();
     return { success: true };
   });
-  electron.ipcMain.handle("agent:getModels", async () => {
-    const agent = agentManager.getActiveAgent();
+  electron.ipcMain.handle("agent:getModels", async (_event, sessionId) => {
+    const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
+    console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
     if (!agent) return [];
     return agent.getModels();
   });
