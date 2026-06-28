@@ -116,9 +116,10 @@ function registerFileHandlers() {
   });
   electron.ipcMain.handle("fs:isCommandAvailable", (_event, command) => {
     try {
-      const cmd = process.platform === "win32" ? `where ${command}` : `which ${command}`;
-      child_process.execSync(cmd, { stdio: "ignore" });
-      return true;
+      const cmd = process.platform === "win32" ? `where ${command}` : `which -a ${command}`;
+      const result = child_process.execSync(cmd, { encoding: "utf-8" }).trim();
+      const lines = result.split("\n").map((l) => l.trim()).filter(Boolean);
+      return lines.some((p) => !p.includes("node_modules"));
     } catch {
       return false;
     }
@@ -1456,11 +1457,16 @@ function registerAgentHandlers(getWindow) {
     return { success: true };
   });
 }
+if (process.platform === "linux") {
+  electron.app.commandLine.appendSwitch("enable-wayland-ime");
+  electron.app.commandLine.appendSwitch("wayland-text-input-version", "3");
+}
 electron.app.setName("hpp");
 let mainWindow = null;
 function createWindow() {
   electron.Menu.setApplicationMenu(null);
   const iconPath = path.join(__dirname, "../renderer/icon.png");
+  const isLinux = process.platform === "linux";
   mainWindow = new electron.BrowserWindow({
     width: 1400,
     height: 900,
@@ -1469,7 +1475,8 @@ function createWindow() {
     backgroundColor: "#1e1e1e",
     title: "Hpp",
     icon: iconPath,
-    frame: false,
+    frame: !isLinux,
+    titleBarStyle: isLinux ? "hidden" : void 0,
     webPreferences: {
       preload: path.join(__dirname, "../preload/preload.js"),
       contextIsolation: true,

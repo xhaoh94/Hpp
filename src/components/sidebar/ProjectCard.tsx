@@ -62,7 +62,7 @@ export function ProjectCard({ project }: Props) {
 
   const handleStartAgent = async (agentId: string) => {
     // Check if agent is installed before starting
-    if (installedAgents[agentId] === false) {
+    if (installedAgents[agentId] !== true) {
       const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
       const name = agent?.name || agentId;
       const cmd = agent?.command || agentId;
@@ -189,7 +189,7 @@ export function ProjectCard({ project }: Props) {
   };
 
   const uncheckedAgents = AVAILABLE_AGENTS.filter(
-    (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] !== false
+    (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true
   );
 
   return (
@@ -222,7 +222,7 @@ export function ProjectCard({ project }: Props) {
           <div className="project-name">{project.name}</div>
           <div className="project-path" title={project.path}>{project.path}</div>
           <div className="project-terminals">
-            {AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] !== false).map((a) => (
+            {AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => (
               <div
                 key={a.id}
                 className="project-terminal-btn"

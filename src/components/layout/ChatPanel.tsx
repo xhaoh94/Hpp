@@ -23,11 +23,23 @@ const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
   const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "error").length;
   const diffCount = entries.filter((entry) => entry.type === "diff").length;
   const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
+  const thinkingEntry = entries.find((entry) => entry.type === "thinking" && entry.state === "running");
+  const runningTool = entries.find((entry) => entry.type === "tool" && entry.state === "running");
 
-  if (toolCount > 0 && diffCount > 0) return `${toolCount} 条命令, ${diffCount} 个文件变更`;
-  if (toolCount > 0) return `已运行 ${toolCount} 条命令`;
-  if (diffCount > 0) return `已编辑 ${diffCount} 个文件`;
-  if (isThinking) return "正在思考";
+  if (isThinking && thinkingEntry) {
+    const thinkingPreview = thinkingEntry.detail ?
+      (thinkingEntry.detail.length > 30 ? thinkingEntry.detail.substring(0, 30) + "..." : thinkingEntry.detail) :
+      "思考中";
+    return `正在思考: ${thinkingPreview}`;
+  }
+
+  if (runningTool) {
+    return runningTool.title;
+  }
+
+  if (toolCount > 0 && diffCount > 0) return `已执行 ${toolCount} 个操作, 修改 ${diffCount} 个文件`;
+  if (toolCount > 0) return `已执行 ${toolCount} 个操作`;
+  if (diffCount > 0) return `已修改 ${diffCount} 个文件`;
 
   return `${entries.length} 条事件`;
 };
@@ -75,6 +87,56 @@ const getToolDetail = (event: any) => {
   if (!event.isError && event.detail) lines.push(stringifyProcessValue(event.detail));
 
   return truncateProcessDetail(lines.filter(Boolean).join("\n"));
+};
+
+const getToolSummary = (toolName: string, args: any, isError: boolean = false): string => {
+  if (isError) {
+    switch (toolName) {
+      case "read": return "读取文件失败";
+      case "write": return "写入文件失败";
+      case "edit": return "编辑文件失败";
+      case "bash": return "命令执行失败";
+      case "glob": return "文件搜索失败";
+      case "grep": return "内容搜索失败";
+      case "search": return "文件搜索失败";
+      case "list": return "列出文件失败";
+      case "readDir": return "读取目录失败";
+      case "webfetch": return "网页获取失败";
+      case "websearch": return "网络搜索失败";
+      default: return `${toolName} 执行失败`;
+    }
+  }
+
+  const filePath = args?.filePath || args?.path || args?.file || "";
+  const command = args?.command || args?.cmd || "";
+  const pattern = args?.pattern || args?.query || "";
+
+  switch (toolName) {
+    case "read":
+      return filePath ? `已读取文件: ${filePath}` : "已读取文件";
+    case "write":
+      return filePath ? `已写入文件: ${filePath}` : "已写入文件";
+    case "edit":
+      return filePath ? `已编辑文件: ${filePath}` : "已编辑文件";
+    case "bash":
+      return command ? `命令执行完成: ${command.length > 30 ? command.substring(0, 30) + "..." : command}` : "命令执行完成";
+    case "glob":
+      return pattern ? `文件搜索完成: ${pattern}` : "文件搜索完成";
+    case "grep":
+      return pattern ? `内容搜索完成: ${pattern}` : "内容搜索完成";
+    case "search":
+      return pattern ? `文件搜索完成: ${pattern}` : "文件搜索完成";
+    case "list":
+      return filePath ? `文件列表获取完成: ${filePath}` : "文件列表获取完成";
+    case "readDir":
+      return filePath ? `目录读取完成: ${filePath}` : "目录读取完成";
+    case "webfetch":
+      return "网页获取完成";
+    case "websearch":
+      return "网络搜索完成";
+    default:
+      return `已完成 ${toolName}`;
+  }
 };
 
 const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["type"] => {
@@ -202,7 +264,7 @@ function ProcessBlock({
   return (
     <div className="chat-process">
       <button className="chat-process-toggle" onClick={() => onToggle(messageId)}>
-        <span>已处理 {elapsed}</span>
+        <span>处理耗时 {elapsed}</span>
         <span className="chat-process-summary">{summarizeProcessEntries(process.entries)}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
@@ -549,9 +611,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       switch (event.type) {
         case "message_start":
           processActiveRef.current = true;
+          const messagePreview = event.content ?
+            (event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content) :
+            "用户消息";
           appendProcessEntry({
             type: "status",
-            title: "发送用户消息",
+            title: `收到消息: "${messagePreview}"`,
             detail: event.content ? truncateProcessDetail(String(event.content)) : undefined,
             state: "completed",
           });
@@ -568,7 +633,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             useChatStore.getState().startAssistantProcess(Date.now());
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
-          appendProcessEntry({ type: "status", title: "Agent 开始处理", state: "running" });
+          appendProcessEntry({ type: "status", title: "正在分析请求并生成响应", state: "running" });
           break;
         case "stream_delta":
           if (!event.delta) break;
@@ -577,19 +642,27 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "thinking_delta":
           thinkingBufferRef.current += event.delta;
           if (thinkingEntryIdRef.current) {
+            const thinkingPreview = thinkingBufferRef.current ?
+              (thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current) :
+              "思考中";
             useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+              title: `正在思考: ${thinkingPreview}`,
               detail: thinkingBufferRef.current,
               state: "running",
             });
           } else {
             const entryId = createProcessEntryId();
             thinkingEntryIdRef.current = entryId;
+            const thinkingPreview = thinkingBufferRef.current ?
+              (thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current) :
+              "思考中";
             appendProcessEntry({
               id: entryId,
               type: "thinking",
-              title: "思考",
+              title: `正在思考: ${thinkingPreview}`,
               detail: thinkingBufferRef.current,
               state: "running",
+              expanded: true,
             });
           }
           break;
@@ -629,10 +702,54 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             const toolName = getToolName(event);
             const key = getToolKey(event);
             const existingEntryId = activeToolEntryRef.current[key];
+            const toolDetail = getToolDetail(event);
+            const args = event.args || event.input || event.parameters || {};
+            const filePath = args.filePath || args.path || args.file || "";
+            const command = args.command || args.cmd || "";
+            const pattern = args.pattern || args.query || "";
+            
+            let toolSummary: string;
+            switch (toolName) {
+              case "read":
+                toolSummary = filePath ? `正在读取文件: ${filePath}` : "正在读取文件";
+                break;
+              case "write":
+                toolSummary = filePath ? `正在写入文件: ${filePath}` : "正在写入文件";
+                break;
+              case "edit":
+                toolSummary = filePath ? `正在编辑文件: ${filePath}` : "正在编辑文件";
+                break;
+              case "bash":
+                toolSummary = command ? `正在执行命令: ${command.length > 30 ? command.substring(0, 30) + "..." : command}` : "正在执行命令";
+                break;
+              case "glob":
+                toolSummary = pattern ? `正在搜索文件: ${pattern}` : "正在搜索文件";
+                break;
+              case "grep":
+                toolSummary = pattern ? `正在搜索内容: ${pattern}` : "正在搜索内容";
+                break;
+              case "search":
+                toolSummary = pattern ? `正在搜索文件: ${pattern}` : "正在搜索文件";
+                break;
+              case "list":
+                toolSummary = filePath ? `正在列出文件: ${filePath}` : "正在列出文件";
+                break;
+              case "readDir":
+                toolSummary = filePath ? `正在读取目录: ${filePath}` : "正在读取目录";
+                break;
+              case "webfetch":
+                toolSummary = "正在获取网页内容";
+                break;
+              case "websearch":
+                toolSummary = "正在搜索网络";
+                break;
+              default:
+                toolSummary = `正在运行 ${toolName}`;
+            }
             if (existingEntryId) {
               useChatStore.getState().updateLastAssistantProcessEntry(existingEntryId, {
-                title: `运行 ${toolName}`,
-                detail: getToolDetail(event) || undefined,
+                title: toolSummary,
+                detail: toolDetail || undefined,
                 state: "running",
                 expanded: true,
               });
@@ -642,8 +759,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               appendProcessEntry({
                 id: entryId,
                 type: "tool",
-                title: `运行 ${toolName}`,
-                detail: getToolDetail(event) || undefined,
+                title: toolSummary,
+                detail: toolDetail || undefined,
                 state: "running",
                 expanded: true,
               });
@@ -655,9 +772,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             const key = getToolKey(event);
             const entryId = activeToolEntryRef.current[key];
             const toolName = getToolName(event);
+            const toolDetail = getToolDetail(event);
+            const args = event.args || event.input || event.parameters || {};
+            const toolSummary = getToolSummary(toolName, args, event.isError);
             const patch = {
-              title: `${event.isError ? "运行失败" : "已运行"} ${toolName}`,
-              detail: getToolDetail(event) || undefined,
+              title: toolSummary,
+              detail: toolDetail || undefined,
               state: event.isError ? "error" : "completed",
               type: event.isError ? "error" : "tool",
               expanded: !!event.isError,
@@ -669,7 +789,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             } else {
               appendProcessEntry({
                 type: event.isError ? "error" : "tool",
-                title: patch.title || `已运行 ${toolName}`,
+                title: patch.title || (event.isError ? `${toolName} 执行失败` : `已完成 ${toolName}`),
                 detail: patch.detail,
                 state: patch.state,
                 expanded: patch.expanded,
@@ -680,27 +800,49 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "diff_update":
           if (event.diffs && event.diffs.length > 0) {
             useChatStore.getState().appendLastAssistantDiffs(event.diffs);
+            const fileNames = event.diffs.map((diff: FileDiff) => {
+              const parts = diff.file.split(/[/\\]/);
+              return parts[parts.length - 1];
+            });
+            const diffTitle = event.diffs.length === 1 ?
+              `已修改文件: ${fileNames[0]}` :
+              `已修改 ${event.diffs.length} 个文件: ${fileNames.slice(0, 3).join(", ")}${event.diffs.length > 3 ? "..." : ""}`;
             appendProcessEntry({
               type: "diff",
-              title: `产生 ${event.diffs.length} 个文件变更`,
-              detail: event.diffs.map((diff: FileDiff) => diff.file).join("\n"),
+              title: diffTitle,
+              detail: event.diffs.map((diff: FileDiff) => `${diff.file} (${diff.status === "added" ? "新增" : diff.status === "deleted" ? "删除" : "修改"})`).join("\n"),
               state: "completed",
               expanded: false,
             });
           }
           break;
         case "process_event":
+          const eventType = normalizeProcessEntryType(event.entryType || event.kind);
+          const eventTitle = String(event.title || "Agent 事件");
+          const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
+          const eventState = normalizeProcessEntryState(event.state);
+
+          let processedTitle = eventTitle;
+          if (eventType === "tool" && !eventTitle.includes("运行") && !eventTitle.includes("已完成") && !eventTitle.includes("失败")) {
+            processedTitle = `正在执行: ${eventTitle}`;
+          } else if (eventType === "diff" && !eventTitle.includes("修改") && !eventTitle.includes("变更")) {
+            processedTitle = `文件变更: ${eventTitle}`;
+          } else if (eventType === "thinking" && !eventTitle.includes("思考")) {
+            processedTitle = `思考: ${eventTitle}`;
+          }
+
           appendProcessEntry({
-            type: normalizeProcessEntryType(event.entryType || event.kind),
-            title: String(event.title || "Agent 事件"),
-            detail: event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined,
-            state: normalizeProcessEntryState(event.state),
+            type: eventType,
+            title: processedTitle,
+            detail: eventDetail,
+            state: eventState,
           });
           break;
         case "agent_ready":
+          const agentName = getAgentName(String(event.agentId || activeAgentId));
           appendProcessEntry({
             type: "status",
-            title: `${getAgentName(String(event.agentId || activeAgentId))} 已就绪`,
+            title: `${agentName} 已就绪，可以开始对话`,
             state: "completed",
           });
           // Models are fetched by the useEffect watching activeSessionId
@@ -794,6 +936,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
+
     const shouldSend =
       (sendKey === "Ctrl+Enter" && e.key === "Enter" && e.ctrlKey) ||
       (sendKey === "Enter" && e.key === "Enter" && !e.ctrlKey);
@@ -802,7 +946,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       e.preventDefault();
       handleSend();
     } else if (e.key === "Enter") {
-      // Allow newline by inserting it manually (works reliably in controlled textarea)
       e.preventDefault();
       const ta = textareaRef.current;
       if (ta) {
@@ -810,7 +953,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         const end = ta.selectionEnd;
         const newValue = input.substring(0, start) + "\n" + input.substring(end);
         setInput(newValue);
-        // Restore cursor position after React re-render
         requestAnimationFrame(() => {
           ta.selectionStart = ta.selectionEnd = start + 1;
         });
@@ -1057,7 +1199,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         {activeSessionId && !isSessionInitialized(activeSessionId) ? (
           <div className="chat-loading-agent">
             <div className="chat-working-spinner" />
-            <span>Agent 正在启动...</span>
+            <span>正在初始化 Agent 会话...</span>
           </div>
         ) : (<>
         {messages.length === 0 && (
@@ -1125,7 +1267,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         {isStreaming && messages.length > 0 && messages[messages.length - 1].role === "user" && (
           <div className="chat-working">
             <div className="chat-working-spinner" />
-            <span>working...</span>
+            <span>正在处理您的请求...</span>
           </div>
         )}
         </>)}

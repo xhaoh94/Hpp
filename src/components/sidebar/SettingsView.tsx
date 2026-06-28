@@ -351,7 +351,7 @@ export function SettingsView() {
                 </p>
                 <div className="filter-group">
                   {AVAILABLE_AGENTS.map((agent) => {
-                    const isInstalled = installedAgents[agent.id] !== false;
+                    const isInstalled = installedAgents[agent.id] === true;
                     return (
                     <div key={agent.id} className="filter-row" style={{ alignItems: "center", opacity: isInstalled ? 1 : 0.5 }}>
                       <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: isInstalled ? "pointer" : "not-allowed", flex: 1 }}>

@@ -5,6 +5,12 @@ import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
 import { registerAgentHandlers } from "./agents/agent-manager";
 
+// Enable IME support on Linux Wayland
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("enable-wayland-ime");
+  app.commandLine.appendSwitch("wayland-text-input-version", "3");
+}
+
 // Set app name
 app.setName("hpp");
 
@@ -17,6 +23,8 @@ function createWindow() {
   // Load app icon for taskbar
   const iconPath = join(__dirname, "../renderer/icon.png");
 
+  const isLinux = process.platform === "linux";
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -25,7 +33,8 @@ function createWindow() {
     backgroundColor: "#1e1e1e",
     title: "Hpp",
     icon: iconPath,
-    frame: false,
+    frame: !isLinux,
+    titleBarStyle: isLinux ? "hidden" : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,

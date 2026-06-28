@@ -127,9 +127,10 @@ export function registerFileHandlers() {
 
   ipcMain.handle("fs:isCommandAvailable", (_event, command: string) => {
     try {
-      const cmd = process.platform === "win32" ? `where ${command}` : `which ${command}`;
-      execSync(cmd, { stdio: "ignore" });
-      return true;
+      const cmd = process.platform === "win32" ? `where ${command}` : `which -a ${command}`;
+      const result = execSync(cmd, { encoding: "utf-8" }).trim();
+      const lines = result.split("\n").map((l) => l.trim()).filter(Boolean);
+      return lines.some((p) => !p.includes("node_modules"));
     } catch {
       return false;
     }
