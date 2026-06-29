@@ -1303,9 +1303,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           </svg>
           <div className="chat-empty-title">选择或创建会话</div>
           <div className="chat-empty-desc">点击项目卡片上的 Agent 按钮新建会话，或点击下方已有会话</div>
-          {activeProject.sessions.length > 0 && (
+          {(() => {
+            const openSessions = activeProject.sessions.filter((s) => !s.closed);
+            if (openSessions.length === 0) return null;
+            return (
             <div className="chat-session-list">
-              {activeProject.sessions.map((session) => {
+              {openSessions.map((session) => {
                 const msgs = sessionMessages[session.id];
                 const firstUserMsg = msgs?.find((m) => m.role === "user");
                 return (
@@ -1354,7 +1357,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                 );
               })}
             </div>
-          )}
+            );
+          })()}
         </div>
       </div>
     );
