@@ -37,13 +37,14 @@
   color: var(--text-primary);
   font-size: 18px;
   line-height: 1;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   border-radius: 4px;
+  flex-shrink: 0;
 }
 
 .btn-add:hover {
@@ -387,6 +388,10 @@
 }
 .project-terminal-btn-add {
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
 }
 .agent-add-popup {
   position: absolute;
@@ -432,7 +437,13 @@
   flex-shrink: 0;
 }
 
-.terminal-child-icon.completed {
+.terminal-child-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #4CAF50;
+  flex-shrink: 0;
+  margin-right: 2px;
 }
 
 .terminal-child-status {

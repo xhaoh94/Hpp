@@ -22,6 +22,8 @@ const formatProcessDuration = (ms: number) => {
 const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
   if (entries.length === 0) return "等待事件";
 
+  if (entries.some((entry) => entry.state === "interrupted")) return "已中断";
+
   const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "question" || entry.type === "error").length;
   const diffCount = entries.filter((entry) => entry.type === "diff").length;
   const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
@@ -240,13 +242,22 @@ const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["type"] =>
 };
 
 const normalizeProcessEntryState = (value: unknown): AgentProcessEntry["state"] | undefined => {
-  if (value === "running" || value === "completed" || value === "error") return value;
+  if (value === "running" || value === "completed" || value === "error" || value === "interrupted") return value;
   return undefined;
 };
 
 function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; state?: AgentProcessEntry["state"] }) {
   if (state === "running") {
     return <span className="chat-process-entry-spinner" />;
+  }
+
+  if (state === "interrupted") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M9 9l6 6M15 9l-6 6" strokeLinecap="round" />
+      </svg>
+    );
   }
 
   if (type === "tool") {
@@ -347,6 +358,79 @@ function ProcessEntryFiles({
   );
 }
 
+const splitCommandDetail = (detail?: string, command?: string) => {
+  if (!detail) return { command: command || "", output: "" };
+  const lines = detail.split("\n");
+  const firstLine = lines[0] || "";
+  if (firstLine.startsWith("$ ")) {
+    return {
+      command: command || firstLine.slice(2).trim(),
+      output: lines.slice(1).join("\n").trim(),
+    };
+  }
+  return { command: command || "", output: detail.trim() };
+};
+
+function CommandDetail({
+  entry,
+}: {
+  entry: AgentProcessEntry;
+}) {
+  const [outputExpanded, setOutputExpanded] = useState(entry.state === "running");
+  const userToggledRef = useRef(false);
+  const { command, output } = splitCommandDetail(entry.detail, entry.command);
+  const outputLines = output ? output.split("\n") : [];
+  const isRunning = entry.state === "running";
+  const previewLines = outputExpanded || isRunning ? outputLines : outputLines.slice(0, 4);
+  const hiddenLineCount = Math.max(0, outputLines.length - previewLines.length);
+  const canExpand = outputLines.length > 0;
+
+  useEffect(() => {
+    if (!isRunning && !userToggledRef.current) {
+      setOutputExpanded(false);
+    }
+  }, [isRunning]);
+
+  const toggleOutput = () => {
+    userToggledRef.current = true;
+    setOutputExpanded((current) => !current);
+  };
+
+  return (
+    <div className={`chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`}>
+      <button
+        className="chat-command-header"
+        onClick={canExpand ? toggleOutput : undefined}
+        disabled={!canExpand}
+      >
+        <span className="chat-command-prompt">$_</span>
+        <span className="chat-command-text">{command || entry.title}</span>
+        <span className="chat-command-state">{isRunning ? "运行中" : entry.state === "error" ? "失败" : entry.state === "interrupted" ? "已中断" : "完成"}</span>
+        {canExpand && (
+          <svg
+            className="chat-command-chevron"
+            width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
+            style={{ transform: outputExpanded || isRunning ? "rotate(180deg)" : "rotate(0deg)" }}
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        )}
+      </button>
+      {outputLines.length > 0 && (
+        <div className="chat-command-output">
+          <div className="chat-command-lang">BASH</div>
+          <pre>{previewLines.join("\n")}</pre>
+          {!outputExpanded && !isRunning && hiddenLineCount > 0 && (
+            <button className="chat-command-more" onClick={toggleOutput}>
+              展开 ({outputLines.length} 行)
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProcessEntryRow({
   messageId,
   entry,
@@ -360,8 +444,10 @@ function ProcessEntryRow({
 }) {
   const hasDetail = !!entry.detail;
   const files = entry.files || [];
-  const canExpand = hasDetail && entry.type !== "thinking";
-  const detailVisible = hasDetail && (!canExpand || entry.expanded);
+  const isCommandEntry = entry.toolKind === "run_command";
+  const canExpand = hasDetail;
+  const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
+  const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
 
   if (entry.type === "info") {
     return (
@@ -394,6 +480,9 @@ function ProcessEntryRow({
           )}
         </button>
         {files.length > 0 && <ProcessEntryFiles files={files} onOpenFile={onOpenFile} />}
+        {commandVisible && (
+          <CommandDetail entry={entry} />
+        )}
         {detailVisible && (
           <pre className={`chat-process-entry-detail ${canExpand ? "panel" : ""}`}>{entry.detail}</pre>
         )}
@@ -419,11 +508,12 @@ function ProcessBlock({
   const durationEnd = process.endedAt || nowTick;
   const elapsed = formatProcessDuration(durationEnd - process.startedAt);
   const expanded = !!process.expanded;
+  const interrupted = process.entries.some((entry) => entry.state === "interrupted");
 
   return (
-    <div className="chat-process">
+    <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
       <button className="chat-process-toggle" onClick={() => onToggle(messageId)}>
-        <span>处理耗时 {elapsed}</span>
+        <span>{interrupted ? "已中断" : "处理耗时"} {elapsed}</span>
         <span className="chat-process-summary">{summarizeProcessEntries(process.entries)}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
@@ -571,8 +661,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const activeToolEntryRef = useRef<Record<string, string>>({});
   const activeToolFileRef = useRef<Record<string, AgentProcessFile[]>>({});
   const streamWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionRuntimeRef = useRef<Record<string, {
+    streamBuffer: string;
+    thinkingBuffer: string;
+    thinkingEntryId: string | null;
+    processActive: boolean;
+    activeToolEntry: Record<string, string>;
+    activeToolFile: Record<string, AgentProcessFile[]>;
+    streamWatchdog: ReturnType<typeof setTimeout> | null;
+  }>>({});
   const isUserScrollingRef = useRef(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
 
   // Track user scrolling - stop auto-scroll when user scrolls up
   useEffect(() => {
@@ -746,8 +846,25 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   // Subscribe to agent events
   useEffect(() => {
-    const appendProcessEntry = (entry: Omit<AgentProcessEntry, "id" | "timestamp"> & { id?: string; timestamp?: number }) => {
-      if (!processActiveRef.current) return;
+    const getRuntime = (sessionId: string) => {
+      const existing = sessionRuntimeRef.current[sessionId];
+      if (existing) return existing;
+      const runtime = {
+        streamBuffer: "",
+        thinkingBuffer: "",
+        thinkingEntryId: null,
+        processActive: false,
+        activeToolEntry: {},
+        activeToolFile: {},
+        streamWatchdog: null,
+      };
+      sessionRuntimeRef.current[sessionId] = runtime;
+      return runtime;
+    };
+
+    const appendProcessEntry = (sessionId: string, entry: Omit<AgentProcessEntry, "id" | "timestamp"> & { id?: string; timestamp?: number }) => {
+      const runtime = getRuntime(sessionId);
+      if (!runtime.processActive) return;
       useChatStore.getState().appendLastAssistantProcessEntry({
         id: entry.id || createProcessEntryId(),
         timestamp: entry.timestamp || Date.now(),
@@ -755,66 +872,79 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         title: entry.title,
         detail: entry.detail,
         files: entry.files,
+        toolKind: entry.toolKind,
+        command: entry.command,
         state: entry.state,
         expanded: entry.expanded,
-      });
+      }, sessionId);
     };
 
-    const finishThinkingEntry = () => {
-      if (thinkingEntryIdRef.current) {
-        useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+    const finishThinkingEntry = (sessionId: string) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.thinkingEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
           state: "completed",
-        });
+        }, sessionId);
       }
-      thinkingEntryIdRef.current = null;
-      thinkingBufferRef.current = "";
+      runtime.thinkingEntryId = null;
+      runtime.thinkingBuffer = "";
     };
 
-    const appendThinkingDelta = (delta: string) => {
+    const appendThinkingDelta = (sessionId: string, delta: string) => {
       if (!delta) return;
-      thinkingBufferRef.current += delta;
-      const thinkingPreview = thinkingBufferRef.current ?
-        (thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current) :
+      const runtime = getRuntime(sessionId);
+      runtime.thinkingBuffer += delta;
+      const thinkingPreview = runtime.thinkingBuffer ?
+        (runtime.thinkingBuffer.length > 50 ? runtime.thinkingBuffer.substring(0, 50) + "..." : runtime.thinkingBuffer) :
         "思考中";
 
-      if (thinkingEntryIdRef.current) {
-        useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+      if (runtime.thinkingEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
           title: `正在思考: ${thinkingPreview}`,
-          detail: thinkingBufferRef.current,
+          detail: runtime.thinkingBuffer,
           state: "running",
-        });
+        }, sessionId);
       } else {
         const entryId = createProcessEntryId();
-        thinkingEntryIdRef.current = entryId;
-        appendProcessEntry({
+        runtime.thinkingEntryId = entryId;
+        appendProcessEntry(sessionId, {
           id: entryId,
           type: "thinking",
           title: `正在思考: ${thinkingPreview}`,
-          detail: thinkingBufferRef.current,
+          detail: runtime.thinkingBuffer,
           state: "running",
-          expanded: true,
+          expanded: false,
         });
       }
     };
 
-    const clearStreamWatchdog = () => {
-      if (streamWatchdogRef.current) {
-        clearTimeout(streamWatchdogRef.current);
-        streamWatchdogRef.current = null;
+    const clearStreamWatchdog = (sessionId?: string) => {
+      if (!sessionId) {
+        if (streamWatchdogRef.current) {
+          clearTimeout(streamWatchdogRef.current);
+          streamWatchdogRef.current = null;
+        }
+        return;
+      }
+      const runtime = getRuntime(sessionId);
+      if (runtime.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
       }
     };
 
     const completeAssistantStream = (
-      currentSessionId: string | null,
+      currentSessionId: string,
       content?: string,
       timedOut = false
     ) => {
-      clearStreamWatchdog();
-      const finalContent = (content || streamBufferRef.current).trim();
+      const runtime = getRuntime(currentSessionId);
+      clearStreamWatchdog(currentSessionId);
+      const finalContent = (content || runtime.streamBuffer).trim();
       if (finalContent.trim().length > 0) {
-        streamBufferRef.current = finalContent;
-        useChatStore.getState().updateLastAssistant(finalContent);
-        useChatStore.getState().collapseLastAssistantProcess();
+        runtime.streamBuffer = finalContent;
+        useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
+        useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
       } else if (timedOut) {
         useChatStore.getState().appendLastAssistantProcessEntry({
           id: createProcessEntryId(),
@@ -824,29 +954,41 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           detail: "Agent 长时间没有返回新的输出，已停止等待。",
           state: "error",
           expanded: true,
-        });
+        }, currentSessionId);
       }
-      finishThinkingEntry();
-      setStreaming(false);
-      useChatStore.getState().finishLastAssistantProcess(Date.now());
-      processActiveRef.current = false;
-      activeToolEntryRef.current = {};
-      activeToolFileRef.current = {};
-      thinkingEntryIdRef.current = null;
-      if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, timedOut ? "error" : "completed");
+      finishThinkingEntry(currentSessionId);
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
+      runtime.processActive = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.thinkingEntryId = null;
+      if (currentSessionId) {
+        const activeId = useProjectStore.getState().activeSessionId;
+        // Only show "completed" notification if the user wasn't watching this session
+        useProjectStore.getState().setAgentStatus(
+          currentSessionId,
+          currentSessionId === activeId ? "idle" : timedOut ? "error" : "completed"
+        );
+      }
     };
 
-    const refreshStreamWatchdog = (currentSessionId: string | null) => {
-      clearStreamWatchdog();
-      if (!processActiveRef.current) return;
-      streamWatchdogRef.current = setTimeout(() => {
+    const refreshStreamWatchdog = (currentSessionId: string) => {
+      const runtime = getRuntime(currentSessionId);
+      clearStreamWatchdog(currentSessionId);
+      if (!runtime.processActive) return;
+      runtime.streamWatchdog = setTimeout(() => {
         completeAssistantStream(currentSessionId, undefined, true);
       }, 45000);
     };
 
     const unsubscribe = window.electronAPI.onAgentEvent((event: any) => {
       // Always read from store to avoid stale closure (useEffect deps=[])
-      const currentSessionId = useProjectStore.getState().activeSessionId;
+      const currentSessionId = typeof event.sessionId === "string"
+        ? event.sessionId
+        : useProjectStore.getState().activeSessionId;
+      if (!currentSessionId) return;
+      const runtime = getRuntime(currentSessionId);
       if (
         event.type !== "message_start" &&
         event.type !== "stream_start" &&
@@ -858,11 +1000,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
       switch (event.type) {
         case "message_start":
-          processActiveRef.current = true;
+          runtime.processActive = true;
           const messagePreview = event.content ?
             (event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content) :
             "用户消息";
-          appendProcessEntry({
+          appendProcessEntry(currentSessionId, {
             type: "status",
             title: `收到消息: "${messagePreview}"`,
             detail: event.content ? truncateProcessDetail(String(event.content)) : undefined,
@@ -871,38 +1013,40 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "stream_start":
           flushSync(() => {
-            streamBufferRef.current = "";
-            thinkingBufferRef.current = "";
-            thinkingEntryIdRef.current = null;
-            setStreaming(true);
-            processActiveRef.current = true;
-            activeToolEntryRef.current = {};
-            activeToolFileRef.current = {};
-            useChatStore.getState().startAssistantProcess(Date.now());
+            runtime.streamBuffer = "";
+            runtime.thinkingBuffer = "";
+            runtime.thinkingEntryId = null;
+            if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
+            runtime.processActive = true;
+            runtime.activeToolEntry = {};
+            runtime.activeToolFile = {};
+            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
-          appendProcessEntry({ type: "status", title: "正在分析请求并生成响应", state: "running" });
+          appendProcessEntry(currentSessionId, { type: "status", title: "正在分析请求并生成响应", state: "running" });
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
+          if (!runtime.processActive) break;
           if (!event.delta) break;
-          finishThinkingEntry();
-          streamBufferRef.current += String(event.delta);
+          finishThinkingEntry(currentSessionId);
+          runtime.streamBuffer += String(event.delta);
           break;
         case "thinking_delta":
-          appendThinkingDelta(String(event.delta || ""));
+          if (!runtime.processActive) break;
+          appendThinkingDelta(currentSessionId, String(event.delta || ""));
           break;
         case "thinking_end":
-          finishThinkingEntry();
+          finishThinkingEntry(currentSessionId);
           break;
         case "user_ask_question":
         case "ask_user_question":
         case "ask_user":
         case "droid.ask_user":
           {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
-            appendProcessEntry({
+            appendProcessEntry(currentSessionId, {
               type: "question",
               title: getQuestionTitle(false),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
@@ -913,7 +1057,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "stream_end":
           {
-            finishThinkingEntry();
+            if (!runtime.processActive) break;
+            finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
           }
@@ -923,16 +1068,17 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           // actually complete. stream_end is the UI completion signal.
           break;
         case "agent_disconnected":
-          finishThinkingEntry();
+          if (!runtime.processActive) break;
+          finishThinkingEntry(currentSessionId);
           completeAssistantStream(currentSessionId, undefined, true);
           break;
         case "tool_start":
           {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
-            const existingEntryId = activeToolEntryRef.current[key];
+            const existingEntryId = runtime.activeToolEntry[key];
             const toolFiles = getToolProcessFiles(event);
-            if (toolFiles.length > 0) activeToolFileRef.current[key] = toolFiles;
+            if (toolFiles.length > 0) runtime.activeToolFile[key] = toolFiles;
             const toolDetail = getToolDetail(event);
             const toolKind = normalizeToolKind(event.toolKind);
             const entryType: AgentProcessEntry["type"] = toolKind === "question" ? "question" : "tool";
@@ -942,19 +1088,23 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                 title: toolSummary,
                 detail: toolDetail || undefined,
                 files: toolFiles.length > 0 ? toolFiles : undefined,
+                toolKind,
+                command: typeof event.command === "string" ? event.command : undefined,
                 state: "running",
                 type: entryType,
                 expanded: true,
-              });
+              }, currentSessionId);
             } else {
               const entryId = createProcessEntryId();
-              activeToolEntryRef.current[key] = entryId;
-              appendProcessEntry({
+              runtime.activeToolEntry[key] = entryId;
+              appendProcessEntry(currentSessionId, {
                 id: entryId,
                 type: entryType,
                 title: toolSummary,
                 detail: toolDetail || undefined,
                 files: toolFiles.length > 0 ? toolFiles : undefined,
+                toolKind,
+                command: typeof event.command === "string" ? event.command : undefined,
                 state: "running",
                 expanded: true,
               });
@@ -963,12 +1113,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "tool_end":
           {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
-            const entryId = activeToolEntryRef.current[key];
+            const entryId = runtime.activeToolEntry[key];
             const toolName = getToolName(event);
             const toolFiles = getToolProcessFiles(event);
-            const preservedToolFiles = toolFiles.length > 0 ? toolFiles : activeToolFileRef.current[key] || [];
+            const preservedToolFiles = toolFiles.length > 0 ? toolFiles : runtime.activeToolFile[key] || [];
             const toolDetail = getToolDetail(event);
             const toolSummary = getToolSummary({ ...event, files: preservedToolFiles.length > 0 ? preservedToolFiles : event.files }, false);
             const entryType: AgentProcessEntry["type"] = normalizeToolKind(event.toolKind) === "question"
@@ -978,17 +1128,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               title: toolSummary,
               detail: toolDetail || undefined,
               files: preservedToolFiles.length > 0 && !event.isError ? preservedToolFiles : undefined,
+              toolKind: normalizeToolKind(event.toolKind),
+              command: typeof event.command === "string" ? event.command : undefined,
               state: event.isError ? "error" : "completed",
               type: entryType,
               expanded: !!event.isError,
             } satisfies Partial<Omit<AgentProcessEntry, "id">>;
 
             if (entryId) {
-              useChatStore.getState().updateLastAssistantProcessEntry(entryId, patch);
-              delete activeToolEntryRef.current[key];
-              delete activeToolFileRef.current[key];
+              useChatStore.getState().updateLastAssistantProcessEntry(entryId, patch, currentSessionId);
+              delete runtime.activeToolEntry[key];
+              delete runtime.activeToolFile[key];
             } else {
-              appendProcessEntry({
+              appendProcessEntry(currentSessionId, {
                 type: entryType,
                 title: patch.title || (event.isError ? `${toolName} 执行失败` : `已完成 ${toolName}`),
                 detail: patch.detail,
@@ -1000,13 +1152,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           }
           break;
         case "diff_update":
+          if (!runtime.processActive) break;
           if (event.diffs && event.diffs.length > 0) {
-            finishThinkingEntry();
-            useChatStore.getState().appendLastAssistantDiffs(event.diffs);
+            finishThinkingEntry(currentSessionId);
+            useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
           }
           break;
         case "process_event":
-          finishThinkingEntry();
+          finishThinkingEntry(currentSessionId);
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
@@ -1023,7 +1176,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             processedTitle = `询问用户: ${eventTitle}`;
           }
 
-          appendProcessEntry({
+          appendProcessEntry(currentSessionId, {
             type: eventType,
             title: processedTitle,
             detail: eventDetail,
@@ -1033,7 +1186,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "agent_ready":
           const agentName = getAgentName(String(event.agentId || activeAgentId));
-          appendProcessEntry({
+          appendProcessEntry(currentSessionId, {
             type: "status",
             title: `${agentName} 已就绪，可以开始对话`,
             state: "completed",
@@ -1042,9 +1195,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         default:
           if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
-            appendProcessEntry({
+            appendProcessEntry(currentSessionId, {
               type: "question",
               title: getQuestionTitle(false),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
@@ -1057,13 +1210,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     });
     return () => {
       clearStreamWatchdog();
+      Object.values(sessionRuntimeRef.current).forEach((runtime) => {
+        if (runtime.streamWatchdog) {
+          clearTimeout(runtime.streamWatchdog);
+          runtime.streamWatchdog = null;
+        }
+      });
       unsubscribe();
     };
   }, []);
 
   const handleSend = async () => {
     const text = input.trim();
-    if ((!text && pendingImages.length === 0 && pendingFiles.length === 0) || isStreaming) return;
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || (!text && pendingImages.length === 0 && pendingFiles.length === 0) || (agentStatuses[targetSessionId] === "running")) return;
 
     // Build display content (short refs) and send content (full details)
     let displayContent = text;
@@ -1112,10 +1272,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
     // Force synchronous render so "working..." appears before IPC call
     isUserScrollingRef.current = false; // Reset so auto-scroll follows new message
-    if (streamWatchdogRef.current) {
-      clearTimeout(streamWatchdogRef.current);
-      streamWatchdogRef.current = null;
-    }
     flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -1123,32 +1279,45 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         content: displayContent,
         timestamp: Date.now(),
         images: messageImages,
-      });
+      }, targetSessionId);
       setInput("");
       setPendingImages([]);
       clearPendingFiles();
       setStreaming(true);
-      thinkingBufferRef.current = "";
-      thinkingEntryIdRef.current = null;
+      useProjectStore.getState().setAgentStatus(targetSessionId, "running");
+      const runtime = sessionRuntimeRef.current[targetSessionId];
+      if (runtime) {
+        if (runtime.streamWatchdog) {
+          clearTimeout(runtime.streamWatchdog);
+          runtime.streamWatchdog = null;
+        }
+        runtime.streamBuffer = "";
+        runtime.thinkingBuffer = "";
+        runtime.thinkingEntryId = null;
+      }
     });
 
-    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages);
+    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
     if (!result.success) {
-      if (streamWatchdogRef.current) {
-        clearTimeout(streamWatchdogRef.current);
-        streamWatchdogRef.current = null;
+      const runtime = sessionRuntimeRef.current[targetSessionId];
+      if (runtime?.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
       }
-      useChatStore.getState().finishLastAssistantProcess(Date.now());
-      processActiveRef.current = false;
-      activeToolEntryRef.current = {};
-      activeToolFileRef.current = {};
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
+      if (runtime) {
+        runtime.processActive = false;
+        runtime.activeToolEntry = {};
+        runtime.activeToolFile = {};
+      }
       setStreaming(false);
+      useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
         content: `发送失败: ${result.error || "请先在项目中启动 Agent"}`,
         timestamp: Date.now(),
-      });
+      }, targetSessionId);
     }
   };
 
@@ -1177,18 +1346,37 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
   };
 
-  const handleAbort = async () => {
-    await window.electronAPI.agentAbort();
-    if (streamWatchdogRef.current) {
-      clearTimeout(streamWatchdogRef.current);
-      streamWatchdogRef.current = null;
+  const handleAbort = () => {
+    const currentSessionId = useProjectStore.getState().activeSessionId;
+    if (!currentSessionId) return;
+    const runtime = sessionRuntimeRef.current[currentSessionId];
+    if (runtime?.streamWatchdog) {
+      clearTimeout(runtime.streamWatchdog);
+      runtime.streamWatchdog = null;
     }
-    useChatStore.getState().finishLastAssistantProcess(Date.now());
-    processActiveRef.current = false;
-    activeToolEntryRef.current = {};
-    activeToolFileRef.current = {};
-    thinkingEntryIdRef.current = null;
+    useChatStore.getState().appendLastAssistantProcessEntry({
+      id: createProcessEntryId(),
+      timestamp: Date.now(),
+      type: "status",
+      title: "用户已手动中断",
+      state: "interrupted",
+      expanded: false,
+    }, currentSessionId);
+    useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
+    if (runtime) {
+      runtime.processActive = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.streamBuffer = "";
+      runtime.thinkingBuffer = "";
+      runtime.thinkingEntryId = null;
+    }
     setStreaming(false);
+    useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
+
+    void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
+      console.error("[agent] abort failed:", err);
+    });
   };
 
   // Image handling
@@ -1475,16 +1663,28 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                       )}
                     </div>
                     {msg.role === "user" && (
-                    <button
-                      className="chat-copy-btn"
-                      onClick={() => navigator.clipboard.writeText(msg.content)}
-                      title="复制"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <rect x="9" y="9" width="13" height="13" rx="2" />
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                      </svg>
-                    </button>
+                    <div className="chat-msg-actions">
+                      <button
+                        className="chat-copy-btn"
+                        onClick={() => setInput(msg.content)}
+                        title="编辑"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                        </svg>
+                      </button>
+                      <button
+                        className="chat-copy-btn"
+                        onClick={() => navigator.clipboard.writeText(msg.content)}
+                        title="复制"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="9" y="9" width="13" height="13" rx="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      </button>
+                    </div>
                     )}
                   </div>
                 )}
@@ -1497,7 +1697,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           );
         })}
 
-        {isStreaming && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+        {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
           <div className="chat-working">
             <div className="chat-working-spinner" />
             <span>正在处理您的请求...</span>
@@ -1568,12 +1768,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             className="chat-textarea"
           />
           <button
-            onClick={isStreaming ? handleAbort : handleSend}
-            disabled={!isStreaming && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
-            className={`chat-send-btn ${isStreaming ? "abort" : ""}`}
-            title={isStreaming ? "停止" : "发送"}
+            onClick={currentSessionRunning ? handleAbort : handleSend}
+            disabled={!currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
+            className={`chat-send-btn ${currentSessionRunning ? "abort" : ""}`}
+            title={currentSessionRunning ? "停止" : "发送"}
           >
-            {isStreaming ? (
+            {currentSessionRunning ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                 <rect x="6" y="6" width="12" height="12" rx="2" />
               </svg>

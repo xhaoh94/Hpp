@@ -80,6 +80,7 @@ function isToolPartComplete(props: any) {
 export class OpenCodeAgent {
   private process: ChildProcess | null = null;
   private window: BrowserWindow | null = null;
+  private hppSessionId: string;
   private port = 0;
   private host = "127.0.0.1";
   private projectPath = "";
@@ -93,6 +94,10 @@ export class OpenCodeAgent {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private runningToolParts = new Set<string>();
   private completedToolParts = new Set<string>();
+
+  constructor(hppSessionId = "default") {
+    this.hppSessionId = hppSessionId;
+  }
 
   setWindow(win: BrowserWindow) {
     this.window = win;
@@ -631,6 +636,9 @@ export class OpenCodeAgent {
   }
 
   private emitEvent(data: unknown) {
-    this.window?.webContents.send("agent:event", data);
+    const payload = data && typeof data === "object"
+      ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
+      : data;
+    this.window?.webContents.send("agent:event", payload);
   }
 }

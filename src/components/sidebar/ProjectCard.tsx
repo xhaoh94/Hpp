@@ -22,7 +22,7 @@ interface Props {
 }
 
 export function ProjectCard({ project }: Props) {
-  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
   const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
@@ -132,6 +132,8 @@ export function ProjectCard({ project }: Props) {
     setActiveProject(project.id);
     setActiveAgent(session.agentId);
     switchSession(session.id);
+    // Dismiss completed status so the green dot disappears permanently
+    setAgentStatus(session.id, "idle");
 
     // Create and switch agent session in background (non-blocking)
     window.electronAPI.agentCreateSession(
@@ -257,7 +259,6 @@ export function ProjectCard({ project }: Props) {
                         onClick={() => { handleStartAgent(agent.id); setShowAddAgent(false); }}
                       >
                         <span className="agent-add-name">{agent.name}</span>
-                        <span className="agent-add-desc">{agent.desc}</span>
                       </div>
                     ))}
                   </div>
@@ -281,10 +282,6 @@ export function ProjectCard({ project }: Props) {
               >
                 {status === "running" ? (
                   <BrailleSpinner />
-                ) : status === "completed" ? (
-                  <svg className="terminal-child-icon completed" width="14" height="14" viewBox="0 0 14 14" fill="none">
-                    <path d="M3 7L6 10L11 4" stroke="var(--text-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
                 ) : (
                   <svg className="terminal-child-icon" width="14" height="14" viewBox="0 0 24 24" fill="none">
                     <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -303,6 +300,9 @@ export function ProjectCard({ project }: Props) {
                       : session.title;
                   })()}
                 </span>
+                {status === "completed" && session.id !== activeSessionId && (
+                  <span className="terminal-child-dot" />
+                )}
                 <button
                   className="terminal-child-close"
                   onClick={(e) => handleCloseSession(e, session.id)}

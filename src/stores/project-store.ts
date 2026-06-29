@@ -21,7 +21,7 @@ export interface Project {
   sessions: ProjectSession[];
 }
 
-export type AgentStatus = "idle" | "running" | "completed";
+export type AgentStatus = "idle" | "running" | "completed" | "error";
 
 interface ProjectState {
   projects: Project[];

@@ -23,6 +23,7 @@ interface AgentModel {
 export class DroidAgent {
   private process: ChildProcess | null = null;
   private window: BrowserWindow | null = null;
+  private hppSessionId: string;
   private projectPath = "";
   private sessionId: string | null = null;
   private models: AgentModel[] = [];
@@ -30,6 +31,10 @@ export class DroidAgent {
   private pendingResponses = new Map<string, (data: any) => void>();
   private isReady = false;
   private autonomyLevel = "medium";
+
+  constructor(hppSessionId = "default") {
+    this.hppSessionId = hppSessionId;
+  }
 
   setWindow(win: BrowserWindow) {
     this.window = win;
@@ -370,6 +375,9 @@ export class DroidAgent {
   }
 
   private emitEvent(data: unknown) {
-    this.window?.webContents.send("agent:event", data);
+    const payload = data && typeof data === "object"
+      ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
+      : data;
+    this.window?.webContents.send("agent:event", payload);
   }
 }

@@ -12744,9 +12744,23 @@ const ensureAssistantProcess = (messages, startedAt = Date.now()) => {
   }
   return { msgs, index: index2 };
 };
+const updateSessionMessages = (state, sessionId, updater) => {
+  const targetSessionId = sessionId || state.activeSessionId;
+  if (!targetSessionId) {
+    return { messages: updater(state.messages) };
+  }
+  const sourceMessages = targetSessionId === state.activeSessionId ? state.messages : state.sessionMessages[targetSessionId] || [];
+  const nextMessages = updater(sourceMessages);
+  const nextSessionMessages = {
+    ...state.sessionMessages,
+    [targetSessionId]: nextMessages
+  };
+  return targetSessionId === state.activeSessionId ? { messages: nextMessages, sessionMessages: nextSessionMessages } : { sessionMessages: nextSessionMessages };
+};
 const useChatStore = create$1((set, get) => ({
   messages: [],
   sessionMessages: {},
+  activeSessionId: null,
   isStreaming: false,
   currentModel: null,
   thinkingLevel: "medium",
@@ -12755,96 +12769,110 @@ const useChatStore = create$1((set, get) => ({
   activeAgentId: "pi",
   highlightedFile: null,
   pendingFiles: [],
-  addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
-  updateLastAssistant: (content2) => set((s) => {
-    const msgs = [...s.messages];
-    const last = msgs[msgs.length - 1];
-    if (last && last.role === "assistant") {
-      msgs[msgs.length - 1] = { ...last, content: content2 };
-    }
-    return { messages: msgs };
-  }),
-  appendLastAssistantDiffs: (diffs) => set((s) => {
-    const msgs = [...s.messages];
-    const index2 = findLastAssistantIndex(msgs);
-    if (index2 >= 0) {
-      const msg = msgs[index2];
-      const existing = msg.diffs || [];
-      msgs[index2] = { ...msg, diffs: [...existing, ...diffs] };
-    }
-    return { messages: msgs };
-  }),
-  startAssistantProcess: (startedAt) => set((s) => {
-    const { msgs } = ensureAssistantProcess(s.messages, startedAt);
-    return { messages: msgs };
-  }),
-  appendLastAssistantProcessEntry: (entry) => set((s) => {
-    const { msgs, index: index2 } = ensureAssistantProcess(s.messages, entry.timestamp);
-    const msg = msgs[index2];
-    const process2 = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
-    const normalizedEntry = {
-      ...entry,
-      expanded: entry.expanded ?? (entry.type === "thinking" || entry.state === "running")
-    };
-    msgs[index2] = {
-      ...msg,
-      process: {
-        ...process2,
-        entries: [...process2.entries, normalizedEntry]
+  addMessage: (msg, sessionId) => set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
+  updateLastAssistant: (content2, sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === "assistant") {
+        msgs[msgs.length - 1] = { ...last, content: content2 };
       }
-    };
-    return { messages: msgs };
+      return msgs;
+    });
   }),
-  updateLastAssistantProcessEntry: (entryId, patch2) => set((s) => {
-    const msgs = [...s.messages];
-    const index2 = findLastAssistantIndex(msgs);
-    if (index2 < 0) return { messages: msgs };
-    const msg = msgs[index2];
-    if (!msg.process) return { messages: msgs };
-    msgs[index2] = {
-      ...msg,
-      process: {
-        ...msg.process,
-        entries: msg.process.entries.map(
-          (entry) => entry.id === entryId ? { ...entry, ...patch2 } : entry
-        )
+  appendLastAssistantDiffs: (diffs, sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index2 = findLastAssistantIndex(msgs);
+      if (index2 >= 0) {
+        const msg = msgs[index2];
+        const existing = msg.diffs || [];
+        msgs[index2] = { ...msg, diffs: [...existing, ...diffs] };
       }
-    };
-    return { messages: msgs };
+      return msgs;
+    });
   }),
-  finishLastAssistantProcess: (endedAt) => set((s) => {
-    const msgs = [...s.messages];
-    const index2 = findLastAssistantIndex(msgs);
-    if (index2 >= 0) {
+  startAssistantProcess: (startedAt, sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const { msgs } = ensureAssistantProcess(messages, startedAt);
+      return msgs;
+    });
+  }),
+  appendLastAssistantProcessEntry: (entry, sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const { msgs, index: index2 } = ensureAssistantProcess(messages, entry.timestamp);
       const msg = msgs[index2];
+      const process2 = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
+      const normalizedEntry = {
+        ...entry,
+        expanded: entry.expanded ?? (entry.type === "thinking" ? false : entry.state === "running")
+      };
       msgs[index2] = {
         ...msg,
-        isStreaming: false,
-        process: msg.process ? {
-          ...msg.process,
-          endedAt: msg.process.endedAt || endedAt || Date.now(),
-          entries: msg.process.entries.map(
-            (entry) => entry.state === "running" ? {
-              ...entry,
-              state: "completed",
-              expanded: entry.type === "thinking" ? entry.expanded : false
-            } : entry
-          )
-        } : msg.process
+        process: {
+          ...process2,
+          entries: [...process2.entries, normalizedEntry]
+        }
       };
-    }
-    return { messages: msgs };
+      return msgs;
+    });
   }),
-  collapseLastAssistantProcess: () => set((s) => {
-    const msgs = [...s.messages];
-    const index2 = findLastAssistantIndex(msgs);
-    if (index2 >= 0) {
+  updateLastAssistantProcessEntry: (entryId, patch2, sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index2 = findLastAssistantIndex(msgs);
+      if (index2 < 0) return msgs;
       const msg = msgs[index2];
-      if (msg.process) {
-        msgs[index2] = { ...msg, process: { ...msg.process, expanded: false } };
+      if (!msg.process) return msgs;
+      msgs[index2] = {
+        ...msg,
+        process: {
+          ...msg.process,
+          entries: msg.process.entries.map(
+            (entry) => entry.id === entryId ? { ...entry, ...patch2 } : entry
+          )
+        }
+      };
+      return msgs;
+    });
+  }),
+  finishLastAssistantProcess: (endedAt, finalState = "completed", sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index2 = findLastAssistantIndex(msgs);
+      if (index2 >= 0) {
+        const msg = msgs[index2];
+        msgs[index2] = {
+          ...msg,
+          isStreaming: false,
+          process: msg.process ? {
+            ...msg.process,
+            endedAt: msg.process.endedAt || endedAt || Date.now(),
+            entries: msg.process.entries.map(
+              (entry) => entry.state === "running" ? {
+                ...entry,
+                state: finalState,
+                expanded: entry.type === "thinking" ? entry.expanded : false
+              } : entry
+            )
+          } : msg.process
+        };
       }
-    }
-    return { messages: msgs };
+      return msgs;
+    });
+  }),
+  collapseLastAssistantProcess: (sessionId) => set((s) => {
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index2 = findLastAssistantIndex(msgs);
+      if (index2 >= 0) {
+        const msg = msgs[index2];
+        if (msg.process) {
+          msgs[index2] = { ...msg, process: { ...msg.process, expanded: false } };
+        }
+      }
+      return msgs;
+    });
   }),
   toggleAssistantProcess: (messageId) => set((s) => ({
     messages: s.messages.map(
@@ -12886,16 +12914,18 @@ const useChatStore = create$1((set, get) => ({
   clearPendingFiles: () => set({ pendingFiles: [] }),
   switchSession: (sessionId) => {
     const state = get();
+    const nextSessionMessages = state.activeSessionId ? { ...state.sessionMessages, [state.activeSessionId]: state.messages } : state.sessionMessages;
     if (sessionId) {
-      const sessionMsgs = state.sessionMessages[sessionId] || [];
-      set({ messages: sessionMsgs, pendingFiles: [] });
+      const sessionMsgs = nextSessionMessages[sessionId] || [];
+      set({ messages: sessionMsgs, sessionMessages: nextSessionMessages, activeSessionId: sessionId, pendingFiles: [] });
     } else {
-      set({ messages: [], pendingFiles: [] });
+      set({ messages: [], sessionMessages: nextSessionMessages, activeSessionId: null, pendingFiles: [] });
     }
   },
   loadSessionMessages: (sessionId, messages) => {
     set((s) => ({
-      sessionMessages: { ...s.sessionMessages, [sessionId]: messages }
+      sessionMessages: { ...s.sessionMessages, [sessionId]: messages },
+      messages: s.activeSessionId === sessionId ? messages : s.messages
     }));
   }
 }));
@@ -13112,7 +13142,7 @@ function BrailleSpinner() {
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "braille-spinner", children: BRAILLE_CHARS[index2] });
 }
 function ProjectCard({ project }) {
-  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
   const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = reactExports.useState(false);
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
@@ -13202,6 +13232,7 @@ ${getInstallHint(cmd)}`);
     setActiveProject(project.id);
     setActiveAgent(session.agentId);
     switchSession(session.id);
+    setAgentStatus(session.id, "idle");
     window.electronAPI.agentCreateSession(
       session.agentId,
       project.path,
@@ -13311,7 +13342,7 @@ ${getInstallHint(cmd)}`);
               children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 5v14M5 12h14", strokeLinecap: "round" }) })
             }
           ),
-          showAddAgent && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "agent-add-popup", children: uncheckedAgents.map((agent) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          showAddAgent && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "agent-add-popup", children: uncheckedAgents.map((agent) => /* @__PURE__ */ jsxRuntimeExports.jsx(
             "div",
             {
               className: "agent-add-item",
@@ -13319,10 +13350,7 @@ ${getInstallHint(cmd)}`);
                 handleStartAgent(agent.id);
                 setShowAddAgent(false);
               },
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-add-name", children: agent.name }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-add-desc", children: agent.desc })
-              ]
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-add-name", children: agent.name })
             },
             agent.id
           )) })
@@ -13337,7 +13365,7 @@ ${getInstallHint(cmd)}`);
           className: `project-terminal-child ${session.id === activeSessionId ? "active" : ""}`,
           onClick: () => handleSelectSession(session),
           children: [
-            status === "running" ? /* @__PURE__ */ jsxRuntimeExports.jsx(BrailleSpinner, {}) : status === "completed" ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { className: "terminal-child-icon completed", width: "14", height: "14", viewBox: "0 0 14 14", fill: "none", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 7L6 10L11 4", stroke: "var(--text-primary)", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { className: "terminal-child-icon", width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", children: [
+            status === "running" ? /* @__PURE__ */ jsxRuntimeExports.jsx(BrailleSpinner, {}) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { className: "terminal-child-icon", width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "2", y: "3", width: "20", height: "18", rx: "2", stroke: "currentColor", strokeWidth: "1.5" }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 8L10 11L7 14", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 14H17", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round" })
@@ -13347,6 +13375,7 @@ ${getInstallHint(cmd)}`);
               const firstUserMsg = msgs?.find((m) => m.role === "user");
               return firstUserMsg ? firstUserMsg.content.length > 30 ? firstUserMsg.content.substring(0, 30) + "..." : firstUserMsg.content : session.title;
             })() }),
+            status === "completed" && session.id !== activeSessionId && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "terminal-child-dot" }),
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "button",
               {
@@ -42294,6 +42323,7 @@ const formatProcessDuration = (ms) => {
 };
 const summarizeProcessEntries = (entries) => {
   if (entries.length === 0) return "等待事件";
+  if (entries.some((entry) => entry.state === "interrupted")) return "已中断";
   const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "question" || entry.type === "error").length;
   const diffCount = entries.filter((entry) => entry.type === "diff").length;
   const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
@@ -42465,12 +42495,18 @@ const normalizeProcessEntryType = (value) => {
   return "status";
 };
 const normalizeProcessEntryState = (value) => {
-  if (value === "running" || value === "completed" || value === "error") return value;
+  if (value === "running" || value === "completed" || value === "error" || value === "interrupted") return value;
   return void 0;
 };
 function ProcessEntryIcon({ type, state }) {
   if (state === "running") {
     return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-spinner" });
+  }
+  if (state === "interrupted") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 9l6 6M15 9l-6 6", strokeLinecap: "round" })
+    ] });
   }
   if (type === "tool") {
     return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
@@ -42541,6 +42577,77 @@ function ProcessEntryFiles({
     ] }, `${file.file}-${index2}`);
   }) });
 }
+const splitCommandDetail = (detail, command) => {
+  if (!detail) return { command: command || "", output: "" };
+  const lines = detail.split("\n");
+  const firstLine = lines[0] || "";
+  if (firstLine.startsWith("$ ")) {
+    return {
+      command: command || firstLine.slice(2).trim(),
+      output: lines.slice(1).join("\n").trim()
+    };
+  }
+  return { command: command || "", output: detail.trim() };
+};
+function CommandDetail({
+  entry
+}) {
+  const [outputExpanded, setOutputExpanded] = reactExports.useState(entry.state === "running");
+  const userToggledRef = reactExports.useRef(false);
+  const { command, output } = splitCommandDetail(entry.detail, entry.command);
+  const outputLines = output ? output.split("\n") : [];
+  const isRunning = entry.state === "running";
+  const previewLines = outputExpanded || isRunning ? outputLines : outputLines.slice(0, 4);
+  const hiddenLineCount = Math.max(0, outputLines.length - previewLines.length);
+  const canExpand = outputLines.length > 0;
+  reactExports.useEffect(() => {
+    if (!isRunning && !userToggledRef.current) {
+      setOutputExpanded(false);
+    }
+  }, [isRunning]);
+  const toggleOutput = () => {
+    userToggledRef.current = true;
+    setOutputExpanded((current) => !current);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "button",
+      {
+        className: "chat-command-header",
+        onClick: canExpand ? toggleOutput : void 0,
+        disabled: !canExpand,
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-prompt", children: "$_" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-text", children: command || entry.title }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-state", children: isRunning ? "运行中" : entry.state === "error" ? "失败" : entry.state === "interrupted" ? "已中断" : "完成" }),
+          canExpand && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "svg",
+            {
+              className: "chat-command-chevron",
+              width: "12",
+              height: "12",
+              viewBox: "0 0 24 24",
+              fill: "none",
+              stroke: "currentColor",
+              strokeWidth: "2.4",
+              style: { transform: outputExpanded || isRunning ? "rotate(180deg)" : "rotate(0deg)" },
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" })
+            }
+          )
+        ]
+      }
+    ),
+    outputLines.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-command-output", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-lang", children: "BASH" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: previewLines.join("\n") }),
+      !outputExpanded && !isRunning && hiddenLineCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-command-more", onClick: toggleOutput, children: [
+        "展开 (",
+        outputLines.length,
+        " 行)"
+      ] })
+    ] })
+  ] });
+}
 function ProcessEntryRow({
   messageId,
   entry,
@@ -42549,8 +42656,10 @@ function ProcessEntryRow({
 }) {
   const hasDetail = !!entry.detail;
   const files = entry.files || [];
-  const canExpand = hasDetail && entry.type !== "thinking";
-  const detailVisible = hasDetail && (!canExpand || entry.expanded);
+  const isCommandEntry = entry.toolKind === "run_command";
+  const canExpand = hasDetail;
+  const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
+  const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
   if (entry.type === "info") {
     return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-output", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: entry.detail || entry.title }) });
   }
@@ -42583,6 +42692,7 @@ function ProcessEntryRow({
         }
       ),
       files.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryFiles, { files, onOpenFile }),
+      commandVisible && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry }),
       detailVisible && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: `chat-process-entry-detail ${canExpand ? "panel" : ""}`, children: entry.detail })
     ] })
   ] });
@@ -42598,10 +42708,12 @@ function ProcessBlock({
   const durationEnd = process2.endedAt || nowTick;
   const elapsed = formatProcessDuration(durationEnd - process2.startedAt);
   const expanded = !!process2.expanded;
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process", children: [
+  const interrupted = process2.entries.some((entry) => entry.state === "interrupted");
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-process ${interrupted ? "interrupted" : ""}`, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-process-toggle", onClick: () => onToggle(messageId), children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-        "处理耗时 ",
+        interrupted ? "已中断" : "处理耗时",
+        " ",
         elapsed
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-summary", children: summarizeProcessEntries(process2.entries) }),
@@ -42734,15 +42846,17 @@ function ChatPanel({ sendKey = "Enter" }) {
   const modelRef = reactExports.useRef(null);
   const thinkingRef = reactExports.useRef(null);
   const modelFetchRunIdRef = reactExports.useRef(0);
-  const streamBufferRef = reactExports.useRef("");
-  const thinkingBufferRef = reactExports.useRef("");
-  const thinkingEntryIdRef = reactExports.useRef(null);
-  const processActiveRef = reactExports.useRef(false);
-  const activeToolEntryRef = reactExports.useRef({});
-  const activeToolFileRef = reactExports.useRef({});
+  reactExports.useRef("");
+  reactExports.useRef("");
+  reactExports.useRef(null);
+  reactExports.useRef(false);
+  reactExports.useRef({});
+  reactExports.useRef({});
   const streamWatchdogRef = reactExports.useRef(null);
+  const sessionRuntimeRef = reactExports.useRef({});
   const isUserScrollingRef = reactExports.useRef(false);
   reactExports.useRef(null);
+  const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -42871,8 +42985,24 @@ function ChatPanel({ sendKey = "Enter" }) {
     }
   }, [messages, activeSessionId]);
   reactExports.useEffect(() => {
-    const appendProcessEntry = (entry) => {
-      if (!processActiveRef.current) return;
+    const getRuntime = (sessionId) => {
+      const existing = sessionRuntimeRef.current[sessionId];
+      if (existing) return existing;
+      const runtime = {
+        streamBuffer: "",
+        thinkingBuffer: "",
+        thinkingEntryId: null,
+        processActive: false,
+        activeToolEntry: {},
+        activeToolFile: {},
+        streamWatchdog: null
+      };
+      sessionRuntimeRef.current[sessionId] = runtime;
+      return runtime;
+    };
+    const appendProcessEntry = (sessionId, entry) => {
+      const runtime = getRuntime(sessionId);
+      if (!runtime.processActive) return;
       useChatStore.getState().appendLastAssistantProcessEntry({
         id: entry.id || createProcessEntryId(),
         timestamp: entry.timestamp || Date.now(),
@@ -42880,55 +43010,68 @@ function ChatPanel({ sendKey = "Enter" }) {
         title: entry.title,
         detail: entry.detail,
         files: entry.files,
+        toolKind: entry.toolKind,
+        command: entry.command,
         state: entry.state,
         expanded: entry.expanded
-      });
+      }, sessionId);
     };
-    const finishThinkingEntry = () => {
-      if (thinkingEntryIdRef.current) {
-        useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+    const finishThinkingEntry = (sessionId) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.thinkingEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
           state: "completed"
-        });
+        }, sessionId);
       }
-      thinkingEntryIdRef.current = null;
-      thinkingBufferRef.current = "";
+      runtime.thinkingEntryId = null;
+      runtime.thinkingBuffer = "";
     };
-    const appendThinkingDelta = (delta) => {
+    const appendThinkingDelta = (sessionId, delta) => {
       if (!delta) return;
-      thinkingBufferRef.current += delta;
-      const thinkingPreview = thinkingBufferRef.current ? thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current : "思考中";
-      if (thinkingEntryIdRef.current) {
-        useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+      const runtime = getRuntime(sessionId);
+      runtime.thinkingBuffer += delta;
+      const thinkingPreview = runtime.thinkingBuffer ? runtime.thinkingBuffer.length > 50 ? runtime.thinkingBuffer.substring(0, 50) + "..." : runtime.thinkingBuffer : "思考中";
+      if (runtime.thinkingEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
           title: `正在思考: ${thinkingPreview}`,
-          detail: thinkingBufferRef.current,
+          detail: runtime.thinkingBuffer,
           state: "running"
-        });
+        }, sessionId);
       } else {
         const entryId = createProcessEntryId();
-        thinkingEntryIdRef.current = entryId;
-        appendProcessEntry({
+        runtime.thinkingEntryId = entryId;
+        appendProcessEntry(sessionId, {
           id: entryId,
           type: "thinking",
           title: `正在思考: ${thinkingPreview}`,
-          detail: thinkingBufferRef.current,
+          detail: runtime.thinkingBuffer,
           state: "running",
-          expanded: true
+          expanded: false
         });
       }
     };
-    const clearStreamWatchdog = () => {
-      if (streamWatchdogRef.current) {
-        clearTimeout(streamWatchdogRef.current);
-        streamWatchdogRef.current = null;
+    const clearStreamWatchdog = (sessionId) => {
+      if (!sessionId) {
+        if (streamWatchdogRef.current) {
+          clearTimeout(streamWatchdogRef.current);
+          streamWatchdogRef.current = null;
+        }
+        return;
+      }
+      const runtime = getRuntime(sessionId);
+      if (runtime.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
       }
     };
     const completeAssistantStream = (currentSessionId, content2, timedOut = false) => {
-      clearStreamWatchdog();
-      const finalContent = (content2 || streamBufferRef.current).trim();
+      const runtime = getRuntime(currentSessionId);
+      clearStreamWatchdog(currentSessionId);
+      const finalContent = (content2 || runtime.streamBuffer).trim();
       if (finalContent.trim().length > 0) {
-        streamBufferRef.current = finalContent;
-        useChatStore.getState().updateLastAssistant(finalContent);
-        useChatStore.getState().collapseLastAssistantProcess();
+        runtime.streamBuffer = finalContent;
+        useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
+        useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
       } else if (timedOut) {
         useChatStore.getState().appendLastAssistantProcessEntry({
           id: createProcessEntryId(),
@@ -42938,34 +43081,43 @@ function ChatPanel({ sendKey = "Enter" }) {
           detail: "Agent 长时间没有返回新的输出，已停止等待。",
           state: "error",
           expanded: true
-        });
+        }, currentSessionId);
       }
-      finishThinkingEntry();
-      setStreaming(false);
-      useChatStore.getState().finishLastAssistantProcess(Date.now());
-      processActiveRef.current = false;
-      activeToolEntryRef.current = {};
-      activeToolFileRef.current = {};
-      thinkingEntryIdRef.current = null;
-      if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, timedOut ? "error" : "completed");
+      finishThinkingEntry(currentSessionId);
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
+      runtime.processActive = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.thinkingEntryId = null;
+      if (currentSessionId) {
+        const activeId = useProjectStore.getState().activeSessionId;
+        useProjectStore.getState().setAgentStatus(
+          currentSessionId,
+          currentSessionId === activeId ? "idle" : timedOut ? "error" : "completed"
+        );
+      }
     };
     const refreshStreamWatchdog = (currentSessionId) => {
-      clearStreamWatchdog();
-      if (!processActiveRef.current) return;
-      streamWatchdogRef.current = setTimeout(() => {
+      const runtime = getRuntime(currentSessionId);
+      clearStreamWatchdog(currentSessionId);
+      if (!runtime.processActive) return;
+      runtime.streamWatchdog = setTimeout(() => {
         completeAssistantStream(currentSessionId, void 0, true);
       }, 45e3);
     };
     const unsubscribe = window.electronAPI.onAgentEvent((event) => {
-      const currentSessionId = useProjectStore.getState().activeSessionId;
+      const currentSessionId = typeof event.sessionId === "string" ? event.sessionId : useProjectStore.getState().activeSessionId;
+      if (!currentSessionId) return;
+      const runtime = getRuntime(currentSessionId);
       if (event.type !== "message_start" && event.type !== "stream_start" && event.type !== "stream_end" && event.type !== "agent_end" && event.type !== "agent_disconnected") {
         refreshStreamWatchdog(currentSessionId);
       }
       switch (event.type) {
         case "message_start":
-          processActiveRef.current = true;
+          runtime.processActive = true;
           const messagePreview = event.content ? event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content : "用户消息";
-          appendProcessEntry({
+          appendProcessEntry(currentSessionId, {
             type: "status",
             title: `收到消息: "${messagePreview}"`,
             detail: event.content ? truncateProcessDetail(String(event.content)) : void 0,
@@ -42974,38 +43126,40 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "stream_start":
           reactDomExports.flushSync(() => {
-            streamBufferRef.current = "";
-            thinkingBufferRef.current = "";
-            thinkingEntryIdRef.current = null;
-            setStreaming(true);
-            processActiveRef.current = true;
-            activeToolEntryRef.current = {};
-            activeToolFileRef.current = {};
-            useChatStore.getState().startAssistantProcess(Date.now());
+            runtime.streamBuffer = "";
+            runtime.thinkingBuffer = "";
+            runtime.thinkingEntryId = null;
+            if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
+            runtime.processActive = true;
+            runtime.activeToolEntry = {};
+            runtime.activeToolFile = {};
+            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
-          appendProcessEntry({ type: "status", title: "正在分析请求并生成响应", state: "running" });
+          appendProcessEntry(currentSessionId, { type: "status", title: "正在分析请求并生成响应", state: "running" });
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
+          if (!runtime.processActive) break;
           if (!event.delta) break;
-          finishThinkingEntry();
-          streamBufferRef.current += String(event.delta);
+          finishThinkingEntry(currentSessionId);
+          runtime.streamBuffer += String(event.delta);
           break;
         case "thinking_delta":
-          appendThinkingDelta(String(event.delta || ""));
+          if (!runtime.processActive) break;
+          appendThinkingDelta(currentSessionId, String(event.delta || ""));
           break;
         case "thinking_end":
-          finishThinkingEntry();
+          finishThinkingEntry(currentSessionId);
           break;
         case "user_ask_question":
         case "ask_user_question":
         case "ask_user":
         case "droid.ask_user":
           {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
-            appendProcessEntry({
+            appendProcessEntry(currentSessionId, {
               type: "question",
               title: getQuestionTitle(false),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
@@ -43016,7 +43170,8 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "stream_end":
           {
-            finishThinkingEntry();
+            if (!runtime.processActive) break;
+            finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
           }
@@ -43024,16 +43179,17 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "agent_end":
           break;
         case "agent_disconnected":
-          finishThinkingEntry();
+          if (!runtime.processActive) break;
+          finishThinkingEntry(currentSessionId);
           completeAssistantStream(currentSessionId, void 0, true);
           break;
         case "tool_start":
           {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
-            const existingEntryId = activeToolEntryRef.current[key];
+            const existingEntryId = runtime.activeToolEntry[key];
             const toolFiles = getToolProcessFiles(event);
-            if (toolFiles.length > 0) activeToolFileRef.current[key] = toolFiles;
+            if (toolFiles.length > 0) runtime.activeToolFile[key] = toolFiles;
             const toolDetail = getToolDetail(event);
             const toolKind = normalizeToolKind(event.toolKind);
             const entryType = toolKind === "question" ? "question" : "tool";
@@ -43043,19 +43199,23 @@ function ChatPanel({ sendKey = "Enter" }) {
                 title: toolSummary,
                 detail: toolDetail || void 0,
                 files: toolFiles.length > 0 ? toolFiles : void 0,
+                toolKind,
+                command: typeof event.command === "string" ? event.command : void 0,
                 state: "running",
                 type: entryType,
                 expanded: true
-              });
+              }, currentSessionId);
             } else {
               const entryId = createProcessEntryId();
-              activeToolEntryRef.current[key] = entryId;
-              appendProcessEntry({
+              runtime.activeToolEntry[key] = entryId;
+              appendProcessEntry(currentSessionId, {
                 id: entryId,
                 type: entryType,
                 title: toolSummary,
                 detail: toolDetail || void 0,
                 files: toolFiles.length > 0 ? toolFiles : void 0,
+                toolKind,
+                command: typeof event.command === "string" ? event.command : void 0,
                 state: "running",
                 expanded: true
               });
@@ -43064,12 +43224,12 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "tool_end":
           {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
-            const entryId = activeToolEntryRef.current[key];
+            const entryId = runtime.activeToolEntry[key];
             const toolName = getToolName(event);
             const toolFiles = getToolProcessFiles(event);
-            const preservedToolFiles = toolFiles.length > 0 ? toolFiles : activeToolFileRef.current[key] || [];
+            const preservedToolFiles = toolFiles.length > 0 ? toolFiles : runtime.activeToolFile[key] || [];
             const toolDetail = getToolDetail(event);
             const toolSummary = getToolSummary({ ...event, files: preservedToolFiles.length > 0 ? preservedToolFiles : event.files }, false);
             const entryType = normalizeToolKind(event.toolKind) === "question" ? event.isError ? "error" : "question" : event.isError ? "error" : "tool";
@@ -43077,16 +43237,18 @@ function ChatPanel({ sendKey = "Enter" }) {
               title: toolSummary,
               detail: toolDetail || void 0,
               files: preservedToolFiles.length > 0 && !event.isError ? preservedToolFiles : void 0,
+              toolKind: normalizeToolKind(event.toolKind),
+              command: typeof event.command === "string" ? event.command : void 0,
               state: event.isError ? "error" : "completed",
               type: entryType,
               expanded: !!event.isError
             };
             if (entryId) {
-              useChatStore.getState().updateLastAssistantProcessEntry(entryId, patch2);
-              delete activeToolEntryRef.current[key];
-              delete activeToolFileRef.current[key];
+              useChatStore.getState().updateLastAssistantProcessEntry(entryId, patch2, currentSessionId);
+              delete runtime.activeToolEntry[key];
+              delete runtime.activeToolFile[key];
             } else {
-              appendProcessEntry({
+              appendProcessEntry(currentSessionId, {
                 type: entryType,
                 title: patch2.title || (event.isError ? `${toolName} 执行失败` : `已完成 ${toolName}`),
                 detail: patch2.detail,
@@ -43098,13 +43260,14 @@ function ChatPanel({ sendKey = "Enter" }) {
           }
           break;
         case "diff_update":
+          if (!runtime.processActive) break;
           if (event.diffs && event.diffs.length > 0) {
-            finishThinkingEntry();
-            useChatStore.getState().appendLastAssistantDiffs(event.diffs);
+            finishThinkingEntry(currentSessionId);
+            useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
           }
           break;
         case "process_event":
-          finishThinkingEntry();
+          finishThinkingEntry(currentSessionId);
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : void 0;
@@ -43119,7 +43282,7 @@ function ChatPanel({ sendKey = "Enter" }) {
           } else if (eventType === "question" && !eventTitle.includes("询问") && !eventTitle.includes("问题")) {
             processedTitle = `询问用户: ${eventTitle}`;
           }
-          appendProcessEntry({
+          appendProcessEntry(currentSessionId, {
             type: eventType,
             title: processedTitle,
             detail: eventDetail,
@@ -43129,7 +43292,7 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "agent_ready":
           const agentName = getAgentName(String(event.agentId || activeAgentId));
-          appendProcessEntry({
+          appendProcessEntry(currentSessionId, {
             type: "status",
             title: `${agentName} 已就绪，可以开始对话`,
             state: "completed"
@@ -43137,9 +43300,9 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         default:
           if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {
-            finishThinkingEntry();
+            finishThinkingEntry(currentSessionId);
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
-            appendProcessEntry({
+            appendProcessEntry(currentSessionId, {
               type: "question",
               title: getQuestionTitle(false),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
@@ -43152,12 +43315,19 @@ function ChatPanel({ sendKey = "Enter" }) {
     });
     return () => {
       clearStreamWatchdog();
+      Object.values(sessionRuntimeRef.current).forEach((runtime) => {
+        if (runtime.streamWatchdog) {
+          clearTimeout(runtime.streamWatchdog);
+          runtime.streamWatchdog = null;
+        }
+      });
       unsubscribe();
     };
   }, []);
   const handleSend = async () => {
     const text2 = input.trim();
-    if (!text2 && pendingImages.length === 0 && pendingFiles.length === 0 || isStreaming) return;
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !text2 && pendingImages.length === 0 && pendingFiles.length === 0 || agentStatuses[targetSessionId] === "running") return;
     let displayContent = text2;
     let sendContent = text2;
     if (pendingFiles.length > 0) {
@@ -43201,10 +43371,6 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       }));
     }
     isUserScrollingRef.current = false;
-    if (streamWatchdogRef.current) {
-      clearTimeout(streamWatchdogRef.current);
-      streamWatchdogRef.current = null;
-    }
     reactDomExports.flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -43212,31 +43378,44 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         content: displayContent,
         timestamp: Date.now(),
         images: messageImages
-      });
+      }, targetSessionId);
       setInput("");
       setPendingImages([]);
       clearPendingFiles();
       setStreaming(true);
-      thinkingBufferRef.current = "";
-      thinkingEntryIdRef.current = null;
-    });
-    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages);
-    if (!result.success) {
-      if (streamWatchdogRef.current) {
-        clearTimeout(streamWatchdogRef.current);
-        streamWatchdogRef.current = null;
+      useProjectStore.getState().setAgentStatus(targetSessionId, "running");
+      const runtime = sessionRuntimeRef.current[targetSessionId];
+      if (runtime) {
+        if (runtime.streamWatchdog) {
+          clearTimeout(runtime.streamWatchdog);
+          runtime.streamWatchdog = null;
+        }
+        runtime.streamBuffer = "";
+        runtime.thinkingBuffer = "";
+        runtime.thinkingEntryId = null;
       }
-      useChatStore.getState().finishLastAssistantProcess(Date.now());
-      processActiveRef.current = false;
-      activeToolEntryRef.current = {};
-      activeToolFileRef.current = {};
+    });
+    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
+    if (!result.success) {
+      const runtime = sessionRuntimeRef.current[targetSessionId];
+      if (runtime?.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
+      }
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
+      if (runtime) {
+        runtime.processActive = false;
+        runtime.activeToolEntry = {};
+        runtime.activeToolFile = {};
+      }
       setStreaming(false);
+      useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
         content: `发送失败: ${result.error || "请先在项目中启动 Agent"}`,
         timestamp: Date.now()
-      });
+      }, targetSessionId);
     }
   };
   const handleKeyDown = (e) => {
@@ -43259,18 +43438,36 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       }
     }
   };
-  const handleAbort = async () => {
-    await window.electronAPI.agentAbort();
-    if (streamWatchdogRef.current) {
-      clearTimeout(streamWatchdogRef.current);
-      streamWatchdogRef.current = null;
+  const handleAbort = () => {
+    const currentSessionId = useProjectStore.getState().activeSessionId;
+    if (!currentSessionId) return;
+    const runtime = sessionRuntimeRef.current[currentSessionId];
+    if (runtime?.streamWatchdog) {
+      clearTimeout(runtime.streamWatchdog);
+      runtime.streamWatchdog = null;
     }
-    useChatStore.getState().finishLastAssistantProcess(Date.now());
-    processActiveRef.current = false;
-    activeToolEntryRef.current = {};
-    activeToolFileRef.current = {};
-    thinkingEntryIdRef.current = null;
+    useChatStore.getState().appendLastAssistantProcessEntry({
+      id: createProcessEntryId(),
+      timestamp: Date.now(),
+      type: "status",
+      title: "用户已手动中断",
+      state: "interrupted",
+      expanded: false
+    }, currentSessionId);
+    useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
+    if (runtime) {
+      runtime.processActive = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.streamBuffer = "";
+      runtime.thinkingBuffer = "";
+      runtime.thinkingEntryId = null;
+    }
     setStreaming(false);
+    useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
+    void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
+      console.error("[agent] abort failed:", err);
+    });
   };
   const addPendingImage = (file) => {
     const reader = new FileReader();
@@ -43367,56 +43564,60 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-empty-title", children: "选择或创建会话" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-empty-desc", children: "点击项目卡片上的 Agent 按钮新建会话，或点击下方已有会话" }),
-        activeProject.sessions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-session-list", children: activeProject.sessions.map((session) => {
-          const msgs = sessionMessages[session.id];
-          const firstUserMsg = msgs?.find((m) => m.role === "user");
-          return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              className: "chat-session-item",
-              onClick: async () => {
-                useProjectStore.getState().setActiveSession(session.id);
-                useChatStore.getState().setActiveAgent(session.agentId);
-                useChatStore.getState().switchSession(session.id);
-                if (activeProject) {
-                  window.electronAPI.agentCreateSession(
-                    session.agentId,
-                    activeProject.path,
-                    session.id,
-                    session.sessionFilePath
-                  ).then(async (result) => {
-                    if (result.sessionFilePath) {
-                      useProjectStore.getState().setSessionFilePath(activeProject.id, session.id, result.sessionFilePath);
-                    }
-                    if (useProjectStore.getState().activeSessionId === session.id) {
-                      applySessionModels(session.id, result.models);
-                    }
-                    useProjectStore.getState().markSessionInitialized(session.id);
-                    if (useProjectStore.getState().activeSessionId === session.id) {
-                      await window.electronAPI.agentSwitchSession(session.id);
-                      try {
-                        const models = await window.electronAPI.agentGetModels(session.id);
-                        if (models && models.length > 0) {
-                          useChatStore.getState().setAvailableModels(models);
-                        }
-                      } catch {
+        (() => {
+          const openSessions = activeProject.sessions.filter((s) => !s.closed);
+          if (openSessions.length === 0) return null;
+          return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-session-list", children: openSessions.map((session) => {
+            const msgs = sessionMessages[session.id];
+            const firstUserMsg = msgs?.find((m) => m.role === "user");
+            return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                className: "chat-session-item",
+                onClick: async () => {
+                  useProjectStore.getState().setActiveSession(session.id);
+                  useChatStore.getState().setActiveAgent(session.agentId);
+                  useChatStore.getState().switchSession(session.id);
+                  if (activeProject) {
+                    window.electronAPI.agentCreateSession(
+                      session.agentId,
+                      activeProject.path,
+                      session.id,
+                      session.sessionFilePath
+                    ).then(async (result) => {
+                      if (result.sessionFilePath) {
+                        useProjectStore.getState().setSessionFilePath(activeProject.id, session.id, result.sessionFilePath);
                       }
-                    }
-                  });
-                }
+                      if (useProjectStore.getState().activeSessionId === session.id) {
+                        applySessionModels(session.id, result.models);
+                      }
+                      useProjectStore.getState().markSessionInitialized(session.id);
+                      if (useProjectStore.getState().activeSessionId === session.id) {
+                        await window.electronAPI.agentSwitchSession(session.id);
+                        try {
+                          const models = await window.electronAPI.agentGetModels(session.id);
+                          if (models && models.length > 0) {
+                            useChatStore.getState().setAvailableModels(models);
+                          }
+                        } catch {
+                        }
+                      }
+                    });
+                  }
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "2", y: "3", width: "20", height: "18", rx: "2", stroke: "currentColor", strokeWidth: "1.5" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 8L10 11L7 14", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 14H17", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round" })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: firstUserMsg ? firstUserMsg.content.length > 30 ? firstUserMsg.content.substring(0, 30) + "..." : firstUserMsg.content : session.title })
+                ]
               },
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "2", y: "3", width: "20", height: "18", rx: "2", stroke: "currentColor", strokeWidth: "1.5" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 8L10 11L7 14", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 14H17", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round" })
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: firstUserMsg ? firstUserMsg.content.length > 30 ? firstUserMsg.content.substring(0, 30) + "..." : firstUserMsg.content : session.title })
-              ]
-            },
-            session.id
-          );
-        }) })
+              session.id
+            );
+          }) });
+        })()
       ] })
     ] });
   }
@@ -43519,7 +43720,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
           ] })
         ] }, msg.id);
       }),
-      isStreaming && messages.length > 0 && messages[messages.length - 1].role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-working", children: [
+      currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-working", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在处理您的请求..." })
       ] })
@@ -43580,11 +43781,11 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
-            onClick: isStreaming ? handleAbort : handleSend,
-            disabled: !isStreaming && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0,
-            className: `chat-send-btn ${isStreaming ? "abort" : ""}`,
-            title: isStreaming ? "停止" : "发送",
-            children: isStreaming ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "currentColor", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
+            onClick: currentSessionRunning ? handleAbort : handleSend,
+            disabled: !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0,
+            className: `chat-send-btn ${currentSessionRunning ? "abort" : ""}`,
+            title: currentSessionRunning ? "停止" : "发送",
+            children: currentSessionRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "currentColor", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M22 2L11 13" }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M22 2L15 22L11 13L2 9L22 2Z" })
             ] })

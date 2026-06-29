@@ -41,8 +41,8 @@ export interface ElectronAPI {
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
-  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>) => Promise<{ success: boolean; error?: string }>;
-  agentAbort: () => Promise<{ success: boolean }>;
+  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string) => Promise<{ success: boolean; error?: string }>;
+  agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
   agentSetModel: (provider: string, modelId: string) => Promise<{ success: boolean }>;
   agentSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;

@@ -23,8 +23,10 @@ export interface AgentProcessEntry {
   title: string;
   detail?: string;
   files?: AgentProcessFile[];
+  toolKind?: string;
+  command?: string;
   timestamp: number;
-  state?: "running" | "completed" | "error";
+  state?: "running" | "completed" | "error" | "interrupted";
   expanded?: boolean;
 }
 
@@ -64,6 +66,7 @@ export interface ModelInfo {
 interface ChatState {
   messages: ChatMessage[];
   sessionMessages: Record<string, ChatMessage[]>; // sessionId -> messages
+  activeSessionId: string | null;
   isStreaming: boolean;
   currentModel: ModelInfo | null;
   thinkingLevel: string;
@@ -73,14 +76,14 @@ interface ChatState {
   highlightedFile: string | null;
   pendingFiles: PendingFile[];
 
-  addMessage: (msg: ChatMessage) => void;
-  updateLastAssistant: (content: string) => void;
-  appendLastAssistantDiffs: (diffs: FileDiff[]) => void;
-  startAssistantProcess: (startedAt?: number) => void;
-  appendLastAssistantProcessEntry: (entry: AgentProcessEntry) => void;
-  updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>) => void;
-  finishLastAssistantProcess: (endedAt?: number) => void;
-  collapseLastAssistantProcess: () => void;
+  addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
+  updateLastAssistant: (content: string, sessionId?: string | null) => void;
+  appendLastAssistantDiffs: (diffs: FileDiff[], sessionId?: string | null) => void;
+  startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
+  appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
+  updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
+  finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
+  collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;
   toggleAssistantProcessEntry: (messageId: string, entryId: string) => void;
   setStreaming: (v: boolean) => void;
@@ -137,9 +140,35 @@ const ensureAssistantProcess = (messages: ChatMessage[], startedAt = Date.now())
   return { msgs, index };
 };
 
+const updateSessionMessages = (
+  state: ChatState,
+  sessionId: string | null | undefined,
+  updater: (messages: ChatMessage[]) => ChatMessage[]
+) => {
+  const targetSessionId = sessionId || state.activeSessionId;
+  if (!targetSessionId) {
+    return { messages: updater(state.messages) };
+  }
+
+  const sourceMessages =
+    targetSessionId === state.activeSessionId
+      ? state.messages
+      : state.sessionMessages[targetSessionId] || [];
+  const nextMessages = updater(sourceMessages);
+  const nextSessionMessages = {
+    ...state.sessionMessages,
+    [targetSessionId]: nextMessages,
+  };
+
+  return targetSessionId === state.activeSessionId
+    ? { messages: nextMessages, sessionMessages: nextSessionMessages }
+    : { sessionMessages: nextSessionMessages };
+};
+
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   sessionMessages: {},
+  activeSessionId: null,
   isStreaming: false,
   currentModel: null,
   thinkingLevel: "medium",
@@ -149,44 +178,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
   highlightedFile: null,
   pendingFiles: [],
 
-  addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
+  addMessage: (msg, sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
 
-  updateLastAssistant: (content) =>
+  updateLastAssistant: (content, sessionId) =>
     set((s) => {
-      const msgs = [...s.messages];
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
       const last = msgs[msgs.length - 1];
       if (last && last.role === "assistant") {
         msgs[msgs.length - 1] = { ...last, content };
       }
-      return { messages: msgs };
+      return msgs;
+      });
     }),
 
-  appendLastAssistantDiffs: (diffs) =>
+  appendLastAssistantDiffs: (diffs, sessionId) =>
     set((s) => {
-      const msgs = [...s.messages];
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
       const index = findLastAssistantIndex(msgs);
       if (index >= 0) {
         const msg = msgs[index];
         const existing = msg.diffs || [];
         msgs[index] = { ...msg, diffs: [...existing, ...diffs] };
       }
-      return { messages: msgs };
+      return msgs;
+      });
     }),
 
-  startAssistantProcess: (startedAt) =>
+  startAssistantProcess: (startedAt, sessionId) =>
     set((s) => {
-      const { msgs } = ensureAssistantProcess(s.messages, startedAt);
-      return { messages: msgs };
+      return updateSessionMessages(s, sessionId, (messages) => {
+        const { msgs } = ensureAssistantProcess(messages, startedAt);
+        return msgs;
+      });
     }),
 
-  appendLastAssistantProcessEntry: (entry) =>
+  appendLastAssistantProcessEntry: (entry, sessionId) =>
     set((s) => {
-      const { msgs, index } = ensureAssistantProcess(s.messages, entry.timestamp);
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const { msgs, index } = ensureAssistantProcess(messages, entry.timestamp);
       const msg = msgs[index];
       const process = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
       const normalizedEntry: AgentProcessEntry = {
         ...entry,
-        expanded: entry.expanded ?? (entry.type === "thinking" || entry.state === "running"),
+        expanded: entry.expanded ?? (entry.type === "thinking" ? false : entry.state === "running"),
       };
       msgs[index] = {
         ...msg,
@@ -195,17 +232,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           entries: [...process.entries, normalizedEntry],
         },
       };
-      return { messages: msgs };
+      return msgs;
+      });
     }),
 
-  updateLastAssistantProcessEntry: (entryId, patch) =>
+  updateLastAssistantProcessEntry: (entryId, patch, sessionId) =>
     set((s) => {
-      const msgs = [...s.messages];
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
       const index = findLastAssistantIndex(msgs);
-      if (index < 0) return { messages: msgs };
+      if (index < 0) return msgs;
 
       const msg = msgs[index];
-      if (!msg.process) return { messages: msgs };
+      if (!msg.process) return msgs;
 
       msgs[index] = {
         ...msg,
@@ -216,12 +255,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ),
         },
       };
-      return { messages: msgs };
+      return msgs;
+      });
     }),
 
-  finishLastAssistantProcess: (endedAt) =>
+  finishLastAssistantProcess: (endedAt, finalState = "completed", sessionId) =>
     set((s) => {
-      const msgs = [...s.messages];
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
       const index = findLastAssistantIndex(msgs);
       if (index >= 0) {
         const msg = msgs[index];
@@ -236,7 +277,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   entry.state === "running"
                     ? {
                         ...entry,
-                        state: "completed",
+                        state: finalState,
                         expanded: entry.type === "thinking" ? entry.expanded : false,
                       }
                     : entry
@@ -245,12 +286,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : msg.process,
         };
       }
-      return { messages: msgs };
+      return msgs;
+      });
     }),
 
-  collapseLastAssistantProcess: () =>
+  collapseLastAssistantProcess: (sessionId) =>
     set((s) => {
-      const msgs = [...s.messages];
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
       const index = findLastAssistantIndex(msgs);
       if (index >= 0) {
         const msg = msgs[index];
@@ -258,7 +301,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           msgs[index] = { ...msg, process: { ...msg.process, expanded: false } };
         }
       }
-      return { messages: msgs };
+      return msgs;
+      });
     }),
 
   toggleAssistantProcess: (messageId) =>
@@ -315,20 +359,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: (sessionId) => {
     const state = get();
-    // Save current messages to sessionMessages if there's an active session
-    // We need to know the previous session ID - use a module-level variable
+    const nextSessionMessages = state.activeSessionId
+      ? { ...state.sessionMessages, [state.activeSessionId]: state.messages }
+      : state.sessionMessages;
     if (sessionId) {
-      // Load messages for the new session
-      const sessionMsgs = state.sessionMessages[sessionId] || [];
-      set({ messages: sessionMsgs, pendingFiles: [] });
+      const sessionMsgs = nextSessionMessages[sessionId] || [];
+      set({ messages: sessionMsgs, sessionMessages: nextSessionMessages, activeSessionId: sessionId, pendingFiles: [] });
     } else {
-      set({ messages: [], pendingFiles: [] });
+      set({ messages: [], sessionMessages: nextSessionMessages, activeSessionId: null, pendingFiles: [] });
     }
   },
 
   loadSessionMessages: (sessionId, messages) => {
     set((s) => ({
       sessionMessages: { ...s.sessionMessages, [sessionId]: messages },
+      messages: s.activeSessionId === sessionId ? messages : s.messages,
     }));
   },
 }));

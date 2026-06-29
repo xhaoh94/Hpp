@@ -36,6 +36,7 @@ interface AgentBackend {
 class PiAgent {
   private process: ChildProcess | null = null;
   private window: BrowserWindow | null = null;
+  private hppSessionId: string;
   private models: AgentModel[] = [];
   private pendingResponses = new Map<string, (data: any) => void>();
   private rpcId = 0;
@@ -45,8 +46,15 @@ class PiAgent {
   private eventQueue: Array<{ type: string; [key: string]: unknown }> = [];
   private eventTimer: ReturnType<typeof setTimeout> | null = null;
   private turnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private abortResponseTimer: ReturnType<typeof setTimeout> | null = null;
+  private processGeneration = 0;
+  private isAborting = false;
   private streamedText = false;
   private pendingAssistantText = "";
+
+  constructor(hppSessionId = "default") {
+    this.hppSessionId = hppSessionId;
+  }
 
   setWindow(win: BrowserWindow) {
     this.window = win;
@@ -60,7 +68,7 @@ class PiAgent {
     this.projectPath = projectPath;
     this.killProcess();
     this.isMock = true;
-    this._sessionFilePath = null;
+    this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
 
     const args = ["--mode", "rpc"];
@@ -68,26 +76,34 @@ class PiAgent {
       args.push("--session", existingSessionFilePath);
     }
 
-    this.process = spawn("pi", args, {
+    const generation = ++this.processGeneration;
+    const child = spawn("pi", args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       shell: true,
     });
+    this.process = child;
 
     const decoder = new StringDecoder("utf8");
     let buffer = "";
     let initResolved = false;
 
-    this.process.on("exit", () => {
+    child.on("exit", () => {
+      if (generation !== this.processGeneration) return;
+      if (this.process === child) this.process = null;
+      if (this.isAborting) {
+        this.finishAbortState();
+        return;
+      }
       if (!initResolved) {
         initResolved = true;
         this.isMock = true;
-        this.process = null;
         this.emitEvent({ type: "agent_ready", agentId: "pi", mock: true });
       }
     });
 
-    this.process.stdout?.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (generation !== this.processGeneration) return;
       buffer += decoder.write(chunk);
       while (true) {
         const newlineIndex = buffer.indexOf("\n");
@@ -112,7 +128,8 @@ class PiAgent {
       }
     });
 
-    this.process.stderr?.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (generation !== this.processGeneration) return;
       console.log("[pi]", chunk.toString().trim());
     });
 
@@ -160,18 +177,25 @@ class PiAgent {
   }
 
   private killProcess() {
-    if (this.process) {
-      this.process.stdin?.end();
-      this.process.kill();
-      this.process = null;
+    const proc = this.process;
+    this.processGeneration += 1;
+    this.process = null;
+    this.isAborting = false;
+    if (proc) {
+      proc.stdin?.destroy();
+      proc.kill();
     }
     this.pendingResponses.clear();
     this.eventQueue = [];
     if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
     this.clearTurnFallback();
+    this.clearAbortResponseTimer();
   }
 
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void> {
+    if (this.isAborting) {
+      this.finishAbortState();
+    }
     if (this.isMock || !this.process) {
       this.mockResponse(message);
       return;
@@ -196,7 +220,39 @@ class PiAgent {
     this.emitEvent({ type: "agent_end" });
   }
 
-  async abort() { this.sendCommand({ type: "abort" }); }
+  async abort() {
+    this.pendingAssistantText = "";
+    this.streamedText = false;
+    this.eventQueue = [];
+    if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    this.clearTurnFallback();
+    this.emitEvent({ type: "thinking_end" });
+    this.emitEvent({ type: "stream_end", content: "" });
+    this.emitEvent({ type: "agent_end" });
+
+    if (this.isMock || !this.process) {
+      this.finishAbortState();
+      return;
+    }
+
+    this.isAborting = true;
+    let abortCommandId: string | null = null;
+
+    try {
+      abortCommandId = this.sendCommand({ type: "abort" }, () => {
+        this.finishAbortState();
+      });
+    } catch {
+      this.finishAbortState();
+      return;
+    }
+
+    this.clearAbortResponseTimer();
+    this.abortResponseTimer = setTimeout(() => {
+      this.abortResponseTimer = null;
+      if (abortCommandId) this.pendingResponses.delete(abortCommandId);
+    }, 10000);
+  }
 
   async getModels(): Promise<AgentModel[]> {
     if (this.models.length > 0) return this.models;
@@ -237,6 +293,14 @@ class PiAgent {
       const handler = this.pendingResponses.get(data.id);
       if (handler) { handler(data); this.pendingResponses.delete(data.id); }
     }
+
+    if (this.isAborting) {
+      if (data.type === "agent_end" || data.type === "message_end") {
+        this.finishAbortState();
+      }
+      return;
+    }
+
     switch (data.type) {
       case "agent_start":
         this.clearTurnFallback();
@@ -304,6 +368,23 @@ class PiAgent {
     }
   }
 
+  private clearAbortResponseTimer() {
+    if (this.abortResponseTimer) {
+      clearTimeout(this.abortResponseTimer);
+      this.abortResponseTimer = null;
+    }
+  }
+
+  private finishAbortState() {
+    this.isAborting = false;
+    this.pendingAssistantText = "";
+    this.streamedText = false;
+    this.eventQueue = [];
+    if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    this.clearTurnFallback();
+    this.clearAbortResponseTimer();
+  }
+
   private scheduleTurnFallback(delayMs: number) {
     this.clearTurnFallback();
     this.turnFallbackTimer = setTimeout(() => {
@@ -317,7 +398,7 @@ class PiAgent {
   private flushQueuedEvents() {
     while (this.eventQueue.length > 0) {
       const item = this.eventQueue.shift()!;
-      this.window?.webContents.send("agent:event", item);
+      this.window?.webContents.send("agent:event", this.withSessionId(item));
     }
     if (this.eventTimer) {
       clearTimeout(this.eventTimer);
@@ -346,8 +427,15 @@ class PiAgent {
     return id;
   }
 
+  private withSessionId(data: { type: string; [key: string]: unknown }) {
+    return { ...data, sessionId: this.hppSessionId };
+  }
+
   private emitEvent(data: unknown) {
-    this.window?.webContents.send("agent:event", data);
+    const payload = data && typeof data === "object"
+      ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
+      : data;
+    this.window?.webContents.send("agent:event", payload);
   }
 
   /** Emit event with throttle for streaming events to prevent React batching */
@@ -358,7 +446,7 @@ class PiAgent {
       this.flushEventQueue();
     } else {
       // Non-streaming and thinking_delta events go through immediately
-      this.window?.webContents.send("agent:event", data);
+      this.window?.webContents.send("agent:event", this.withSessionId(data));
     }
   }
 
@@ -366,7 +454,7 @@ class PiAgent {
     if (this.eventTimer) return; // Already scheduled
     if (this.eventQueue.length === 0) return;
     const item = this.eventQueue.shift()!;
-    this.window?.webContents.send("agent:event", item);
+    this.window?.webContents.send("agent:event", this.withSessionId(item));
     if (this.eventQueue.length > 0) {
       this.eventTimer = setTimeout(() => {
         this.eventTimer = null;
@@ -388,10 +476,10 @@ class AgentManager {
 
   setWindow(win: BrowserWindow) { this.window = win; }
 
-  private createAgentBackend(agentId: string): AgentBackend {
-    if (agentId === "opencode") return new OpenCodeAgent();
-    if (agentId === "droid") return new DroidAgent();
-    return new PiAgent(); // default
+  private createAgentBackend(agentId: string, sessionId: string): AgentBackend {
+    if (agentId === "opencode") return new OpenCodeAgent(sessionId);
+    if (agentId === "droid") return new DroidAgent(sessionId);
+    return new PiAgent(sessionId); // default
   }
 
   /** Create or resume a session */
@@ -402,7 +490,7 @@ class AgentManager {
     console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
     let agent = this.sessionAgents.get(sessionId);
     if (!agent) {
-      agent = this.createAgentBackend(agentId);
+      agent = this.createAgentBackend(agentId, sessionId);
       this.sessionAgents.set(sessionId, agent);
       this.sessionAgentTypes.set(sessionId, agentId);
       console.log("[agent-manager] Created new agent:", agent.constructor.name);
@@ -487,8 +575,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>) => {
-    const agent = agentManager.getActiveAgent();
+  ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string) => {
+    const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     if (!agent) return { success: false, error: "No active agent" };
     try {
       await agent.sendMessage(message, images);
@@ -498,8 +586,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
   });
 
-  ipcMain.handle("agent:abort", async () => {
-    const agent = agentManager.getActiveAgent();
+  ipcMain.handle("agent:abort", async (_event, sessionId?: string) => {
+    const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     if (!agent) return { success: false };
     await agent.abort();
     return { success: true };
