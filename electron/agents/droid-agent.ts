@@ -4,6 +4,11 @@ import { StringDecoder } from "string_decoder";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import {
+  buildDiffsFromToolEvent,
+  normalizeQuestionProcessEvent,
+  normalizeToolEvent,
+} from "./process-events";
 
 interface AgentModel {
   id: string;
@@ -225,6 +230,8 @@ export class DroidAgent {
     this.process.stdin?.write(JSON.stringify(response) + "\n");
   }
 
+  get sessionFilePath(): string | null { return this.sessionId; }
+
   /** Dispose and clean up */
   dispose() {
     this.killProcess();
@@ -298,13 +305,7 @@ export class DroidAgent {
         this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         break;
       case "droid.ask_user":
-        this.emitEvent({
-          type: "process_event",
-          entryType: "question",
-          title: "询问用户",
-          detail: params,
-          state: "completed",
-        });
+        this.emitEvent(normalizeQuestionProcessEvent({ type: method, detail: params }));
         // Auto-respond
         this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
         break;
@@ -334,47 +335,31 @@ export class DroidAgent {
       case "ask_user":
       case "ask_user_question":
       case "user_ask_question":
-        this.emitEvent({
-          type: "process_event",
-          entryType: "question",
-          title: "询问用户",
-          detail: notifData,
-          state: "completed",
-        });
+        this.emitEvent(normalizeQuestionProcessEvent({ type: notifType, detail: notifData }));
         break;
       case "tool_progress_update":
-        this.emitEvent({
-          type: "tool_start",
-          toolName: notifData?.toolName || notifData?.name || "tool",
-          toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
-          args: notifData?.args || notifData?.input,
-          result: notifData?.result,
-          detail: notifData?.message || notifData?.status,
-        });
-        // Extract diff/patch data if present in tool result
-        if (notifData?.result?.details?.patch || notifData?.diff || notifData?.patch) {
-          const patch = notifData.result?.details?.patch || notifData.patch || notifData.diff;
-          const filePath = notifData.args?.filePath || notifData.args?.path || notifData.file || notifData.fileName || "";
-          if (patch) {
-            const addCount = (patch.match(/^\+[^+]/gm) || []).length;
-            const delCount = (patch.match(/^-[^-]/gm) || []).length;
-            this.emitEvent({
-              type: "diff_update",
-              diffs: [{
-                file: filePath,
-                patch,
-                additions: addCount,
-                deletions: delCount,
-                status: "modified",
-              }],
-            });
+        {
+          const normalizedInput = {
+            toolName: notifData?.toolName || notifData?.name || "tool",
+            toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
+            args: notifData?.args || notifData?.input,
+            result: notifData?.result,
+            detail: notifData?.message || notifData?.status,
+            patch: notifData?.patch || notifData?.diff,
+            isError: notifData?.isError || notifData?.status === "error",
+          };
+          const phase = notifData?.result || notifData?.patch || notifData?.diff || notifData?.status === "completed" || notifData?.status === "error"
+            ? "tool_end"
+            : "tool_start";
+          const toolEvent = normalizeToolEvent(phase, normalizedInput);
+          this.emitEvent(toolEvent);
+          if (phase === "tool_end") {
+            const diffs = buildDiffsFromToolEvent(toolEvent);
+            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
           }
         }
         break;
       case "droid_working_state_changed":
-        if (notifData?.state === "idle") {
-          this.emitEvent({ type: "tool_end", toolName: "" });
-        }
         break;
       case "error":
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${notifData?.message || "未知错误"}` });

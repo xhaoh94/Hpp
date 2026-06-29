@@ -157,6 +157,313 @@ function registerStoreHandlers() {
     }
   );
 }
+const TOOL_KIND_ALIASES = {
+  read_file: ["read", "readfile", "read_file", "view", "view_file", "open_file"],
+  list_dir: [
+    "list",
+    "list_dir",
+    "list_directory",
+    "ls",
+    "readdir",
+    "read_dir",
+    "read_directory",
+    "readfolder",
+    "read_folder",
+    "tree",
+    "directory_tree"
+  ],
+  write_file: ["write", "writefile", "write_file", "create", "create_file"],
+  edit_file: [
+    "edit",
+    "edit_file",
+    "multiedit",
+    "multi_edit",
+    "apply_patch",
+    "patch",
+    "str_replace_editor",
+    "str_replace_based_edit_tool",
+    "replace_in_file"
+  ],
+  run_command: ["bash", "shell", "sh", "powershell", "pwsh", "cmd", "run_command", "execute_command", "terminal"],
+  search_files: ["glob", "find", "fd", "file_search", "search_files"],
+  search_text: ["grep", "rg", "search", "search_text", "content_search"],
+  web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
+  web_search: ["websearch", "web_search", "search_web"],
+  question: ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"]
+};
+const normalizeName = (value) => String(value || "").trim().toLowerCase();
+const getNestedValue = (value, path2) => {
+  let current = value;
+  for (const key of path2) {
+    if (current === void 0 || current === null) return void 0;
+    current = current[key];
+  }
+  return current;
+};
+const findFirstString = (value, paths) => {
+  for (const path2 of paths) {
+    const found = getNestedValue(value, path2);
+    if (typeof found === "string" && found.trim()) return found;
+  }
+  return "";
+};
+const tryParseJson = (value) => {
+  const trimmed = value.trim();
+  if (!trimmed || !trimmed.startsWith("{") && !trimmed.startsWith("[")) return void 0;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return void 0;
+  }
+};
+const unwrapToolText = (value, depth = 0) => {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value === "string") {
+    const parsed = depth < 2 ? tryParseJson(value) : void 0;
+    if (parsed !== void 0) {
+      const parsedText = unwrapToolText(parsed, depth + 1);
+      if (parsedText !== void 0) return parsedText;
+    }
+    return value;
+  }
+  if (typeof value !== "object") return void 0;
+  const anyValue = value;
+  if (Array.isArray(anyValue.content)) {
+    const text = anyValue.content.map((item) => {
+      if (typeof item === "string") return item;
+      if (item?.type === "text" && typeof item.text === "string") return item.text;
+      if (typeof item?.text === "string") return item.text;
+      return "";
+    }).filter(Boolean).join("\n");
+    if (text.trim()) return text;
+  }
+  if (typeof anyValue.text === "string" && (!anyValue.type || anyValue.type === "text")) {
+    return anyValue.text;
+  }
+  const stdout = typeof anyValue.stdout === "string" ? anyValue.stdout : "";
+  const stderr = typeof anyValue.stderr === "string" ? anyValue.stderr : "";
+  if (stdout || stderr) return [stdout, stderr].filter(Boolean).join("\n");
+  for (const key of ["output", "result", "message"]) {
+    if (typeof anyValue[key] === "string") return anyValue[key];
+  }
+  return void 0;
+};
+const stringifyProcessValue = (value) => {
+  if (value === void 0 || value === null || value === "") return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+const truncateDetail = (value) => {
+  const maxLength = 1200;
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
+};
+const getFileName = (filePath) => {
+  const parts = filePath.split(/[/\\]/);
+  return parts[parts.length - 1] || filePath;
+};
+const extractFilePathFromPatch = (patch) => {
+  const lines = patch.split("\n");
+  for (const line of lines) {
+    const match = line.match(/^\*\*\*\s+(?:Add|Update|Delete) File:\s+(.+)$/) || line.match(/^diff --git\s+a\/.+\s+b\/(.+)$/) || line.match(/^\+\+\+\s+(?:b\/)?(.+)$/) || line.match(/^---\s+(?:a\/)?(.+)$/);
+    if (!match) continue;
+    const filePath = match[1].trim();
+    if (filePath && filePath !== "/dev/null") return filePath;
+  }
+  return "";
+};
+const countPatchChanges = (patch) => ({
+  additions: (patch.match(/^\+[^+]/gm) || []).length,
+  deletions: (patch.match(/^-[^-]/gm) || []).length
+});
+const getToolKind = (toolName, command, patch) => {
+  const normalized = normalizeName(toolName);
+  for (const [kind, aliases] of Object.entries(TOOL_KIND_ALIASES)) {
+    if (aliases.includes(normalized)) return kind;
+  }
+  if (patch) return "edit_file";
+  if (command && !normalized) return "run_command";
+  return "unknown";
+};
+const getToolPath = (toolKind, data, args, result, patchFilePath) => {
+  if (patchFilePath) return patchFilePath;
+  if (!["read_file", "list_dir", "write_file", "edit_file"].includes(toolKind)) return "";
+  return findFirstString(
+    { args, result, data },
+    [
+      ["args", "filePath"],
+      ["args", "file_path"],
+      ["args", "path"],
+      ["args", "file"],
+      ["args", "filename"],
+      ["args", "fileName"],
+      ["args", "target_file"],
+      ["args", "targetFile"],
+      ["args", "directory"],
+      ["args", "dir"],
+      ["data", "filePath"],
+      ["data", "file_path"],
+      ["data", "path"],
+      ["data", "file"],
+      ["data", "filename"],
+      ["data", "fileName"],
+      ["result", "filePath"],
+      ["result", "file_path"],
+      ["result", "path"],
+      ["result", "file"],
+      ["result", "filename"],
+      ["result", "fileName"]
+    ]
+  );
+};
+const getPatch = (data, args, result) => {
+  return findFirstString(
+    { data, args, result },
+    [
+      ["result", "details", "patch"],
+      ["result", "details", "diff"],
+      ["result", "patch"],
+      ["result", "diff"],
+      ["args", "patch"],
+      ["args", "diff"],
+      ["data", "patch"],
+      ["data", "diff"]
+    ]
+  );
+};
+const getCommand = (args, data) => findFirstString(
+  { args, data },
+  [
+    ["args", "command"],
+    ["args", "cmd"],
+    ["args", "script"],
+    ["data", "command"],
+    ["data", "cmd"],
+    ["data", "script"]
+  ]
+);
+const getPattern = (args, data) => findFirstString(
+  { args, data },
+  [
+    ["args", "pattern"],
+    ["args", "query"],
+    ["args", "glob"],
+    ["data", "pattern"],
+    ["data", "query"],
+    ["data", "glob"]
+  ]
+);
+const buildFiles = (toolKind, filePath, patch, additions, deletions) => {
+  if (!filePath) return [];
+  const action = toolKind === "read_file" ? "read" : toolKind === "list_dir" ? "listed" : toolKind === "write_file" ? "written" : toolKind === "edit_file" ? "edited" : void 0;
+  if (!action) return [];
+  return [{
+    file: filePath,
+    label: getFileName(filePath),
+    action,
+    additions,
+    deletions,
+    status: patch ? "modified" : void 0
+  }];
+};
+const getErrorText = (data) => {
+  const direct = unwrapToolText(data.error);
+  if (direct) return direct;
+  if (typeof data.message === "string") return data.message;
+  if (data.error) return stringifyProcessValue(data.error);
+  return "";
+};
+const buildDetail = (payload) => {
+  const lines = [];
+  const detailAllowedKinds = [
+    "run_command",
+    "search_files",
+    "search_text",
+    "web_fetch",
+    "web_search",
+    "unknown"
+  ];
+  if (payload.toolKind === "run_command" && payload.command) {
+    lines.push(`$ ${payload.command}`);
+  }
+  if (payload.isError && payload.errorText) {
+    lines.push(payload.errorText);
+  } else if (payload.outputText && detailAllowedKinds.includes(payload.toolKind)) {
+    lines.push(payload.outputText);
+  } else if (detailAllowedKinds.includes(payload.toolKind) && typeof payload.rawDetail === "string" && payload.rawDetail.trim()) {
+    lines.push(payload.rawDetail);
+  }
+  const detail = lines.filter(Boolean).join("\n");
+  return detail ? truncateDetail(detail) : void 0;
+};
+const normalizeToolEvent = (phase, data) => {
+  const args = data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
+  const result = data.result !== void 0 ? data.result : data.output;
+  const toolName = String(data.toolName || data.name || data.tool || "tool");
+  const toolCallId = data.toolCallId || data.callId || data.callID || data.id;
+  const patch = getPatch(data, args || {}, result || {});
+  const command = getCommand(args || {}, data);
+  const pattern = getPattern(args || {}, data);
+  const toolKind = getToolKind(toolName, command, patch);
+  const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
+  const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
+  const changes = patch ? countPatchChanges(patch) : { additions: void 0, deletions: void 0 };
+  const outputText = unwrapToolText(result);
+  const errorText = data.isError ? getErrorText(data) : void 0;
+  const files = buildFiles(toolKind, filePath, patch, changes.additions, changes.deletions);
+  const detail = buildDetail({
+    toolKind,
+    command,
+    outputText,
+    errorText,
+    rawDetail: data.detail,
+    isError: data.isError
+  });
+  return {
+    type: phase,
+    toolName,
+    toolCallId: toolCallId ? String(toolCallId) : void 0,
+    toolKind,
+    args,
+    result,
+    isError: !!data.isError,
+    detail,
+    outputText,
+    errorText,
+    files: files.length > 0 ? files : void 0,
+    filePath: filePath || void 0,
+    patch: patch || void 0,
+    additions: changes.additions,
+    deletions: changes.deletions,
+    command: command || void 0,
+    pattern: pattern || void 0
+  };
+};
+const buildDiffsFromToolEvent = (payload) => {
+  if (!payload.patch || !payload.filePath) return [];
+  return [{
+    file: payload.filePath,
+    patch: payload.patch,
+    additions: payload.additions || 0,
+    deletions: payload.deletions || 0,
+    status: "modified"
+  }];
+};
+const normalizeQuestionProcessEvent = (data) => {
+  const detail = data.question || data.prompt || data.message || unwrapToolText(data.args) || unwrapToolText(data.input) || (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
+  return {
+    type: "process_event",
+    entryType: "question",
+    kind: "question",
+    title: "询问用户",
+    detail,
+    state: "completed"
+  };
+};
 function formatProcessDetail(value) {
   if (value === void 0 || value === null || value === "") return void 0;
   if (typeof value === "string") return value;
@@ -379,34 +686,15 @@ class OpenCodeAgent {
           if (this.completedToolParts.has(tool.toolCallId)) break;
           if (!this.runningToolParts.has(tool.toolCallId)) {
             this.runningToolParts.add(tool.toolCallId);
-            this.emitEvent({
-              type: "tool_start",
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args,
-              result: tool.result,
-              detail: tool.detail
-            });
+            this.emitEvent(normalizeToolEvent("tool_start", tool));
           } else if (tool.detail) {
-            this.emitEvent({
-              type: "tool_start",
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args,
-              result: tool.result,
-              detail: tool.detail
-            });
+            this.emitEvent(normalizeToolEvent("tool_start", tool));
           }
           if (isToolPartComplete(props)) {
-            this.emitEvent({
-              type: "tool_end",
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args,
-              result: tool.result,
-              detail: tool.detail,
-              isError: tool.isError
-            });
+            const toolEvent = normalizeToolEvent("tool_end", tool);
+            this.emitEvent(toolEvent);
+            const diffs = buildDiffsFromToolEvent(toolEvent);
+            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
             this.runningToolParts.delete(tool.toolCallId);
             this.completedToolParts.add(tool.toolCallId);
           }
@@ -421,15 +709,10 @@ class OpenCodeAgent {
         } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
-          this.emitEvent({
-            type: "tool_end",
-            toolName: tool.toolName,
-            toolCallId: tool.toolCallId,
-            args: tool.args,
-            result: tool.result,
-            detail: tool.detail,
-            isError: tool.isError
-          });
+          const toolEvent = normalizeToolEvent("tool_end", tool);
+          this.emitEvent(toolEvent);
+          const diffs = buildDiffsFromToolEvent(toolEvent);
+          if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
           this.runningToolParts.delete(tool.toolCallId);
           this.completedToolParts.add(tool.toolCallId);
         }
@@ -942,6 +1225,9 @@ class DroidAgent {
     if (!this.process || !this.isReady) return;
     this.process.stdin?.write(JSON.stringify(response) + "\n");
   }
+  get sessionFilePath() {
+    return this.sessionId;
+  }
   /** Dispose and clean up */
   dispose() {
     this.killProcess();
@@ -1004,13 +1290,7 @@ class DroidAgent {
         this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         break;
       case "droid.ask_user":
-        this.emitEvent({
-          type: "process_event",
-          entryType: "question",
-          title: "询问用户",
-          detail: params,
-          state: "completed"
-        });
+        this.emitEvent(normalizeQuestionProcessEvent({ type: method, detail: params }));
         this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
         break;
     }
@@ -1037,46 +1317,29 @@ class DroidAgent {
       case "ask_user":
       case "ask_user_question":
       case "user_ask_question":
-        this.emitEvent({
-          type: "process_event",
-          entryType: "question",
-          title: "询问用户",
-          detail: notifData,
-          state: "completed"
-        });
+        this.emitEvent(normalizeQuestionProcessEvent({ type: notifType, detail: notifData }));
         break;
       case "tool_progress_update":
-        this.emitEvent({
-          type: "tool_start",
-          toolName: notifData?.toolName || notifData?.name || "tool",
-          toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
-          args: notifData?.args || notifData?.input,
-          result: notifData?.result,
-          detail: notifData?.message || notifData?.status
-        });
-        if (notifData?.result?.details?.patch || notifData?.diff || notifData?.patch) {
-          const patch = notifData.result?.details?.patch || notifData.patch || notifData.diff;
-          const filePath = notifData.args?.filePath || notifData.args?.path || notifData.file || notifData.fileName || "";
-          if (patch) {
-            const addCount = (patch.match(/^\+[^+]/gm) || []).length;
-            const delCount = (patch.match(/^-[^-]/gm) || []).length;
-            this.emitEvent({
-              type: "diff_update",
-              diffs: [{
-                file: filePath,
-                patch,
-                additions: addCount,
-                deletions: delCount,
-                status: "modified"
-              }]
-            });
+        {
+          const normalizedInput = {
+            toolName: notifData?.toolName || notifData?.name || "tool",
+            toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
+            args: notifData?.args || notifData?.input,
+            result: notifData?.result,
+            detail: notifData?.message || notifData?.status,
+            patch: notifData?.patch || notifData?.diff,
+            isError: notifData?.isError || notifData?.status === "error"
+          };
+          const phase = notifData?.result || notifData?.patch || notifData?.diff || notifData?.status === "completed" || notifData?.status === "error" ? "tool_end" : "tool_start";
+          const toolEvent = normalizeToolEvent(phase, normalizedInput);
+          this.emitEvent(toolEvent);
+          if (phase === "tool_end") {
+            const diffs = buildDiffsFromToolEvent(toolEvent);
+            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
           }
         }
         break;
       case "droid_working_state_changed":
-        if (notifData?.state === "idle") {
-          this.emitEvent({ type: "tool_end", toolName: "" });
-        }
         break;
       case "error":
         this.emitEvent({ type: "stream_delta", delta: `
@@ -1331,101 +1594,27 @@ class PiAgent {
       case "user_ask_question":
       case "ask_user_question":
       case "ask_user":
-        this.emitEvent({
-          type: "process_event",
-          entryType: "question",
-          title: "询问用户",
-          detail: data.question || data.prompt || data.message || data.args || data,
-          state: "completed"
-        });
+        this.emitEvent(normalizeQuestionProcessEvent(data));
         break;
       case "agent_end":
         this.completeTurn();
         break;
       case "tool_execution_start":
         this.clearTurnFallback();
-        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: this.getToolArgs(data) });
+        this.emitEvent(normalizeToolEvent("tool_start", { ...data, args: this.getToolArgs(data) }));
         break;
       case "tool_execution_end":
         {
-          const fileSummary = this.extractToolFileSummary(data);
-          this.emitEvent({
-            type: "tool_end",
-            toolName: data.toolName,
-            toolCallId: data.toolCallId,
-            isError: data.isError,
-            args: this.getToolArgs(data),
-            result: data.result,
-            error: data.error,
-            ...fileSummary
-          });
+          const toolEvent = normalizeToolEvent("tool_end", { ...data, args: this.getToolArgs(data) });
+          this.emitEvent(toolEvent);
+          const diffs = buildDiffsFromToolEvent(toolEvent);
+          if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
         }
-        {
-          const fileSummary = this.extractToolFileSummary(data);
-          const patch = fileSummary.patch || data.result?.details?.patch;
-          if (patch) {
-            const toolArgs = this.getToolArgs(data);
-            const filePath = fileSummary.filePath || toolArgs?.filePath || toolArgs?.path || toolArgs?.file || "";
-            const addCount = (patch.match(/^\+[^+]/gm) || []).length;
-            const delCount = (patch.match(/^-[^-]/gm) || []).length;
-            this.emitEvent({
-              type: "diff_update",
-              diffs: [{
-                file: filePath,
-                patch,
-                additions: addCount,
-                deletions: delCount,
-                status: "modified"
-              }]
-            });
-          }
-        }
-        if (this.pendingAssistantText || this.streamedText) this.scheduleTurnFallback(15e3);
         break;
     }
   }
-  extractToolFileSummary(data) {
-    const toolArgs = this.getToolArgs(data);
-    const filePath = toolArgs?.filePath || toolArgs?.path || toolArgs?.file || toolArgs?.filename || toolArgs?.fileName || data.result?.filePath || data.result?.path || data.result?.file || this.extractFilePathFromValue(data.result) || this.extractFilePathFromValue(data);
-    const patch = data.result?.details?.patch || data.result?.details?.diff || data.result?.patch || data.result?.diff || data.patch || data.diff;
-    if (!filePath && !patch) return {};
-    const additions = typeof patch === "string" ? (patch.match(/^\+[^+]/gm) || []).length : void 0;
-    const deletions = typeof patch === "string" ? (patch.match(/^-[^-]/gm) || []).length : void 0;
-    return {
-      filePath,
-      patch,
-      additions,
-      deletions
-    };
-  }
   getToolArgs(data) {
     return data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
-  }
-  extractFilePathFromValue(value) {
-    const seen = /* @__PURE__ */ new WeakSet();
-    const visit = (current) => {
-      if (typeof current === "string") return this.extractFilePathFromText(current);
-      if (!current || typeof current !== "object") return "";
-      if (seen.has(current)) return "";
-      seen.add(current);
-      if (Array.isArray(current)) {
-        for (const item of current) {
-          const found = visit(item);
-          if (found) return found;
-        }
-        return "";
-      }
-      for (const item of Object.values(current)) {
-        const found = visit(item);
-        if (found) return found;
-      }
-      return "";
-    };
-    return visit(value);
-  }
-  extractFilePathFromText(text) {
-    const match = text.match(/[A-Za-z]:[\\/][^\s"'`]+/);
-    return match?.[0]?.replace(/[),.;\]]+$/, "") || "";
   }
   clearTurnFallback() {
     if (this.turnFallbackTimer) {

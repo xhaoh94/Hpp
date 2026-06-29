@@ -2813,10 +2813,24 @@
 
 .chat-process-file-name {
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
   color: #60a5fa;
+  font: inherit;
+  cursor: default;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
+}
+
+.chat-process-file-name.openable {
+  cursor: pointer;
+}
+
+.chat-process-file-name.openable:hover {
+  text-decoration: underline;
 }
 
 .chat-process-file-add {

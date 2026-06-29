@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import * as http from "http";
+import { buildDiffsFromToolEvent, normalizeToolEvent } from "./process-events";
 
 interface AgentModel {
   id: string;
@@ -281,35 +282,16 @@ export class OpenCodeAgent {
 
           if (!this.runningToolParts.has(tool.toolCallId)) {
             this.runningToolParts.add(tool.toolCallId);
-            this.emitEvent({
-              type: "tool_start",
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args,
-              result: tool.result,
-              detail: tool.detail,
-            });
+            this.emitEvent(normalizeToolEvent("tool_start", tool));
           } else if (tool.detail) {
-            this.emitEvent({
-              type: "tool_start",
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args,
-              result: tool.result,
-              detail: tool.detail,
-            });
+            this.emitEvent(normalizeToolEvent("tool_start", tool));
           }
 
           if (isToolPartComplete(props)) {
-            this.emitEvent({
-              type: "tool_end",
-              toolName: tool.toolName,
-              toolCallId: tool.toolCallId,
-              args: tool.args,
-              result: tool.result,
-              detail: tool.detail,
-              isError: tool.isError,
-            });
+            const toolEvent = normalizeToolEvent("tool_end", tool);
+            this.emitEvent(toolEvent);
+            const diffs = buildDiffsFromToolEvent(toolEvent);
+            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
             this.runningToolParts.delete(tool.toolCallId);
             this.completedToolParts.add(tool.toolCallId);
           }
@@ -325,15 +307,10 @@ export class OpenCodeAgent {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
 
-          this.emitEvent({
-            type: "tool_end",
-            toolName: tool.toolName,
-            toolCallId: tool.toolCallId,
-            args: tool.args,
-            result: tool.result,
-            detail: tool.detail,
-            isError: tool.isError,
-          });
+          const toolEvent = normalizeToolEvent("tool_end", tool);
+          this.emitEvent(toolEvent);
+          const diffs = buildDiffsFromToolEvent(toolEvent);
+          if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
           this.runningToolParts.delete(tool.toolCallId);
           this.completedToolParts.add(tool.toolCallId);
         }

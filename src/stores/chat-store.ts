@@ -11,7 +11,7 @@ export interface FileDiff {
 export interface AgentProcessFile {
   file: string;
   label?: string;
-  action?: "read" | "edited" | "modified" | "written";
+  action?: "read" | "listed" | "edited" | "modified" | "written";
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";

@@ -3,6 +3,11 @@ import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
+import {
+  buildDiffsFromToolEvent,
+  normalizeQuestionProcessEvent,
+  normalizeToolEvent,
+} from "./process-events";
 
 interface AgentModel {
   id: string;
@@ -37,7 +42,7 @@ class PiAgent {
   private isMock = true;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
-  private eventQueue: Array<{ type: string; data: unknown }> = [];
+  private eventQueue: Array<{ type: string; [key: string]: unknown }> = [];
   private eventTimer: ReturnType<typeof setTimeout> | null = null;
   private turnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private streamedText = false;
@@ -268,124 +273,28 @@ class PiAgent {
       case "user_ask_question":
       case "ask_user_question":
       case "ask_user":
-        this.emitEvent({
-          type: "process_event",
-          entryType: "question",
-          title: "询问用户",
-          detail: data.question || data.prompt || data.message || data.args || data,
-          state: "completed",
-        });
+        this.emitEvent(normalizeQuestionProcessEvent(data));
         break;
       case "agent_end":
         this.completeTurn();
         break;
       case "tool_execution_start":
         this.clearTurnFallback();
-        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: this.getToolArgs(data) });
+        this.emitEvent(normalizeToolEvent("tool_start", { ...data, args: this.getToolArgs(data) }));
         break;
       case "tool_execution_end":
         {
-          const fileSummary = this.extractToolFileSummary(data);
-          this.emitEvent({
-            type: "tool_end",
-            toolName: data.toolName,
-            toolCallId: data.toolCallId,
-            isError: data.isError,
-            args: this.getToolArgs(data),
-            result: data.result,
-            error: data.error,
-            ...fileSummary,
-          });
+          const toolEvent = normalizeToolEvent("tool_end", { ...data, args: this.getToolArgs(data) });
+          this.emitEvent(toolEvent);
+          const diffs = buildDiffsFromToolEvent(toolEvent);
+          if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
         }
-        // Extract diff/patch data from tool result (edit tool provides details.patch and details.diff)
-        {
-          const fileSummary = this.extractToolFileSummary(data);
-          const patch = fileSummary.patch || data.result?.details?.patch;
-          if (patch) {
-            const toolArgs = this.getToolArgs(data);
-            const filePath = fileSummary.filePath || toolArgs?.filePath || toolArgs?.path || toolArgs?.file || "";
-          const addCount = (patch.match(/^\+[^+]/gm) || []).length;
-          const delCount = (patch.match(/^-[^-]/gm) || []).length;
-          this.emitEvent({
-            type: "diff_update",
-            diffs: [{
-              file: filePath,
-              patch,
-              additions: addCount,
-              deletions: delCount,
-              status: "modified",
-            }],
-          });
-          }
-        }
-        if (this.pendingAssistantText || this.streamedText) this.scheduleTurnFallback(15000);
         break;
     }
   }
 
-  private extractToolFileSummary(data: any) {
-    const toolArgs = this.getToolArgs(data);
-    const filePath =
-      toolArgs?.filePath ||
-      toolArgs?.path ||
-      toolArgs?.file ||
-      toolArgs?.filename ||
-      toolArgs?.fileName ||
-      data.result?.filePath ||
-      data.result?.path ||
-      data.result?.file ||
-      this.extractFilePathFromValue(data.result) ||
-      this.extractFilePathFromValue(data);
-    const patch =
-      data.result?.details?.patch ||
-      data.result?.details?.diff ||
-      data.result?.patch ||
-      data.result?.diff ||
-      data.patch ||
-      data.diff;
-
-    if (!filePath && !patch) return {};
-
-    const additions = typeof patch === "string" ? (patch.match(/^\+[^+]/gm) || []).length : undefined;
-    const deletions = typeof patch === "string" ? (patch.match(/^-[^-]/gm) || []).length : undefined;
-    return {
-      filePath,
-      patch,
-      additions,
-      deletions,
-    };
-  }
-
   private getToolArgs(data: any) {
     return data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
-  }
-
-  private extractFilePathFromValue(value: unknown): string {
-    const seen = new WeakSet<object>();
-    const visit = (current: unknown): string => {
-      if (typeof current === "string") return this.extractFilePathFromText(current);
-      if (!current || typeof current !== "object") return "";
-      if (seen.has(current)) return "";
-      seen.add(current);
-      if (Array.isArray(current)) {
-        for (const item of current) {
-          const found = visit(item);
-          if (found) return found;
-        }
-        return "";
-      }
-      for (const item of Object.values(current)) {
-        const found = visit(item);
-        if (found) return found;
-      }
-      return "";
-    };
-    return visit(value);
-  }
-
-  private extractFilePathFromText(text: string): string {
-    const match = text.match(/[A-Za-z]:[\\/][^\s"'`]+/);
-    return match?.[0]?.replace(/[),.;\]]+$/, "") || "";
   }
 
   private clearTurnFallback() {

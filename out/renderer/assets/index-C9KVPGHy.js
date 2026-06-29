@@ -42333,65 +42333,6 @@ const getFileName = (filePath) => {
   const parts = filePath.split(/[/\\]/);
   return parts[parts.length - 1] || filePath;
 };
-const countPatchChanges = (patch2) => ({
-  additions: (patch2.match(/^\+[^+]/gm) || []).length,
-  deletions: (patch2.match(/^-[^-]/gm) || []).length
-});
-const getNestedValue = (value, path2) => {
-  let current = value;
-  for (const key of path2) {
-    if (current === void 0 || current === null) return void 0;
-    current = current[key];
-  }
-  return current;
-};
-const findFirstString = (value, paths) => {
-  for (const path2 of paths) {
-    const found = getNestedValue(value, path2);
-    if (typeof found === "string" && found.trim()) return found;
-  }
-  return "";
-};
-const collectStrings = (value, output = [], seen = /* @__PURE__ */ new WeakSet()) => {
-  if (typeof value === "string") {
-    output.push(value);
-  } else if (Array.isArray(value)) {
-    if (seen.has(value)) return output;
-    seen.add(value);
-    for (const item of value) collectStrings(item, output, seen);
-  } else if (value && typeof value === "object") {
-    if (seen.has(value)) return output;
-    seen.add(value);
-    for (const item of Object.values(value)) collectStrings(item, output, seen);
-  }
-  return output;
-};
-const extractFilePathFromText = (text2) => {
-  const match = text2.match(/[A-Za-z]:[\\/][^\s"'`]+/);
-  return match?.[0]?.replace(/[),.;\]]+$/, "") || "";
-};
-const unwrapToolText = (value) => {
-  if (typeof value === "string") return value;
-  if (!value || typeof value !== "object") return void 0;
-  const content2 = value.content;
-  if (Array.isArray(content2)) {
-    const text2 = content2.map((item) => {
-      if (typeof item === "string") return item;
-      if (item?.type === "text" && typeof item.text === "string") return item.text;
-      return "";
-    }).filter(Boolean).join("\n");
-    if (text2.trim()) return text2;
-  }
-  return void 0;
-};
-const buildProcessFilesFromDiffs = (diffs) => diffs.map((diff2) => ({
-  file: diff2.file,
-  label: getFileName(diff2.file),
-  action: "modified",
-  additions: diff2.additions,
-  deletions: diff2.deletions,
-  status: diff2.status
-}));
 const getToolKey = (event) => {
   const raw = event.toolCallId || event.callId || event.id || event.toolName || event.name || "tool";
   return String(raw);
@@ -42399,82 +42340,13 @@ const getToolKey = (event) => {
 const getToolName = (event) => {
   return event.toolName || event.name || event.tool || "tool";
 };
-const normalizeToolName = (toolName) => String(toolName || "").trim().toLowerCase();
-const isAskUserToolName = (toolName) => ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"].includes(normalizeToolName(toolName));
-const getAskUserTitle = (toolName, running = false) => {
-  const prefix = running ? "正在询问用户" : "已处理用户询问";
-  return isAskUserToolName(toolName) ? prefix : `${prefix}: ${toolName}`;
-};
-const getToolDetail = (event) => {
-  const lines = [];
-  const args = event.args || event.input || event.parameters;
-  const result = event.result || event.output;
-  const error = event.error || event.message;
-  const resultText = unwrapToolText(result);
-  if (args !== void 0) lines.push(`参数: ${stringifyProcessValue(args)}`);
-  if (resultText !== void 0) lines.push(resultText);
-  else if (result !== void 0) lines.push(`结果: ${stringifyProcessValue(result)}`);
-  if (event.isError && error) lines.push(`错误: ${stringifyProcessValue(error)}`);
-  if (!event.isError && event.detail) lines.push(stringifyProcessValue(event.detail));
-  return truncateProcessDetail(lines.filter(Boolean).join("\n"));
-};
-const getToolProcessFiles = (event, toolName = getToolName(event)) => {
-  const args = event.args || event.input || event.parameters || {};
-  const result = event.result || event.output || {};
-  const detail = event.detail;
-  let filePath = findFirstString(
-    { args, result, detail, event },
-    [
-      ["args", "filePath"],
-      ["args", "path"],
-      ["args", "file"],
-      ["args", "filename"],
-      ["args", "fileName"],
-      ["result", "filePath"],
-      ["result", "path"],
-      ["result", "file"],
-      ["result", "filename"],
-      ["result", "fileName"],
-      ["event", "filePath"],
-      ["event", "path"],
-      ["event", "file"],
-      ["event", "filename"],
-      ["event", "fileName"]
-    ]
-  );
-  if (!filePath) {
-    const textWithPath = collectStrings({ result, detail, event }).find((text2) => extractFilePathFromText(text2));
-    filePath = textWithPath ? extractFilePathFromText(textWithPath) : "";
-  }
-  if (!filePath) return [];
-  const patch2 = findFirstString(
-    { args, result, detail, event },
-    [
-      ["result", "details", "patch"],
-      ["result", "details", "diff"],
-      ["result", "patch"],
-      ["result", "diff"],
-      ["event", "patch"],
-      ["event", "diff"]
-    ]
-  );
-  const changes = patch2 ? countPatchChanges(patch2) : { additions: void 0, deletions: void 0 };
-  const normalizedName = normalizeToolName(toolName);
-  const action = ["read", "readfile", "read_file", "view"].includes(normalizedName) ? "read" : ["write", "writefile", "write_file", "create"].includes(normalizedName) ? "written" : ["edit", "multiedit", "multi_edit", "apply_patch", "str_replace_editor", "str_replace_based_edit_tool"].includes(normalizedName) ? "edited" : "modified";
-  return [{
-    file: filePath,
-    label: getFileName(filePath),
-    action,
-    additions: changes.additions,
-    deletions: changes.deletions,
-    status: patch2 ? "modified" : void 0
-  }];
-};
 const getFileEntryTitle = (action, count, running = false) => {
   if (running) {
     switch (action) {
       case "read":
         return `正在读取 ${count} 个文件`;
+      case "listed":
+        return `正在查看 ${count} 个目录`;
       case "written":
         return `正在写入 ${count} 个文件`;
       case "edited":
@@ -42486,6 +42358,8 @@ const getFileEntryTitle = (action, count, running = false) => {
   switch (action) {
     case "read":
       return `已读取 ${count} 个文件`;
+    case "listed":
+      return `已查看 ${count} 个目录`;
     case "written":
       return `已写入 ${count} 个文件`;
     case "edited":
@@ -42494,101 +42368,97 @@ const getFileEntryTitle = (action, count, running = false) => {
       return `已修改 ${count} 个文件`;
   }
 };
-const getToolSummary = (toolName, args, isError = false) => {
-  if (isAskUserToolName(toolName)) {
-    return isError ? "用户询问处理失败" : getAskUserTitle(toolName, false);
+const getToolProcessFiles = (event) => {
+  if (Array.isArray(event.files)) {
+    return event.files.filter((file) => typeof file?.file === "string" && file.file.trim()).map((file) => ({
+      ...file,
+      label: file.label || getFileName(file.file)
+    }));
   }
-  const normalizedName = normalizeToolName(toolName);
-  if (isError) {
-    switch (normalizedName) {
-      case "read":
-        return "读取文件失败";
-      case "readfile":
-        return "读取文件失败";
+  if (!event.filePath) return [];
+  const toolKind = normalizeToolKind(event.toolKind);
+  const action = toolKind === "read_file" ? "read" : toolKind === "list_dir" ? "listed" : toolKind === "write_file" ? "written" : toolKind === "edit_file" ? "edited" : void 0;
+  if (!action) return [];
+  return [{
+    file: event.filePath,
+    label: getFileName(event.filePath),
+    action,
+    additions: event.additions,
+    deletions: event.deletions,
+    status: event.patch ? "modified" : void 0
+  }];
+};
+const normalizeToolKind = (value) => {
+  const normalized = String(value || "").trim();
+  if (normalized === "read_file" || normalized === "list_dir" || normalized === "write_file" || normalized === "edit_file" || normalized === "run_command" || normalized === "search_files" || normalized === "search_text" || normalized === "web_fetch" || normalized === "web_search" || normalized === "question" || normalized === "unknown") {
+    return normalized;
+  }
+  return "unknown";
+};
+const getQuestionTitle = (running = false, isError = false) => {
+  if (isError) return "用户询问处理失败";
+  return running ? "正在询问用户" : "已处理用户询问";
+};
+const getToolDetail = (event) => {
+  const detail = typeof event.detail === "string" ? event.detail : "";
+  if (detail.trim()) return truncateProcessDetail(detail);
+  if (event.isError && event.errorText) return truncateProcessDetail(String(event.errorText));
+  if (event.outputText && ["run_command", "search_files", "search_text", "web_fetch", "web_search", "unknown"].includes(normalizeToolKind(event.toolKind))) {
+    return truncateProcessDetail(String(event.outputText));
+  }
+  return void 0;
+};
+const getToolSummary = (event, running = false) => {
+  const toolKind = normalizeToolKind(event.toolKind);
+  const toolName = getToolName(event);
+  const files = getToolProcessFiles(event);
+  if (event.isError) {
+    switch (toolKind) {
       case "read_file":
         return "读取文件失败";
-      case "view":
-        return "读取文件失败";
-      case "write":
-        return "写入文件失败";
-      case "writefile":
-        return "写入文件失败";
+      case "list_dir":
+        return "读取目录失败";
       case "write_file":
         return "写入文件失败";
-      case "edit":
+      case "edit_file":
         return "编辑文件失败";
-      case "multiedit":
-        return "编辑文件失败";
-      case "multi_edit":
-        return "编辑文件失败";
-      case "apply_patch":
-        return "编辑文件失败";
-      case "str_replace_editor":
-        return "编辑文件失败";
-      case "str_replace_based_edit_tool":
-        return "编辑文件失败";
-      case "bash":
+      case "run_command":
         return "命令执行失败";
-      case "glob":
+      case "search_files":
         return "文件搜索失败";
-      case "grep":
+      case "search_text":
         return "内容搜索失败";
-      case "search":
-        return "文件搜索失败";
-      case "list":
-        return "列出文件失败";
-      case "readDir":
-        return "读取目录失败";
-      case "webfetch":
+      case "web_fetch":
         return "网页获取失败";
-      case "websearch":
+      case "web_search":
         return "网络搜索失败";
+      case "question":
+        return getQuestionTitle(false, true);
       default:
         return `${toolName} 执行失败`;
     }
   }
-  const filePath = args?.filePath || args?.path || args?.file || "";
-  const command = args?.command || args?.cmd || "";
-  const pattern = args?.pattern || args?.query || "";
-  switch (normalizedName) {
-    case "read":
-    case "readfile":
-    case "read_file":
-    case "view":
-      return filePath ? `已读取文件: ${filePath}` : "已读取文件";
-    case "write":
-    case "writefile":
-    case "write_file":
-      return filePath ? `已写入文件: ${filePath}` : "已写入文件";
-    case "edit":
-    case "multiedit":
-    case "multi_edit":
-    case "apply_patch":
-    case "str_replace_editor":
-    case "str_replace_based_edit_tool":
-      return filePath ? `已编辑文件: ${filePath}` : "已编辑文件";
-    case "bash":
-      return command ? `命令执行完成: ${command.length > 30 ? command.substring(0, 30) + "..." : command}` : "命令执行完成";
-    case "glob":
-      return pattern ? `文件搜索完成: ${pattern}` : "文件搜索完成";
-    case "grep":
-      return pattern ? `内容搜索完成: ${pattern}` : "内容搜索完成";
-    case "search":
-      return pattern ? `文件搜索完成: ${pattern}` : "文件搜索完成";
-    case "list":
-      return filePath ? `文件列表获取完成: ${filePath}` : "文件列表获取完成";
-    case "readDir":
-      return filePath ? `目录读取完成: ${filePath}` : "目录读取完成";
-    case "webfetch":
-      return "网页获取完成";
-    case "websearch":
-      return "网络搜索完成";
+  if (files.length > 0) return getFileEntryTitle(files[0].action, files.length, running);
+  const prefix = running ? "正在运行" : "已运行";
+  const completedPrefix = running ? "正在" : "已完成";
+  switch (toolKind) {
+    case "run_command":
+      return toolName ? `${prefix} ${toolName}` : `${prefix}命令`;
+    case "search_files":
+      return `${completedPrefix}搜索文件`;
+    case "search_text":
+      return `${completedPrefix}搜索内容`;
+    case "web_fetch":
+      return `${completedPrefix}获取网页内容`;
+    case "web_search":
+      return `${completedPrefix}搜索网络`;
+    case "question":
+      return getQuestionTitle(running, false);
     default:
-      return `已完成 ${toolName}`;
+      return toolName ? `${prefix} ${toolName}` : `${prefix}工具`;
   }
 };
 const normalizeProcessEntryType = (value) => {
-  if (isAskUserToolName(value)) return "question";
   if (value === "status" || value === "tool" || value === "diff" || value === "error" || value === "info" || value === "thinking" || value === "question") {
     return value;
   }
@@ -42640,13 +42510,26 @@ function ProcessEntryIcon({ type, state }) {
     /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 8v4l3 2", strokeLinecap: "round", strokeLinejoin: "round" })
   ] });
 }
-function ProcessEntryFiles({ files }) {
+function ProcessEntryFiles({
+  files,
+  onOpenFile
+}) {
   return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-files", children: files.map((file, index2) => {
-    const action = file.action === "read" ? "已读取" : file.action === "written" ? "已写入" : file.action === "edited" ? "已编辑" : "已修改";
+    const action = file.action === "read" ? "已读取" : file.action === "listed" ? "已查看" : file.action === "written" ? "已写入" : file.action === "edited" ? "已编辑" : "已修改";
     const label = file.label || getFileName(file.file);
+    const canOpen = file.action !== "listed";
     return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-file", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-file-action", children: action }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-file-name", title: file.file, children: label }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: `chat-process-file-name ${canOpen ? "openable" : ""}`,
+          title: file.file,
+          onClick: canOpen ? () => onOpenFile(file.file) : void 0,
+          disabled: !canOpen,
+          children: label
+        }
+      ),
       typeof file.additions === "number" && file.additions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-file-add", children: [
         "+",
         file.additions
@@ -42661,7 +42544,8 @@ function ProcessEntryFiles({ files }) {
 function ProcessEntryRow({
   messageId,
   entry,
-  onToggleEntry
+  onToggleEntry,
+  onOpenFile
 }) {
   const hasDetail = !!entry.detail;
   const files = entry.files || [];
@@ -42698,7 +42582,7 @@ function ProcessEntryRow({
           ]
         }
       ),
-      files.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryFiles, { files }),
+      files.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryFiles, { files, onOpenFile }),
       detailVisible && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: `chat-process-entry-detail ${canExpand ? "panel" : ""}`, children: entry.detail })
     ] })
   ] });
@@ -42707,7 +42591,8 @@ function ProcessBlock({
   messageId,
   process: process2,
   onToggle,
-  onToggleEntry
+  onToggleEntry,
+  onOpenFile
 }) {
   const nowTick = useProcessTicker(!process2.endedAt);
   const durationEnd = process2.endedAt || nowTick;
@@ -42739,7 +42624,8 @@ function ProcessBlock({
       {
         messageId,
         entry,
-        onToggleEntry
+        onToggleEntry,
+        onOpenFile
       },
       entry.id
     )) })
@@ -42840,6 +42726,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   const [thinkingOpen, setThinkingOpen] = reactExports.useState(false);
   const [expandedProvider, setExpandedProvider] = reactExports.useState(null);
   const [zoomImage, setZoomImage] = reactExports.useState(null);
+  const [previewFile, setPreviewFile] = reactExports.useState(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = reactExports.useState(false);
   const userMsgHistoryRef = reactExports.useRef(null);
   const scrollRef = reactExports.useRef(null);
@@ -42848,11 +42735,6 @@ function ChatPanel({ sendKey = "Enter" }) {
   const thinkingRef = reactExports.useRef(null);
   const modelFetchRunIdRef = reactExports.useRef(0);
   const streamBufferRef = reactExports.useRef("");
-  const preFinalStreamBufferRef = reactExports.useRef("");
-  const processOutputBufferRef = reactExports.useRef("");
-  const processOutputEntryIdRef = reactExports.useRef(null);
-  const processOutputFlushedRef = reactExports.useRef(false);
-  const processOutputFlushedTextRef = reactExports.useRef("");
   const thinkingBufferRef = reactExports.useRef("");
   const thinkingEntryIdRef = reactExports.useRef(null);
   const processActiveRef = reactExports.useRef(false);
@@ -43034,28 +42916,6 @@ function ChatPanel({ sendKey = "Enter" }) {
         });
       }
     };
-    const appendProcessOutput = (delta) => {
-      processOutputBufferRef.current += delta;
-    };
-    const flushProcessOutput = () => {
-      const rawOutput = processOutputBufferRef.current;
-      const output = processOutputBufferRef.current.trim();
-      if (!output) return;
-      finishThinkingEntry();
-      const entryId = createProcessEntryId();
-      appendProcessEntry({
-        id: entryId,
-        type: "info",
-        title: output,
-        detail: output,
-        state: "completed",
-        expanded: true
-      });
-      processOutputFlushedRef.current = true;
-      processOutputFlushedTextRef.current += rawOutput;
-      processOutputEntryIdRef.current = null;
-      processOutputBufferRef.current = "";
-    };
     const clearStreamWatchdog = () => {
       if (streamWatchdogRef.current) {
         clearTimeout(streamWatchdogRef.current);
@@ -43064,10 +42924,7 @@ function ChatPanel({ sendKey = "Enter" }) {
     };
     const completeAssistantStream = (currentSessionId, content2, timedOut = false) => {
       clearStreamWatchdog();
-      const pendingFinalContent = processOutputBufferRef.current.trim();
-      const rawFinalContent = (content2 || streamBufferRef.current || pendingFinalContent).trim();
-      const flushedContent = processOutputFlushedTextRef.current.trim();
-      const finalContent = processOutputFlushedRef.current ? pendingFinalContent || (flushedContent && rawFinalContent.startsWith(flushedContent) ? rawFinalContent.slice(flushedContent.length).trim() : rawFinalContent) : rawFinalContent;
+      const finalContent = (content2 || streamBufferRef.current).trim();
       if (finalContent.trim().length > 0) {
         streamBufferRef.current = finalContent;
         useChatStore.getState().updateLastAssistant(finalContent);
@@ -43090,10 +42947,6 @@ function ChatPanel({ sendKey = "Enter" }) {
       activeToolEntryRef.current = {};
       activeToolFileRef.current = {};
       thinkingEntryIdRef.current = null;
-      processOutputEntryIdRef.current = null;
-      processOutputBufferRef.current = "";
-      processOutputFlushedRef.current = false;
-      processOutputFlushedTextRef.current = "";
       if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, timedOut ? "error" : "completed");
     };
     const refreshStreamWatchdog = (currentSessionId) => {
@@ -43122,11 +42975,6 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "stream_start":
           reactDomExports.flushSync(() => {
             streamBufferRef.current = "";
-            preFinalStreamBufferRef.current = "";
-            processOutputBufferRef.current = "";
-            processOutputEntryIdRef.current = null;
-            processOutputFlushedRef.current = false;
-            processOutputFlushedTextRef.current = "";
             thinkingBufferRef.current = "";
             thinkingEntryIdRef.current = null;
             setStreaming(true);
@@ -43142,8 +42990,7 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "stream_delta":
           if (!event.delta) break;
           finishThinkingEntry();
-          preFinalStreamBufferRef.current += event.delta;
-          appendProcessOutput(String(event.delta));
+          streamBufferRef.current += String(event.delta);
           break;
         case "thinking_delta":
           appendThinkingDelta(String(event.delta || ""));
@@ -43157,11 +43004,10 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "droid.ask_user":
           {
             finishThinkingEntry();
-            flushProcessOutput();
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry({
               type: "question",
-              title: getAskUserTitle(String(event.type), false),
+              title: getQuestionTitle(false),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
               state: "completed",
               expanded: false
@@ -43184,72 +43030,14 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "tool_start":
           {
             finishThinkingEntry();
-            flushProcessOutput();
-            const toolName = getToolName(event);
             const key = getToolKey(event);
             const existingEntryId = activeToolEntryRef.current[key];
-            const args = event.args || event.input || event.parameters || {};
-            const toolFiles = getToolProcessFiles(event, toolName);
+            const toolFiles = getToolProcessFiles(event);
             if (toolFiles.length > 0) activeToolFileRef.current[key] = toolFiles;
-            const toolDetail = toolFiles.length > 0 ? "" : getToolDetail(event);
-            const filePath = args.filePath || args.path || args.file || "";
-            const command = args.command || args.cmd || "";
-            const pattern = args.pattern || args.query || "";
-            const normalizedName = normalizeToolName(toolName);
-            let toolSummary;
-            switch (normalizedName) {
-              case "read":
-              case "readfile":
-              case "read_file":
-              case "view":
-                toolSummary = filePath ? `正在读取文件: ${filePath}` : "正在读取文件";
-                break;
-              case "write":
-              case "writefile":
-              case "write_file":
-                toolSummary = filePath ? `正在写入文件: ${filePath}` : "正在写入文件";
-                break;
-              case "edit":
-              case "multiedit":
-              case "multi_edit":
-              case "apply_patch":
-              case "str_replace_editor":
-              case "str_replace_based_edit_tool":
-                toolSummary = filePath ? `正在编辑文件: ${filePath}` : "正在编辑文件";
-                break;
-              case "bash":
-                toolSummary = command ? `正在执行命令: ${command.length > 30 ? command.substring(0, 30) + "..." : command}` : "正在执行命令";
-                break;
-              case "glob":
-                toolSummary = pattern ? `正在搜索文件: ${pattern}` : "正在搜索文件";
-                break;
-              case "grep":
-                toolSummary = pattern ? `正在搜索内容: ${pattern}` : "正在搜索内容";
-                break;
-              case "search":
-                toolSummary = pattern ? `正在搜索文件: ${pattern}` : "正在搜索文件";
-                break;
-              case "list":
-                toolSummary = filePath ? `正在列出文件: ${filePath}` : "正在列出文件";
-                break;
-              case "readDir":
-                toolSummary = filePath ? `正在读取目录: ${filePath}` : "正在读取目录";
-                break;
-              case "webfetch":
-                toolSummary = "正在获取网页内容";
-                break;
-              case "websearch":
-                toolSummary = "正在搜索网络";
-                break;
-              default:
-                toolSummary = `正在运行 ${toolName}`;
-            }
-            const entryType = isAskUserToolName(toolName) ? "question" : "tool";
-            if (entryType === "question") {
-              toolSummary = getAskUserTitle(toolName, true);
-            } else if (toolFiles.length > 0) {
-              toolSummary = getFileEntryTitle(toolFiles[0].action, toolFiles.length, true);
-            }
+            const toolDetail = getToolDetail(event);
+            const toolKind = normalizeToolKind(event.toolKind);
+            const entryType = toolKind === "question" ? "question" : "tool";
+            const toolSummary = getToolSummary(event, true);
             if (existingEntryId) {
               useChatStore.getState().updateLastAssistantProcessEntry(existingEntryId, {
                 title: toolSummary,
@@ -43280,16 +43068,14 @@ function ChatPanel({ sendKey = "Enter" }) {
             const key = getToolKey(event);
             const entryId = activeToolEntryRef.current[key];
             const toolName = getToolName(event);
-            const args = event.args || event.input || event.parameters || {};
-            const toolFiles = getToolProcessFiles(event, toolName);
+            const toolFiles = getToolProcessFiles(event);
             const preservedToolFiles = toolFiles.length > 0 ? toolFiles : activeToolFileRef.current[key] || [];
-            const toolDetail = toolFiles.length > 0 && !event.isError ? "" : getToolDetail(event);
-            const finalToolDetail = preservedToolFiles.length > 0 && !event.isError ? "" : toolDetail;
-            const toolSummary = preservedToolFiles.length > 0 && !event.isError ? getFileEntryTitle(preservedToolFiles[0].action, preservedToolFiles.length, false) : getToolSummary(toolName, args, event.isError);
-            const entryType = isAskUserToolName(toolName) ? event.isError ? "error" : "question" : event.isError ? "error" : "tool";
+            const toolDetail = getToolDetail(event);
+            const toolSummary = getToolSummary({ ...event, files: preservedToolFiles.length > 0 ? preservedToolFiles : event.files }, false);
+            const entryType = normalizeToolKind(event.toolKind) === "question" ? event.isError ? "error" : "question" : event.isError ? "error" : "tool";
             const patch2 = {
               title: toolSummary,
-              detail: finalToolDetail || void 0,
+              detail: toolDetail || void 0,
               files: preservedToolFiles.length > 0 && !event.isError ? preservedToolFiles : void 0,
               state: event.isError ? "error" : "completed",
               type: entryType,
@@ -43314,25 +43100,11 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "diff_update":
           if (event.diffs && event.diffs.length > 0) {
             finishThinkingEntry();
-            flushProcessOutput();
             useChatStore.getState().appendLastAssistantDiffs(event.diffs);
-            event.diffs.map((diff2) => {
-              const parts = diff2.file.split(/[/\\]/);
-              return parts[parts.length - 1];
-            });
-            const diffTitle = event.diffs.length === 1 ? "已修改文件" : `已修改 ${event.diffs.length} 个文件`;
-            appendProcessEntry({
-              type: "diff",
-              title: diffTitle,
-              files: buildProcessFilesFromDiffs(event.diffs),
-              state: "completed",
-              expanded: false
-            });
           }
           break;
         case "process_event":
           finishThinkingEntry();
-          flushProcessOutput();
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : void 0;
@@ -43351,6 +43123,7 @@ function ChatPanel({ sendKey = "Enter" }) {
             type: eventType,
             title: processedTitle,
             detail: eventDetail,
+            files: Array.isArray(event.files) ? getToolProcessFiles(event) : void 0,
             state: eventState
           });
           break;
@@ -43363,13 +43136,12 @@ function ChatPanel({ sendKey = "Enter" }) {
           });
           break;
         default:
-          if (isAskUserToolName(event.mode || event.entryType || event.kind || event.toolName || event.name)) {
+          if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {
             finishThinkingEntry();
-            flushProcessOutput();
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry({
               type: "question",
-              title: getAskUserTitle(String(event.mode || event.type || "user_ask_question"), false),
+              title: getQuestionTitle(false),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
               state: normalizeProcessEntryState(event.state) || "completed",
               expanded: false
@@ -43447,9 +43219,6 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       setStreaming(true);
       thinkingBufferRef.current = "";
       thinkingEntryIdRef.current = null;
-      processOutputBufferRef.current = "";
-      processOutputEntryIdRef.current = null;
-      processOutputFlushedTextRef.current = "";
     });
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages);
     if (!result.success) {
@@ -43461,9 +43230,6 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       processActiveRef.current = false;
       activeToolEntryRef.current = {};
       activeToolFileRef.current = {};
-      processOutputBufferRef.current = "";
-      processOutputEntryIdRef.current = null;
-      processOutputFlushedTextRef.current = "";
       setStreaming(false);
       addMessage({
         id: crypto.randomUUID(),
@@ -43504,9 +43270,6 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
     activeToolEntryRef.current = {};
     activeToolFileRef.current = {};
     thinkingEntryIdRef.current = null;
-    processOutputBufferRef.current = "";
-    processOutputEntryIdRef.current = null;
-    processOutputFlushedTextRef.current = "";
     setStreaming(false);
   };
   const addPendingImage = (file) => {
@@ -43722,7 +43485,8 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
               messageId: msg.id,
               process: msg.process,
               onToggle: toggleAssistantProcess,
-              onToggleEntry: toggleAssistantProcessEntry
+              onToggleEntry: toggleAssistantProcessEntry,
+              onOpenFile: setPreviewFile
             }
           ),
           hasVisibleBubble && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-msg ${msg.role}`, children: [
@@ -43950,7 +43714,8 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
     zoomImage && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-image-zoom-overlay", onClick: () => setZoomImage(null), children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: zoomImage, className: "chat-image-zoom", onClick: (e) => e.stopPropagation() }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-image-zoom-close", onClick: () => setZoomImage(null), children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "20", height: "20", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M18 6L6 18M6 6l12 12" }) }) })
-    ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(FilePreview, { filePath: previewFile, onClose: () => setPreviewFile(null) })
   ] });
 }
 function fuzzyMatch(text2, pattern) {
