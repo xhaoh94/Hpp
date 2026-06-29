@@ -9,7 +9,7 @@
 }
 
 .fp-modal {
-  width: 700px;
+  width: min(90vw, 1100px);
   max-height: 80vh;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);

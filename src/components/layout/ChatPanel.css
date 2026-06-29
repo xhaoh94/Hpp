@@ -577,15 +577,16 @@
 .chat-process-entry-main {
   display: flex;
   flex-direction: column;
-  min-width: 0;
   flex: 1;
+  min-width: 0;
+  width: 100%;
 }
 
 .chat-process-entry-header {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   padding: 0;
   border: none;
@@ -610,6 +611,8 @@
 .chat-process-entry-title {
   color: var(--text-primary);
   overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .chat-process-files {
@@ -991,36 +994,54 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: var(--accent-color);
-  border: none;
-  color: #fff;
-  border-radius: 10px;
+  background-color: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  color: #555;
+  border-radius: 50%;
   cursor: pointer;
   transition: all 0.15s;
   flex-shrink: 0;
 }
 
-.chat-send-btn:hover {
-  background-color: #006bbc;
-  transform: scale(1.05);
+.chat-send-btn:hover:not(:disabled) {
+  background-color: #3a3a3a;
+  border-color: #4a4a4a;
+  color: #888;
 }
 
-.chat-send-btn:active {
+.chat-send-btn:active:not(:disabled) {
   transform: scale(0.95);
 }
 
 .chat-send-btn.abort {
-  background-color: var(--danger-color);
+  background-color: #fff;
+  border-color: #fff;
+  color: #000;
 }
 
 .chat-send-btn.abort:hover {
-  background-color: #d63030;
+  background-color: #e0e0e0;
 }
 
 .chat-send-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.55;
   cursor: not-allowed;
   transform: none;
+  background-color: #3a3a3a;
+  border-color: #3a3a3a;
+  color: #666;
+}
+
+/* Has content - highlighted */
+.chat-send-btn:not(:disabled):not(.abort) {
+  background-color: #fff;
+  border-color: #fff;
+  color: #000;
+}
+
+.chat-send-btn:not(:disabled):not(.abort):hover {
+  background-color: #e0e0e0;
+  border-color: #e0e0e0;
 }
 
 /* Model & thinking selectors in toolbar */

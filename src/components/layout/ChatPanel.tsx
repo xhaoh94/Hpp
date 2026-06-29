@@ -491,6 +491,50 @@ function ProcessEntryRow({
   );
 }
 
+// Helper to map toolKind to AgentProcessFile["action"] for title generation
+const toolKindToAction = (toolKind: string): AgentProcessFile["action"] => {
+  switch (toolKind) {
+    case "read_file": return "read";
+    case "list_dir": return "listed";
+    case "write_file": return "written";
+    case "edit_file": return "edited";
+    default: return undefined;
+  }
+};
+
+// Merge consecutive same-type tool entries into a single entry with combined files
+// e.g. 4 x "已读取 1 个文件" → 1 x "已读取 4 个文件"
+const mergeProcessEntries = (entries: AgentProcessEntry[]): AgentProcessEntry[] => {
+  const merged: AgentProcessEntry[] = [];
+
+  for (const entry of entries) {
+    const last = merged[merged.length - 1];
+
+    // Only merge consecutive tool entries with same toolKind and state, both having files
+    if (
+      entry.type === "tool" && last?.type === "tool" &&
+      entry.toolKind && last.toolKind === entry.toolKind &&
+      entry.state === last.state &&
+      last.files && last.files.length > 0 &&
+      entry.files && entry.files.length > 0
+    ) {
+      // Merge files into the last entry
+      last.files = [...last.files, ...entry.files];
+      // Update title with combined count
+      const action = toolKindToAction(entry.toolKind);
+      last.title = getFileEntryTitle(action, last.files.length, entry.state === "running");
+      // Use the later entry's id so the key stays unique
+      last.id = entry.id;
+      continue;
+    }
+
+    // Push a shallow copy to avoid mutating original entries
+    merged.push({ ...entry, files: entry.files ? [...entry.files] : undefined });
+  }
+
+  return merged;
+};
+
 function ProcessBlock({
   messageId,
   process,
@@ -526,7 +570,7 @@ function ProcessBlock({
         <div className="chat-process-content">
           {process.entries.length === 0 ? (
             <div className="chat-process-empty">等待 agent 事件...</div>
-          ) : process.entries.map((entry) => (
+          ) : mergeProcessEntries(process.entries).map((entry) => (
             <ProcessEntryRow
               key={entry.id}
               messageId={messageId}
@@ -1774,13 +1818,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             title={currentSessionRunning ? "停止" : "发送"}
           >
             {currentSessionRunning ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="6" width="12" height="12" rx="2" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
               </svg>
             ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M22 2L11 13" />
-                <path d="M22 2L15 22L11 13L2 9L22 2Z" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 19V5" />
+                <path d="M5 12l7-7 7 7" />
               </svg>
             )}
           </button>
