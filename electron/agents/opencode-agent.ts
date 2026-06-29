@@ -32,9 +32,30 @@ function summarizeToolPart(props: any) {
   return {
     toolName,
     toolCallId: String(toolCallId),
+    args,
+    result: output,
     detail: formatProcessDetail(error ? { args, error } : output !== undefined ? { args, output } : args),
     isError: !!error,
   };
+}
+
+function normalizeEventName(value: unknown) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isAskUserName(value: unknown) {
+  return ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"].includes(normalizeEventName(value));
+}
+
+function isToolLikePart(props: any) {
+  const part = props.part || props;
+  const partType = part.type || props.type;
+  const toolName = part.tool || part.toolName || part.name || props.tool || props.toolName || partType;
+  return (
+    (partType && String(partType).startsWith("tool")) ||
+    isAskUserName(partType) ||
+    isAskUserName(toolName)
+  );
 }
 
 function isToolPartComplete(props: any) {
@@ -254,8 +275,7 @@ export class OpenCodeAgent {
     switch (eventType) {
       case "message.part.added":
       case "message.part.updated": {
-        const partType = props.part?.type || props.type;
-        if (partType && String(partType).startsWith("tool")) {
+        if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
 
@@ -265,6 +285,8 @@ export class OpenCodeAgent {
               type: "tool_start",
               toolName: tool.toolName,
               toolCallId: tool.toolCallId,
+              args: tool.args,
+              result: tool.result,
               detail: tool.detail,
             });
           } else if (tool.detail) {
@@ -272,6 +294,8 @@ export class OpenCodeAgent {
               type: "tool_start",
               toolName: tool.toolName,
               toolCallId: tool.toolCallId,
+              args: tool.args,
+              result: tool.result,
               detail: tool.detail,
             });
           }
@@ -281,6 +305,8 @@ export class OpenCodeAgent {
               type: "tool_end",
               toolName: tool.toolName,
               toolCallId: tool.toolCallId,
+              args: tool.args,
+              result: tool.result,
               detail: tool.detail,
               isError: tool.isError,
             });
@@ -293,7 +319,9 @@ export class OpenCodeAgent {
       case "message.part.done":
       case "message.part.removed": {
         const partType = props.part?.type || props.type;
-        if (partType && String(partType).startsWith("tool")) {
+        if (partType === "thinking") {
+          this.emitEvent({ type: "thinking_end" });
+        } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
 
@@ -301,6 +329,8 @@ export class OpenCodeAgent {
             type: "tool_end",
             toolName: tool.toolName,
             toolCallId: tool.toolCallId,
+            args: tool.args,
+            result: tool.result,
             detail: tool.detail,
             isError: tool.isError,
           });
@@ -426,6 +456,7 @@ export class OpenCodeAgent {
               this.emitEvent({ type: "stream_delta", delta: part.text });
             } else if (part.type === "thinking" && part.text) {
               this.emitEvent({ type: "thinking_delta", delta: part.text });
+              this.emitEvent({ type: "thinking_end" });
             }
           }
         } else if (assistantMsg?.info?.error) {
@@ -526,6 +557,11 @@ export class OpenCodeAgent {
   /** Set thinking level - opencode does not have a direct equivalent */
   async setThinkingLevel(_level: string) {
     this.emitEvent({ type: "thinking_level_changed", level: _level });
+  }
+
+  sendUIResponse(_response: any) {
+    // OpenCode ask-user style events are surfaced in the process trace; the
+    // current HTTP/SSE bridge does not expose a matching UI response endpoint.
   }
 
   /** For OpenCode, the session ID serves as the session file path equivalent */

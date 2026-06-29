@@ -358,6 +358,11 @@
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
   border-bottom-left-radius: 4px;
+  /* Override pre-wrap for markdown content — markdown uses block elements */
+  white-space: normal;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .chat-bubble.system {
@@ -504,6 +509,28 @@
   color: #f87171;
 }
 
+.chat-process-output {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.65;
+  padding: 6px 0 4px 24px;
+  max-width: 100%;
+}
+
+.chat-process-output .md-content {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+.chat-process-output .md-content p {
+  margin: 0.35em 0;
+}
+
+.chat-process-output .md-content .md-code-block {
+  margin: 0.55em 0;
+}
+
 .chat-process-entry.thinking .chat-process-entry-detail {
   font-family: inherit;
   color: var(--text-secondary);
@@ -556,6 +583,46 @@
 .chat-process-entry-title {
   color: var(--text-primary);
   overflow-wrap: anywhere;
+}
+
+.chat-process-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.chat-process-file {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-process-file-action {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.chat-process-file-name {
+  min-width: 0;
+  color: #60a5fa;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-process-file-add {
+  flex-shrink: 0;
+  color: #4ade80;
+}
+
+.chat-process-file-del {
+  flex-shrink: 0;
+  color: #f87171;
 }
 
 .chat-process-entry-chevron {

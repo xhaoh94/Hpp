@@ -8,11 +8,21 @@ export interface FileDiff {
   status?: "added" | "deleted" | "modified";
 }
 
+export interface AgentProcessFile {
+  file: string;
+  label?: string;
+  action?: "read" | "edited" | "modified" | "written";
+  additions?: number;
+  deletions?: number;
+  status?: "added" | "deleted" | "modified";
+}
+
 export interface AgentProcessEntry {
   id: string;
-  type: "status" | "tool" | "diff" | "error" | "info" | "thinking";
+  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question";
   title: string;
   detail?: string;
+  files?: AgentProcessFile[];
   timestamp: number;
   state?: "running" | "completed" | "error";
   expanded?: boolean;

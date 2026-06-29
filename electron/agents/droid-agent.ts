@@ -220,6 +220,11 @@ export class DroidAgent {
     this.emitEvent({ type: "thinking_level_changed", level });
   }
 
+  sendUIResponse(response: any) {
+    if (!this.process || !this.isReady) return;
+    this.process.stdin?.write(JSON.stringify(response) + "\n");
+  }
+
   /** Dispose and clean up */
   dispose() {
     this.killProcess();
@@ -293,6 +298,13 @@ export class DroidAgent {
         this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         break;
       case "droid.ask_user":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "question",
+          title: "询问用户",
+          detail: params,
+          state: "completed",
+        });
         // Auto-respond
         this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
         break;
@@ -316,7 +328,19 @@ export class DroidAgent {
         this.emitEvent({ type: "thinking_delta", delta: notifData?.delta || notifData?.text || "" });
         break;
       case "thinking_text_complete":
-        // thinking done, no action needed
+        this.emitEvent({ type: "thinking_end" });
+        break;
+      case "droid.ask_user":
+      case "ask_user":
+      case "ask_user_question":
+      case "user_ask_question":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "question",
+          title: "询问用户",
+          detail: notifData,
+          state: "completed",
+        });
         break;
       case "tool_progress_update":
         this.emitEvent({

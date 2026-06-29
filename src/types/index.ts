@@ -46,6 +46,7 @@ export interface ElectronAPI {
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
   agentSetModel: (provider: string, modelId: string) => Promise<{ success: boolean }>;
   agentSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;
+  agentSendUIResponse: (response: any) => Promise<{ success: boolean }>;
 
   // Agent events
   onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;

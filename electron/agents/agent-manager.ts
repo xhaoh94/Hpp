@@ -20,6 +20,7 @@ interface AgentBackend {
   getModels(): Promise<AgentModel[]>;
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
+  sendUIResponse(response: any): void;
   dispose(): void;
   readonly sessionFilePath: string | null;
 }
@@ -38,6 +39,7 @@ class PiAgent {
   private _sessionFilePath: string | null = null;
   private eventQueue: Array<{ type: string; data: unknown }> = [];
   private eventTimer: ReturnType<typeof setTimeout> | null = null;
+  private turnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private streamedText = false;
   private pendingAssistantText = "";
 
@@ -146,6 +148,12 @@ class PiAgent {
 
   get sessionFilePath(): string | null { return this._sessionFilePath; }
 
+  sendUIResponse(response: any) {
+    if (this.isMock || !this.process) return;
+    const line = JSON.stringify(response) + "\n";
+    this.process.stdin?.write(line);
+  }
+
   private killProcess() {
     if (this.process) {
       this.process.stdin?.end();
@@ -155,6 +163,7 @@ class PiAgent {
     this.pendingResponses.clear();
     this.eventQueue = [];
     if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    this.clearTurnFallback();
   }
 
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void> {
@@ -225,11 +234,13 @@ class PiAgent {
     }
     switch (data.type) {
       case "agent_start":
+        this.clearTurnFallback();
         this.streamedText = false;
         this.pendingAssistantText = "";
         this.emitEvent({ type: "stream_start", role: "assistant" });
         break;
       case "message_update": {
+        this.clearTurnFallback();
         const aev = data.assistantMessageEvent;
         if (aev) {
           if (aev.type === "text_delta") {
@@ -242,34 +253,57 @@ class PiAgent {
       }
       case "message_end":
         if (data.message?.role === "assistant") {
-          const textParts = (data.message.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
-          if (textParts) this.pendingAssistantText = textParts;
+          const content = data.message.content || [];
+          const textParts = content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
+          const thinkingParts = content.filter((c: any) => c.type === "thinking").map((c: any) => c.text || c.thinking || "").join("");
+          if (thinkingParts) {
+            this.emitEvent({ type: "thinking_end" });
+          }
+          if (textParts) {
+            this.pendingAssistantText = textParts;
+            this.scheduleTurnFallback(4000);
+          }
         }
+        break;
+      case "user_ask_question":
+      case "ask_user_question":
+      case "ask_user":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "question",
+          title: "询问用户",
+          detail: data.question || data.prompt || data.message || data.args || data,
+          state: "completed",
+        });
         break;
       case "agent_end":
-        // Flush any remaining queued events before sending agent_end
-        while (this.eventQueue.length > 0) {
-          const item = this.eventQueue.shift()!;
-          this.window?.webContents.send("agent:event", item);
-        }
-        if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
-        if (!this.streamedText && this.pendingAssistantText) {
-          this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
-          this.streamedText = true;
-        }
-        this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
-        this.emitEvent({ type: "agent_end" });
-        this.pendingAssistantText = "";
+        this.completeTurn();
         break;
       case "tool_execution_start":
-        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: data.args });
+        this.clearTurnFallback();
+        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: this.getToolArgs(data) });
         break;
       case "tool_execution_end":
-        this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError, args: data.args, result: data.result, error: data.error });
+        {
+          const fileSummary = this.extractToolFileSummary(data);
+          this.emitEvent({
+            type: "tool_end",
+            toolName: data.toolName,
+            toolCallId: data.toolCallId,
+            isError: data.isError,
+            args: this.getToolArgs(data),
+            result: data.result,
+            error: data.error,
+            ...fileSummary,
+          });
+        }
         // Extract diff/patch data from tool result (edit tool provides details.patch and details.diff)
-        if (data.result?.details?.patch) {
-          const filePath = data.args?.filePath || data.args?.path || data.args?.file || "";
-          const patch = data.result.details.patch;
+        {
+          const fileSummary = this.extractToolFileSummary(data);
+          const patch = fileSummary.patch || data.result?.details?.patch;
+          if (patch) {
+            const toolArgs = this.getToolArgs(data);
+            const filePath = fileSummary.filePath || toolArgs?.filePath || toolArgs?.path || toolArgs?.file || "";
           const addCount = (patch.match(/^\+[^+]/gm) || []).length;
           const delCount = (patch.match(/^-[^-]/gm) || []).length;
           this.emitEvent({
@@ -282,9 +316,117 @@ class PiAgent {
               status: "modified",
             }],
           });
+          }
         }
+        if (this.pendingAssistantText || this.streamedText) this.scheduleTurnFallback(15000);
         break;
     }
+  }
+
+  private extractToolFileSummary(data: any) {
+    const toolArgs = this.getToolArgs(data);
+    const filePath =
+      toolArgs?.filePath ||
+      toolArgs?.path ||
+      toolArgs?.file ||
+      toolArgs?.filename ||
+      toolArgs?.fileName ||
+      data.result?.filePath ||
+      data.result?.path ||
+      data.result?.file ||
+      this.extractFilePathFromValue(data.result) ||
+      this.extractFilePathFromValue(data);
+    const patch =
+      data.result?.details?.patch ||
+      data.result?.details?.diff ||
+      data.result?.patch ||
+      data.result?.diff ||
+      data.patch ||
+      data.diff;
+
+    if (!filePath && !patch) return {};
+
+    const additions = typeof patch === "string" ? (patch.match(/^\+[^+]/gm) || []).length : undefined;
+    const deletions = typeof patch === "string" ? (patch.match(/^-[^-]/gm) || []).length : undefined;
+    return {
+      filePath,
+      patch,
+      additions,
+      deletions,
+    };
+  }
+
+  private getToolArgs(data: any) {
+    return data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
+  }
+
+  private extractFilePathFromValue(value: unknown): string {
+    const seen = new WeakSet<object>();
+    const visit = (current: unknown): string => {
+      if (typeof current === "string") return this.extractFilePathFromText(current);
+      if (!current || typeof current !== "object") return "";
+      if (seen.has(current)) return "";
+      seen.add(current);
+      if (Array.isArray(current)) {
+        for (const item of current) {
+          const found = visit(item);
+          if (found) return found;
+        }
+        return "";
+      }
+      for (const item of Object.values(current)) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return "";
+    };
+    return visit(value);
+  }
+
+  private extractFilePathFromText(text: string): string {
+    const match = text.match(/[A-Za-z]:[\\/][^\s"'`]+/);
+    return match?.[0]?.replace(/[),.;\]]+$/, "") || "";
+  }
+
+  private clearTurnFallback() {
+    if (this.turnFallbackTimer) {
+      clearTimeout(this.turnFallbackTimer);
+      this.turnFallbackTimer = null;
+    }
+  }
+
+  private scheduleTurnFallback(delayMs: number) {
+    this.clearTurnFallback();
+    this.turnFallbackTimer = setTimeout(() => {
+      this.turnFallbackTimer = null;
+      if (this.pendingAssistantText || this.streamedText) {
+        this.completeTurn();
+      }
+    }, delayMs);
+  }
+
+  private flushQueuedEvents() {
+    while (this.eventQueue.length > 0) {
+      const item = this.eventQueue.shift()!;
+      this.window?.webContents.send("agent:event", item);
+    }
+    if (this.eventTimer) {
+      clearTimeout(this.eventTimer);
+      this.eventTimer = null;
+    }
+  }
+
+  private completeTurn() {
+    this.clearTurnFallback();
+    this.flushQueuedEvents();
+    if (!this.streamedText && this.pendingAssistantText) {
+      this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
+      this.streamedText = true;
+    }
+    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
+    this.emitEvent({ type: "agent_end" });
+    this.pendingAssistantText = "";
+    this.streamedText = false;
   }
 
   private sendCommand(cmd: any, onResponse?: (data: any) => void): string {
@@ -392,6 +534,12 @@ class AgentManager {
     return agent.getModels();
   }
 
+  sendUIResponse(response: any) {
+    const agent = this.getActiveAgent();
+    if (!agent) return;
+    agent.sendUIResponse(response);
+  }
+
   removeSession(sessionId: string) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) { agent.dispose(); this.sessionAgents.delete(sessionId); }
@@ -468,6 +616,11 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     const agent = agentManager.getActiveAgent();
     if (!agent) return { success: false };
     await agent.setThinkingLevel(level);
+    return { success: true };
+  });
+
+  ipcMain.handle("agent:sendUIResponse", async (_event, response: any) => {
+    agentManager.sendUIResponse(response);
     return { success: true };
   });
 }

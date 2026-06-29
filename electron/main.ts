@@ -23,8 +23,6 @@ function createWindow() {
   // Load app icon for taskbar
   const iconPath = join(__dirname, "../renderer/icon.png");
 
-  const isLinux = process.platform === "linux";
-
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -33,8 +31,7 @@ function createWindow() {
     backgroundColor: "#1e1e1e",
     title: "Hpp",
     icon: iconPath,
-    frame: !isLinux,
-    titleBarStyle: isLinux ? "hidden" : undefined,
+    frame: false,
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,

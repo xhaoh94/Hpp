@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:setModel", provider, modelId),
   agentSetThinkingLevel: (level: string) =>
     ipcRenderer.invoke("agent:setThinkingLevel", level),
+  agentSendUIResponse: (response: any) =>
+    ipcRenderer.invoke("agent:sendUIResponse", response),
 
   // Agent events
   onAgentEvent: (callback: (event: unknown) => void) => {

@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { flushSync } from "react-dom";
-import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry } from "@/stores/chat-store";
+import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry, type AgentProcessFile } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName } from "@/lib/agents";
 import { applySessionModels, getSessionModel, saveSessionModel, getSessionThinking, saveSessionThinking } from "@/hooks/useDataPersistence";
+import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import "./ChatPanel.css";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
@@ -20,11 +21,11 @@ const formatProcessDuration = (ms: number) => {
 const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
   if (entries.length === 0) return "等待事件";
 
-  const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "error").length;
+  const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "question" || entry.type === "error").length;
   const diffCount = entries.filter((entry) => entry.type === "diff").length;
   const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
   const thinkingEntry = entries.find((entry) => entry.type === "thinking" && entry.state === "running");
-  const runningTool = entries.find((entry) => entry.type === "tool" && entry.state === "running");
+  const runningTool = entries.find((entry) => (entry.type === "tool" || entry.type === "question") && entry.state === "running");
 
   if (isThinking && thinkingEntry) {
     const thinkingPreview = thinkingEntry.detail ?
@@ -66,6 +67,81 @@ const truncateProcessDetail = (value: string) => {
   return `${value.slice(0, maxLength)}...`;
 };
 
+const getFileName = (filePath: string) => {
+  const parts = filePath.split(/[/\\]/);
+  return parts[parts.length - 1] || filePath;
+};
+
+const countPatchChanges = (patch: string) => ({
+  additions: (patch.match(/^\+[^+]/gm) || []).length,
+  deletions: (patch.match(/^-[^-]/gm) || []).length,
+});
+
+const getNestedValue = (value: any, path: string[]): any => {
+  let current = value;
+  for (const key of path) {
+    if (current === undefined || current === null) return undefined;
+    current = current[key];
+  }
+  return current;
+};
+
+const findFirstString = (value: any, paths: string[][]) => {
+  for (const path of paths) {
+    const found = getNestedValue(value, path);
+    if (typeof found === "string" && found.trim()) return found;
+  }
+  return "";
+};
+
+const collectStrings = (value: unknown, output: string[] = [], seen = new WeakSet<object>()): string[] => {
+  if (typeof value === "string") {
+    output.push(value);
+  } else if (Array.isArray(value)) {
+    if (seen.has(value)) return output;
+    seen.add(value);
+    for (const item of value) collectStrings(item, output, seen);
+  } else if (value && typeof value === "object") {
+    if (seen.has(value)) return output;
+    seen.add(value);
+    for (const item of Object.values(value)) collectStrings(item, output, seen);
+  }
+  return output;
+};
+
+const extractFilePathFromText = (text: string) => {
+  const match = text.match(/[A-Za-z]:[\\/][^\s"'`]+/);
+  return match?.[0]?.replace(/[),.;\]]+$/, "") || "";
+};
+
+const unwrapToolText = (value: unknown): string | undefined => {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return undefined;
+  const content = (value as any).content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item?.type === "text" && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    if (text.trim()) return text;
+  }
+  return undefined;
+};
+
+const buildProcessFilesFromDiffs = (diffs: FileDiff[]): AgentProcessFile[] =>
+  diffs.map((diff) => ({
+    file: diff.file,
+    label: getFileName(diff.file),
+    action: "modified",
+    additions: diff.additions,
+    deletions: diff.deletions,
+    status: diff.status,
+  }));
+
 const getToolKey = (event: any) => {
   const raw = event.toolCallId || event.callId || event.id || event.toolName || event.name || "tool";
   return String(raw);
@@ -75,26 +151,132 @@ const getToolName = (event: any) => {
   return event.toolName || event.name || event.tool || "tool";
 };
 
+const normalizeToolName = (toolName: unknown) => String(toolName || "").trim().toLowerCase();
+
+const isAskUserToolName = (toolName: unknown) =>
+  ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"].includes(normalizeToolName(toolName));
+
+const getAskUserTitle = (toolName: string, running = false) => {
+  const prefix = running ? "正在询问用户" : "已处理用户询问";
+  return isAskUserToolName(toolName) ? prefix : `${prefix}: ${toolName}`;
+};
+
 const getToolDetail = (event: any) => {
   const lines: string[] = [];
   const args = event.args || event.input || event.parameters;
   const result = event.result || event.output;
   const error = event.error || event.message;
+  const resultText = unwrapToolText(result);
 
   if (args !== undefined) lines.push(`参数: ${stringifyProcessValue(args)}`);
-  if (result !== undefined) lines.push(`结果: ${stringifyProcessValue(result)}`);
+  if (resultText !== undefined) lines.push(resultText);
+  else if (result !== undefined) lines.push(`结果: ${stringifyProcessValue(result)}`);
   if (event.isError && error) lines.push(`错误: ${stringifyProcessValue(error)}`);
   if (!event.isError && event.detail) lines.push(stringifyProcessValue(event.detail));
 
   return truncateProcessDetail(lines.filter(Boolean).join("\n"));
 };
 
+const getToolProcessFiles = (event: any, toolName = getToolName(event)): AgentProcessFile[] => {
+  const args = event.args || event.input || event.parameters || {};
+  const result = event.result || event.output || {};
+  const detail = event.detail;
+  let filePath = findFirstString(
+    { args, result, detail, event },
+    [
+      ["args", "filePath"],
+      ["args", "path"],
+      ["args", "file"],
+      ["args", "filename"],
+      ["args", "fileName"],
+      ["result", "filePath"],
+      ["result", "path"],
+      ["result", "file"],
+      ["result", "filename"],
+      ["result", "fileName"],
+      ["event", "filePath"],
+      ["event", "path"],
+      ["event", "file"],
+      ["event", "filename"],
+      ["event", "fileName"],
+    ]
+  );
+
+  if (!filePath) {
+    const textWithPath = collectStrings({ result, detail, event }).find((text) => extractFilePathFromText(text));
+    filePath = textWithPath ? extractFilePathFromText(textWithPath) : "";
+  }
+
+  if (!filePath) return [];
+
+  const patch = findFirstString(
+    { args, result, detail, event },
+    [
+      ["result", "details", "patch"],
+      ["result", "details", "diff"],
+      ["result", "patch"],
+      ["result", "diff"],
+      ["event", "patch"],
+      ["event", "diff"],
+    ]
+  );
+  const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
+  const normalizedName = normalizeToolName(toolName);
+  const action: AgentProcessFile["action"] =
+    ["read", "readfile", "read_file", "view"].includes(normalizedName) ? "read" :
+    ["write", "writefile", "write_file", "create"].includes(normalizedName) ? "written" :
+    ["edit", "multiedit", "multi_edit", "apply_patch", "str_replace_editor", "str_replace_based_edit_tool"].includes(normalizedName) ? "edited" :
+    "modified";
+
+  return [{
+    file: filePath,
+    label: getFileName(filePath),
+    action,
+    additions: changes.additions,
+    deletions: changes.deletions,
+    status: patch ? "modified" : undefined,
+  }];
+};
+
+const getFileEntryTitle = (action: AgentProcessFile["action"] | undefined, count: number, running = false) => {
+  if (running) {
+    switch (action) {
+      case "read": return `正在读取 ${count} 个文件`;
+      case "written": return `正在写入 ${count} 个文件`;
+      case "edited": return `正在编辑 ${count} 个文件`;
+      default: return `正在修改 ${count} 个文件`;
+    }
+  }
+
+  switch (action) {
+    case "read": return `已读取 ${count} 个文件`;
+    case "written": return `已写入 ${count} 个文件`;
+    case "edited": return `已编辑 ${count} 个文件`;
+    default: return `已修改 ${count} 个文件`;
+  }
+};
+
 const getToolSummary = (toolName: string, args: any, isError: boolean = false): string => {
+  if (isAskUserToolName(toolName)) {
+    return isError ? "用户询问处理失败" : getAskUserTitle(toolName, false);
+  }
+
+  const normalizedName = normalizeToolName(toolName);
   if (isError) {
-    switch (toolName) {
+    switch (normalizedName) {
       case "read": return "读取文件失败";
+      case "readfile": return "读取文件失败";
+      case "read_file": return "读取文件失败";
+      case "view": return "读取文件失败";
       case "write": return "写入文件失败";
+      case "writefile": return "写入文件失败";
+      case "write_file": return "写入文件失败";
       case "edit": return "编辑文件失败";
+      case "multiedit": return "编辑文件失败";
+      case "multi_edit": return "编辑文件失败";
+      case "apply_patch": return "编辑文件失败";
+      case "str_replace_editor": return "编辑文件失败";
+      case "str_replace_based_edit_tool": return "编辑文件失败";
       case "bash": return "命令执行失败";
       case "glob": return "文件搜索失败";
       case "grep": return "内容搜索失败";
@@ -111,12 +293,22 @@ const getToolSummary = (toolName: string, args: any, isError: boolean = false): 
   const command = args?.command || args?.cmd || "";
   const pattern = args?.pattern || args?.query || "";
 
-  switch (toolName) {
+  switch (normalizedName) {
     case "read":
+    case "readfile":
+    case "read_file":
+    case "view":
       return filePath ? `已读取文件: ${filePath}` : "已读取文件";
     case "write":
+    case "writefile":
+    case "write_file":
       return filePath ? `已写入文件: ${filePath}` : "已写入文件";
     case "edit":
+    case "multiedit":
+    case "multi_edit":
+    case "apply_patch":
+    case "str_replace_editor":
+    case "str_replace_based_edit_tool":
       return filePath ? `已编辑文件: ${filePath}` : "已编辑文件";
     case "bash":
       return command ? `命令执行完成: ${command.length > 30 ? command.substring(0, 30) + "..." : command}` : "命令执行完成";
@@ -140,7 +332,16 @@ const getToolSummary = (toolName: string, args: any, isError: boolean = false): 
 };
 
 const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["type"] => {
-  if (value === "status" || value === "tool" || value === "diff" || value === "error" || value === "info" || value === "thinking") {
+  if (isAskUserToolName(value)) return "question";
+  if (
+    value === "status" ||
+    value === "tool" ||
+    value === "diff" ||
+    value === "error" ||
+    value === "info" ||
+    value === "thinking" ||
+    value === "question"
+  ) {
     return value;
   }
   return "status";
@@ -185,6 +386,16 @@ function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; st
     );
   }
 
+  if (type === "question") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M9.75 9a2.35 2.35 0 0 1 4.5 1c0 1.5-1.2 2.05-2.25 2.8V14" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M12 17h.01" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
   if (type === "error" || state === "error") {
     return (
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -202,6 +413,33 @@ function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; st
   );
 }
 
+function ProcessEntryFiles({ files }: { files: AgentProcessFile[] }) {
+  return (
+    <div className="chat-process-files">
+      {files.map((file, index) => {
+        const action =
+          file.action === "read" ? "已读取" :
+          file.action === "written" ? "已写入" :
+          file.action === "edited" ? "已编辑" :
+          "已修改";
+        const label = file.label || getFileName(file.file);
+        return (
+          <div className="chat-process-file" key={`${file.file}-${index}`}>
+            <span className="chat-process-file-action">{action}</span>
+            <span className="chat-process-file-name" title={file.file}>{label}</span>
+            {typeof file.additions === "number" && file.additions > 0 && (
+              <span className="chat-process-file-add">+{file.additions}</span>
+            )}
+            {typeof file.deletions === "number" && file.deletions > 0 && (
+              <span className="chat-process-file-del">-{file.deletions}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ProcessEntryRow({
   messageId,
   entry,
@@ -212,8 +450,17 @@ function ProcessEntryRow({
   onToggleEntry: (messageId: string, entryId: string) => void;
 }) {
   const hasDetail = !!entry.detail;
+  const files = entry.files || [];
   const canExpand = hasDetail && entry.type !== "thinking";
   const detailVisible = hasDetail && (!canExpand || entry.expanded);
+
+  if (entry.type === "info") {
+    return (
+      <div className="chat-process-output">
+        <MarkdownRenderer content={entry.detail || entry.title} />
+      </div>
+    );
+  }
 
   return (
     <div className={`chat-process-entry ${entry.state || ""} ${entry.type}`}>
@@ -237,6 +484,7 @@ function ProcessEntryRow({
             </svg>
           )}
         </button>
+        {files.length > 0 && <ProcessEntryFiles files={files} />}
         {detailVisible && (
           <pre className={`chat-process-entry-detail ${canExpand ? "panel" : ""}`}>{entry.detail}</pre>
         )}
@@ -405,10 +653,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const modelFetchRunIdRef = useRef(0);
   const streamBufferRef = useRef("");
   const preFinalStreamBufferRef = useRef("");
+  const processOutputBufferRef = useRef("");
+  const processOutputEntryIdRef = useRef<string | null>(null);
+  const processOutputFlushedRef = useRef(false);
+  const processOutputFlushedTextRef = useRef("");
   const thinkingBufferRef = useRef("");
   const thinkingEntryIdRef = useRef<string | null>(null);
   const processActiveRef = useRef(false);
   const activeToolEntryRef = useRef<Record<string, string>>({});
+  const activeToolFileRef = useRef<Record<string, AgentProcessFile[]>>({});
+  const streamWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUserScrollingRef = useRef(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -592,22 +846,144 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         type: entry.type,
         title: entry.title,
         detail: entry.detail,
+        files: entry.files,
         state: entry.state,
         expanded: entry.expanded,
       });
     };
 
     const finishThinkingEntry = () => {
-      if (!thinkingEntryIdRef.current) return;
-      useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
-        state: "completed",
-      });
+      if (thinkingEntryIdRef.current) {
+        useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+          state: "completed",
+        });
+      }
       thinkingEntryIdRef.current = null;
+      thinkingBufferRef.current = "";
+    };
+
+    const appendThinkingDelta = (delta: string) => {
+      if (!delta) return;
+      thinkingBufferRef.current += delta;
+      const thinkingPreview = thinkingBufferRef.current ?
+        (thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current) :
+        "思考中";
+
+      if (thinkingEntryIdRef.current) {
+        useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
+          title: `正在思考: ${thinkingPreview}`,
+          detail: thinkingBufferRef.current,
+          state: "running",
+        });
+      } else {
+        const entryId = createProcessEntryId();
+        thinkingEntryIdRef.current = entryId;
+        appendProcessEntry({
+          id: entryId,
+          type: "thinking",
+          title: `正在思考: ${thinkingPreview}`,
+          detail: thinkingBufferRef.current,
+          state: "running",
+          expanded: true,
+        });
+      }
+    };
+
+    const appendProcessOutput = (delta: string) => {
+      processOutputBufferRef.current += delta;
+    };
+
+    const flushProcessOutput = () => {
+      const rawOutput = processOutputBufferRef.current;
+      const output = processOutputBufferRef.current.trim();
+      if (!output) return;
+      finishThinkingEntry();
+      const entryId = createProcessEntryId();
+      appendProcessEntry({
+        id: entryId,
+        type: "info",
+        title: output,
+        detail: output,
+        state: "completed",
+        expanded: true,
+      });
+      processOutputFlushedRef.current = true;
+      processOutputFlushedTextRef.current += rawOutput;
+      processOutputEntryIdRef.current = null;
+      processOutputBufferRef.current = "";
+    };
+
+    const clearStreamWatchdog = () => {
+      if (streamWatchdogRef.current) {
+        clearTimeout(streamWatchdogRef.current);
+        streamWatchdogRef.current = null;
+      }
+    };
+
+    const completeAssistantStream = (
+      currentSessionId: string | null,
+      content?: string,
+      timedOut = false
+    ) => {
+      clearStreamWatchdog();
+      const pendingFinalContent = processOutputBufferRef.current.trim();
+      const rawFinalContent = (content || streamBufferRef.current || pendingFinalContent).trim();
+      const flushedContent = processOutputFlushedTextRef.current.trim();
+      const finalContent = processOutputFlushedRef.current
+        ? pendingFinalContent ||
+          (flushedContent && rawFinalContent.startsWith(flushedContent)
+            ? rawFinalContent.slice(flushedContent.length).trim()
+            : rawFinalContent)
+        : rawFinalContent;
+      if (finalContent.trim().length > 0) {
+        streamBufferRef.current = finalContent;
+        useChatStore.getState().updateLastAssistant(finalContent);
+        useChatStore.getState().collapseLastAssistantProcess();
+      } else if (timedOut) {
+        useChatStore.getState().appendLastAssistantProcessEntry({
+          id: createProcessEntryId(),
+          timestamp: Date.now(),
+          type: "error",
+          title: "未收到响应结束事件",
+          detail: "Agent 长时间没有返回新的输出，已停止等待。",
+          state: "error",
+          expanded: true,
+        });
+      }
+      finishThinkingEntry();
+      setStreaming(false);
+      useChatStore.getState().finishLastAssistantProcess(Date.now());
+      processActiveRef.current = false;
+      activeToolEntryRef.current = {};
+      activeToolFileRef.current = {};
+      thinkingEntryIdRef.current = null;
+      processOutputEntryIdRef.current = null;
+      processOutputBufferRef.current = "";
+      processOutputFlushedRef.current = false;
+      processOutputFlushedTextRef.current = "";
+      if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, timedOut ? "error" : "completed");
+    };
+
+    const refreshStreamWatchdog = (currentSessionId: string | null) => {
+      clearStreamWatchdog();
+      if (!processActiveRef.current) return;
+      streamWatchdogRef.current = setTimeout(() => {
+        completeAssistantStream(currentSessionId, undefined, true);
+      }, 45000);
     };
 
     const unsubscribe = window.electronAPI.onAgentEvent((event: any) => {
       // Always read from store to avoid stale closure (useEffect deps=[])
       const currentSessionId = useProjectStore.getState().activeSessionId;
+      if (
+        event.type !== "message_start" &&
+        event.type !== "stream_start" &&
+        event.type !== "stream_end" &&
+        event.type !== "agent_end" &&
+        event.type !== "agent_disconnected"
+      ) {
+        refreshStreamWatchdog(currentSessionId);
+      }
       switch (event.type) {
         case "message_start":
           processActiveRef.current = true;
@@ -625,64 +1001,57 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           flushSync(() => {
             streamBufferRef.current = "";
             preFinalStreamBufferRef.current = "";
+            processOutputBufferRef.current = "";
+            processOutputEntryIdRef.current = null;
+            processOutputFlushedRef.current = false;
+            processOutputFlushedTextRef.current = "";
             thinkingBufferRef.current = "";
             thinkingEntryIdRef.current = null;
             setStreaming(true);
             processActiveRef.current = true;
             activeToolEntryRef.current = {};
+            activeToolFileRef.current = {};
             useChatStore.getState().startAssistantProcess(Date.now());
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
           appendProcessEntry({ type: "status", title: "正在分析请求并生成响应", state: "running" });
+          refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
           if (!event.delta) break;
+          finishThinkingEntry();
           preFinalStreamBufferRef.current += event.delta;
+          appendProcessOutput(String(event.delta));
           break;
         case "thinking_delta":
-          thinkingBufferRef.current += event.delta;
-          if (thinkingEntryIdRef.current) {
-            const thinkingPreview = thinkingBufferRef.current ?
-              (thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current) :
-              "思考中";
-            useChatStore.getState().updateLastAssistantProcessEntry(thinkingEntryIdRef.current, {
-              title: `正在思考: ${thinkingPreview}`,
-              detail: thinkingBufferRef.current,
-              state: "running",
-            });
-          } else {
-            const entryId = createProcessEntryId();
-            thinkingEntryIdRef.current = entryId;
-            const thinkingPreview = thinkingBufferRef.current ?
-              (thinkingBufferRef.current.length > 50 ? thinkingBufferRef.current.substring(0, 50) + "..." : thinkingBufferRef.current) :
-              "思考中";
+          appendThinkingDelta(String(event.delta || ""));
+          break;
+        case "thinking_end":
+          finishThinkingEntry();
+          break;
+        case "user_ask_question":
+        case "ask_user_question":
+        case "ask_user":
+        case "droid.ask_user":
+          {
+            finishThinkingEntry();
+            flushProcessOutput();
+            const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry({
-              id: entryId,
-              type: "thinking",
-              title: `正在思考: ${thinkingPreview}`,
-              detail: thinkingBufferRef.current,
-              state: "running",
-              expanded: true,
+              type: "question",
+              title: getAskUserTitle(String(event.type), false),
+              detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
+              state: "completed",
+              expanded: false,
             });
           }
           break;
         case "stream_end":
           {
-            const eventContent = event.content ? String(event.content) : "";
-            const finalContent = eventContent || preFinalStreamBufferRef.current || streamBufferRef.current;
-            if (finalContent.trim().length > 0) {
-              streamBufferRef.current = finalContent;
-              useChatStore.getState().updateLastAssistant(finalContent);
-              useChatStore.getState().collapseLastAssistantProcess();
-            }
             finishThinkingEntry();
+            const eventContent = event.content ? String(event.content) : "";
+            completeAssistantStream(currentSessionId, eventContent, false);
           }
-          setStreaming(false);
-          useChatStore.getState().finishLastAssistantProcess(Date.now());
-          processActiveRef.current = false;
-          activeToolEntryRef.current = {};
-          thinkingEntryIdRef.current = null;
-          if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "completed");
           break;
         case "agent_end":
           // Some backends can emit agent_end before the assistant stream is
@@ -690,33 +1059,43 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "agent_disconnected":
           finishThinkingEntry();
-          setStreaming(false);
-          useChatStore.getState().finishLastAssistantProcess(Date.now());
-          processActiveRef.current = false;
-          activeToolEntryRef.current = {};
-          thinkingEntryIdRef.current = null;
-          if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "completed");
+          completeAssistantStream(currentSessionId, undefined, true);
           break;
         case "tool_start":
           {
+            finishThinkingEntry();
+            flushProcessOutput();
             const toolName = getToolName(event);
             const key = getToolKey(event);
             const existingEntryId = activeToolEntryRef.current[key];
-            const toolDetail = getToolDetail(event);
             const args = event.args || event.input || event.parameters || {};
+            const toolFiles = getToolProcessFiles(event, toolName);
+            if (toolFiles.length > 0) activeToolFileRef.current[key] = toolFiles;
+            const toolDetail = toolFiles.length > 0 ? "" : getToolDetail(event);
             const filePath = args.filePath || args.path || args.file || "";
             const command = args.command || args.cmd || "";
             const pattern = args.pattern || args.query || "";
+            const normalizedName = normalizeToolName(toolName);
             
             let toolSummary: string;
-            switch (toolName) {
+            switch (normalizedName) {
               case "read":
+              case "readfile":
+              case "read_file":
+              case "view":
                 toolSummary = filePath ? `正在读取文件: ${filePath}` : "正在读取文件";
                 break;
               case "write":
+              case "writefile":
+              case "write_file":
                 toolSummary = filePath ? `正在写入文件: ${filePath}` : "正在写入文件";
                 break;
               case "edit":
+              case "multiedit":
+              case "multi_edit":
+              case "apply_patch":
+              case "str_replace_editor":
+              case "str_replace_based_edit_tool":
                 toolSummary = filePath ? `正在编辑文件: ${filePath}` : "正在编辑文件";
                 break;
               case "bash":
@@ -746,11 +1125,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               default:
                 toolSummary = `正在运行 ${toolName}`;
             }
+            const entryType: AgentProcessEntry["type"] = isAskUserToolName(toolName) ? "question" : "tool";
+            if (entryType === "question") {
+              toolSummary = getAskUserTitle(toolName, true);
+            } else if (toolFiles.length > 0) {
+              toolSummary = getFileEntryTitle(toolFiles[0].action, toolFiles.length, true);
+            }
             if (existingEntryId) {
               useChatStore.getState().updateLastAssistantProcessEntry(existingEntryId, {
                 title: toolSummary,
                 detail: toolDetail || undefined,
+                files: toolFiles.length > 0 ? toolFiles : undefined,
                 state: "running",
+                type: entryType,
                 expanded: true,
               });
             } else {
@@ -758,9 +1145,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               activeToolEntryRef.current[key] = entryId;
               appendProcessEntry({
                 id: entryId,
-                type: "tool",
+                type: entryType,
                 title: toolSummary,
                 detail: toolDetail || undefined,
+                files: toolFiles.length > 0 ? toolFiles : undefined,
                 state: "running",
                 expanded: true,
               });
@@ -769,28 +1157,40 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "tool_end":
           {
+            finishThinkingEntry();
             const key = getToolKey(event);
             const entryId = activeToolEntryRef.current[key];
             const toolName = getToolName(event);
-            const toolDetail = getToolDetail(event);
             const args = event.args || event.input || event.parameters || {};
-            const toolSummary = getToolSummary(toolName, args, event.isError);
+            const toolFiles = getToolProcessFiles(event, toolName);
+            const preservedToolFiles = toolFiles.length > 0 ? toolFiles : activeToolFileRef.current[key] || [];
+            const toolDetail = toolFiles.length > 0 && !event.isError ? "" : getToolDetail(event);
+            const finalToolDetail = preservedToolFiles.length > 0 && !event.isError ? "" : toolDetail;
+            const toolSummary = preservedToolFiles.length > 0 && !event.isError
+              ? getFileEntryTitle(preservedToolFiles[0].action, preservedToolFiles.length, false)
+              : getToolSummary(toolName, args, event.isError);
+            const entryType: AgentProcessEntry["type"] = isAskUserToolName(toolName)
+              ? (event.isError ? "error" : "question")
+              : (event.isError ? "error" : "tool");
             const patch = {
               title: toolSummary,
-              detail: toolDetail || undefined,
+              detail: finalToolDetail || undefined,
+              files: preservedToolFiles.length > 0 && !event.isError ? preservedToolFiles : undefined,
               state: event.isError ? "error" : "completed",
-              type: event.isError ? "error" : "tool",
+              type: entryType,
               expanded: !!event.isError,
             } satisfies Partial<Omit<AgentProcessEntry, "id">>;
 
             if (entryId) {
               useChatStore.getState().updateLastAssistantProcessEntry(entryId, patch);
               delete activeToolEntryRef.current[key];
+              delete activeToolFileRef.current[key];
             } else {
               appendProcessEntry({
-                type: event.isError ? "error" : "tool",
+                type: entryType,
                 title: patch.title || (event.isError ? `${toolName} 执行失败` : `已完成 ${toolName}`),
                 detail: patch.detail,
+                files: patch.files,
                 state: patch.state,
                 expanded: patch.expanded,
               });
@@ -799,25 +1199,29 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "diff_update":
           if (event.diffs && event.diffs.length > 0) {
+            finishThinkingEntry();
+            flushProcessOutput();
             useChatStore.getState().appendLastAssistantDiffs(event.diffs);
             const fileNames = event.diffs.map((diff: FileDiff) => {
               const parts = diff.file.split(/[/\\]/);
               return parts[parts.length - 1];
             });
             const diffTitle = event.diffs.length === 1 ?
-              `已修改文件: ${fileNames[0]}` :
-              `已修改 ${event.diffs.length} 个文件: ${fileNames.slice(0, 3).join(", ")}${event.diffs.length > 3 ? "..." : ""}`;
+              "已修改文件" :
+              `已修改 ${event.diffs.length} 个文件`;
             appendProcessEntry({
               type: "diff",
               title: diffTitle,
-              detail: event.diffs.map((diff: FileDiff) => `${diff.file} (${diff.status === "added" ? "新增" : diff.status === "deleted" ? "删除" : "修改"})`).join("\n"),
+              files: buildProcessFilesFromDiffs(event.diffs),
               state: "completed",
               expanded: false,
             });
           }
           break;
         case "process_event":
-          const eventType = normalizeProcessEntryType(event.entryType || event.kind);
+          finishThinkingEntry();
+          flushProcessOutput();
+          const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
           const eventState = normalizeProcessEntryState(event.state);
@@ -829,6 +1233,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             processedTitle = `文件变更: ${eventTitle}`;
           } else if (eventType === "thinking" && !eventTitle.includes("思考")) {
             processedTitle = `思考: ${eventTitle}`;
+          } else if (eventType === "question" && !eventTitle.includes("询问") && !eventTitle.includes("问题")) {
+            processedTitle = `询问用户: ${eventTitle}`;
           }
 
           appendProcessEntry({
@@ -847,9 +1253,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           });
           // Models are fetched by the useEffect watching activeSessionId
           break;
+        default:
+          if (isAskUserToolName(event.mode || event.entryType || event.kind || event.toolName || event.name)) {
+            finishThinkingEntry();
+            flushProcessOutput();
+            const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
+            appendProcessEntry({
+              type: "question",
+              title: getAskUserTitle(String(event.mode || event.type || "user_ask_question"), false),
+              detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
+              state: normalizeProcessEntryState(event.state) || "completed",
+              expanded: false,
+            });
+          }
+          break;
       }
     });
     return () => {
+      clearStreamWatchdog();
       unsubscribe();
     };
   }, []);
@@ -905,6 +1326,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
     // Force synchronous render so "working..." appears before IPC call
     isUserScrollingRef.current = false; // Reset so auto-scroll follows new message
+    if (streamWatchdogRef.current) {
+      clearTimeout(streamWatchdogRef.current);
+      streamWatchdogRef.current = null;
+    }
     flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -919,12 +1344,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       setStreaming(true);
       thinkingBufferRef.current = "";
       thinkingEntryIdRef.current = null;
+      processOutputBufferRef.current = "";
+      processOutputEntryIdRef.current = null;
+      processOutputFlushedTextRef.current = "";
     });
 
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages);
     if (!result.success) {
+      if (streamWatchdogRef.current) {
+        clearTimeout(streamWatchdogRef.current);
+        streamWatchdogRef.current = null;
+      }
       useChatStore.getState().finishLastAssistantProcess(Date.now());
       processActiveRef.current = false;
+      activeToolEntryRef.current = {};
+      activeToolFileRef.current = {};
+      processOutputBufferRef.current = "";
+      processOutputEntryIdRef.current = null;
+      processOutputFlushedTextRef.current = "";
       setStreaming(false);
       addMessage({
         id: crypto.randomUUID(),
@@ -962,10 +1399,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   const handleAbort = async () => {
     await window.electronAPI.agentAbort();
+    if (streamWatchdogRef.current) {
+      clearTimeout(streamWatchdogRef.current);
+      streamWatchdogRef.current = null;
+    }
     useChatStore.getState().finishLastAssistantProcess(Date.now());
     processActiveRef.current = false;
     activeToolEntryRef.current = {};
+    activeToolFileRef.current = {};
     thinkingEntryIdRef.current = null;
+    processOutputBufferRef.current = "";
+    processOutputEntryIdRef.current = null;
+    processOutputFlushedTextRef.current = "";
     setStreaming(false);
   };
 
@@ -1240,7 +1685,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                 )}
                 {hasContent && (
                   <div className="chat-bubble-row">
-                    <div className={`chat-bubble ${msg.role}`}>{msg.content}</div>
+                    <div className={`chat-bubble ${msg.role}`}>
+                      {msg.role === "assistant" ? (
+                        <MarkdownRenderer content={msg.content} />
+                      ) : (
+                        msg.content
+                      )}
+                    </div>
                     {msg.role === "user" && (
                     <button
                       className="chat-copy-btn"

@@ -27,6 +27,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   agentGetModels: (sessionId) => electron.ipcRenderer.invoke("agent:getModels", sessionId),
   agentSetModel: (provider, modelId) => electron.ipcRenderer.invoke("agent:setModel", provider, modelId),
   agentSetThinkingLevel: (level) => electron.ipcRenderer.invoke("agent:setThinkingLevel", level),
+  agentSendUIResponse: (response) => electron.ipcRenderer.invoke("agent:sendUIResponse", response),
   // Agent events
   onAgentEvent: (callback) => {
     const handler = (_event, data) => callback(data);

@@ -176,9 +176,23 @@ function summarizeToolPart(props) {
   return {
     toolName,
     toolCallId: String(toolCallId),
+    args,
+    result: output,
     detail: formatProcessDetail(error ? { args, error } : output !== void 0 ? { args, output } : args),
     isError: !!error
   };
+}
+function normalizeEventName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+function isAskUserName(value) {
+  return ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"].includes(normalizeEventName(value));
+}
+function isToolLikePart(props) {
+  const part = props.part || props;
+  const partType = part.type || props.type;
+  const toolName = part.tool || part.toolName || part.name || props.tool || props.toolName || partType;
+  return partType && String(partType).startsWith("tool") || isAskUserName(partType) || isAskUserName(toolName);
 }
 function isToolPartComplete(props) {
   const part = props.part || props;
@@ -360,8 +374,7 @@ class OpenCodeAgent {
     switch (eventType) {
       case "message.part.added":
       case "message.part.updated": {
-        const partType = props.part?.type || props.type;
-        if (partType && String(partType).startsWith("tool")) {
+        if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
           if (!this.runningToolParts.has(tool.toolCallId)) {
@@ -370,6 +383,8 @@ class OpenCodeAgent {
               type: "tool_start",
               toolName: tool.toolName,
               toolCallId: tool.toolCallId,
+              args: tool.args,
+              result: tool.result,
               detail: tool.detail
             });
           } else if (tool.detail) {
@@ -377,6 +392,8 @@ class OpenCodeAgent {
               type: "tool_start",
               toolName: tool.toolName,
               toolCallId: tool.toolCallId,
+              args: tool.args,
+              result: tool.result,
               detail: tool.detail
             });
           }
@@ -385,6 +402,8 @@ class OpenCodeAgent {
               type: "tool_end",
               toolName: tool.toolName,
               toolCallId: tool.toolCallId,
+              args: tool.args,
+              result: tool.result,
               detail: tool.detail,
               isError: tool.isError
             });
@@ -397,13 +416,17 @@ class OpenCodeAgent {
       case "message.part.done":
       case "message.part.removed": {
         const partType = props.part?.type || props.type;
-        if (partType && String(partType).startsWith("tool")) {
+        if (partType === "thinking") {
+          this.emitEvent({ type: "thinking_end" });
+        } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
           this.emitEvent({
             type: "tool_end",
             toolName: tool.toolName,
             toolCallId: tool.toolCallId,
+            args: tool.args,
+            result: tool.result,
             detail: tool.detail,
             isError: tool.isError
           });
@@ -519,6 +542,7 @@ class OpenCodeAgent {
               this.emitEvent({ type: "stream_delta", delta: part.text });
             } else if (part.type === "thinking" && part.text) {
               this.emitEvent({ type: "thinking_delta", delta: part.text });
+              this.emitEvent({ type: "thinking_end" });
             }
           }
         } else if (assistantMsg?.info?.error) {
@@ -612,6 +636,8 @@ class OpenCodeAgent {
   /** Set thinking level - opencode does not have a direct equivalent */
   async setThinkingLevel(_level) {
     this.emitEvent({ type: "thinking_level_changed", level: _level });
+  }
+  sendUIResponse(_response) {
   }
   /** For OpenCode, the session ID serves as the session file path equivalent */
   get sessionFilePath() {
@@ -912,6 +938,10 @@ class DroidAgent {
     }
     this.emitEvent({ type: "thinking_level_changed", level });
   }
+  sendUIResponse(response) {
+    if (!this.process || !this.isReady) return;
+    this.process.stdin?.write(JSON.stringify(response) + "\n");
+  }
   /** Dispose and clean up */
   dispose() {
     this.killProcess();
@@ -974,6 +1004,13 @@ class DroidAgent {
         this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         break;
       case "droid.ask_user":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "question",
+          title: "询问用户",
+          detail: params,
+          state: "completed"
+        });
         this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
         break;
     }
@@ -994,6 +1031,19 @@ class DroidAgent {
         this.emitEvent({ type: "thinking_delta", delta: notifData?.delta || notifData?.text || "" });
         break;
       case "thinking_text_complete":
+        this.emitEvent({ type: "thinking_end" });
+        break;
+      case "droid.ask_user":
+      case "ask_user":
+      case "ask_user_question":
+      case "user_ask_question":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "question",
+          title: "询问用户",
+          detail: notifData,
+          state: "completed"
+        });
         break;
       case "tool_progress_update":
         this.emitEvent({
@@ -1052,6 +1102,7 @@ class PiAgent {
   _sessionFilePath = null;
   eventQueue = [];
   eventTimer = null;
+  turnFallbackTimer = null;
   streamedText = false;
   pendingAssistantText = "";
   setWindow(win) {
@@ -1151,6 +1202,11 @@ class PiAgent {
   get sessionFilePath() {
     return this._sessionFilePath;
   }
+  sendUIResponse(response) {
+    if (this.isMock || !this.process) return;
+    const line = JSON.stringify(response) + "\n";
+    this.process.stdin?.write(line);
+  }
   killProcess() {
     if (this.process) {
       this.process.stdin?.end();
@@ -1163,6 +1219,7 @@ class PiAgent {
       clearTimeout(this.eventTimer);
       this.eventTimer = null;
     }
+    this.clearTurnFallback();
   }
   async sendMessage(message, images) {
     if (this.isMock || !this.process) {
@@ -1241,11 +1298,13 @@ class PiAgent {
     }
     switch (data.type) {
       case "agent_start":
+        this.clearTurnFallback();
         this.streamedText = false;
         this.pendingAssistantText = "";
         this.emitEvent({ type: "stream_start", role: "assistant" });
         break;
       case "message_update": {
+        this.clearTurnFallback();
         const aev = data.assistantMessageEvent;
         if (aev) {
           if (aev.type === "text_delta") {
@@ -1257,50 +1316,153 @@ class PiAgent {
       }
       case "message_end":
         if (data.message?.role === "assistant") {
-          const textParts = (data.message.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
-          if (textParts) this.pendingAssistantText = textParts;
+          const content = data.message.content || [];
+          const textParts = content.filter((c) => c.type === "text").map((c) => c.text).join("");
+          const thinkingParts = content.filter((c) => c.type === "thinking").map((c) => c.text || c.thinking || "").join("");
+          if (thinkingParts) {
+            this.emitEvent({ type: "thinking_end" });
+          }
+          if (textParts) {
+            this.pendingAssistantText = textParts;
+            this.scheduleTurnFallback(4e3);
+          }
         }
+        break;
+      case "user_ask_question":
+      case "ask_user_question":
+      case "ask_user":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "question",
+          title: "询问用户",
+          detail: data.question || data.prompt || data.message || data.args || data,
+          state: "completed"
+        });
         break;
       case "agent_end":
-        while (this.eventQueue.length > 0) {
-          const item = this.eventQueue.shift();
-          this.window?.webContents.send("agent:event", item);
-        }
-        if (this.eventTimer) {
-          clearTimeout(this.eventTimer);
-          this.eventTimer = null;
-        }
-        if (!this.streamedText && this.pendingAssistantText) {
-          this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
-          this.streamedText = true;
-        }
-        this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
-        this.emitEvent({ type: "agent_end" });
-        this.pendingAssistantText = "";
+        this.completeTurn();
         break;
       case "tool_execution_start":
-        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: data.args });
+        this.clearTurnFallback();
+        this.emitEvent({ type: "tool_start", toolName: data.toolName, toolCallId: data.toolCallId, args: this.getToolArgs(data) });
         break;
       case "tool_execution_end":
-        this.emitEvent({ type: "tool_end", toolName: data.toolName, toolCallId: data.toolCallId, isError: data.isError, args: data.args, result: data.result, error: data.error });
-        if (data.result?.details?.patch) {
-          const filePath = data.args?.filePath || data.args?.path || data.args?.file || "";
-          const patch = data.result.details.patch;
-          const addCount = (patch.match(/^\+[^+]/gm) || []).length;
-          const delCount = (patch.match(/^-[^-]/gm) || []).length;
+        {
+          const fileSummary = this.extractToolFileSummary(data);
           this.emitEvent({
-            type: "diff_update",
-            diffs: [{
-              file: filePath,
-              patch,
-              additions: addCount,
-              deletions: delCount,
-              status: "modified"
-            }]
+            type: "tool_end",
+            toolName: data.toolName,
+            toolCallId: data.toolCallId,
+            isError: data.isError,
+            args: this.getToolArgs(data),
+            result: data.result,
+            error: data.error,
+            ...fileSummary
           });
         }
+        {
+          const fileSummary = this.extractToolFileSummary(data);
+          const patch = fileSummary.patch || data.result?.details?.patch;
+          if (patch) {
+            const toolArgs = this.getToolArgs(data);
+            const filePath = fileSummary.filePath || toolArgs?.filePath || toolArgs?.path || toolArgs?.file || "";
+            const addCount = (patch.match(/^\+[^+]/gm) || []).length;
+            const delCount = (patch.match(/^-[^-]/gm) || []).length;
+            this.emitEvent({
+              type: "diff_update",
+              diffs: [{
+                file: filePath,
+                patch,
+                additions: addCount,
+                deletions: delCount,
+                status: "modified"
+              }]
+            });
+          }
+        }
+        if (this.pendingAssistantText || this.streamedText) this.scheduleTurnFallback(15e3);
         break;
     }
+  }
+  extractToolFileSummary(data) {
+    const toolArgs = this.getToolArgs(data);
+    const filePath = toolArgs?.filePath || toolArgs?.path || toolArgs?.file || toolArgs?.filename || toolArgs?.fileName || data.result?.filePath || data.result?.path || data.result?.file || this.extractFilePathFromValue(data.result) || this.extractFilePathFromValue(data);
+    const patch = data.result?.details?.patch || data.result?.details?.diff || data.result?.patch || data.result?.diff || data.patch || data.diff;
+    if (!filePath && !patch) return {};
+    const additions = typeof patch === "string" ? (patch.match(/^\+[^+]/gm) || []).length : void 0;
+    const deletions = typeof patch === "string" ? (patch.match(/^-[^-]/gm) || []).length : void 0;
+    return {
+      filePath,
+      patch,
+      additions,
+      deletions
+    };
+  }
+  getToolArgs(data) {
+    return data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
+  }
+  extractFilePathFromValue(value) {
+    const seen = /* @__PURE__ */ new WeakSet();
+    const visit = (current) => {
+      if (typeof current === "string") return this.extractFilePathFromText(current);
+      if (!current || typeof current !== "object") return "";
+      if (seen.has(current)) return "";
+      seen.add(current);
+      if (Array.isArray(current)) {
+        for (const item of current) {
+          const found = visit(item);
+          if (found) return found;
+        }
+        return "";
+      }
+      for (const item of Object.values(current)) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return "";
+    };
+    return visit(value);
+  }
+  extractFilePathFromText(text) {
+    const match = text.match(/[A-Za-z]:[\\/][^\s"'`]+/);
+    return match?.[0]?.replace(/[),.;\]]+$/, "") || "";
+  }
+  clearTurnFallback() {
+    if (this.turnFallbackTimer) {
+      clearTimeout(this.turnFallbackTimer);
+      this.turnFallbackTimer = null;
+    }
+  }
+  scheduleTurnFallback(delayMs) {
+    this.clearTurnFallback();
+    this.turnFallbackTimer = setTimeout(() => {
+      this.turnFallbackTimer = null;
+      if (this.pendingAssistantText || this.streamedText) {
+        this.completeTurn();
+      }
+    }, delayMs);
+  }
+  flushQueuedEvents() {
+    while (this.eventQueue.length > 0) {
+      const item = this.eventQueue.shift();
+      this.window?.webContents.send("agent:event", item);
+    }
+    if (this.eventTimer) {
+      clearTimeout(this.eventTimer);
+      this.eventTimer = null;
+    }
+  }
+  completeTurn() {
+    this.clearTurnFallback();
+    this.flushQueuedEvents();
+    if (!this.streamedText && this.pendingAssistantText) {
+      this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
+      this.streamedText = true;
+    }
+    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
+    this.emitEvent({ type: "agent_end" });
+    this.pendingAssistantText = "";
+    this.streamedText = false;
   }
   sendCommand(cmd, onResponse) {
     const id = `rpc-${++this.rpcId}`;
@@ -1389,6 +1551,11 @@ class AgentManager {
     if (!agent) return [];
     return agent.getModels();
   }
+  sendUIResponse(response) {
+    const agent = this.getActiveAgent();
+    if (!agent) return;
+    agent.sendUIResponse(response);
+  }
   removeSession(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) {
@@ -1456,6 +1623,10 @@ function registerAgentHandlers(getWindow) {
     await agent.setThinkingLevel(level);
     return { success: true };
   });
+  electron.ipcMain.handle("agent:sendUIResponse", async (_event, response) => {
+    agentManager.sendUIResponse(response);
+    return { success: true };
+  });
 }
 if (process.platform === "linux") {
   electron.app.commandLine.appendSwitch("enable-wayland-ime");
@@ -1466,7 +1637,6 @@ let mainWindow = null;
 function createWindow() {
   electron.Menu.setApplicationMenu(null);
   const iconPath = path.join(__dirname, "../renderer/icon.png");
-  const isLinux = process.platform === "linux";
   mainWindow = new electron.BrowserWindow({
     width: 1400,
     height: 900,
@@ -1475,8 +1645,7 @@ function createWindow() {
     backgroundColor: "#1e1e1e",
     title: "Hpp",
     icon: iconPath,
-    frame: !isLinux,
-    titleBarStyle: isLinux ? "hidden" : void 0,
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
