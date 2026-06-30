@@ -17,6 +17,18 @@ export interface AgentEvent {
   [key: string]: unknown;
 }
 
+export interface PiSDKStatus {
+  installed: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+  updateAvailable: boolean;
+  canUpdate: boolean;
+  packageRoot?: string;
+  nodeVersion?: string;
+  nodeOk?: boolean;
+  error?: string;
+}
+
 export interface ElectronAPI {
   // Window controls
   minimize: () => void;
@@ -32,6 +44,8 @@ export interface ElectronAPI {
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
   getHomeDir: () => Promise<string>;
   isCommandAvailable: (command: string) => Promise<boolean>;
+  piSDKGetStatus: () => Promise<PiSDKStatus>;
+  piSDKUpdate: () => Promise<{ success: boolean; error?: string; status?: PiSDKStatus }>;
 
   // Data persistence
   loadData: (key: string) => Promise<unknown>;

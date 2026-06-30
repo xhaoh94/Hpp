@@ -5,6 +5,7 @@ const utils = require("@electron-toolkit/utils");
 const promises = require("fs/promises");
 const os = require("os");
 const child_process = require("child_process");
+const fs = require("fs");
 const string_decoder = require("string_decoder");
 const http = require("http");
 function _interopNamespaceDefault(e) {
@@ -157,6 +158,233 @@ function registerStoreHandlers() {
     }
   );
 }
+const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
+const MIN_NODE_VERSION = "22.19.0";
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    child_process.execFile(
+      command,
+      args,
+      {
+        cwd: options.cwd,
+        encoding: "utf8",
+        timeout: options.timeout ?? 15e3,
+        maxBuffer: 1024 * 1024 * 4
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const commandError = error;
+          commandError.stdout = stdout;
+          commandError.stderr = stderr;
+          reject(commandError);
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
+  });
+}
+function nodeCommand() {
+  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
+  return process.platform === "win32" ? "node.exe" : "node";
+}
+function runNpmCommand(args, options = {}) {
+  if (process.platform === "win32") {
+    return runCommand("cmd.exe", ["/d", "/s", "/c", "npm", ...args], options);
+  }
+  return runCommand("npm", args, options);
+}
+function parseVersion(version) {
+  return version.replace(/^v/, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+function compareVersions(a, b) {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+function formatError(error) {
+  const err = error;
+  const detail = (err.stderr || err.stdout || err.message || String(error)).trim();
+  return detail.split(/\r?\n/).filter(Boolean).slice(-3).join("\n");
+}
+async function readJsonFile(filePath) {
+  try {
+    return JSON.parse(await promises.readFile(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+async function findPackageRoot() {
+  const candidates = Array.from(/* @__PURE__ */ new Set([
+    process.cwd(),
+    electron.app.getAppPath()
+  ]));
+  for (const candidate of candidates) {
+    const packageJsonPath = path.join(candidate, "package.json");
+    if (!fs.existsSync(packageJsonPath)) continue;
+    const packageJson = await readJsonFile(packageJsonPath);
+    if (packageJson?.name === "hpp" || packageJson?.dependencies?.[PI_SDK_PACKAGE] || packageJson?.devDependencies?.[PI_SDK_PACKAGE]) {
+      return candidate;
+    }
+  }
+  return void 0;
+}
+async function getInstalledVersion(packageRoot) {
+  const packageJson = await readJsonFile(
+    path.join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json")
+  );
+  return packageJson?.version;
+}
+async function getLatestVersion(packageRoot) {
+  const { stdout } = await runNpmCommand(
+    ["view", PI_SDK_PACKAGE, "version", "--json"],
+    { cwd: packageRoot, timeout: 15e3 }
+  );
+  const raw = stdout.trim();
+  if (!raw) return void 0;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string" ? parsed : void 0;
+  } catch {
+    return raw.replace(/^"|"$/g, "");
+  }
+}
+async function getNodeStatus() {
+  try {
+    const { stdout } = await runCommand(nodeCommand(), ["-v"], { timeout: 5e3 });
+    const nodeVersion = stdout.trim().replace(/^v/, "");
+    return {
+      nodeVersion,
+      nodeOk: compareVersions(nodeVersion, MIN_NODE_VERSION) >= 0
+    };
+  } catch {
+    return { nodeOk: false };
+  }
+}
+async function getPiSDKStatus() {
+  const packageRoot = await findPackageRoot();
+  const currentVersion = packageRoot ? await getInstalledVersion(packageRoot) : void 0;
+  const nodeStatus = await getNodeStatus();
+  let latestVersion;
+  let error;
+  try {
+    latestVersion = await getLatestVersion(packageRoot);
+  } catch (err) {
+    error = `无法检查最新版本：${formatError(err)}`;
+  }
+  const updateAvailable = !!(currentVersion && latestVersion && compareVersions(currentVersion, latestVersion) < 0);
+  return {
+    installed: !!currentVersion,
+    currentVersion,
+    latestVersion,
+    updateAvailable,
+    canUpdate: !!packageRoot && !electron.app.isPackaged,
+    packageRoot,
+    ...nodeStatus,
+    error
+  };
+}
+let updateInProgress = false;
+function registerPiSDKHandlers() {
+  electron.ipcMain.handle("pi-sdk:getStatus", async () => getPiSDKStatus());
+  electron.ipcMain.handle("pi-sdk:update", async () => {
+    if (updateInProgress) {
+      return { success: false, error: "Pi SDK 正在更新中" };
+    }
+    const packageRoot = await findPackageRoot();
+    if (!packageRoot) {
+      return { success: false, error: "未找到 Hpp 的 package.json" };
+    }
+    if (electron.app.isPackaged) {
+      return { success: false, error: "打包版暂不支持自动更新 Pi SDK" };
+    }
+    updateInProgress = true;
+    try {
+      await runNpmCommand(
+        ["install", `${PI_SDK_PACKAGE}@latest`],
+        { cwd: packageRoot, timeout: 18e4 }
+      );
+      return { success: true, status: await getPiSDKStatus() };
+    } catch (err) {
+      return { success: false, error: formatError(err), status: await getPiSDKStatus() };
+    } finally {
+      updateInProgress = false;
+    }
+  });
+}
+const STREAM_FLUSH_INTERVAL_MS = 50;
+const MAX_BUFFERED_CHARS = 4e3;
+class AgentEventBuffer {
+  window = null;
+  hppSessionId;
+  queue = [];
+  bufferedChars = 0;
+  flushTimer = null;
+  constructor(hppSessionId) {
+    this.hppSessionId = hppSessionId;
+  }
+  setWindow(win) {
+    this.window = win;
+  }
+  send(data) {
+    if (this.isStreamDelta(data)) {
+      this.enqueueDelta(data.type, String(data.delta || ""));
+      return;
+    }
+    this.flush();
+    this.sendNow(data);
+  }
+  flush() {
+    this.clearTimer();
+    while (this.queue.length > 0) {
+      const event = this.queue.shift();
+      this.sendNow(event);
+    }
+    this.bufferedChars = 0;
+  }
+  clear() {
+    this.clearTimer();
+    this.queue = [];
+    this.bufferedChars = 0;
+  }
+  enqueueDelta(type, delta) {
+    if (!delta) return;
+    const last = this.queue[this.queue.length - 1];
+    if (last?.type === type) {
+      last.delta += delta;
+    } else {
+      this.queue.push({ type, delta });
+    }
+    this.bufferedChars += delta.length;
+    if (this.bufferedChars >= MAX_BUFFERED_CHARS) {
+      this.flush();
+      return;
+    }
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => this.flush(), STREAM_FLUSH_INTERVAL_MS);
+    }
+  }
+  sendNow(data) {
+    const payload = data && typeof data === "object" ? { ...data, sessionId: this.hppSessionId } : data;
+    this.window?.webContents.send("agent:event", payload);
+  }
+  isStreamDelta(data) {
+    if (!data || typeof data !== "object") return false;
+    const type = data.type;
+    return type === "stream_delta" || type === "thinking_delta";
+  }
+  clearTimer() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+}
 const TOOL_KIND_ALIASES = {
   read_file: ["read", "readfile", "read_file", "view", "view_file", "open_file"],
   list_dir: [
@@ -189,7 +417,7 @@ const TOOL_KIND_ALIASES = {
   search_text: ["grep", "rg", "search", "search_text", "content_search"],
   web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
   web_search: ["websearch", "web_search", "search_web"],
-  question: ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"]
+  question: ["ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"]
 };
 const normalizeName = (value) => String(value || "").trim().toLowerCase();
 const getNestedValue = (value, path2) => {
@@ -454,14 +682,17 @@ const buildDiffsFromToolEvent = (payload) => {
   }];
 };
 const normalizeQuestionProcessEvent = (data) => {
-  const detail = data.question || data.prompt || data.message || unwrapToolText(data.args) || unwrapToolText(data.input) || (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
+  const prompt = data.title || data.question || data.prompt || data.message || data.placeholder || findFirstString(data, [["detail", "title"], ["detail", "message"], ["detail", "question"], ["detail", "prompt"]]);
+  const detail = prompt || unwrapToolText(data.args) || unwrapToolText(data.input) || (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
   return {
     type: "process_event",
     entryType: "question",
     kind: "question",
-    title: "询问用户",
+    requestId: data.id || data.requestId,
+    method: data.method,
+    title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
-    state: "completed"
+    state: data.state || "running"
   };
 };
 function formatProcessDetail(value) {
@@ -519,16 +750,19 @@ class OpenCodeAgent {
   currentModelId = null;
   currentProviderId = null;
   eventSource = null;
-  eventBuffer = "";
+  sseBuffer = "";
   streamedContent = false;
   idleTimer = null;
   runningToolParts = /* @__PURE__ */ new Set();
   completedToolParts = /* @__PURE__ */ new Set();
+  eventBuffer;
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
+    this.eventBuffer = new AgentEventBuffer(hppSessionId);
   }
   setWindow(win) {
     this.window = win;
+    this.eventBuffer.setWindow(win);
   }
   /** Start opencode serve and wait for it to be ready */
   async init(projectPath, existingSessionId) {
@@ -642,7 +876,7 @@ class OpenCodeAgent {
   /** Listen to SSE events for streaming responses */
   startSSEListener() {
     this.stopSSEListener();
-    this.eventBuffer = "";
+    this.sseBuffer = "";
     this.streamedContent = false;
     this.runningToolParts.clear();
     this.completedToolParts.clear();
@@ -651,7 +885,7 @@ class OpenCodeAgent {
       (res) => {
         res.setEncoding("utf-8");
         res.on("data", (chunk) => {
-          this.eventBuffer += chunk;
+          this.sseBuffer += chunk;
           this.processSSEBuffer();
         });
         res.on("end", () => this.stopSSEListener());
@@ -662,8 +896,8 @@ class OpenCodeAgent {
     this.eventSource = req;
   }
   processSSEBuffer() {
-    const lines = this.eventBuffer.split("\n");
-    this.eventBuffer = lines.pop() || "";
+    const lines = this.sseBuffer.split("\n");
+    this.sseBuffer = lines.pop() || "";
     for (const line of lines) {
       if (line.startsWith("data: ")) {
         const jsonStr = line.slice(6).trim();
@@ -934,6 +1168,7 @@ class OpenCodeAgent {
   dispose() {
     this.cancelIdleTimer();
     this.stopSSEListener();
+    this.eventBuffer.flush();
     this.killProcess();
   }
   killProcess() {
@@ -1032,8 +1267,7 @@ class OpenCodeAgent {
     });
   }
   emitEvent(data) {
-    const payload = data && typeof data === "object" ? { ...data, sessionId: this.hppSessionId } : data;
-    this.window?.webContents.send("agent:event", payload);
+    this.eventBuffer.send(data);
   }
 }
 class DroidAgent {
@@ -1045,13 +1279,17 @@ class DroidAgent {
   models = [];
   rpcId = 0;
   pendingResponses = /* @__PURE__ */ new Map();
+  pendingAskUserRequestId = null;
   isReady = false;
   autonomyLevel = "medium";
+  eventBuffer;
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
+    this.eventBuffer = new AgentEventBuffer(hppSessionId);
   }
   setWindow(win) {
     this.window = win;
+    this.eventBuffer.setWindow(win);
   }
   /** Start droid exec in stream-jsonrpc mode */
   async init(projectPath, existingSessionId) {
@@ -1175,6 +1413,10 @@ class DroidAgent {
   }
   /** Abort current response */
   async abort() {
+    if (this.pendingAskUserRequestId) {
+      this.sendRpcResponse(this.pendingAskUserRequestId, { cancelled: true, answers: [] });
+      this.pendingAskUserRequestId = null;
+    }
     if (this.process) {
       this.sendRpc("droid.interrupt_session", {});
     }
@@ -1232,6 +1474,15 @@ class DroidAgent {
   }
   sendUIResponse(response) {
     if (!this.process || !this.isReady) return;
+    if (this.pendingAskUserRequestId) {
+      const text = typeof response?.text === "string" ? response.text : typeof response?.value === "string" ? response.value : "";
+      this.sendRpcResponse(this.pendingAskUserRequestId, {
+        cancelled: false,
+        answers: Array.isArray(response?.answers) && response.answers.length > 0 ? response.answers : [{ value: text }]
+      });
+      this.pendingAskUserRequestId = null;
+      return;
+    }
     this.process.stdin?.write(JSON.stringify(response) + "\n");
   }
   get sessionFilePath() {
@@ -1250,6 +1501,8 @@ class DroidAgent {
     this.isReady = false;
     this.sessionId = null;
     this.pendingResponses.clear();
+    this.pendingAskUserRequestId = null;
+    this.eventBuffer.flush();
   }
   // ---- JSON-RPC (Factory protocol) ----
   sendRpc(method, params, onResponse) {
@@ -1299,8 +1552,8 @@ class DroidAgent {
         this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         break;
       case "droid.ask_user":
+        this.pendingAskUserRequestId = requestId;
         this.emitEvent(normalizeQuestionProcessEvent({ type: method, detail: params }));
-        this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
         break;
     }
   }
@@ -1360,71 +1613,63 @@ class DroidAgent {
     }
   }
   emitEvent(data) {
-    const payload = data && typeof data === "object" ? { ...data, sessionId: this.hppSessionId } : data;
-    this.window?.webContents.send("agent:event", payload);
+    this.eventBuffer.send(data);
   }
 }
-class PiAgent {
-  process = null;
-  window = null;
-  hppSessionId;
-  models = [];
-  pendingResponses = /* @__PURE__ */ new Map();
-  rpcId = 0;
-  isMock = true;
-  projectPath = "";
-  _sessionFilePath = null;
-  eventQueue = [];
-  eventTimer = null;
-  turnFallbackTimer = null;
-  abortResponseTimer = null;
-  processGeneration = 0;
-  isAborting = false;
-  streamedText = false;
-  pendingAssistantText = "";
+const getWorkerPath = () => {
+  const candidates = [
+    path.join(__dirname, "pi-sdk-worker.mjs"),
+    path.join(electron.app.getAppPath(), "electron", "agents", "pi-sdk-worker.mjs"),
+    path.join(process.cwd(), "electron", "agents", "pi-sdk-worker.mjs")
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[candidates.length - 1];
+};
+const getNodeExecutable = () => {
+  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
+  return process.platform === "win32" ? "node.exe" : "node";
+};
+class PiSDKAgent {
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
+    this.eventBuffer = new AgentEventBuffer(hppSessionId);
+  }
+  process = null;
+  window = null;
+  projectPath = "";
+  _sessionFilePath = null;
+  eventBuffer;
+  pendingResponses = /* @__PURE__ */ new Map();
+  rpcId = 0;
+  models = [];
+  pendingAssistantText = "";
+  streamedText = false;
+  pendingUIRequestIds = /* @__PURE__ */ new Set();
+  turnFallbackTimer = null;
+  isAborting = false;
+  get sessionFilePath() {
+    return this._sessionFilePath;
   }
   setWindow(win) {
     this.window = win;
+    this.eventBuffer.setWindow(win);
   }
-  /** Start a new pi process for this session */
   async init(projectPath, existingSessionFilePath) {
-    if (this.process && this.projectPath === projectPath) return;
+    if (this.process && this.projectPath === projectPath && this._sessionFilePath === (existingSessionFilePath || this._sessionFilePath)) {
+      return;
+    }
+    this.dispose();
     this.projectPath = projectPath;
-    this.killProcess();
-    this.isMock = true;
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
-    const args = ["--mode", "rpc"];
-    if (existingSessionFilePath) {
-      args.push("--session", existingSessionFilePath);
-    }
-    const generation = ++this.processGeneration;
-    const child = child_process.spawn("pi", args, {
+    const child = child_process.spawn(getNodeExecutable(), [getWorkerPath()], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: true
+      env: process.env
     });
     this.process = child;
     const decoder = new string_decoder.StringDecoder("utf8");
     let buffer = "";
-    let initResolved = false;
-    child.on("exit", () => {
-      if (generation !== this.processGeneration) return;
-      if (this.process === child) this.process = null;
-      if (this.isAborting) {
-        this.finishAbortState();
-        return;
-      }
-      if (!initResolved) {
-        initResolved = true;
-        this.isMock = true;
-        this.emitEvent({ type: "agent_ready", agentId: "pi", mock: true });
-      }
-    });
     child.stdout?.on("data", (chunk) => {
-      if (generation !== this.processGeneration) return;
       buffer += decoder.write(chunk);
       while (true) {
         const newlineIndex = buffer.indexOf("\n");
@@ -1432,202 +1677,152 @@ class PiAgent {
         let line = buffer.slice(0, newlineIndex);
         buffer = buffer.slice(newlineIndex + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (line.length > 0) {
-          try {
-            const data = JSON.parse(line);
-            this.handleMessage(data);
-            if (!initResolved && data.type === "response" && data.command === "get_state") {
-              initResolved = true;
-              this.isMock = false;
-              if (data.data?.sessionFile) {
-                this._sessionFilePath = data.data.sessionFile;
-              }
-              this.emitEvent({ type: "agent_ready", agentId: "pi", mock: false });
-            }
-          } catch {
-          }
+        if (!line.trim()) continue;
+        try {
+          this.handleWorkerMessage(JSON.parse(line));
+        } catch {
         }
       }
     });
     child.stderr?.on("data", (chunk) => {
-      if (generation !== this.processGeneration) return;
-      console.log("[pi]", chunk.toString().trim());
+      console.log("[pi-sdk-worker]", chunk.toString().trim());
     });
-    await new Promise((resolve) => {
-      this.sendCommand({ type: "get_state" });
-      const check = setInterval(() => {
-        if (initResolved) {
-          clearInterval(check);
+    child.on("error", (error) => {
+      this.emitEvent({
+        type: "process_event",
+        entryType: "error",
+        kind: "error",
+        title: "Pi 启动失败",
+        detail: `${error.message}
+请确认系统 PATH 中的 node 版本 >= 22，或设置 PI_NODE_PATH 指向 Node 22。`,
+        state: "error"
+      });
+      for (const handler of this.pendingResponses.values()) handler({ type: "error", error: error.message });
+      this.pendingResponses.clear();
+    });
+    child.on("exit", () => {
+      if (this.process === child) this.process = null;
+      if (!this.isAborting) {
+        this.emitEvent({ type: "agent_disconnected" });
+      }
+    });
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(initId);
+        reject(new Error("Pi SDK worker init timed out"));
+      }, 12e3);
+      const initId = this.sendWorkerCommand({
+        type: "init",
+        projectPath,
+        sessionFilePath: existingSessionFilePath
+      }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "ready") {
+          this._sessionFilePath = data.sessionFilePath || existingSessionFilePath || null;
+          this.emitEvent({ type: "agent_ready", agentId: "pi", mock: false });
           resolve();
-        }
-      }, 100);
-      setTimeout(() => {
-        clearInterval(check);
-        if (!initResolved) {
-          initResolved = true;
-          this.isMock = true;
-          this.killProcess();
-          this.emitEvent({ type: "agent_ready", agentId: "pi", mock: true });
-        }
-        resolve();
-      }, 8e3);
-    });
-  }
-  /** Switch to an existing session file (for resuming after restart) */
-  async switchToSession(sessionFilePath) {
-    if (this.isMock || !this.process) return false;
-    return new Promise((resolve) => {
-      this.sendCommand({ type: "switch_session", sessionPath: sessionFilePath }, (data) => {
-        if (data.success && !data.data?.cancelled) {
-          this._sessionFilePath = sessionFilePath;
-          resolve(true);
         } else {
-          resolve(false);
+          reject(new Error(data.error || "Pi SDK worker init failed"));
         }
       });
-      setTimeout(() => resolve(false), 5e3);
     });
   }
-  get sessionFilePath() {
-    return this._sessionFilePath;
-  }
-  sendUIResponse(response) {
-    if (this.isMock || !this.process) return;
-    const line = JSON.stringify(response) + "\n";
-    this.process.stdin?.write(line);
-  }
-  killProcess() {
-    const proc = this.process;
-    this.processGeneration += 1;
-    this.process = null;
-    this.isAborting = false;
-    if (proc) {
-      proc.stdin?.destroy();
-      proc.kill();
-    }
-    this.pendingResponses.clear();
-    this.eventQueue = [];
-    if (this.eventTimer) {
-      clearTimeout(this.eventTimer);
-      this.eventTimer = null;
-    }
-    this.clearTurnFallback();
-    this.clearAbortResponseTimer();
-  }
   async sendMessage(message, images) {
-    if (this.isAborting) {
-      this.finishAbortState();
-    }
-    if (this.isMock || !this.process) {
-      this.mockResponse(message);
-      return;
-    }
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    if (this.isAborting) this.finishAbortState();
     this.emitEvent({ type: "message_start", role: "user", content: message });
-    const cmd = { type: "prompt", message };
-    if (images && images.length > 0) {
-      cmd.images = images;
-    }
-    this.sendCommand(cmd);
-  }
-  async mockResponse(message) {
-    this.emitEvent({ type: "message_start", role: "user", content: message });
-    this.emitEvent({ type: "stream_start", role: "assistant" });
-    const response = `收到消息: "${message}"
-
-这是离线模拟回复。如需使用真实 Agent，请安装 \`pi\` CLI 并配置 API key。`;
-    for (let i = 0; i < response.length; i += 4) {
-      await new Promise((r) => setTimeout(r, 8));
-      this.emitEvent({ type: "stream_delta", delta: response.slice(i, i + 4) });
-    }
-    this.emitEvent({ type: "stream_end" });
-    this.emitEvent({ type: "agent_end" });
+    this.sendWorkerCommand({ type: "prompt", message, images });
   }
   async abort() {
     this.pendingAssistantText = "";
     this.streamedText = false;
-    this.eventQueue = [];
-    if (this.eventTimer) {
-      clearTimeout(this.eventTimer);
-      this.eventTimer = null;
-    }
+    this.pendingUIRequestIds.clear();
+    this.eventBuffer.clear();
     this.clearTurnFallback();
     this.emitEvent({ type: "thinking_end" });
     this.emitEvent({ type: "stream_end", content: "" });
     this.emitEvent({ type: "agent_end" });
-    if (this.isMock || !this.process) {
-      this.finishAbortState();
-      return;
-    }
     this.isAborting = true;
-    let abortCommandId = null;
-    try {
-      abortCommandId = this.sendCommand({ type: "abort" }, () => {
-        this.finishAbortState();
-      });
-    } catch {
+    if (!this.process) {
       this.finishAbortState();
       return;
     }
-    this.clearAbortResponseTimer();
-    this.abortResponseTimer = setTimeout(() => {
-      this.abortResponseTimer = null;
-      if (abortCommandId) this.pendingResponses.delete(abortCommandId);
-    }, 1e4);
+    await new Promise((resolve) => {
+      const timeout = setTimeout(resolve, 5e3);
+      this.sendWorkerCommand({ type: "abort" }, () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    this.finishAbortState();
   }
   async getModels() {
     if (this.models.length > 0) return this.models;
-    try {
-      const rpcModels = await new Promise((resolve) => {
-        this.sendCommand({ type: "get_available_models" }, (data) => {
-          const models = [];
-          if (data.success && data.data?.models) {
-            models.push(...data.data.models.map((m) => ({
-              id: m.id,
-              name: m.name || m.id,
-              provider: m.provider,
-              reasoning: m.reasoning ?? false
-            })));
-          }
-          resolve(models);
-        });
-        setTimeout(() => resolve([]), 3e3);
+    if (!this.process) return [];
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve([]), 4e3);
+      this.sendWorkerCommand({ type: "getModels" }, (data) => {
+        clearTimeout(timeout);
+        this.models = Array.isArray(data.models) ? data.models : [];
+        resolve(this.models);
       });
-      if (rpcModels.length > 0) {
-        this.models = rpcModels;
-        return this.models;
-      }
-    } catch {
-    }
-    return this.models;
+    });
   }
   async setModel(provider, modelId) {
-    this.sendCommand({ type: "set_model", provider, modelId }, (data) => {
-      if (data.success) this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
+    this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
+      if (data.type === "model_changed") this.emitEvent({ type: "model_changed", model: data.model });
     });
   }
   async setThinkingLevel(level) {
-    this.sendCommand({ type: "set_thinking_level", level }, (data) => {
-      if (data.success) this.emitEvent({ type: "thinking_level_changed", level });
+    this.sendWorkerCommand({ type: "setThinkingLevel", level }, (data) => {
+      if (data.type === "thinking_level_changed") this.emitEvent({ type: "thinking_level_changed", level: data.level });
+    });
+  }
+  sendUIResponse(response) {
+    const id = response?.id;
+    if (id) {
+      this.pendingUIRequestIds.delete(String(id));
+      if (this.pendingUIRequestIds.size === 0 && (this.pendingAssistantText || this.streamedText)) {
+        this.scheduleTurnFallback(4e3);
+      }
+    }
+    this.sendWorkerCommand({
+      type: "uiResponse",
+      response: {
+        id,
+        value: response?.value ?? response?.text,
+        confirmed: response?.confirmed,
+        cancelled: !!response?.cancelled,
+        result: response?.result ?? (response?.answers ? { cancelled: false, answers: response.answers } : void 0)
+      }
     });
   }
   dispose() {
-    this.killProcess();
+    this.clearTurnFallback();
+    this.pendingResponses.clear();
+    this.pendingUIRequestIds.clear();
+    this.eventBuffer.flush();
+    const child = this.process;
+    this.process = null;
+    if (child) {
+      child.stdin?.write(`${JSON.stringify({ type: "dispose" })}
+`);
+      setTimeout(() => child.kill(), 500);
+    }
   }
-  handleMessage(data) {
-    if (data.type === "response" && data.id) {
+  handleWorkerMessage(data) {
+    if (data.id) {
       const handler = this.pendingResponses.get(data.id);
       if (handler) {
-        handler(data);
         this.pendingResponses.delete(data.id);
+        handler(data);
       }
-    }
-    if (this.isAborting) {
-      if (data.type === "agent_end" || data.type === "message_end") {
-        this.finishAbortState();
-      }
-      return;
     }
     switch (data.type) {
+      case "ready":
+        for (const handler of this.pendingResponses.values()) handler(data);
+        this.pendingResponses.clear();
+        break;
       case "agent_start":
         this.clearTurnFallback();
         this.streamedText = false;
@@ -1636,53 +1831,95 @@ class PiAgent {
         break;
       case "message_update": {
         this.clearTurnFallback();
-        const aev = data.assistantMessageEvent;
-        if (aev) {
-          if (aev.type === "text_delta") {
-            if (aev.delta) this.streamedText = true;
-            this.emitEventThrottled({ type: "stream_delta", delta: aev.delta });
-          } else if (aev.type === "thinking_delta") this.emitEventThrottled({ type: "thinking_delta", delta: aev.delta });
+        const assistantEvent = data.assistantMessageEvent;
+        if (assistantEvent?.type === "text_delta") {
+          if (assistantEvent.delta) this.streamedText = true;
+          this.emitEventThrottled({ type: "stream_delta", delta: assistantEvent.delta || "" });
+        } else if (assistantEvent?.type === "thinking_delta") {
+          this.emitEventThrottled({ type: "thinking_delta", delta: assistantEvent.delta || "" });
         }
         break;
       }
       case "message_end":
         if (data.message?.role === "assistant") {
-          const content = data.message.content || [];
-          const textParts = content.filter((c) => c.type === "text").map((c) => c.text).join("");
-          const thinkingParts = content.filter((c) => c.type === "thinking").map((c) => c.text || c.thinking || "").join("");
-          if (thinkingParts) {
-            this.emitEvent({ type: "thinking_end" });
-          }
-          if (textParts) {
-            this.pendingAssistantText = textParts;
+          if (data.message.thinking) this.emitEvent({ type: "thinking_end" });
+          if (data.message.text) {
+            this.pendingAssistantText = data.message.text;
             this.scheduleTurnFallback(4e3);
           }
         }
         break;
-      case "user_ask_question":
-      case "ask_user_question":
-      case "ask_user":
-        this.emitEvent(normalizeQuestionProcessEvent(data));
+      case "tool_execution_start":
+        this.clearTurnFallback();
+        this.emitEvent(normalizeToolEvent("tool_start", { ...data, args: data.args, name: data.toolName }));
+        break;
+      case "tool_execution_update": {
+        const detail = unwrapToolText(data.partialResult);
+        if (detail) {
+          this.emitEvent(normalizeToolEvent("tool_start", {
+            ...data,
+            args: data.args,
+            result: data.partialResult,
+            detail,
+            name: data.toolName
+          }));
+        }
+        break;
+      }
+      case "tool_execution_end": {
+        const toolEvent = normalizeToolEvent("tool_end", {
+          ...data,
+          args: data.args,
+          result: data.result,
+          output: data.result,
+          name: data.toolName
+        });
+        this.emitEvent(toolEvent);
+        const diffs = buildDiffsFromToolEvent(toolEvent);
+        if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+        break;
+      }
+      case "extension_ui_request":
+        this.handleUIRequest(data.request);
         break;
       case "agent_end":
         this.completeTurn();
         break;
-      case "tool_execution_start":
-        this.clearTurnFallback();
-        this.emitEvent(normalizeToolEvent("tool_start", { ...data, args: this.getToolArgs(data) }));
-        break;
-      case "tool_execution_end":
-        {
-          const toolEvent = normalizeToolEvent("tool_end", { ...data, args: this.getToolArgs(data) });
-          this.emitEvent(toolEvent);
-          const diffs = buildDiffsFromToolEvent(toolEvent);
-          if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
-        }
+      case "error":
+        this.emitEvent({
+          type: "process_event",
+          entryType: "error",
+          kind: "error",
+          title: "Pi 运行失败",
+          detail: data.error || "Unknown error",
+          state: "error"
+        });
+        this.completeTurn();
         break;
     }
   }
-  getToolArgs(data) {
-    return data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
+  handleUIRequest(request) {
+    if (!request || request.method === "notify") return;
+    this.pendingUIRequestIds.add(String(request.id));
+    this.clearTurnFallback();
+    this.emitEvent(normalizeQuestionProcessEvent({
+      type: "extension_ui_request",
+      id: request.id,
+      requestId: request.id,
+      method: request.method === "custom" ? request.kind : request.method,
+      title: request.method === "custom" && request.kind === "ask_user_question" ? "请选择答案" : request.title || request.message || "正在询问用户",
+      detail: request,
+      questions: request.method === "custom" ? request.questions : void 0,
+      state: "running"
+    }));
+  }
+  sendWorkerCommand(command, onResponse) {
+    const id = command.id || `sdk-${++this.rpcId}`;
+    const fullCommand = { ...command, id };
+    if (onResponse) this.pendingResponses.set(id, onResponse);
+    this.process?.stdin?.write(`${JSON.stringify(fullCommand)}
+`);
+    return id;
   }
   clearTurnFallback() {
     if (this.turnFallbackTimer) {
@@ -1690,46 +1927,18 @@ class PiAgent {
       this.turnFallbackTimer = null;
     }
   }
-  clearAbortResponseTimer() {
-    if (this.abortResponseTimer) {
-      clearTimeout(this.abortResponseTimer);
-      this.abortResponseTimer = null;
-    }
-  }
-  finishAbortState() {
-    this.isAborting = false;
-    this.pendingAssistantText = "";
-    this.streamedText = false;
-    this.eventQueue = [];
-    if (this.eventTimer) {
-      clearTimeout(this.eventTimer);
-      this.eventTimer = null;
-    }
-    this.clearTurnFallback();
-    this.clearAbortResponseTimer();
-  }
   scheduleTurnFallback(delayMs) {
+    if (this.pendingUIRequestIds.size > 0) return;
     this.clearTurnFallback();
     this.turnFallbackTimer = setTimeout(() => {
       this.turnFallbackTimer = null;
-      if (this.pendingAssistantText || this.streamedText) {
-        this.completeTurn();
-      }
+      if (this.pendingAssistantText || this.streamedText) this.completeTurn();
     }, delayMs);
   }
-  flushQueuedEvents() {
-    while (this.eventQueue.length > 0) {
-      const item = this.eventQueue.shift();
-      this.window?.webContents.send("agent:event", this.withSessionId(item));
-    }
-    if (this.eventTimer) {
-      clearTimeout(this.eventTimer);
-      this.eventTimer = null;
-    }
-  }
   completeTurn() {
+    if (this.pendingUIRequestIds.size > 0) return;
     this.clearTurnFallback();
-    this.flushQueuedEvents();
+    this.eventBuffer.flush();
     if (!this.streamedText && this.pendingAssistantText) {
       this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
       this.streamedText = true;
@@ -1739,41 +1948,19 @@ class PiAgent {
     this.pendingAssistantText = "";
     this.streamedText = false;
   }
-  sendCommand(cmd, onResponse) {
-    const id = `rpc-${++this.rpcId}`;
-    const fullCmd = { ...cmd, id };
-    if (onResponse) this.pendingResponses.set(id, onResponse);
-    this.process?.stdin?.write(JSON.stringify(fullCmd) + "\n");
-    return id;
-  }
-  withSessionId(data) {
-    return { ...data, sessionId: this.hppSessionId };
+  finishAbortState() {
+    this.isAborting = false;
+    this.pendingAssistantText = "";
+    this.streamedText = false;
+    this.pendingUIRequestIds.clear();
+    this.eventBuffer.clear();
+    this.clearTurnFallback();
   }
   emitEvent(data) {
-    const payload = data && typeof data === "object" ? { ...data, sessionId: this.hppSessionId } : data;
-    this.window?.webContents.send("agent:event", payload);
+    this.eventBuffer.send(data);
   }
-  /** Emit event with throttle for streaming events to prevent React batching */
   emitEventThrottled(data) {
-    const streamingTypes = /* @__PURE__ */ new Set(["stream_delta"]);
-    if (streamingTypes.has(data.type)) {
-      this.eventQueue.push(data);
-      this.flushEventQueue();
-    } else {
-      this.window?.webContents.send("agent:event", this.withSessionId(data));
-    }
-  }
-  flushEventQueue() {
-    if (this.eventTimer) return;
-    if (this.eventQueue.length === 0) return;
-    const item = this.eventQueue.shift();
-    this.window?.webContents.send("agent:event", this.withSessionId(item));
-    if (this.eventQueue.length > 0) {
-      this.eventTimer = setTimeout(() => {
-        this.eventTimer = null;
-        this.flushEventQueue();
-      }, 5);
-    }
+    this.eventBuffer.send(data);
   }
 }
 class AgentManager {
@@ -1789,7 +1976,7 @@ class AgentManager {
   createAgentBackend(agentId, sessionId) {
     if (agentId === "opencode") return new OpenCodeAgent(sessionId);
     if (agentId === "droid") return new DroidAgent(sessionId);
-    return new PiAgent(sessionId);
+    return new PiSDKAgent(sessionId);
   }
   /** Create or resume a session */
   async createSession(sessionId, agentId, projectPath, existingSessionFilePath) {
@@ -1831,7 +2018,7 @@ class AgentManager {
     return agent.getModels();
   }
   sendUIResponse(response) {
-    const agent = this.getActiveAgent();
+    const agent = response?.sessionId ? this.getAgentBySessionId(response.sessionId) : this.getActiveAgent();
     if (!agent) return;
     agent.sendUIResponse(response);
   }
@@ -1928,7 +2115,8 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
   if (utils.is.dev && process.env.ELECTRON_RENDERER_URL) {
@@ -1941,6 +2129,7 @@ electron.app.whenReady().then(() => {
   createWindow();
   registerFileHandlers();
   registerStoreHandlers();
+  registerPiSDKHandlers();
   registerAgentHandlers(() => mainWindow);
   electron.app.on("activate", () => {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();

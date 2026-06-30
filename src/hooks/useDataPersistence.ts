@@ -24,8 +24,59 @@ let _sessionModelsCache: Record<string, ModelInfo> = {};
 let _sessionThinkingCache: Record<string, string> = {};
 let _cacheDirty = false;
 let _saveTimeout: ReturnType<typeof setTimeout> | null = null;
+let _projectsSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+let _messagesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+let _pendingProjectsData: PersistedData | null = null;
+let _pendingMessagesData: PersistedMessages | null = null;
+
+function flushProjectsToDisk() {
+  if (_projectsSaveTimeout) {
+    clearTimeout(_projectsSaveTimeout);
+    _projectsSaveTimeout = null;
+  }
+  if (!_pendingProjectsData) return;
+  const data = _pendingProjectsData;
+  _pendingProjectsData = null;
+  window.electronAPI.saveData("projects", data);
+}
+
+function scheduleProjectsSave(data: PersistedData) {
+  _pendingProjectsData = data;
+  if (_projectsSaveTimeout) clearTimeout(_projectsSaveTimeout);
+  _projectsSaveTimeout = setTimeout(flushProjectsToDisk, 500);
+}
+
+function flushMessagesToDisk() {
+  if (_messagesSaveTimeout) {
+    clearTimeout(_messagesSaveTimeout);
+    _messagesSaveTimeout = null;
+  }
+  if (!_pendingMessagesData) return;
+  const data = _pendingMessagesData;
+  _pendingMessagesData = null;
+  window.electronAPI.saveData("sessionMessages", data);
+}
+
+function scheduleMessagesSave(data: PersistedMessages) {
+  _pendingMessagesData = data;
+  if (_messagesSaveTimeout) clearTimeout(_messagesSaveTimeout);
+  _messagesSaveTimeout = setTimeout(flushMessagesToDisk, 1000);
+}
+
+function flushPendingDataToDisk() {
+  if (_cacheDirty) {
+    flushModelsToDisk();
+  }
+  flushProjectsToDisk();
+  flushMessagesToDisk();
+}
 
 function flushModelsToDisk() {
+  if (_saveTimeout) {
+    clearTimeout(_saveTimeout);
+    _saveTimeout = null;
+  }
+  if (!_cacheDirty) return;
   _cacheDirty = false;
   window.electronAPI.saveData("currentModel", {
     models: { ..._sessionModelsCache },
@@ -176,8 +227,24 @@ export function useDataPersistence() {
 
   // Save projects, activeProjectId, and activeSessionId when they change
   useEffect(() => {
+    let lastProjects = useProjectStore.getState().projects;
+    let lastActiveProjectId = useProjectStore.getState().activeProjectId;
+    let lastActiveSessionId = useProjectStore.getState().activeSessionId;
+
     const unsubscribe = useProjectStore.subscribe((state) => {
-      window.electronAPI.saveData("projects", {
+      if (
+        state.projects === lastProjects &&
+        state.activeProjectId === lastActiveProjectId &&
+        state.activeSessionId === lastActiveSessionId
+      ) {
+        return;
+      }
+
+      lastProjects = state.projects;
+      lastActiveProjectId = state.activeProjectId;
+      lastActiveSessionId = state.activeSessionId;
+
+      scheduleProjectsSave({
         projects: state.projects,
         activeProjectId: state.activeProjectId,
         activeSessionId: state.activeSessionId,
@@ -188,11 +255,35 @@ export function useDataPersistence() {
 
   // Save session messages when they change
   useEffect(() => {
+    let lastSessionMessages = useChatStore.getState().sessionMessages;
     const unsubscribe = useChatStore.subscribe((state) => {
-      window.electronAPI.saveData("sessionMessages", {
+      if (state.sessionMessages === lastSessionMessages) return;
+      lastSessionMessages = state.sessionMessages;
+
+      scheduleMessagesSave({
         sessionMessages: state.sessionMessages,
       });
     });
     return unsubscribe;
+  }, []);
+
+  // Flush debounced saves before the renderer is suspended or closed.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flushPendingDataToDisk();
+      }
+    };
+
+    window.addEventListener("beforeunload", flushPendingDataToDisk);
+    window.addEventListener("pagehide", flushPendingDataToDisk);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("beforeunload", flushPendingDataToDisk);
+      window.removeEventListener("pagehide", flushPendingDataToDisk);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      flushPendingDataToDisk();
+    };
   }, []);
 }

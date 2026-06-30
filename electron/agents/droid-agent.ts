@@ -4,6 +4,7 @@ import { StringDecoder } from "string_decoder";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import { AgentEventBuffer } from "./agent-event-buffer";
 import {
   buildDiffsFromToolEvent,
   normalizeQuestionProcessEvent,
@@ -29,15 +30,19 @@ export class DroidAgent {
   private models: AgentModel[] = [];
   private rpcId = 0;
   private pendingResponses = new Map<string, (data: any) => void>();
+  private pendingAskUserRequestId: string | null = null;
   private isReady = false;
   private autonomyLevel = "medium";
+  private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
+    this.eventBuffer = new AgentEventBuffer(hppSessionId);
   }
 
   setWindow(win: BrowserWindow) {
     this.window = win;
+    this.eventBuffer.setWindow(win);
   }
 
   /** Start droid exec in stream-jsonrpc mode */
@@ -169,6 +174,10 @@ export class DroidAgent {
 
   /** Abort current response */
   async abort() {
+    if (this.pendingAskUserRequestId) {
+      this.sendRpcResponse(this.pendingAskUserRequestId, { cancelled: true, answers: [] });
+      this.pendingAskUserRequestId = null;
+    }
     if (this.process) {
       this.sendRpc("droid.interrupt_session", {});
     }
@@ -232,6 +241,20 @@ export class DroidAgent {
 
   sendUIResponse(response: any) {
     if (!this.process || !this.isReady) return;
+    if (this.pendingAskUserRequestId) {
+      const text =
+        typeof response?.text === "string" ? response.text :
+        typeof response?.value === "string" ? response.value :
+        "";
+      this.sendRpcResponse(this.pendingAskUserRequestId, {
+        cancelled: false,
+        answers: Array.isArray(response?.answers) && response.answers.length > 0
+          ? response.answers
+          : [{ value: text }],
+      });
+      this.pendingAskUserRequestId = null;
+      return;
+    }
     this.process.stdin?.write(JSON.stringify(response) + "\n");
   }
 
@@ -251,6 +274,8 @@ export class DroidAgent {
     this.isReady = false;
     this.sessionId = null;
     this.pendingResponses.clear();
+    this.pendingAskUserRequestId = null;
+    this.eventBuffer.flush();
   }
 
   // ---- JSON-RPC (Factory protocol) ----
@@ -310,9 +335,8 @@ export class DroidAgent {
         this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         break;
       case "droid.ask_user":
+        this.pendingAskUserRequestId = requestId;
         this.emitEvent(normalizeQuestionProcessEvent({ type: method, detail: params }));
-        // Auto-respond
-        this.sendRpcResponse(requestId, { cancelled: true, answers: [] });
         break;
     }
   }
@@ -375,9 +399,6 @@ export class DroidAgent {
   }
 
   private emitEvent(data: unknown) {
-    const payload = data && typeof data === "object"
-      ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
-      : data;
-    this.window?.webContents.send("agent:event", payload);
+    this.eventBuffer.send(data);
   }
 }

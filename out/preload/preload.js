@@ -15,6 +15,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   openDirectory: () => electron.ipcRenderer.invoke("fs:openDirectory"),
   getHomeDir: () => electron.ipcRenderer.invoke("fs:getHomeDir"),
   isCommandAvailable: (command) => electron.ipcRenderer.invoke("fs:isCommandAvailable", command),
+  piSDKGetStatus: () => electron.ipcRenderer.invoke("pi-sdk:getStatus"),
+  piSDKUpdate: () => electron.ipcRenderer.invoke("pi-sdk:update"),
   // Data persistence
   loadData: (key) => electron.ipcRenderer.invoke("store:load", key),
   saveData: (key, data) => electron.ipcRenderer.invoke("store:save", key, data),

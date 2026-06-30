@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),
   getHomeDir: () => ipcRenderer.invoke("fs:getHomeDir"),
   isCommandAvailable: (command: string) => ipcRenderer.invoke("fs:isCommandAvailable", command),
+  piSDKGetStatus: () => ipcRenderer.invoke("pi-sdk:getStatus"),
+  piSDKUpdate: () => ipcRenderer.invoke("pi-sdk:update"),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),

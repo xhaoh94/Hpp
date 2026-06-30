@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import * as http from "http";
+import { AgentEventBuffer } from "./agent-event-buffer";
 import { buildDiffsFromToolEvent, normalizeToolEvent } from "./process-events";
 
 interface AgentModel {
@@ -89,18 +90,21 @@ export class OpenCodeAgent {
   private currentModelId: string | null = null;
   private currentProviderId: string | null = null;
   private eventSource: ReturnType<typeof http.get> | null = null;
-  private eventBuffer = "";
+  private sseBuffer = "";
   private streamedContent = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private runningToolParts = new Set<string>();
   private completedToolParts = new Set<string>();
+  private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
+    this.eventBuffer = new AgentEventBuffer(hppSessionId);
   }
 
   setWindow(win: BrowserWindow) {
     this.window = win;
+    this.eventBuffer.setWindow(win);
   }
 
   /** Start opencode serve and wait for it to be ready */
@@ -234,7 +238,7 @@ export class OpenCodeAgent {
   /** Listen to SSE events for streaming responses */
   private startSSEListener() {
     this.stopSSEListener();
-    this.eventBuffer = "";
+    this.sseBuffer = "";
     this.streamedContent = false;
     this.runningToolParts.clear();
     this.completedToolParts.clear();
@@ -244,7 +248,7 @@ export class OpenCodeAgent {
       (res) => {
         res.setEncoding("utf-8");
         res.on("data", (chunk: string) => {
-          this.eventBuffer += chunk;
+          this.sseBuffer += chunk;
           this.processSSEBuffer();
         });
         res.on("end", () => this.stopSSEListener());
@@ -257,8 +261,8 @@ export class OpenCodeAgent {
   }
 
   private processSSEBuffer() {
-    const lines = this.eventBuffer.split("\n");
-    this.eventBuffer = lines.pop() || "";
+    const lines = this.sseBuffer.split("\n");
+    this.sseBuffer = lines.pop() || "";
 
     for (const line of lines) {
       // OpenCode SSE format: each line is "data: {json}"
@@ -553,6 +557,7 @@ export class OpenCodeAgent {
   dispose() {
     this.cancelIdleTimer();
     this.stopSSEListener();
+    this.eventBuffer.flush();
     this.killProcess();
   }
 
@@ -636,9 +641,6 @@ export class OpenCodeAgent {
   }
 
   private emitEvent(data: unknown) {
-    const payload = data && typeof data === "object"
-      ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
-      : data;
-    this.window?.webContents.send("agent:event", payload);
+    this.eventBuffer.send(data);
   }
 }

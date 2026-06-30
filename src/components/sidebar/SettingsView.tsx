@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { AVAILABLE_AGENTS } from "@/lib/agents";
+import type { PiSDKStatus } from "@/types";
 import "./Settings.css";
 
 interface ShortcutConfig {
@@ -73,9 +74,47 @@ export function SettingsView() {
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
+  const [piSDKStatus, setPiSDKStatus] = useState<PiSDKStatus | null>(null);
+  const [piSDKChecking, setPiSDKChecking] = useState(false);
+  const [piSDKUpdating, setPiSDKUpdating] = useState(false);
+  const [piSDKUpdateError, setPiSDKUpdateError] = useState<string | null>(null);
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
+
+  const refreshPiSDKStatus = useCallback(async () => {
+    setPiSDKChecking(true);
+    try {
+      const status = await window.electronAPI.piSDKGetStatus();
+      setPiSDKStatus(status);
+      setPiSDKUpdateError(null);
+    } catch (error) {
+      setPiSDKStatus({
+        installed: false,
+        updateAvailable: false,
+        canUpdate: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setPiSDKChecking(false);
+    }
+  }, []);
+
+  const handlePiSDKUpdate = useCallback(async () => {
+    setPiSDKUpdating(true);
+    setPiSDKUpdateError(null);
+    try {
+      const result = await window.electronAPI.piSDKUpdate();
+      if (result.status) setPiSDKStatus(result.status);
+      if (!result.success) {
+        setPiSDKUpdateError(result.error || "Pi SDK 更新失败");
+      }
+    } catch (error) {
+      setPiSDKUpdateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPiSDKUpdating(false);
+    }
+  }, []);
 
   // Load saved settings on mount
   useEffect(() => {
@@ -103,7 +142,8 @@ export function SettingsView() {
         setInstalledAgents((prev) => ({ ...prev, [agent.id]: installed }));
       });
     }
-  }, []);
+    refreshPiSDKStatus();
+  }, [refreshPiSDKStatus]);
 
   // Save shortcuts when changed
   const saveShortcuts = (s: ShortcutConfig) => {
@@ -351,38 +391,85 @@ export function SettingsView() {
                 </p>
                 <div className="filter-group">
                   {AVAILABLE_AGENTS.map((agent) => {
-                    const isInstalled = installedAgents[agent.id] === true;
+                    const isPiAgent = agent.id === "pi";
+                    const isInstalled = isPiAgent
+                      ? piSDKStatus?.installed === true
+                      : installedAgents[agent.id] === true;
+                    const isCheckingPi = isPiAgent && (piSDKChecking || !piSDKStatus);
+                    const isUnavailable = !isInstalled && !isCheckingPi;
+                    const sdkVersionLabel = piSDKStatus?.currentVersion
+                      ? `SDK v${piSDKStatus.currentVersion}`
+                      : isCheckingPi ? "检查 SDK 中..." : "SDK 未安装";
                     return (
-                    <div key={agent.id} className="filter-row" style={{ alignItems: "center", opacity: isInstalled ? 1 : 0.5 }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: isInstalled ? "pointer" : "not-allowed", flex: 1 }}>
+                    <div key={agent.id} className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`}>
+                      <label className="agent-settings-main">
                         <input
                           type="checkbox"
                           checked={enabledAgents.includes(agent.id)}
-                          disabled={!isInstalled}
+                          disabled={!isInstalled || isCheckingPi}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              setEnabledAgents([...enabledAgents, agent.id]);
+                              setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
                             } else {
-                              setEnabledAgents(enabledAgents.filter((id) => id !== agent.id));
+                              setEnabledAgents((prev) => prev.filter((id) => id !== agent.id));
                             }
                           }}
-                          style={{ width: 16, height: 16, accentColor: "var(--accent-color)" }}
+                          className="agent-settings-checkbox"
                         />
-                        <span style={{ fontSize: 13 }}>{agent.name}</span>
-                        <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{agent.desc}</span>
-                        {!isInstalled && (
-                          <span style={{
-                            fontSize: 10,
-                            color: "#e5a100",
-                            background: "rgba(229,161,0,0.12)",
-                            padding: "1px 6px",
-                            borderRadius: 4,
-                            whiteSpace: "nowrap",
-                          }}>
-                            未安装
+                        <span className="agent-settings-copy">
+                          <span className="agent-settings-title-line">
+                            <span className="agent-settings-name">{agent.name}</span>
+                            {isPiAgent && (
+                              <span className={`agent-settings-badge ${piSDKStatus?.updateAvailable ? "agent-settings-badge-warning" : ""}`}>
+                                {sdkVersionLabel}
+                              </span>
+                            )}
+                            {isUnavailable && (
+                              <span className="agent-settings-badge agent-settings-badge-warning">
+                                未安装
+                              </span>
+                            )}
                           </span>
-                        )}
+                          <span className="agent-settings-desc">{agent.desc}</span>
+                          {isPiAgent && piSDKStatus?.latestVersion && (
+                            <span className="agent-settings-meta">
+                              最新 v{piSDKStatus.latestVersion}
+                            </span>
+                          )}
+                          {isPiAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
+                            <span className="agent-settings-error">
+                              Node v{piSDKStatus.nodeVersion} 过低，需要 22.19.0 或更高版本
+                            </span>
+                          )}
+                          {isPiAgent && (piSDKStatus?.error || piSDKUpdateError) && (
+                            <span className="agent-settings-error">
+                              {piSDKUpdateError || piSDKStatus?.error}
+                            </span>
+                          )}
+                        </span>
                       </label>
+                      {isPiAgent && (
+                        <div className="agent-settings-actions">
+                          {piSDKStatus?.updateAvailable && (
+                            <button
+                              className="filter-add-btn agent-settings-update-btn"
+                              onClick={handlePiSDKUpdate}
+                              disabled={piSDKUpdating || !piSDKStatus.canUpdate}
+                              title={piSDKStatus.canUpdate ? "更新 Pi SDK" : "当前环境不支持自动更新 Pi SDK"}
+                            >
+                              {piSDKUpdating ? "更新中..." : "更新"}
+                            </button>
+                          )}
+                          <button
+                            className="btn-action agent-settings-refresh-btn"
+                            onClick={refreshPiSDKStatus}
+                            disabled={piSDKChecking || piSDKUpdating}
+                            title="重新检查 Pi SDK 版本"
+                          >
+                            {piSDKChecking ? "检查中..." : "刷新"}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                   })}

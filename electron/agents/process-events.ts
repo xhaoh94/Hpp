@@ -80,7 +80,7 @@ const TOOL_KIND_ALIASES: Record<Exclude<NormalizedToolKind, "unknown">, string[]
   search_text: ["grep", "rg", "search", "search_text", "content_search"],
   web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
   web_search: ["websearch", "web_search", "search_web"],
-  question: ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"],
+  question: ["ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"],
 };
 
 const normalizeName = (value: unknown) => String(value || "").trim().toLowerCase();
@@ -408,10 +408,15 @@ export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "pa
 };
 
 export const normalizeQuestionProcessEvent = (data: any) => {
-  const detail =
+  const prompt =
+    data.title ||
     data.question ||
     data.prompt ||
     data.message ||
+    data.placeholder ||
+    findFirstString(data, [["detail", "title"], ["detail", "message"], ["detail", "question"], ["detail", "prompt"]]);
+  const detail =
+    prompt ||
     unwrapToolText(data.args) ||
     unwrapToolText(data.input) ||
     (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
@@ -420,8 +425,10 @@ export const normalizeQuestionProcessEvent = (data: any) => {
     type: "process_event",
     entryType: "question",
     kind: "question",
-    title: "询问用户",
+    requestId: data.id || data.requestId,
+    method: data.method,
+    title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
-    state: "completed",
+    state: data.state || "running",
   };
 };

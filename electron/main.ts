@@ -3,6 +3,7 @@ import { join } from "path";
 import { is } from "@electron-toolkit/utils";
 import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
+import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentHandlers } from "./agents/agent-manager";
 
 // Enable IME support on Linux Wayland
@@ -36,6 +37,7 @@ function createWindow() {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
     },
   });
 
@@ -52,6 +54,7 @@ app.whenReady().then(() => {
   // Register IPC handlers
   registerFileHandlers();
   registerStoreHandlers();
+  registerPiSDKHandlers();
   registerAgentHandlers(() => mainWindow);
 
   app.on("activate", () => {

@@ -10,6 +10,15 @@ import { FilePreview } from "@/components/shared/FilePreview";
 import "./ChatPanel.css";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
+const THINKING_PREVIEW_CHAR_LIMIT = 240;
+
+const getThinkingPreview = (value?: string) => {
+  const preview = value?.replace(/\s+/g, " ").trim();
+  if (!preview) return "思考中";
+  return preview.length > THINKING_PREVIEW_CHAR_LIMIT
+    ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
+    : preview;
+};
 
 const formatProcessDuration = (ms: number) => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -31,10 +40,7 @@ const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
   const runningTool = entries.find((entry) => (entry.type === "tool" || entry.type === "question") && entry.state === "running");
 
   if (isThinking && thinkingEntry) {
-    const thinkingPreview = thinkingEntry.detail ?
-      (thinkingEntry.detail.length > 30 ? thinkingEntry.detail.substring(0, 30) + "..." : thinkingEntry.detail) :
-      "思考中";
-    return `正在思考: ${thinkingPreview}`;
+    return `正在思考: ${getThinkingPreview(thinkingEntry.detail)}`;
   }
 
   if (runningTool) {
@@ -171,6 +177,78 @@ const normalizeToolKind = (value: unknown): NormalizedToolKind => {
 const getQuestionTitle = (running = false, isError = false) => {
   if (isError) return "用户询问处理失败";
   return running ? "正在询问用户" : "已处理用户询问";
+};
+
+const getUIResponsePayload = (response: {
+  sessionId: string;
+  requestId?: string;
+  method?: string;
+  text: string;
+}) => {
+  const base: Record<string, unknown> = {
+    sessionId: response.sessionId,
+    text: response.text,
+    value: response.text,
+    answers: [{ value: response.text }],
+    cancelled: false,
+  };
+
+  if (response.requestId) {
+    base.type = "extension_ui_response";
+    base.id = response.requestId;
+  }
+
+  if (response.method) {
+    base.method = response.method;
+  }
+
+  if (response.method === "confirm") {
+    base.confirmed = !["no", "n", "false", "否", "取消"].includes(response.text.trim().toLowerCase());
+  }
+
+  return base;
+};
+
+type AskQuestionOption = {
+  label: string;
+  description?: string;
+  preview?: string;
+  hasPreview?: boolean;
+};
+
+type AskQuestionPayload = {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  options?: AskQuestionOption[];
+};
+
+const normalizeAskQuestions = (value: unknown): AskQuestionPayload[] => {
+  const rawQuestions = Array.isArray(value)
+    ? value
+    : value && typeof value === "object" && Array.isArray((value as any).questions)
+      ? (value as any).questions
+      : [];
+
+  return rawQuestions.map((raw: any, index) => {
+    const options = Array.isArray(raw?.options)
+      ? raw.options.map((option: any) => {
+          if (typeof option === "string") return { label: option };
+          return {
+            label: String(option?.label ?? option?.value ?? option?.text ?? `选项 ${index + 1}`),
+            description: typeof option?.description === "string" ? option.description : undefined,
+            preview: typeof option?.preview === "string" ? option.preview : undefined,
+            hasPreview: !!option?.hasPreview,
+          };
+        })
+      : [];
+    return {
+      question: String(raw?.question ?? raw?.title ?? raw?.prompt ?? `问题 ${index + 1}`),
+      header: typeof raw?.header === "string" ? raw.header : undefined,
+      multiSelect: !!raw?.multiSelect,
+      options,
+    };
+  });
 };
 
 const getToolDetail = (event: any) => {
@@ -381,8 +459,6 @@ function CommandDetail({
   const { command, output } = splitCommandDetail(entry.detail, entry.command);
   const outputLines = output ? output.split("\n") : [];
   const isRunning = entry.state === "running";
-  const previewLines = outputExpanded || isRunning ? outputLines : outputLines.slice(0, 4);
-  const hiddenLineCount = Math.max(0, outputLines.length - previewLines.length);
   const canExpand = outputLines.length > 0;
 
   useEffect(() => {
@@ -416,17 +492,50 @@ function CommandDetail({
           </svg>
         )}
       </button>
-      {outputLines.length > 0 && (
+      {outputLines.length > 0 && (outputExpanded || isRunning) && (
         <div className="chat-command-output">
           <div className="chat-command-lang">BASH</div>
-          <pre>{previewLines.join("\n")}</pre>
-          {!outputExpanded && !isRunning && hiddenLineCount > 0 && (
-            <button className="chat-command-more" onClick={toggleOutput}>
-              展开 ({outputLines.length} 行)
-            </button>
-          )}
+          <pre>{outputLines.join("\n")}</pre>
         </div>
       )}
+    </div>
+  );
+}
+
+function CommandGroup({
+  entries,
+}: {
+  entries: AgentProcessEntry[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="chat-process-entry tool chat-command-group">
+      <span className="chat-process-entry-icon">
+        <ProcessEntryIcon type="tool" />
+      </span>
+      <div className="chat-process-entry-main">
+        <button
+          className="chat-process-entry-header expandable"
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <span className="chat-process-entry-title">已运行 {entries.length} 条命令</span>
+          <svg
+            className="chat-process-entry-chevron"
+            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}
+          >
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+        </button>
+        {expanded && (
+          <div className="chat-command-group-list">
+            {entries.map((entry) => (
+              <CommandDetail key={entry.id} entry={entry} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -489,6 +598,53 @@ function ProcessEntryRow({
       </div>
     </div>
   );
+}
+
+function ProcessEntries({
+  entries,
+  messageId,
+  onToggleEntry,
+  onOpenFile,
+}: {
+  entries: AgentProcessEntry[];
+  messageId: string;
+  onToggleEntry: (messageId: string, entryId: string) => void;
+  onOpenFile: (filePath: string) => void;
+}) {
+  const rows: React.ReactNode[] = [];
+  let commandEntries: AgentProcessEntry[] = [];
+
+  const flushCommands = () => {
+    if (commandEntries.length === 0) return;
+    rows.push(
+      <CommandGroup
+        key={`commands-${commandEntries[0].id}-${commandEntries[commandEntries.length - 1].id}`}
+        entries={commandEntries}
+      />
+    );
+    commandEntries = [];
+  };
+
+  entries.forEach((entry) => {
+    if (entry.toolKind === "run_command") {
+      commandEntries.push(entry);
+      return;
+    }
+
+    flushCommands();
+    rows.push(
+      <ProcessEntryRow
+        key={entry.id}
+        messageId={messageId}
+        entry={entry}
+        onToggleEntry={onToggleEntry}
+        onOpenFile={onOpenFile}
+      />
+    );
+  });
+
+  flushCommands();
+  return <>{rows}</>;
 }
 
 // Helper to map toolKind to AgentProcessFile["action"] for title generation
@@ -570,15 +726,14 @@ function ProcessBlock({
         <div className="chat-process-content">
           {process.entries.length === 0 ? (
             <div className="chat-process-empty">等待 agent 事件...</div>
-          ) : mergeProcessEntries(process.entries).map((entry) => (
-            <ProcessEntryRow
-              key={entry.id}
+          ) : (
+            <ProcessEntries
+              entries={mergeProcessEntries(process.entries)}
               messageId={messageId}
-              entry={entry}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}
             />
-          ))}
+          )}
         </div>
       )}
     </div>
@@ -653,6 +808,121 @@ function DiffBlock({ diffs }: { diffs: FileDiff[] }) {
   );
 }
 
+function QuestionnairePanel({
+  questions,
+  onSubmit,
+  onCancel,
+}: {
+  questions: AskQuestionPayload[];
+  onSubmit: (answers: unknown[]) => void;
+  onCancel: () => void;
+}) {
+  const [singleChoice, setSingleChoice] = useState<Record<number, string>>({});
+  const [multiChoice, setMultiChoice] = useState<Record<number, string[]>>({});
+  const [customText, setCustomText] = useState<Record<number, string>>({});
+
+  const buildAnswers = () => questions.map((question, questionIndex) => {
+    const custom = customText[questionIndex]?.trim();
+    if (custom) {
+      return {
+        questionIndex,
+        question: question.question,
+        kind: "custom",
+        answer: custom,
+      };
+    }
+    if (question.multiSelect) {
+      return {
+        questionIndex,
+        question: question.question,
+        kind: "multi",
+        answer: null,
+        selected: multiChoice[questionIndex] || [],
+      };
+    }
+    return {
+      questionIndex,
+      question: question.question,
+      kind: "option",
+      answer: singleChoice[questionIndex] || null,
+    };
+  });
+
+  const hasAnswer = questions.every((question, questionIndex) => {
+    if (customText[questionIndex]?.trim()) return true;
+    if (question.multiSelect) return (multiChoice[questionIndex] || []).length > 0;
+    if (!question.options || question.options.length === 0) return true;
+    return !!singleChoice[questionIndex];
+  });
+
+  return (
+    <div className="chat-questionnaire">
+      <div className="chat-questionnaire-header">
+        <span>需要你的选择</span>
+        <button type="button" onClick={onCancel}>取消</button>
+      </div>
+      <div className="chat-questionnaire-list">
+        {questions.map((question, questionIndex) => (
+          <div className="chat-questionnaire-question" key={`${question.question}-${questionIndex}`}>
+            <div className="chat-questionnaire-title">
+              {question.header && <span>{question.header}</span>}
+              <strong>{question.question}</strong>
+            </div>
+            {!!question.options?.length && (
+              <div className="chat-questionnaire-options">
+                {question.options.map((option) => {
+                  const checked = question.multiSelect
+                    ? (multiChoice[questionIndex] || []).includes(option.label)
+                    : singleChoice[questionIndex] === option.label;
+                  return (
+                    <button
+                      type="button"
+                      key={option.label}
+                      className={`chat-questionnaire-option ${checked ? "selected" : ""}`}
+                      onClick={() => {
+                        if (question.multiSelect) {
+                          const prev = multiChoice[questionIndex] || [];
+                          setMultiChoice({
+                            ...multiChoice,
+                            [questionIndex]: checked ? prev.filter((item) => item !== option.label) : [...prev, option.label],
+                          });
+                        } else {
+                          setSingleChoice({ ...singleChoice, [questionIndex]: option.label });
+                        }
+                      }}
+                    >
+                      <span className="chat-questionnaire-mark" />
+                      <span className="chat-questionnaire-option-text">
+                        <span>{option.label}</span>
+                        {option.description && <small>{option.description}</small>}
+                        {option.preview && <pre>{option.preview}</pre>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {!question.multiSelect && (
+              <textarea
+                className="chat-questionnaire-custom"
+                rows={2}
+                placeholder="自定义回答"
+                value={customText[questionIndex] || ""}
+                onChange={(event) => setCustomText({ ...customText, [questionIndex]: event.target.value })}
+              />
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="chat-questionnaire-actions">
+        <button type="button" onClick={() => onSubmit(buildAnswers())} disabled={!hasAnswer}>
+          提交回答
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const {
     messages,
@@ -692,6 +962,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
+  const [pendingUIResponse, setPendingUIResponse] = useState<{
+    sessionId: string;
+    requestId?: string;
+    method?: string;
+    entryId?: string;
+    questions?: AskQuestionPayload[];
+  } | null>(null);
+  const pendingUIResponseRef = useRef<typeof pendingUIResponse>(null);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -717,6 +995,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const isUserScrollingRef = useRef(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
+  const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
+  const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.method === "ask_user_question" && pendingUIResponse.questions?.length
+    ? pendingUIResponse
+    : null;
+
+  const setPendingUIResponseState = (next: typeof pendingUIResponse | ((current: typeof pendingUIResponse) => typeof pendingUIResponse)) => {
+    const value = typeof next === "function" ? next(pendingUIResponseRef.current) : next;
+    pendingUIResponseRef.current = value;
+    setPendingUIResponse(value);
+  };
+
+  useEffect(() => {
+    pendingUIResponseRef.current = pendingUIResponse;
+  }, [pendingUIResponse]);
 
   // Track user scrolling - stop auto-scroll when user scrolls up
   useEffect(() => {
@@ -883,10 +1175,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   // Persist messages to sessionMessages whenever messages change (for restart survival)
   useEffect(() => {
-    if (activeSessionId && messages.length > 0) {
+    if (
+      activeSessionId &&
+      messages.length > 0 &&
+      sessionMessages[activeSessionId] !== messages
+    ) {
       loadSessionMessages(activeSessionId, messages);
     }
-  }, [messages, activeSessionId]);
+  }, [messages, activeSessionId, sessionMessages, loadSessionMessages]);
 
   // Subscribe to agent events
   useEffect(() => {
@@ -938,9 +1234,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       if (!delta) return;
       const runtime = getRuntime(sessionId);
       runtime.thinkingBuffer += delta;
-      const thinkingPreview = runtime.thinkingBuffer ?
-        (runtime.thinkingBuffer.length > 50 ? runtime.thinkingBuffer.substring(0, 50) + "..." : runtime.thinkingBuffer) :
-        "思考中";
+      const thinkingPreview = getThinkingPreview(runtime.thinkingBuffer);
 
       if (runtime.thinkingEntryId) {
         useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
@@ -960,6 +1254,29 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           expanded: false,
         });
       }
+    };
+
+    const getPendingUIFromEvent = (event: any, sessionId: string, entryId: string) => {
+      const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+      const method = String(event.method || detail.method || event.kind || event.toolName || "").trim();
+      const normalizedMethod =
+        method === "custom" && detail.kind === "ask_user_question"
+          ? "ask_user_question"
+          : method;
+      const questions = normalizeAskQuestions(event.questions ?? detail.questions ?? event.args?.questions ?? event.input?.questions);
+      return {
+        sessionId,
+        requestId: typeof event.requestId === "string"
+          ? event.requestId
+          : typeof event.id === "string"
+            ? event.id
+            : typeof detail.id === "string"
+              ? detail.id
+              : undefined,
+        method: normalizedMethod || undefined,
+        entryId,
+        questions: questions.length > 0 ? questions : undefined,
+      };
     };
 
     const clearStreamWatchdog = (sessionId?: string) => {
@@ -1089,12 +1406,15 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "droid.ask_user":
           {
             finishThinkingEntry(currentSessionId);
+            const entryId = createProcessEntryId();
+            setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry(currentSessionId, {
+              id: entryId,
               type: "question",
-              title: getQuestionTitle(false),
+              title: getQuestionTitle(true),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
-              state: "completed",
+              state: "running",
               expanded: false,
             });
           }
@@ -1102,9 +1422,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "stream_end":
           {
             if (!runtime.processActive) break;
+            if (pendingUIResponseRef.current?.sessionId === currentSessionId) break;
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
+            setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           }
           break;
         case "agent_end":
@@ -1115,6 +1437,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           if (!runtime.processActive) break;
           finishThinkingEntry(currentSessionId);
           completeAssistantStream(currentSessionId, undefined, true);
+          setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           break;
         case "tool_start":
           {
@@ -1208,6 +1531,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
           const eventState = normalizeProcessEntryState(event.state);
+          let questionEntryId: string | undefined;
+          if (eventType === "question") {
+            questionEntryId = createProcessEntryId();
+            setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, questionEntryId));
+          }
 
           let processedTitle = eventTitle;
           if (eventType === "tool" && !eventTitle.includes("运行") && !eventTitle.includes("已完成") && !eventTitle.includes("失败")) {
@@ -1221,11 +1549,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           }
 
           appendProcessEntry(currentSessionId, {
+            id: questionEntryId,
             type: eventType,
             title: processedTitle,
             detail: eventDetail,
             files: Array.isArray(event.files) ? getToolProcessFiles(event) : undefined,
-            state: eventState,
+            state: eventType === "question" ? eventState || "running" : eventState,
           });
           break;
         case "agent_ready":
@@ -1240,12 +1569,15 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         default:
           if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {
             finishThinkingEntry(currentSessionId);
+            const entryId = createProcessEntryId();
+            setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry(currentSessionId, {
+              id: entryId,
               type: "question",
-              title: getQuestionTitle(false),
+              title: getQuestionTitle(true),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
-              state: normalizeProcessEntryState(event.state) || "completed",
+              state: normalizeProcessEntryState(event.state) || "running",
               expanded: false,
             });
           }
@@ -1264,7 +1596,128 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     };
   }, []);
 
+  const handleSendUIResponse = async () => {
+    const text = input.trim();
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || pendingUIResponse?.sessionId !== targetSessionId || !text) return;
+    const pendingResponse = pendingUIResponse;
+
+    isUserScrollingRef.current = false;
+    flushSync(() => {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: text,
+        timestamp: Date.now(),
+      }, targetSessionId);
+      setInput("");
+      setPendingUIResponseState(null);
+      if (pendingResponse.entryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
+          title: getQuestionTitle(false),
+          state: "completed",
+          expanded: false,
+        }, targetSessionId);
+      }
+    });
+
+    const result = await window.electronAPI.agentSendUIResponse(getUIResponsePayload({
+      sessionId: targetSessionId,
+      requestId: pendingResponse.requestId,
+      method: pendingResponse.method,
+      text,
+    }));
+
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "发送回答失败",
+        timestamp: Date.now(),
+      }, targetSessionId);
+      if (pendingResponse.entryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
+          title: getQuestionTitle(false, true),
+          state: "error",
+          expanded: true,
+        }, targetSessionId);
+      }
+    }
+  };
+
+  const finishPendingQuestionEntry = (targetSessionId: string, pendingResponse: typeof pendingUIResponse, failed = false) => {
+    if (!pendingResponse?.entryId) return;
+    useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
+      title: failed ? getQuestionTitle(false, true) : getQuestionTitle(false),
+      state: failed ? "error" : "completed",
+      expanded: false,
+    }, targetSessionId);
+  };
+
+  const handleSubmitQuestionnaire = async (answers: unknown[]) => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
+    const pendingResponse = activeQuestionnaire;
+    const answerSummary = answers
+      .map((answer: any) => answer?.answer || (Array.isArray(answer?.selected) ? answer.selected.join(", ") : ""))
+      .filter(Boolean)
+      .join("\n");
+
+    flushSync(() => {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: answerSummary || "已提交问卷回答",
+        timestamp: Date.now(),
+      }, targetSessionId);
+      setPendingUIResponseState(null);
+      finishPendingQuestionEntry(targetSessionId, pendingResponse);
+    });
+
+    const result = await window.electronAPI.agentSendUIResponse({
+      sessionId: targetSessionId,
+      type: "extension_ui_response",
+      id: pendingResponse.requestId,
+      method: pendingResponse.method,
+      cancelled: false,
+      result: { cancelled: false, answers },
+      answers,
+    });
+
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "发送问卷回答失败",
+        timestamp: Date.now(),
+      }, targetSessionId);
+      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    }
+  };
+
+  const handleCancelQuestionnaire = async () => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
+    const pendingResponse = activeQuestionnaire;
+    setPendingUIResponseState(null);
+    finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    await window.electronAPI.agentSendUIResponse({
+      sessionId: targetSessionId,
+      type: "extension_ui_response",
+      id: pendingResponse.requestId,
+      method: pendingResponse.method,
+      cancelled: true,
+    });
+  };
+
   const handleSend = async () => {
+    if (activeQuestionnaire) return;
+
+    if (isAwaitingUIResponse) {
+      await handleSendUIResponse();
+      return;
+    }
+
     const text = input.trim();
     const targetSessionId = useProjectStore.getState().activeSessionId;
     if (!targetSessionId || (!text && pendingImages.length === 0 && pendingFiles.length === 0) || (agentStatuses[targetSessionId] === "running")) return;
@@ -1415,6 +1868,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
     }
+    setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
     setStreaming(false);
     useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
 
@@ -1752,6 +2206,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
       {/* Input area */}
       <div className="chat-input-area">
+        {activeQuestionnaire && (
+          <QuestionnairePanel
+            questions={activeQuestionnaire.questions || []}
+            onSubmit={handleSubmitQuestionnaire}
+            onCancel={handleCancelQuestionnaire}
+          />
+        )}
+
         {/* Combined preview bar for files and images */}
         {(pendingFiles.length > 0 || pendingImages.length > 0) && (
           <div className="chat-preview-bar">
@@ -1807,17 +2269,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)"}
+            placeholder={activeQuestionnaire ? "请在上方提交问卷" : sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)"}
             rows={1}
             className="chat-textarea"
+            disabled={!!activeQuestionnaire}
           />
           <button
-            onClick={currentSessionRunning ? handleAbort : handleSend}
-            disabled={!currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
-            className={`chat-send-btn ${currentSessionRunning ? "abort" : ""}`}
-            title={currentSessionRunning ? "停止" : "发送"}
+            onClick={currentSessionRunning && !isAwaitingUIResponse ? handleAbort : handleSend}
+            disabled={
+              activeQuestionnaire
+                ? true
+                : isAwaitingUIResponse
+                ? !input.trim()
+                : !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0
+            }
+            className={`chat-send-btn ${currentSessionRunning && !isAwaitingUIResponse ? "abort" : ""}`}
+            title={activeQuestionnaire ? "请在上方提交问卷" : currentSessionRunning && !isAwaitingUIResponse ? "停止" : isAwaitingUIResponse ? "发送回答" : "发送"}
           >
-            {currentSessionRunning ? (
+            {currentSessionRunning && !isAwaitingUIResponse ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
               </svg>

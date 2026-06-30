@@ -3,6 +3,8 @@ import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
+import { AgentEventBuffer } from "./agent-event-buffer";
+import { PiSDKAgent } from "./pi-sdk-agent";
 import {
   buildDiffsFromToolEvent,
   normalizeQuestionProcessEvent,
@@ -43,21 +45,23 @@ class PiAgent {
   private isMock = true;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
-  private eventQueue: Array<{ type: string; [key: string]: unknown }> = [];
-  private eventTimer: ReturnType<typeof setTimeout> | null = null;
   private turnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private abortResponseTimer: ReturnType<typeof setTimeout> | null = null;
   private processGeneration = 0;
   private isAborting = false;
   private streamedText = false;
   private pendingAssistantText = "";
+  private pendingUIRequestIds = new Set<string>();
+  private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
+    this.eventBuffer = new AgentEventBuffer(hppSessionId);
   }
 
   setWindow(win: BrowserWindow) {
     this.window = win;
+    this.eventBuffer.setWindow(win);
   }
 
   /** Start a new pi process for this session */
@@ -172,6 +176,12 @@ class PiAgent {
 
   sendUIResponse(response: any) {
     if (this.isMock || !this.process) return;
+    if (response?.id) {
+      this.pendingUIRequestIds.delete(response.id);
+      if (this.pendingUIRequestIds.size === 0 && (this.pendingAssistantText || this.streamedText)) {
+        this.scheduleTurnFallback(4000);
+      }
+    }
     const line = JSON.stringify(response) + "\n";
     this.process.stdin?.write(line);
   }
@@ -186,8 +196,8 @@ class PiAgent {
       proc.kill();
     }
     this.pendingResponses.clear();
-    this.eventQueue = [];
-    if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    this.pendingUIRequestIds.clear();
+    this.eventBuffer.flush();
     this.clearTurnFallback();
     this.clearAbortResponseTimer();
   }
@@ -223,8 +233,8 @@ class PiAgent {
   async abort() {
     this.pendingAssistantText = "";
     this.streamedText = false;
-    this.eventQueue = [];
-    if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    this.pendingUIRequestIds.clear();
+    this.eventBuffer.clear();
     this.clearTurnFallback();
     this.emitEvent({ type: "thinking_end" });
     this.emitEvent({ type: "stream_end", content: "" });
@@ -339,6 +349,13 @@ class PiAgent {
       case "ask_user":
         this.emitEvent(normalizeQuestionProcessEvent(data));
         break;
+      case "extension_ui_request":
+        if (data.id && data.method !== "notify" && data.method !== "setStatus" && data.method !== "setWidget" && data.method !== "setTitle" && data.method !== "set_editor_text") {
+          this.pendingUIRequestIds.add(String(data.id));
+          this.clearTurnFallback();
+          this.emitEvent(normalizeQuestionProcessEvent(data));
+        }
+        break;
       case "agent_end":
         this.completeTurn();
         break;
@@ -379,13 +396,14 @@ class PiAgent {
     this.isAborting = false;
     this.pendingAssistantText = "";
     this.streamedText = false;
-    this.eventQueue = [];
-    if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    this.pendingUIRequestIds.clear();
+    this.eventBuffer.clear();
     this.clearTurnFallback();
     this.clearAbortResponseTimer();
   }
 
   private scheduleTurnFallback(delayMs: number) {
+    if (this.pendingUIRequestIds.size > 0) return;
     this.clearTurnFallback();
     this.turnFallbackTimer = setTimeout(() => {
       this.turnFallbackTimer = null;
@@ -396,14 +414,7 @@ class PiAgent {
   }
 
   private flushQueuedEvents() {
-    while (this.eventQueue.length > 0) {
-      const item = this.eventQueue.shift()!;
-      this.window?.webContents.send("agent:event", this.withSessionId(item));
-    }
-    if (this.eventTimer) {
-      clearTimeout(this.eventTimer);
-      this.eventTimer = null;
-    }
+    this.eventBuffer.flush();
   }
 
   private completeTurn() {
@@ -432,35 +443,12 @@ class PiAgent {
   }
 
   private emitEvent(data: unknown) {
-    const payload = data && typeof data === "object"
-      ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
-      : data;
-    this.window?.webContents.send("agent:event", payload);
+    this.eventBuffer.send(data);
   }
 
   /** Emit event with throttle for streaming events to prevent React batching */
   private emitEventThrottled(data: { type: string; [key: string]: unknown }) {
-    const streamingTypes = new Set(["stream_delta"]);
-    if (streamingTypes.has(data.type)) {
-      this.eventQueue.push(data);
-      this.flushEventQueue();
-    } else {
-      // Non-streaming and thinking_delta events go through immediately
-      this.window?.webContents.send("agent:event", this.withSessionId(data));
-    }
-  }
-
-  private flushEventQueue() {
-    if (this.eventTimer) return; // Already scheduled
-    if (this.eventQueue.length === 0) return;
-    const item = this.eventQueue.shift()!;
-    this.window?.webContents.send("agent:event", this.withSessionId(item));
-    if (this.eventQueue.length > 0) {
-      this.eventTimer = setTimeout(() => {
-        this.eventTimer = null;
-        this.flushEventQueue();
-      }, 5); // 5ms delay between streaming events
-    }
+    this.eventBuffer.send(data);
   }
 }
 
@@ -479,7 +467,7 @@ class AgentManager {
   private createAgentBackend(agentId: string, sessionId: string): AgentBackend {
     if (agentId === "opencode") return new OpenCodeAgent(sessionId);
     if (agentId === "droid") return new DroidAgent(sessionId);
-    return new PiAgent(sessionId); // default
+    return new PiSDKAgent(sessionId); // default
   }
 
   /** Create or resume a session */
@@ -532,7 +520,9 @@ class AgentManager {
   }
 
   sendUIResponse(response: any) {
-    const agent = this.getActiveAgent();
+    const agent = response?.sessionId
+      ? this.getAgentBySessionId(response.sessionId)
+      : this.getActiveAgent();
     if (!agent) return;
     agent.sendUIResponse(response);
   }
