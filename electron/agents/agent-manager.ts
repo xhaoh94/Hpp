@@ -1,4 +1,7 @@
-import { ipcMain, BrowserWindow } from "electron";
+import { ipcMain, BrowserWindow, app } from "electron";
+import { readFileSync, existsSync, statSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
 import { PiSDKAgent } from "./pi-sdk-agent";
@@ -22,6 +25,71 @@ interface AgentBackend {
   sendUIResponse(response: any): void;
   dispose(): void;
   readonly sessionFilePath: string | null;
+}
+
+// ============================================================
+// Local models.json config support
+// ============================================================
+
+interface LocalModelsConfig {
+  providers?: Record<string, {
+    models?: Array<{ id: string; name?: string; reasoning?: boolean }>;
+  }>;
+}
+
+let _localModelsConfig: LocalModelsConfig | null = null;
+let _localModelsConfigMtime = 0;
+
+/** Read ~/.pi/agent/models.json, cached with mtime check */
+function readLocalModelsConfig(): LocalModelsConfig {
+  const configPath = join(homedir(), ".pi", "agent", "models.json");
+  try {
+    const stat = existsSync(configPath) ? statSync(configPath) : null;
+    const mtime = stat ? stat.mtimeMs : 0;
+    if (_localModelsConfig && mtime <= _localModelsConfigMtime) {
+      return _localModelsConfig;
+    }
+    const content = readFileSync(configPath, "utf-8");
+    _localModelsConfig = JSON.parse(content) as LocalModelsConfig;
+    _localModelsConfigMtime = mtime;
+  } catch {
+    _localModelsConfig = {};
+    _localModelsConfigMtime = Date.now();
+  }
+  return _localModelsConfig!;
+}
+
+/**
+ * Filter fetched models against the local models.json config.
+ * If the provider (vendor) is defined in models.json.providers,
+ * only return the models whose IDs are listed in that provider's models array.
+ * If the provider is NOT configured, return all models for that provider unchanged.
+ */
+function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
+  const config = readLocalModelsConfig();
+  if (!config?.providers) return models;
+
+  const result: AgentModel[] = [];
+  for (const model of models) {
+    const providerConfig = config.providers[model.provider];
+    if (!providerConfig?.models) {
+      // Provider not configured — keep all models
+      result.push(model);
+    } else {
+      // Provider is configured — only include models whose id matches
+      const configuredIds = new Set(providerConfig.models.map((m: any) => m.id));
+      if (configuredIds.has(model.id)) {
+        // Use the config's model info as-is (id, name, reasoning) to respect custom overrides
+        const configuredModel = providerConfig.models.find((m: any) => m.id === model.id);
+        result.push({
+          ...model,
+          name: configuredModel?.name ?? model.name,
+          reasoning: configuredModel?.reasoning ?? model.reasoning,
+        });
+      }
+    }
+  }
+  return result;
 }
 
 // ============================================================
@@ -88,7 +156,8 @@ class AgentManager {
   async getModelsBySessionId(sessionId: string): Promise<AgentModel[]> {
     const agent = this.sessionAgents.get(sessionId);
     if (!agent) return [];
-    return agent.getModels();
+    const models = await agent.getModels();
+    return filterModelsByLocalConfig(models);
   }
 
   sendUIResponse(response: any) {
@@ -161,7 +230,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       : agentManager.getActiveAgent();
     console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
     if (!agent) return [];
-    return agent.getModels();
+    const models = await agent.getModels();
+    return filterModelsByLocalConfig(models);
   });
 
   ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string) => {

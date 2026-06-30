@@ -2169,6 +2169,47 @@ class PiSDKAgent {
     this.eventBuffer.send(data);
   }
 }
+let _localModelsConfig = null;
+let _localModelsConfigMtime = 0;
+function readLocalModelsConfig() {
+  const configPath = path.join(os.homedir(), ".pi", "agent", "models.json");
+  try {
+    const stat = fs.existsSync(configPath) ? fs.statSync(configPath) : null;
+    const mtime = stat ? stat.mtimeMs : 0;
+    if (_localModelsConfig && mtime <= _localModelsConfigMtime) {
+      return _localModelsConfig;
+    }
+    const content = fs.readFileSync(configPath, "utf-8");
+    _localModelsConfig = JSON.parse(content);
+    _localModelsConfigMtime = mtime;
+  } catch {
+    _localModelsConfig = {};
+    _localModelsConfigMtime = Date.now();
+  }
+  return _localModelsConfig;
+}
+function filterModelsByLocalConfig(models) {
+  const config = readLocalModelsConfig();
+  if (!config?.providers) return models;
+  const result = [];
+  for (const model of models) {
+    const providerConfig = config.providers[model.provider];
+    if (!providerConfig?.models) {
+      result.push(model);
+    } else {
+      const configuredIds = new Set(providerConfig.models.map((m) => m.id));
+      if (configuredIds.has(model.id)) {
+        const configuredModel = providerConfig.models.find((m) => m.id === model.id);
+        result.push({
+          ...model,
+          name: configuredModel?.name ?? model.name,
+          reasoning: configuredModel?.reasoning ?? model.reasoning
+        });
+      }
+    }
+  }
+  return result;
+}
 class AgentManager {
   sessionAgents = /* @__PURE__ */ new Map();
   sessionAgentTypes = /* @__PURE__ */ new Map();
@@ -2221,7 +2262,8 @@ class AgentManager {
   async getModelsBySessionId(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (!agent) return [];
-    return agent.getModels();
+    const models = await agent.getModels();
+    return filterModelsByLocalConfig(models);
   }
   sendUIResponse(response) {
     const agent = response?.sessionId ? this.getAgentBySessionId(response.sessionId) : this.getActiveAgent();
@@ -2281,7 +2323,8 @@ function registerAgentHandlers(getWindow) {
     const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
     if (!agent) return [];
-    return agent.getModels();
+    const models = await agent.getModels();
+    return filterModelsByLocalConfig(models);
   });
   electron.ipcMain.handle("agent:setModel", async (_event, provider, modelId) => {
     const agent = agentManager.getActiveAgent();
