@@ -31,6 +31,48 @@ const normalizeQuestions = (value) => {
   return [];
 };
 
+const normalizeToolName = (value) => String(value || "").trim().toLowerCase().replace(/-/g, "_");
+
+const normalizeQuestionOption = (option) => {
+  if (typeof option === "string") return { value: option, label: option };
+  if (!isRecord(option)) return { value: String(option), label: String(option) };
+  const label = option.label ?? option.value ?? option.text ?? option.title ?? "";
+  return {
+    ...option,
+    value: String(option.value ?? label),
+    label: String(label),
+  };
+};
+
+const buildQuestionFromArgs = (args) => {
+  if (!isRecord(args)) return [];
+  const options = readPath(args, "$.options");
+  if (!Array.isArray(options)) return [];
+  const prompt =
+    readPath(args, "$.question") ||
+    readPath(args, "$.prompt") ||
+    readPath(args, "$.message") ||
+    readPath(args, "$.title") ||
+    "请选择答案";
+  return [{
+    id: readPath(args, "$.id") || "question",
+    label: readPath(args, "$.label"),
+    prompt,
+    options: options.map(normalizeQuestionOption),
+    allowOther: readPath(args, "$.allowOther"),
+  }];
+};
+
+const buildQuestionResult = (response) => {
+  const answer = Array.isArray(response?.answers) ? response.answers[0] : undefined;
+  if (response?.cancelled || !answer) return null;
+  return {
+    answer: String(answer.label ?? answer.answer ?? answer.value ?? ""),
+    wasCustom: !!answer.wasCustom || answer.kind === "custom",
+    index: typeof answer.index === "number" ? answer.index : undefined,
+  };
+};
+
 const getTextFromMessage = (message) => {
   if (!message) return "";
   if (typeof message.content === "string") return message.content;
@@ -142,14 +184,18 @@ class DesktopUIBridge {
       custom: async () => {
         const id = randomUUID();
         const questions = this.buildAskQuestions();
+        const toolName = this.interactArgs?.toolName;
         this.lastAskPayload = null;
         this.interactArgs = null;
         return createDialogPromise(
           (request) => send({ type: "extension_ui_request", request }),
           this.pending,
-          { id, method: "custom", kind: "ask_user_question", questions },
-          (response) => (response.cancelled ? { cancelled: true, answers: [] } : response.result),
-          { cancelled: true, answers: [] }
+          { id, method: "custom", kind: "ask_user_question", toolName, questions },
+          (response) => {
+            if (toolName === "question") return buildQuestionResult(response);
+            return response.cancelled ? { cancelled: true, answers: [] } : response.result;
+          },
+          toolName === "question" ? null : { cancelled: true, answers: [] }
         );
       },
       onTerminalInput: () => () => {},
@@ -180,11 +226,14 @@ class DesktopUIBridge {
   }
 
   cacheInteractArgs(toolName, args) {
-    if (toolName !== "ask_user_question") return;
+    const normalizedToolName = normalizeToolName(toolName);
+    if (normalizedToolName !== "ask_user_question" && normalizedToolName !== "questionnaire" && normalizedToolName !== "question") return;
+    const questions = readPath(args, "$.questions");
     this.interactArgs = {
       schema: "questions",
+      toolName: normalizedToolName,
       args: {
-        questions: readPath(args, "$.questions"),
+        questions: normalizeQuestions(questions).length > 0 ? questions : buildQuestionFromArgs(args),
         options: readPath(args, "$.options"),
       },
     };
@@ -281,7 +330,7 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
   uiBridge = new DesktopUIBridge(eventBus);
   await session.bindExtensions({
     uiContext: uiBridge.uiContext,
-    mode: "json",
+    mode: "tui",
     commandContextActions: buildCommandContextActions(session),
   });
   unsubscribe = session.subscribe(handleSessionEvent);
@@ -368,10 +417,14 @@ const handleCommand = async (command) => {
         break;
       case "prompt":
         if (!session) throw new Error("Pi SDK session is not initialized");
-        session.prompt(command.message, { images: command.images }).catch((error) => {
-          send({ type: "error", error: error?.message || String(error) });
-        });
         send({ type: "accepted", id: command.id });
+        session.prompt(command.message, { images: command.images })
+          .then(() => {
+            send({ type: "prompt_done", id: command.id });
+          })
+          .catch((error) => {
+            send({ type: "error", id: command.id, error: error?.message || String(error) });
+          });
         break;
       case "abort":
         await session?.abort();

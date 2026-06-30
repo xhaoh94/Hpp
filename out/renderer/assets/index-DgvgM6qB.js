@@ -12609,9 +12609,9 @@ function Sidebar() {
   ] }) });
 }
 const AVAILABLE_AGENTS = [
-  { id: "pi", name: "Pi Agent", desc: "AI 编程助手", command: "pi" },
-  { id: "opencode", name: "OpenCode", desc: "开源 AI 编程助手", command: "opencode" },
-  { id: "droid", name: "Factory Droid", desc: "Factory AI 编程助手", command: "droid" }
+  { id: "pi", name: "Pi Agent", desc: "AI 编程助手", runtime: "sdk" },
+  { id: "opencode", name: "OpenCode", desc: "开源 AI 编程助手", runtime: "cli", command: "opencode" },
+  { id: "droid", name: "Factory Droid", desc: "Factory AI 编程助手", runtime: "cli", command: "droid" }
 ];
 function getAgentName(id) {
   return AVAILABLE_AGENTS.find((a) => a.id === id)?.name || id;
@@ -12619,11 +12619,11 @@ function getAgentName(id) {
 function getInstallHint(command) {
   switch (command) {
     case "pi":
-      return "npm install -g @anthropic-ai/pi";
+      return "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest";
     case "opencode":
       return "npm install -g opencode-ai";
     case "droid":
-      return "curl -fsSL https://app.factory.ai/cli | sh";
+      return "npm install -g droid";
     default:
       return `请安装 ${command}`;
   }
@@ -12996,8 +12996,56 @@ function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onRes
 }
 let _sessionModelsCache = {};
 let _sessionThinkingCache = {};
+let _cacheDirty = false;
 let _saveTimeout = null;
+let _projectsSaveTimeout = null;
+let _messagesSaveTimeout = null;
+let _pendingProjectsData = null;
+let _pendingMessagesData = null;
+function flushProjectsToDisk() {
+  if (_projectsSaveTimeout) {
+    clearTimeout(_projectsSaveTimeout);
+    _projectsSaveTimeout = null;
+  }
+  if (!_pendingProjectsData) return;
+  const data = _pendingProjectsData;
+  _pendingProjectsData = null;
+  window.electronAPI.saveData("projects", data);
+}
+function scheduleProjectsSave(data) {
+  _pendingProjectsData = data;
+  if (_projectsSaveTimeout) clearTimeout(_projectsSaveTimeout);
+  _projectsSaveTimeout = setTimeout(flushProjectsToDisk, 500);
+}
+function flushMessagesToDisk() {
+  if (_messagesSaveTimeout) {
+    clearTimeout(_messagesSaveTimeout);
+    _messagesSaveTimeout = null;
+  }
+  if (!_pendingMessagesData) return;
+  const data = _pendingMessagesData;
+  _pendingMessagesData = null;
+  window.electronAPI.saveData("sessionMessages", data);
+}
+function scheduleMessagesSave(data) {
+  _pendingMessagesData = data;
+  if (_messagesSaveTimeout) clearTimeout(_messagesSaveTimeout);
+  _messagesSaveTimeout = setTimeout(flushMessagesToDisk, 1e3);
+}
+function flushPendingDataToDisk() {
+  if (_cacheDirty) {
+    flushModelsToDisk();
+  }
+  flushProjectsToDisk();
+  flushMessagesToDisk();
+}
 function flushModelsToDisk() {
+  if (_saveTimeout) {
+    clearTimeout(_saveTimeout);
+    _saveTimeout = null;
+  }
+  if (!_cacheDirty) return;
+  _cacheDirty = false;
   window.electronAPI.saveData("currentModel", {
     models: { ..._sessionModelsCache },
     thinkingLevels: { ..._sessionThinkingCache },
@@ -13006,6 +13054,7 @@ function flushModelsToDisk() {
 }
 function saveSessionModel(sessionId, model) {
   _sessionModelsCache[sessionId] = model;
+  _cacheDirty = true;
   if (_saveTimeout) clearTimeout(_saveTimeout);
   _saveTimeout = setTimeout(flushModelsToDisk, 500);
 }
@@ -13014,6 +13063,7 @@ function getSessionModel(sessionId) {
 }
 function saveSessionThinking(sessionId, level) {
   _sessionThinkingCache[sessionId] = level;
+  _cacheDirty = true;
   if (_saveTimeout) clearTimeout(_saveTimeout);
   _saveTimeout = setTimeout(flushModelsToDisk, 500);
 }
@@ -13114,8 +13164,17 @@ function useDataPersistence() {
     });
   }, []);
   reactExports.useEffect(() => {
+    let lastProjects = useProjectStore.getState().projects;
+    let lastActiveProjectId = useProjectStore.getState().activeProjectId;
+    let lastActiveSessionId = useProjectStore.getState().activeSessionId;
     const unsubscribe = useProjectStore.subscribe((state) => {
-      window.electronAPI.saveData("projects", {
+      if (state.projects === lastProjects && state.activeProjectId === lastActiveProjectId && state.activeSessionId === lastActiveSessionId) {
+        return;
+      }
+      lastProjects = state.projects;
+      lastActiveProjectId = state.activeProjectId;
+      lastActiveSessionId = state.activeSessionId;
+      scheduleProjectsSave({
         projects: state.projects,
         activeProjectId: state.activeProjectId,
         activeSessionId: state.activeSessionId
@@ -13124,12 +13183,31 @@ function useDataPersistence() {
     return unsubscribe;
   }, []);
   reactExports.useEffect(() => {
+    let lastSessionMessages = useChatStore.getState().sessionMessages;
     const unsubscribe = useChatStore.subscribe((state) => {
-      window.electronAPI.saveData("sessionMessages", {
+      if (state.sessionMessages === lastSessionMessages) return;
+      lastSessionMessages = state.sessionMessages;
+      scheduleMessagesSave({
         sessionMessages: state.sessionMessages
       });
     });
     return unsubscribe;
+  }, []);
+  reactExports.useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flushPendingDataToDisk();
+      }
+    };
+    window.addEventListener("beforeunload", flushPendingDataToDisk);
+    window.addEventListener("pagehide", flushPendingDataToDisk);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("beforeunload", flushPendingDataToDisk);
+      window.removeEventListener("pagehide", flushPendingDataToDisk);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      flushPendingDataToDisk();
+    };
   }, []);
 }
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -13157,6 +13235,13 @@ function ProjectCard({ project }) {
   }, []);
   reactExports.useEffect(() => {
     for (const agent of AVAILABLE_AGENTS) {
+      if (agent.id === "pi") {
+        window.electronAPI.piSDKGetStatus().then((status) => {
+          setInstalledAgents((prev) => ({ ...prev, [agent.id]: status.installed }));
+        });
+        continue;
+      }
+      if (agent.runtime !== "cli" || !agent.command) continue;
       window.electronAPI.isCommandAvailable(agent.command).then((ok2) => {
         setInstalledAgents((prev) => ({ ...prev, [agent.id]: ok2 }));
       });
@@ -13177,7 +13262,7 @@ function ProjectCard({ project }) {
     if (installedAgents[agentId] !== true) {
       const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
       const name2 = agent?.name || agentId;
-      const cmd = agent?.command || agentId;
+      const cmd = agent?.id === "pi" ? "pi" : agent?.command || agentId;
       alert(`${name2} 未安装，请先安装：
 
 ${getInstallHint(cmd)}`);
@@ -13821,10 +13906,84 @@ function SettingsView() {
   const [tempImagePath, setTempImagePath] = reactExports.useState("");
   const [imageRetentionHours, setImageRetentionHours] = reactExports.useState(12);
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
-  const [installedAgents, setInstalledAgents] = reactExports.useState({});
+  const [piSDKStatus, setPiSDKStatus] = reactExports.useState(null);
+  const [piSDKChecking, setPiSDKChecking] = reactExports.useState(false);
+  const [piSDKUpdating, setPiSDKUpdating] = reactExports.useState(false);
+  const [piSDKUpdateError, setPiSDKUpdateError] = reactExports.useState(null);
+  const [agentStatuses, setAgentStatuses] = reactExports.useState({});
+  const [agentChecking, setAgentChecking] = reactExports.useState({});
+  const [agentUpdating, setAgentUpdating] = reactExports.useState({});
+  const [agentUpdateErrors, setAgentUpdateErrors] = reactExports.useState({});
   const [newFolder, setNewFolder] = reactExports.useState("");
   const [newExt, setNewExt] = reactExports.useState("");
   const [newFile, setNewFile] = reactExports.useState("");
+  const refreshPiSDKStatus = reactExports.useCallback(async () => {
+    setPiSDKChecking(true);
+    try {
+      const status = await window.electronAPI.piSDKGetStatus();
+      setPiSDKStatus(status);
+      setPiSDKUpdateError(null);
+    } catch (error) {
+      setPiSDKStatus({
+        installed: false,
+        updateAvailable: false,
+        canUpdate: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setPiSDKChecking(false);
+    }
+  }, []);
+  const handlePiSDKUpdate = reactExports.useCallback(async () => {
+    setPiSDKUpdating(true);
+    setPiSDKUpdateError(null);
+    try {
+      const result = await window.electronAPI.piSDKUpdate();
+      if (result.status) setPiSDKStatus(result.status);
+      if (!result.success) {
+        setPiSDKUpdateError(result.error || "Pi SDK 更新失败");
+      }
+    } catch (error) {
+      setPiSDKUpdateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPiSDKUpdating(false);
+    }
+  }, []);
+  const refreshAgentStatus = reactExports.useCallback(async (agentId) => {
+    setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
+    try {
+      const status = await window.electronAPI.agentGetStatus(agentId);
+      setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
+      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
+    } catch (error) {
+      setAgentStatuses((prev) => ({
+        ...prev,
+        [agentId]: {
+          installed: false,
+          updateAvailable: false,
+          canUpdate: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    } finally {
+      setAgentChecking((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
+  const handleAgentUpdate = reactExports.useCallback(async (agentId) => {
+    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
+    setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
+    try {
+      const result = await window.electronAPI.agentUpdate(agentId);
+      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status }));
+      if (!result.success) {
+        setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
+      }
+    } catch (error) {
+      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
   reactExports.useEffect(() => {
     window.electronAPI.loadData("settings").then((data) => {
       if (data) {
@@ -13842,12 +14001,12 @@ function SettingsView() {
     });
   }, []);
   reactExports.useEffect(() => {
+    refreshPiSDKStatus();
     for (const agent of AVAILABLE_AGENTS) {
-      window.electronAPI.isCommandAvailable(agent.command).then((installed) => {
-        setInstalledAgents((prev) => ({ ...prev, [agent.id]: installed }));
-      });
+      if (agent.id === "pi") continue;
+      refreshAgentStatus(agent.id);
     }
-  }, []);
+  }, [refreshPiSDKStatus, refreshAgentStatus]);
   const saveShortcuts = (s) => {
     setShortcuts(s);
     window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
@@ -14060,35 +14219,71 @@ function SettingsView() {
           /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "选择启用的 Agent，未启用的不会显示在项目卡片上" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
             AVAILABLE_AGENTS.map((agent) => {
-              const isInstalled = installedAgents[agent.id] === true;
-              return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-row", style: { alignItems: "center", opacity: isInstalled ? 1 : 0.5 }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: isInstalled ? "pointer" : "not-allowed", flex: 1 }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "input",
-                  {
-                    type: "checkbox",
-                    checked: enabledAgents.includes(agent.id),
-                    disabled: !isInstalled,
-                    onChange: (e) => {
-                      if (e.target.checked) {
-                        setEnabledAgents([...enabledAgents, agent.id]);
-                      } else {
-                        setEnabledAgents(enabledAgents.filter((id) => id !== agent.id));
-                      }
-                    },
-                    style: { width: 16, height: 16, accentColor: "var(--accent-color)" }
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13 }, children: agent.name }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-secondary)" }, children: agent.desc }),
-                !isInstalled && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-                  fontSize: 10,
-                  color: "#e5a100",
-                  background: "rgba(229,161,0,0.12)",
-                  padding: "1px 6px",
-                  borderRadius: 4,
-                  whiteSpace: "nowrap"
-                }, children: "未安装" })
-              ] }) }, agent.id);
+              const isPiSDKAgent = agent.id === "pi";
+              const agentStatus = agentStatuses[agent.id];
+              const isInstalled = isPiSDKAgent ? piSDKStatus?.installed === true : agentStatus?.installed === true;
+              const isChecking = isPiSDKAgent ? piSDKChecking || !piSDKStatus : agentChecking[agent.id];
+              const isUnavailable = !isInstalled && !isChecking;
+              const versionLabel = isPiSDKAgent ? piSDKStatus?.currentVersion ? `v${piSDKStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装" : agentStatus?.currentVersion ? `v${agentStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装";
+              return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "agent-settings-main", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "checkbox",
+                      checked: enabledAgents.includes(agent.id),
+                      disabled: !isInstalled || isChecking,
+                      onChange: (e) => {
+                        if (e.target.checked) {
+                          setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
+                        } else {
+                          setEnabledAgents((prev) => prev.filter((id) => id !== agent.id));
+                        }
+                      },
+                      className: "agent-settings-checkbox"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-copy", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-title-line", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-name", children: agent.name }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`, children: versionLabel }),
+                      isUnavailable && versionLabel !== "未安装" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-badge agent-settings-badge-warning", children: "未安装" }),
+                      (isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-meta", children: [
+                        "最新 v",
+                        isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion
+                      ] })
+                    ] }),
+                    isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-error", children: [
+                      "Node v",
+                      piSDKStatus.nodeVersion,
+                      " 过低，需要 22.19.0 或更高版本"
+                    ] }),
+                    (isPiSDKAgent ? piSDKStatus?.error || piSDKUpdateError : agentStatus?.error || agentUpdateErrors[agent.id]) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-error", children: isPiSDKAgent ? piSDKUpdateError || piSDKStatus?.error : agentUpdateErrors[agent.id] || agentStatus?.error })
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "agent-settings-actions", children: [
+                  (isPiSDKAgent && piSDKStatus?.updateAvailable || !isPiSDKAgent && agentStatus?.updateAvailable) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "filter-add-btn agent-settings-update-btn",
+                      onClick: () => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id),
+                      disabled: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate),
+                      title: (isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新",
+                      children: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "btn-action agent-settings-refresh-btn",
+                      onClick: () => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id),
+                      disabled: isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]),
+                      title: "重新检查版本",
+                      children: isChecking ? "检查中..." : "刷新"
+                    }
+                  )
+                ] })
+              ] }, agent.id);
             }),
             AVAILABLE_AGENTS.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "暂无可用 Agent" })
           ] })
@@ -42314,6 +42509,12 @@ function MarkdownRenderer({ content: content2 }) {
   ) });
 }
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
+const THINKING_PREVIEW_CHAR_LIMIT = 240;
+const getThinkingPreview = (value) => {
+  const preview = value?.replace(/\s+/g, " ").trim();
+  if (!preview) return "思考中";
+  return preview.length > THINKING_PREVIEW_CHAR_LIMIT ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...` : preview;
+};
 const formatProcessDuration = (ms) => {
   const seconds = Math.max(0, Math.floor(ms / 1e3));
   const minutes = Math.floor(seconds / 60);
@@ -42330,8 +42531,7 @@ const summarizeProcessEntries = (entries) => {
   const thinkingEntry = entries.find((entry) => entry.type === "thinking" && entry.state === "running");
   const runningTool = entries.find((entry) => (entry.type === "tool" || entry.type === "question") && entry.state === "running");
   if (isThinking && thinkingEntry) {
-    const thinkingPreview = thinkingEntry.detail ? thinkingEntry.detail.length > 30 ? thinkingEntry.detail.substring(0, 30) + "..." : thinkingEntry.detail : "思考中";
-    return `正在思考: ${thinkingPreview}`;
+    return `正在思考: ${getThinkingPreview(thinkingEntry.detail)}`;
   }
   if (runningTool) {
     return runningTool.title;
@@ -42428,6 +42628,153 @@ const normalizeToolKind = (value) => {
 const getQuestionTitle = (running = false, isError = false) => {
   if (isError) return "用户询问处理失败";
   return running ? "正在询问用户" : "已处理用户询问";
+};
+const getUIResponsePayload = (response) => {
+  const base = {
+    sessionId: response.sessionId,
+    text: response.text,
+    value: response.text,
+    answers: [{ value: response.text }],
+    cancelled: false
+  };
+  if (response.requestId) {
+    base.type = "extension_ui_response";
+    base.id = response.requestId;
+  }
+  if (response.method) {
+    base.method = response.method;
+  }
+  if (response.method === "confirm") {
+    base.confirmed = !["no", "n", "false", "否", "取消"].includes(response.text.trim().toLowerCase());
+  }
+  return base;
+};
+const getNestedQuestionValue = (value, path2) => {
+  let current = value;
+  for (const key of path2) {
+    if (current === void 0 || current === null) return void 0;
+    current = current[key];
+  }
+  return current;
+};
+const readFirstQuestionValue = (value, paths) => {
+  for (const path2 of paths) {
+    const found = getNestedQuestionValue(value, path2);
+    if (found !== void 0 && found !== null && found !== "") return found;
+  }
+  return void 0;
+};
+const parseJsonQuestionValue = (value) => {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed || !trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+};
+const normalizeAskOptions = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value.map((option, index2) => {
+    if (typeof option === "string") return { label: option, value: option };
+    return {
+      label: String(option?.label ?? option?.value ?? option?.text ?? option?.title ?? `选项 ${index2 + 1}`),
+      value: option?.value === void 0 || option?.value === null ? void 0 : String(option.value),
+      description: typeof option?.description === "string" ? option.description : void 0,
+      preview: typeof option?.preview === "string" ? option.preview : void 0,
+      hasPreview: !!option?.hasPreview
+    };
+  });
+};
+const normalizeAskQuestions = (value) => {
+  const parsedValue = parseJsonQuestionValue(value);
+  const rawQuestions = Array.isArray(parsedValue) ? parsedValue : parsedValue && typeof parsedValue === "object" && Array.isArray(parsedValue.questions) ? parsedValue.questions : [];
+  if (rawQuestions.length === 0 && parsedValue && typeof parsedValue === "object") {
+    const raw = parsedValue;
+    const question = readFirstQuestionValue(raw, [
+      ["question"],
+      ["title"],
+      ["prompt"],
+      ["message"],
+      ["placeholder"],
+      ["detail", "question"],
+      ["detail", "title"],
+      ["detail", "prompt"],
+      ["detail", "message"],
+      ["params", "question"],
+      ["params", "prompt"],
+      ["params", "message"]
+    ]);
+    const options = readFirstQuestionValue(raw, [
+      ["options"],
+      ["choices"],
+      ["items"],
+      ["detail", "options"],
+      ["detail", "choices"],
+      ["params", "options"],
+      ["params", "choices"]
+    ]);
+    if (question || Array.isArray(options)) {
+      return [{
+        id: typeof raw.id === "string" ? raw.id : void 0,
+        question: String(question || "请选择答案"),
+        header: typeof raw.header === "string" ? raw.header : void 0,
+        multiSelect: !!(raw.multiSelect ?? raw.multiple ?? raw.detail?.multiSelect ?? raw.params?.multiSelect),
+        options: normalizeAskOptions(options)
+      }];
+    }
+  }
+  if (rawQuestions.length === 0 && typeof parsedValue === "string" && parsedValue.trim()) {
+    return [{ question: parsedValue.trim(), options: [] }];
+  }
+  return rawQuestions.map((raw, questionIndex) => {
+    const options = normalizeAskOptions(raw?.options ?? raw?.choices);
+    return {
+      id: typeof raw?.id === "string" ? raw.id : void 0,
+      question: String(raw?.question ?? raw?.prompt ?? raw?.title ?? raw?.message ?? `问题 ${questionIndex + 1}`),
+      header: typeof raw?.label === "string" ? raw.label : typeof raw?.header === "string" ? raw.header : void 0,
+      multiSelect: !!(raw?.multiSelect ?? raw?.multiple),
+      options
+    };
+  });
+};
+const normalizeAskQuestionsFromCandidates = (...values) => {
+  for (const value of values) {
+    const questions = normalizeAskQuestions(value);
+    if (questions.length > 0) return questions;
+  }
+  const optionSource = values.find(
+    (value) => Array.isArray(value?.options) || Array.isArray(value?.choices) || Array.isArray(value?.detail?.options) || Array.isArray(value?.params?.options)
+  );
+  const promptSource = values.find(
+    (value) => typeof value === "string" || typeof value?.question === "string" || typeof value?.prompt === "string" || typeof value?.message === "string" || typeof value?.title === "string" || typeof value?.detail?.question === "string" || typeof value?.detail?.prompt === "string" || typeof value?.detail?.message === "string" || typeof value?.detail?.title === "string"
+  );
+  const question = typeof promptSource === "string" ? promptSource : readFirstQuestionValue(promptSource, [
+    ["question"],
+    ["prompt"],
+    ["message"],
+    ["title"],
+    ["detail", "question"],
+    ["detail", "prompt"],
+    ["detail", "message"],
+    ["detail", "title"]
+  ]);
+  const options = readFirstQuestionValue(optionSource, [
+    ["options"],
+    ["choices"],
+    ["detail", "options"],
+    ["detail", "choices"],
+    ["params", "options"],
+    ["params", "choices"]
+  ]);
+  if (question || Array.isArray(options)) {
+    return [{
+      question: String(question || "请选择答案"),
+      options: normalizeAskOptions(options)
+    }];
+  }
+  return [];
 };
 const getToolDetail = (event) => {
   const detail = typeof event.detail === "string" ? event.detail : "";
@@ -42597,8 +42944,6 @@ function CommandDetail({
   const { command, output } = splitCommandDetail(entry.detail, entry.command);
   const outputLines = output ? output.split("\n") : [];
   const isRunning = entry.state === "running";
-  const previewLines = outputExpanded || isRunning ? outputLines : outputLines.slice(0, 4);
-  const hiddenLineCount = Math.max(0, outputLines.length - previewLines.length);
   const canExpand = outputLines.length > 0;
   reactExports.useEffect(() => {
     if (!isRunning && !userToggledRef.current) {
@@ -42637,14 +42982,48 @@ function CommandDetail({
         ]
       }
     ),
-    outputLines.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-command-output", children: [
+    outputLines.length > 0 && (outputExpanded || isRunning) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-command-output", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-lang", children: "BASH" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: previewLines.join("\n") }),
-      !outputExpanded && !isRunning && hiddenLineCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-command-more", onClick: toggleOutput, children: [
-        "展开 (",
-        outputLines.length,
-        " 行)"
-      ] })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: outputLines.join("\n") })
+    ] })
+  ] });
+}
+function CommandGroup({
+  entries
+}) {
+  const [expanded, setExpanded] = reactExports.useState(false);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry tool chat-command-group", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryIcon, { type: "tool" }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry-main", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          className: "chat-process-entry-header expandable",
+          onClick: () => setExpanded((current) => !current),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-entry-title", children: [
+              "已运行 ",
+              entries.length,
+              " 条命令"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "svg",
+              {
+                className: "chat-process-entry-chevron",
+                width: "10",
+                height: "10",
+                viewBox: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                strokeWidth: "2.5",
+                style: { transform: expanded ? "rotate(90deg)" : "rotate(0deg)" },
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
+              }
+            )
+          ]
+        }
+      ),
+      expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-group-list", children: entries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry }, entry.id)) })
     ] })
   ] });
 }
@@ -42697,6 +43076,78 @@ function ProcessEntryRow({
     ] })
   ] });
 }
+function ProcessEntries({
+  entries,
+  messageId,
+  onToggleEntry,
+  onOpenFile
+}) {
+  const rows = [];
+  let commandEntries = [];
+  const flushCommands = () => {
+    if (commandEntries.length === 0) return;
+    rows.push(
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        CommandGroup,
+        {
+          entries: commandEntries
+        },
+        `commands-${commandEntries[0].id}-${commandEntries[commandEntries.length - 1].id}`
+      )
+    );
+    commandEntries = [];
+  };
+  entries.forEach((entry) => {
+    if (entry.toolKind === "run_command") {
+      commandEntries.push(entry);
+      return;
+    }
+    flushCommands();
+    rows.push(
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ProcessEntryRow,
+        {
+          messageId,
+          entry,
+          onToggleEntry,
+          onOpenFile
+        },
+        entry.id
+      )
+    );
+  });
+  flushCommands();
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children: rows });
+}
+const toolKindToAction = (toolKind) => {
+  switch (toolKind) {
+    case "read_file":
+      return "read";
+    case "list_dir":
+      return "listed";
+    case "write_file":
+      return "written";
+    case "edit_file":
+      return "edited";
+    default:
+      return void 0;
+  }
+};
+const mergeProcessEntries = (entries) => {
+  const merged = [];
+  for (const entry of entries) {
+    const last = merged[merged.length - 1];
+    if (entry.type === "tool" && last?.type === "tool" && entry.toolKind && last.toolKind === entry.toolKind && entry.state === last.state && last.files && last.files.length > 0 && entry.files && entry.files.length > 0) {
+      last.files = [...last.files, ...entry.files];
+      const action = toolKindToAction(entry.toolKind);
+      last.title = getFileEntryTitle(action, last.files.length, entry.state === "running");
+      last.id = entry.id;
+      continue;
+    }
+    merged.push({ ...entry, files: entry.files ? [...entry.files] : void 0 });
+  }
+  return merged;
+};
 function ProcessBlock({
   messageId,
   process: process2,
@@ -42731,16 +43182,15 @@ function ProcessBlock({
         }
       )
     ] }),
-    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-content", children: process2.entries.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-empty", children: "等待 agent 事件..." }) : process2.entries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-      ProcessEntryRow,
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-content", children: process2.entries.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-empty", children: "等待 agent 事件..." }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ProcessEntries,
       {
+        entries: mergeProcessEntries(process2.entries),
         messageId,
-        entry,
         onToggleEntry,
         onOpenFile
-      },
-      entry.id
-    )) })
+      }
+    ) })
   ] });
 }
 function useProcessTicker(enabled) {
@@ -42803,6 +43253,117 @@ function DiffBlock({ diffs }) {
     ] }, `${diff2.file}-${i}`);
   }) });
 }
+function QuestionnairePanel({
+  questions,
+  onSubmit,
+  onCancel
+}) {
+  const [singleChoice, setSingleChoice] = reactExports.useState({});
+  const [multiChoice, setMultiChoice] = reactExports.useState({});
+  const [customText, setCustomText] = reactExports.useState({});
+  const buildAnswers = () => questions.map((question, questionIndex) => {
+    const custom = customText[questionIndex]?.trim();
+    if (custom) {
+      return {
+        id: question.id || `question-${questionIndex + 1}`,
+        questionIndex,
+        question: question.question,
+        kind: "custom",
+        answer: custom,
+        value: custom,
+        label: custom,
+        wasCustom: true
+      };
+    }
+    if (question.multiSelect) {
+      const selectedLabels = multiChoice[questionIndex] || [];
+      const selectedOptions = (question.options || []).filter((option) => selectedLabels.includes(option.label));
+      return {
+        id: question.id || `question-${questionIndex + 1}`,
+        questionIndex,
+        question: question.question,
+        kind: "multi",
+        answer: null,
+        selected: selectedLabels,
+        selectedOptions,
+        values: selectedOptions.map((option) => option.value ?? option.label)
+      };
+    }
+    const selectedLabel = singleChoice[questionIndex] || null;
+    const selectedOption = selectedLabel ? question.options?.find((option) => option.label === selectedLabel) : void 0;
+    return {
+      id: question.id || `question-${questionIndex + 1}`,
+      questionIndex,
+      question: question.question,
+      kind: "option",
+      answer: selectedOption?.value ?? selectedLabel,
+      value: selectedOption?.value ?? selectedLabel,
+      label: selectedLabel,
+      wasCustom: false,
+      index: selectedOption ? (question.options || []).findIndex((option) => option.label === selectedOption.label) + 1 : void 0,
+      selectedOption
+    };
+  });
+  const hasAnswer = questions.every((question, questionIndex) => {
+    if (customText[questionIndex]?.trim()) return true;
+    if (question.multiSelect) return (multiChoice[questionIndex] || []).length > 0;
+    if (!question.options || question.options.length === 0) return false;
+    return !!singleChoice[questionIndex];
+  });
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-questionnaire", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-questionnaire-header", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "需要你的选择" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: onCancel, children: "取消" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-questionnaire-list", children: questions.map((question, questionIndex) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-questionnaire-question", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-questionnaire-title", children: [
+        question.header && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: question.header }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: question.question })
+      ] }),
+      !!question.options?.length && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-questionnaire-options", children: question.options.map((option) => {
+        const checked = question.multiSelect ? (multiChoice[questionIndex] || []).includes(option.label) : singleChoice[questionIndex] === option.label;
+        return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            className: `chat-questionnaire-option ${checked ? "selected" : ""}`,
+            onClick: () => {
+              if (question.multiSelect) {
+                const prev = multiChoice[questionIndex] || [];
+                setMultiChoice({
+                  ...multiChoice,
+                  [questionIndex]: checked ? prev.filter((item) => item !== option.label) : [...prev, option.label]
+                });
+              } else {
+                setSingleChoice({ ...singleChoice, [questionIndex]: option.label });
+              }
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-questionnaire-mark" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-questionnaire-option-text", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: option.label }),
+                option.description && /* @__PURE__ */ jsxRuntimeExports.jsx("small", { children: option.description }),
+                option.preview && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: option.preview })
+              ] })
+            ]
+          },
+          option.label
+        );
+      }) }),
+      !question.multiSelect && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "textarea",
+        {
+          className: "chat-questionnaire-custom",
+          rows: 2,
+          placeholder: "自定义回答",
+          value: customText[questionIndex] || "",
+          onChange: (event) => setCustomText({ ...customText, [questionIndex]: event.target.value })
+        }
+      )
+    ] }, `${question.question}-${questionIndex}`)) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-questionnaire-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: () => onSubmit(buildAnswers()), disabled: !hasAnswer, children: "提交回答" }) })
+  ] });
+}
 function ChatPanel({ sendKey = "Enter" }) {
   const {
     messages,
@@ -42840,6 +43401,8 @@ function ChatPanel({ sendKey = "Enter" }) {
   const [zoomImage, setZoomImage] = reactExports.useState(null);
   const [previewFile, setPreviewFile] = reactExports.useState(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = reactExports.useState(false);
+  const [pendingUIResponse, setPendingUIResponse] = reactExports.useState(null);
+  const pendingUIResponseRef = reactExports.useRef(null);
   const userMsgHistoryRef = reactExports.useRef(null);
   const scrollRef = reactExports.useRef(null);
   const textareaRef = reactExports.useRef(null);
@@ -42857,6 +43420,16 @@ function ChatPanel({ sendKey = "Enter" }) {
   const isUserScrollingRef = reactExports.useRef(false);
   reactExports.useRef(null);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
+  const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
+  const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.questions?.length ? pendingUIResponse : null;
+  const setPendingUIResponseState = (next) => {
+    const value = typeof next === "function" ? next(pendingUIResponseRef.current) : next;
+    pendingUIResponseRef.current = value;
+    setPendingUIResponse(value);
+  };
+  reactExports.useEffect(() => {
+    pendingUIResponseRef.current = pendingUIResponse;
+  }, [pendingUIResponse]);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -42980,10 +43553,10 @@ function ChatPanel({ sendKey = "Enter" }) {
     });
   }, [activeSessionId, activeSessionInitialized]);
   reactExports.useEffect(() => {
-    if (activeSessionId && messages.length > 0) {
+    if (activeSessionId && messages.length > 0 && sessionMessages[activeSessionId] !== messages) {
       loadSessionMessages(activeSessionId, messages);
     }
-  }, [messages, activeSessionId]);
+  }, [messages, activeSessionId, sessionMessages, loadSessionMessages]);
   reactExports.useEffect(() => {
     const getRuntime = (sessionId) => {
       const existing = sessionRuntimeRef.current[sessionId];
@@ -42993,6 +43566,7 @@ function ChatPanel({ sendKey = "Enter" }) {
         thinkingBuffer: "",
         thinkingEntryId: null,
         processActive: false,
+        streamStarted: false,
         activeToolEntry: {},
         activeToolFile: {},
         streamWatchdog: null
@@ -43030,7 +43604,7 @@ function ChatPanel({ sendKey = "Enter" }) {
       if (!delta) return;
       const runtime = getRuntime(sessionId);
       runtime.thinkingBuffer += delta;
-      const thinkingPreview = runtime.thinkingBuffer ? runtime.thinkingBuffer.length > 50 ? runtime.thinkingBuffer.substring(0, 50) + "..." : runtime.thinkingBuffer : "思考中";
+      const thinkingPreview = getThinkingPreview(runtime.thinkingBuffer);
       if (runtime.thinkingEntryId) {
         useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
           title: `正在思考: ${thinkingPreview}`,
@@ -43049,6 +43623,39 @@ function ChatPanel({ sendKey = "Enter" }) {
           expanded: false
         });
       }
+    };
+    const getPendingUIFromEvent = (event, sessionId, entryId) => {
+      const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+      const method = String(event.method || detail.method || event.kind || event.toolName || "").trim();
+      const normalizedMethod = method === "custom" && detail.kind === "ask_user_question" ? "ask_user_question" : method;
+      const questions = normalizeAskQuestionsFromCandidates(
+        event.questions,
+        detail.questions,
+        event.args?.questions,
+        event.input?.questions,
+        event,
+        detail,
+        event.args,
+        event.input,
+        event.detail
+      );
+      const fallbackQuestion = questions.length > 0 ? questions : normalizeAskQuestionsFromCandidates(
+        event.question,
+        event.prompt,
+        event.message,
+        event.title,
+        detail.question,
+        detail.prompt,
+        detail.message,
+        detail.title
+      );
+      return {
+        sessionId,
+        requestId: typeof event.requestId === "string" ? event.requestId : typeof event.id === "string" ? event.id : typeof detail.id === "string" ? detail.id : void 0,
+        method: normalizedMethod || void 0,
+        entryId,
+        questions: fallbackQuestion.length > 0 ? fallbackQuestion : [{ question: "请回答 Agent 的问题", options: [] }]
+      };
     };
     const clearStreamWatchdog = (sessionId) => {
       if (!sessionId) {
@@ -43087,6 +43694,7 @@ function ChatPanel({ sendKey = "Enter" }) {
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
       useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
       runtime.processActive = false;
+      runtime.streamStarted = false;
       runtime.activeToolEntry = {};
       runtime.activeToolFile = {};
       runtime.thinkingEntryId = null;
@@ -43115,6 +43723,9 @@ function ChatPanel({ sendKey = "Enter" }) {
       }
       switch (event.type) {
         case "message_start":
+          if (!runtime.processActive) {
+            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+          }
           runtime.processActive = true;
           const messagePreview = event.content ? event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content : "用户消息";
           appendProcessEntry(currentSessionId, {
@@ -43125,18 +43736,30 @@ function ChatPanel({ sendKey = "Enter" }) {
           });
           break;
         case "stream_start":
+          const alreadyStarted = runtime.streamStarted;
           reactDomExports.flushSync(() => {
-            runtime.streamBuffer = "";
-            runtime.thinkingBuffer = "";
-            runtime.thinkingEntryId = null;
+            if (!alreadyStarted) {
+              runtime.streamBuffer = "";
+              runtime.thinkingBuffer = "";
+              runtime.thinkingEntryId = null;
+            }
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
             runtime.processActive = true;
+            runtime.streamStarted = true;
             runtime.activeToolEntry = {};
             runtime.activeToolFile = {};
-            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+            if (!alreadyStarted) {
+              useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+            }
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
-          appendProcessEntry(currentSessionId, { type: "status", title: "正在分析请求并生成响应", state: "running" });
+          if (!alreadyStarted) {
+            appendProcessEntry(currentSessionId, {
+              type: "status",
+              title: "正在分析请求并生成响应",
+              state: "running"
+            });
+          }
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
@@ -43158,12 +43781,15 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "droid.ask_user":
           {
             finishThinkingEntry(currentSessionId);
+            const entryId = createProcessEntryId();
+            setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry(currentSessionId, {
+              id: entryId,
               type: "question",
-              title: getQuestionTitle(false),
+              title: getQuestionTitle(true),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
-              state: "completed",
+              state: "running",
               expanded: false
             });
           }
@@ -43171,9 +43797,11 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "stream_end":
           {
             if (!runtime.processActive) break;
+            if (pendingUIResponseRef.current?.sessionId === currentSessionId) break;
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
+            setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           }
           break;
         case "agent_end":
@@ -43182,6 +43810,7 @@ function ChatPanel({ sendKey = "Enter" }) {
           if (!runtime.processActive) break;
           finishThinkingEntry(currentSessionId);
           completeAssistantStream(currentSessionId, void 0, true);
+          setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           break;
         case "tool_start":
           {
@@ -43272,6 +43901,11 @@ function ChatPanel({ sendKey = "Enter" }) {
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : void 0;
           const eventState = normalizeProcessEntryState(event.state);
+          let questionEntryId;
+          if (eventType === "question") {
+            questionEntryId = createProcessEntryId();
+            setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, questionEntryId));
+          }
           let processedTitle = eventTitle;
           if (eventType === "tool" && !eventTitle.includes("运行") && !eventTitle.includes("已完成") && !eventTitle.includes("失败")) {
             processedTitle = `正在执行: ${eventTitle}`;
@@ -43283,11 +43917,12 @@ function ChatPanel({ sendKey = "Enter" }) {
             processedTitle = `询问用户: ${eventTitle}`;
           }
           appendProcessEntry(currentSessionId, {
+            id: questionEntryId,
             type: eventType,
             title: processedTitle,
             detail: eventDetail,
             files: Array.isArray(event.files) ? getToolProcessFiles(event) : void 0,
-            state: eventState
+            state: eventType === "question" ? eventState || "running" : eventState
           });
           break;
         case "agent_ready":
@@ -43301,12 +43936,15 @@ function ChatPanel({ sendKey = "Enter" }) {
         default:
           if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {
             finishThinkingEntry(currentSessionId);
+            const entryId = createProcessEntryId();
+            setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
             const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry(currentSessionId, {
+              id: entryId,
               type: "question",
-              title: getQuestionTitle(false),
+              title: getQuestionTitle(true),
               detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
-              state: normalizeProcessEntryState(event.state) || "completed",
+              state: normalizeProcessEntryState(event.state) || "running",
               expanded: false
             });
           }
@@ -43324,7 +43962,115 @@ function ChatPanel({ sendKey = "Enter" }) {
       unsubscribe();
     };
   }, []);
+  const handleSendUIResponse = async () => {
+    const text2 = input.trim();
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || pendingUIResponse?.sessionId !== targetSessionId || !text2) return;
+    const pendingResponse = pendingUIResponse;
+    isUserScrollingRef.current = false;
+    reactDomExports.flushSync(() => {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: text2,
+        timestamp: Date.now()
+      }, targetSessionId);
+      setInput("");
+      setPendingUIResponseState(null);
+      if (pendingResponse.entryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
+          title: getQuestionTitle(false),
+          state: "completed",
+          expanded: false
+        }, targetSessionId);
+      }
+    });
+    const result = await window.electronAPI.agentSendUIResponse(getUIResponsePayload({
+      sessionId: targetSessionId,
+      requestId: pendingResponse.requestId,
+      method: pendingResponse.method,
+      text: text2
+    }));
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "发送回答失败",
+        timestamp: Date.now()
+      }, targetSessionId);
+      if (pendingResponse.entryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
+          title: getQuestionTitle(false, true),
+          state: "error",
+          expanded: true
+        }, targetSessionId);
+      }
+    }
+  };
+  const finishPendingQuestionEntry = (targetSessionId, pendingResponse, failed = false) => {
+    if (!pendingResponse?.entryId) return;
+    useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
+      title: failed ? getQuestionTitle(false, true) : getQuestionTitle(false),
+      state: failed ? "error" : "completed",
+      expanded: false
+    }, targetSessionId);
+  };
+  const handleSubmitQuestionnaire = async (answers) => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
+    const pendingResponse = activeQuestionnaire;
+    const answerSummary = answers.map((answer) => answer?.label || answer?.answer || (Array.isArray(answer?.selected) ? answer.selected.join(", ") : "")).filter(Boolean).join("\n");
+    reactDomExports.flushSync(() => {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: answerSummary || "已提交问卷回答",
+        timestamp: Date.now()
+      }, targetSessionId);
+      setPendingUIResponseState(null);
+      finishPendingQuestionEntry(targetSessionId, pendingResponse);
+    });
+    const result = await window.electronAPI.agentSendUIResponse({
+      sessionId: targetSessionId,
+      type: "extension_ui_response",
+      id: pendingResponse.requestId,
+      method: pendingResponse.method,
+      cancelled: false,
+      result: { cancelled: false, answers },
+      value: answerSummary,
+      text: answerSummary,
+      answers
+    });
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "发送问卷回答失败",
+        timestamp: Date.now()
+      }, targetSessionId);
+      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    }
+  };
+  const handleCancelQuestionnaire = async () => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
+    const pendingResponse = activeQuestionnaire;
+    setPendingUIResponseState(null);
+    finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    await window.electronAPI.agentSendUIResponse({
+      sessionId: targetSessionId,
+      type: "extension_ui_response",
+      id: pendingResponse.requestId,
+      method: pendingResponse.method,
+      cancelled: true
+    });
+  };
   const handleSend = async () => {
+    if (activeQuestionnaire) return;
+    if (isAwaitingUIResponse) {
+      await handleSendUIResponse();
+      return;
+    }
     const text2 = input.trim();
     const targetSessionId = useProjectStore.getState().activeSessionId;
     if (!targetSessionId || !text2 && pendingImages.length === 0 && pendingFiles.length === 0 || agentStatuses[targetSessionId] === "running") return;
@@ -43405,6 +44151,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
       if (runtime) {
         runtime.processActive = false;
+        runtime.streamStarted = false;
         runtime.activeToolEntry = {};
         runtime.activeToolFile = {};
       }
@@ -43457,12 +44204,14 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
     useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
     if (runtime) {
       runtime.processActive = false;
+      runtime.streamStarted = false;
       runtime.activeToolEntry = {};
       runtime.activeToolFile = {};
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
     }
+    setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
     setStreaming(false);
     useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
     void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
@@ -43703,18 +44452,32 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
             )) }),
             hasContent && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-bubble-row", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `chat-bubble ${msg.role}`, children: msg.role === "assistant" ? /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: msg.content }) : msg.content }),
-              msg.role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  className: "chat-copy-btn",
-                  onClick: () => navigator.clipboard.writeText(msg.content),
-                  title: "复制",
-                  children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "9", y: "9", width: "13", height: "13", rx: "2" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" })
-                  ] })
-                }
-              )
+              msg.role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-msg-actions", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    className: "chat-copy-btn",
+                    onClick: () => setInput(msg.content),
+                    title: "编辑",
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" })
+                    ] })
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    className: "chat-copy-btn",
+                    onClick: () => navigator.clipboard.writeText(msg.content),
+                    title: "复制",
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "9", y: "9", width: "13", height: "13", rx: "2" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" })
+                    ] })
+                  }
+                )
+              ] })
             ] }),
             hasDiffs && msg.diffs && /* @__PURE__ */ jsxRuntimeExports.jsx(DiffBlock, { diffs: msg.diffs })
           ] })
@@ -43726,6 +44489,14 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       ] })
     ] }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-area", children: [
+      activeQuestionnaire && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        QuestionnairePanel,
+        {
+          questions: activeQuestionnaire.questions || [],
+          onSubmit: handleSubmitQuestionnaire,
+          onCancel: handleCancelQuestionnaire
+        }
+      ),
       (pendingFiles.length > 0 || pendingImages.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-preview-bar", children: [
         pendingFiles.map((pf) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-file-card", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", className: "chat-file-icon", children: [
@@ -43773,21 +44544,22 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
             onChange: (e) => setInput(e.target.value),
             onKeyDown: handleKeyDown,
             onPaste: handlePaste,
-            placeholder: sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)",
+            placeholder: activeQuestionnaire ? "请在上方提交问卷" : sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)",
             rows: 1,
-            className: "chat-textarea"
+            className: "chat-textarea",
+            disabled: !!activeQuestionnaire
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
-            onClick: currentSessionRunning ? handleAbort : handleSend,
-            disabled: !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0,
-            className: `chat-send-btn ${currentSessionRunning ? "abort" : ""}`,
-            title: currentSessionRunning ? "停止" : "发送",
-            children: currentSessionRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "currentColor", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M22 2L11 13" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M22 2L15 22L11 13L2 9L22 2Z" })
+            onClick: currentSessionRunning && !isAwaitingUIResponse ? handleAbort : handleSend,
+            disabled: activeQuestionnaire ? true : isAwaitingUIResponse ? !input.trim() : !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0,
+            className: `chat-send-btn ${currentSessionRunning && !isAwaitingUIResponse ? "abort" : ""}`,
+            title: activeQuestionnaire ? "请在上方提交问卷" : currentSessionRunning && !isAwaitingUIResponse ? "停止" : isAwaitingUIResponse ? "发送回答" : "发送",
+            children: currentSessionRunning && !isAwaitingUIResponse ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2", fill: "currentColor", stroke: "none" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 19V5" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 12l7-7 7 7" })
             ] })
           }
         )

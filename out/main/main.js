@@ -160,7 +160,7 @@ function registerStoreHandlers() {
 }
 const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 const MIN_NODE_VERSION = "22.19.0";
-function runCommand(command, args, options = {}) {
+function runCommand$1(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     child_process.execFile(
       command,
@@ -188,18 +188,18 @@ function nodeCommand() {
   if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
   return process.platform === "win32" ? "node.exe" : "node";
 }
-function runNpmCommand(args, options = {}) {
+function runNpmCommand$1(args, options = {}) {
   if (process.platform === "win32") {
-    return runCommand("cmd.exe", ["/d", "/s", "/c", "npm", ...args], options);
+    return runCommand$1("cmd.exe", ["/d", "/s", "/c", "npm", ...args], options);
   }
-  return runCommand("npm", args, options);
+  return runCommand$1("npm", args, options);
 }
-function parseVersion(version) {
+function parseVersion$1(version) {
   return version.replace(/^v/, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
 }
-function compareVersions(a, b) {
-  const left = parseVersion(a);
-  const right = parseVersion(b);
+function compareVersions$1(a, b) {
+  const left = parseVersion$1(a);
+  const right = parseVersion$1(b);
   const length = Math.max(left.length, right.length);
   for (let i = 0; i < length; i += 1) {
     const diff = (left[i] || 0) - (right[i] || 0);
@@ -207,7 +207,7 @@ function compareVersions(a, b) {
   }
   return 0;
 }
-function formatError(error) {
+function formatError$1(error) {
   const err = error;
   const detail = (err.stderr || err.stdout || err.message || String(error)).trim();
   return detail.split(/\r?\n/).filter(Boolean).slice(-3).join("\n");
@@ -241,7 +241,7 @@ async function getInstalledVersion(packageRoot) {
   return packageJson?.version;
 }
 async function getLatestVersion(packageRoot) {
-  const { stdout } = await runNpmCommand(
+  const { stdout } = await runNpmCommand$1(
     ["view", PI_SDK_PACKAGE, "version", "--json"],
     { cwd: packageRoot, timeout: 15e3 }
   );
@@ -256,11 +256,11 @@ async function getLatestVersion(packageRoot) {
 }
 async function getNodeStatus() {
   try {
-    const { stdout } = await runCommand(nodeCommand(), ["-v"], { timeout: 5e3 });
+    const { stdout } = await runCommand$1(nodeCommand(), ["-v"], { timeout: 5e3 });
     const nodeVersion = stdout.trim().replace(/^v/, "");
     return {
       nodeVersion,
-      nodeOk: compareVersions(nodeVersion, MIN_NODE_VERSION) >= 0
+      nodeOk: compareVersions$1(nodeVersion, MIN_NODE_VERSION) >= 0
     };
   } catch {
     return { nodeOk: false };
@@ -275,9 +275,9 @@ async function getPiSDKStatus() {
   try {
     latestVersion = await getLatestVersion(packageRoot);
   } catch (err) {
-    error = `无法检查最新版本：${formatError(err)}`;
+    error = `无法检查最新版本：${formatError$1(err)}`;
   }
-  const updateAvailable = !!(currentVersion && latestVersion && compareVersions(currentVersion, latestVersion) < 0);
+  const updateAvailable = !!(currentVersion && latestVersion && compareVersions$1(currentVersion, latestVersion) < 0);
   return {
     installed: !!currentVersion,
     currentVersion,
@@ -289,11 +289,11 @@ async function getPiSDKStatus() {
     error
   };
 }
-let updateInProgress = false;
+let updateInProgress$1 = false;
 function registerPiSDKHandlers() {
   electron.ipcMain.handle("pi-sdk:getStatus", async () => getPiSDKStatus());
   electron.ipcMain.handle("pi-sdk:update", async () => {
-    if (updateInProgress) {
+    if (updateInProgress$1) {
       return { success: false, error: "Pi SDK 正在更新中" };
     }
     const packageRoot = await findPackageRoot();
@@ -303,18 +303,195 @@ function registerPiSDKHandlers() {
     if (electron.app.isPackaged) {
       return { success: false, error: "打包版暂不支持自动更新 Pi SDK" };
     }
-    updateInProgress = true;
+    updateInProgress$1 = true;
     try {
-      await runNpmCommand(
+      await runNpmCommand$1(
         ["install", `${PI_SDK_PACKAGE}@latest`],
         { cwd: packageRoot, timeout: 18e4 }
       );
       return { success: true, status: await getPiSDKStatus() };
     } catch (err) {
-      return { success: false, error: formatError(err), status: await getPiSDKStatus() };
+      return { success: false, error: formatError$1(err), status: await getPiSDKStatus() };
     } finally {
-      updateInProgress = false;
+      updateInProgress$1 = false;
     }
+  });
+}
+const CLI_AGENTS = {
+  opencode: {
+    command: "opencode",
+    packageName: "opencode-ai",
+    displayName: "OpenCode"
+  },
+  droid: {
+    command: "droid",
+    packageName: "droid",
+    displayName: "Factory Droid"
+  }
+};
+const updateInProgress = /* @__PURE__ */ new Set();
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    child_process.execFile(
+      command,
+      args,
+      {
+        cwd: options.cwd,
+        encoding: "utf8",
+        timeout: options.timeout ?? 15e3,
+        maxBuffer: 1024 * 1024 * 4
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const commandError = error;
+          commandError.stdout = stdout;
+          commandError.stderr = stderr;
+          reject(commandError);
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
+  });
+}
+function runShellCommand(command, args, options = {}) {
+  if (process.platform === "win32") {
+    return runCommand("cmd.exe", ["/d", "/s", "/c", command, ...args], options);
+  }
+  return runCommand(command, args, options);
+}
+function runNpmCommand(args, options = {}) {
+  return runShellCommand("npm", args, options);
+}
+function parseVersion(version) {
+  return version.replace(/^v/, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+function compareVersions(a, b) {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+function formatError(error) {
+  const err = error;
+  const detail = (err.stderr || err.stdout || err.message || String(error)).trim();
+  return detail.split(/\r?\n/).filter(Boolean).slice(-3).join("\n");
+}
+function extractVersion(output) {
+  return output.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
+}
+function splitCommandPaths(output) {
+  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+async function commandExists(command) {
+  try {
+    const lookupCommand = process.platform === "win32" ? "where.exe" : "which";
+    const lookupArgs = process.platform === "win32" ? [command] : ["-a", command];
+    const { stdout } = await runCommand(lookupCommand, lookupArgs, { timeout: 5e3 });
+    return splitCommandPaths(stdout).some((path2) => !path2.includes("node_modules"));
+  } catch {
+    return false;
+  }
+}
+async function getCommandVersion(command) {
+  try {
+    const { stdout, stderr } = await runShellCommand(command, ["--version"], { timeout: 5e3 });
+    return extractVersion(`${stdout}
+${stderr}`);
+  } catch {
+    return void 0;
+  }
+}
+async function getLatestPackageVersion(packageName) {
+  const { stdout } = await runNpmCommand(["view", packageName, "version", "--json"], {
+    timeout: 15e3
+  });
+  const raw = stdout.trim();
+  if (!raw) return void 0;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string" ? parsed : void 0;
+  } catch {
+    return raw.replace(/^"|"$/g, "");
+  }
+}
+async function getCliAgentStatus(config) {
+  const installed = await commandExists(config.command);
+  if (!installed) {
+    return {
+      installed: false,
+      updateAvailable: false,
+      canUpdate: false
+    };
+  }
+  const currentVersion = await getCommandVersion(config.command);
+  let latestVersion;
+  let error;
+  try {
+    latestVersion = await getLatestPackageVersion(config.packageName);
+  } catch (err) {
+    error = `无法检查 ${config.displayName} 最新版本：${formatError(err)}`;
+  }
+  const canUpdate = await commandExists("npm");
+  const updateAvailable = !!(currentVersion && latestVersion && compareVersions(currentVersion, latestVersion) < 0);
+  return {
+    installed: true,
+    currentVersion,
+    latestVersion,
+    updateAvailable,
+    canUpdate,
+    error
+  };
+}
+async function getAgentStatus(agentId) {
+  const config = CLI_AGENTS[agentId];
+  if (!config) {
+    return {
+      installed: false,
+      updateAvailable: false,
+      canUpdate: false,
+      error: `不支持的 agent: ${agentId}`
+    };
+  }
+  return getCliAgentStatus(config);
+}
+async function updateAgent(agentId) {
+  const config = CLI_AGENTS[agentId];
+  if (!config) {
+    return { success: false, error: `不支持的 agent: ${agentId}` };
+  }
+  if (updateInProgress.has(agentId)) {
+    return { success: false, error: `${config.displayName} 正在更新中` };
+  }
+  if (!await commandExists("npm")) {
+    return {
+      success: false,
+      error: "未找到 npm，无法自动更新 CLI agent",
+      status: await getAgentStatus(agentId)
+    };
+  }
+  updateInProgress.add(agentId);
+  try {
+    await runNpmCommand(["install", "-g", `${config.packageName}@latest`], {
+      timeout: 18e4
+    });
+    return { success: true, status: await getAgentStatus(agentId) };
+  } catch (err) {
+    return { success: false, error: formatError(err), status: await getAgentStatus(agentId) };
+  } finally {
+    updateInProgress.delete(agentId);
+  }
+}
+function registerAgentStatusHandlers() {
+  electron.ipcMain.handle("agent:getStatus", async (_event, agentId) => {
+    return getAgentStatus(agentId);
+  });
+  electron.ipcMain.handle("agent:update", async (_event, agentId) => {
+    return updateAgent(agentId);
   });
 }
 const STREAM_FLUSH_INTERVAL_MS = 50;
@@ -417,7 +594,7 @@ const TOOL_KIND_ALIASES = {
   search_text: ["grep", "rg", "search", "search_text", "content_search"],
   web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
   web_search: ["websearch", "web_search", "search_web"],
-  question: ["ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"]
+  question: ["question", "questionnaire", "ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"]
 };
 const normalizeName = (value) => String(value || "").trim().toLowerCase();
 const getNestedValue = (value, path2) => {
@@ -682,7 +859,10 @@ const buildDiffsFromToolEvent = (payload) => {
   }];
 };
 const normalizeQuestionProcessEvent = (data) => {
+  const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
   const prompt = data.title || data.question || data.prompt || data.message || data.placeholder || findFirstString(data, [["detail", "title"], ["detail", "message"], ["detail", "question"], ["detail", "prompt"]]);
+  const questions = data.questions || detailObject.questions || data.args?.questions || data.input?.questions;
+  const options = data.options || detailObject.options || data.args?.options || data.input?.options;
   const detail = prompt || unwrapToolText(data.args) || unwrapToolText(data.input) || (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
   return {
     type: "process_event",
@@ -692,6 +872,10 @@ const normalizeQuestionProcessEvent = (data) => {
     method: data.method,
     title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
+    prompt: prompt || void 0,
+    question: data.question || detailObject.question || void 0,
+    questions,
+    options,
     state: data.state || "running"
   };
 };
@@ -1646,6 +1830,8 @@ class PiSDKAgent {
   pendingUIRequestIds = /* @__PURE__ */ new Set();
   turnFallbackTimer = null;
   isAborting = false;
+  activePromptIds = /* @__PURE__ */ new Set();
+  turnActive = false;
   get sessionFilePath() {
     return this._sessionFilePath;
   }
@@ -1731,12 +1917,16 @@ class PiSDKAgent {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
     this.emitEvent({ type: "message_start", role: "user", content: message });
-    this.sendWorkerCommand({ type: "prompt", message, images });
+    this.beginTurn();
+    const promptId = this.sendWorkerCommand({ type: "prompt", message, images });
+    this.activePromptIds.add(promptId);
   }
   async abort() {
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
     this.eventBuffer.clear();
     this.clearTurnFallback();
     this.emitEvent({ type: "thinking_end" });
@@ -1824,10 +2014,7 @@ class PiSDKAgent {
         this.pendingResponses.clear();
         break;
       case "agent_start":
-        this.clearTurnFallback();
-        this.streamedText = false;
-        this.pendingAssistantText = "";
-        this.emitEvent({ type: "stream_start", role: "assistant" });
+        this.beginTurn();
         break;
       case "message_update": {
         this.clearTurnFallback();
@@ -1882,10 +2069,15 @@ class PiSDKAgent {
       case "extension_ui_request":
         this.handleUIRequest(data.request);
         break;
-      case "agent_end":
+      case "prompt_done":
+        if (data.id) this.activePromptIds.delete(String(data.id));
         this.completeTurn();
         break;
+      case "agent_end":
+        if (this.activePromptIds.size === 0) this.completeTurn();
+        break;
       case "error":
+        if (data.id) this.activePromptIds.delete(String(data.id));
         this.emitEvent({
           type: "process_event",
           entryType: "error",
@@ -1910,6 +2102,7 @@ class PiSDKAgent {
       title: request.method === "custom" && request.kind === "ask_user_question" ? "请选择答案" : request.title || request.message || "正在询问用户",
       detail: request,
       questions: request.method === "custom" ? request.questions : void 0,
+      toolName: request.toolName,
       state: "running"
     }));
   }
@@ -1935,8 +2128,18 @@ class PiSDKAgent {
       if (this.pendingAssistantText || this.streamedText) this.completeTurn();
     }, delayMs);
   }
+  beginTurn() {
+    this.clearTurnFallback();
+    if (this.turnActive) return;
+    this.turnActive = true;
+    this.streamedText = false;
+    this.pendingAssistantText = "";
+    this.emitEvent({ type: "stream_start", role: "assistant" });
+  }
   completeTurn() {
+    if (!this.turnActive) return;
     if (this.pendingUIRequestIds.size > 0) return;
+    if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
     this.eventBuffer.flush();
     if (!this.streamedText && this.pendingAssistantText) {
@@ -1947,12 +2150,15 @@ class PiSDKAgent {
     this.emitEvent({ type: "agent_end" });
     this.pendingAssistantText = "";
     this.streamedText = false;
+    this.turnActive = false;
   }
   finishAbortState() {
     this.isAborting = false;
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
     this.eventBuffer.clear();
     this.clearTurnFallback();
   }
@@ -2130,6 +2336,7 @@ electron.app.whenReady().then(() => {
   registerFileHandlers();
   registerStoreHandlers();
   registerPiSDKHandlers();
+  registerAgentStatusHandlers();
   registerAgentHandlers(() => mainWindow);
   electron.app.on("activate", () => {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();

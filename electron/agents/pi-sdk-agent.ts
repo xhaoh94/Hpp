@@ -41,6 +41,8 @@ export class PiSDKAgent {
   private pendingUIRequestIds = new Set<string>();
   private turnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private isAborting = false;
+  private activePromptIds = new Set<string>();
+  private turnActive = false;
 
   constructor(private readonly hppSessionId = "default") {
     this.eventBuffer = new AgentEventBuffer(hppSessionId);
@@ -141,13 +143,17 @@ export class PiSDKAgent {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
     this.emitEvent({ type: "message_start", role: "user", content: message });
-    this.sendWorkerCommand({ type: "prompt", message, images });
+    this.beginTurn();
+    const promptId = this.sendWorkerCommand({ type: "prompt", message, images });
+    this.activePromptIds.add(promptId);
   }
 
   async abort(): Promise<void> {
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
     this.eventBuffer.clear();
     this.clearTurnFallback();
     this.emitEvent({ type: "thinking_end" });
@@ -242,10 +248,7 @@ export class PiSDKAgent {
         this.pendingResponses.clear();
         break;
       case "agent_start":
-        this.clearTurnFallback();
-        this.streamedText = false;
-        this.pendingAssistantText = "";
-        this.emitEvent({ type: "stream_start", role: "assistant" });
+        this.beginTurn();
         break;
       case "message_update": {
         this.clearTurnFallback();
@@ -300,10 +303,15 @@ export class PiSDKAgent {
       case "extension_ui_request":
         this.handleUIRequest(data.request);
         break;
-      case "agent_end":
+      case "prompt_done":
+        if (data.id) this.activePromptIds.delete(String(data.id));
         this.completeTurn();
         break;
+      case "agent_end":
+        if (this.activePromptIds.size === 0) this.completeTurn();
+        break;
       case "error":
+        if (data.id) this.activePromptIds.delete(String(data.id));
         this.emitEvent({
           type: "process_event",
           entryType: "error",
@@ -329,6 +337,7 @@ export class PiSDKAgent {
       title: request.method === "custom" && request.kind === "ask_user_question" ? "请选择答案" : request.title || request.message || "正在询问用户",
       detail: request,
       questions: request.method === "custom" ? request.questions : undefined,
+      toolName: request.toolName,
       state: "running",
     }));
   }
@@ -357,8 +366,19 @@ export class PiSDKAgent {
     }, delayMs);
   }
 
+  private beginTurn() {
+    this.clearTurnFallback();
+    if (this.turnActive) return;
+    this.turnActive = true;
+    this.streamedText = false;
+    this.pendingAssistantText = "";
+    this.emitEvent({ type: "stream_start", role: "assistant" });
+  }
+
   private completeTurn() {
+    if (!this.turnActive) return;
     if (this.pendingUIRequestIds.size > 0) return;
+    if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
     this.eventBuffer.flush();
     if (!this.streamedText && this.pendingAssistantText) {
@@ -369,6 +389,7 @@ export class PiSDKAgent {
     this.emitEvent({ type: "agent_end" });
     this.pendingAssistantText = "";
     this.streamedText = false;
+    this.turnActive = false;
   }
 
   private finishAbortState() {
@@ -376,6 +397,8 @@ export class PiSDKAgent {
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
     this.eventBuffer.clear();
     this.clearTurnFallback();
   }

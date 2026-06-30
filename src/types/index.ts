@@ -17,7 +17,7 @@ export interface AgentEvent {
   [key: string]: unknown;
 }
 
-export interface PiSDKStatus {
+export interface AgentPackageStatus {
   installed: boolean;
   currentVersion?: string;
   latestVersion?: string;
@@ -28,6 +28,8 @@ export interface PiSDKStatus {
   nodeOk?: boolean;
   error?: string;
 }
+
+export type PiSDKStatus = AgentPackageStatus;
 
 export interface ElectronAPI {
   // Window controls
@@ -46,6 +48,8 @@ export interface ElectronAPI {
   isCommandAvailable: (command: string) => Promise<boolean>;
   piSDKGetStatus: () => Promise<PiSDKStatus>;
   piSDKUpdate: () => Promise<{ success: boolean; error?: string; status?: PiSDKStatus }>;
+  agentGetStatus: (agentId: string) => Promise<AgentPackageStatus>;
+  agentUpdate: (agentId: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
 
   // Data persistence
   loadData: (key: string) => Promise<unknown>;

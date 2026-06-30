@@ -4,6 +4,7 @@ import { is } from "@electron-toolkit/utils";
 import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
+import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers } from "./agents/agent-manager";
 
 // Enable IME support on Linux Wayland
@@ -55,6 +56,7 @@ app.whenReady().then(() => {
   registerFileHandlers();
   registerStoreHandlers();
   registerPiSDKHandlers();
+  registerAgentStatusHandlers();
   registerAgentHandlers(() => mainWindow);
 
   app.on("activate", () => {

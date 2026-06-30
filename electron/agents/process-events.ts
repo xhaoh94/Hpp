@@ -80,7 +80,7 @@ const TOOL_KIND_ALIASES: Record<Exclude<NormalizedToolKind, "unknown">, string[]
   search_text: ["grep", "rg", "search", "search_text", "content_search"],
   web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
   web_search: ["websearch", "web_search", "search_web"],
-  question: ["ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"],
+  question: ["question", "questionnaire", "ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"],
 };
 
 const normalizeName = (value: unknown) => String(value || "").trim().toLowerCase();
@@ -408,6 +408,7 @@ export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "pa
 };
 
 export const normalizeQuestionProcessEvent = (data: any) => {
+  const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
   const prompt =
     data.title ||
     data.question ||
@@ -415,6 +416,16 @@ export const normalizeQuestionProcessEvent = (data: any) => {
     data.message ||
     data.placeholder ||
     findFirstString(data, [["detail", "title"], ["detail", "message"], ["detail", "question"], ["detail", "prompt"]]);
+  const questions =
+    data.questions ||
+    detailObject.questions ||
+    data.args?.questions ||
+    data.input?.questions;
+  const options =
+    data.options ||
+    detailObject.options ||
+    data.args?.options ||
+    data.input?.options;
   const detail =
     prompt ||
     unwrapToolText(data.args) ||
@@ -429,6 +440,10 @@ export const normalizeQuestionProcessEvent = (data: any) => {
     method: data.method,
     title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
+    prompt: prompt || undefined,
+    question: data.question || detailObject.question || undefined,
+    questions,
+    options,
     state: data.state || "running",
   };
 };

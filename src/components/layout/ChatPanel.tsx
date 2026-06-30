@@ -211,44 +211,175 @@ const getUIResponsePayload = (response: {
 
 type AskQuestionOption = {
   label: string;
+  value?: string;
   description?: string;
   preview?: string;
   hasPreview?: boolean;
 };
 
 type AskQuestionPayload = {
+  id?: string;
   question: string;
   header?: string;
   multiSelect?: boolean;
   options?: AskQuestionOption[];
 };
 
+const getNestedQuestionValue = (value: any, path: string[]): any => {
+  let current = value;
+  for (const key of path) {
+    if (current === undefined || current === null) return undefined;
+    current = current[key];
+  }
+  return current;
+};
+
+const readFirstQuestionValue = (value: any, paths: string[][]): any => {
+  for (const path of paths) {
+    const found = getNestedQuestionValue(value, path);
+    if (found !== undefined && found !== null && found !== "") return found;
+  }
+  return undefined;
+};
+
+const parseJsonQuestionValue = (value: unknown): unknown => {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+};
+
+const normalizeAskOptions = (value: unknown): AskQuestionOption[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map((option: any, index) => {
+    if (typeof option === "string") return { label: option, value: option };
+    return {
+      label: String(option?.label ?? option?.value ?? option?.text ?? option?.title ?? `选项 ${index + 1}`),
+      value: option?.value === undefined || option?.value === null ? undefined : String(option.value),
+      description: typeof option?.description === "string" ? option.description : undefined,
+      preview: typeof option?.preview === "string" ? option.preview : undefined,
+      hasPreview: !!option?.hasPreview,
+    };
+  });
+};
+
 const normalizeAskQuestions = (value: unknown): AskQuestionPayload[] => {
-  const rawQuestions = Array.isArray(value)
-    ? value
-    : value && typeof value === "object" && Array.isArray((value as any).questions)
-      ? (value as any).questions
+  const parsedValue = parseJsonQuestionValue(value);
+  const rawQuestions = Array.isArray(parsedValue)
+    ? parsedValue
+    : parsedValue && typeof parsedValue === "object" && Array.isArray((parsedValue as any).questions)
+      ? (parsedValue as any).questions
       : [];
 
-  return rawQuestions.map((raw: any, index) => {
-    const options = Array.isArray(raw?.options)
-      ? raw.options.map((option: any) => {
-          if (typeof option === "string") return { label: option };
-          return {
-            label: String(option?.label ?? option?.value ?? option?.text ?? `选项 ${index + 1}`),
-            description: typeof option?.description === "string" ? option.description : undefined,
-            preview: typeof option?.preview === "string" ? option.preview : undefined,
-            hasPreview: !!option?.hasPreview,
-          };
-        })
-      : [];
+  if (rawQuestions.length === 0 && parsedValue && typeof parsedValue === "object") {
+    const raw = parsedValue as any;
+    const question = readFirstQuestionValue(raw, [
+      ["question"],
+      ["title"],
+      ["prompt"],
+      ["message"],
+      ["placeholder"],
+      ["detail", "question"],
+      ["detail", "title"],
+      ["detail", "prompt"],
+      ["detail", "message"],
+      ["params", "question"],
+      ["params", "prompt"],
+      ["params", "message"],
+    ]);
+    const options = readFirstQuestionValue(raw, [
+      ["options"],
+      ["choices"],
+      ["items"],
+      ["detail", "options"],
+      ["detail", "choices"],
+      ["params", "options"],
+      ["params", "choices"],
+    ]);
+    if (question || Array.isArray(options)) {
+      return [{
+        id: typeof raw.id === "string" ? raw.id : undefined,
+        question: String(question || "请选择答案"),
+        header: typeof raw.header === "string" ? raw.header : undefined,
+        multiSelect: !!(raw.multiSelect ?? raw.multiple ?? raw.detail?.multiSelect ?? raw.params?.multiSelect),
+        options: normalizeAskOptions(options),
+      }];
+    }
+  }
+
+  if (rawQuestions.length === 0 && typeof parsedValue === "string" && parsedValue.trim()) {
+    return [{ question: parsedValue.trim(), options: [] }];
+  }
+
+  return rawQuestions.map((raw: any, questionIndex) => {
+    const options = normalizeAskOptions(raw?.options ?? raw?.choices);
     return {
-      question: String(raw?.question ?? raw?.title ?? raw?.prompt ?? `问题 ${index + 1}`),
-      header: typeof raw?.header === "string" ? raw.header : undefined,
-      multiSelect: !!raw?.multiSelect,
+      id: typeof raw?.id === "string" ? raw.id : undefined,
+      question: String(raw?.question ?? raw?.prompt ?? raw?.title ?? raw?.message ?? `问题 ${questionIndex + 1}`),
+      header: typeof raw?.label === "string" ? raw.label : typeof raw?.header === "string" ? raw.header : undefined,
+      multiSelect: !!(raw?.multiSelect ?? raw?.multiple),
       options,
     };
   });
+};
+
+const normalizeAskQuestionsFromCandidates = (...values: unknown[]): AskQuestionPayload[] => {
+  for (const value of values) {
+    const questions = normalizeAskQuestions(value);
+    if (questions.length > 0) return questions;
+  }
+
+  const optionSource = values.find((value: any) =>
+    Array.isArray(value?.options) ||
+    Array.isArray(value?.choices) ||
+    Array.isArray(value?.detail?.options) ||
+    Array.isArray(value?.params?.options)
+  ) as any;
+  const promptSource = values.find((value: any) =>
+    typeof value === "string" ||
+    typeof value?.question === "string" ||
+    typeof value?.prompt === "string" ||
+    typeof value?.message === "string" ||
+    typeof value?.title === "string" ||
+    typeof value?.detail?.question === "string" ||
+    typeof value?.detail?.prompt === "string" ||
+    typeof value?.detail?.message === "string" ||
+    typeof value?.detail?.title === "string"
+  ) as any;
+
+  const question = typeof promptSource === "string"
+    ? promptSource
+    : readFirstQuestionValue(promptSource, [
+        ["question"],
+        ["prompt"],
+        ["message"],
+        ["title"],
+        ["detail", "question"],
+        ["detail", "prompt"],
+        ["detail", "message"],
+        ["detail", "title"],
+      ]);
+  const options = readFirstQuestionValue(optionSource, [
+    ["options"],
+    ["choices"],
+    ["detail", "options"],
+    ["detail", "choices"],
+    ["params", "options"],
+    ["params", "choices"],
+  ]);
+
+  if (question || Array.isArray(options)) {
+    return [{
+      question: String(question || "请选择答案"),
+      options: normalizeAskOptions(options),
+    }];
+  }
+
+  return [];
 };
 
 const getToolDetail = (event: any) => {
@@ -825,33 +956,52 @@ function QuestionnairePanel({
     const custom = customText[questionIndex]?.trim();
     if (custom) {
       return {
+        id: question.id || `question-${questionIndex + 1}`,
         questionIndex,
         question: question.question,
         kind: "custom",
         answer: custom,
+        value: custom,
+        label: custom,
+        wasCustom: true,
       };
     }
     if (question.multiSelect) {
+      const selectedLabels = multiChoice[questionIndex] || [];
+      const selectedOptions = (question.options || []).filter((option) => selectedLabels.includes(option.label));
       return {
+        id: question.id || `question-${questionIndex + 1}`,
         questionIndex,
         question: question.question,
         kind: "multi",
         answer: null,
-        selected: multiChoice[questionIndex] || [],
+        selected: selectedLabels,
+        selectedOptions,
+        values: selectedOptions.map((option) => option.value ?? option.label),
       };
     }
+    const selectedLabel = singleChoice[questionIndex] || null;
+    const selectedOption = selectedLabel
+      ? question.options?.find((option) => option.label === selectedLabel)
+      : undefined;
     return {
+      id: question.id || `question-${questionIndex + 1}`,
       questionIndex,
       question: question.question,
       kind: "option",
-      answer: singleChoice[questionIndex] || null,
+      answer: selectedOption?.value ?? selectedLabel,
+      value: selectedOption?.value ?? selectedLabel,
+      label: selectedLabel,
+      wasCustom: false,
+      index: selectedOption ? (question.options || []).findIndex((option) => option.label === selectedOption.label) + 1 : undefined,
+      selectedOption,
     };
   });
 
   const hasAnswer = questions.every((question, questionIndex) => {
     if (customText[questionIndex]?.trim()) return true;
     if (question.multiSelect) return (multiChoice[questionIndex] || []).length > 0;
-    if (!question.options || question.options.length === 0) return true;
+    if (!question.options || question.options.length === 0) return false;
     return !!singleChoice[questionIndex];
   });
 
@@ -988,6 +1138,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     thinkingBuffer: string;
     thinkingEntryId: string | null;
     processActive: boolean;
+    streamStarted: boolean;
     activeToolEntry: Record<string, string>;
     activeToolFile: Record<string, AgentProcessFile[]>;
     streamWatchdog: ReturnType<typeof setTimeout> | null;
@@ -996,7 +1147,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
-  const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.method === "ask_user_question" && pendingUIResponse.questions?.length
+  const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.questions?.length
     ? pendingUIResponse
     : null;
 
@@ -1194,6 +1345,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         thinkingBuffer: "",
         thinkingEntryId: null,
         processActive: false,
+        streamStarted: false,
         activeToolEntry: {},
         activeToolFile: {},
         streamWatchdog: null,
@@ -1263,7 +1415,30 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         method === "custom" && detail.kind === "ask_user_question"
           ? "ask_user_question"
           : method;
-      const questions = normalizeAskQuestions(event.questions ?? detail.questions ?? event.args?.questions ?? event.input?.questions);
+      const questions = normalizeAskQuestionsFromCandidates(
+        event.questions,
+        detail.questions,
+        event.args?.questions,
+        event.input?.questions,
+        event,
+        detail,
+        event.args,
+        event.input,
+        event.detail
+      );
+      const fallbackQuestion =
+        questions.length > 0
+          ? questions
+          : normalizeAskQuestionsFromCandidates(
+              event.question,
+              event.prompt,
+              event.message,
+              event.title,
+              detail.question,
+              detail.prompt,
+              detail.message,
+              detail.title
+            );
       return {
         sessionId,
         requestId: typeof event.requestId === "string"
@@ -1275,7 +1450,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               : undefined,
         method: normalizedMethod || undefined,
         entryId,
-        questions: questions.length > 0 ? questions : undefined,
+        questions: fallbackQuestion.length > 0 ? fallbackQuestion : [{ question: "请回答 Agent 的问题", options: [] }],
       };
     };
 
@@ -1321,6 +1496,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
       useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
       runtime.processActive = false;
+      runtime.streamStarted = false;
       runtime.activeToolEntry = {};
       runtime.activeToolFile = {};
       runtime.thinkingEntryId = null;
@@ -1361,6 +1537,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
       switch (event.type) {
         case "message_start":
+          if (!runtime.processActive) {
+            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+          }
           runtime.processActive = true;
           const messagePreview = event.content ?
             (event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content) :
@@ -1373,18 +1552,30 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           });
           break;
         case "stream_start":
+          const alreadyStarted = runtime.streamStarted;
           flushSync(() => {
-            runtime.streamBuffer = "";
-            runtime.thinkingBuffer = "";
-            runtime.thinkingEntryId = null;
+            if (!alreadyStarted) {
+              runtime.streamBuffer = "";
+              runtime.thinkingBuffer = "";
+              runtime.thinkingEntryId = null;
+            }
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
             runtime.processActive = true;
+            runtime.streamStarted = true;
             runtime.activeToolEntry = {};
             runtime.activeToolFile = {};
-            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+            if (!alreadyStarted) {
+              useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+            }
             if (currentSessionId) useProjectStore.getState().setAgentStatus(currentSessionId, "running");
           });
-          appendProcessEntry(currentSessionId, { type: "status", title: "正在分析请求并生成响应", state: "running" });
+          if (!alreadyStarted) {
+            appendProcessEntry(currentSessionId, {
+              type: "status",
+              title: "正在分析请求并生成响应",
+              state: "running",
+            });
+          }
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
@@ -1659,7 +1850,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
     const pendingResponse = activeQuestionnaire;
     const answerSummary = answers
-      .map((answer: any) => answer?.answer || (Array.isArray(answer?.selected) ? answer.selected.join(", ") : ""))
+      .map((answer: any) => answer?.label || answer?.answer || (Array.isArray(answer?.selected) ? answer.selected.join(", ") : ""))
       .filter(Boolean)
       .join("\n");
 
@@ -1681,6 +1872,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       method: pendingResponse.method,
       cancelled: false,
       result: { cancelled: false, answers },
+      value: answerSummary,
+      text: answerSummary,
       answers,
     });
 
@@ -1804,6 +1997,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
       if (runtime) {
         runtime.processActive = false;
+        runtime.streamStarted = false;
         runtime.activeToolEntry = {};
         runtime.activeToolFile = {};
       }
@@ -1862,6 +2056,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
     if (runtime) {
       runtime.processActive = false;
+      runtime.streamStarted = false;
       runtime.activeToolEntry = {};
       runtime.activeToolFile = {};
       runtime.streamBuffer = "";
@@ -2280,7 +2475,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               activeQuestionnaire
                 ? true
                 : isAwaitingUIResponse
-                ? !input.trim()
+                  ? !input.trim()
                 : !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0
             }
             className={`chat-send-btn ${currentSessionRunning && !isAwaitingUIResponse ? "abort" : ""}`}

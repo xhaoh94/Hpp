@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   isCommandAvailable: (command: string) => ipcRenderer.invoke("fs:isCommandAvailable", command),
   piSDKGetStatus: () => ipcRenderer.invoke("pi-sdk:getStatus"),
   piSDKUpdate: () => ipcRenderer.invoke("pi-sdk:update"),
+  agentGetStatus: (agentId: string) => ipcRenderer.invoke("agent:getStatus", agentId),
+  agentUpdate: (agentId: string) => ipcRenderer.invoke("agent:update", agentId),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),

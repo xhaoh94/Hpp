@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { AVAILABLE_AGENTS } from "@/lib/agents";
-import type { PiSDKStatus } from "@/types";
+import type { AgentPackageStatus, PiSDKStatus } from "@/types";
 import "./Settings.css";
 
 interface ShortcutConfig {
@@ -73,11 +73,14 @@ export function SettingsView() {
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
-  const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [piSDKStatus, setPiSDKStatus] = useState<PiSDKStatus | null>(null);
   const [piSDKChecking, setPiSDKChecking] = useState(false);
   const [piSDKUpdating, setPiSDKUpdating] = useState(false);
   const [piSDKUpdateError, setPiSDKUpdateError] = useState<string | null>(null);
+  const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentPackageStatus>>({});
+  const [agentChecking, setAgentChecking] = useState<Record<string, boolean>>({});
+  const [agentUpdating, setAgentUpdating] = useState<Record<string, boolean>>({});
+  const [agentUpdateErrors, setAgentUpdateErrors] = useState<Record<string, string>>({});
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
@@ -116,6 +119,43 @@ export function SettingsView() {
     }
   }, []);
 
+  const refreshAgentStatus = useCallback(async (agentId: string) => {
+    setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
+    try {
+      const status = await window.electronAPI.agentGetStatus(agentId);
+      setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
+      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
+    } catch (error) {
+      setAgentStatuses((prev) => ({
+        ...prev,
+        [agentId]: {
+          installed: false,
+          updateAvailable: false,
+          canUpdate: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      }));
+    } finally {
+      setAgentChecking((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
+
+  const handleAgentUpdate = useCallback(async (agentId: string) => {
+    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
+    setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
+    try {
+      const result = await window.electronAPI.agentUpdate(agentId);
+      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status }));
+      if (!result.success) {
+        setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
+      }
+    } catch (error) {
+      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
+
   // Load saved settings on mount
   useEffect(() => {
     window.electronAPI.loadData("settings").then((data: any) => {
@@ -135,16 +175,16 @@ export function SettingsView() {
     });
   }, []);
 
-  // Check which agents are installed
+  // Check agent package status
   useEffect(() => {
-    for (const agent of AVAILABLE_AGENTS) {
-      if (agent.runtime !== "cli" || !agent.command) continue;
-      window.electronAPI.isCommandAvailable(agent.command).then((installed) => {
-        setInstalledAgents((prev) => ({ ...prev, [agent.id]: installed }));
-      });
-    }
     refreshPiSDKStatus();
-  }, [refreshPiSDKStatus]);
+
+    // Check status for other agents
+    for (const agent of AVAILABLE_AGENTS) {
+      if (agent.id === "pi") continue;
+      refreshAgentStatus(agent.id);
+    }
+  }, [refreshPiSDKStatus, refreshAgentStatus]);
 
   // Save shortcuts when changed
   const saveShortcuts = (s: ShortcutConfig) => {
@@ -393,21 +433,36 @@ export function SettingsView() {
                 <div className="filter-group">
                   {AVAILABLE_AGENTS.map((agent) => {
                     const isPiSDKAgent = agent.id === "pi";
+                    const agentStatus = agentStatuses[agent.id];
                     const isInstalled = isPiSDKAgent
                       ? piSDKStatus?.installed === true
-                      : installedAgents[agent.id] === true;
-                    const isCheckingPi = isPiSDKAgent && (piSDKChecking || !piSDKStatus);
-                    const isUnavailable = !isInstalled && !isCheckingPi;
-                    const sdkVersionLabel = piSDKStatus?.currentVersion
-                      ? `SDK v${piSDKStatus.currentVersion}`
-                      : isCheckingPi ? "检查 SDK 中..." : "SDK 未安装";
+                      : agentStatus?.installed === true;
+                    const isChecking = isPiSDKAgent
+                      ? (piSDKChecking || !piSDKStatus)
+                      : agentChecking[agent.id];
+                    const isUnavailable = !isInstalled && !isChecking;
+                    const versionLabel = isPiSDKAgent
+                      ? piSDKStatus?.currentVersion
+                        ? `v${piSDKStatus.currentVersion}`
+                        : isChecking
+                          ? "检查中..."
+                          : isInstalled
+                            ? "版本未知"
+                            : "未安装"
+                      : agentStatus?.currentVersion
+                        ? `v${agentStatus.currentVersion}`
+                        : isChecking
+                          ? "检查中..."
+                          : isInstalled
+                            ? "版本未知"
+                            : "未安装";
                     return (
                     <div key={agent.id} className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`}>
                       <label className="agent-settings-main">
                         <input
                           type="checkbox"
                           checked={enabledAgents.includes(agent.id)}
-                          disabled={!isInstalled || isCheckingPi}
+                          disabled={!isInstalled || isChecking}
                           onChange={(e) => {
                             if (e.target.checked) {
                               setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
@@ -420,57 +475,52 @@ export function SettingsView() {
                         <span className="agent-settings-copy">
                           <span className="agent-settings-title-line">
                             <span className="agent-settings-name">{agent.name}</span>
-                            {isPiSDKAgent && (
-                              <span className={`agent-settings-badge ${piSDKStatus?.updateAvailable ? "agent-settings-badge-warning" : ""}`}>
-                                {sdkVersionLabel}
-                              </span>
-                            )}
-                            {isUnavailable && (
+                            <span className={`agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`}>
+                              {versionLabel}
+                            </span>
+                            {isUnavailable && versionLabel !== "未安装" && (
                               <span className="agent-settings-badge agent-settings-badge-warning">
                                 未安装
                               </span>
                             )}
+                            {(isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && (
+                              <span className="agent-settings-meta">
+                                最新 v{isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion}
+                              </span>
+                            )}
                           </span>
-                          <span className="agent-settings-desc">{agent.desc}</span>
-                          {isPiSDKAgent && piSDKStatus?.latestVersion && (
-                            <span className="agent-settings-meta">
-                              最新 v{piSDKStatus.latestVersion}
-                            </span>
-                          )}
                           {isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
                             <span className="agent-settings-error">
                               Node v{piSDKStatus.nodeVersion} 过低，需要 22.19.0 或更高版本
                             </span>
                           )}
-                          {isPiSDKAgent && (piSDKStatus?.error || piSDKUpdateError) && (
+                          {(isPiSDKAgent ? (piSDKStatus?.error || piSDKUpdateError) : (agentStatus?.error || agentUpdateErrors[agent.id])) && (
                             <span className="agent-settings-error">
-                              {piSDKUpdateError || piSDKStatus?.error}
+                              {isPiSDKAgent ? (piSDKUpdateError || piSDKStatus?.error) : (agentUpdateErrors[agent.id] || agentStatus?.error)}
                             </span>
                           )}
                         </span>
                       </label>
-                      {isPiSDKAgent && (
-                        <div className="agent-settings-actions">
-                          {piSDKStatus?.updateAvailable && (
-                            <button
-                              className="filter-add-btn agent-settings-update-btn"
-                              onClick={handlePiSDKUpdate}
-                              disabled={piSDKUpdating || !piSDKStatus.canUpdate}
-                              title={piSDKStatus.canUpdate ? "更新 Pi SDK" : "当前环境不支持自动更新 Pi SDK"}
-                            >
-                              {piSDKUpdating ? "更新中..." : "更新"}
-                            </button>
-                          )}
+                      <div className="agent-settings-actions">
+                        {((isPiSDKAgent && piSDKStatus?.updateAvailable) || (!isPiSDKAgent && agentStatus?.updateAvailable)) && (
                           <button
-                            className="btn-action agent-settings-refresh-btn"
-                            onClick={refreshPiSDKStatus}
-                            disabled={piSDKChecking || piSDKUpdating}
-                            title="重新检查 Pi SDK 版本"
+                            className="filter-add-btn agent-settings-update-btn"
+                            onClick={() => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id)}
+                            disabled={(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate)}
+                            title={(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新"}
                           >
-                            {piSDKChecking ? "检查中..." : "刷新"}
+                            {(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"}
                           </button>
-                        </div>
-                      )}
+                        )}
+                        <button
+                          className="btn-action agent-settings-refresh-btn"
+                          onClick={() => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id)}
+                          disabled={isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id])}
+                          title="重新检查版本"
+                        >
+                          {isChecking ? "检查中..." : "刷新"}
+                        </button>
+                      </div>
                     </div>
                   );
                   })}

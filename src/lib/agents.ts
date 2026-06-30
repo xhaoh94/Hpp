@@ -13,7 +13,16 @@ export function getInstallHint(command: string): string {
   switch (command) {
     case "pi": return "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest";
     case "opencode": return "npm install -g opencode-ai";
-    case "droid": return "curl -fsSL https://app.factory.ai/cli | sh";
+    case "droid": return "npm install -g droid";
     default: return `请安装 ${command}`;
+  }
+}
+
+export function getAgentUpdateCommand(agentId: string): string | null {
+  switch (agentId) {
+    case "pi": return "npm install @earendil-works/pi-coding-agent@latest";
+    case "opencode": return "npm install -g opencode-ai@latest";
+    case "droid": return "npm install -g droid@latest";
+    default: return null;
   }
 }
