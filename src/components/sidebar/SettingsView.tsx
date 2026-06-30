@@ -138,6 +138,7 @@ export function SettingsView() {
   // Check which agents are installed
   useEffect(() => {
     for (const agent of AVAILABLE_AGENTS) {
+      if (agent.runtime !== "cli" || !agent.command) continue;
       window.electronAPI.isCommandAvailable(agent.command).then((installed) => {
         setInstalledAgents((prev) => ({ ...prev, [agent.id]: installed }));
       });
@@ -391,11 +392,11 @@ export function SettingsView() {
                 </p>
                 <div className="filter-group">
                   {AVAILABLE_AGENTS.map((agent) => {
-                    const isPiAgent = agent.id === "pi";
-                    const isInstalled = isPiAgent
+                    const isPiSDKAgent = agent.id === "pi";
+                    const isInstalled = isPiSDKAgent
                       ? piSDKStatus?.installed === true
                       : installedAgents[agent.id] === true;
-                    const isCheckingPi = isPiAgent && (piSDKChecking || !piSDKStatus);
+                    const isCheckingPi = isPiSDKAgent && (piSDKChecking || !piSDKStatus);
                     const isUnavailable = !isInstalled && !isCheckingPi;
                     const sdkVersionLabel = piSDKStatus?.currentVersion
                       ? `SDK v${piSDKStatus.currentVersion}`
@@ -419,7 +420,7 @@ export function SettingsView() {
                         <span className="agent-settings-copy">
                           <span className="agent-settings-title-line">
                             <span className="agent-settings-name">{agent.name}</span>
-                            {isPiAgent && (
+                            {isPiSDKAgent && (
                               <span className={`agent-settings-badge ${piSDKStatus?.updateAvailable ? "agent-settings-badge-warning" : ""}`}>
                                 {sdkVersionLabel}
                               </span>
@@ -431,24 +432,24 @@ export function SettingsView() {
                             )}
                           </span>
                           <span className="agent-settings-desc">{agent.desc}</span>
-                          {isPiAgent && piSDKStatus?.latestVersion && (
+                          {isPiSDKAgent && piSDKStatus?.latestVersion && (
                             <span className="agent-settings-meta">
                               最新 v{piSDKStatus.latestVersion}
                             </span>
                           )}
-                          {isPiAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
+                          {isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
                             <span className="agent-settings-error">
                               Node v{piSDKStatus.nodeVersion} 过低，需要 22.19.0 或更高版本
                             </span>
                           )}
-                          {isPiAgent && (piSDKStatus?.error || piSDKUpdateError) && (
+                          {isPiSDKAgent && (piSDKStatus?.error || piSDKUpdateError) && (
                             <span className="agent-settings-error">
                               {piSDKUpdateError || piSDKStatus?.error}
                             </span>
                           )}
                         </span>
                       </label>
-                      {isPiAgent && (
+                      {isPiSDKAgent && (
                         <div className="agent-settings-actions">
                           {piSDKStatus?.updateAvailable && (
                             <button

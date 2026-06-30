@@ -281,7 +281,7 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
   uiBridge = new DesktopUIBridge(eventBus);
   await session.bindExtensions({
     uiContext: uiBridge.uiContext,
-    mode: "rpc",
+    mode: "json",
     commandContextActions: buildCommandContextActions(session),
   });
   unsubscribe = session.subscribe(handleSessionEvent);

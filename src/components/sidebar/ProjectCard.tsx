@@ -41,6 +41,14 @@ export function ProjectCard({ project }: Props) {
   // Check which agents are installed
   useEffect(() => {
     for (const agent of AVAILABLE_AGENTS) {
+      if (agent.id === "pi") {
+        window.electronAPI.piSDKGetStatus().then((status) => {
+          setInstalledAgents((prev) => ({ ...prev, [agent.id]: status.installed }));
+        });
+        continue;
+      }
+
+      if (agent.runtime !== "cli" || !agent.command) continue;
       window.electronAPI.isCommandAvailable(agent.command).then((ok) => {
         setInstalledAgents((prev) => ({ ...prev, [agent.id]: ok }));
       });
@@ -65,7 +73,7 @@ export function ProjectCard({ project }: Props) {
     if (installedAgents[agentId] !== true) {
       const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
       const name = agent?.name || agentId;
-      const cmd = agent?.command || agentId;
+      const cmd = agent?.id === "pi" ? "pi" : agent?.command || agentId;
       alert(`${name} 未安装，请先安装：\n\n${getInstallHint(cmd)}`);
       return;
     }

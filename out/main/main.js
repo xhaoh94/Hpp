@@ -6,8 +6,8 @@ const promises = require("fs/promises");
 const os = require("os");
 const child_process = require("child_process");
 const fs = require("fs");
-const string_decoder = require("string_decoder");
 const http = require("http");
+const string_decoder = require("string_decoder");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -1639,7 +1639,7 @@ class PiSDKAgent {
   _sessionFilePath = null;
   eventBuffer;
   pendingResponses = /* @__PURE__ */ new Map();
-  rpcId = 0;
+  requestId = 0;
   models = [];
   pendingAssistantText = "";
   streamedText = false;
@@ -1914,7 +1914,7 @@ class PiSDKAgent {
     }));
   }
   sendWorkerCommand(command, onResponse) {
-    const id = command.id || `sdk-${++this.rpcId}`;
+    const id = command.id || `sdk-${++this.requestId}`;
     const fullCommand = { ...command, id };
     if (onResponse) this.pendingResponses.set(id, onResponse);
     this.process?.stdin?.write(`${JSON.stringify(fullCommand)}

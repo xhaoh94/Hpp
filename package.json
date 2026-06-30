@@ -23,7 +23,7 @@
     "vite": "^6.4.3"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.9",
+    "@earendil-works/pi-coding-agent": "^0.80.2",
     "@electron-toolkit/utils": "^4.0.0",
     "electron-vite": "^5.0.0",
     "lucide-react": "^1.21.0",

@@ -34,7 +34,7 @@ export class PiSDKAgent {
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
   private pendingResponses = new Map<string, (data: any) => void>();
-  private rpcId = 0;
+  private requestId = 0;
   private models: AgentModel[] = [];
   private pendingAssistantText = "";
   private streamedText = false;
@@ -334,7 +334,7 @@ export class PiSDKAgent {
   }
 
   private sendWorkerCommand(command: any, onResponse?: (data: any) => void): string {
-    const id = command.id || `sdk-${++this.rpcId}`;
+    const id = command.id || `sdk-${++this.requestId}`;
     const fullCommand = { ...command, id };
     if (onResponse) this.pendingResponses.set(id, onResponse);
     this.process?.stdin?.write(`${JSON.stringify(fullCommand)}\n`);
