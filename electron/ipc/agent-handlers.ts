@@ -1,5 +1,5 @@
 import { ipcMain } from "electron";
-import { execFile } from "child_process";
+import { execFile, exec } from "child_process";
 
 export interface AgentStatus {
   installed: boolean;
@@ -75,10 +75,38 @@ function runShellCommand(
   args: string[],
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
-  if (process.platform === "win32") {
-    return runCommand("cmd.exe", ["/d", "/s", "/c", command, ...args], options);
-  }
-  return runCommand(command, args, options);
+  // Join command and args into a single shell string.
+  // Using exec() ensures proper PATH resolution and shell semantics on all platforms.
+  const parts = [command, ...args].map((a) => {
+    // Quote arguments containing spaces
+    if (/[\s"]/.test(a)) {
+      return JSON.stringify(a);
+    }
+    return a;
+  });
+  const fullCommand = parts.join(" ");
+
+  return new Promise((resolve, reject) => {
+    exec(
+      fullCommand,
+      {
+        cwd: options.cwd,
+        encoding: "utf8",
+        timeout: options.timeout ?? 15000,
+        maxBuffer: 1024 * 1024 * 4,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const commandError = error as CommandError;
+          commandError.stdout = stdout;
+          commandError.stderr = stderr;
+          reject(commandError);
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
+  });
 }
 
 function runNpmCommand(

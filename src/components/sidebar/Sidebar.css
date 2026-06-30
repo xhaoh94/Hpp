@@ -362,6 +362,15 @@
   margin-top: 6px;
 }
 
+.project-terminals-loading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .project-terminal-btn {
   display: flex;
   align-items: center;

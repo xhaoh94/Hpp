@@ -8,9 +8,19 @@ let session = null;
 let uiBridge = null;
 let unsubscribe = null;
 let projectPath = "";
+let activePromptId = null;
+const completedPromptIds = new Set();
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
+};
+
+const finishPrompt = (id) => {
+  if (!id || completedPromptIds.has(id)) return;
+  completedPromptIds.add(id);
+  if (activePromptId === id) activePromptId = null;
+  send({ type: "prompt_done", id });
+  setTimeout(() => completedPromptIds.delete(id), 60000);
 };
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -299,6 +309,8 @@ const buildCommandContextActions = (sess) => ({
 });
 
 const disposeSession = () => {
+  activePromptId = null;
+  completedPromptIds.clear();
   unsubscribe?.();
   unsubscribe = null;
   uiBridge?.dispose();
@@ -344,6 +356,10 @@ const handleSessionEvent = (event) => {
       break;
     case "agent_end":
       send({ type: "agent_end" });
+      {
+        const promptId = activePromptId;
+        setTimeout(() => finishPrompt(promptId), 250);
+      }
       break;
     case "message_update": {
       const assistantEvent = event.assistantMessageEvent;
@@ -417,12 +433,15 @@ const handleCommand = async (command) => {
         break;
       case "prompt":
         if (!session) throw new Error("Pi SDK session is not initialized");
+        activePromptId = command.id;
+        completedPromptIds.delete(command.id);
         send({ type: "accepted", id: command.id });
         session.prompt(command.message, { images: command.images })
           .then(() => {
-            send({ type: "prompt_done", id: command.id });
+            finishPrompt(command.id);
           })
           .catch((error) => {
+            if (activePromptId === command.id) activePromptId = null;
             send({ type: "error", id: command.id, error: error?.message || String(error) });
           });
         break;

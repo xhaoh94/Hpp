@@ -43,6 +43,7 @@ export class PiSDKAgent {
   private isAborting = false;
   private activePromptIds = new Set<string>();
   private turnActive = false;
+  private turnToken = 0;
 
   constructor(private readonly hppSessionId = "default") {
     this.eventBuffer = new AgentEventBuffer(hppSessionId);
@@ -142,10 +143,18 @@ export class PiSDKAgent {
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
+
+    if (this.turnActive) {
+      this.completeTurn(true);
+    } else {
+      this.prepareNewTurn();
+    }
+
+    const promptId = this.createCommandId();
+    this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: message });
     this.beginTurn();
-    const promptId = this.sendWorkerCommand({ type: "prompt", message, images });
-    this.activePromptIds.add(promptId);
+    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
   }
 
   async abort(): Promise<void> {
@@ -251,6 +260,8 @@ export class PiSDKAgent {
         this.beginTurn();
         break;
       case "message_update": {
+        if (!this.turnActive && this.activePromptIds.size > 0) this.beginTurn();
+        if (!this.turnActive) break;
         this.clearTurnFallback();
         const assistantEvent = data.assistantMessageEvent;
         if (assistantEvent?.type === "text_delta") {
@@ -262,11 +273,13 @@ export class PiSDKAgent {
         break;
       }
       case "message_end":
+        if (!this.turnActive && this.activePromptIds.size === 0) break;
+        if (!this.turnActive) this.beginTurn();
         if (data.message?.role === "assistant") {
           if (data.message.thinking) this.emitEvent({ type: "thinking_end" });
           if (data.message.text) {
             this.pendingAssistantText = data.message.text;
-            this.scheduleTurnFallback(4000);
+            this.scheduleTurnFallback(4000, true);
           }
         }
         break;
@@ -304,14 +317,17 @@ export class PiSDKAgent {
         this.handleUIRequest(data.request);
         break;
       case "prompt_done":
-        if (data.id) this.activePromptIds.delete(String(data.id));
-        this.completeTurn();
+        if (data.id && !this.activePromptIds.delete(String(data.id))) break;
+        if (!data.id) this.activePromptIds.clear();
+        this.pendingUIRequestIds.clear();
+        this.completeTurn(true);
         break;
       case "agent_end":
-        if (this.activePromptIds.size === 0) this.completeTurn();
+        if (this.activePromptIds.size === 0) this.scheduleTurnFallback(250, true);
         break;
       case "error":
-        if (data.id) this.activePromptIds.delete(String(data.id));
+        if (data.id && !this.activePromptIds.delete(String(data.id))) break;
+        this.pendingUIRequestIds.clear();
         this.emitEvent({
           type: "process_event",
           entryType: "error",
@@ -320,7 +336,7 @@ export class PiSDKAgent {
           detail: data.error || "Unknown error",
           state: "error",
         });
-        this.completeTurn();
+        this.completeTurn(true);
         break;
     }
   }
@@ -343,11 +359,15 @@ export class PiSDKAgent {
   }
 
   private sendWorkerCommand(command: any, onResponse?: (data: any) => void): string {
-    const id = command.id || `sdk-${++this.requestId}`;
+    const id = command.id || this.createCommandId();
     const fullCommand = { ...command, id };
     if (onResponse) this.pendingResponses.set(id, onResponse);
     this.process?.stdin?.write(`${JSON.stringify(fullCommand)}\n`);
     return id;
+  }
+
+  private createCommandId(): string {
+    return `sdk-${++this.requestId}`;
   }
 
   private clearTurnFallback() {
@@ -357,26 +377,33 @@ export class PiSDKAgent {
     }
   }
 
-  private scheduleTurnFallback(delayMs: number) {
-    if (this.pendingUIRequestIds.size > 0) return;
+  private scheduleTurnFallback(delayMs: number, force = false) {
+    if (!force && this.pendingUIRequestIds.size > 0) return;
     this.clearTurnFallback();
+    const token = this.turnToken;
     this.turnFallbackTimer = setTimeout(() => {
       this.turnFallbackTimer = null;
-      if (this.pendingAssistantText || this.streamedText) this.completeTurn();
+      if (token !== this.turnToken) return;
+      if (force || this.pendingAssistantText || this.streamedText) this.completeTurn(force);
     }, delayMs);
   }
 
   private beginTurn() {
     this.clearTurnFallback();
     if (this.turnActive) return;
+    this.turnToken += 1;
     this.turnActive = true;
     this.streamedText = false;
     this.pendingAssistantText = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
   }
 
-  private completeTurn() {
+  private completeTurn(force = false) {
     if (!this.turnActive) return;
+    if (force) {
+      this.pendingUIRequestIds.clear();
+      this.activePromptIds.clear();
+    }
     if (this.pendingUIRequestIds.size > 0) return;
     if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
@@ -385,11 +412,23 @@ export class PiSDKAgent {
       this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
       this.streamedText = true;
     }
-    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
+    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
     this.emitEvent({ type: "agent_end" });
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.turnActive = false;
+    this.turnToken += 1;
+  }
+
+  private prepareNewTurn() {
+    this.clearTurnFallback();
+    this.eventBuffer.flush();
+    this.pendingAssistantText = "";
+    this.streamedText = false;
+    this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
+    this.turnToken += 1;
   }
 
   private finishAbortState() {
@@ -399,6 +438,7 @@ export class PiSDKAgent {
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
+    this.turnToken += 1;
     this.eventBuffer.clear();
     this.clearTurnFallback();
   }

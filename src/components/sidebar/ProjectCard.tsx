@@ -28,31 +28,41 @@ export function ProjectCard({ project }: Props) {
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [showAddAgent, setShowAddAgent] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // Load enabled agents from settings
+  // Load enabled agents & check installation status, then show buttons
   useEffect(() => {
-    window.electronAPI.loadData("settings").then((data: any) => {
-      if (data?.general?.enabledAgents) {
-        setEnabledAgents(data.general.enabledAgents);
-      }
-    });
-  }, []);
-
-  // Check which agents are installed
-  useEffect(() => {
-    for (const agent of AVAILABLE_AGENTS) {
-      if (agent.id === "pi") {
-        window.electronAPI.piSDKGetStatus().then((status) => {
-          setInstalledAgents((prev) => ({ ...prev, [agent.id]: status.installed }));
-        });
-        continue;
-      }
-
-      if (agent.runtime !== "cli" || !agent.command) continue;
-      window.electronAPI.isCommandAvailable(agent.command).then((ok) => {
-        setInstalledAgents((prev) => ({ ...prev, [agent.id]: ok }));
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      // Load settings
+      const data: any = await window.electronAPI.loadData("settings");
+      if (cancelled) return;
+      const enabled = data?.general?.enabledAgents || ["pi"];
+      setEnabledAgents(enabled);
+      // Check all agents in parallel
+      const checks = AVAILABLE_AGENTS.map(async (agent) => {
+        if (agent.id === "pi") {
+          const status = await window.electronAPI.piSDKGetStatus();
+          return { id: agent.id, installed: status.installed };
+        }
+        if (agent.runtime !== "cli" || !agent.command) {
+          return { id: agent.id, installed: false };
+        }
+        const ok = await window.electronAPI.isCommandAvailable(agent.command);
+        return { id: agent.id, installed: ok };
       });
-    }
+      const results = await Promise.all(checks);
+      if (cancelled) return;
+      const installed: Record<string, boolean> = {};
+      for (const r of results) {
+        installed[r.id] = r.installed;
+      }
+      setInstalledAgents(installed);
+      setLoading(false);
+    };
+    run();
+    return () => { cancelled = true; };
   }, []);
 
   // Close add agent popup on outside click
@@ -232,46 +242,55 @@ export function ProjectCard({ project }: Props) {
           <div className="project-name">{project.name}</div>
           <div className="project-path" title={project.path}>{project.path}</div>
           <div className="project-terminals">
-            {AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => (
-              <div
-                key={a.id}
-                className="project-terminal-btn"
-                onClick={() => handleStartAgent(a.id)}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                  <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                  <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-                <span>{a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id}</span>
+            {loading ? (
+              <div className="project-terminals-loading">
+                <BrailleSpinner />
+                <span style={{ fontSize: 11, color: '#888', marginLeft: 4 }}>检查 Agent...</span>
               </div>
-            ))}
-            {/* Add agent button - only show when there are unchecked agents */}
-            {uncheckedAgents.length > 0 && (
-              <div className="relative">
-                <div
-                  className="project-terminal-btn project-terminal-btn-add"
-                  onClick={() => setShowAddAgent(!showAddAgent)}
-                  title="新建 Agent 会话"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-                  </svg>
-                </div>
-                {showAddAgent && (
-                  <div className="agent-add-popup">
-                    {uncheckedAgents.map((agent) => (
-                      <div
-                        key={agent.id}
-                        className="agent-add-item"
-                        onClick={() => { handleStartAgent(agent.id); setShowAddAgent(false); }}
-                      >
-                        <span className="agent-add-name">{agent.name}</span>
+            ) : (
+              <>
+                {AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => (
+                  <div
+                    key={a.id}
+                    className="project-terminal-btn"
+                    onClick={() => handleStartAgent(a.id)}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                      <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                      <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    </svg>
+                    <span>{a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id}</span>
+                  </div>
+                ))}
+                {/* Add agent button - only show when there are unchecked agents */}
+                {uncheckedAgents.length > 0 && (
+                  <div className="relative">
+                    <div
+                      className="project-terminal-btn project-terminal-btn-add"
+                      onClick={() => setShowAddAgent(!showAddAgent)}
+                      title="新建 Agent 会话"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+                      </svg>
+                    </div>
+                    {showAddAgent && (
+                      <div className="agent-add-popup">
+                        {uncheckedAgents.map((agent) => (
+                          <div
+                            key={agent.id}
+                            className="agent-add-item"
+                            onClick={() => { handleStartAgent(agent.id); setShowAddAgent(false); }}
+                          >
+                            <span className="agent-add-name">{agent.name}</span>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
-              </div>
+              </>
             )}
           </div>
         </div>

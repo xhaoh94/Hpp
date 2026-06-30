@@ -63,6 +63,13 @@ function formatKey(e: KeyboardEvent): string {
   return parts.join("+");
 }
 
+// === Module-level version check cache (persists across mounts) ===
+let cachedPiSDKStatus: PiSDKStatus | null = null;
+let cachedAgentStatuses: Record<string, AgentPackageStatus> = {};
+let lastPiSDKCheck = 0;
+let lastAgentChecks: Record<string, number> = {};
+const VERSION_CACHE_MS = 60_000; // 1 minute
+
 export function SettingsView() {
   const [shortcuts, setShortcuts] = useState<ShortcutConfig>(DEFAULT_SHORTCUTS);
   const [filters, setFilters] = useState<FilterConfig>(DEFAULT_FILTERS);
@@ -89,9 +96,12 @@ export function SettingsView() {
     setPiSDKChecking(true);
     try {
       const status = await window.electronAPI.piSDKGetStatus();
+      cachedPiSDKStatus = status;
+      lastPiSDKCheck = Date.now();
       setPiSDKStatus(status);
       setPiSDKUpdateError(null);
     } catch (error) {
+      cachedPiSDKStatus = null;
       setPiSDKStatus({
         installed: false,
         updateAvailable: false,
@@ -123,9 +133,12 @@ export function SettingsView() {
     setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
     try {
       const status = await window.electronAPI.agentGetStatus(agentId);
+      cachedAgentStatuses[agentId] = status;
+      lastAgentChecks[agentId] = Date.now();
       setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
       setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
     } catch (error) {
+      delete cachedAgentStatuses[agentId];
       setAgentStatuses((prev) => ({
         ...prev,
         [agentId]: {
@@ -175,14 +188,23 @@ export function SettingsView() {
     });
   }, []);
 
-  // Check agent package status
+  // Check agent package status (with 1-minute cache)
   useEffect(() => {
-    refreshPiSDKStatus();
+    const now = Date.now();
 
-    // Check status for other agents
+    if (now - lastPiSDKCheck > VERSION_CACHE_MS) {
+      refreshPiSDKStatus();
+    } else if (cachedPiSDKStatus) {
+      setPiSDKStatus(cachedPiSDKStatus);
+    }
+
     for (const agent of AVAILABLE_AGENTS) {
       if (agent.id === "pi") continue;
-      refreshAgentStatus(agent.id);
+      if (now - (lastAgentChecks[agent.id] || 0) > VERSION_CACHE_MS) {
+        refreshAgentStatus(agent.id);
+      } else if (cachedAgentStatuses[agent.id]) {
+        setAgentStatuses((prev) => ({ ...prev, [agent.id]: cachedAgentStatuses[agent.id]! }));
+      }
     }
   }, [refreshPiSDKStatus, refreshAgentStatus]);
 

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry, type AgentProcessFile } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -11,6 +11,8 @@ import "./ChatPanel.css";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
+const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
+const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 
 const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\s+/g, " ").trim();
@@ -1112,6 +1114,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
+  const [questionnairePaneHeight, setQuestionnairePaneHeight] = useState<number | null>(null);
   const [pendingUIResponse, setPendingUIResponse] = useState<{
     sessionId: string;
     requestId?: string;
@@ -1121,6 +1124,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   } | null>(null);
   const pendingUIResponseRef = useRef<typeof pendingUIResponse>(null);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
+  const chatPanelRef = useRef<HTMLDivElement>(null);
+  const questionnaireResizeCleanupRef = useRef<(() => void) | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
@@ -1160,6 +1165,69 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   useEffect(() => {
     pendingUIResponseRef.current = pendingUIResponse;
   }, [pendingUIResponse]);
+
+  useEffect(() => {
+    setQuestionnairePaneHeight(null);
+  }, [activeQuestionnaire?.sessionId, activeQuestionnaire?.requestId, activeQuestionnaire?.entryId]);
+
+  useEffect(() => {
+    return () => {
+      questionnaireResizeCleanupRef.current?.();
+    };
+  }, []);
+
+  const getQuestionnairePaneHeight = useCallback((clientY: number) => {
+    const panel = chatPanelRef.current;
+    if (!panel) return null;
+
+    const rect = panel.getBoundingClientRect();
+    const header = panel.querySelector<HTMLElement>(".chat-header");
+    const headerHeight = header?.offsetHeight ?? 36;
+    const minHeight = Math.min(
+      QUESTIONNAIRE_RESIZE_MIN_HEIGHT,
+      Math.max(120, rect.height - headerHeight - 80)
+    );
+    const maxHeight = Math.max(
+      minHeight,
+      rect.height - headerHeight - QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT
+    );
+    const nextHeight = rect.bottom - clientY;
+
+    return Math.min(Math.max(nextHeight, minHeight), maxHeight);
+  }, []);
+
+  const handleQuestionnaireResizeStart = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!activeQuestionnaire) return;
+    event.preventDefault();
+    questionnaireResizeCleanupRef.current?.();
+
+    const applyHeight = (clientY: number) => {
+      const nextHeight = getQuestionnairePaneHeight(clientY);
+      if (nextHeight !== null) {
+        setQuestionnairePaneHeight(nextHeight);
+      }
+    };
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      moveEvent.preventDefault();
+      applyHeight(moveEvent.clientY);
+    };
+
+    const stopResize = () => {
+      document.body.classList.remove("chat-questionnaire-resizing");
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+      questionnaireResizeCleanupRef.current = null;
+    };
+
+    document.body.classList.add("chat-questionnaire-resizing");
+    questionnaireResizeCleanupRef.current = stopResize;
+    applyHeight(event.clientY);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  }, [activeQuestionnaire, getQuestionnairePaneHeight]);
 
   // Track user scrolling - stop auto-scroll when user scrolls up
   useEffect(() => {
@@ -1537,9 +1605,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
       switch (event.type) {
         case "message_start":
-          if (!runtime.processActive) {
-            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+          if (runtime.processActive || runtime.streamStarted) {
+            clearStreamWatchdog(currentSessionId);
+            finishThinkingEntry(currentSessionId);
+            useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
           }
+          runtime.streamBuffer = "";
+          runtime.thinkingBuffer = "";
+          runtime.thinkingEntryId = null;
+          runtime.streamStarted = false;
+          runtime.activeToolEntry = {};
+          runtime.activeToolFile = {};
+          setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
+          useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
           runtime.processActive = true;
           const messagePreview = event.content ?
             (event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content) :
@@ -1579,10 +1657,17 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
-          if (!runtime.processActive) break;
           if (!event.delta) break;
+          if (!runtime.processActive) {
+            runtime.processActive = true;
+            runtime.streamStarted = true;
+            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+            if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
+            useProjectStore.getState().setAgentStatus(currentSessionId, "running");
+          }
           finishThinkingEntry(currentSessionId);
           runtime.streamBuffer += String(event.delta);
+          useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
           break;
         case "thinking_delta":
           if (!runtime.processActive) break;
@@ -1611,7 +1696,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "stream_end":
           {
             if (!runtime.processActive) break;
-            if (pendingUIResponseRef.current?.sessionId === currentSessionId) break;
+            if (pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) break;
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
@@ -2251,7 +2336,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }
 
   return (
-    <div className="chat-panel">
+    <div ref={chatPanelRef} className="chat-panel">
       {/* Header */}
       <div className="chat-header">
         <div className="chat-agent-dot" />
@@ -2404,8 +2489,22 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         </>)}
       </div>
 
+      {activeQuestionnaire && (
+        <div
+          className="chat-questionnaire-resizer"
+          role="separator"
+          aria-label="调整问卷面板高度"
+          aria-orientation="horizontal"
+          title="拖动调整问卷高度"
+          onPointerDown={handleQuestionnaireResizeStart}
+        />
+      )}
+
       {/* Input area */}
-      <div className="chat-input-area">
+      <div
+        className={`chat-input-area${activeQuestionnaire ? " questionnaire-active" : ""}${activeQuestionnaire && questionnairePaneHeight !== null ? " questionnaire-resized" : ""}`}
+        style={activeQuestionnaire && questionnairePaneHeight !== null ? { height: questionnairePaneHeight } : undefined}
+      >
         {activeQuestionnaire && (
           <QuestionnairePanel
             questions={activeQuestionnaire.questions || []}

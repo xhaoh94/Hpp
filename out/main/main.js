@@ -355,10 +355,34 @@ function runCommand(command, args, options = {}) {
   });
 }
 function runShellCommand(command, args, options = {}) {
-  if (process.platform === "win32") {
-    return runCommand("cmd.exe", ["/d", "/s", "/c", command, ...args], options);
-  }
-  return runCommand(command, args, options);
+  const parts = [command, ...args].map((a) => {
+    if (/[\s"]/.test(a)) {
+      return JSON.stringify(a);
+    }
+    return a;
+  });
+  const fullCommand = parts.join(" ");
+  return new Promise((resolve, reject) => {
+    child_process.exec(
+      fullCommand,
+      {
+        cwd: options.cwd,
+        encoding: "utf8",
+        timeout: options.timeout ?? 15e3,
+        maxBuffer: 1024 * 1024 * 4
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const commandError = error;
+          commandError.stdout = stdout;
+          commandError.stderr = stderr;
+          reject(commandError);
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
+  });
 }
 function runNpmCommand(args, options = {}) {
   return runShellCommand("npm", args, options);
@@ -1832,6 +1856,7 @@ class PiSDKAgent {
   isAborting = false;
   activePromptIds = /* @__PURE__ */ new Set();
   turnActive = false;
+  turnToken = 0;
   get sessionFilePath() {
     return this._sessionFilePath;
   }
@@ -1916,10 +1941,16 @@ class PiSDKAgent {
   async sendMessage(message, images) {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
+    if (this.turnActive) {
+      this.completeTurn(true);
+    } else {
+      this.prepareNewTurn();
+    }
+    const promptId = this.createCommandId();
+    this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: message });
     this.beginTurn();
-    const promptId = this.sendWorkerCommand({ type: "prompt", message, images });
-    this.activePromptIds.add(promptId);
+    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
   }
   async abort() {
     this.pendingAssistantText = "";
@@ -2017,6 +2048,8 @@ class PiSDKAgent {
         this.beginTurn();
         break;
       case "message_update": {
+        if (!this.turnActive && this.activePromptIds.size > 0) this.beginTurn();
+        if (!this.turnActive) break;
         this.clearTurnFallback();
         const assistantEvent = data.assistantMessageEvent;
         if (assistantEvent?.type === "text_delta") {
@@ -2028,11 +2061,13 @@ class PiSDKAgent {
         break;
       }
       case "message_end":
+        if (!this.turnActive && this.activePromptIds.size === 0) break;
+        if (!this.turnActive) this.beginTurn();
         if (data.message?.role === "assistant") {
           if (data.message.thinking) this.emitEvent({ type: "thinking_end" });
           if (data.message.text) {
             this.pendingAssistantText = data.message.text;
-            this.scheduleTurnFallback(4e3);
+            this.scheduleTurnFallback(4e3, true);
           }
         }
         break;
@@ -2070,14 +2105,17 @@ class PiSDKAgent {
         this.handleUIRequest(data.request);
         break;
       case "prompt_done":
-        if (data.id) this.activePromptIds.delete(String(data.id));
-        this.completeTurn();
+        if (data.id && !this.activePromptIds.delete(String(data.id))) break;
+        if (!data.id) this.activePromptIds.clear();
+        this.pendingUIRequestIds.clear();
+        this.completeTurn(true);
         break;
       case "agent_end":
-        if (this.activePromptIds.size === 0) this.completeTurn();
+        if (this.activePromptIds.size === 0) this.scheduleTurnFallback(250, true);
         break;
       case "error":
-        if (data.id) this.activePromptIds.delete(String(data.id));
+        if (data.id && !this.activePromptIds.delete(String(data.id))) break;
+        this.pendingUIRequestIds.clear();
         this.emitEvent({
           type: "process_event",
           entryType: "error",
@@ -2086,7 +2124,7 @@ class PiSDKAgent {
           detail: data.error || "Unknown error",
           state: "error"
         });
-        this.completeTurn();
+        this.completeTurn(true);
         break;
     }
   }
@@ -2107,12 +2145,15 @@ class PiSDKAgent {
     }));
   }
   sendWorkerCommand(command, onResponse) {
-    const id = command.id || `sdk-${++this.requestId}`;
+    const id = command.id || this.createCommandId();
     const fullCommand = { ...command, id };
     if (onResponse) this.pendingResponses.set(id, onResponse);
     this.process?.stdin?.write(`${JSON.stringify(fullCommand)}
 `);
     return id;
+  }
+  createCommandId() {
+    return `sdk-${++this.requestId}`;
   }
   clearTurnFallback() {
     if (this.turnFallbackTimer) {
@@ -2120,24 +2161,31 @@ class PiSDKAgent {
       this.turnFallbackTimer = null;
     }
   }
-  scheduleTurnFallback(delayMs) {
-    if (this.pendingUIRequestIds.size > 0) return;
+  scheduleTurnFallback(delayMs, force = false) {
+    if (!force && this.pendingUIRequestIds.size > 0) return;
     this.clearTurnFallback();
+    const token = this.turnToken;
     this.turnFallbackTimer = setTimeout(() => {
       this.turnFallbackTimer = null;
-      if (this.pendingAssistantText || this.streamedText) this.completeTurn();
+      if (token !== this.turnToken) return;
+      if (force || this.pendingAssistantText || this.streamedText) this.completeTurn(force);
     }, delayMs);
   }
   beginTurn() {
     this.clearTurnFallback();
     if (this.turnActive) return;
+    this.turnToken += 1;
     this.turnActive = true;
     this.streamedText = false;
     this.pendingAssistantText = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
   }
-  completeTurn() {
+  completeTurn(force = false) {
     if (!this.turnActive) return;
+    if (force) {
+      this.pendingUIRequestIds.clear();
+      this.activePromptIds.clear();
+    }
     if (this.pendingUIRequestIds.size > 0) return;
     if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
@@ -2146,11 +2194,22 @@ class PiSDKAgent {
       this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
       this.streamedText = true;
     }
-    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText });
+    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
     this.emitEvent({ type: "agent_end" });
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.turnActive = false;
+    this.turnToken += 1;
+  }
+  prepareNewTurn() {
+    this.clearTurnFallback();
+    this.eventBuffer.flush();
+    this.pendingAssistantText = "";
+    this.streamedText = false;
+    this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
+    this.turnToken += 1;
   }
   finishAbortState() {
     this.isAborting = false;
@@ -2159,6 +2218,7 @@ class PiSDKAgent {
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
+    this.turnToken += 1;
     this.eventBuffer.clear();
     this.clearTurnFallback();
   }

@@ -13226,26 +13226,39 @@ function ProjectCard({ project }) {
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
   const [installedAgents, setInstalledAgents] = reactExports.useState({});
   const [showAddAgent, setShowAddAgent] = reactExports.useState(false);
+  const [loading, setLoading] = reactExports.useState(true);
   reactExports.useEffect(() => {
-    window.electronAPI.loadData("settings").then((data) => {
-      if (data?.general?.enabledAgents) {
-        setEnabledAgents(data.general.enabledAgents);
-      }
-    });
-  }, []);
-  reactExports.useEffect(() => {
-    for (const agent of AVAILABLE_AGENTS) {
-      if (agent.id === "pi") {
-        window.electronAPI.piSDKGetStatus().then((status) => {
-          setInstalledAgents((prev) => ({ ...prev, [agent.id]: status.installed }));
-        });
-        continue;
-      }
-      if (agent.runtime !== "cli" || !agent.command) continue;
-      window.electronAPI.isCommandAvailable(agent.command).then((ok2) => {
-        setInstalledAgents((prev) => ({ ...prev, [agent.id]: ok2 }));
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      const data = await window.electronAPI.loadData("settings");
+      if (cancelled) return;
+      const enabled = data?.general?.enabledAgents || ["pi"];
+      setEnabledAgents(enabled);
+      const checks2 = AVAILABLE_AGENTS.map(async (agent) => {
+        if (agent.id === "pi") {
+          const status = await window.electronAPI.piSDKGetStatus();
+          return { id: agent.id, installed: status.installed };
+        }
+        if (agent.runtime !== "cli" || !agent.command) {
+          return { id: agent.id, installed: false };
+        }
+        const ok2 = await window.electronAPI.isCommandAvailable(agent.command);
+        return { id: agent.id, installed: ok2 };
       });
-    }
+      const results = await Promise.all(checks2);
+      if (cancelled) return;
+      const installed = {};
+      for (const r2 of results) {
+        installed[r2.id] = r2.installed;
+      }
+      setInstalledAgents(installed);
+      setLoading(false);
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
   }, []);
   reactExports.useEffect(() => {
     if (!showAddAgent) return;
@@ -13400,7 +13413,10 @@ ${getInstallHint(cmd)}`);
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-name", children: project.name }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-path", title: project.path, children: project.path }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "project-terminals", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-terminals", children: loading ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "project-terminals-loading", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(BrailleSpinner, {}),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#888", marginLeft: 4 }, children: "检查 Agent..." })
+      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
         AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "div",
           {
@@ -13440,7 +13456,7 @@ ${getInstallHint(cmd)}`);
             agent.id
           )) })
         ] })
-      ] })
+      ] }) })
     ] }) }),
     project.sessions.filter((s) => !s.closed).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-terminal-children", children: project.sessions.filter((s) => !s.closed).map((session) => {
       const status = agentStatuses[session.id];
@@ -13896,6 +13912,11 @@ function formatKey(e) {
   else parts.push(key);
   return parts.join("+");
 }
+let cachedPiSDKStatus = null;
+let cachedAgentStatuses = {};
+let lastPiSDKCheck = 0;
+let lastAgentChecks = {};
+const VERSION_CACHE_MS = 6e4;
 function SettingsView() {
   const [shortcuts, setShortcuts] = reactExports.useState(DEFAULT_SHORTCUTS);
   const [filters, setFilters] = reactExports.useState(DEFAULT_FILTERS);
@@ -13921,9 +13942,12 @@ function SettingsView() {
     setPiSDKChecking(true);
     try {
       const status = await window.electronAPI.piSDKGetStatus();
+      cachedPiSDKStatus = status;
+      lastPiSDKCheck = Date.now();
       setPiSDKStatus(status);
       setPiSDKUpdateError(null);
     } catch (error) {
+      cachedPiSDKStatus = null;
       setPiSDKStatus({
         installed: false,
         updateAvailable: false,
@@ -13953,9 +13977,12 @@ function SettingsView() {
     setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
     try {
       const status = await window.electronAPI.agentGetStatus(agentId);
+      cachedAgentStatuses[agentId] = status;
+      lastAgentChecks[agentId] = Date.now();
       setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
       setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
     } catch (error) {
+      delete cachedAgentStatuses[agentId];
       setAgentStatuses((prev) => ({
         ...prev,
         [agentId]: {
@@ -14001,10 +14028,19 @@ function SettingsView() {
     });
   }, []);
   reactExports.useEffect(() => {
-    refreshPiSDKStatus();
+    const now = Date.now();
+    if (now - lastPiSDKCheck > VERSION_CACHE_MS) {
+      refreshPiSDKStatus();
+    } else if (cachedPiSDKStatus) {
+      setPiSDKStatus(cachedPiSDKStatus);
+    }
     for (const agent of AVAILABLE_AGENTS) {
       if (agent.id === "pi") continue;
-      refreshAgentStatus(agent.id);
+      if (now - (lastAgentChecks[agent.id] || 0) > VERSION_CACHE_MS) {
+        refreshAgentStatus(agent.id);
+      } else if (cachedAgentStatuses[agent.id]) {
+        setAgentStatuses((prev) => ({ ...prev, [agent.id]: cachedAgentStatuses[agent.id] }));
+      }
     }
   }, [refreshPiSDKStatus, refreshAgentStatus]);
   const saveShortcuts = (s) => {
@@ -42510,6 +42546,8 @@ function MarkdownRenderer({ content: content2 }) {
 }
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
+const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
+const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 const getThinkingPreview = (value) => {
   const preview = value?.replace(/\s+/g, " ").trim();
   if (!preview) return "思考中";
@@ -43401,9 +43439,12 @@ function ChatPanel({ sendKey = "Enter" }) {
   const [zoomImage, setZoomImage] = reactExports.useState(null);
   const [previewFile, setPreviewFile] = reactExports.useState(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = reactExports.useState(false);
+  const [questionnairePaneHeight, setQuestionnairePaneHeight] = reactExports.useState(null);
   const [pendingUIResponse, setPendingUIResponse] = reactExports.useState(null);
   const pendingUIResponseRef = reactExports.useRef(null);
   const userMsgHistoryRef = reactExports.useRef(null);
+  const chatPanelRef = reactExports.useRef(null);
+  const questionnaireResizeCleanupRef = reactExports.useRef(null);
   const scrollRef = reactExports.useRef(null);
   const textareaRef = reactExports.useRef(null);
   const modelRef = reactExports.useRef(null);
@@ -43430,6 +43471,59 @@ function ChatPanel({ sendKey = "Enter" }) {
   reactExports.useEffect(() => {
     pendingUIResponseRef.current = pendingUIResponse;
   }, [pendingUIResponse]);
+  reactExports.useEffect(() => {
+    setQuestionnairePaneHeight(null);
+  }, [activeQuestionnaire?.sessionId, activeQuestionnaire?.requestId, activeQuestionnaire?.entryId]);
+  reactExports.useEffect(() => {
+    return () => {
+      questionnaireResizeCleanupRef.current?.();
+    };
+  }, []);
+  const getQuestionnairePaneHeight = reactExports.useCallback((clientY) => {
+    const panel = chatPanelRef.current;
+    if (!panel) return null;
+    const rect = panel.getBoundingClientRect();
+    const header = panel.querySelector(".chat-header");
+    const headerHeight = header?.offsetHeight ?? 36;
+    const minHeight = Math.min(
+      QUESTIONNAIRE_RESIZE_MIN_HEIGHT,
+      Math.max(120, rect.height - headerHeight - 80)
+    );
+    const maxHeight = Math.max(
+      minHeight,
+      rect.height - headerHeight - QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT
+    );
+    const nextHeight = rect.bottom - clientY;
+    return Math.min(Math.max(nextHeight, minHeight), maxHeight);
+  }, []);
+  const handleQuestionnaireResizeStart = reactExports.useCallback((event) => {
+    if (!activeQuestionnaire) return;
+    event.preventDefault();
+    questionnaireResizeCleanupRef.current?.();
+    const applyHeight = (clientY) => {
+      const nextHeight = getQuestionnairePaneHeight(clientY);
+      if (nextHeight !== null) {
+        setQuestionnairePaneHeight(nextHeight);
+      }
+    };
+    const handleMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      applyHeight(moveEvent.clientY);
+    };
+    const stopResize = () => {
+      document.body.classList.remove("chat-questionnaire-resizing");
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+      questionnaireResizeCleanupRef.current = null;
+    };
+    document.body.classList.add("chat-questionnaire-resizing");
+    questionnaireResizeCleanupRef.current = stopResize;
+    applyHeight(event.clientY);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  }, [activeQuestionnaire, getQuestionnairePaneHeight]);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -43723,9 +43817,19 @@ function ChatPanel({ sendKey = "Enter" }) {
       }
       switch (event.type) {
         case "message_start":
-          if (!runtime.processActive) {
-            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+          if (runtime.processActive || runtime.streamStarted) {
+            clearStreamWatchdog(currentSessionId);
+            finishThinkingEntry(currentSessionId);
+            useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
           }
+          runtime.streamBuffer = "";
+          runtime.thinkingBuffer = "";
+          runtime.thinkingEntryId = null;
+          runtime.streamStarted = false;
+          runtime.activeToolEntry = {};
+          runtime.activeToolFile = {};
+          setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
+          useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
           runtime.processActive = true;
           const messagePreview = event.content ? event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content : "用户消息";
           appendProcessEntry(currentSessionId, {
@@ -43763,10 +43867,17 @@ function ChatPanel({ sendKey = "Enter" }) {
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_delta":
-          if (!runtime.processActive) break;
           if (!event.delta) break;
+          if (!runtime.processActive) {
+            runtime.processActive = true;
+            runtime.streamStarted = true;
+            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+            if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
+            useProjectStore.getState().setAgentStatus(currentSessionId, "running");
+          }
           finishThinkingEntry(currentSessionId);
           runtime.streamBuffer += String(event.delta);
+          useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
           break;
         case "thinking_delta":
           if (!runtime.processActive) break;
@@ -43795,7 +43906,7 @@ function ChatPanel({ sendKey = "Enter" }) {
         case "stream_end":
           {
             if (!runtime.processActive) break;
-            if (pendingUIResponseRef.current?.sessionId === currentSessionId) break;
+            if (pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) break;
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
@@ -44375,7 +44486,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       ] })
     ] });
   }
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-panel", children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: chatPanelRef, className: "chat-panel", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-header", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-agent-dot" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-agent-name", children: activeProject.name }),
@@ -44493,202 +44604,220 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在处理您的请求..." })
       ] })
     ] }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-area", children: [
-      activeQuestionnaire && /* @__PURE__ */ jsxRuntimeExports.jsx(
-        QuestionnairePanel,
-        {
-          questions: activeQuestionnaire.questions || [],
-          onSubmit: handleSubmitQuestionnaire,
-          onCancel: handleCancelQuestionnaire
-        }
-      ),
-      (pendingFiles.length > 0 || pendingImages.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-preview-bar", children: [
-        pendingFiles.map((pf) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-file-card", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", className: "chat-file-icon", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "14 2 14 8 20 8" })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-file-name", children: [
-            pf.fileName,
-            ":",
-            pf.startLine,
-            "-",
-            pf.endLine
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-file-remove", onClick: () => removePendingFile(pf.id), children: "×" })
-        ] }, pf.id)),
-        pendingImages.map((img) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-image-card-inline", children: [
-          img.file.type.startsWith("image/") ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: img.src, alt: img.name, className: "chat-image-thumb-inline", onClick: () => setZoomImage(img.src) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "var(--accent-color)", strokeWidth: "2", className: "chat-file-icon", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "14 2 14 8 20 8" })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-file-name", children: img.name }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-file-remove", onClick: () => removePendingImage(img.id), children: "×" })
-        ] }, img.id))
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-container", onDrop: handleDrop, onDragOver: handleDragOver, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "input",
-          {
-            ref: fileInputRef,
-            type: "file",
-            multiple: true,
-            style: { display: "none" },
-            onChange: (e) => {
-              Array.from(e.target.files || []).forEach(addPendingImage);
-              e.target.value = "";
-            }
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-input-actions-left", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-input-btn", title: "上传文件", onClick: () => fileInputRef.current?.click(), children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 5v14M5 12h14", strokeLinecap: "round" }) }) }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "textarea",
-          {
-            ref: textareaRef,
-            value: input,
-            onChange: (e) => setInput(e.target.value),
-            onKeyDown: handleKeyDown,
-            onPaste: handlePaste,
-            placeholder: activeQuestionnaire ? "请在上方提交问卷" : sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)",
-            rows: 1,
-            className: "chat-textarea",
-            disabled: !!activeQuestionnaire
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            onClick: currentSessionRunning && !isAwaitingUIResponse ? handleAbort : handleSend,
-            disabled: activeQuestionnaire ? true : isAwaitingUIResponse ? !input.trim() : !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0,
-            className: `chat-send-btn ${currentSessionRunning && !isAwaitingUIResponse ? "abort" : ""}`,
-            title: activeQuestionnaire ? "请在上方提交问卷" : currentSessionRunning && !isAwaitingUIResponse ? "停止" : isAwaitingUIResponse ? "发送回答" : "发送",
-            children: currentSessionRunning && !isAwaitingUIResponse ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2", fill: "currentColor", stroke: "none" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 19V5" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 12l7-7 7 7" })
-            ] })
-          }
-        )
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-toolbar", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: modelRef, className: "relative", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
+    activeQuestionnaire && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        className: "chat-questionnaire-resizer",
+        role: "separator",
+        "aria-label": "调整问卷面板高度",
+        "aria-orientation": "horizontal",
+        title: "拖动调整问卷高度",
+        onPointerDown: handleQuestionnaireResizeStart
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: `chat-input-area${activeQuestionnaire ? " questionnaire-active" : ""}${activeQuestionnaire && questionnairePaneHeight !== null ? " questionnaire-resized" : ""}`,
+        style: activeQuestionnaire && questionnairePaneHeight !== null ? { height: questionnairePaneHeight } : void 0,
+        children: [
+          activeQuestionnaire && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            QuestionnairePanel,
             {
-              onClick: () => {
-                setModelOpen(!modelOpen);
-                setThinkingOpen(false);
-                if (modelOpen) setExpandedProvider(null);
-              },
-              className: "chat-toolbar-select",
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "3", y: "3", width: "18", height: "18", rx: "3" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "8.5", cy: "8.5", r: "1.5" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "15.5", cy: "8.5", r: "1.5" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 14c0 0 1.5 2 4 2s4-2 4-2" })
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: currentModel?.name || "选择模型" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" }) })
-              ]
+              questions: activeQuestionnaire.questions || [],
+              onSubmit: handleSubmitQuestionnaire,
+              onCancel: handleCancelQuestionnaire
             }
           ),
-          modelOpen && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-dropdown", children: [
-            modelProviders.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-dropdown-empty", children: "暂无可用模型" }),
-            modelProviders.map((provider) => {
-              const providerModels = availableModels.filter((m) => m.provider === provider);
-              const isExpanded = expandedProvider === provider;
-              const hasActiveModel = providerModels.some(
-                (m) => m.id === currentModel?.id && m.provider === currentModel?.provider
-              );
-              return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                  "div",
-                  {
-                    className: `chat-dropdown-provider ${isExpanded ? "expanded" : ""} ${hasActiveModel ? "has-active" : ""}`,
-                    onClick: () => setExpandedProvider(isExpanded ? null : provider),
-                    children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        "svg",
-                        {
-                          width: "10",
-                          height: "10",
-                          viewBox: "0 0 24 24",
-                          fill: "none",
-                          stroke: "currentColor",
-                          strokeWidth: "2.5",
-                          style: { transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" },
-                          children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
-                        }
-                      ),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: provider }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-dropdown-provider-count", children: providerModels.length })
-                    ]
-                  }
-                ),
-                isExpanded && providerModels.map((model) => {
-                  const isFav = favoriteModels.some((f) => f.id === model.id && f.provider === model.provider);
-                  const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
-                  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                    "div",
-                    {
-                      className: `chat-dropdown-item ${isActive ? "active" : ""}`,
-                      onClick: () => handleSelectModel(model),
-                      children: [
-                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: model.name }),
-                        /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          "button",
-                          {
-                            onClick: (e) => {
-                              e.stopPropagation();
-                              toggleFavorite(model);
-                            },
-                            className: `chat-dropdown-star ${isFav ? "fav" : ""}`,
-                            children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: isFav ? "currentColor" : "none", stroke: "currentColor", strokeWidth: "2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("polygon", { points: "12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" }) })
-                          }
-                        )
-                      ]
-                    },
-                    model.id
+          (pendingFiles.length > 0 || pendingImages.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-preview-bar", children: [
+            pendingFiles.map((pf) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-file-card", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", className: "chat-file-icon", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "14 2 14 8 20 8" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-file-name", children: [
+                pf.fileName,
+                ":",
+                pf.startLine,
+                "-",
+                pf.endLine
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-file-remove", onClick: () => removePendingFile(pf.id), children: "×" })
+            ] }, pf.id)),
+            pendingImages.map((img) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-image-card-inline", children: [
+              img.file.type.startsWith("image/") ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: img.src, alt: img.name, className: "chat-image-thumb-inline", onClick: () => setZoomImage(img.src) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "var(--accent-color)", strokeWidth: "2", className: "chat-file-icon", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "14 2 14 8 20 8" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-file-name", children: img.name }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-file-remove", onClick: () => removePendingImage(img.id), children: "×" })
+            ] }, img.id))
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-container", onDrop: handleDrop, onDragOver: handleDragOver, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                ref: fileInputRef,
+                type: "file",
+                multiple: true,
+                style: { display: "none" },
+                onChange: (e) => {
+                  Array.from(e.target.files || []).forEach(addPendingImage);
+                  e.target.value = "";
+                }
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-input-actions-left", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-input-btn", title: "上传文件", onClick: () => fileInputRef.current?.click(), children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 5v14M5 12h14", strokeLinecap: "round" }) }) }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "textarea",
+              {
+                ref: textareaRef,
+                value: input,
+                onChange: (e) => setInput(e.target.value),
+                onKeyDown: handleKeyDown,
+                onPaste: handlePaste,
+                placeholder: activeQuestionnaire ? "请在上方提交问卷" : sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)",
+                rows: 1,
+                className: "chat-textarea",
+                disabled: !!activeQuestionnaire
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: currentSessionRunning && !isAwaitingUIResponse ? handleAbort : handleSend,
+                disabled: activeQuestionnaire ? true : isAwaitingUIResponse ? !input.trim() : !currentSessionRunning && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0,
+                className: `chat-send-btn ${currentSessionRunning && !isAwaitingUIResponse ? "abort" : ""}`,
+                title: activeQuestionnaire ? "请在上方提交问卷" : currentSessionRunning && !isAwaitingUIResponse ? "停止" : isAwaitingUIResponse ? "发送回答" : "发送",
+                children: currentSessionRunning && !isAwaitingUIResponse ? /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "6", y: "6", width: "12", height: "12", rx: "2", fill: "currentColor", stroke: "none" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 19V5" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 12l7-7 7 7" })
+                ] })
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-toolbar", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: modelRef, className: "relative", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  onClick: () => {
+                    setModelOpen(!modelOpen);
+                    setThinkingOpen(false);
+                    if (modelOpen) setExpandedProvider(null);
+                  },
+                  className: "chat-toolbar-select",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "3", y: "3", width: "18", height: "18", rx: "3" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "8.5", cy: "8.5", r: "1.5" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "15.5", cy: "8.5", r: "1.5" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 14c0 0 1.5 2 4 2s4-2 4-2" })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: currentModel?.name || "选择模型" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" }) })
+                  ]
+                }
+              ),
+              modelOpen && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-dropdown", children: [
+                modelProviders.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-dropdown-empty", children: "暂无可用模型" }),
+                modelProviders.map((provider) => {
+                  const providerModels = availableModels.filter((m) => m.provider === provider);
+                  const isExpanded = expandedProvider === provider;
+                  const hasActiveModel = providerModels.some(
+                    (m) => m.id === currentModel?.id && m.provider === currentModel?.provider
                   );
+                  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "div",
+                      {
+                        className: `chat-dropdown-provider ${isExpanded ? "expanded" : ""} ${hasActiveModel ? "has-active" : ""}`,
+                        onClick: () => setExpandedProvider(isExpanded ? null : provider),
+                        children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "svg",
+                            {
+                              width: "10",
+                              height: "10",
+                              viewBox: "0 0 24 24",
+                              fill: "none",
+                              stroke: "currentColor",
+                              strokeWidth: "2.5",
+                              style: { transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" },
+                              children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: provider }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-dropdown-provider-count", children: providerModels.length })
+                        ]
+                      }
+                    ),
+                    isExpanded && providerModels.map((model) => {
+                      const isFav = favoriteModels.some((f) => f.id === model.id && f.provider === model.provider);
+                      const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
+                      return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "div",
+                        {
+                          className: `chat-dropdown-item ${isActive ? "active" : ""}`,
+                          onClick: () => handleSelectModel(model),
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: model.name }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                onClick: (e) => {
+                                  e.stopPropagation();
+                                  toggleFavorite(model);
+                                },
+                                className: `chat-dropdown-star ${isFav ? "fav" : ""}`,
+                                children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: isFav ? "currentColor" : "none", stroke: "currentColor", strokeWidth: "2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("polygon", { points: "12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" }) })
+                              }
+                            )
+                          ]
+                        },
+                        model.id
+                      );
+                    })
+                  ] }, provider);
                 })
-              ] }, provider);
-            })
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: thinkingRef, className: "relative", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  onClick: () => {
+                    setThinkingOpen(!thinkingOpen);
+                    setModelOpen(false);
+                  },
+                  className: "chat-toolbar-select",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10 21h4" })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                      "思考: ",
+                      currentThinking.label
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" }) })
+                  ]
+                }
+              ),
+              thinkingOpen && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-thinking-dropdown", children: thinkingLevels.map((level) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => handleSelectThinking(level.id),
+                  className: `chat-thinking-option ${thinkingLevel === level.id ? "active" : ""}`,
+                  children: level.label
+                },
+                level.id
+              )) })
+            ] })
           ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: thinkingRef, className: "relative", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              onClick: () => {
-                setThinkingOpen(!thinkingOpen);
-                setModelOpen(false);
-              },
-              className: "chat-toolbar-select",
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10 21h4" })
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-                  "思考: ",
-                  currentThinking.label
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" }) })
-              ]
-            }
-          ),
-          thinkingOpen && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-thinking-dropdown", children: thinkingLevels.map((level) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              onClick: () => handleSelectThinking(level.id),
-              className: `chat-thinking-option ${thinkingLevel === level.id ? "active" : ""}`,
-              children: level.label
-            },
-            level.id
-          )) })
-        ] })
-      ] })
-    ] }),
+        ]
+      }
+    ),
     zoomImage && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-image-zoom-overlay", onClick: () => setZoomImage(null), children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: zoomImage, className: "chat-image-zoom", onClick: (e) => e.stopPropagation() }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-image-zoom-close", onClick: () => setZoomImage(null), children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "20", height: "20", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M18 6L6 18M6 6l12 12" }) }) })
