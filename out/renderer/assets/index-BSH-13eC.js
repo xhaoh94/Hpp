@@ -42626,8 +42626,8 @@ const normalizeToolKind = (value) => {
   return "unknown";
 };
 const getQuestionTitle = (running = false, isError = false) => {
-  if (isError) return "用户询问处理失败";
-  return running ? "正在询问用户" : "已处理用户询问";
+  if (isError) return "用户选择处理失败";
+  return running ? "等待用户选择" : "已提交选择";
 };
 const getUIResponsePayload = (response) => {
   const base = {
@@ -43783,12 +43783,10 @@ function ChatPanel({ sendKey = "Enter" }) {
             finishThinkingEntry(currentSessionId);
             const entryId = createProcessEntryId();
             setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
-            const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry(currentSessionId, {
               id: entryId,
               type: "question",
               title: getQuestionTitle(true),
-              detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
               state: "running",
               expanded: false
             });
@@ -43816,6 +43814,10 @@ function ChatPanel({ sendKey = "Enter" }) {
           {
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
+            if (normalizeToolKind(event.toolKind) === "question") {
+              runtime.activeToolEntry[key] = "";
+              break;
+            }
             const existingEntryId = runtime.activeToolEntry[key];
             const toolFiles = getToolProcessFiles(event);
             if (toolFiles.length > 0) runtime.activeToolFile[key] = toolFiles;
@@ -43856,6 +43858,11 @@ function ChatPanel({ sendKey = "Enter" }) {
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             const entryId = runtime.activeToolEntry[key];
+            if (normalizeToolKind(event.toolKind) === "question") {
+              delete runtime.activeToolEntry[key];
+              delete runtime.activeToolFile[key];
+              break;
+            }
             const toolName = getToolName(event);
             const toolFiles = getToolProcessFiles(event);
             const preservedToolFiles = toolFiles.length > 0 ? toolFiles : runtime.activeToolFile[key] || [];
@@ -43920,7 +43927,7 @@ function ChatPanel({ sendKey = "Enter" }) {
             id: questionEntryId,
             type: eventType,
             title: processedTitle,
-            detail: eventDetail,
+            detail: eventType === "question" ? void 0 : eventDetail,
             files: Array.isArray(event.files) ? getToolProcessFiles(event) : void 0,
             state: eventType === "question" ? eventState || "running" : eventState
           });
@@ -43938,12 +43945,10 @@ function ChatPanel({ sendKey = "Enter" }) {
             finishThinkingEntry(currentSessionId);
             const entryId = createProcessEntryId();
             setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
-            const questionDetail = event.detail ?? event.question ?? event.prompt ?? event.args ?? event.input ?? event;
             appendProcessEntry(currentSessionId, {
               id: entryId,
               type: "question",
               title: getQuestionTitle(true),
-              detail: truncateProcessDetail(stringifyProcessValue(questionDetail)),
               state: normalizeProcessEntryState(event.state) || "running",
               expanded: false
             });
