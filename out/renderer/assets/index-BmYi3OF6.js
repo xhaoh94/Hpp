@@ -13573,837 +13573,6 @@ function ProjectView() {
     ] })
   ] });
 }
-function FilePreview({ filePath, onClose }) {
-  const [content2, setContent] = reactExports.useState("");
-  const [loading, setLoading] = reactExports.useState(false);
-  const [error, setError] = reactExports.useState(null);
-  const [contextMenu, setContextMenu] = reactExports.useState(null);
-  const contentRef = reactExports.useRef(null);
-  const { addPendingFile } = useChatStore();
-  reactExports.useEffect(() => {
-    if (!filePath) return;
-    const loadContent = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const result = await window.electronAPI.readFile(filePath);
-        if (result.success) {
-          setContent(result.content || "");
-        } else {
-          setError(result.error || "无法读取文件");
-        }
-      } catch (err) {
-        setError(err.message || "无法读取文件");
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadContent();
-  }, [filePath]);
-  reactExports.useEffect(() => {
-    if (!contextMenu) return;
-    const handleClose2 = (e) => {
-      if (e.target.closest(".fp-context-menu")) return;
-      setContextMenu(null);
-    };
-    document.addEventListener("mousedown", handleClose2, true);
-    return () => document.removeEventListener("mousedown", handleClose2, true);
-  }, [contextMenu]);
-  if (!filePath) return null;
-  const fileName = filePath.split(/[/\\]/).pop() || filePath;
-  const handleContextMenu = (e) => {
-    setContextMenu(null);
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) return;
-    const selectedText = selection.toString();
-    if (!selectedText.trim()) return;
-    const contentEl = contentRef.current;
-    if (!contentEl) return;
-    let startLine = 1;
-    let endLine = 1;
-    try {
-      const range = selection.getRangeAt(0);
-      let startNode = range.startContainer;
-      while (startNode && startNode !== contentEl) {
-        if (startNode instanceof HTMLElement && startNode.dataset.line) {
-          startLine = parseInt(startNode.dataset.line, 10);
-          break;
-        }
-        startNode = startNode.parentNode;
-      }
-      let endNode = range.endContainer;
-      while (endNode && endNode !== contentEl) {
-        if (endNode instanceof HTMLElement && endNode.dataset.line) {
-          endLine = parseInt(endNode.dataset.line, 10);
-          break;
-        }
-        endNode = endNode.parentNode;
-      }
-      if (endLine < startLine) endLine = startLine;
-    } catch {
-    }
-    e.preventDefault();
-    setTimeout(() => {
-      setContextMenu({ x: e.clientX, y: e.clientY, selection: selectedText, startLine, endLine });
-    }, 10);
-  };
-  const handleSendToChat = () => {
-    if (!contextMenu || !filePath) return;
-    addPendingFile({
-      id: crypto.randomUUID(),
-      fileName,
-      filePath,
-      startLine: contextMenu.startLine,
-      endLine: contextMenu.endLine
-    });
-    setContextMenu(null);
-  };
-  const handleClose = () => {
-    setContextMenu(null);
-    onClose();
-  };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-overlay", onClick: handleClose, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-modal", onClick: (e) => e.stopPropagation(), children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-title", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 2H14L20 8V20C20 21.1046 19.1046 22 18 22H6C4.89543 22 4 21.1046 4 20V4C4 2.89543 4.89543 2 6 2Z", stroke: "currentColor", strokeWidth: "1.5" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2V8H20", stroke: "currentColor", strokeWidth: "1.5" })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: fileName })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "fp-close", onClick: handleClose, children: "×" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-content", onContextMenu: handleContextMenu, children: loading ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-status", children: "加载中..." }) : error ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-status fp-error", children: error }) : /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { ref: contentRef, className: "fp-text", "data-file-path": filePath, children: content2.split("\n").map((line, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-line", "data-line": i + 1, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "fp-line-number", "data-line": i + 1, children: i + 1 }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "fp-line-content", "data-line": i + 1, children: line })
-      ] }, i)) }) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-footer", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "选择内容后右键可发送到聊天" }) })
-    ] }),
-    contextMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-context-menu", style: { left: contextMenu.x, top: contextMenu.y }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-cm-header", children: "发送到聊天" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-cm-info", children: [
-        "第 ",
-        contextMenu.startLine,
-        " - ",
-        contextMenu.endLine,
-        " 行"
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "fp-cm-btn", onClick: handleSendToChat, children: [
-        "发送 [",
-        fileName,
-        ":",
-        contextMenu.startLine,
-        "-",
-        contextMenu.endLine,
-        "]"
-      ] })
-    ] })
-  ] });
-}
-function getFileIcon(name2) {
-  const ext = name2.split(".").pop()?.toLowerCase() || "";
-  if (name2 === "package.json") return { icon: "📦", color: "#cb3837" };
-  if (name2 === "tsconfig.json") return { icon: "⚙️", color: "#3178c6" };
-  if (name2 === ".gitignore") return { icon: "🔧", color: "#f05032" };
-  if (name2 === "README.md") return { icon: "📖", color: "#083fa1" };
-  switch (ext) {
-    case "js":
-    case "jsx":
-    case "mjs":
-    case "cjs":
-      return { icon: "📄", color: "#f7df1e" };
-    case "ts":
-    case "tsx":
-    case "mts":
-    case "cts":
-      return { icon: "📘", color: "#3178c6" };
-    case "json":
-      return { icon: "📋", color: "#5b5b5b" };
-    case "css":
-    case "scss":
-    case "less":
-      return { icon: "🎨", color: "#264de4" };
-    case "html":
-    case "htm":
-      return { icon: "🌐", color: "#e34c26" };
-    case "md":
-    case "mdx":
-      return { icon: "📝", color: "#083fa1" };
-    case "py":
-      return { icon: "🐍", color: "#3776ab" };
-    case "rs":
-      return { icon: "🦀", color: "#dea584" };
-    case "go":
-      return { icon: "🔷", color: "#00add8" };
-    case "java":
-      return { icon: "☕", color: "#ed8b00" };
-    case "vue":
-      return { icon: "💚", color: "#42b883" };
-    case "svelte":
-      return { icon: "🔥", color: "#ff3e00" };
-    case "yaml":
-    case "yml":
-      return { icon: "⚙️", color: "#cb171e" };
-    case "toml":
-      return { icon: "⚙️", color: "#9c4121" };
-    case "xml":
-      return { icon: "📰", color: "#0060ac" };
-    case "svg":
-      return { icon: "🖼️", color: "#ffb13b" };
-    case "png":
-    case "jpg":
-    case "jpeg":
-    case "gif":
-    case "webp":
-      return { icon: "🖼️", color: "#a855f7" };
-    case "sh":
-    case "bash":
-    case "zsh":
-      return { icon: "🖥️", color: "#89e051" };
-    case "sql":
-      return { icon: "🗄️", color: "#336791" };
-    case "env":
-      return { icon: "🔐", color: "#ecd53f" };
-    case "lock":
-      return { icon: "🔒", color: "#888" };
-    case "txt":
-      return { icon: "📄", color: "#888" };
-    default:
-      return { icon: "📄", color: "#6D8098" };
-  }
-}
-function FileTreeItem({
-  entry,
-  depth,
-  highlightedPath,
-  onFileClick
-}) {
-  const [expanded, setExpanded] = reactExports.useState(false);
-  const [children, setChildren] = reactExports.useState([]);
-  const handleToggle = async () => {
-    if (entry.type === "folder") {
-      if (!expanded && children.length === 0) {
-        const loaded = await window.electronAPI.readDirectory(entry.path);
-        setChildren(loaded);
-      }
-      setExpanded(!expanded);
-    } else {
-      onFileClick(entry.path);
-    }
-  };
-  const isHighlighted = highlightedPath === entry.path;
-  const fileInfo = entry.type === "file" ? getFileIcon(entry.name) : null;
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs(
-      "div",
-      {
-        onClick: handleToggle,
-        className: `file-tree-item ${entry.type === "file" ? "is-file" : ""} ${isHighlighted ? "highlighted" : ""}`,
-        style: { paddingLeft: `${depth * 16 + 8}px` },
-        children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "file-icon", style: { color: fileInfo?.color || "#DCAB5F" }, children: entry.type === "folder" ? expanded ? "📂" : "📁" : fileInfo?.icon || "📄" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "file-name", children: entry.name })
-        ]
-      }
-    ),
-    expanded && children.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "file-tree-children", children: children.map((child) => /* @__PURE__ */ jsxRuntimeExports.jsx(FileTreeItem, { entry: child, depth: depth + 1, highlightedPath, onFileClick }, child.path)) })
-  ] });
-}
-function FileExplorer() {
-  const [search2, setSearch] = reactExports.useState("");
-  const [rootEntries, setRootEntries] = reactExports.useState([]);
-  const [searchResults, setSearchResults] = reactExports.useState([]);
-  const [previewFile, setPreviewFile] = reactExports.useState(null);
-  const { projects, activeProjectId } = useProjectStore();
-  const { highlightedFile } = useChatStore();
-  const activeProject = projects.find((p2) => p2.id === activeProjectId);
-  const handleFileClick = reactExports.useCallback((path2) => {
-    setPreviewFile(path2);
-  }, []);
-  reactExports.useEffect(() => {
-    if (activeProject) {
-      window.electronAPI.readDirectory(activeProject.path).then(setRootEntries);
-    }
-  }, [activeProject]);
-  reactExports.useEffect(() => {
-    if (!search2.trim() || !activeProject) {
-      setSearchResults([]);
-      return;
-    }
-    const timer = setTimeout(async () => {
-      const results = await window.electronAPI.searchFiles(activeProject.path, search2);
-      setSearchResults(results);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [search2, activeProject]);
-  const displayEntries = search2.trim() ? searchResults : rootEntries;
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "file-tree", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "file-tree-header", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "资源管理器" }),
-      activeProject && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "file-tree-header-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          onClick: () => window.electronAPI.readDirectory(activeProject.path).then(setRootEntries),
-          className: "btn-refresh",
-          title: "刷新",
-          children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M1 4v6h6M23 20v-6h-6", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" })
-          ] })
-        }
-      ) })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "file-tree-search", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { className: "file-tree-search-icon", width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "11", cy: "11", r: "8", stroke: "currentColor", strokeWidth: "2" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M21 21L16.65 16.65", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "input",
-        {
-          value: search2,
-          onChange: (e) => setSearch(e.target.value),
-          placeholder: "搜索文件...",
-          className: "file-tree-search-input"
-        }
-      ),
-      search2 && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setSearch(""), className: "file-tree-search-clear", children: "×" })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "file-tree-content", children: !activeProject ? /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "placeholder-text", children: "请先选择一个项目" }) : displayEntries.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "placeholder-text", children: search2 ? "无匹配结果" : "空目录" }) : displayEntries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(FileTreeItem, { entry, depth: 0, highlightedPath: highlightedFile, onFileClick: handleFileClick }, entry.path)) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(FilePreview, { filePath: previewFile, onClose: () => setPreviewFile(null) })
-  ] });
-}
-const SHORTCUT_LABELS = {
-  fileSearch: "文件搜索",
-  switchToFiles: "切换到资源管理器",
-  prevModel: "上一个模型",
-  nextModel: "下一个模型"
-};
-const DEFAULT_SHORTCUTS = {
-  sendKey: "Enter",
-  fileSearch: "Ctrl+P",
-  switchToFiles: "Ctrl+Shift+F",
-  prevModel: "Ctrl+[",
-  nextModel: "Ctrl+]"
-};
-const DEFAULT_FILTERS = {
-  excludeFolders: ["node_modules", ".git", "dist"],
-  excludeExtensions: [".pyc", ".class"],
-  excludeFiles: [".env"]
-};
-function formatKey(e) {
-  const parts = [];
-  if (e.ctrlKey) parts.push("Ctrl");
-  if (e.shiftKey) parts.push("Shift");
-  if (e.altKey) parts.push("Alt");
-  if (e.metaKey) parts.push("Cmd");
-  const key = e.key;
-  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return "";
-  if (key === " ") parts.push("Space");
-  else if (key === "Enter") parts.push("Enter");
-  else if (key === "Backspace") parts.push("Backspace");
-  else if (key === "Escape") parts.push("Esc");
-  else if (key === "ArrowUp") parts.push("Up");
-  else if (key === "ArrowDown") parts.push("Down");
-  else if (key === "ArrowLeft") parts.push("Left");
-  else if (key === "ArrowRight") parts.push("Right");
-  else if (key === "Tab") parts.push("Tab");
-  else if (key === "<") parts.push("<");
-  else if (key.length === 1) parts.push(key.toUpperCase());
-  else parts.push(key);
-  return parts.join("+");
-}
-let cachedPiSDKStatus = null;
-let cachedAgentStatuses = {};
-let lastPiSDKCheck = 0;
-let lastAgentChecks = {};
-const VERSION_CACHE_MS = 6e4;
-function SettingsView() {
-  const [shortcuts, setShortcuts] = reactExports.useState(DEFAULT_SHORTCUTS);
-  const [filters, setFilters] = reactExports.useState(DEFAULT_FILTERS);
-  const [recordingKey, setRecordingKey] = reactExports.useState(null);
-  const [showShortcutModal, setShowShortcutModal] = reactExports.useState(false);
-  const [showFilterModal, setShowFilterModal] = reactExports.useState(false);
-  const [showGeneralModal, setShowGeneralModal] = reactExports.useState(false);
-  const [tempImagePath, setTempImagePath] = reactExports.useState("");
-  const [imageRetentionHours, setImageRetentionHours] = reactExports.useState(12);
-  const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
-  const [piSDKStatus, setPiSDKStatus] = reactExports.useState(null);
-  const [piSDKChecking, setPiSDKChecking] = reactExports.useState(false);
-  const [piSDKUpdating, setPiSDKUpdating] = reactExports.useState(false);
-  const [piSDKUpdateError, setPiSDKUpdateError] = reactExports.useState(null);
-  const [agentStatuses, setAgentStatuses] = reactExports.useState({});
-  const [agentChecking, setAgentChecking] = reactExports.useState({});
-  const [agentUpdating, setAgentUpdating] = reactExports.useState({});
-  const [agentUpdateErrors, setAgentUpdateErrors] = reactExports.useState({});
-  const [newFolder, setNewFolder] = reactExports.useState("");
-  const [newExt, setNewExt] = reactExports.useState("");
-  const [newFile, setNewFile] = reactExports.useState("");
-  const refreshPiSDKStatus = reactExports.useCallback(async () => {
-    setPiSDKChecking(true);
-    try {
-      const status = await window.electronAPI.piSDKGetStatus();
-      cachedPiSDKStatus = status;
-      lastPiSDKCheck = Date.now();
-      setPiSDKStatus(status);
-      setPiSDKUpdateError(null);
-    } catch (error) {
-      cachedPiSDKStatus = null;
-      setPiSDKStatus({
-        installed: false,
-        updateAvailable: false,
-        canUpdate: false,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setPiSDKChecking(false);
-    }
-  }, []);
-  const handlePiSDKUpdate = reactExports.useCallback(async () => {
-    setPiSDKUpdating(true);
-    setPiSDKUpdateError(null);
-    try {
-      const result = await window.electronAPI.piSDKUpdate();
-      if (result.status) setPiSDKStatus(result.status);
-      if (!result.success) {
-        setPiSDKUpdateError(result.error || "Pi SDK 更新失败");
-      }
-    } catch (error) {
-      setPiSDKUpdateError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPiSDKUpdating(false);
-    }
-  }, []);
-  const refreshAgentStatus = reactExports.useCallback(async (agentId) => {
-    setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
-    try {
-      const status = await window.electronAPI.agentGetStatus(agentId);
-      cachedAgentStatuses[agentId] = status;
-      lastAgentChecks[agentId] = Date.now();
-      setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
-      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
-    } catch (error) {
-      delete cachedAgentStatuses[agentId];
-      setAgentStatuses((prev) => ({
-        ...prev,
-        [agentId]: {
-          installed: false,
-          updateAvailable: false,
-          canUpdate: false,
-          error: error instanceof Error ? error.message : String(error)
-        }
-      }));
-    } finally {
-      setAgentChecking((prev) => ({ ...prev, [agentId]: false }));
-    }
-  }, []);
-  const handleAgentUpdate = reactExports.useCallback(async (agentId) => {
-    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
-    setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
-    try {
-      const result = await window.electronAPI.agentUpdate(agentId);
-      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status }));
-      if (!result.success) {
-        setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
-      }
-    } catch (error) {
-      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: error instanceof Error ? error.message : String(error) }));
-    } finally {
-      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
-    }
-  }, []);
-  reactExports.useEffect(() => {
-    window.electronAPI.loadData("settings").then((data) => {
-      if (data) {
-        if (data.shortcuts) {
-          const { cycleModel, ...rest } = data.shortcuts;
-          setShortcuts({ ...DEFAULT_SHORTCUTS, ...rest });
-        }
-        if (data.filters) setFilters({ ...DEFAULT_FILTERS, ...data.filters });
-        if (data.general) {
-          setTempImagePath(data.general.tempImagePath || "");
-          setImageRetentionHours(data.general.imageRetentionHours || 12);
-          if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
-        }
-      }
-    });
-  }, []);
-  reactExports.useEffect(() => {
-    const now = Date.now();
-    if (now - lastPiSDKCheck > VERSION_CACHE_MS) {
-      refreshPiSDKStatus();
-    } else if (cachedPiSDKStatus) {
-      setPiSDKStatus(cachedPiSDKStatus);
-    }
-    for (const agent of AVAILABLE_AGENTS) {
-      if (agent.id === "pi") continue;
-      if (now - (lastAgentChecks[agent.id] || 0) > VERSION_CACHE_MS) {
-        refreshAgentStatus(agent.id);
-      } else if (cachedAgentStatuses[agent.id]) {
-        setAgentStatuses((prev) => ({ ...prev, [agent.id]: cachedAgentStatuses[agent.id] }));
-      }
-    }
-  }, [refreshPiSDKStatus, refreshAgentStatus]);
-  const saveShortcuts = (s) => {
-    setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
-  };
-  const saveFilters = (f) => {
-    setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents } });
-  };
-  const saveGeneral = () => {
-    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
-  };
-  const handleKeyDown = reactExports.useCallback((e) => {
-    if (!recordingKey) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const combo = formatKey(e);
-    if (!combo) return;
-    const newShortcuts = { ...shortcuts, [recordingKey]: combo };
-    saveShortcuts(newShortcuts);
-    setRecordingKey(null);
-  }, [recordingKey, shortcuts, filters]);
-  reactExports.useEffect(() => {
-    if (recordingKey) {
-      window.addEventListener("keydown", handleKeyDown, true);
-      return () => window.removeEventListener("keydown", handleKeyDown, true);
-    }
-  }, [recordingKey, handleKeyDown]);
-  const addFolder = () => {
-    if (newFolder.trim()) {
-      const newFilters = { ...filters, excludeFolders: [...filters.excludeFolders, newFolder.trim()] };
-      saveFilters(newFilters);
-      setNewFolder("");
-    }
-  };
-  const addExt = () => {
-    if (newExt.trim()) {
-      const ext = newExt.startsWith(".") ? newExt.trim() : `.${newExt.trim()}`;
-      const newFilters = { ...filters, excludeExtensions: [...filters.excludeExtensions, ext] };
-      saveFilters(newFilters);
-      setNewExt("");
-    }
-  };
-  const addFile = () => {
-    if (newFile.trim()) {
-      const newFilters = { ...filters, excludeFiles: [...filters.excludeFiles, newFile.trim()] };
-      saveFilters(newFilters);
-      setNewFile("");
-    }
-  };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-header", children: "设置" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-content", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-section", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "快速操作" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-quick-buttons", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            onClick: () => {
-              setShowShortcutModal(true);
-              setRecordingKey(null);
-            },
-            className: "btn-quick-setting",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z", stroke: "currentColor", strokeWidth: "1.5" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M19.4 15a2 2 0 00.4 2.2l.1.1a2 2 0 01-2.8 2.8l-.1-.1a2 2 0 00-2.2-.4 2 2 0 00-1.2 1.2v.1a2 2 0 01-4 0v-.1a2 2 0 00-1.1-1.1 2 2 0 00-2.2.4l-.1.1a2 2 0 01-2.8-2.8l.1-.1a2 2 0 00.4-2.2 2 2 0 00-1.2-1.2h-.1a2 2 0 01 0-4h.1A2 2 0 004.6 9a2 2 0 00-.4-2.2l-.1-.1a2 2 0 012.8-2.8l.1.1a2 2 0 002.2.4h.1a2 2 0 001.1-1.1v-.1a2 2 0 014 0v.1a2 2 0 001.1 1.1h.1a2 2 0 002.2-.4l.1-.1a2 2 0 012.8 2.8l-.1.1a2 2 0 00-.4 2.2v.1a2 2 0 001.2 1.2h.1a2 2 0 010 4h-.1a2 2 0 00-1.2 1.2z", stroke: "currentColor", strokeWidth: "1.5" })
-              ] }),
-              "快捷键设置"
-            ]
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            onClick: () => setShowFilterModal(true),
-            className: "btn-quick-setting",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707L14 14v7a1 1 0 01-1 1h-2a1 1 0 01-1-1v-7L3.293 7.293A1 1 0 013 6.586V4z", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }) }),
-              "过滤规则"
-            ]
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            onClick: () => setShowGeneralModal(true),
-            className: "btn-quick-setting",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "3", stroke: "currentColor", strokeWidth: "1.5" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" })
-              ] }),
-              "通用设置"
-            ]
-          }
-        )
-      ] })
-    ] }) }),
-    showShortcutModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-overlay", onClick: () => {
-      setShowShortcutModal(false);
-      setRecordingKey(null);
-    }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal", onClick: (e) => e.stopPropagation(), children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "快捷键设置" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => {
-          setShowShortcutModal(false);
-          setRecordingKey(null);
-        }, className: "settings-modal-close", children: "×" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-content", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-list", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-item", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "shortcut-label", children: "发送消息" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shortcut-control", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "select",
-              {
-                className: "send-mode-select",
-                value: shortcuts.sendKey,
-                onChange: (e) => saveShortcuts({ ...shortcuts, sendKey: e.target.value }),
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "Enter", children: "Enter 发送" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "Ctrl+Enter", children: "Ctrl + Enter 发送" })
-                ]
-              }
-            ) })
-          ] }),
-          Object.entries(shortcuts).filter(([k]) => k !== "sendKey" && k !== "prevModel" && k !== "nextModel").map(([key, value]) => {
-            const isRecording = recordingKey === key;
-            return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-item", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "shortcut-label", children: SHORTCUT_LABELS[key] || key }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shortcut-control", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  className: `shortcut-btn ${isRecording ? "recording" : ""}`,
-                  onClick: () => setRecordingKey(isRecording ? null : key),
-                  children: isRecording ? "按下快捷键..." : value
-                }
-              ) })
-            ] }, key);
-          }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-item", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "shortcut-label", children: "切换模型" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shortcut-control", style: { display: "flex", gap: 8 }, children: ["prevModel", "nextModel"].map((key) => {
-              const isRecording = recordingKey === key;
-              return /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  className: `shortcut-btn ${isRecording ? "recording" : ""}`,
-                  onClick: () => setRecordingKey(isRecording ? null : key),
-                  title: key === "prevModel" ? "上一个" : "下一个",
-                  children: isRecording ? "按下..." : `${key === "prevModel" ? "上一个" : "下一个"}: ${shortcuts[key]}`
-                },
-                key
-              );
-            }) })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 11, color: "var(--text-secondary)", marginTop: 12 }, children: "点击快捷键按钮后，按下新的组合键即可设置。按 Esc 取消。" })
-      ] })
-    ] }) }),
-    showFilterModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-overlay", onClick: () => setShowFilterModal(false), children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal", onClick: (e) => e.stopPropagation(), children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "过滤规则" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setShowFilterModal(false), className: "settings-modal-close", children: "×" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-content", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "排除文件夹" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-custom-list", children: filters.excludeFolders.map((f) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "filter-custom-tag", children: [
-            f,
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => saveFilters({ ...filters, excludeFolders: filters.excludeFolders.filter((x) => x !== f) }), className: "filter-custom-remove", children: "×" })
-          ] }, f)) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-custom-ext", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("input", { value: newFolder, onChange: (e) => setNewFolder(e.target.value), onKeyDown: (e) => e.key === "Enter" && addFolder(), placeholder: "添加文件夹", className: "filter-custom-input" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: addFolder, className: "filter-add-btn", children: "添加" })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "排除文件后缀" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-custom-list", children: filters.excludeExtensions.map((ext) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "filter-custom-tag", children: [
-            ext,
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => saveFilters({ ...filters, excludeExtensions: filters.excludeExtensions.filter((x) => x !== ext) }), className: "filter-custom-remove", children: "×" })
-          ] }, ext)) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-custom-ext", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("input", { value: newExt, onChange: (e) => setNewExt(e.target.value), onKeyDown: (e) => e.key === "Enter" && addExt(), placeholder: "如 .log", className: "filter-custom-input" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: addExt, className: "filter-add-btn", children: "添加" })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "排除文件名" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-custom-list", children: filters.excludeFiles.map((f) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "filter-custom-tag", children: [
-            f,
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => saveFilters({ ...filters, excludeFiles: filters.excludeFiles.filter((x) => x !== f) }), className: "filter-custom-remove", children: "×" })
-          ] }, f)) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-custom-ext", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("input", { value: newFile, onChange: (e) => setNewFile(e.target.value), onKeyDown: (e) => e.key === "Enter" && addFile(), placeholder: "如 .env", className: "filter-custom-input" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: addFile, className: "filter-add-btn", children: "添加" })
-          ] })
-        ] })
-      ] }) })
-    ] }) }),
-    showGeneralModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-overlay", onClick: () => setShowGeneralModal(false), children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal", onClick: (e) => e.stopPropagation(), children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "通用设置" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setShowGeneralModal(false), className: "settings-modal-close", children: "×" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-content", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-section", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Agent 设置" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "选择启用的 Agent，未启用的不会显示在项目卡片上" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
-            AVAILABLE_AGENTS.map((agent) => {
-              const isPiSDKAgent = agent.id === "pi";
-              const agentStatus = agentStatuses[agent.id];
-              const isInstalled = isPiSDKAgent ? piSDKStatus?.installed === true : agentStatus?.installed === true;
-              const isChecking = isPiSDKAgent ? piSDKChecking || !piSDKStatus : agentChecking[agent.id];
-              const isUnavailable = !isInstalled && !isChecking;
-              const versionLabel = isPiSDKAgent ? piSDKStatus?.currentVersion ? `v${piSDKStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装" : agentStatus?.currentVersion ? `v${agentStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装";
-              return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "agent-settings-main", children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "input",
-                    {
-                      type: "checkbox",
-                      checked: enabledAgents.includes(agent.id),
-                      disabled: !isInstalled || isChecking,
-                      onChange: (e) => {
-                        if (e.target.checked) {
-                          setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
-                        } else {
-                          setEnabledAgents((prev) => prev.filter((id) => id !== agent.id));
-                        }
-                      },
-                      className: "agent-settings-checkbox"
-                    }
-                  ),
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-copy", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-title-line", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-name", children: agent.name }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`, children: versionLabel }),
-                      isUnavailable && versionLabel !== "未安装" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-badge agent-settings-badge-warning", children: "未安装" }),
-                      (isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-meta", children: [
-                        "最新 v",
-                        isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion
-                      ] })
-                    ] }),
-                    isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-error", children: [
-                      "Node v",
-                      piSDKStatus.nodeVersion,
-                      " 过低，需要 22.19.0 或更高版本"
-                    ] }),
-                    (isPiSDKAgent ? piSDKStatus?.error || piSDKUpdateError : agentStatus?.error || agentUpdateErrors[agent.id]) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-error", children: isPiSDKAgent ? piSDKUpdateError || piSDKStatus?.error : agentUpdateErrors[agent.id] || agentStatus?.error })
-                  ] })
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "agent-settings-actions", children: [
-                  (isPiSDKAgent && piSDKStatus?.updateAvailable || !isPiSDKAgent && agentStatus?.updateAvailable) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "button",
-                    {
-                      className: "filter-add-btn agent-settings-update-btn",
-                      onClick: () => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id),
-                      disabled: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate),
-                      title: (isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新",
-                      children: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"
-                    }
-                  ),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "button",
-                    {
-                      className: "btn-action agent-settings-refresh-btn",
-                      onClick: () => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id),
-                      disabled: isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]),
-                      title: "重新检查版本",
-                      children: isChecking ? "检查中..." : "刷新"
-                    }
-                  )
-                ] })
-              ] }, agent.id);
-            }),
-            AVAILABLE_AGENTS.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "暂无可用 Agent" })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-section", style: { marginTop: 16 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "图片设置" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "临时图片将在指定时间后自动清理" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "临时图片存储路径" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "input",
-                  {
-                    value: tempImagePath,
-                    onChange: (e) => setTempImagePath(e.target.value),
-                    placeholder: "留空使用默认路径",
-                    className: "filter-custom-input",
-                    style: { flex: 1 }
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "button",
-                  {
-                    className: "filter-add-btn",
-                    onClick: async () => {
-                      const result = await window.electronAPI.openDirectory();
-                      if (!result.canceled && result.path) {
-                        setTempImagePath(result.path);
-                      }
-                    },
-                    title: "选择文件夹",
-                    children: "浏览"
-                  }
-                )
-              ] })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "图片保留时间（小时）" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "input",
-                  {
-                    type: "number",
-                    min: 1,
-                    max: 168,
-                    value: imageRetentionHours,
-                    onChange: (e) => setImageRetentionHours(parseInt(e.target.value) || 12),
-                    className: "filter-custom-input",
-                    style: { width: 80 }
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "小时" })
-              ] })
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              className: "filter-add-btn",
-              style: { marginTop: 12 },
-              onClick: () => {
-                saveGeneral();
-                setShowGeneralModal(false);
-              },
-              children: "保存"
-            }
-          )
-        ] })
-      ] })
-    ] }) })
-  ] });
-}
-function ContentArea() {
-  const { sidebarTab, sidebarCollapsed } = useAppStore();
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("aside", { className: `sidebar-panel ${sidebarCollapsed ? "collapsed" : ""}`, children: [
-    sidebarTab === "projects" && /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectView, {}),
-    sidebarTab === "files" && /* @__PURE__ */ jsxRuntimeExports.jsx(FileExplorer, {}),
-    sidebarTab === "settings" && /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsView, {})
-  ] });
-}
-var reactDomExports = requireReactDom();
 function ok$1() {
 }
 function unreachable() {
@@ -42546,6 +41715,924 @@ function MarkdownRenderer({ content: content2 }) {
     }
   ) });
 }
+class ErrorBoundary extends reactExports.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+const MAX_RENDER_LINES = 1e3;
+const MAX_MARKDOWN_CHARS = 5e5;
+function FilePreview({ filePath, onClose }) {
+  const [content2, setContent] = reactExports.useState("");
+  const [loading, setLoading] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState(null);
+  const [previewMode, setPreviewMode] = reactExports.useState(null);
+  const [contextMenu, setContextMenu] = reactExports.useState(null);
+  const contentRef = reactExports.useRef(null);
+  const { addPendingFile } = useChatStore();
+  const onCloseRef = reactExports.useRef(onClose);
+  onCloseRef.current = onClose;
+  const handleClose = reactExports.useCallback(() => {
+    setContextMenu(null);
+    onCloseRef.current();
+  }, []);
+  const isMarkdown = reactExports.useMemo(() => {
+    if (!filePath) return false;
+    return /\.mdx?$/i.test(filePath);
+  }, [filePath]);
+  reactExports.useEffect(() => {
+    setPreviewMode(isMarkdown ? true : null);
+  }, [isMarkdown]);
+  reactExports.useEffect(() => {
+    if (!filePath) return;
+    let cancelled = false;
+    const loadContent = async () => {
+      setLoading(true);
+      setError(null);
+      setContent("");
+      try {
+        const result = await window.electronAPI.readFile(filePath);
+        if (cancelled) return;
+        if (result.success) {
+          setContent(result.content || "");
+        } else {
+          setError(result.error || "无法读取文件");
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(err.message || "无法读取文件");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    loadContent();
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath]);
+  reactExports.useEffect(() => {
+    if (!filePath) return;
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        handleClose();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [filePath, handleClose]);
+  reactExports.useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = (e) => {
+      if (e.target.closest(".fp-context-menu")) return;
+      setContextMenu(null);
+    };
+    document.addEventListener("mousedown", handleClick, true);
+    return () => document.removeEventListener("mousedown", handleClick, true);
+  }, [contextMenu]);
+  const fileName = reactExports.useMemo(() => filePath?.split(/[/\\]/).pop() || filePath || "", [filePath]);
+  const showMarkdownPreview = previewMode === true && isMarkdown;
+  const contentLines = reactExports.useMemo(() => content2.split("\n"), [content2]);
+  const totalLines = contentLines.length;
+  const shouldLimit = totalLines > MAX_RENDER_LINES && !showMarkdownPreview;
+  const displayContent = reactExports.useMemo(() => {
+    if (loading) return "";
+    if (shouldLimit) return contentLines.slice(0, MAX_RENDER_LINES).join("\n");
+    return content2;
+  }, [content2, contentLines, shouldLimit, loading]);
+  const markdownContent = reactExports.useMemo(() => {
+    if (!showMarkdownPreview) return content2;
+    if (content2.length > MAX_MARKDOWN_CHARS) {
+      return content2.slice(0, MAX_MARKDOWN_CHARS) + "\n\n> ... 内容过长，已截断显示";
+    }
+    return content2;
+  }, [content2, showMarkdownPreview]);
+  const handleContextMenu = reactExports.useCallback(
+    (e) => {
+      setContextMenu(null);
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) return;
+      const selectedText = selection.toString();
+      if (!selectedText.trim()) return;
+      const contentEl = contentRef.current;
+      if (!contentEl) return;
+      let startLine = 1;
+      let endLine = 1;
+      try {
+        const range = selection.getRangeAt(0);
+        let startNode = range.startContainer;
+        while (startNode && startNode !== contentEl) {
+          if (startNode instanceof HTMLElement && startNode.dataset.line) {
+            startLine = parseInt(startNode.dataset.line, 10);
+            break;
+          }
+          startNode = startNode.parentNode;
+        }
+        let endNode = range.endContainer;
+        while (endNode && endNode !== contentEl) {
+          if (endNode instanceof HTMLElement && endNode.dataset.line) {
+            endLine = parseInt(endNode.dataset.line, 10);
+            break;
+          }
+          endNode = endNode.parentNode;
+        }
+        if (endLine < startLine) endLine = startLine;
+      } catch {
+      }
+      e.preventDefault();
+      setTimeout(() => {
+        setContextMenu({ x: e.clientX, y: e.clientY, selection: selectedText, startLine, endLine });
+      }, 10);
+    },
+    []
+  );
+  const handleSendToChat = reactExports.useCallback(() => {
+    if (!contextMenu || !filePath) return;
+    addPendingFile({
+      id: crypto.randomUUID(),
+      fileName,
+      filePath,
+      startLine: contextMenu.startLine,
+      endLine: contextMenu.endLine
+    });
+    setContextMenu(null);
+  }, [contextMenu, filePath, fileName, addPendingFile]);
+  if (!filePath) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-overlay", onClick: handleClose, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-modal", onClick: (e) => e.stopPropagation(), children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-title", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 2H14L20 8V20C20 21.1046 19.1046 22 18 22H6C4.89543 22 4 21.1046 4 20V4C4 2.89543 4.89543 2 6 2Z", stroke: "currentColor", strokeWidth: "1.5" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2V8H20", stroke: "currentColor", strokeWidth: "1.5" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: fileName })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "fp-close", onClick: handleClose, children: "×" })
+      ] }),
+      isMarkdown && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-toolbar", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `fp-toolbar-btn ${previewMode === true ? "active" : ""}`,
+            onClick: () => setPreviewMode(true),
+            children: "预览"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: `fp-toolbar-btn ${previewMode === false ? "active" : ""}`,
+            onClick: () => setPreviewMode(false),
+            children: "源码"
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-content", onContextMenu: handleContextMenu, children: loading ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-status", children: "加载中..." }) : error ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-status fp-error", children: error }) : showMarkdownPreview ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-markdown-preview", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { fallback: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-status", children: "Markdown 渲染失败，请切换到源码模式" }), children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: markdownContent }) }) }) : /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { ref: contentRef, className: "fp-text", "data-file-path": filePath, children: displayContent.split("\n").map((line, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-line", "data-line": i + 1, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "fp-line-number", "data-line": i + 1, children: i + 1 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "fp-line-content", "data-line": i + 1, children: line })
+      ] }, i)) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-footer", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "选择内容后右键可发送到聊天" }) })
+    ] }),
+    contextMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-context-menu", style: { left: contextMenu.x, top: contextMenu.y }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fp-cm-header", children: "发送到聊天" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "fp-cm-info", children: [
+        "第 ",
+        contextMenu.startLine,
+        " - ",
+        contextMenu.endLine,
+        " 行"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "fp-cm-btn", onClick: handleSendToChat, children: [
+        "发送 [",
+        fileName,
+        ":",
+        contextMenu.startLine,
+        "-",
+        contextMenu.endLine,
+        "]"
+      ] })
+    ] })
+  ] });
+}
+function getFileIcon(name2) {
+  const ext = name2.split(".").pop()?.toLowerCase() || "";
+  if (name2 === "package.json") return { icon: "📦", color: "#cb3837" };
+  if (name2 === "tsconfig.json") return { icon: "⚙️", color: "#3178c6" };
+  if (name2 === ".gitignore") return { icon: "🔧", color: "#f05032" };
+  if (name2 === "README.md") return { icon: "📖", color: "#083fa1" };
+  switch (ext) {
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return { icon: "📄", color: "#f7df1e" };
+    case "ts":
+    case "tsx":
+    case "mts":
+    case "cts":
+      return { icon: "📘", color: "#3178c6" };
+    case "json":
+      return { icon: "📋", color: "#5b5b5b" };
+    case "css":
+    case "scss":
+    case "less":
+      return { icon: "🎨", color: "#264de4" };
+    case "html":
+    case "htm":
+      return { icon: "🌐", color: "#e34c26" };
+    case "md":
+    case "mdx":
+      return { icon: "📝", color: "#083fa1" };
+    case "py":
+      return { icon: "🐍", color: "#3776ab" };
+    case "rs":
+      return { icon: "🦀", color: "#dea584" };
+    case "go":
+      return { icon: "🔷", color: "#00add8" };
+    case "java":
+      return { icon: "☕", color: "#ed8b00" };
+    case "vue":
+      return { icon: "💚", color: "#42b883" };
+    case "svelte":
+      return { icon: "🔥", color: "#ff3e00" };
+    case "yaml":
+    case "yml":
+      return { icon: "⚙️", color: "#cb171e" };
+    case "toml":
+      return { icon: "⚙️", color: "#9c4121" };
+    case "xml":
+      return { icon: "📰", color: "#0060ac" };
+    case "svg":
+      return { icon: "🖼️", color: "#ffb13b" };
+    case "png":
+    case "jpg":
+    case "jpeg":
+    case "gif":
+    case "webp":
+      return { icon: "🖼️", color: "#a855f7" };
+    case "sh":
+    case "bash":
+    case "zsh":
+      return { icon: "🖥️", color: "#89e051" };
+    case "sql":
+      return { icon: "🗄️", color: "#336791" };
+    case "env":
+      return { icon: "🔐", color: "#ecd53f" };
+    case "lock":
+      return { icon: "🔒", color: "#888" };
+    case "txt":
+      return { icon: "📄", color: "#888" };
+    default:
+      return { icon: "📄", color: "#6D8098" };
+  }
+}
+const FileTreeItem = reactExports.memo(function FileTreeItem2({
+  entry,
+  depth,
+  highlightedPath,
+  onFileClick
+}) {
+  const [expanded, setExpanded] = reactExports.useState(false);
+  const [children, setChildren] = reactExports.useState([]);
+  const [loadingFolder, setLoadingFolder] = reactExports.useState(false);
+  const handleToggle = reactExports.useCallback(async () => {
+    if (entry.type === "folder") {
+      if (!expanded && children.length === 0) {
+        setLoadingFolder(true);
+        try {
+          const loaded = await window.electronAPI.readDirectory(entry.path);
+          setChildren(loaded);
+        } finally {
+          setLoadingFolder(false);
+        }
+      }
+      setExpanded(!expanded);
+    } else {
+      onFileClick(entry.path);
+    }
+  }, [entry, expanded, children.length, onFileClick]);
+  const isHighlighted = highlightedPath === entry.path;
+  const fileInfo = entry.type === "file" ? getFileIcon(entry.name) : null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        onClick: handleToggle,
+        className: `file-tree-item ${entry.type === "file" ? "is-file" : ""} ${isHighlighted ? "highlighted" : ""}`,
+        style: { paddingLeft: `${depth * 16 + 8}px` },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "file-icon", style: { color: fileInfo?.color || "#DCAB5F" }, children: entry.type === "folder" ? expanded ? "📂" : loadingFolder ? "⏳" : "📁" : fileInfo?.icon || "📄" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "file-name", children: entry.name })
+        ]
+      }
+    ),
+    expanded && children.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "file-tree-children", children: children.map((child) => /* @__PURE__ */ jsxRuntimeExports.jsx(FileTreeItem2, { entry: child, depth: depth + 1, highlightedPath, onFileClick }, child.path)) })
+  ] });
+});
+function FileExplorer() {
+  const [search2, setSearch] = reactExports.useState("");
+  const [rootEntries, setRootEntries] = reactExports.useState([]);
+  const [searchResults, setSearchResults] = reactExports.useState([]);
+  const [previewFile, setPreviewFile] = reactExports.useState(null);
+  const { projects, activeProjectId } = useProjectStore();
+  const { highlightedFile } = useChatStore();
+  const activeProject = projects.find((p2) => p2.id === activeProjectId);
+  const handleFileClick = reactExports.useCallback((path2) => {
+    setPreviewFile(path2);
+  }, []);
+  reactExports.useEffect(() => {
+    if (activeProject) {
+      window.electronAPI.readDirectory(activeProject.path).then(setRootEntries);
+    }
+  }, [activeProject]);
+  reactExports.useEffect(() => {
+    if (!search2.trim() || !activeProject) {
+      setSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      const results = await window.electronAPI.searchFiles(activeProject.path, search2);
+      setSearchResults(results);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search2, activeProject]);
+  const displayEntries = search2.trim() ? searchResults : rootEntries;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "file-tree", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "file-tree-header", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "资源管理器" }),
+      activeProject && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "file-tree-header-actions", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => window.electronAPI.readDirectory(activeProject.path).then(setRootEntries),
+          className: "btn-refresh",
+          title: "刷新",
+          children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M1 4v6h6M23 20v-6h-6", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" })
+          ] })
+        }
+      ) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "file-tree-search", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { className: "file-tree-search-icon", width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "11", cy: "11", r: "8", stroke: "currentColor", strokeWidth: "2" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M21 21L16.65 16.65", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          value: search2,
+          onChange: (e) => setSearch(e.target.value),
+          placeholder: "搜索文件...",
+          className: "file-tree-search-input"
+        }
+      ),
+      search2 && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setSearch(""), className: "file-tree-search-clear", children: "×" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "file-tree-content", children: !activeProject ? /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "placeholder-text", children: "请先选择一个项目" }) : displayEntries.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "placeholder-text", children: search2 ? "无匹配结果" : "空目录" }) : displayEntries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(FileTreeItem, { entry, depth: 0, highlightedPath: highlightedFile, onFileClick: handleFileClick }, entry.path)) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(FilePreview, { filePath: previewFile, onClose: () => setPreviewFile(null) })
+  ] });
+}
+const SHORTCUT_LABELS = {
+  fileSearch: "文件搜索",
+  switchToFiles: "切换到资源管理器",
+  prevModel: "上一个模型",
+  nextModel: "下一个模型"
+};
+const DEFAULT_SHORTCUTS = {
+  sendKey: "Enter",
+  fileSearch: "Ctrl+P",
+  switchToFiles: "Ctrl+Shift+F",
+  prevModel: "Ctrl+[",
+  nextModel: "Ctrl+]"
+};
+const DEFAULT_FILTERS = {
+  excludeFolders: ["node_modules", ".git", "dist"],
+  excludeExtensions: [".pyc", ".class"],
+  excludeFiles: [".env"]
+};
+function formatKey(e) {
+  const parts = [];
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.shiftKey) parts.push("Shift");
+  if (e.altKey) parts.push("Alt");
+  if (e.metaKey) parts.push("Cmd");
+  const key = e.key;
+  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return "";
+  if (key === " ") parts.push("Space");
+  else if (key === "Enter") parts.push("Enter");
+  else if (key === "Backspace") parts.push("Backspace");
+  else if (key === "Escape") parts.push("Esc");
+  else if (key === "ArrowUp") parts.push("Up");
+  else if (key === "ArrowDown") parts.push("Down");
+  else if (key === "ArrowLeft") parts.push("Left");
+  else if (key === "ArrowRight") parts.push("Right");
+  else if (key === "Tab") parts.push("Tab");
+  else if (key === "<") parts.push("<");
+  else if (key.length === 1) parts.push(key.toUpperCase());
+  else parts.push(key);
+  return parts.join("+");
+}
+let cachedPiSDKStatus = null;
+let cachedAgentStatuses = {};
+let lastPiSDKCheck = 0;
+let lastAgentChecks = {};
+const VERSION_CACHE_MS = 6e4;
+function SettingsView() {
+  const [shortcuts, setShortcuts] = reactExports.useState(DEFAULT_SHORTCUTS);
+  const [filters, setFilters] = reactExports.useState(DEFAULT_FILTERS);
+  const [recordingKey, setRecordingKey] = reactExports.useState(null);
+  const [showShortcutModal, setShowShortcutModal] = reactExports.useState(false);
+  const [showFilterModal, setShowFilterModal] = reactExports.useState(false);
+  const [showGeneralModal, setShowGeneralModal] = reactExports.useState(false);
+  const [tempImagePath, setTempImagePath] = reactExports.useState("");
+  const [imageRetentionHours, setImageRetentionHours] = reactExports.useState(12);
+  const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
+  const [piSDKStatus, setPiSDKStatus] = reactExports.useState(null);
+  const [piSDKChecking, setPiSDKChecking] = reactExports.useState(false);
+  const [piSDKUpdating, setPiSDKUpdating] = reactExports.useState(false);
+  const [piSDKUpdateError, setPiSDKUpdateError] = reactExports.useState(null);
+  const [agentStatuses, setAgentStatuses] = reactExports.useState({});
+  const [agentChecking, setAgentChecking] = reactExports.useState({});
+  const [agentUpdating, setAgentUpdating] = reactExports.useState({});
+  const [agentUpdateErrors, setAgentUpdateErrors] = reactExports.useState({});
+  const [newFolder, setNewFolder] = reactExports.useState("");
+  const [newExt, setNewExt] = reactExports.useState("");
+  const [newFile, setNewFile] = reactExports.useState("");
+  const refreshPiSDKStatus = reactExports.useCallback(async () => {
+    setPiSDKChecking(true);
+    try {
+      const status = await window.electronAPI.piSDKGetStatus();
+      cachedPiSDKStatus = status;
+      lastPiSDKCheck = Date.now();
+      setPiSDKStatus(status);
+      setPiSDKUpdateError(null);
+    } catch (error) {
+      cachedPiSDKStatus = null;
+      setPiSDKStatus({
+        installed: false,
+        updateAvailable: false,
+        canUpdate: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setPiSDKChecking(false);
+    }
+  }, []);
+  const handlePiSDKUpdate = reactExports.useCallback(async () => {
+    setPiSDKUpdating(true);
+    setPiSDKUpdateError(null);
+    try {
+      const result = await window.electronAPI.piSDKUpdate();
+      if (result.status) setPiSDKStatus(result.status);
+      if (!result.success) {
+        setPiSDKUpdateError(result.error || "Pi SDK 更新失败");
+      }
+    } catch (error) {
+      setPiSDKUpdateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPiSDKUpdating(false);
+    }
+  }, []);
+  const refreshAgentStatus = reactExports.useCallback(async (agentId) => {
+    setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
+    try {
+      const status = await window.electronAPI.agentGetStatus(agentId);
+      cachedAgentStatuses[agentId] = status;
+      lastAgentChecks[agentId] = Date.now();
+      setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
+      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
+    } catch (error) {
+      delete cachedAgentStatuses[agentId];
+      setAgentStatuses((prev) => ({
+        ...prev,
+        [agentId]: {
+          installed: false,
+          updateAvailable: false,
+          canUpdate: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    } finally {
+      setAgentChecking((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
+  const handleAgentUpdate = reactExports.useCallback(async (agentId) => {
+    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
+    setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
+    try {
+      const result = await window.electronAPI.agentUpdate(agentId);
+      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status }));
+      if (!result.success) {
+        setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
+      }
+    } catch (error) {
+      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
+  reactExports.useEffect(() => {
+    window.electronAPI.loadData("settings").then((data) => {
+      if (data) {
+        if (data.shortcuts) {
+          const { cycleModel, ...rest } = data.shortcuts;
+          setShortcuts({ ...DEFAULT_SHORTCUTS, ...rest });
+        }
+        if (data.filters) setFilters({ ...DEFAULT_FILTERS, ...data.filters });
+        if (data.general) {
+          setTempImagePath(data.general.tempImagePath || "");
+          setImageRetentionHours(data.general.imageRetentionHours || 12);
+          if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
+        }
+      }
+    });
+  }, []);
+  reactExports.useEffect(() => {
+    const now = Date.now();
+    if (now - lastPiSDKCheck > VERSION_CACHE_MS) {
+      refreshPiSDKStatus();
+    } else if (cachedPiSDKStatus) {
+      setPiSDKStatus(cachedPiSDKStatus);
+    }
+    for (const agent of AVAILABLE_AGENTS) {
+      if (agent.id === "pi") continue;
+      if (now - (lastAgentChecks[agent.id] || 0) > VERSION_CACHE_MS) {
+        refreshAgentStatus(agent.id);
+      } else if (cachedAgentStatuses[agent.id]) {
+        setAgentStatuses((prev) => ({ ...prev, [agent.id]: cachedAgentStatuses[agent.id] }));
+      }
+    }
+  }, [refreshPiSDKStatus, refreshAgentStatus]);
+  const saveShortcuts = (s) => {
+    setShortcuts(s);
+    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+  };
+  const saveFilters = (f) => {
+    setFilters(f);
+    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+  };
+  const saveGeneral = () => {
+    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+  };
+  const handleKeyDown = reactExports.useCallback((e) => {
+    if (!recordingKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const combo = formatKey(e);
+    if (!combo) return;
+    const newShortcuts = { ...shortcuts, [recordingKey]: combo };
+    saveShortcuts(newShortcuts);
+    setRecordingKey(null);
+  }, [recordingKey, shortcuts, filters]);
+  reactExports.useEffect(() => {
+    if (recordingKey) {
+      window.addEventListener("keydown", handleKeyDown, true);
+      return () => window.removeEventListener("keydown", handleKeyDown, true);
+    }
+  }, [recordingKey, handleKeyDown]);
+  const addFolder = () => {
+    if (newFolder.trim()) {
+      const newFilters = { ...filters, excludeFolders: [...filters.excludeFolders, newFolder.trim()] };
+      saveFilters(newFilters);
+      setNewFolder("");
+    }
+  };
+  const addExt = () => {
+    if (newExt.trim()) {
+      const ext = newExt.startsWith(".") ? newExt.trim() : `.${newExt.trim()}`;
+      const newFilters = { ...filters, excludeExtensions: [...filters.excludeExtensions, ext] };
+      saveFilters(newFilters);
+      setNewExt("");
+    }
+  };
+  const addFile = () => {
+    if (newFile.trim()) {
+      const newFilters = { ...filters, excludeFiles: [...filters.excludeFiles, newFile.trim()] };
+      saveFilters(newFilters);
+      setNewFile("");
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-header", children: "设置" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-content", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-section", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "快速操作" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-quick-buttons", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            onClick: () => {
+              setShowShortcutModal(true);
+              setRecordingKey(null);
+            },
+            className: "btn-quick-setting",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z", stroke: "currentColor", strokeWidth: "1.5" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M19.4 15a2 2 0 00.4 2.2l.1.1a2 2 0 01-2.8 2.8l-.1-.1a2 2 0 00-2.2-.4 2 2 0 00-1.2 1.2v.1a2 2 0 01-4 0v-.1a2 2 0 00-1.1-1.1 2 2 0 00-2.2.4l-.1.1a2 2 0 01-2.8-2.8l.1-.1a2 2 0 00.4-2.2 2 2 0 00-1.2-1.2h-.1a2 2 0 01 0-4h.1A2 2 0 004.6 9a2 2 0 00-.4-2.2l-.1-.1a2 2 0 012.8-2.8l.1.1a2 2 0 002.2.4h.1a2 2 0 001.1-1.1v-.1a2 2 0 014 0v.1a2 2 0 001.1 1.1h.1a2 2 0 002.2-.4l.1-.1a2 2 0 012.8 2.8l-.1.1a2 2 0 00-.4 2.2v.1a2 2 0 001.2 1.2h.1a2 2 0 010 4h-.1a2 2 0 00-1.2 1.2z", stroke: "currentColor", strokeWidth: "1.5" })
+              ] }),
+              "快捷键设置"
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            onClick: () => setShowFilterModal(true),
+            className: "btn-quick-setting",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707L14 14v7a1 1 0 01-1 1h-2a1 1 0 01-1-1v-7L3.293 7.293A1 1 0 013 6.586V4z", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }) }),
+              "过滤规则"
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            onClick: () => setShowGeneralModal(true),
+            className: "btn-quick-setting",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "3", stroke: "currentColor", strokeWidth: "1.5" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" })
+              ] }),
+              "通用设置"
+            ]
+          }
+        )
+      ] })
+    ] }) }),
+    showShortcutModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-overlay", onClick: () => {
+      setShowShortcutModal(false);
+      setRecordingKey(null);
+    }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal", onClick: (e) => e.stopPropagation(), children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "快捷键设置" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => {
+          setShowShortcutModal(false);
+          setRecordingKey(null);
+        }, className: "settings-modal-close", children: "×" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-content", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-list", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-item", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "shortcut-label", children: "发送消息" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shortcut-control", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "select",
+              {
+                className: "send-mode-select",
+                value: shortcuts.sendKey,
+                onChange: (e) => saveShortcuts({ ...shortcuts, sendKey: e.target.value }),
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "Enter", children: "Enter 发送" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "Ctrl+Enter", children: "Ctrl + Enter 发送" })
+                ]
+              }
+            ) })
+          ] }),
+          Object.entries(shortcuts).filter(([k]) => k !== "sendKey" && k !== "prevModel" && k !== "nextModel").map(([key, value]) => {
+            const isRecording = recordingKey === key;
+            return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-item", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "shortcut-label", children: SHORTCUT_LABELS[key] || key }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shortcut-control", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  className: `shortcut-btn ${isRecording ? "recording" : ""}`,
+                  onClick: () => setRecordingKey(isRecording ? null : key),
+                  children: isRecording ? "按下快捷键..." : value
+                }
+              ) })
+            ] }, key);
+          }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "shortcut-item", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "shortcut-label", children: "切换模型" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "shortcut-control", style: { display: "flex", gap: 8 }, children: ["prevModel", "nextModel"].map((key) => {
+              const isRecording = recordingKey === key;
+              return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  className: `shortcut-btn ${isRecording ? "recording" : ""}`,
+                  onClick: () => setRecordingKey(isRecording ? null : key),
+                  title: key === "prevModel" ? "上一个" : "下一个",
+                  children: isRecording ? "按下..." : `${key === "prevModel" ? "上一个" : "下一个"}: ${shortcuts[key]}`
+                },
+                key
+              );
+            }) })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 11, color: "var(--text-secondary)", marginTop: 12 }, children: "点击快捷键按钮后，按下新的组合键即可设置。按 Esc 取消。" })
+      ] })
+    ] }) }),
+    showFilterModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-overlay", onClick: () => setShowFilterModal(false), children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal", onClick: (e) => e.stopPropagation(), children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "过滤规则" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setShowFilterModal(false), className: "settings-modal-close", children: "×" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-content", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "排除文件夹" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-custom-list", children: filters.excludeFolders.map((f) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "filter-custom-tag", children: [
+            f,
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => saveFilters({ ...filters, excludeFolders: filters.excludeFolders.filter((x) => x !== f) }), className: "filter-custom-remove", children: "×" })
+          ] }, f)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-custom-ext", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("input", { value: newFolder, onChange: (e) => setNewFolder(e.target.value), onKeyDown: (e) => e.key === "Enter" && addFolder(), placeholder: "添加文件夹", className: "filter-custom-input" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: addFolder, className: "filter-add-btn", children: "添加" })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "排除文件后缀" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-custom-list", children: filters.excludeExtensions.map((ext) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "filter-custom-tag", children: [
+            ext,
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => saveFilters({ ...filters, excludeExtensions: filters.excludeExtensions.filter((x) => x !== ext) }), className: "filter-custom-remove", children: "×" })
+          ] }, ext)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-custom-ext", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("input", { value: newExt, onChange: (e) => setNewExt(e.target.value), onKeyDown: (e) => e.key === "Enter" && addExt(), placeholder: "如 .log", className: "filter-custom-input" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: addExt, className: "filter-add-btn", children: "添加" })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "排除文件名" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "filter-custom-list", children: filters.excludeFiles.map((f) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "filter-custom-tag", children: [
+            f,
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => saveFilters({ ...filters, excludeFiles: filters.excludeFiles.filter((x) => x !== f) }), className: "filter-custom-remove", children: "×" })
+          ] }, f)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-custom-ext", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("input", { value: newFile, onChange: (e) => setNewFile(e.target.value), onKeyDown: (e) => e.key === "Enter" && addFile(), placeholder: "如 .env", className: "filter-custom-input" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: addFile, className: "filter-add-btn", children: "添加" })
+          ] })
+        ] })
+      ] }) })
+    ] }) }),
+    showGeneralModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-modal-overlay", onClick: () => setShowGeneralModal(false), children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal", onClick: (e) => e.stopPropagation(), children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "通用设置" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setShowGeneralModal(false), className: "settings-modal-close", children: "×" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-modal-content", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-section", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Agent 设置" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "选择启用的 Agent，未启用的不会显示在项目卡片上" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
+            AVAILABLE_AGENTS.map((agent) => {
+              const isPiSDKAgent = agent.id === "pi";
+              const agentStatus = agentStatuses[agent.id];
+              const isInstalled = isPiSDKAgent ? piSDKStatus?.installed === true : agentStatus?.installed === true;
+              const isChecking = isPiSDKAgent ? piSDKChecking || !piSDKStatus : agentChecking[agent.id];
+              const isUnavailable = !isInstalled && !isChecking;
+              const versionLabel = isPiSDKAgent ? piSDKStatus?.currentVersion ? `v${piSDKStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装" : agentStatus?.currentVersion ? `v${agentStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装";
+              return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "agent-settings-main", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "checkbox",
+                      checked: enabledAgents.includes(agent.id),
+                      disabled: !isInstalled || isChecking,
+                      onChange: (e) => {
+                        if (e.target.checked) {
+                          setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
+                        } else {
+                          setEnabledAgents((prev) => prev.filter((id) => id !== agent.id));
+                        }
+                      },
+                      className: "agent-settings-checkbox"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-copy", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-title-line", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-name", children: agent.name }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`, children: versionLabel }),
+                      isUnavailable && versionLabel !== "未安装" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-badge agent-settings-badge-warning", children: "未安装" }),
+                      (isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-meta", children: [
+                        "最新 v",
+                        isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion
+                      ] })
+                    ] }),
+                    isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-error", children: [
+                      "Node v",
+                      piSDKStatus.nodeVersion,
+                      " 过低，需要 22.19.0 或更高版本"
+                    ] }),
+                    (isPiSDKAgent ? piSDKStatus?.error || piSDKUpdateError : agentStatus?.error || agentUpdateErrors[agent.id]) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-error", children: isPiSDKAgent ? piSDKUpdateError || piSDKStatus?.error : agentUpdateErrors[agent.id] || agentStatus?.error })
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "agent-settings-actions", children: [
+                  (isPiSDKAgent && piSDKStatus?.updateAvailable || !isPiSDKAgent && agentStatus?.updateAvailable) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "filter-add-btn agent-settings-update-btn",
+                      onClick: () => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id),
+                      disabled: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate),
+                      title: (isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新",
+                      children: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "btn-action agent-settings-refresh-btn",
+                      onClick: () => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id),
+                      disabled: isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]),
+                      title: "重新检查版本",
+                      children: isChecking ? "检查中..." : "刷新"
+                    }
+                  )
+                ] })
+              ] }, agent.id);
+            }),
+            AVAILABLE_AGENTS.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "暂无可用 Agent" })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-section", style: { marginTop: 16 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "图片设置" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "临时图片将在指定时间后自动清理" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "临时图片存储路径" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    value: tempImagePath,
+                    onChange: (e) => setTempImagePath(e.target.value),
+                    placeholder: "留空使用默认路径",
+                    className: "filter-custom-input",
+                    style: { flex: 1 }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    className: "filter-add-btn",
+                    onClick: async () => {
+                      const result = await window.electronAPI.openDirectory();
+                      if (!result.canceled && result.path) {
+                        setTempImagePath(result.path);
+                      }
+                    },
+                    title: "选择文件夹",
+                    children: "浏览"
+                  }
+                )
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-row", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "图片保留时间（小时）" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    type: "number",
+                    min: 1,
+                    max: 168,
+                    value: imageRetentionHours,
+                    onChange: (e) => setImageRetentionHours(parseInt(e.target.value) || 12),
+                    className: "filter-custom-input",
+                    style: { width: 80 }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "小时" })
+              ] })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: "filter-add-btn",
+              style: { marginTop: 12 },
+              onClick: () => {
+                saveGeneral();
+                setShowGeneralModal(false);
+              },
+              children: "保存"
+            }
+          )
+        ] })
+      ] })
+    ] }) })
+  ] });
+}
+function ContentArea() {
+  const { sidebarTab, sidebarCollapsed } = useAppStore();
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("aside", { className: `sidebar-panel ${sidebarCollapsed ? "collapsed" : ""}`, children: [
+    sidebarTab === "projects" && /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectView, {}),
+    sidebarTab === "files" && /* @__PURE__ */ jsxRuntimeExports.jsx(FileExplorer, {}),
+    sidebarTab === "settings" && /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsView, {})
+  ] });
+}
+var reactDomExports = requireReactDom();
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
 const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;

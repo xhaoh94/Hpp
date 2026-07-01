@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, memo } from "react";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { FilePreview } from "@/components/shared/FilePreview";
@@ -82,7 +82,7 @@ function getFileIcon(name: string): { icon: string; color: string } {
   }
 }
 
-function FileTreeItem({
+const FileTreeItem = memo(function FileTreeItem({
   entry,
   depth,
   highlightedPath,
@@ -95,18 +95,24 @@ function FileTreeItem({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[]>([]);
+  const [loadingFolder, setLoadingFolder] = useState(false);
 
-  const handleToggle = async () => {
+  const handleToggle = useCallback(async () => {
     if (entry.type === "folder") {
       if (!expanded && children.length === 0) {
-        const loaded = await window.electronAPI.readDirectory(entry.path);
-        setChildren(loaded);
+        setLoadingFolder(true);
+        try {
+          const loaded = await window.electronAPI.readDirectory(entry.path);
+          setChildren(loaded);
+        } finally {
+          setLoadingFolder(false);
+        }
       }
       setExpanded(!expanded);
     } else {
       onFileClick(entry.path);
     }
-  };
+  }, [entry, expanded, children.length, onFileClick]);
 
   const isHighlighted = highlightedPath === entry.path;
   const fileInfo = entry.type === 'file' ? getFileIcon(entry.name) : null;
@@ -120,7 +126,7 @@ function FileTreeItem({
       >
         <span className="file-icon" style={{ color: fileInfo?.color || '#DCAB5F' }}>
           {entry.type === "folder" ? (
-            expanded ? '📂' : '📁'
+            expanded ? '📂' : (loadingFolder ? '⏳' : '📁')
           ) : (
             fileInfo?.icon || '📄'
           )}
@@ -136,7 +142,7 @@ function FileTreeItem({
       )}
     </div>
   );
-}
+});
 
 export function FileExplorer() {
   const [search, setSearch] = useState("");
