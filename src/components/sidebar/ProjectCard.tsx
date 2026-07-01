@@ -22,7 +22,7 @@ interface Props {
 }
 
 export function ProjectCard({ project }: Props) {
-  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
   const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
@@ -214,7 +214,7 @@ export function ProjectCard({ project }: Props) {
 
   return (
     <>
-      <div className="project-item always-active">
+      <div className={`project-item always-active ${project.id === activeProjectId ? "active" : ""}`}>
         <div className="project-info">
           <button
             className="project-close-btn"
