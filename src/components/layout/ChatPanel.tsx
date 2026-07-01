@@ -791,7 +791,7 @@ function ProcessEntries({
     if (commandEntries.length === 0) return;
     rows.push(
       <CommandGroup
-        key={`commands-${commandEntries[0].id}-${commandEntries[commandEntries.length - 1].id}`}
+        key={`commands-${commandEntries[0].id}`}
         entries={commandEntries}
       />
     );
@@ -2049,6 +2049,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             state: "completed",
           });
           // Models are fetched by the useEffect watching activeSessionId
+          break;
+        case "session_file_path":
+          {
+            const sessionFilePath = String(event.sessionFilePath || "");
+            if (!sessionFilePath) break;
+            const project = useProjectStore.getState().projects.find((p) =>
+              p.sessions.some((session) => session.id === currentSessionId)
+            );
+            if (project) {
+              useProjectStore.getState().setSessionFilePath(project.id, currentSessionId, sessionFilePath);
+            }
+          }
           break;
         default:
           if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {

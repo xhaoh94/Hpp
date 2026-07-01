@@ -174,7 +174,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingLevel: "medium",
   availableModels: [],
   favoriteModels: [],
-  activeAgentId: "pi",
+  activeAgentId: "codex",
   highlightedFile: null,
   pendingFiles: [],
 

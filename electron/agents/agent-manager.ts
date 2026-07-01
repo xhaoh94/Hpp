@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
 import { PiSDKAgent } from "./pi-sdk-agent";
+import { CodexSDKAgent } from "./codex-sdk-agent";
 
 interface AgentModel {
   id: string;
@@ -105,6 +106,7 @@ class AgentManager {
   setWindow(win: BrowserWindow) { this.window = win; }
 
   private createAgentBackend(agentId: string, sessionId: string): AgentBackend {
+    if (agentId === "codex") return new CodexSDKAgent(sessionId);
     if (agentId === "opencode") return new OpenCodeAgent(sessionId);
     if (agentId === "droid") return new DroidAgent(sessionId);
     return new PiSDKAgent(sessionId); // default
@@ -139,6 +141,10 @@ class AgentManager {
     return this.sessionFilePaths.get(sessionId);
   }
 
+  getSessionAgentType(sessionId: string): string | undefined {
+    return this.sessionAgentTypes.get(sessionId);
+  }
+
   switchSession(sessionId: string) {
     if (this.sessionAgents.has(sessionId)) {
       this.activeSessionId = sessionId;
@@ -153,10 +159,15 @@ class AgentManager {
     return this.sessionAgents.get(sessionId) || null;
   }
 
+  getActiveAgentType(): string | undefined {
+    return this.activeSessionId ? this.sessionAgentTypes.get(this.activeSessionId) : undefined;
+  }
+
   async getModelsBySessionId(sessionId: string): Promise<AgentModel[]> {
     const agent = this.sessionAgents.get(sessionId);
     if (!agent) return [];
     const models = await agent.getModels();
+    if (this.sessionAgentTypes.get(sessionId) === "codex") return models;
     return filterModelsByLocalConfig(models);
   }
 
@@ -231,6 +242,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
     if (!agent) return [];
     const models = await agent.getModels();
+    const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
+    if (agentType === "codex") return models;
     return filterModelsByLocalConfig(models);
   });
 

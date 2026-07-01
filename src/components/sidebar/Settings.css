@@ -477,10 +477,48 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px;
+  transition: border-color 0.15s, background-color 0.15s, opacity 0.15s;
 }
 
 .agent-settings-row-disabled {
   opacity: 0.55;
+}
+
+.agent-settings-row-dragging {
+  opacity: 0.45;
+}
+
+.agent-settings-row-drop-target {
+  border-color: var(--accent-color);
+  background-color: var(--bg-hover);
+}
+
+.agent-settings-drag-handle {
+  width: 22px;
+  height: 22px;
+  margin-top: -2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: grab;
+}
+
+.agent-settings-drag-handle:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.agent-settings-drag-handle:active {
+  cursor: grabbing;
 }
 
 .agent-settings-main {

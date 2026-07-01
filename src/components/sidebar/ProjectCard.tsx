@@ -2,8 +2,10 @@ import { useState, useEffect } from "react";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
-import { AVAILABLE_AGENTS, getAgentName, getInstallHint } from "@/lib/agents";
+import { AVAILABLE_AGENTS, getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { applySessionModels, getSessionModel, getSessionThinking } from "@/hooks/useDataPersistence";
+
+const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
 // Braille Spinner
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -25,7 +27,8 @@ export function ProjectCard({ project }: Props) {
   const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
   const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
-  const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
+  const [enabledAgents, setEnabledAgents] = useState<string[]>(["codex", "pi"]);
+  const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -38,12 +41,15 @@ export function ProjectCard({ project }: Props) {
       // Load settings
       const data: any = await window.electronAPI.loadData("settings");
       if (cancelled) return;
-      const enabled = data?.general?.enabledAgents || ["pi"];
+      const enabled = data?.general?.enabledAgents || ["codex", "pi"];
       setEnabledAgents(enabled);
+      setAgentOrder(normalizeAgentOrder(data?.general?.agentOrder));
       // Check all agents in parallel
       const checks = AVAILABLE_AGENTS.map(async (agent) => {
-        if (agent.id === "pi") {
-          const status = await window.electronAPI.piSDKGetStatus();
+        if (agent.runtime === "sdk") {
+          const status = agent.id === "pi"
+            ? await window.electronAPI.piSDKGetStatus()
+            : await window.electronAPI.agentGetStatus(agent.id);
           return { id: agent.id, installed: status.installed };
         }
         if (agent.runtime !== "cli" || !agent.command) {
@@ -65,6 +71,16 @@ export function ProjectCard({ project }: Props) {
     return () => { cancelled = true; };
   }, []);
 
+  useEffect(() => {
+    const handleAgentSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ enabledAgents?: string[]; agentOrder?: string[] }>).detail;
+      if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(detail.enabledAgents);
+      setAgentOrder(normalizeAgentOrder(detail?.agentOrder));
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+    return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+  }, []);
+
   // Close add agent popup on outside click
   useEffect(() => {
     if (!showAddAgent) return;
@@ -83,7 +99,7 @@ export function ProjectCard({ project }: Props) {
     if (installedAgents[agentId] !== true) {
       const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
       const name = agent?.name || agentId;
-      const cmd = agent?.id === "pi" ? "pi" : agent?.command || agentId;
+      const cmd = agent?.runtime === "sdk" ? agent.id : agent?.command || agentId;
       alert(`${name} 未安装，请先安装：\n\n${getInstallHint(cmd)}`);
       return;
     }
@@ -208,7 +224,8 @@ export function ProjectCard({ project }: Props) {
     removeSession(project.id, sessionId);
   };
 
-  const uncheckedAgents = AVAILABLE_AGENTS.filter(
+  const orderedAgents = orderAgents(AVAILABLE_AGENTS, agentOrder);
+  const uncheckedAgents = orderedAgents.filter(
     (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true
   );
 
@@ -249,7 +266,7 @@ export function ProjectCard({ project }: Props) {
               </div>
             ) : (
               <>
-                {AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => (
+                {orderedAgents.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => (
                   <div
                     key={a.id}
                     className="project-terminal-btn"
@@ -260,7 +277,7 @@ export function ProjectCard({ project }: Props) {
                       <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                       <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                     </svg>
-                    <span>{a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id}</span>
+                    <span>{a.id === "codex" ? "CX" : a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id}</span>
                   </div>
                 ))}
                 {/* Add agent button - only show when there are unchecked agents */}

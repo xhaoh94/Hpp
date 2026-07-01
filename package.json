@@ -23,8 +23,9 @@
     "vite": "^6.4.3"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
     "@electron-toolkit/utils": "^4.0.0",
+    "@openai/codex-sdk": "^0.142.5",
     "electron-vite": "^5.0.0",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",

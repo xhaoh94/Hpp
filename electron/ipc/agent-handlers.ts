@@ -1,5 +1,8 @@
-import { ipcMain } from "electron";
+import { app, ipcMain } from "electron";
 import { execFile, exec } from "child_process";
+import { existsSync } from "fs";
+import { readFile } from "fs/promises";
+import { join } from "path";
 
 export interface AgentStatus {
   installed: boolean;
@@ -26,6 +29,12 @@ interface CliAgentConfig {
   displayName: string;
 }
 
+interface SDKAgentConfig {
+  packageName: string;
+  displayName: string;
+  packagePath: string[];
+}
+
 const CLI_AGENTS: Record<string, CliAgentConfig> = {
   opencode: {
     command: "opencode",
@@ -36,6 +45,14 @@ const CLI_AGENTS: Record<string, CliAgentConfig> = {
     command: "droid",
     packageName: "droid",
     displayName: "Factory Droid",
+  },
+};
+
+const SDK_AGENTS: Record<string, SDKAgentConfig> = {
+  codex: {
+    packageName: "@openai/codex-sdk",
+    displayName: "Codex SDK",
+    packagePath: ["@openai", "codex-sdk"],
   },
 };
 
@@ -152,6 +169,37 @@ function splitCommandPaths(output: string): string[] {
     .filter(Boolean);
 }
 
+async function readJsonFile<T>(filePath: string): Promise<T | null> {
+  try {
+    return JSON.parse(await readFile(filePath, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function findProjectPackageRoot(packageName: string): Promise<string | undefined> {
+  const candidates = Array.from(new Set([
+    process.cwd(),
+    app.getAppPath(),
+  ]));
+
+  for (const candidate of candidates) {
+    const packageJsonPath = join(candidate, "package.json");
+    if (!existsSync(packageJsonPath)) continue;
+
+    const packageJson = await readJsonFile<{
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    }>(packageJsonPath);
+
+    if (packageJson?.dependencies?.[packageName] || packageJson?.devDependencies?.[packageName]) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 async function commandExists(command: string): Promise<boolean> {
   try {
     const lookupCommand = process.platform === "win32" ? "where.exe" : "which";
@@ -224,7 +272,44 @@ async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
   };
 }
 
+async function getSDKAgentStatus(config: SDKAgentConfig): Promise<AgentStatus> {
+  const packageRoot = await findProjectPackageRoot(config.packageName);
+  const packageJsonPath = packageRoot
+    ? join(packageRoot, "node_modules", ...config.packagePath, "package.json")
+    : undefined;
+  const packageJson = packageJsonPath
+    ? await readJsonFile<{ version?: string }>(packageJsonPath)
+    : null;
+  const currentVersion = packageJson?.version;
+
+  let latestVersion: string | undefined;
+  let error: string | undefined;
+  try {
+    latestVersion = await getLatestPackageVersion(config.packageName);
+  } catch (err) {
+    error = `无法检查 ${config.displayName} 最新版本：${formatError(err)}`;
+  }
+
+  const updateAvailable = !!(
+    currentVersion &&
+    latestVersion &&
+    compareVersions(currentVersion, latestVersion) < 0
+  );
+
+  return {
+    installed: !!currentVersion,
+    currentVersion,
+    latestVersion,
+    updateAvailable,
+    canUpdate: !!packageRoot && !app.isPackaged,
+    error,
+  };
+}
+
 async function getAgentStatus(agentId: string): Promise<AgentStatus> {
+  const sdkConfig = SDK_AGENTS[agentId];
+  if (sdkConfig) return getSDKAgentStatus(sdkConfig);
+
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return {
@@ -239,6 +324,34 @@ async function getAgentStatus(agentId: string): Promise<AgentStatus> {
 }
 
 async function updateAgent(agentId: string): Promise<{ success: boolean; status?: AgentStatus; error?: string }> {
+  const sdkConfig = SDK_AGENTS[agentId];
+  if (sdkConfig) {
+    if (updateInProgress.has(agentId)) {
+      return { success: false, error: `${sdkConfig.displayName} 正在更新中` };
+    }
+
+    const packageRoot = await findProjectPackageRoot(sdkConfig.packageName);
+    if (!packageRoot) {
+      return { success: false, error: `未找到包含 ${sdkConfig.packageName} 的 package.json` };
+    }
+    if (app.isPackaged) {
+      return { success: false, error: `打包版暂不支持自动更新 ${sdkConfig.displayName}` };
+    }
+
+    updateInProgress.add(agentId);
+    try {
+      await runNpmCommand(["install", `${sdkConfig.packageName}@latest`], {
+        cwd: packageRoot,
+        timeout: 180000,
+      });
+      return { success: true, status: await getAgentStatus(agentId) };
+    } catch (err) {
+      return { success: false, error: formatError(err), status: await getAgentStatus(agentId) };
+    } finally {
+      updateInProgress.delete(agentId);
+    }
+  }
+
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return { success: false, error: `不支持的 agent: ${agentId}` };

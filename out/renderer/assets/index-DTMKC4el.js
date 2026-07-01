@@ -12609,6 +12609,7 @@ function Sidebar() {
   ] }) });
 }
 const AVAILABLE_AGENTS = [
+  { id: "codex", name: "Codex", desc: "OpenAI Codex SDK 编程助手", runtime: "sdk" },
   { id: "pi", name: "Pi Agent", desc: "AI 编程助手", runtime: "sdk" },
   { id: "opencode", name: "OpenCode", desc: "开源 AI 编程助手", runtime: "cli", command: "opencode" },
   { id: "droid", name: "Factory Droid", desc: "Factory AI 编程助手", runtime: "cli", command: "droid" }
@@ -12618,6 +12619,8 @@ function getAgentName(id) {
 }
 function getInstallHint(command) {
   switch (command) {
+    case "codex":
+      return "在通用设置中更新 Codex SDK，或运行 npm install @openai/codex-sdk@latest";
     case "pi":
       return "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest";
     case "opencode":
@@ -12627,6 +12630,30 @@ function getInstallHint(command) {
     default:
       return `请安装 ${command}`;
   }
+}
+const DEFAULT_AGENT_ORDER = AVAILABLE_AGENTS.map((agent) => agent.id);
+function normalizeAgentOrder(order2) {
+  const knownIds = new Set(DEFAULT_AGENT_ORDER);
+  const normalized = (Array.isArray(order2) ? order2 : []).filter((id) => knownIds.has(id));
+  const seen = /* @__PURE__ */ new Set();
+  const unique = normalized.filter((id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  return [
+    ...unique,
+    ...DEFAULT_AGENT_ORDER.filter((id) => !seen.has(id))
+  ];
+}
+function orderAgents(agents, order2) {
+  const normalizedOrder = normalizeAgentOrder(order2);
+  const indexById = new Map(normalizedOrder.map((id, index2) => [id, index2]));
+  return [...agents].sort((a, b) => {
+    const left = indexById.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+    const right = indexById.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+    return left - right;
+  });
 }
 const useProjectStore = create$1((set, get) => ({
   projects: [],
@@ -12766,7 +12793,7 @@ const useChatStore = create$1((set, get) => ({
   thinkingLevel: "medium",
   availableModels: [],
   favoriteModels: [],
-  activeAgentId: "pi",
+  activeAgentId: "codex",
   highlightedFile: null,
   pendingFiles: [],
   addMessage: (msg, sessionId) => set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
@@ -13212,6 +13239,7 @@ function useDataPersistence() {
     };
   }, []);
 }
+const AGENT_SETTINGS_UPDATED_EVENT$1 = "agent-settings-updated";
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 function BrailleSpinner() {
   const [index2, setIndex] = reactExports.useState(0);
@@ -13225,7 +13253,8 @@ function ProjectCard({ project }) {
   const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
   const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = reactExports.useState(false);
-  const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
+  const [enabledAgents, setEnabledAgents] = reactExports.useState(["codex", "pi"]);
+  const [agentOrder, setAgentOrder] = reactExports.useState(normalizeAgentOrder());
   const [installedAgents, setInstalledAgents] = reactExports.useState({});
   const [showAddAgent, setShowAddAgent] = reactExports.useState(false);
   const [loading, setLoading] = reactExports.useState(true);
@@ -13235,11 +13264,12 @@ function ProjectCard({ project }) {
       setLoading(true);
       const data = await window.electronAPI.loadData("settings");
       if (cancelled) return;
-      const enabled = data?.general?.enabledAgents || ["pi"];
+      const enabled = data?.general?.enabledAgents || ["codex", "pi"];
       setEnabledAgents(enabled);
+      setAgentOrder(normalizeAgentOrder(data?.general?.agentOrder));
       const checks2 = AVAILABLE_AGENTS.map(async (agent) => {
-        if (agent.id === "pi") {
-          const status = await window.electronAPI.piSDKGetStatus();
+        if (agent.runtime === "sdk") {
+          const status = agent.id === "pi" ? await window.electronAPI.piSDKGetStatus() : await window.electronAPI.agentGetStatus(agent.id);
           return { id: agent.id, installed: status.installed };
         }
         if (agent.runtime !== "cli" || !agent.command) {
@@ -13263,6 +13293,15 @@ function ProjectCard({ project }) {
     };
   }, []);
   reactExports.useEffect(() => {
+    const handleAgentSettingsUpdated = (event) => {
+      const detail = event.detail;
+      if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(detail.enabledAgents);
+      setAgentOrder(normalizeAgentOrder(detail?.agentOrder));
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT$1, handleAgentSettingsUpdated);
+    return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT$1, handleAgentSettingsUpdated);
+  }, []);
+  reactExports.useEffect(() => {
     if (!showAddAgent) return;
     const handleClick = (e) => {
       const target = e.target;
@@ -13277,7 +13316,7 @@ function ProjectCard({ project }) {
     if (installedAgents[agentId] !== true) {
       const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
       const name2 = agent?.name || agentId;
-      const cmd = agent?.id === "pi" ? "pi" : agent?.command || agentId;
+      const cmd = agent?.runtime === "sdk" ? agent.id : agent?.command || agentId;
       alert(`${name2} 未安装，请先安装：
 
 ${getInstallHint(cmd)}`);
@@ -13382,7 +13421,8 @@ ${getInstallHint(cmd)}`);
   const handleDeleteHistorySession = (sessionId) => {
     removeSession(project.id, sessionId);
   };
-  const uncheckedAgents = AVAILABLE_AGENTS.filter(
+  const orderedAgents = orderAgents(AVAILABLE_AGENTS, agentOrder);
+  const uncheckedAgents = orderedAgents.filter(
     (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true
   );
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
@@ -13419,7 +13459,7 @@ ${getInstallHint(cmd)}`);
         /* @__PURE__ */ jsxRuntimeExports.jsx(BrailleSpinner, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#888", marginLeft: 4 }, children: "检查 Agent..." })
       ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        AVAILABLE_AGENTS.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        orderedAgents.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "div",
           {
             className: "project-terminal-btn",
@@ -13430,7 +13470,7 @@ ${getInstallHint(cmd)}`);
                 /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M7 8L10 11L7 14", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 14H17", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round" })
               ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: a.id === "codex" ? "CX" : a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id })
             ]
           },
           a.id
@@ -42103,6 +42143,142 @@ function FileExplorer() {
     /* @__PURE__ */ jsxRuntimeExports.jsx(FilePreview, { filePath: previewFile, onClose: () => setPreviewFile(null) })
   ] });
 }
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const mergeClasses = (...classes) => classes.filter((className, index2, array) => {
+  return Boolean(className) && className.trim() !== "" && array.indexOf(className) === index2;
+}).join(" ").trim();
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const toKebabCase = (string2) => string2.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const toCamelCase = (string2) => string2.replace(
+  /^([A-Z])|[\s-_]+(\w)/g,
+  (match, p1, p2) => p2 ? p2.toUpperCase() : p1.toLowerCase()
+);
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const toPascalCase = (string2) => {
+  const camelCase = toCamelCase(string2);
+  return camelCase.charAt(0).toUpperCase() + camelCase.slice(1);
+};
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+var defaultAttributes = {
+  xmlns: "http://www.w3.org/2000/svg",
+  width: 24,
+  height: 24,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round",
+  strokeLinejoin: "round"
+};
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const hasA11yProp = (props) => {
+  for (const prop in props) {
+    if (prop.startsWith("aria-") || prop === "role" || prop === "title") {
+      return true;
+    }
+  }
+  return false;
+};
+const LucideContext = reactExports.createContext({});
+const useLucideContext = () => reactExports.useContext(LucideContext);
+const Icon = reactExports.forwardRef(
+  ({ color: color2, size, strokeWidth, absoluteStrokeWidth, className = "", children, iconNode, ...rest }, ref) => {
+    const {
+      size: contextSize = 24,
+      strokeWidth: contextStrokeWidth = 2,
+      absoluteStrokeWidth: contextAbsoluteStrokeWidth = false,
+      color: contextColor = "currentColor",
+      className: contextClass = ""
+    } = useLucideContext() ?? {};
+    const calculatedStrokeWidth = absoluteStrokeWidth ?? contextAbsoluteStrokeWidth ? Number(strokeWidth ?? contextStrokeWidth) * 24 / Number(size ?? contextSize) : strokeWidth ?? contextStrokeWidth;
+    return reactExports.createElement(
+      "svg",
+      {
+        ref,
+        ...defaultAttributes,
+        width: size ?? contextSize ?? defaultAttributes.width,
+        height: size ?? contextSize ?? defaultAttributes.height,
+        stroke: color2 ?? contextColor,
+        strokeWidth: calculatedStrokeWidth,
+        className: mergeClasses("lucide", contextClass, className),
+        ...!children && !hasA11yProp(rest) && { "aria-hidden": "true" },
+        ...rest
+      },
+      [
+        ...iconNode.map(([tag, attrs]) => reactExports.createElement(tag, attrs)),
+        ...Array.isArray(children) ? children : [children]
+      ]
+    );
+  }
+);
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const createLucideIcon = (iconName, iconNode) => {
+  const Component = reactExports.forwardRef(
+    ({ className, ...props }, ref) => reactExports.createElement(Icon, {
+      ref,
+      iconNode,
+      className: mergeClasses(
+        `lucide-${toKebabCase(toPascalCase(iconName))}`,
+        `lucide-${iconName}`,
+        className
+      ),
+      ...props
+    })
+  );
+  Component.displayName = toPascalCase(iconName);
+  return Component;
+};
+/**
+ * @license lucide-react v1.21.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const __iconNode = [
+  ["circle", { cx: "9", cy: "12", r: "1", key: "1vctgf" }],
+  ["circle", { cx: "9", cy: "5", r: "1", key: "hp0tcf" }],
+  ["circle", { cx: "9", cy: "19", r: "1", key: "fkjjf6" }],
+  ["circle", { cx: "15", cy: "12", r: "1", key: "1tmaij" }],
+  ["circle", { cx: "15", cy: "5", r: "1", key: "19l28e" }],
+  ["circle", { cx: "15", cy: "19", r: "1", key: "f4zoj3" }]
+];
+const GripVertical = createLucideIcon("grip-vertical", __iconNode);
 const SHORTCUT_LABELS = {
   fileSearch: "文件搜索",
   switchToFiles: "切换到资源管理器",
@@ -42148,6 +42324,7 @@ let cachedAgentStatuses = {};
 let lastPiSDKCheck = 0;
 let lastAgentChecks = {};
 const VERSION_CACHE_MS = 6e4;
+const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 function SettingsView() {
   const [shortcuts, setShortcuts] = reactExports.useState(DEFAULT_SHORTCUTS);
   const [filters, setFilters] = reactExports.useState(DEFAULT_FILTERS);
@@ -42157,7 +42334,10 @@ function SettingsView() {
   const [showGeneralModal, setShowGeneralModal] = reactExports.useState(false);
   const [tempImagePath, setTempImagePath] = reactExports.useState("");
   const [imageRetentionHours, setImageRetentionHours] = reactExports.useState(12);
-  const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
+  const [enabledAgents, setEnabledAgents] = reactExports.useState(["codex", "pi"]);
+  const [agentOrder, setAgentOrder] = reactExports.useState(normalizeAgentOrder());
+  const [draggingAgentId, setDraggingAgentId] = reactExports.useState(null);
+  const [dragOverAgentId, setDragOverAgentId] = reactExports.useState(null);
   const [piSDKStatus, setPiSDKStatus] = reactExports.useState(null);
   const [piSDKChecking, setPiSDKChecking] = reactExports.useState(false);
   const [piSDKUpdating, setPiSDKUpdating] = reactExports.useState(false);
@@ -42254,6 +42434,7 @@ function SettingsView() {
           setTempImagePath(data.general.tempImagePath || "");
           setImageRetentionHours(data.general.imageRetentionHours || 12);
           if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
+          setAgentOrder(normalizeAgentOrder(data.general.agentOrder));
         }
       }
     });
@@ -42276,14 +42457,37 @@ function SettingsView() {
   }, [refreshPiSDKStatus, refreshAgentStatus]);
   const saveShortcuts = (s) => {
     setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
   };
   const saveFilters = (f) => {
     setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
   };
   const saveGeneral = () => {
-    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, { detail: { enabledAgents, agentOrder } }));
+  };
+  const saveAgentSettings = (nextEnabledAgents = enabledAgents, nextAgentOrder = agentOrder) => {
+    window.electronAPI.saveData("settings", {
+      shortcuts,
+      filters,
+      general: { tempImagePath, imageRetentionHours, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder }
+    });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
+      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder }
+    }));
+  };
+  const moveAgent = (sourceId, targetId) => {
+    if (sourceId === targetId) return;
+    const currentOrder = normalizeAgentOrder(agentOrder);
+    const fromIndex = currentOrder.indexOf(sourceId);
+    const toIndex = currentOrder.indexOf(targetId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, moved);
+    setAgentOrder(nextOrder);
+    saveAgentSettings(enabledAgents, nextOrder);
   };
   const handleKeyDown = reactExports.useCallback((e) => {
     if (!recordingKey) return;
@@ -42485,72 +42689,112 @@ function SettingsView() {
           /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Agent 设置" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }, children: "选择启用的 Agent，未启用的不会显示在项目卡片上" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
-            AVAILABLE_AGENTS.map((agent) => {
+            orderAgents(AVAILABLE_AGENTS, agentOrder).map((agent) => {
               const isPiSDKAgent = agent.id === "pi";
               const agentStatus = agentStatuses[agent.id];
               const isInstalled = isPiSDKAgent ? piSDKStatus?.installed === true : agentStatus?.installed === true;
               const isChecking = isPiSDKAgent ? piSDKChecking || !piSDKStatus : agentChecking[agent.id];
               const isUnavailable = !isInstalled && !isChecking;
               const versionLabel = isPiSDKAgent ? piSDKStatus?.currentVersion ? `v${piSDKStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装" : agentStatus?.currentVersion ? `v${agentStatus.currentVersion}` : isChecking ? "检查中..." : isInstalled ? "版本未知" : "未安装";
-              return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "agent-settings-main", children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "input",
-                    {
-                      type: "checkbox",
-                      checked: enabledAgents.includes(agent.id),
-                      disabled: !isInstalled || isChecking,
-                      onChange: (e) => {
-                        if (e.target.checked) {
-                          setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
-                        } else {
-                          setEnabledAgents((prev) => prev.filter((id) => id !== agent.id));
+              return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  className: `filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? "agent-settings-row-drop-target" : ""}`,
+                  onDragOver: (event) => {
+                    event.preventDefault();
+                    if (draggingAgentId && draggingAgentId !== agent.id) setDragOverAgentId(agent.id);
+                  },
+                  onDragLeave: () => setDragOverAgentId((current) => current === agent.id ? null : current),
+                  onDrop: (event) => {
+                    event.preventDefault();
+                    if (draggingAgentId) moveAgent(draggingAgentId, agent.id);
+                    setDraggingAgentId(null);
+                    setDragOverAgentId(null);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "agent-settings-drag-handle",
+                        draggable: true,
+                        onDragStart: (event) => {
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("text/plain", agent.id);
+                          setDraggingAgentId(agent.id);
+                        },
+                        onDragEnd: () => {
+                          setDraggingAgentId(null);
+                          setDragOverAgentId(null);
+                        },
+                        title: "拖动排序",
+                        children: /* @__PURE__ */ jsxRuntimeExports.jsx(GripVertical, { size: 14 })
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "agent-settings-main", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          type: "checkbox",
+                          checked: enabledAgents.includes(agent.id),
+                          disabled: !isInstalled || isChecking,
+                          onChange: (e) => {
+                            let nextEnabledAgents;
+                            if (e.target.checked) {
+                              nextEnabledAgents = enabledAgents.includes(agent.id) ? enabledAgents : [...enabledAgents, agent.id];
+                            } else {
+                              nextEnabledAgents = enabledAgents.filter((id) => id !== agent.id);
+                            }
+                            setEnabledAgents(nextEnabledAgents);
+                            saveAgentSettings(nextEnabledAgents, agentOrder);
+                          },
+                          className: "agent-settings-checkbox"
                         }
-                      },
-                      className: "agent-settings-checkbox"
-                    }
-                  ),
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-copy", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-title-line", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-name", children: agent.name }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`, children: versionLabel }),
-                      isUnavailable && versionLabel !== "未安装" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-badge agent-settings-badge-warning", children: "未安装" }),
-                      (isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-meta", children: [
-                        "最新 v",
-                        isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-copy", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-title-line", children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-name", children: agent.name }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`, children: versionLabel }),
+                          isUnavailable && versionLabel !== "未安装" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-badge agent-settings-badge-warning", children: "未安装" }),
+                          (isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-meta", children: [
+                            "最新 v",
+                            isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion
+                          ] })
+                        ] }),
+                        isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-error", children: [
+                          "Node v",
+                          piSDKStatus.nodeVersion,
+                          " 过低，需要 22.19.0 或更高版本"
+                        ] }),
+                        (isPiSDKAgent ? piSDKStatus?.error || piSDKUpdateError : agentStatus?.error || agentUpdateErrors[agent.id]) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-error", children: isPiSDKAgent ? piSDKUpdateError || piSDKStatus?.error : agentUpdateErrors[agent.id] || agentStatus?.error })
                       ] })
                     ] }),
-                    isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-error", children: [
-                      "Node v",
-                      piSDKStatus.nodeVersion,
-                      " 过低，需要 22.19.0 或更高版本"
-                    ] }),
-                    (isPiSDKAgent ? piSDKStatus?.error || piSDKUpdateError : agentStatus?.error || agentUpdateErrors[agent.id]) && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "agent-settings-error", children: isPiSDKAgent ? piSDKUpdateError || piSDKStatus?.error : agentUpdateErrors[agent.id] || agentStatus?.error })
-                  ] })
-                ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "agent-settings-actions", children: [
-                  (isPiSDKAgent && piSDKStatus?.updateAvailable || !isPiSDKAgent && agentStatus?.updateAvailable) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "button",
-                    {
-                      className: "filter-add-btn agent-settings-update-btn",
-                      onClick: () => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id),
-                      disabled: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate),
-                      title: (isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新",
-                      children: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"
-                    }
-                  ),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "button",
-                    {
-                      className: "btn-action agent-settings-refresh-btn",
-                      onClick: () => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id),
-                      disabled: isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]),
-                      title: "重新检查版本",
-                      children: isChecking ? "检查中..." : "刷新"
-                    }
-                  )
-                ] })
-              ] }, agent.id);
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "agent-settings-actions", children: [
+                      (isPiSDKAgent && piSDKStatus?.updateAvailable || !isPiSDKAgent && agentStatus?.updateAvailable) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "button",
+                        {
+                          className: "filter-add-btn agent-settings-update-btn",
+                          onClick: () => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id),
+                          disabled: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate),
+                          title: (isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新",
+                          children: (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "button",
+                        {
+                          className: "btn-action agent-settings-refresh-btn",
+                          onClick: () => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id),
+                          disabled: isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]),
+                          title: "重新检查版本",
+                          children: isChecking ? "检查中..." : "刷新"
+                        }
+                      )
+                    ] })
+                  ]
+                },
+                agent.id
+              );
             }),
             AVAILABLE_AGENTS.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 12, color: "var(--text-secondary)" }, children: "暂无可用 Agent" })
           ] })
@@ -43242,7 +43486,7 @@ function ProcessEntries({
         {
           entries: commandEntries
         },
-        `commands-${commandEntries[0].id}-${commandEntries[commandEntries.length - 1].id}`
+        `commands-${commandEntries[0].id}`
       )
     );
     commandEntries = [];
@@ -44303,6 +44547,18 @@ ${detail.trim()}` : title;
             title: `${agentName} 已就绪，可以开始对话`,
             state: "completed"
           });
+          break;
+        case "session_file_path":
+          {
+            const sessionFilePath = String(event.sessionFilePath || "");
+            if (!sessionFilePath) break;
+            const project = useProjectStore.getState().projects.find(
+              (p2) => p2.sessions.some((session) => session.id === currentSessionId)
+            );
+            if (project) {
+              useProjectStore.getState().setSessionFilePath(project.id, currentSessionId, sessionFilePath);
+            }
+          }
           break;
         default:
           if (normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question") {

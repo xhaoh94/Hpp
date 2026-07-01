@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { AVAILABLE_AGENTS } from "@/lib/agents";
+import { GripVertical } from "lucide-react";
+import { AVAILABLE_AGENTS, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import type { AgentPackageStatus, PiSDKStatus } from "@/types";
 import "./Settings.css";
 
@@ -69,6 +70,7 @@ let cachedAgentStatuses: Record<string, AgentPackageStatus> = {};
 let lastPiSDKCheck = 0;
 let lastAgentChecks: Record<string, number> = {};
 const VERSION_CACHE_MS = 60_000; // 1 minute
+const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
 export function SettingsView() {
   const [shortcuts, setShortcuts] = useState<ShortcutConfig>(DEFAULT_SHORTCUTS);
@@ -79,7 +81,10 @@ export function SettingsView() {
   const [showGeneralModal, setShowGeneralModal] = useState(false);
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
-  const [enabledAgents, setEnabledAgents] = useState<string[]>(["pi"]);
+  const [enabledAgents, setEnabledAgents] = useState<string[]>(["codex", "pi"]);
+  const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
+  const [draggingAgentId, setDraggingAgentId] = useState<string | null>(null);
+  const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
   const [piSDKStatus, setPiSDKStatus] = useState<PiSDKStatus | null>(null);
   const [piSDKChecking, setPiSDKChecking] = useState(false);
   const [piSDKUpdating, setPiSDKUpdating] = useState(false);
@@ -183,6 +188,7 @@ export function SettingsView() {
           setTempImagePath(data.general.tempImagePath || "");
           setImageRetentionHours(data.general.imageRetentionHours || 12);
           if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
+          setAgentOrder(normalizeAgentOrder(data.general.agentOrder));
         }
       }
     });
@@ -211,16 +217,41 @@ export function SettingsView() {
   // Save shortcuts when changed
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
   };
 
   const saveFilters = (f: FilterConfig) => {
     setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
   };
 
   const saveGeneral = () => {
-    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents } });
+    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, { detail: { enabledAgents, agentOrder } }));
+  };
+
+  const saveAgentSettings = (nextEnabledAgents = enabledAgents, nextAgentOrder = agentOrder) => {
+    window.electronAPI.saveData("settings", {
+      shortcuts,
+      filters,
+      general: { tempImagePath, imageRetentionHours, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder },
+    });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
+      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder },
+    }));
+  };
+
+  const moveAgent = (sourceId: string, targetId: string) => {
+    if (sourceId === targetId) return;
+    const currentOrder = normalizeAgentOrder(agentOrder);
+    const fromIndex = currentOrder.indexOf(sourceId);
+    const toIndex = currentOrder.indexOf(targetId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, moved);
+    setAgentOrder(nextOrder);
+    saveAgentSettings(enabledAgents, nextOrder);
   };
 
   // Keyboard recording handler
@@ -453,7 +484,7 @@ export function SettingsView() {
                   选择启用的 Agent，未启用的不会显示在项目卡片上
                 </p>
                 <div className="filter-group">
-                  {AVAILABLE_AGENTS.map((agent) => {
+                  {orderAgents(AVAILABLE_AGENTS, agentOrder).map((agent) => {
                     const isPiSDKAgent = agent.id === "pi";
                     const agentStatus = agentStatuses[agent.id];
                     const isInstalled = isPiSDKAgent
@@ -479,18 +510,52 @@ export function SettingsView() {
                             ? "版本未知"
                             : "未安装";
                     return (
-                    <div key={agent.id} className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""}`}>
+                    <div
+                      key={agent.id}
+                      className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? "agent-settings-row-drop-target" : ""}`}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        if (draggingAgentId && draggingAgentId !== agent.id) setDragOverAgentId(agent.id);
+                      }}
+                      onDragLeave={() => setDragOverAgentId((current) => current === agent.id ? null : current)}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (draggingAgentId) moveAgent(draggingAgentId, agent.id);
+                        setDraggingAgentId(null);
+                        setDragOverAgentId(null);
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="agent-settings-drag-handle"
+                        draggable
+                        onDragStart={(event) => {
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("text/plain", agent.id);
+                          setDraggingAgentId(agent.id);
+                        }}
+                        onDragEnd={() => {
+                          setDraggingAgentId(null);
+                          setDragOverAgentId(null);
+                        }}
+                        title="拖动排序"
+                      >
+                        <GripVertical size={14} />
+                      </button>
                       <label className="agent-settings-main">
                         <input
                           type="checkbox"
                           checked={enabledAgents.includes(agent.id)}
                           disabled={!isInstalled || isChecking}
                           onChange={(e) => {
+                            let nextEnabledAgents: string[];
                             if (e.target.checked) {
-                              setEnabledAgents((prev) => prev.includes(agent.id) ? prev : [...prev, agent.id]);
+                              nextEnabledAgents = enabledAgents.includes(agent.id) ? enabledAgents : [...enabledAgents, agent.id];
                             } else {
-                              setEnabledAgents((prev) => prev.filter((id) => id !== agent.id));
+                              nextEnabledAgents = enabledAgents.filter((id) => id !== agent.id);
                             }
+                            setEnabledAgents(nextEnabledAgents);
+                            saveAgentSettings(nextEnabledAgents, agentOrder);
                           }}
                           className="agent-settings-checkbox"
                         />
