@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, type PointerEvent as ReactPointerEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry, type AgentProcessFile } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -15,6 +15,7 @@ const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
 const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
+const SCROLL_BOTTOM_THRESHOLD = 50;
 
 const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\s+/g, " ").trim();
@@ -1188,8 +1189,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     streamWatchdog: ReturnType<typeof setTimeout> | null;
     autoAbortReason: string | null;
   }>>({});
-  const isUserScrollingRef = useRef(false);
-  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoFollowBottomRef = useRef(true);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
@@ -1270,31 +1270,52 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     window.addEventListener("pointercancel", stopResize);
   }, [activeQuestionnaire, getQuestionnairePaneHeight]);
 
-  const syncScrollPositionState = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    requestAnimationFrame(() => {
-      const current = scrollRef.current;
-      if (!current) return;
-      const distanceFromBottom = current.scrollHeight - current.scrollTop - current.clientHeight;
-      const shouldShow = distanceFromBottom > 50;
-      isUserScrollingRef.current = shouldShow;
-      setShowScrollBottom(shouldShow);
-    });
+  const getDistanceFromScrollBottom = useCallback((el: HTMLDivElement) => {
+    return Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
   }, []);
+
+  const updateScrollBottomState = useCallback((el = scrollRef.current) => {
+    if (!el) return false;
+    const shouldShow = getDistanceFromScrollBottom(el) > SCROLL_BOTTOM_THRESHOLD;
+    setShowScrollBottom(shouldShow);
+    return shouldShow;
+  }, [getDistanceFromScrollBottom]);
 
   // Track scroll position - show scroll-to-bottom button when scrolled up
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.addEventListener("scroll", syncScrollPositionState, { passive: true, capture: true });
-    return () => el.removeEventListener("scroll", syncScrollPositionState, { capture: true });
-  }, [syncScrollPositionState]);
+    const handleScroll = () => {
+      const awayFromBottom = updateScrollBottomState(el);
+      autoFollowBottomRef.current = !awayFromBottom;
+    };
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, [updateScrollBottomState]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (autoFollowBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    updateScrollBottomState(el);
+  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, updateScrollBottomState]);
 
   useEffect(() => {
-    syncScrollPositionState();
-  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, syncScrollPositionState]);
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (autoFollowBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      updateScrollBottomState(el);
+    });
+    observer.observe(el);
+    Array.from(el.children).forEach((child) => observer.observe(child));
+    return () => observer.disconnect();
+  }, [messages, activeSessionId, activeSessionInitialized, updateScrollBottomState]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -1321,11 +1342,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     setShowScrollBottom(false);
     el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(syncScrollPositionState);
-  }, [syncScrollPositionState]);
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      current.scrollTop = current.scrollHeight;
+      updateScrollBottomState(current);
+    });
+  }, [updateScrollBottomState]);
 
   // Scroll to a specific message
   const scrollToMessage = useCallback((msgId: string) => {
@@ -1434,26 +1460,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   // Auto-scroll to bottom only when user is already near bottom
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || isUserScrollingRef.current) return;
-    // Check if already near bottom (within 100px)
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-    if (atBottom) {
+    if (!el || !autoFollowBottomRef.current) return;
+    if (getDistanceFromScrollBottom(el) < 100) {
       el.scrollTop = el.scrollHeight;
-      requestAnimationFrame(syncScrollPositionState);
+      requestAnimationFrame(() => updateScrollBottomState(el));
     }
-  }, [messages, syncScrollPositionState]);
+  }, [messages, getDistanceFromScrollBottom, updateScrollBottomState]);
 
   // Instant scroll to bottom on session switch (no animation)
   // Also scroll when session initializes (messages become visible in DOM)
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
-      syncScrollPositionState();
+      updateScrollBottomState(el);
     });
-  }, [activeSessionId, activeSessionInitialized, syncScrollPositionState]);
+  }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);
 
   // Persist messages to sessionMessages whenever messages change (for restart survival)
   useEffect(() => {
@@ -2060,7 +2084,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (!targetSessionId || pendingUIResponse?.sessionId !== targetSessionId || !text) return;
     const pendingResponse = pendingUIResponse;
 
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -2240,7 +2264,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
 
     // Force synchronous render so "working..." appears before IPC call
-    isUserScrollingRef.current = false; // Reset so auto-scroll follows new message
+    autoFollowBottomRef.current = true; // New outgoing messages should keep the latest turn visible.
     flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -2271,6 +2295,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const scrollEl = scrollRef.current;
     if (scrollEl) {
       scrollEl.scrollTop = scrollEl.scrollHeight;
+      updateScrollBottomState(scrollEl);
     }
 
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);

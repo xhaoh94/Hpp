@@ -42639,6 +42639,7 @@ const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
 const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
+const SCROLL_BOTTOM_THRESHOLD = 50;
 const getThinkingPreview = (value) => {
   const preview = value?.replace(/\s+/g, " ").trim();
   if (!preview) return "思考中";
@@ -43569,8 +43570,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   reactExports.useRef({});
   const streamWatchdogRef = reactExports.useRef(null);
   const sessionRuntimeRef = reactExports.useRef({});
-  const isUserScrollingRef = reactExports.useRef(false);
-  reactExports.useRef(null);
+  const autoFollowBottomRef = reactExports.useRef(true);
   const [showScrollBottom, setShowScrollBottom] = reactExports.useState(false);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
@@ -43636,27 +43636,47 @@ function ChatPanel({ sendKey = "Enter" }) {
     window.addEventListener("pointerup", stopResize);
     window.addEventListener("pointercancel", stopResize);
   }, [activeQuestionnaire, getQuestionnairePaneHeight]);
-  const syncScrollPositionState = reactExports.useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => {
-      const current = scrollRef.current;
-      if (!current) return;
-      const distanceFromBottom = current.scrollHeight - current.scrollTop - current.clientHeight;
-      const shouldShow = distanceFromBottom > 50;
-      isUserScrollingRef.current = shouldShow;
-      setShowScrollBottom(shouldShow);
-    });
+  const getDistanceFromScrollBottom = reactExports.useCallback((el) => {
+    return Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
   }, []);
+  const updateScrollBottomState = reactExports.useCallback((el = scrollRef.current) => {
+    if (!el) return false;
+    const shouldShow = getDistanceFromScrollBottom(el) > SCROLL_BOTTOM_THRESHOLD;
+    setShowScrollBottom(shouldShow);
+    return shouldShow;
+  }, [getDistanceFromScrollBottom]);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.addEventListener("scroll", syncScrollPositionState, { passive: true, capture: true });
-    return () => el.removeEventListener("scroll", syncScrollPositionState, { capture: true });
-  }, [syncScrollPositionState]);
+    const handleScroll = () => {
+      const awayFromBottom = updateScrollBottomState(el);
+      autoFollowBottomRef.current = !awayFromBottom;
+    };
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, [updateScrollBottomState]);
+  reactExports.useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (autoFollowBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    updateScrollBottomState(el);
+  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, updateScrollBottomState]);
   reactExports.useEffect(() => {
-    syncScrollPositionState();
-  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, syncScrollPositionState]);
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (autoFollowBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      updateScrollBottomState(el);
+    });
+    observer.observe(el);
+    Array.from(el.children).forEach((child) => observer.observe(child));
+    return () => observer.disconnect();
+  }, [messages, activeSessionId, activeSessionInitialized, updateScrollBottomState]);
   reactExports.useEffect(() => {
     const ta = textareaRef.current;
     if (ta) {
@@ -43677,11 +43697,16 @@ function ChatPanel({ sendKey = "Enter" }) {
   const scrollToBottom = reactExports.useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     setShowScrollBottom(false);
     el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(syncScrollPositionState);
-  }, [syncScrollPositionState]);
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      current.scrollTop = current.scrollHeight;
+      updateScrollBottomState(current);
+    });
+  }, [updateScrollBottomState]);
   const scrollToMessage = reactExports.useCallback((msgId) => {
     const el = scrollRef.current;
     if (!el) return;
@@ -43759,22 +43784,21 @@ function ChatPanel({ sendKey = "Enter" }) {
   }, []);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
-    if (!el || isUserScrollingRef.current) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-    if (atBottom) {
+    if (!el || !autoFollowBottomRef.current) return;
+    if (getDistanceFromScrollBottom(el) < 100) {
       el.scrollTop = el.scrollHeight;
-      requestAnimationFrame(syncScrollPositionState);
+      requestAnimationFrame(() => updateScrollBottomState(el));
     }
-  }, [messages, syncScrollPositionState]);
+  }, [messages, getDistanceFromScrollBottom, updateScrollBottomState]);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
-      syncScrollPositionState();
+      updateScrollBottomState(el);
     });
-  }, [activeSessionId, activeSessionInitialized, syncScrollPositionState]);
+  }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);
   reactExports.useEffect(() => {
     if (activeSessionId && messages.length > 0 && sessionMessages[activeSessionId] !== messages) {
       loadSessionMessages(activeSessionId, messages);
@@ -44312,7 +44336,7 @@ ${detail.trim()}` : title;
     const targetSessionId = useProjectStore.getState().activeSessionId;
     if (!targetSessionId || pendingUIResponse?.sessionId !== targetSessionId || !text2) return;
     const pendingResponse = pendingUIResponse;
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     reactDomExports.flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -44470,7 +44494,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         mimeType: img.file.type || "image/png"
       }));
     }
-    isUserScrollingRef.current = false;
+    autoFollowBottomRef.current = true;
     reactDomExports.flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
@@ -44499,6 +44523,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
     const scrollEl = scrollRef.current;
     if (scrollEl) {
       scrollEl.scrollTop = scrollEl.scrollHeight;
+      updateScrollBottomState(scrollEl);
     }
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
     if (!result.success) {
