@@ -13116,9 +13116,11 @@ function useDataPersistence() {
       if (msgData && typeof msgData === "object" && "sessionMessages" in msgData) {
         const md = msgData;
         useChatStore.setState({ sessionMessages: md.sessionMessages });
-        if (activeSessionId && md.sessionMessages[activeSessionId]) {
-          useChatStore.setState({ messages: md.sessionMessages[activeSessionId] });
+        if (activeSessionId) {
+          useChatStore.getState().switchSession(activeSessionId);
         }
+      } else if (activeSessionId) {
+        useChatStore.getState().switchSession(activeSessionId);
       }
       if (modelData && typeof modelData === "object") {
         const md = modelData;
@@ -42548,6 +42550,8 @@ const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
 const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
 const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
+const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
+const THINKING_REPEAT_MIN_COUNT = 3;
 const getThinkingPreview = (value) => {
   const preview = value?.replace(/\s+/g, " ").trim();
   if (!preview) return "思考中";
@@ -42596,6 +42600,26 @@ const truncateProcessDetail = (value) => {
   const maxLength = 1200;
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength)}...`;
+};
+const normalizeThinkingRepeatUnit = (value) => value.replace(/[`"'“”‘’]+/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+const getRepeatedThinkingPattern = (value) => {
+  const units = value.replace(/[。！？!?]+/g, "$&\n").split(/[\r\n]+/).map(normalizeThinkingRepeatUnit).filter((unit) => unit.length >= 12).slice(-16);
+  for (let size = 1; size <= 4; size += 1) {
+    if (units.length < size * THINKING_REPEAT_MIN_COUNT) continue;
+    const patternUnits = units.slice(units.length - size);
+    const pattern = patternUnits.join("\n");
+    if (pattern.length < THINKING_REPEAT_MIN_PATTERN_LENGTH) continue;
+    let repeatCount = 1;
+    for (let index2 = units.length - size * 2; index2 >= 0; index2 -= size) {
+      const previous2 = units.slice(index2, index2 + size).join("\n");
+      if (previous2 !== pattern) break;
+      repeatCount += 1;
+    }
+    if (repeatCount >= THINKING_REPEAT_MIN_COUNT) {
+      return { pattern, repeatCount };
+    }
+  }
+  return null;
 };
 const getFileName = (filePath) => {
   const parts = filePath.split(/[/\\]/);
@@ -43460,6 +43484,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   const sessionRuntimeRef = reactExports.useRef({});
   const isUserScrollingRef = reactExports.useRef(false);
   reactExports.useRef(null);
+  const [showScrollBottom, setShowScrollBottom] = reactExports.useState(false);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
   const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.questions?.length ? pendingUIResponse : null;
@@ -43524,20 +43549,27 @@ function ChatPanel({ sendKey = "Enter" }) {
     window.addEventListener("pointerup", stopResize);
     window.addEventListener("pointercancel", stopResize);
   }, [activeQuestionnaire, getQuestionnairePaneHeight]);
+  const syncScrollPositionState = reactExports.useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      const distanceFromBottom = current.scrollHeight - current.scrollTop - current.clientHeight;
+      const shouldShow = distanceFromBottom > 50;
+      isUserScrollingRef.current = shouldShow;
+      setShowScrollBottom(shouldShow);
+    });
+  }, []);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const handleScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-      if (!atBottom) {
-        isUserScrollingRef.current = true;
-      } else {
-        isUserScrollingRef.current = false;
-      }
-    };
-    el.addEventListener("scroll", handleScroll, { passive: true });
-    return () => el.removeEventListener("scroll", handleScroll);
-  }, []);
+    el.addEventListener("scroll", syncScrollPositionState, { passive: true, capture: true });
+    return () => el.removeEventListener("scroll", syncScrollPositionState, { capture: true });
+  }, [syncScrollPositionState]);
+  reactExports.useEffect(() => {
+    syncScrollPositionState();
+  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, syncScrollPositionState]);
   reactExports.useEffect(() => {
     const ta = textareaRef.current;
     if (ta) {
@@ -43555,6 +43587,14 @@ function ChatPanel({ sendKey = "Enter" }) {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [userMsgHistoryOpen]);
+  const scrollToBottom = reactExports.useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isUserScrollingRef.current = false;
+    setShowScrollBottom(false);
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(syncScrollPositionState);
+  }, [syncScrollPositionState]);
   const scrollToMessage = reactExports.useCallback((msgId) => {
     const el = scrollRef.current;
     if (!el) return;
@@ -43636,16 +43676,18 @@ function ChatPanel({ sendKey = "Enter" }) {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     if (atBottom) {
       el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(syncScrollPositionState);
     }
-  }, [messages]);
+  }, [messages, syncScrollPositionState]);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     isUserScrollingRef.current = false;
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
+      syncScrollPositionState();
     });
-  }, [activeSessionId, activeSessionInitialized]);
+  }, [activeSessionId, activeSessionInitialized, syncScrollPositionState]);
   reactExports.useEffect(() => {
     if (activeSessionId && messages.length > 0 && sessionMessages[activeSessionId] !== messages) {
       loadSessionMessages(activeSessionId, messages);
@@ -43663,7 +43705,8 @@ function ChatPanel({ sendKey = "Enter" }) {
         streamStarted: false,
         activeToolEntry: {},
         activeToolFile: {},
-        streamWatchdog: null
+        streamWatchdog: null,
+        autoAbortReason: null
       };
       sessionRuntimeRef.current[sessionId] = runtime;
       return runtime;
@@ -43694,6 +43737,39 @@ function ChatPanel({ sendKey = "Enter" }) {
       runtime.thinkingEntryId = null;
       runtime.thinkingBuffer = "";
     };
+    const abortRepeatedThinking = (sessionId, pattern, repeatCount) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.autoAbortReason) return;
+      runtime.autoAbortReason = "repeated-thinking";
+      if (runtime.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
+      }
+      useChatStore.getState().appendLastAssistantProcessEntry({
+        id: createProcessEntryId(),
+        timestamp: Date.now(),
+        type: "error",
+        title: "检测到重复思考，已自动中断",
+        detail: `最近思考内容连续重复 ${repeatCount} 次:
+${pattern}`,
+        state: "interrupted",
+        expanded: true
+      }, sessionId);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
+      runtime.processActive = false;
+      runtime.streamStarted = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.streamBuffer = "";
+      runtime.thinkingBuffer = "";
+      runtime.thinkingEntryId = null;
+      setPendingUIResponseState((current) => current?.sessionId === sessionId ? null : current);
+      if (sessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
+      useProjectStore.getState().setAgentStatus(sessionId, "idle");
+      void window.electronAPI.agentAbort(sessionId).catch((err) => {
+        console.error("[agent] auto abort repeated thinking failed:", err);
+      });
+    };
     const appendThinkingDelta = (sessionId, delta) => {
       if (!delta) return;
       const runtime = getRuntime(sessionId);
@@ -43716,6 +43792,10 @@ function ChatPanel({ sendKey = "Enter" }) {
           state: "running",
           expanded: false
         });
+      }
+      const repeatedPattern = getRepeatedThinkingPattern(runtime.thinkingBuffer);
+      if (repeatedPattern) {
+        abortRepeatedThinking(sessionId, repeatedPattern.pattern, repeatedPattern.repeatCount);
       }
     };
     const getPendingUIFromEvent = (event, sessionId, entryId) => {
@@ -43813,6 +43893,7 @@ function ChatPanel({ sendKey = "Enter" }) {
       if (runtime.processActive) return runtime;
       runtime.processActive = true;
       runtime.streamStarted = true;
+      runtime.autoAbortReason = null;
       useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
       useProjectStore.getState().setAgentStatus(currentSessionId, "running");
@@ -43838,6 +43919,7 @@ function ChatPanel({ sendKey = "Enter" }) {
           runtime.streamStarted = false;
           runtime.activeToolEntry = {};
           runtime.activeToolFile = {};
+          runtime.autoAbortReason = null;
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
           runtime.processActive = true;
@@ -43860,6 +43942,7 @@ function ChatPanel({ sendKey = "Enter" }) {
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
             runtime.processActive = true;
             runtime.streamStarted = true;
+            runtime.autoAbortReason = null;
             runtime.activeToolEntry = {};
             runtime.activeToolFile = {};
             if (!alreadyStarted) {
@@ -44155,6 +44238,7 @@ function ChatPanel({ sendKey = "Enter" }) {
     runtime.streamStarted = false;
     runtime.activeToolEntry = {};
     runtime.activeToolFile = {};
+    runtime.autoAbortReason = null;
   };
   const finishPendingQuestionTurn = (targetSessionId, pendingResponse, failed = false) => {
     finishPendingQuestionEntry(targetSessionId, pendingResponse, failed);
@@ -44285,6 +44369,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         runtime.streamBuffer = "";
         runtime.thinkingBuffer = "";
         runtime.thinkingEntryId = null;
+        runtime.autoAbortReason = null;
       }
     });
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
@@ -44356,6 +44441,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
+      runtime.autoAbortReason = null;
     }
     setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
     setStreaming(false);
@@ -44563,77 +44649,83 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         ] })
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: scrollRef, className: "chat-messages", children: activeSessionId && !isSessionInitialized(activeSessionId) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-loading-agent", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在初始化 Agent 会话..." })
-    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-      messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-empty", children: "发送消息开始对话" }),
-      messages.map((msg) => {
-        const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
-        const hasImages = !!msg.images?.length;
-        const hasDiffs = !!msg.diffs?.length && !processRunning;
-        const hasContent = msg.content.trim().length > 0;
-        const hasVisibleBubble = msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
-        return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { "data-msg-id": msg.id, className: "chat-msg-wrapper", children: [
-          msg.role === "assistant" && msg.process && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            ProcessBlock,
-            {
-              messageId: msg.id,
-              process: msg.process,
-              onToggle: toggleAssistantProcess,
-              onToggleEntry: toggleAssistantProcessEntry,
-              onOpenFile: setPreviewFile
-            }
-          ),
-          hasVisibleBubble && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-msg ${msg.role}`, children: [
-            hasImages && msg.images && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-images", children: msg.images.map((img) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "img",
-              {
-                src: img.src,
-                alt: img.name,
-                className: "chat-image",
-                onClick: () => setZoomImage(img.src)
-              },
-              img.id
-            )) }),
-            hasContent && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-bubble-row", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `chat-bubble ${msg.role}`, children: msg.role === "assistant" ? /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: msg.content }) : msg.content }),
-              msg.role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-msg-actions", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "button",
-                  {
-                    className: "chat-copy-btn",
-                    onClick: () => setInput(msg.content),
-                    title: "编辑",
-                    children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" })
-                    ] })
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "button",
-                  {
-                    className: "chat-copy-btn",
-                    onClick: () => navigator.clipboard.writeText(msg.content),
-                    title: "复制",
-                    children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "9", y: "9", width: "13", height: "13", rx: "2" }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" })
-                    ] })
-                  }
-                )
-              ] })
-            ] }),
-            hasDiffs && msg.diffs && /* @__PURE__ */ jsxRuntimeExports.jsx(DiffBlock, { diffs: msg.diffs })
-          ] })
-        ] }, msg.id);
-      }),
-      currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-working", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-messages-area", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: scrollRef, className: "chat-messages", children: activeSessionId && !isSessionInitialized(activeSessionId) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-loading-agent", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在处理您的请求..." })
-      ] })
-    ] }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在初始化 Agent 会话..." })
+      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        messages.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-empty", children: "发送消息开始对话" }),
+        messages.map((msg) => {
+          const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
+          const hasImages = !!msg.images?.length;
+          const hasDiffs = !!msg.diffs?.length && !processRunning;
+          const hasContent = msg.content.trim().length > 0;
+          const hasVisibleBubble = msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { "data-msg-id": msg.id, className: "chat-msg-wrapper", children: [
+            msg.role === "assistant" && msg.process && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              ProcessBlock,
+              {
+                messageId: msg.id,
+                process: msg.process,
+                onToggle: toggleAssistantProcess,
+                onToggleEntry: toggleAssistantProcessEntry,
+                onOpenFile: setPreviewFile
+              }
+            ),
+            hasVisibleBubble && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-msg ${msg.role}`, children: [
+              hasImages && msg.images && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-images", children: msg.images.map((img) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "img",
+                {
+                  src: img.src,
+                  alt: img.name,
+                  className: "chat-image",
+                  onClick: () => setZoomImage(img.src)
+                },
+                img.id
+              )) }),
+              hasContent && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-bubble-row", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `chat-bubble ${msg.role}`, children: msg.role === "assistant" ? /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: msg.content }) : msg.content }),
+                msg.role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-msg-actions", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "chat-copy-btn",
+                      onClick: () => setInput(msg.content),
+                      title: "编辑",
+                      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" })
+                      ] })
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "chat-copy-btn",
+                      onClick: () => navigator.clipboard.writeText(msg.content),
+                      title: "复制",
+                      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "9", y: "9", width: "13", height: "13", rx: "2" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" })
+                      ] })
+                    }
+                  )
+                ] })
+              ] }),
+              hasDiffs && msg.diffs && /* @__PURE__ */ jsxRuntimeExports.jsx(DiffBlock, { diffs: msg.diffs })
+            ] })
+          ] }, msg.id);
+        }),
+        currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-working", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在处理您的请求..." })
+        ] })
+      ] }) }),
+      showScrollBottom && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "chat-scroll-bottom", onClick: scrollToBottom, title: "返回底部", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 5v14" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M19 12l-7 7-7-7" })
+      ] }) })
+    ] }),
     activeQuestionnaire && /* @__PURE__ */ jsxRuntimeExports.jsx(
       "div",
       {

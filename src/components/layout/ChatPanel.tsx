@@ -13,6 +13,8 @@ const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
 const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
 const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
+const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
+const THINKING_REPEAT_MIN_COUNT = 3;
 
 const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\s+/g, " ").trim();
@@ -89,6 +91,43 @@ const truncateProcessDetail = (value: string) => {
   const maxLength = 1200;
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength)}...`;
+};
+
+const normalizeThinkingRepeatUnit = (value: string) =>
+  value
+    .replace(/[`"'“”‘’]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const getRepeatedThinkingPattern = (value: string) => {
+  const units = value
+    .replace(/[。！？!?]+/g, "$&\n")
+    .split(/[\r\n]+/)
+    .map(normalizeThinkingRepeatUnit)
+    .filter((unit) => unit.length >= 12)
+    .slice(-16);
+
+  for (let size = 1; size <= 4; size += 1) {
+    if (units.length < size * THINKING_REPEAT_MIN_COUNT) continue;
+
+    const patternUnits = units.slice(units.length - size);
+    const pattern = patternUnits.join("\n");
+    if (pattern.length < THINKING_REPEAT_MIN_PATTERN_LENGTH) continue;
+
+    let repeatCount = 1;
+    for (let index = units.length - size * 2; index >= 0; index -= size) {
+      const previous = units.slice(index, index + size).join("\n");
+      if (previous !== pattern) break;
+      repeatCount += 1;
+    }
+
+    if (repeatCount >= THINKING_REPEAT_MIN_COUNT) {
+      return { pattern, repeatCount };
+    }
+  }
+
+  return null;
 };
 
 const getFileName = (filePath: string) => {
@@ -1147,9 +1186,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeToolEntry: Record<string, string>;
     activeToolFile: Record<string, AgentProcessFile[]>;
     streamWatchdog: ReturnType<typeof setTimeout> | null;
+    autoAbortReason: string | null;
   }>>({});
   const isUserScrollingRef = useRef(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
   const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.questions?.length
@@ -1229,21 +1270,31 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     window.addEventListener("pointercancel", stopResize);
   }, [activeQuestionnaire, getQuestionnairePaneHeight]);
 
-  // Track user scrolling - stop auto-scroll when user scrolls up
+  const syncScrollPositionState = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      const distanceFromBottom = current.scrollHeight - current.scrollTop - current.clientHeight;
+      const shouldShow = distanceFromBottom > 50;
+      isUserScrollingRef.current = shouldShow;
+      setShowScrollBottom(shouldShow);
+    });
+  }, []);
+
+  // Track scroll position - show scroll-to-bottom button when scrolled up
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const handleScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-      if (!atBottom) {
-        isUserScrollingRef.current = true;
-      } else {
-        isUserScrollingRef.current = false;
-      }
-    };
-    el.addEventListener("scroll", handleScroll, { passive: true });
-    return () => el.removeEventListener("scroll", handleScroll);
-  }, []);
+    el.addEventListener("scroll", syncScrollPositionState, { passive: true, capture: true });
+    return () => el.removeEventListener("scroll", syncScrollPositionState, { capture: true });
+  }, [syncScrollPositionState]);
+
+  useEffect(() => {
+    syncScrollPositionState();
+  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, syncScrollPositionState]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -1265,6 +1316,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [userMsgHistoryOpen]);
+
+  // Scroll to bottom
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isUserScrollingRef.current = false;
+    setShowScrollBottom(false);
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(syncScrollPositionState);
+  }, [syncScrollPositionState]);
 
   // Scroll to a specific message
   const scrollToMessage = useCallback((msgId: string) => {
@@ -1378,8 +1439,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     if (atBottom) {
       el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(syncScrollPositionState);
     }
-  }, [messages]);
+  }, [messages, syncScrollPositionState]);
 
   // Instant scroll to bottom on session switch (no animation)
   // Also scroll when session initializes (messages become visible in DOM)
@@ -1389,8 +1451,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     isUserScrollingRef.current = false;
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
+      syncScrollPositionState();
     });
-  }, [activeSessionId, activeSessionInitialized]);
+  }, [activeSessionId, activeSessionInitialized, syncScrollPositionState]);
 
   // Persist messages to sessionMessages whenever messages change (for restart survival)
   useEffect(() => {
@@ -1417,6 +1480,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         activeToolEntry: {},
         activeToolFile: {},
         streamWatchdog: null,
+        autoAbortReason: null,
       };
       sessionRuntimeRef.current[sessionId] = runtime;
       return runtime;
@@ -1450,6 +1514,44 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.thinkingBuffer = "";
     };
 
+    const abortRepeatedThinking = (sessionId: string, pattern: string, repeatCount: number) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.autoAbortReason) return;
+
+      runtime.autoAbortReason = "repeated-thinking";
+      if (runtime.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
+      }
+
+      useChatStore.getState().appendLastAssistantProcessEntry({
+        id: createProcessEntryId(),
+        timestamp: Date.now(),
+        type: "error",
+        title: "检测到重复思考，已自动中断",
+        detail: `最近思考内容连续重复 ${repeatCount} 次:\n${pattern}`,
+        state: "interrupted",
+        expanded: true,
+      }, sessionId);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
+
+      runtime.processActive = false;
+      runtime.streamStarted = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.streamBuffer = "";
+      runtime.thinkingBuffer = "";
+      runtime.thinkingEntryId = null;
+
+      setPendingUIResponseState((current) => current?.sessionId === sessionId ? null : current);
+      if (sessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
+      useProjectStore.getState().setAgentStatus(sessionId, "idle");
+
+      void window.electronAPI.agentAbort(sessionId).catch((err) => {
+        console.error("[agent] auto abort repeated thinking failed:", err);
+      });
+    };
+
     const appendThinkingDelta = (sessionId: string, delta: string) => {
       if (!delta) return;
       const runtime = getRuntime(sessionId);
@@ -1473,6 +1575,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           state: "running",
           expanded: false,
         });
+      }
+
+      const repeatedPattern = getRepeatedThinkingPattern(runtime.thinkingBuffer);
+      if (repeatedPattern) {
+        abortRepeatedThinking(sessionId, repeatedPattern.pattern, repeatedPattern.repeatCount);
       }
     };
 
@@ -1593,6 +1700,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
       runtime.processActive = true;
       runtime.streamStarted = true;
+      runtime.autoAbortReason = null;
       useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
       useProjectStore.getState().setAgentStatus(currentSessionId, "running");
@@ -1629,6 +1737,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           runtime.streamStarted = false;
           runtime.activeToolEntry = {};
           runtime.activeToolFile = {};
+          runtime.autoAbortReason = null;
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
           runtime.processActive = true;
@@ -1653,6 +1762,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
             runtime.processActive = true;
             runtime.streamStarted = true;
+            runtime.autoAbortReason = null;
             runtime.activeToolEntry = {};
             runtime.activeToolFile = {};
             if (!alreadyStarted) {
@@ -1963,6 +2073,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     runtime.streamStarted = false;
     runtime.activeToolEntry = {};
     runtime.activeToolFile = {};
+    runtime.autoAbortReason = null;
   };
 
   const finishPendingQuestionTurn = (targetSessionId: string, pendingResponse: typeof pendingUIResponse, failed = false) => {
@@ -2110,6 +2221,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         runtime.streamBuffer = "";
         runtime.thinkingBuffer = "";
         runtime.thinkingEntryId = null;
+        runtime.autoAbortReason = null;
       }
     });
 
@@ -2188,6 +2300,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
+      runtime.autoAbortReason = null;
     }
     setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
     setStreaming(false);
@@ -2428,101 +2541,112 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="chat-messages">
-        {activeSessionId && !isSessionInitialized(activeSessionId) ? (
-          <div className="chat-loading-agent">
-            <div className="chat-working-spinner" />
-            <span>正在初始化 Agent 会话...</span>
-          </div>
-        ) : (<>
-        {messages.length === 0 && (
-          <div className="chat-empty">发送消息开始对话</div>
-        )}
-        {messages.map((msg) => {
-          const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
-          const hasImages = !!msg.images?.length;
-          const hasDiffs = !!msg.diffs?.length && !processRunning;
-          const hasContent = msg.content.trim().length > 0;
-          const hasVisibleBubble =
-            msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
+      <div className="chat-messages-area">
+        <div ref={scrollRef} className="chat-messages">
+          {activeSessionId && !isSessionInitialized(activeSessionId) ? (
+            <div className="chat-loading-agent">
+              <div className="chat-working-spinner" />
+              <span>正在初始化 Agent 会话...</span>
+            </div>
+          ) : (<>
+          {messages.length === 0 && (
+            <div className="chat-empty">发送消息开始对话</div>
+          )}
+          {messages.map((msg) => {
+            const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
+            const hasImages = !!msg.images?.length;
+            const hasDiffs = !!msg.diffs?.length && !processRunning;
+            const hasContent = msg.content.trim().length > 0;
+            const hasVisibleBubble =
+              msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
 
-          return (
-            <div key={msg.id} data-msg-id={msg.id} className="chat-msg-wrapper">
-              {msg.role === "assistant" && msg.process && (
-                <ProcessBlock
-                  messageId={msg.id}
-                  process={msg.process}
-                  onToggle={toggleAssistantProcess}
-                  onToggleEntry={toggleAssistantProcessEntry}
-                  onOpenFile={setPreviewFile}
-                />
-              )}
-              {hasVisibleBubble && (
-              <div className={`chat-msg ${msg.role}`}>
-                {hasImages && msg.images && (
-                  <div className="chat-images">
-                    {msg.images.map((img) => (
-                      <img
-                        key={img.id}
-                        src={img.src}
-                        alt={img.name}
-                        className="chat-image"
-                        onClick={() => setZoomImage(img.src)}
-                      />
-                    ))}
-                  </div>
+            return (
+              <div key={msg.id} data-msg-id={msg.id} className="chat-msg-wrapper">
+                {msg.role === "assistant" && msg.process && (
+                  <ProcessBlock
+                    messageId={msg.id}
+                    process={msg.process}
+                    onToggle={toggleAssistantProcess}
+                    onToggleEntry={toggleAssistantProcessEntry}
+                    onOpenFile={setPreviewFile}
+                  />
                 )}
-                {hasContent && (
-                  <div className="chat-bubble-row">
-                    <div className={`chat-bubble ${msg.role}`}>
-                      {msg.role === "assistant" ? (
-                        <MarkdownRenderer content={msg.content} />
-                      ) : (
-                        msg.content
+                {hasVisibleBubble && (
+                <div className={`chat-msg ${msg.role}`}>
+                  {hasImages && msg.images && (
+                    <div className="chat-images">
+                      {msg.images.map((img) => (
+                        <img
+                          key={img.id}
+                          src={img.src}
+                          alt={img.name}
+                          className="chat-image"
+                          onClick={() => setZoomImage(img.src)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {hasContent && (
+                    <div className="chat-bubble-row">
+                      <div className={`chat-bubble ${msg.role}`}>
+                        {msg.role === "assistant" ? (
+                          <MarkdownRenderer content={msg.content} />
+                        ) : (
+                          msg.content
+                        )}
+                      </div>
+                      {msg.role === "user" && (
+                      <div className="chat-msg-actions">
+                        <button
+                          className="chat-copy-btn"
+                          onClick={() => setInput(msg.content)}
+                          title="编辑"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        </button>
+                        <button
+                          className="chat-copy-btn"
+                          onClick={() => navigator.clipboard.writeText(msg.content)}
+                          title="复制"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" />
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                          </svg>
+                        </button>
+                      </div>
                       )}
                     </div>
-                    {msg.role === "user" && (
-                    <div className="chat-msg-actions">
-                      <button
-                        className="chat-copy-btn"
-                        onClick={() => setInput(msg.content)}
-                        title="编辑"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                        </svg>
-                      </button>
-                      <button
-                        className="chat-copy-btn"
-                        onClick={() => navigator.clipboard.writeText(msg.content)}
-                        title="复制"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <rect x="9" y="9" width="13" height="13" rx="2" />
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                        </svg>
-                      </button>
-                    </div>
-                    )}
-                  </div>
-                )}
-                {hasDiffs && msg.diffs && (
-                  <DiffBlock diffs={msg.diffs} />
+                  )}
+                  {hasDiffs && msg.diffs && (
+                    <DiffBlock diffs={msg.diffs} />
+                  )}
+                </div>
                 )}
               </div>
-              )}
-            </div>
-          );
-        })}
+            );
+          })}
 
-        {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
-          <div className="chat-working">
-            <div className="chat-working-spinner" />
-            <span>正在处理您的请求...</span>
-          </div>
+          {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+            <div className="chat-working">
+              <div className="chat-working-spinner" />
+              <span>正在处理您的请求...</span>
+            </div>
+          )}
+          </>)}
+        </div>
+
+        {showScrollBottom && (
+          <button className="chat-scroll-bottom" onClick={scrollToBottom} title="返回底部">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5v14" />
+              <path d="M19 12l-7 7-7-7" />
+            </svg>
+          </button>
         )}
-        </>)}
       </div>
 
       {activeQuestionnaire && (

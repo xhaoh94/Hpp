@@ -165,9 +165,11 @@ export function useDataPersistence() {
       if (msgData && typeof msgData === "object" && "sessionMessages" in msgData) {
         const md = msgData as PersistedMessages;
         useChatStore.setState({ sessionMessages: md.sessionMessages });
-        if (activeSessionId && md.sessionMessages[activeSessionId]) {
-          useChatStore.setState({ messages: md.sessionMessages[activeSessionId] });
+        if (activeSessionId) {
+          useChatStore.getState().switchSession(activeSessionId);
         }
+      } else if (activeSessionId) {
+        useChatStore.getState().switchSession(activeSessionId);
       }
 
       // 3. Load per-session models and thinking levels into cache, restore active session
