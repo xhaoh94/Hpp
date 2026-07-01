@@ -2071,6 +2071,27 @@ class PiSDKAgent {
         if (!this.turnActive) this.beginTurn();
         if (data.message?.role === "assistant") {
           if (data.message.thinking) this.emitEvent({ type: "thinking_end" });
+          const stopReason = String(data.message.stopReason || "");
+          const errorMessage = String(data.message.errorMessage || "").trim();
+          if (stopReason === "error" || errorMessage) {
+            this.pendingAssistantText = "";
+            this.streamedText = false;
+            this.streamedTextBuffer = "";
+            this.emittedAssistantTextSnapshot = "";
+            this.pendingUIRequestIds.clear();
+            this.activePromptIds.clear();
+            this.clearTurnFallback();
+            this.emitEvent({
+              type: "process_event",
+              entryType: "error",
+              kind: "error",
+              title: "模型请求失败",
+              detail: errorMessage || `Assistant stopped with reason: ${stopReason || "error"}`,
+              state: "error"
+            });
+            this.completeTurn(true);
+            break;
+          }
           if (data.message.text) {
             this.pendingAssistantText = data.message.text;
             this.emitPendingAssistantText();

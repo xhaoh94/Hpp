@@ -485,7 +485,13 @@
 
 .project-item.always-active {
   background-color: var(--bg-primary);
-  border: 1px solid var(--accent-color);
+  border: 1px solid var(--border-color);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.project-item.active {
+  border-color: rgba(0, 122, 204, 0.4);
+  box-shadow: 0 0 0 1px rgba(0, 122, 204, 0.15);
 }
 
 .project-item.dragging {
@@ -614,7 +620,8 @@
   gap: 6px;
   padding: 6px 10px;
   margin: 0 8px;
-  background-color: transparent;
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.1s ease;
@@ -623,19 +630,15 @@
 }
 
 .project-terminal-child:hover {
-  background-color: var(--bg-hover);
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
   color: var(--text-primary);
 }
 
 .project-terminal-child.active {
-  background-color: var(--bg-tertiary);
+  background-color: rgba(0, 122, 204, 0.15);
   color: var(--text-primary);
-}
-
-.project-terminal-child.active {
-  background-color: var(--bg-primary);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  border-color: rgba(0, 122, 204, 0.4);
 }
 
 .terminal-child-icon {

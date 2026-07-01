@@ -1685,6 +1685,43 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
     };
 
+    const failAssistantStream = (currentSessionId: string, title: string, detail?: string) => {
+      const runtime = getRuntime(currentSessionId);
+      clearStreamWatchdog(currentSessionId);
+      finishThinkingEntry(currentSessionId);
+
+      const errorContent = detail?.trim()
+        ? `${title}\n\n${detail.trim()}`
+        : title;
+      if (errorContent.trim()) {
+        runtime.streamBuffer = errorContent;
+        useChatStore.getState().updateLastAssistant(errorContent, currentSessionId);
+      }
+
+      useChatStore.getState().appendLastAssistantProcessEntry({
+        id: createProcessEntryId(),
+        timestamp: Date.now(),
+        type: "error",
+        title,
+        detail,
+        state: "error",
+        expanded: true,
+      }, currentSessionId);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
+
+      runtime.processActive = false;
+      runtime.streamStarted = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.streamBuffer = "";
+      runtime.thinkingBuffer = "";
+      runtime.thinkingEntryId = null;
+      runtime.autoAbortReason = null;
+
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
+      useProjectStore.getState().setAgentStatus(currentSessionId, "error");
+    };
+
     const refreshStreamWatchdog = (currentSessionId: string) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
@@ -1949,6 +1986,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
           const eventState = normalizeProcessEntryState(event.state);
+          if (eventType === "error" || eventState === "error") {
+            failAssistantStream(currentSessionId, eventTitle, eventDetail);
+            setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
+            break;
+          }
           let questionEntryId: string | undefined;
           if (eventType === "question") {
             questionEntryId = createProcessEntryId();

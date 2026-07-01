@@ -289,7 +289,8 @@
   gap: 6px;
   padding: 6px 10px;
   margin: 0 8px;
-  background-color: transparent;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.1s ease;
@@ -298,14 +299,16 @@
 }
 
 .project-terminal-child:hover {
-  background-color: var(--bg-hover);
+  background-color: var(--bg-primary);
+  border-color: var(--border-color);
   color: var(--text-primary);
 }
 
 .project-terminal-child.active {
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  border: 1px solid rgba(0, 122, 204, 0.35);
+  border-color: rgba(0, 122, 204, 0.4);
+  box-shadow: 0 0 0 1px rgba(0, 122, 204, 0.15);
 }
 
 .terminal-child-icon {

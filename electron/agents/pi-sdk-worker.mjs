@@ -107,6 +107,29 @@ const getThinkingFromMessage = (message) => {
     .join("");
 };
 
+const stringifyErrorValue = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value.message === "string") return value.message;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const getErrorFromMessage = (message) => {
+  if (!message) return "";
+  return (
+    stringifyErrorValue(message.errorMessage) ||
+    stringifyErrorValue(message.error) ||
+    stringifyErrorValue(message.info?.error) ||
+    stringifyErrorValue(message.metadata?.error) ||
+    ""
+  );
+};
+
 const createDialogPromise = (emit, pending, request, parse, defaultValue, opts = {}) => {
   if (opts.signal?.aborted) return Promise.resolve(defaultValue);
 
@@ -379,6 +402,8 @@ const handleSessionEvent = (event) => {
             role: "assistant",
             text: getTextFromMessage(message),
             thinking: getThinkingFromMessage(message),
+            stopReason: message.stopReason,
+            errorMessage: getErrorFromMessage(message),
           },
         });
       }

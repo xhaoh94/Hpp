@@ -13222,7 +13222,7 @@ function BrailleSpinner() {
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "braille-spinner", children: BRAILLE_CHARS[index2] });
 }
 function ProjectCard({ project }) {
-  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
   const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
   const [showHistory, setShowHistory] = reactExports.useState(false);
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["pi"]);
@@ -13386,7 +13386,7 @@ ${getInstallHint(cmd)}`);
     (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true
   );
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "project-item always-active", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "project-info", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: `project-item always-active ${project.id === activeProjectId ? "active" : ""}`, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "project-info", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
@@ -43880,6 +43880,38 @@ ${pattern}`,
         );
       }
     };
+    const failAssistantStream = (currentSessionId, title, detail) => {
+      const runtime = getRuntime(currentSessionId);
+      clearStreamWatchdog(currentSessionId);
+      finishThinkingEntry(currentSessionId);
+      const errorContent = detail?.trim() ? `${title}
+
+${detail.trim()}` : title;
+      if (errorContent.trim()) {
+        runtime.streamBuffer = errorContent;
+        useChatStore.getState().updateLastAssistant(errorContent, currentSessionId);
+      }
+      useChatStore.getState().appendLastAssistantProcessEntry({
+        id: createProcessEntryId(),
+        timestamp: Date.now(),
+        type: "error",
+        title,
+        detail,
+        state: "error",
+        expanded: true
+      }, currentSessionId);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
+      runtime.processActive = false;
+      runtime.streamStarted = false;
+      runtime.activeToolEntry = {};
+      runtime.activeToolFile = {};
+      runtime.streamBuffer = "";
+      runtime.thinkingBuffer = "";
+      runtime.thinkingEntryId = null;
+      runtime.autoAbortReason = null;
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
+      useProjectStore.getState().setAgentStatus(currentSessionId, "error");
+    };
     const refreshStreamWatchdog = (currentSessionId) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
@@ -44124,6 +44156,11 @@ ${pattern}`,
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : void 0;
           const eventState = normalizeProcessEntryState(event.state);
+          if (eventType === "error" || eventState === "error") {
+            failAssistantStream(currentSessionId, eventTitle, eventDetail);
+            setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
+            break;
+          }
           let questionEntryId;
           if (eventType === "question") {
             questionEntryId = createProcessEntryId();
@@ -44372,6 +44409,10 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
         runtime.autoAbortReason = null;
       }
     });
+    const scrollEl = scrollRef.current;
+    if (scrollEl) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
