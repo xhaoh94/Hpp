@@ -2225,6 +2225,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
     });
 
+    // Scroll to bottom immediately after sending (user wants to see their message)
+    const scrollEl = scrollRef.current;
+    if (scrollEl) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+
     const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
