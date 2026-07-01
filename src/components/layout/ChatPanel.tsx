@@ -1587,6 +1587,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }, 45000);
     };
 
+    const ensureAssistantContinuation = (currentSessionId: string) => {
+      const runtime = getRuntime(currentSessionId);
+      if (runtime.processActive) return runtime;
+
+      runtime.processActive = true;
+      runtime.streamStarted = true;
+      useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
+      useProjectStore.getState().setAgentStatus(currentSessionId, "running");
+      return runtime;
+    };
+
     const unsubscribe = window.electronAPI.onAgentEvent((event: any) => {
       // Always read from store to avoid stale closure (useEffect deps=[])
       const currentSessionId = typeof event.sessionId === "string"
@@ -1597,6 +1609,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       if (
         event.type !== "message_start" &&
         event.type !== "stream_start" &&
+        event.type !== "stream_snapshot" &&
         event.type !== "stream_end" &&
         event.type !== "agent_end" &&
         event.type !== "agent_disconnected"
@@ -1658,19 +1671,25 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "stream_delta":
           if (!event.delta) break;
-          if (!runtime.processActive) {
-            runtime.processActive = true;
-            runtime.streamStarted = true;
-            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
-            if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
-            useProjectStore.getState().setAgentStatus(currentSessionId, "running");
-          }
+          ensureAssistantContinuation(currentSessionId);
           finishThinkingEntry(currentSessionId);
           runtime.streamBuffer += String(event.delta);
           useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+          refreshStreamWatchdog(currentSessionId);
+          break;
+        case "stream_snapshot":
+          {
+            const content = String(event.content || "");
+            if (!content) break;
+            ensureAssistantContinuation(currentSessionId);
+            finishThinkingEntry(currentSessionId);
+            runtime.streamBuffer = content;
+            useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+            refreshStreamWatchdog(currentSessionId);
+          }
           break;
         case "thinking_delta":
-          if (!runtime.processActive) break;
+          ensureAssistantContinuation(currentSessionId);
           appendThinkingDelta(currentSessionId, String(event.delta || ""));
           break;
         case "thinking_end":
@@ -1695,7 +1714,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "stream_end":
           {
-            if (!runtime.processActive) break;
+            if (!runtime.processActive) {
+              const eventContent = event.content ? String(event.content) : "";
+              if (!eventContent.trim()) break;
+              ensureAssistantContinuation(currentSessionId);
+            }
             if (pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) break;
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
@@ -1715,6 +1738,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "tool_start":
           {
+            ensureAssistantContinuation(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             if (normalizeToolKind(event.toolKind) === "question") {
@@ -1802,13 +1826,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           }
           break;
         case "diff_update":
-          if (!runtime.processActive) break;
+          ensureAssistantContinuation(currentSessionId);
           if (event.diffs && event.diffs.length > 0) {
             finishThinkingEntry(currentSessionId);
             useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
           }
           break;
         case "process_event":
+          ensureAssistantContinuation(currentSessionId);
           finishThinkingEntry(currentSessionId);
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
@@ -1893,13 +1918,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }, targetSessionId);
       setInput("");
       setPendingUIResponseState(null);
-      if (pendingResponse.entryId) {
-        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
-          title: getQuestionTitle(false),
-          state: "completed",
-          expanded: false,
-        }, targetSessionId);
-      }
+      finishPendingQuestionTurn(targetSessionId, pendingResponse);
     });
 
     const result = await window.electronAPI.agentSendUIResponse(getUIResponsePayload({
@@ -1916,13 +1935,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         content: "发送回答失败",
         timestamp: Date.now(),
       }, targetSessionId);
-      if (pendingResponse.entryId) {
-        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
-          title: getQuestionTitle(false, true),
-          state: "error",
-          expanded: true,
-        }, targetSessionId);
-      }
+      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
     }
   };
 
@@ -1933,6 +1946,29 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       state: failed ? "error" : "completed",
       expanded: false,
     }, targetSessionId);
+  };
+
+  const resetRuntimeAfterUIResponse = (targetSessionId: string) => {
+    const runtime = sessionRuntimeRef.current[targetSessionId];
+    if (!runtime) return;
+
+    if (runtime.streamWatchdog) {
+      clearTimeout(runtime.streamWatchdog);
+      runtime.streamWatchdog = null;
+    }
+    runtime.streamBuffer = "";
+    runtime.thinkingBuffer = "";
+    runtime.thinkingEntryId = null;
+    runtime.processActive = false;
+    runtime.streamStarted = false;
+    runtime.activeToolEntry = {};
+    runtime.activeToolFile = {};
+  };
+
+  const finishPendingQuestionTurn = (targetSessionId: string, pendingResponse: typeof pendingUIResponse, failed = false) => {
+    finishPendingQuestionEntry(targetSessionId, pendingResponse, failed);
+    useChatStore.getState().finishLastAssistantProcess(Date.now(), failed ? "interrupted" : "completed", targetSessionId);
+    resetRuntimeAfterUIResponse(targetSessionId);
   };
 
   const handleSubmitQuestionnaire = async (answers: unknown[]) => {
@@ -1952,7 +1988,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         timestamp: Date.now(),
       }, targetSessionId);
       setPendingUIResponseState(null);
-      finishPendingQuestionEntry(targetSessionId, pendingResponse);
+      finishPendingQuestionTurn(targetSessionId, pendingResponse);
     });
 
     const result = await window.electronAPI.agentSendUIResponse({
@@ -1983,7 +2019,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
     const pendingResponse = activeQuestionnaire;
     setPendingUIResponseState(null);
-    finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    finishPendingQuestionTurn(targetSessionId, pendingResponse, true);
     await window.electronAPI.agentSendUIResponse({
       sessionId: targetSessionId,
       type: "extension_ui_response",

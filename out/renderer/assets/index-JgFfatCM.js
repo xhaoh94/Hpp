@@ -43808,11 +43808,21 @@ function ChatPanel({ sendKey = "Enter" }) {
         completeAssistantStream(currentSessionId, void 0, true);
       }, 45e3);
     };
+    const ensureAssistantContinuation = (currentSessionId) => {
+      const runtime = getRuntime(currentSessionId);
+      if (runtime.processActive) return runtime;
+      runtime.processActive = true;
+      runtime.streamStarted = true;
+      useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
+      useProjectStore.getState().setAgentStatus(currentSessionId, "running");
+      return runtime;
+    };
     const unsubscribe = window.electronAPI.onAgentEvent((event) => {
       const currentSessionId = typeof event.sessionId === "string" ? event.sessionId : useProjectStore.getState().activeSessionId;
       if (!currentSessionId) return;
       const runtime = getRuntime(currentSessionId);
-      if (event.type !== "message_start" && event.type !== "stream_start" && event.type !== "stream_end" && event.type !== "agent_end" && event.type !== "agent_disconnected") {
+      if (event.type !== "message_start" && event.type !== "stream_start" && event.type !== "stream_snapshot" && event.type !== "stream_end" && event.type !== "agent_end" && event.type !== "agent_disconnected") {
         refreshStreamWatchdog(currentSessionId);
       }
       switch (event.type) {
@@ -43868,19 +43878,25 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "stream_delta":
           if (!event.delta) break;
-          if (!runtime.processActive) {
-            runtime.processActive = true;
-            runtime.streamStarted = true;
-            useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
-            if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
-            useProjectStore.getState().setAgentStatus(currentSessionId, "running");
-          }
+          ensureAssistantContinuation(currentSessionId);
           finishThinkingEntry(currentSessionId);
           runtime.streamBuffer += String(event.delta);
           useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+          refreshStreamWatchdog(currentSessionId);
+          break;
+        case "stream_snapshot":
+          {
+            const content2 = String(event.content || "");
+            if (!content2) break;
+            ensureAssistantContinuation(currentSessionId);
+            finishThinkingEntry(currentSessionId);
+            runtime.streamBuffer = content2;
+            useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+            refreshStreamWatchdog(currentSessionId);
+          }
           break;
         case "thinking_delta":
-          if (!runtime.processActive) break;
+          ensureAssistantContinuation(currentSessionId);
           appendThinkingDelta(currentSessionId, String(event.delta || ""));
           break;
         case "thinking_end":
@@ -43905,7 +43921,11 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "stream_end":
           {
-            if (!runtime.processActive) break;
+            if (!runtime.processActive) {
+              const eventContent2 = event.content ? String(event.content) : "";
+              if (!eventContent2.trim()) break;
+              ensureAssistantContinuation(currentSessionId);
+            }
             if (pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) break;
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
@@ -43923,6 +43943,7 @@ function ChatPanel({ sendKey = "Enter" }) {
           break;
         case "tool_start":
           {
+            ensureAssistantContinuation(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             if (normalizeToolKind(event.toolKind) === "question") {
@@ -44007,13 +44028,14 @@ function ChatPanel({ sendKey = "Enter" }) {
           }
           break;
         case "diff_update":
-          if (!runtime.processActive) break;
+          ensureAssistantContinuation(currentSessionId);
           if (event.diffs && event.diffs.length > 0) {
             finishThinkingEntry(currentSessionId);
             useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
           }
           break;
         case "process_event":
+          ensureAssistantContinuation(currentSessionId);
           finishThinkingEntry(currentSessionId);
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
@@ -44093,13 +44115,7 @@ function ChatPanel({ sendKey = "Enter" }) {
       }, targetSessionId);
       setInput("");
       setPendingUIResponseState(null);
-      if (pendingResponse.entryId) {
-        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
-          title: getQuestionTitle(false),
-          state: "completed",
-          expanded: false
-        }, targetSessionId);
-      }
+      finishPendingQuestionTurn(targetSessionId, pendingResponse);
     });
     const result = await window.electronAPI.agentSendUIResponse(getUIResponsePayload({
       sessionId: targetSessionId,
@@ -44114,13 +44130,7 @@ function ChatPanel({ sendKey = "Enter" }) {
         content: "发送回答失败",
         timestamp: Date.now()
       }, targetSessionId);
-      if (pendingResponse.entryId) {
-        useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
-          title: getQuestionTitle(false, true),
-          state: "error",
-          expanded: true
-        }, targetSessionId);
-      }
+      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
     }
   };
   const finishPendingQuestionEntry = (targetSessionId, pendingResponse, failed = false) => {
@@ -44130,6 +44140,26 @@ function ChatPanel({ sendKey = "Enter" }) {
       state: failed ? "error" : "completed",
       expanded: false
     }, targetSessionId);
+  };
+  const resetRuntimeAfterUIResponse = (targetSessionId) => {
+    const runtime = sessionRuntimeRef.current[targetSessionId];
+    if (!runtime) return;
+    if (runtime.streamWatchdog) {
+      clearTimeout(runtime.streamWatchdog);
+      runtime.streamWatchdog = null;
+    }
+    runtime.streamBuffer = "";
+    runtime.thinkingBuffer = "";
+    runtime.thinkingEntryId = null;
+    runtime.processActive = false;
+    runtime.streamStarted = false;
+    runtime.activeToolEntry = {};
+    runtime.activeToolFile = {};
+  };
+  const finishPendingQuestionTurn = (targetSessionId, pendingResponse, failed = false) => {
+    finishPendingQuestionEntry(targetSessionId, pendingResponse, failed);
+    useChatStore.getState().finishLastAssistantProcess(Date.now(), failed ? "interrupted" : "completed", targetSessionId);
+    resetRuntimeAfterUIResponse(targetSessionId);
   };
   const handleSubmitQuestionnaire = async (answers) => {
     const targetSessionId = useProjectStore.getState().activeSessionId;
@@ -44144,7 +44174,7 @@ function ChatPanel({ sendKey = "Enter" }) {
         timestamp: Date.now()
       }, targetSessionId);
       setPendingUIResponseState(null);
-      finishPendingQuestionEntry(targetSessionId, pendingResponse);
+      finishPendingQuestionTurn(targetSessionId, pendingResponse);
     });
     const result = await window.electronAPI.agentSendUIResponse({
       sessionId: targetSessionId,
@@ -44172,7 +44202,7 @@ function ChatPanel({ sendKey = "Enter" }) {
     if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
     const pendingResponse = activeQuestionnaire;
     setPendingUIResponseState(null);
-    finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    finishPendingQuestionTurn(targetSessionId, pendingResponse, true);
     await window.electronAPI.agentSendUIResponse({
       sessionId: targetSessionId,
       type: "extension_ui_response",

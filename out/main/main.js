@@ -1851,6 +1851,8 @@ class PiSDKAgent {
   models = [];
   pendingAssistantText = "";
   streamedText = false;
+  streamedTextBuffer = "";
+  emittedAssistantTextSnapshot = "";
   pendingUIRequestIds = /* @__PURE__ */ new Set();
   turnFallbackTimer = null;
   isAborting = false;
@@ -2053,8 +2055,12 @@ class PiSDKAgent {
         this.clearTurnFallback();
         const assistantEvent = data.assistantMessageEvent;
         if (assistantEvent?.type === "text_delta") {
-          if (assistantEvent.delta) this.streamedText = true;
-          this.emitEventThrottled({ type: "stream_delta", delta: assistantEvent.delta || "" });
+          const delta = assistantEvent.delta || "";
+          if (delta) {
+            this.streamedText = true;
+            this.streamedTextBuffer += delta;
+          }
+          this.emitEventThrottled({ type: "stream_delta", delta });
         } else if (assistantEvent?.type === "thinking_delta") {
           this.emitEventThrottled({ type: "thinking_delta", delta: assistantEvent.delta || "" });
         }
@@ -2067,7 +2073,10 @@ class PiSDKAgent {
           if (data.message.thinking) this.emitEvent({ type: "thinking_end" });
           if (data.message.text) {
             this.pendingAssistantText = data.message.text;
-            this.scheduleTurnFallback(4e3, true);
+            this.emitPendingAssistantText();
+            if (this.pendingUIRequestIds.size === 0) {
+              this.scheduleTurnFallback(4e3, true);
+            }
           }
         }
         break;
@@ -2132,6 +2141,7 @@ class PiSDKAgent {
     if (!request || request.method === "notify") return;
     this.pendingUIRequestIds.add(String(request.id));
     this.clearTurnFallback();
+    this.emitPendingAssistantText();
     this.emitEvent(normalizeQuestionProcessEvent({
       type: "extension_ui_request",
       id: request.id,
@@ -2177,6 +2187,8 @@ class PiSDKAgent {
     this.turnToken += 1;
     this.turnActive = true;
     this.streamedText = false;
+    this.streamedTextBuffer = "";
+    this.emittedAssistantTextSnapshot = "";
     this.pendingAssistantText = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
   }
@@ -2190,22 +2202,35 @@ class PiSDKAgent {
     if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
     this.eventBuffer.flush();
-    if (!this.streamedText && this.pendingAssistantText) {
-      this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
-      this.streamedText = true;
-    }
+    this.emitPendingAssistantText();
     this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
     this.emitEvent({ type: "agent_end" });
     this.pendingAssistantText = "";
     this.streamedText = false;
+    this.streamedTextBuffer = "";
+    this.emittedAssistantTextSnapshot = "";
     this.turnActive = false;
     this.turnToken += 1;
+  }
+  emitPendingAssistantText() {
+    if (!this.pendingAssistantText || this.emittedAssistantTextSnapshot === this.pendingAssistantText) return;
+    if (!this.streamedText) {
+      this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
+      this.streamedTextBuffer = this.pendingAssistantText;
+      this.streamedText = true;
+    } else if (this.streamedTextBuffer !== this.pendingAssistantText) {
+      this.emitEvent({ type: "stream_snapshot", content: this.pendingAssistantText });
+      this.streamedTextBuffer = this.pendingAssistantText;
+    }
+    this.emittedAssistantTextSnapshot = this.pendingAssistantText;
   }
   prepareNewTurn() {
     this.clearTurnFallback();
     this.eventBuffer.flush();
     this.pendingAssistantText = "";
     this.streamedText = false;
+    this.streamedTextBuffer = "";
+    this.emittedAssistantTextSnapshot = "";
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
@@ -2215,6 +2240,8 @@ class PiSDKAgent {
     this.isAborting = false;
     this.pendingAssistantText = "";
     this.streamedText = false;
+    this.streamedTextBuffer = "";
+    this.emittedAssistantTextSnapshot = "";
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
