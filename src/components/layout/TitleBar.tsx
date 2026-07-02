@@ -9,16 +9,16 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
   const [maximized, setMaximized] = useState(false)
 
   const handleMinimize = useCallback(() => {
-    ;(window as any).electronAPI?.minimize()
+    window.electronAPI?.minimize()
   }, [])
 
   const handleToggleMaximize = useCallback(() => {
-    ;(window as any).electronAPI?.maximize()
+    window.electronAPI?.maximize()
     setMaximized((prev) => !prev)
   }, [])
 
   const handleClose = useCallback(() => {
-    ;(window as any).electronAPI?.close()
+    window.electronAPI?.close()
   }, [])
 
   return (

@@ -1,8 +1,8 @@
 import { ipcMain, dialog, BrowserWindow } from "electron";
-import { readdir, readFile, stat, access } from "fs/promises";
-import { join, extname } from "path";
+import { readdir, readFile, access } from "fs/promises";
+import { join } from "path";
 import { homedir } from "os";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 
 interface FileEntry {
   name: string;
@@ -13,6 +13,7 @@ interface FileEntry {
 
 export function registerFileHandlers() {
   ipcMain.handle("fs:readDirectory", async (_event, dirPath: string) => {
+    if (typeof dirPath !== "string" || !dirPath.trim()) return [];
     try {
       const entries = await readdir(dirPath, { withFileTypes: true });
       const result: FileEntry[] = [];
@@ -48,15 +49,19 @@ export function registerFileHandlers() {
   });
 
   ipcMain.handle("fs:readFile", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || !filePath.trim()) {
+      return { success: false, error: "Invalid file path" };
+    }
     try {
       const content = await readFile(filePath, "utf-8");
       return { success: true, content };
-    } catch (err: any) {
-      return { success: false, error: err.message };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
 
   ipcMain.handle("fs:fileExists", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || !filePath.trim()) return false;
     try {
       await access(filePath);
       return true;
@@ -70,6 +75,9 @@ export function registerFileHandlers() {
     async (_event, dirPath: string, query: string) => {
       const results: FileEntry[] = [];
       const maxDepth = 5;
+      if (typeof dirPath !== "string" || !dirPath.trim()) return results;
+      const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
+      if (!normalizedQuery) return results;
 
       async function walk(dir: string, depth: number) {
         if (depth > maxDepth) return;
@@ -86,9 +94,7 @@ export function registerFileHandlers() {
 
             const fullPath = join(dir, entry.name);
 
-            if (
-              entry.name.toLowerCase().includes(query.toLowerCase())
-            ) {
+            if (entry.name.toLowerCase().includes(normalizedQuery)) {
               results.push({
                 name: entry.name,
                 path: fullPath,
@@ -126,10 +132,15 @@ export function registerFileHandlers() {
   });
 
   ipcMain.handle("fs:isCommandAvailable", (_event, command: string) => {
+    if (typeof command !== "string" || !/^[\w@./:-]+$/.test(command)) return false;
     try {
-      const cmd = process.platform === "win32" ? `where ${command}` : `which -a ${command}`;
-      const result = execSync(cmd, { encoding: "utf-8" }).trim();
-      const lines = result.split("\n").map((l) => l.trim()).filter(Boolean);
+      const executable = process.platform === "win32" ? "where" : "which";
+      const args = process.platform === "win32" ? [command] : ["-a", command];
+      const result = spawnSync(executable, args, { encoding: "utf-8", shell: false });
+      if (result.status !== 0 || result.error) return false;
+      const output = result.stdout.trim();
+      if (!output) return false;
+      const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
       return lines.some((p) => !p.includes("node_modules"));
     } catch {
       return false;

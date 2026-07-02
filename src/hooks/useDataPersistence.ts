@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useProjectStore, type Project } from "@/stores/project-store";
+import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 
 interface PersistedData {
@@ -13,11 +13,157 @@ interface PersistedMessages {
 }
 
 interface PersistedModel {
+  modelVersion?: number;
   currentModel?: ModelInfo | null;
   thinkingLevel?: string;
   thinkingLevels?: Record<string, string>;
   models?: Record<string, ModelInfo>;
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+const getString = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
+
+const getStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+const parseProjectSession = (value: unknown): ProjectSession | null => {
+  if (!isRecord(value)) return null;
+  const id = getString(value.id);
+  const agentId = getString(value.agentId);
+  const agentSessionId = getString(value.agentSessionId);
+  const title = getString(value.title);
+  const createdAt = getString(value.createdAt);
+  const lastActiveAt = getString(value.lastActiveAt);
+  if (!id || !agentId || !agentSessionId || !title || !createdAt || !lastActiveAt) return null;
+
+  return {
+    id,
+    agentId,
+    agentSessionId,
+    title,
+    createdAt,
+    lastActiveAt,
+    sessionFilePath: getString(value.sessionFilePath),
+    closed: typeof value.closed === "boolean" ? value.closed : undefined,
+  };
+};
+
+const parseProject = (value: unknown): Project | null => {
+  if (!isRecord(value)) return null;
+  const id = getString(value.id);
+  const name = getString(value.name);
+  const path = getString(value.path);
+  const createdAt = getString(value.createdAt);
+  if (!id || !name || !path || !createdAt) return null;
+
+  return {
+    id,
+    name,
+    path,
+    createdAt,
+    agents: getStringArray(value.agents),
+    sessions: Array.isArray(value.sessions)
+      ? value.sessions.map(parseProjectSession).filter((session): session is ProjectSession => !!session)
+      : [],
+  };
+};
+
+const parsePersistedData = (value: unknown): PersistedData | null => {
+  if (!isRecord(value) || !Array.isArray(value.projects)) return null;
+  const projects = value.projects.map(parseProject).filter((project): project is Project => !!project);
+  const activeProjectId = getString(value.activeProjectId) || null;
+  const activeSessionId = getString(value.activeSessionId) || null;
+
+  return {
+    projects,
+    activeProjectId: activeProjectId && projects.some((project) => project.id === activeProjectId)
+      ? activeProjectId
+      : null,
+    activeSessionId: activeSessionId && projects.some((project) => project.sessions.some((session) => session.id === activeSessionId))
+      ? activeSessionId
+      : null,
+  };
+};
+
+const parseChatMessage = (value: unknown): ChatMessage | null => {
+  if (!isRecord(value)) return null;
+  const id = getString(value.id);
+  const role = value.role;
+  const content = getString(value.content);
+  const timestamp = typeof value.timestamp === "number" ? value.timestamp : undefined;
+  if (!id || (role !== "user" && role !== "assistant" && role !== "system") || content === undefined || timestamp === undefined) {
+    return null;
+  }
+
+  return {
+    ...(value as unknown as ChatMessage),
+    id,
+    role,
+    content,
+    timestamp,
+    // Never restore a stale streaming state after app restart.
+    isStreaming: false,
+  };
+};
+
+const parsePersistedMessages = (value: unknown): PersistedMessages | null => {
+  if (!isRecord(value) || !isRecord(value.sessionMessages)) return null;
+  const sessionMessages: Record<string, ChatMessage[]> = {};
+  for (const [sessionId, messages] of Object.entries(value.sessionMessages)) {
+    if (!Array.isArray(messages)) continue;
+    sessionMessages[sessionId] = messages
+      .map(parseChatMessage)
+      .filter((message): message is ChatMessage => !!message);
+  }
+  return { sessionMessages };
+};
+
+const parseModelInfo = (value: unknown): ModelInfo | null => {
+  if (!isRecord(value)) return null;
+  const id = getString(value.id);
+  const name = getString(value.name);
+  const provider = getString(value.provider);
+  if (!id || !name || !provider) return null;
+  return {
+    id,
+    name,
+    provider,
+    reasoning: typeof value.reasoning === "boolean" ? value.reasoning : false,
+  };
+};
+
+const parseModelRecord = (value: unknown): Record<string, ModelInfo> => {
+  if (!isRecord(value)) return {};
+  const result: Record<string, ModelInfo> = {};
+  for (const [sessionId, model] of Object.entries(value)) {
+    const parsed = parseModelInfo(model);
+    if (parsed) result[sessionId] = parsed;
+  }
+  return result;
+};
+
+const parseStringRecord = (value: unknown): Record<string, string> => {
+  if (!isRecord(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") result[key] = item;
+  }
+  return result;
+};
+
+const parsePersistedModel = (value: unknown): PersistedModel | null => {
+  if (!isRecord(value)) return null;
+  return {
+    modelVersion: typeof value.modelVersion === "number" ? value.modelVersion : undefined,
+    currentModel: parseModelInfo(value.currentModel),
+    thinkingLevel: getString(value.thinkingLevel),
+    thinkingLevels: parseStringRecord(value.thinkingLevels),
+    models: parseModelRecord(value.models),
+  };
+};
 
 // In-memory cache for per-session models and thinking levels, synced to disk.
 let _sessionModelsCache: Record<string, ModelInfo> = {};
@@ -141,10 +287,10 @@ export function useDataPersistence() {
       let activeSessionId: string | null = null;
       let activeAgentId: string | null = null;
       let activeProject: Project | undefined;
-      let activeSession: any = undefined;
+      let activeSession: ProjectSession | undefined;
 
-      if (projectData && typeof projectData === "object" && "projects" in projectData) {
-        const d = projectData as PersistedData;
+      const d = parsePersistedData(projectData);
+      if (d) {
         activeSessionId = d.activeSessionId || null;
         useProjectStore.setState({
           projects: d.projects,
@@ -162,8 +308,8 @@ export function useDataPersistence() {
       }
 
       // 2. Load session messages
-      if (msgData && typeof msgData === "object" && "sessionMessages" in msgData) {
-        const md = msgData as PersistedMessages;
+      const md = parsePersistedMessages(msgData);
+      if (md) {
         useChatStore.setState({ sessionMessages: md.sessionMessages });
         if (activeSessionId) {
           useChatStore.getState().switchSession(activeSessionId);
@@ -173,15 +319,15 @@ export function useDataPersistence() {
       }
 
       // 3. Load per-session models and thinking levels into cache, restore active session
-      if (modelData && typeof modelData === "object") {
-        const md = modelData as PersistedModel;
+      const model = parsePersistedModel(modelData);
+      if (model) {
 
         // Migration: v4 (per-agent→per-session) or older → reset to empty
-        if (!(modelData as any).modelVersion || (modelData as any).modelVersion < 5) {
+        if (!model.modelVersion || model.modelVersion < 5) {
           _sessionModelsCache = {};
           _sessionThinkingCache = {};
           // Migrate legacy global thinkingLevel if present
-          if (md.thinkingLevel) {
+          if (model.thinkingLevel) {
             _sessionThinkingCache = {};
           }
           window.electronAPI.saveData("currentModel", {
@@ -190,8 +336,8 @@ export function useDataPersistence() {
             modelVersion: 5,
           });
         } else {
-          if (md.models) _sessionModelsCache = { ...md.models };
-          if (md.thinkingLevels) _sessionThinkingCache = { ...md.thinkingLevels };
+          if (model.models) _sessionModelsCache = { ...model.models };
+          if (model.thinkingLevels) _sessionThinkingCache = { ...model.thinkingLevels };
         }
 
         // Restore active session's model from cache
@@ -201,7 +347,7 @@ export function useDataPersistence() {
 
         // Restore active session's thinking level from cache
         if (activeSessionId && _sessionThinkingCache[activeSessionId]) {
-          useChatStore.setState({ thinkingLevel: _sessionThinkingCache[activeSessionId] } as any);
+          useChatStore.setState({ thinkingLevel: _sessionThinkingCache[activeSessionId] });
         }
       }
 

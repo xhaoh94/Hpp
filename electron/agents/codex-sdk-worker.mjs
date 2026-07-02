@@ -107,15 +107,7 @@ const materializeImages = async (images) => {
 };
 
 const getModels = () => {
-  const models = [
-    ...readConfiguredModels(),
-    {
-      id: DEFAULT_MODEL_ID,
-      name: "Codex default",
-      provider: CODEX_PROVIDER,
-      reasoning: true,
-    },
-  ];
+  const models = readConfiguredModels();
   const seen = new Set();
   return models.filter((model) => {
     if (seen.has(model.id)) return false;
