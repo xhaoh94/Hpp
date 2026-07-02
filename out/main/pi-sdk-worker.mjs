@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
+const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "questionnaire"];
 
 let sdk = null;
 let session = null;
@@ -368,6 +369,14 @@ const disposeSession = () => {
   session = null;
 };
 
+const setPermissionMode = (permissionMode) => {
+  if (!session?.setActiveToolsByName) return;
+  const tools = permissionMode === "plan"
+    ? PLAN_MODE_TOOLS
+    : session.getAllTools?.().map((tool) => tool.name).filter(Boolean) || [];
+  session.setActiveToolsByName(tools);
+};
+
 const init = async ({ projectPath: cwd, sessionFilePath }) => {
   disposeSession();
   projectPath = cwd;
@@ -489,6 +498,7 @@ const handleCommand = async (command) => {
         break;
       case "prompt":
         if (!session) throw new Error("Pi SDK session is not initialized");
+        setPermissionMode(command.permissionMode === "plan" || command.planModeEnabled ? "plan" : "full-access");
         activePromptId = command.id;
         completedPromptIds.delete(command.id);
         send({ type: "accepted", id: command.id });

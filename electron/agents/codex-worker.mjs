@@ -36,6 +36,7 @@ let pendingRpc = new Map();
 let currentModelId = null;
 let thinkingLevel = "medium";
 let activePlanModeEnabled = false;
+let activePermissionMode = "full-access";
 let activePromptId = null;
 let activeTurnId = null;
 let activeThreadId = null;
@@ -423,10 +424,12 @@ const buildInput = (message, images) => {
 };
 
 const buildThreadParams = () => {
+  const planAccessEnabled = activePermissionMode === "plan";
+  const fullAccessEnabled = activePermissionMode === "full-access";
   const params = {
     cwd: projectPath,
-    sandbox: activePlanModeEnabled ? "read-only" : undefined,
-    approvalPolicy: activePlanModeEnabled ? "never" : undefined,
+    sandbox: planAccessEnabled ? "read-only" : fullAccessEnabled ? "danger-full-access" : undefined,
+    approvalPolicy: planAccessEnabled || fullAccessEnabled ? "never" : undefined,
     config: activePlanModeEnabled
       ? {
           collaboration_mode: "Plan",
@@ -1005,6 +1008,7 @@ const finishPrompt = () => {
   promptRunning = false;
   activePromptId = null;
   activePlanModeEnabled = false;
+  activePermissionMode = "full-access";
   activeTurnId = null;
 };
 
@@ -1015,6 +1019,7 @@ const runPrompt = async (command) => {
   aborting = false;
   activePromptId = command.id;
   activePlanModeEnabled = !!command.planModeEnabled;
+  activePermissionMode = command.permissionMode === "plan" ? "plan" : "full-access";
   resetTurnState();
   send({ type: "accepted", id: command.id });
   startStream();
@@ -1028,8 +1033,12 @@ const runPrompt = async (command) => {
       clientUserMessageId: command.id,
       input: buildInput(command.message, imagePayload.entries),
       cwd: projectPath,
-      approvalPolicy: activePlanModeEnabled ? "never" : undefined,
-      sandboxPolicy: activePlanModeEnabled ? { type: "readOnly", networkAccess: false } : undefined,
+      approvalPolicy: "never",
+      sandboxPolicy: activePermissionMode === "plan"
+        ? { type: "readOnly", networkAccess: false }
+        : activePermissionMode === "full-access"
+          ? { type: "dangerFullAccess" }
+          : undefined,
       model: currentModelId && currentModelId !== DEFAULT_MODEL_ID ? currentModelId : undefined,
       effort: normalizeReasoningEffort(thinkingLevel),
     });
@@ -1078,6 +1087,7 @@ const abortPrompt = async (command) => {
   promptRunning = false;
   activePromptId = null;
   activePlanModeEnabled = false;
+  activePermissionMode = "full-access";
   activeTurnId = null;
   aborting = false;
 };
@@ -1099,6 +1109,7 @@ const disposeSession = () => {
   activeTurnId = null;
   activeThreadId = null;
   activePlanModeEnabled = false;
+  activePermissionMode = "full-access";
   pendingUIRequest = null;
   resetTurnState();
   failPendingRpc(new Error("Codex worker disposed"));

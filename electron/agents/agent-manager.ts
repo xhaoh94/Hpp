@@ -31,6 +31,7 @@ interface AgentBackend {
 interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
+  permissionMode?: "plan" | "full-access";
 }
 
 // ============================================================
@@ -244,11 +245,13 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     try {
       const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
       const planModeEnabled = !!options?.planModeEnabled;
+      const permissionMode: AgentSendOptions["permissionMode"] = planModeEnabled ? "plan" : "full-access";
       const effectiveMessage = planModeEnabled && !supportsNativePlanMode(agentType)
         ? withPromptPlanMode(message)
         : message;
       await agent.sendMessage(effectiveMessage, images, {
         planModeEnabled: planModeEnabled && supportsNativePlanMode(agentType),
+        permissionMode,
         displayMessage: message,
       });
       return { success: true };

@@ -22,6 +22,7 @@ interface AgentModel {
 interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
+  permissionMode?: "plan" | "full-access";
 }
 
 // ============================================================
@@ -37,9 +38,11 @@ export class DroidAgent {
   private rpcId = 0;
   private pendingResponses = new Map<string, (data: any) => void>();
   private pendingAskUserRequestId: string | null = null;
+  private pendingPermissionRequestId: string | null = null;
   private isReady = false;
-  private autonomyLevel = "medium";
+  private autonomyLevel: "low" | "medium" | "high" = "high";
   private interactionMode = "auto";
+  private planModeEnabled = false;
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
@@ -156,7 +159,8 @@ export class DroidAgent {
     }
 
     this.emitEvent({ type: "stream_start", role: "assistant" });
-    await this.setInteractionMode(options?.planModeEnabled ? "spec" : "auto");
+    const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
+    await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
 
     const msgParams: any = { text: message };
     if (images && images.length > 0) {
@@ -183,6 +187,10 @@ export class DroidAgent {
 
   /** Abort current response */
   async abort() {
+    if (this.pendingPermissionRequestId) {
+      this.sendRpcResponse(this.pendingPermissionRequestId, { selectedOption: "deny" });
+      this.pendingPermissionRequestId = null;
+    }
     if (this.pendingAskUserRequestId) {
       this.sendRpcResponse(this.pendingAskUserRequestId, { cancelled: true, answers: [] });
       this.pendingAskUserRequestId = null;
@@ -248,17 +256,51 @@ export class DroidAgent {
     this.emitEvent({ type: "thinking_level_changed", level });
   }
 
-  private async setInteractionMode(mode: "auto" | "spec") {
-    if (this.interactionMode === mode) return;
-    this.interactionMode = mode;
-    if (this.process && this.isReady) {
-      await this.sendRpcAsync("droid.update_session_settings", { interactionMode: mode });
+  private async setPermissionMode(mode: "plan" | "full-access") {
+    const nextPlanModeEnabled = mode === "plan";
+    const nextInteractionMode = nextPlanModeEnabled ? "spec" : "auto";
+    const nextAutonomyLevel: "low" | "medium" | "high" = nextPlanModeEnabled ? "medium" : "high";
+    const settings: Record<string, unknown> = {};
+
+    this.planModeEnabled = nextPlanModeEnabled;
+    if (this.interactionMode !== nextInteractionMode) {
+      this.interactionMode = nextInteractionMode;
+      settings.interactionMode = nextInteractionMode;
     }
-    this.emitEvent({ type: "process_event", entryType: "status", title: mode === "spec" ? "Droid 已进入 Spec 模式" : "Droid 已切回 Auto 模式", state: "completed" });
+    if (this.autonomyLevel !== nextAutonomyLevel) {
+      this.autonomyLevel = nextAutonomyLevel;
+      settings.autonomyLevel = nextAutonomyLevel;
+    }
+    if (this.process && this.isReady && Object.keys(settings).length > 0) {
+      await this.sendRpcAsync("droid.update_session_settings", settings);
+    }
+    this.emitEvent({
+      type: "process_event",
+      entryType: "status",
+      title: nextPlanModeEnabled ? "Droid 已进入 Spec 模式" : "Droid 已开启完全访问模式",
+      state: "completed",
+    });
   }
 
   sendUIResponse(response: any) {
     if (!this.process || !this.isReady) return;
+    if (this.pendingPermissionRequestId) {
+      const answers = Array.isArray(response?.answers) ? response.answers : [];
+      const firstAnswer = answers[0] || {};
+      const selectedValue = String(
+        firstAnswer.value ||
+        firstAnswer.answer ||
+        firstAnswer.label ||
+        response?.value ||
+        response?.text ||
+        ""
+      );
+      this.sendRpcResponse(this.pendingPermissionRequestId, {
+        selectedOption: selectedValue === "proceed_once" ? "proceed_once" : "deny",
+      });
+      this.pendingPermissionRequestId = null;
+      return;
+    }
     if (this.pendingAskUserRequestId) {
       const text =
         typeof response?.text === "string" ? response.text :
@@ -293,6 +335,7 @@ export class DroidAgent {
     this.sessionId = null;
     this.pendingResponses.clear();
     this.pendingAskUserRequestId = null;
+    this.pendingPermissionRequestId = null;
     this.eventBuffer.flush();
   }
 
@@ -355,8 +398,21 @@ export class DroidAgent {
   private handleServerRequest(method: string, requestId: string, params: any) {
     switch (method) {
       case "droid.request_permission":
-        // Auto-approve
-        this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+        if (!this.planModeEnabled) {
+          this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+        } else {
+          this.pendingPermissionRequestId = requestId;
+          this.emitEvent(normalizeQuestionProcessEvent({
+            type: method,
+            requestId,
+            detail: params,
+            title: params?.title || params?.message || "Droid 请求权限",
+            options: [
+              { label: "允许", value: "proceed_once" },
+              { label: "拒绝", value: "deny" },
+            ],
+          }));
+        }
         break;
       case "droid.ask_user":
         this.pendingAskUserRequestId = requestId;

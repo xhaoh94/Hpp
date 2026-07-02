@@ -14,6 +14,7 @@ interface AgentModel {
 interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
+  permissionMode?: "plan" | "full-access";
 }
 
 function formatProcessDetail(value: unknown): string | undefined {
@@ -80,6 +81,23 @@ function isToolPartComplete(props: any) {
   );
 }
 
+function buildOpenCodeConfigContent(existing?: string): string {
+  if (!existing?.trim()) {
+    return JSON.stringify({ permission: "allow" });
+  }
+
+  try {
+    const parsed = JSON.parse(existing);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !("permission" in parsed)) {
+      return JSON.stringify({ ...parsed, permission: "allow" });
+    }
+  } catch {
+    // Preserve caller-provided inline config if it is not plain JSON.
+  }
+
+  return existing;
+}
+
 // ============================================================
 // OpenCode Agent - communicates with opencode serve via HTTP/SSE
 // ============================================================
@@ -131,7 +149,11 @@ export class OpenCodeAgent {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       shell: true,
-      env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "true" },
+      env: {
+        ...process.env,
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(process.env.OPENCODE_CONFIG_CONTENT),
+      },
     });
 
     this.process.stderr?.on("data", (chunk: Buffer) => {
@@ -228,8 +250,10 @@ export class OpenCodeAgent {
 
     try {
       const body: any = { parts: [{ type: "text", text: message }] };
-      if (options?.planModeEnabled) {
+      if (options?.planModeEnabled || options?.permissionMode === "plan") {
         body.agent = "plan";
+      } else {
+        body.agent = "build";
       }
       if (this.currentModelId && this.currentProviderId) {
         body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };

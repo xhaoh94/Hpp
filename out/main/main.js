@@ -1083,6 +1083,19 @@ function isToolPartComplete(props) {
   const normalizedState = typeof state === "string" ? state.toLowerCase() : "";
   return part.output !== void 0 || part.result !== void 0 || part.error !== void 0 || props.output !== void 0 || props.result !== void 0 || props.error !== void 0 || ["done", "completed", "complete", "success", "error", "failed"].includes(normalizedState);
 }
+function buildOpenCodeConfigContent(existing) {
+  if (!existing?.trim()) {
+    return JSON.stringify({ permission: "allow" });
+  }
+  try {
+    const parsed = JSON.parse(existing);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !("permission" in parsed)) {
+      return JSON.stringify({ ...parsed, permission: "allow" });
+    }
+  } catch {
+  }
+  return existing;
+}
 class OpenCodeAgent {
   process = null;
   window = null;
@@ -1125,7 +1138,11 @@ class OpenCodeAgent {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       shell: true,
-      env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "true" }
+      env: {
+        ...process.env,
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(process.env.OPENCODE_CONFIG_CONTENT)
+      }
     });
     this.process.stderr?.on("data", (chunk) => {
       console.log("[opencode]", chunk.toString().trim());
@@ -1205,8 +1222,10 @@ class OpenCodeAgent {
     this.startSSEListener();
     try {
       const body = { parts: [{ type: "text", text: message }] };
-      if (options?.planModeEnabled) {
+      if (options?.planModeEnabled || options?.permissionMode === "plan") {
         body.agent = "plan";
+      } else {
+        body.agent = "build";
       }
       if (this.currentModelId && this.currentProviderId) {
         body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };
@@ -1667,9 +1686,11 @@ class DroidAgent {
   rpcId = 0;
   pendingResponses = /* @__PURE__ */ new Map();
   pendingAskUserRequestId = null;
+  pendingPermissionRequestId = null;
   isReady = false;
-  autonomyLevel = "medium";
+  autonomyLevel = "high";
   interactionMode = "auto";
+  planModeEnabled = false;
   eventBuffer;
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
@@ -1776,7 +1797,8 @@ class DroidAgent {
       return;
     }
     this.emitEvent({ type: "stream_start", role: "assistant" });
-    await this.setInteractionMode(options?.planModeEnabled ? "spec" : "auto");
+    const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
+    await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
     const msgParams = { text: message };
     if (images && images.length > 0) {
       msgParams.images = images.map((img) => ({
@@ -1803,6 +1825,10 @@ class DroidAgent {
   }
   /** Abort current response */
   async abort() {
+    if (this.pendingPermissionRequestId) {
+      this.sendRpcResponse(this.pendingPermissionRequestId, { selectedOption: "deny" });
+      this.pendingPermissionRequestId = null;
+    }
     if (this.pendingAskUserRequestId) {
       this.sendRpcResponse(this.pendingAskUserRequestId, { cancelled: true, answers: [] });
       this.pendingAskUserRequestId = null;
@@ -1862,16 +1888,44 @@ class DroidAgent {
     }
     this.emitEvent({ type: "thinking_level_changed", level });
   }
-  async setInteractionMode(mode) {
-    if (this.interactionMode === mode) return;
-    this.interactionMode = mode;
-    if (this.process && this.isReady) {
-      await this.sendRpcAsync("droid.update_session_settings", { interactionMode: mode });
+  async setPermissionMode(mode) {
+    const nextPlanModeEnabled = mode === "plan";
+    const nextInteractionMode = nextPlanModeEnabled ? "spec" : "auto";
+    const nextAutonomyLevel = nextPlanModeEnabled ? "medium" : "high";
+    const settings = {};
+    this.planModeEnabled = nextPlanModeEnabled;
+    if (this.interactionMode !== nextInteractionMode) {
+      this.interactionMode = nextInteractionMode;
+      settings.interactionMode = nextInteractionMode;
     }
-    this.emitEvent({ type: "process_event", entryType: "status", title: mode === "spec" ? "Droid 已进入 Spec 模式" : "Droid 已切回 Auto 模式", state: "completed" });
+    if (this.autonomyLevel !== nextAutonomyLevel) {
+      this.autonomyLevel = nextAutonomyLevel;
+      settings.autonomyLevel = nextAutonomyLevel;
+    }
+    if (this.process && this.isReady && Object.keys(settings).length > 0) {
+      await this.sendRpcAsync("droid.update_session_settings", settings);
+    }
+    this.emitEvent({
+      type: "process_event",
+      entryType: "status",
+      title: nextPlanModeEnabled ? "Droid 已进入 Spec 模式" : "Droid 已开启完全访问模式",
+      state: "completed"
+    });
   }
   sendUIResponse(response) {
     if (!this.process || !this.isReady) return;
+    if (this.pendingPermissionRequestId) {
+      const answers = Array.isArray(response?.answers) ? response.answers : [];
+      const firstAnswer = answers[0] || {};
+      const selectedValue = String(
+        firstAnswer.value || firstAnswer.answer || firstAnswer.label || response?.value || response?.text || ""
+      );
+      this.sendRpcResponse(this.pendingPermissionRequestId, {
+        selectedOption: selectedValue === "proceed_once" ? "proceed_once" : "deny"
+      });
+      this.pendingPermissionRequestId = null;
+      return;
+    }
     if (this.pendingAskUserRequestId) {
       const text = typeof response?.text === "string" ? response.text : typeof response?.value === "string" ? response.value : "";
       this.sendRpcResponse(this.pendingAskUserRequestId, {
@@ -1900,6 +1954,7 @@ class DroidAgent {
     this.sessionId = null;
     this.pendingResponses.clear();
     this.pendingAskUserRequestId = null;
+    this.pendingPermissionRequestId = null;
     this.eventBuffer.flush();
   }
   // ---- JSON-RPC (Factory protocol) ----
@@ -1952,7 +2007,21 @@ class DroidAgent {
   handleServerRequest(method, requestId, params) {
     switch (method) {
       case "droid.request_permission":
-        this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+        if (!this.planModeEnabled) {
+          this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+        } else {
+          this.pendingPermissionRequestId = requestId;
+          this.emitEvent(normalizeQuestionProcessEvent({
+            type: method,
+            requestId,
+            detail: params,
+            title: params?.title || params?.message || "Droid 请求权限",
+            options: [
+              { label: "允许", value: "proceed_once" },
+              { label: "拒绝", value: "deny" }
+            ]
+          }));
+        }
         break;
       case "droid.ask_user":
         this.pendingAskUserRequestId = requestId;
@@ -2159,7 +2228,14 @@ class PiSDKAgent {
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
-    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
+    this.sendWorkerCommand({
+      id: promptId,
+      type: "prompt",
+      message,
+      images,
+      planModeEnabled: !!options?.planModeEnabled,
+      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access")
+    });
   }
   async abort() {
     this.pendingAssistantText = "";
@@ -2604,7 +2680,14 @@ class CodexAgent {
     this.isAborting = false;
     const promptId = this.createCommandId();
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
-    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images, planModeEnabled: !!options?.planModeEnabled });
+    this.sendWorkerCommand({
+      id: promptId,
+      type: "prompt",
+      message,
+      images,
+      planModeEnabled: !!options?.planModeEnabled,
+      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access")
+    });
   }
   async abort() {
     this.isAborting = true;
@@ -2914,9 +2997,11 @@ function registerAgentHandlers(getWindow) {
     try {
       const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
       const planModeEnabled = !!options?.planModeEnabled;
+      const permissionMode = planModeEnabled ? "plan" : "full-access";
       const effectiveMessage = planModeEnabled && !supportsNativePlanMode(agentType) ? withPromptPlanMode(message) : message;
       await agent.sendMessage(effectiveMessage, images, {
         planModeEnabled: planModeEnabled && supportsNativePlanMode(agentType),
+        permissionMode,
         displayMessage: message
       });
       return { success: true };

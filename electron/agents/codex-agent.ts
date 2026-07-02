@@ -15,6 +15,7 @@ interface AgentModel {
 interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
+  permissionMode?: "plan" | "full-access";
 }
 
 const getWorkerPath = () => {
@@ -143,7 +144,14 @@ export class CodexAgent {
     this.isAborting = false;
     const promptId = this.createCommandId();
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
-    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images, planModeEnabled: !!options?.planModeEnabled });
+    this.sendWorkerCommand({
+      id: promptId,
+      type: "prompt",
+      message,
+      images,
+      planModeEnabled: !!options?.planModeEnabled,
+      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+    });
   }
 
   async abort(): Promise<void> {

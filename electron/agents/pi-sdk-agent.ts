@@ -14,6 +14,8 @@ interface AgentModel {
 }
 
 interface AgentSendOptions {
+  planModeEnabled?: boolean;
+  permissionMode?: "plan" | "full-access";
   displayMessage?: string;
 }
 
@@ -160,7 +162,14 @@ export class PiSDKAgent {
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
-    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
+    this.sendWorkerCommand({
+      id: promptId,
+      type: "prompt",
+      message,
+      images,
+      planModeEnabled: !!options?.planModeEnabled,
+      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+    });
   }
 
   async abort(): Promise<void> {
