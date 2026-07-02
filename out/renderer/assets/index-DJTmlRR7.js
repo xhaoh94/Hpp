@@ -42930,18 +42930,11 @@ function ContentArea() {
   ] });
 }
 var reactDomExports = requireReactDom();
-const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
-const THINKING_PREVIEW_CHAR_LIMIT = 240;
-const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
-const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
-const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
-const THINKING_REPEAT_MIN_COUNT = 3;
-const SCROLL_BOTTOM_THRESHOLD = 50;
-const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
-const getThinkingPreview = (value) => {
+const THINKING_PREVIEW_CHAR_LIMIT$1 = 240;
+const getThinkingPreview$1 = (value) => {
   const preview = value?.replace(/\s+/g, " ").trim();
   if (!preview) return "思考中";
-  return preview.length > THINKING_PREVIEW_CHAR_LIMIT ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...` : preview;
+  return preview.length > THINKING_PREVIEW_CHAR_LIMIT$1 ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT$1)}...` : preview;
 };
 const formatProcessDuration = (ms) => {
   const seconds = Math.max(0, Math.floor(ms / 1e3));
@@ -42959,7 +42952,7 @@ const summarizeProcessEntries = (entries) => {
   const thinkingEntry = entries.find((entry) => entry.type === "thinking" && entry.state === "running");
   const runningTool = entries.find((entry) => (entry.type === "tool" || entry.type === "question") && entry.state === "running");
   if (isThinking && thinkingEntry) {
-    return `正在思考: ${getThinkingPreview(thinkingEntry.detail)}`;
+    return `正在思考: ${getThinkingPreview$1(thinkingEntry.detail)}`;
   }
   if (runningTool) {
     return runningTool.title;
@@ -42968,6 +42961,418 @@ const summarizeProcessEntries = (entries) => {
   if (toolCount > 0) return `已执行 ${toolCount} 个操作`;
   if (diffCount > 0) return `已修改 ${diffCount} 个文件`;
   return `${entries.length} 条事件`;
+};
+const getFileName$1 = (filePath) => {
+  const parts = filePath.split(/[/\\]/);
+  return parts[parts.length - 1] || filePath;
+};
+const getFileEntryTitle$1 = (action, count, running = false) => {
+  if (running) {
+    switch (action) {
+      case "read":
+        return `正在读取 ${count} 个文件`;
+      case "listed":
+        return `正在查看 ${count} 个目录`;
+      case "written":
+        return `正在写入 ${count} 个文件`;
+      case "edited":
+        return `正在编辑 ${count} 个文件`;
+      default:
+        return `正在修改 ${count} 个文件`;
+    }
+  }
+  switch (action) {
+    case "read":
+      return `已读取 ${count} 个文件`;
+    case "listed":
+      return `已查看 ${count} 个目录`;
+    case "written":
+      return `已写入 ${count} 个文件`;
+    case "edited":
+      return `已编辑 ${count} 个文件`;
+    default:
+      return `已修改 ${count} 个文件`;
+  }
+};
+function ProcessEntryIcon({ type, state }) {
+  if (state === "running") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-spinner" });
+  }
+  if (state === "interrupted") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 9l6 6M15 9l-6 6", strokeLinecap: "round" })
+    ] });
+  }
+  if (type === "tool") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "3", y: "4", width: "18", height: "16", rx: "2" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 9l3 3-3 3", strokeLinecap: "round", strokeLinejoin: "round" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M13 15h4", strokeLinecap: "round" })
+    ] });
+  }
+  if (type === "diff") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2v5h5" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 13h6M12 10v6", strokeLinecap: "round" })
+    ] });
+  }
+  if (type === "thinking") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 3a6 6 0 0 1 4 10.47V16a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.53A6 6 0 0 1 12 3z" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10 21h4", strokeLinecap: "round" })
+    ] });
+  }
+  if (type === "question") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9.75 9a2.35 2.35 0 0 1 4.5 1c0 1.5-1.2 2.05-2.25 2.8V14", strokeLinecap: "round", strokeLinejoin: "round" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 17h.01", strokeLinecap: "round" })
+    ] });
+  }
+  if (type === "error" || state === "error") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 8v5M12 16h.01", strokeLinecap: "round" })
+    ] });
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 8v4l3 2", strokeLinecap: "round", strokeLinejoin: "round" })
+  ] });
+}
+function ProcessEntryFiles({
+  files,
+  onOpenFile
+}) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-files", children: files.map((file, index2) => {
+    const action = file.action === "read" ? "已读取" : file.action === "listed" ? "已查看" : file.action === "written" ? "已写入" : file.action === "edited" ? "已编辑" : "已修改";
+    const label = file.label || getFileName$1(file.file);
+    const canOpen = file.action !== "listed";
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-file", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-file-action", children: action }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: `chat-process-file-name ${canOpen ? "openable" : ""}`,
+          title: file.file,
+          onClick: canOpen ? () => onOpenFile(file.file) : void 0,
+          disabled: !canOpen,
+          children: label
+        }
+      ),
+      typeof file.additions === "number" && file.additions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-file-add", children: [
+        "+",
+        file.additions
+      ] }),
+      typeof file.deletions === "number" && file.deletions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-file-del", children: [
+        "-",
+        file.deletions
+      ] })
+    ] }, `${file.file}-${index2}`);
+  }) });
+}
+const splitCommandDetail = (detail, command) => {
+  if (!detail) return { command: command || "", output: "" };
+  const lines = detail.split("\n");
+  const firstLine = lines[0] || "";
+  if (firstLine.startsWith("$ ")) {
+    return {
+      command: command || firstLine.slice(2).trim(),
+      output: lines.slice(1).join("\n").trim()
+    };
+  }
+  return { command: command || "", output: detail.trim() };
+};
+function CommandDetail({
+  entry,
+  onPreserveScroll
+}) {
+  const [outputExpanded, setOutputExpanded] = reactExports.useState(entry.state === "running");
+  const userToggledRef = reactExports.useRef(false);
+  const { command, output } = splitCommandDetail(entry.detail, entry.command);
+  const outputLines = output ? output.split("\n") : [];
+  const isRunning = entry.state === "running";
+  const canExpand = outputLines.length > 0;
+  reactExports.useEffect(() => {
+    if (!isRunning && !userToggledRef.current) {
+      setOutputExpanded(false);
+    }
+  }, [isRunning]);
+  const toggleOutput = (anchor) => {
+    userToggledRef.current = true;
+    const action = () => setOutputExpanded((current) => !current);
+    if (onPreserveScroll) onPreserveScroll(action, anchor);
+    else action();
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "button",
+      {
+        className: "chat-command-header",
+        onClick: canExpand ? (event) => toggleOutput(event.currentTarget) : void 0,
+        disabled: !canExpand,
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-prompt", children: "$_" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-text", children: command || entry.title }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-state", children: isRunning ? "运行中" : entry.state === "error" ? "失败" : entry.state === "interrupted" ? "已中断" : "完成" }),
+          canExpand && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "svg",
+            {
+              className: "chat-command-chevron",
+              width: "12",
+              height: "12",
+              viewBox: "0 0 24 24",
+              fill: "none",
+              stroke: "currentColor",
+              strokeWidth: "2.4",
+              style: { transform: outputExpanded || isRunning ? "rotate(180deg)" : "rotate(0deg)" },
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" })
+            }
+          )
+        ]
+      }
+    ),
+    outputLines.length > 0 && (outputExpanded || isRunning) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-command-output", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-lang", children: "BASH" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: outputLines.join("\n") })
+    ] })
+  ] });
+}
+function CommandGroup({
+  entries,
+  onPreserveScroll
+}) {
+  const [expanded, setExpanded] = reactExports.useState(false);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry tool chat-command-group", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryIcon, { type: "tool" }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry-main", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          className: "chat-process-entry-header expandable",
+          onClick: (event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-entry-title", children: [
+              "已运行 ",
+              entries.length,
+              " 条命令"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "svg",
+              {
+                className: "chat-process-entry-chevron",
+                width: "10",
+                height: "10",
+                viewBox: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                strokeWidth: "2.5",
+                style: { transform: expanded ? "rotate(90deg)" : "rotate(0deg)" },
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
+              }
+            )
+          ]
+        }
+      ),
+      expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-group-list", children: entries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry, onPreserveScroll }, entry.id)) })
+    ] })
+  ] });
+}
+function ProcessEntryRow({
+  messageId,
+  entry,
+  onToggleEntry,
+  onOpenFile,
+  onPreserveScroll
+}) {
+  const hasDetail = !!entry.detail;
+  const files = entry.files || [];
+  const isCommandEntry = entry.toolKind === "run_command";
+  const canExpand = hasDetail;
+  const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
+  const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
+  if (entry.type === "info") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-output", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: entry.detail || entry.title }) });
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-process-entry ${entry.state || ""} ${entry.type}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryIcon, { type: entry.type, state: entry.state }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry-main", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          className: `chat-process-entry-header ${canExpand ? "expandable" : ""}`,
+          onClick: canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : void 0,
+          disabled: !canExpand,
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-title", children: entry.title }),
+            canExpand && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "svg",
+              {
+                className: "chat-process-entry-chevron",
+                width: "10",
+                height: "10",
+                viewBox: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                strokeWidth: "2.5",
+                style: { transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" },
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
+              }
+            )
+          ]
+        }
+      ),
+      files.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryFiles, { files, onOpenFile }),
+      commandVisible && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry, onPreserveScroll }),
+      detailVisible && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: `chat-process-entry-detail ${canExpand ? "panel" : ""}`, children: entry.detail })
+    ] })
+  ] });
+}
+function ProcessEntries({
+  entries,
+  messageId,
+  onToggleEntry,
+  onOpenFile,
+  onPreserveScroll
+}) {
+  const rows = [];
+  let commandEntries = [];
+  const flushCommands = () => {
+    if (commandEntries.length === 0) return;
+    rows.push(
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        CommandGroup,
+        {
+          entries: commandEntries,
+          onPreserveScroll
+        },
+        `commands-${commandEntries[0].id}`
+      )
+    );
+    commandEntries = [];
+  };
+  entries.forEach((entry) => {
+    if (entry.toolKind === "run_command") {
+      commandEntries.push(entry);
+      return;
+    }
+    flushCommands();
+    rows.push(
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ProcessEntryRow,
+        {
+          messageId,
+          entry,
+          onToggleEntry,
+          onOpenFile,
+          onPreserveScroll
+        },
+        entry.id
+      )
+    );
+  });
+  flushCommands();
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children: rows });
+}
+const toolKindToAction = (toolKind) => {
+  switch (toolKind) {
+    case "read_file":
+      return "read";
+    case "list_dir":
+      return "listed";
+    case "write_file":
+      return "written";
+    case "edit_file":
+      return "edited";
+    default:
+      return void 0;
+  }
+};
+const mergeProcessEntries = (entries) => {
+  const merged = [];
+  for (const entry of entries) {
+    const last = merged[merged.length - 1];
+    if (entry.type === "tool" && last?.type === "tool" && entry.toolKind && last.toolKind === entry.toolKind && entry.state === last.state && last.files && last.files.length > 0 && entry.files && entry.files.length > 0) {
+      last.files = [...last.files, ...entry.files];
+      const action = toolKindToAction(entry.toolKind);
+      last.title = getFileEntryTitle$1(action, last.files.length, entry.state === "running");
+      last.id = entry.id;
+      continue;
+    }
+    merged.push({ ...entry, files: entry.files ? [...entry.files] : void 0 });
+  }
+  return merged;
+};
+function useProcessTicker(enabled) {
+  const [now, setNow] = reactExports.useState(Date.now());
+  reactExports.useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => setNow(Date.now()), 1e3);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
+function ProcessBlock({
+  messageId,
+  process: process2,
+  onToggle,
+  onToggleEntry,
+  onOpenFile,
+  onPreserveScroll
+}) {
+  const nowTick = useProcessTicker(!process2.endedAt);
+  const durationEnd = process2.endedAt || nowTick;
+  const elapsed = formatProcessDuration(durationEnd - process2.startedAt);
+  const expanded = !!process2.expanded;
+  const interrupted = process2.entries.some((entry) => entry.state === "interrupted");
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-process ${interrupted ? "interrupted" : ""}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-process-toggle", onClick: (event) => onToggle(messageId, event.currentTarget), children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+        interrupted ? "已中断" : "处理耗时",
+        " ",
+        elapsed
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-summary", children: summarizeProcessEntries(process2.entries) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "svg",
+        {
+          width: "12",
+          height: "12",
+          viewBox: "0 0 24 24",
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: "2.4",
+          style: { transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" },
+          children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
+        }
+      )
+    ] }),
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-content", children: process2.entries.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-empty", children: "等待 agent 事件..." }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ProcessEntries,
+      {
+        entries: mergeProcessEntries(process2.entries),
+        messageId,
+        onToggleEntry,
+        onOpenFile,
+        onPreserveScroll
+      }
+    ) })
+  ] });
+}
+const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1e3, 2e3, 4e3, 8e3];
+const THINKING_PREVIEW_CHAR_LIMIT = 240;
+const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
+const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
+const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
+const THINKING_REPEAT_MIN_COUNT = 3;
+const SCROLL_BOTTOM_THRESHOLD = 50;
+const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+const getThinkingPreview = (value) => {
+  const preview = value?.replace(/\s+/g, " ").trim();
+  if (!preview) return "思考中";
+  return preview.length > THINKING_PREVIEW_CHAR_LIMIT ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...` : preview;
 };
 const createProcessEntryId = () => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -43293,373 +43698,6 @@ const normalizeProcessEntryState = (value) => {
   if (value === "running" || value === "completed" || value === "error" || value === "interrupted") return value;
   return void 0;
 };
-function ProcessEntryIcon({ type, state }) {
-  if (state === "running") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-spinner" });
-  }
-  if (state === "interrupted") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 9l6 6M15 9l-6 6", strokeLinecap: "round" })
-    ] });
-  }
-  if (type === "tool") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("rect", { x: "3", y: "4", width: "18", height: "16", rx: "2" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 9l3 3-3 3", strokeLinecap: "round", strokeLinejoin: "round" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M13 15h4", strokeLinecap: "round" })
-    ] });
-  }
-  if (type === "diff") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 2v5h5" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 13h6M12 10v6", strokeLinecap: "round" })
-    ] });
-  }
-  if (type === "thinking") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 3a6 6 0 0 1 4 10.47V16a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.53A6 6 0 0 1 12 3z" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M10 21h4", strokeLinecap: "round" })
-    ] });
-  }
-  if (type === "question") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9.75 9a2.35 2.35 0 0 1 4.5 1c0 1.5-1.2 2.05-2.25 2.8V14", strokeLinecap: "round", strokeLinejoin: "round" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 17h.01", strokeLinecap: "round" })
-    ] });
-  }
-  if (type === "error" || state === "error") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 8v5M12 16h.01", strokeLinecap: "round" })
-    ] });
-  }
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M12 8v4l3 2", strokeLinecap: "round", strokeLinejoin: "round" })
-  ] });
-}
-function ProcessEntryFiles({
-  files,
-  onOpenFile
-}) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-files", children: files.map((file, index2) => {
-    const action = file.action === "read" ? "已读取" : file.action === "listed" ? "已查看" : file.action === "written" ? "已写入" : file.action === "edited" ? "已编辑" : "已修改";
-    const label = file.label || getFileName(file.file);
-    const canOpen = file.action !== "listed";
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-file", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-file-action", children: action }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: `chat-process-file-name ${canOpen ? "openable" : ""}`,
-          title: file.file,
-          onClick: canOpen ? () => onOpenFile(file.file) : void 0,
-          disabled: !canOpen,
-          children: label
-        }
-      ),
-      typeof file.additions === "number" && file.additions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-file-add", children: [
-        "+",
-        file.additions
-      ] }),
-      typeof file.deletions === "number" && file.deletions > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-file-del", children: [
-        "-",
-        file.deletions
-      ] })
-    ] }, `${file.file}-${index2}`);
-  }) });
-}
-const splitCommandDetail = (detail, command) => {
-  if (!detail) return { command: command || "", output: "" };
-  const lines = detail.split("\n");
-  const firstLine = lines[0] || "";
-  if (firstLine.startsWith("$ ")) {
-    return {
-      command: command || firstLine.slice(2).trim(),
-      output: lines.slice(1).join("\n").trim()
-    };
-  }
-  return { command: command || "", output: detail.trim() };
-};
-function CommandDetail({
-  entry,
-  onPreserveScroll
-}) {
-  const [outputExpanded, setOutputExpanded] = reactExports.useState(entry.state === "running");
-  const userToggledRef = reactExports.useRef(false);
-  const { command, output } = splitCommandDetail(entry.detail, entry.command);
-  const outputLines = output ? output.split("\n") : [];
-  const isRunning = entry.state === "running";
-  const canExpand = outputLines.length > 0;
-  reactExports.useEffect(() => {
-    if (!isRunning && !userToggledRef.current) {
-      setOutputExpanded(false);
-    }
-  }, [isRunning]);
-  const toggleOutput = (anchor) => {
-    userToggledRef.current = true;
-    const action = () => setOutputExpanded((current) => !current);
-    if (onPreserveScroll) onPreserveScroll(action, anchor);
-    else action();
-  };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs(
-      "button",
-      {
-        className: "chat-command-header",
-        onClick: canExpand ? (event) => toggleOutput(event.currentTarget) : void 0,
-        disabled: !canExpand,
-        children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-prompt", children: "$_" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-text", children: command || entry.title }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-state", children: isRunning ? "运行中" : entry.state === "error" ? "失败" : entry.state === "interrupted" ? "已中断" : "完成" }),
-          canExpand && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "svg",
-            {
-              className: "chat-command-chevron",
-              width: "12",
-              height: "12",
-              viewBox: "0 0 24 24",
-              fill: "none",
-              stroke: "currentColor",
-              strokeWidth: "2.4",
-              style: { transform: outputExpanded || isRunning ? "rotate(180deg)" : "rotate(0deg)" },
-              children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 9l6 6 6-6" })
-            }
-          )
-        ]
-      }
-    ),
-    outputLines.length > 0 && (outputExpanded || isRunning) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-command-output", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-lang", children: "BASH" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: outputLines.join("\n") })
-    ] })
-  ] });
-}
-function CommandGroup({
-  entries,
-  onPreserveScroll
-}) {
-  const [expanded, setExpanded] = reactExports.useState(false);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry tool chat-command-group", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryIcon, { type: "tool" }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry-main", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "button",
-        {
-          className: "chat-process-entry-header expandable",
-          onClick: (event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget),
-          children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-entry-title", children: [
-              "已运行 ",
-              entries.length,
-              " 条命令"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "svg",
-              {
-                className: "chat-process-entry-chevron",
-                width: "10",
-                height: "10",
-                viewBox: "0 0 24 24",
-                fill: "none",
-                stroke: "currentColor",
-                strokeWidth: "2.5",
-                style: { transform: expanded ? "rotate(90deg)" : "rotate(0deg)" },
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
-              }
-            )
-          ]
-        }
-      ),
-      expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-group-list", children: entries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry, onPreserveScroll }, entry.id)) })
-    ] })
-  ] });
-}
-function ProcessEntryRow({
-  messageId,
-  entry,
-  onToggleEntry,
-  onOpenFile,
-  onPreserveScroll
-}) {
-  const hasDetail = !!entry.detail;
-  const files = entry.files || [];
-  const isCommandEntry = entry.toolKind === "run_command";
-  const canExpand = hasDetail;
-  const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
-  const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
-  if (entry.type === "info") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-output", children: /* @__PURE__ */ jsxRuntimeExports.jsx(MarkdownRenderer, { content: entry.detail || entry.title }) });
-  }
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-process-entry ${entry.state || ""} ${entry.type}`, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryIcon, { type: entry.type, state: entry.state }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry-main", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "button",
-        {
-          className: `chat-process-entry-header ${canExpand ? "expandable" : ""}`,
-          onClick: canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : void 0,
-          disabled: !canExpand,
-          children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-title", children: entry.title }),
-            canExpand && /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "svg",
-              {
-                className: "chat-process-entry-chevron",
-                width: "10",
-                height: "10",
-                viewBox: "0 0 24 24",
-                fill: "none",
-                stroke: "currentColor",
-                strokeWidth: "2.5",
-                style: { transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" },
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
-              }
-            )
-          ]
-        }
-      ),
-      files.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryFiles, { files, onOpenFile }),
-      commandVisible && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry, onPreserveScroll }),
-      detailVisible && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: `chat-process-entry-detail ${canExpand ? "panel" : ""}`, children: entry.detail })
-    ] })
-  ] });
-}
-function ProcessEntries({
-  entries,
-  messageId,
-  onToggleEntry,
-  onOpenFile,
-  onPreserveScroll
-}) {
-  const rows = [];
-  let commandEntries = [];
-  const flushCommands = () => {
-    if (commandEntries.length === 0) return;
-    rows.push(
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        CommandGroup,
-        {
-          entries: commandEntries,
-          onPreserveScroll
-        },
-        `commands-${commandEntries[0].id}`
-      )
-    );
-    commandEntries = [];
-  };
-  entries.forEach((entry) => {
-    if (entry.toolKind === "run_command") {
-      commandEntries.push(entry);
-      return;
-    }
-    flushCommands();
-    rows.push(
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        ProcessEntryRow,
-        {
-          messageId,
-          entry,
-          onToggleEntry,
-          onOpenFile,
-          onPreserveScroll
-        },
-        entry.id
-      )
-    );
-  });
-  flushCommands();
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children: rows });
-}
-const toolKindToAction = (toolKind) => {
-  switch (toolKind) {
-    case "read_file":
-      return "read";
-    case "list_dir":
-      return "listed";
-    case "write_file":
-      return "written";
-    case "edit_file":
-      return "edited";
-    default:
-      return void 0;
-  }
-};
-const mergeProcessEntries = (entries) => {
-  const merged = [];
-  for (const entry of entries) {
-    const last = merged[merged.length - 1];
-    if (entry.type === "tool" && last?.type === "tool" && entry.toolKind && last.toolKind === entry.toolKind && entry.state === last.state && last.files && last.files.length > 0 && entry.files && entry.files.length > 0) {
-      last.files = [...last.files, ...entry.files];
-      const action = toolKindToAction(entry.toolKind);
-      last.title = getFileEntryTitle(action, last.files.length, entry.state === "running");
-      last.id = entry.id;
-      continue;
-    }
-    merged.push({ ...entry, files: entry.files ? [...entry.files] : void 0 });
-  }
-  return merged;
-};
-function ProcessBlock({
-  messageId,
-  process: process2,
-  onToggle,
-  onToggleEntry,
-  onOpenFile,
-  onPreserveScroll
-}) {
-  const nowTick = useProcessTicker(!process2.endedAt);
-  const durationEnd = process2.endedAt || nowTick;
-  const elapsed = formatProcessDuration(durationEnd - process2.startedAt);
-  const expanded = !!process2.expanded;
-  const interrupted = process2.entries.some((entry) => entry.state === "interrupted");
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-process ${interrupted ? "interrupted" : ""}`, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-process-toggle", onClick: (event) => onToggle(messageId, event.currentTarget), children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-        interrupted ? "已中断" : "处理耗时",
-        " ",
-        elapsed
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-summary", children: summarizeProcessEntries(process2.entries) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "svg",
-        {
-          width: "12",
-          height: "12",
-          viewBox: "0 0 24 24",
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: "2.4",
-          style: { transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" },
-          children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18l6-6-6-6" })
-        }
-      )
-    ] }),
-    expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-content", children: process2.entries.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-process-empty", children: "等待 agent 事件..." }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
-      ProcessEntries,
-      {
-        entries: mergeProcessEntries(process2.entries),
-        messageId,
-        onToggleEntry,
-        onOpenFile,
-        onPreserveScroll
-      }
-    ) })
-  ] });
-}
-function useProcessTicker(enabled) {
-  const [now, setNow] = reactExports.useState(Date.now());
-  reactExports.useEffect(() => {
-    if (!enabled) return;
-    const timer = setInterval(() => setNow(Date.now()), 1e3);
-    return () => clearInterval(timer);
-  }, [enabled]);
-  return now;
-}
 function DiffBlock({ diffs }) {
   const [expandedFiles, setExpandedFiles] = reactExports.useState(/* @__PURE__ */ new Set());
   const toggleFile = (file) => {
@@ -44314,15 +44352,28 @@ ${pattern}`,
       if (delta) appendAssistantProcessText(sessionId, delta);
     };
     const normalizeStreamText = (value) => value.replace(/\s+/g, " ").trim();
-    const removeFinalAssistantProcessTextIfDuplicated = (sessionId, finalContent) => {
+    const stripProcessTextPrefixFromFinal = (sessionId, finalContent) => {
       const runtime = getRuntime(sessionId);
-      if (runtime.processTextEntryIds.length === 0) return;
-      if (normalizeStreamText(runtime.processTextHistory.join("")) !== normalizeStreamText(finalContent)) return;
-      useChatStore.getState().removeLastAssistantProcessEntries(runtime.processTextEntryIds, sessionId);
-      runtime.processTextEntryId = null;
-      runtime.processTextEntryIds = [];
-      runtime.processTextHistory = [];
-      runtime.processTextBuffer = "";
+      let remaining = finalContent.trim();
+      for (const text2 of runtime.processTextHistory.slice(0, -1)) {
+        const prefix = text2.trim();
+        const next = remaining.trimStart();
+        if (prefix && next.startsWith(prefix)) {
+          remaining = next.slice(prefix.length).trimStart();
+        }
+      }
+      return remaining.trim();
+    };
+    const moveFinalAssistantProcessTextToBubble = (sessionId, finalContent) => {
+      const runtime = getRuntime(sessionId);
+      const lastIndex = runtime.processTextHistory.length - 1;
+      if (lastIndex < 0) return;
+      const lastText = runtime.processTextHistory[lastIndex];
+      const lastEntryId = runtime.processTextEntryIds[lastIndex];
+      if (!lastEntryId || normalizeStreamText(lastText) !== normalizeStreamText(finalContent)) return;
+      useChatStore.getState().removeLastAssistantProcessEntries([lastEntryId], sessionId);
+      runtime.processTextEntryIds.splice(lastIndex, 1);
+      runtime.processTextHistory.splice(lastIndex, 1);
     };
     const appendThinkingDelta = (sessionId, delta) => {
       if (!delta) return;
@@ -44403,11 +44454,11 @@ ${pattern}`,
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
       finishAssistantProcessText(currentSessionId);
-      const finalContent = (content2 || runtime.streamBuffer).trim();
+      const finalContent = stripProcessTextPrefixFromFinal(currentSessionId, content2 || runtime.streamBuffer);
       if (finalContent.trim().length > 0) {
         runtime.streamBuffer = finalContent;
         useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
-        removeFinalAssistantProcessTextIfDuplicated(currentSessionId, finalContent);
+        moveFinalAssistantProcessTextToBubble(currentSessionId, finalContent);
         useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
       } else if (timedOut) {
         useChatStore.getState().appendLastAssistantProcessEntry({

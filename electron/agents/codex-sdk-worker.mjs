@@ -397,7 +397,6 @@ const handleItemEvent = (item, phase) => {
       if (delta) send({ type: "stream_delta", delta });
       if (phase === "completed") {
         finalResponse = text;
-        send({ type: "stream_snapshot", content: text });
       }
       break;
     }
