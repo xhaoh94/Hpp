@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry, type AgentProcessFile } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentName } from "@/lib/agents";
+import { getAgentName, getAgentPlanModeTooltip } from "@/lib/agents";
 import { applySessionModels, getSessionModel, saveSessionModel, getSessionThinking, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
@@ -16,6 +16,7 @@ const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
 const SCROLL_BOTTOM_THRESHOLD = 50;
+const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
 const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\s+/g, " ").trim();
@@ -1155,6 +1156,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
   const [questionnairePaneHeight, setQuestionnairePaneHeight] = useState<number | null>(null);
+  const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [pendingUIResponse, setPendingUIResponse] = useState<{
     sessionId: string;
     requestId?: string;
@@ -1206,6 +1208,45 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   useEffect(() => {
     pendingUIResponseRef.current = pendingUIResponse;
   }, [pendingUIResponse]);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.electronAPI.loadData("settings").then((data: any) => {
+      if (!cancelled) setPlanModeEnabled(!!data?.general?.planModeEnabled);
+    });
+
+    const handleAgentSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ planModeEnabled?: boolean }>).detail;
+      if (typeof detail?.planModeEnabled === "boolean") {
+        setPlanModeEnabled(detail.planModeEnabled);
+      }
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+    };
+  }, []);
+
+  const savePlanModeEnabled = async (nextPlanModeEnabled: boolean) => {
+    setPlanModeEnabled(nextPlanModeEnabled);
+    setModelOpen(false);
+    setThinkingOpen(false);
+    setExpandedProvider(null);
+    const data = await window.electronAPI.loadData("settings") as any;
+    const currentSettings = data && typeof data === "object" ? data : {};
+    const nextSettings = {
+      ...currentSettings,
+      general: {
+        ...(currentSettings.general || {}),
+        planModeEnabled: nextPlanModeEnabled,
+      },
+    };
+    await window.electronAPI.saveData("settings", nextSettings);
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
+      detail: { planModeEnabled: nextPlanModeEnabled },
+    }));
+  };
 
   useEffect(() => {
     setQuestionnairePaneHeight(null);
@@ -2310,7 +2351,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       updateScrollBottomState(scrollEl);
     }
 
-    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
+    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId, { planModeEnabled });
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
       if (runtime?.streamWatchdog) {
@@ -2845,6 +2886,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
         {/* Toolbar below input */}
         <div className="chat-input-toolbar">
+          <button
+            type="button"
+            onClick={() => savePlanModeEnabled(!planModeEnabled)}
+            className={`chat-toolbar-select chat-toolbar-plan-toggle ${planModeEnabled ? "active" : ""}`}
+            title={getAgentPlanModeTooltip(activeSession?.agentId || activeAgentId)}
+            aria-pressed={planModeEnabled}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M9 6h11" />
+              <path d="M9 12h11" />
+              <path d="M9 18h11" />
+              <path d="M4 6l1 1 2-2" />
+              <path d="M4 12l1 1 2-2" />
+              <path d="M4 18l1 1 2-2" />
+            </svg>
+            <span>Plan 模式</span>
+          </button>
+
           {/* Model selector */}
           <div ref={modelRef} className="relative">
             <button

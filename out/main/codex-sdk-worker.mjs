@@ -8,11 +8,14 @@ const CODEX_PROVIDER = "codex";
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 
 let codex = null;
+let planCodex = null;
+let codexSdkModule = null;
 let thread = null;
 let threadId = null;
 let projectPath = "";
 let currentModelId = null;
 let thinkingLevel = "medium";
+let activePlanModeEnabled = false;
 let activeAbortController = null;
 let activePromptId = null;
 let promptRunning = false;
@@ -196,14 +199,29 @@ const buildThreadOptions = () => {
   return options;
 };
 
+const getCodexClient = () => {
+  if (!activePlanModeEnabled) return codex;
+  if (!codexSdkModule) throw new Error("Codex SDK is not initialized");
+  if (!planCodex) {
+    planCodex = new codexSdkModule.Codex({
+      config: {
+        collaboration_mode: "Plan",
+        include_collaboration_mode_instructions: true,
+      },
+    });
+  }
+  return planCodex;
+};
+
 const createThreadForTurn = () => {
   if (!codex) throw new Error("Codex SDK is not initialized");
 
   const options = buildThreadOptions();
+  const activeCodex = getCodexClient();
   if (threadId) {
-    thread = codex.resumeThread(threadId, options);
+    thread = activeCodex.resumeThread(threadId, options);
   } else if (!thread) {
-    thread = codex.startThread(options);
+    thread = activeCodex.startThread(options);
   }
   return thread;
 };
@@ -441,8 +459,9 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
   projectPath = cwd;
   threadId = sessionFilePath || null;
   await loadConfiguredModels();
-  const sdk = await import("@openai/codex-sdk");
-  codex = new sdk.Codex();
+  codexSdkModule = await import("@openai/codex-sdk");
+  codex = new codexSdkModule.Codex();
+  planCodex = null;
   send({ type: "ready", sessionFilePath: threadId });
 };
 
@@ -452,6 +471,7 @@ const runPrompt = async (command) => {
   promptRunning = true;
   activePromptId = command.id;
   activeAbortController = new AbortController();
+  activePlanModeEnabled = !!command.planModeEnabled;
   resetTurnState();
   send({ type: "accepted", id: command.id });
   startStream();
@@ -498,6 +518,7 @@ const runPrompt = async (command) => {
     promptRunning = false;
     activePromptId = null;
     activeAbortController = null;
+    activePlanModeEnabled = false;
   }
 };
 
@@ -505,9 +526,12 @@ const disposeSession = () => {
   activeAbortController?.abort();
   activeAbortController = null;
   activePromptId = null;
+  activePlanModeEnabled = false;
   promptRunning = false;
   thread = null;
   codex = null;
+  planCodex = null;
+  codexSdkModule = null;
   resetTurnState();
 };
 

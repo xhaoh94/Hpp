@@ -26,7 +26,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   agentCreateSession: (agentId, projectPath, sessionId, sessionFilePath) => electron.ipcRenderer.invoke("agent:createSession", agentId, projectPath, sessionId, sessionFilePath),
   agentSwitchSession: (sessionId) => electron.ipcRenderer.invoke("agent:switchSession", sessionId),
   agentRemoveSession: (sessionId) => electron.ipcRenderer.invoke("agent:removeSession", sessionId),
-  agentSendMessage: (message, images, sessionId) => electron.ipcRenderer.invoke("agent:sendMessage", message, images, sessionId),
+  agentSendMessage: (message, images, sessionId, options) => electron.ipcRenderer.invoke("agent:sendMessage", message, images, sessionId, options),
   agentAbort: (sessionId) => electron.ipcRenderer.invoke("agent:abort", sessionId),
   agentGetModels: (sessionId) => electron.ipcRenderer.invoke("agent:getModels", sessionId),
   agentSetModel: (provider, modelId) => electron.ipcRenderer.invoke("agent:setModel", provider, modelId),

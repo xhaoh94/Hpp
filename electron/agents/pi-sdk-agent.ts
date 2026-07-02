@@ -13,6 +13,10 @@ interface AgentModel {
   reasoning: boolean;
 }
 
+interface AgentSendOptions {
+  displayMessage?: string;
+}
+
 const getWorkerPath = () => {
   const candidates = [
     join(__dirname, "pi-sdk-worker.mjs"),
@@ -142,7 +146,7 @@ export class PiSDKAgent {
     });
   }
 
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void> {
+  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
 
@@ -154,7 +158,7 @@ export class PiSDKAgent {
 
     const promptId = this.createCommandId();
     this.activePromptIds.add(promptId);
-    this.emitEvent({ type: "message_start", role: "user", content: message });
+    this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
     this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
   }

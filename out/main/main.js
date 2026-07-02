@@ -1130,7 +1130,7 @@ class OpenCodeAgent {
     return null;
   }
   /** Send a message to the opencode session */
-  async sendMessage(message) {
+  async sendMessage(message, _images, options) {
     if (!this.sessionId) {
       await this.createSession();
     }
@@ -1145,6 +1145,9 @@ class OpenCodeAgent {
     this.startSSEListener();
     try {
       const body = { parts: [{ type: "text", text: message }] };
+      if (options?.planModeEnabled) {
+        body.agent = "plan";
+      }
       if (this.currentModelId && this.currentProviderId) {
         body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };
       }
@@ -1568,6 +1571,7 @@ class DroidAgent {
   pendingAskUserRequestId = null;
   isReady = false;
   autonomyLevel = "medium";
+  interactionMode = "auto";
   eventBuffer;
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
@@ -1645,7 +1649,8 @@ class DroidAgent {
     this.sendRpc("droid.initialize_session", {
       machineId: "default",
       cwd: projectPath,
-      autonomyLevel: this.autonomyLevel
+      autonomyLevel: this.autonomyLevel,
+      interactionMode: this.interactionMode
     });
     await new Promise((resolve) => {
       const check = setInterval(() => {
@@ -1667,12 +1672,13 @@ class DroidAgent {
     });
   }
   /** Send a user message */
-  async sendMessage(message, images) {
+  async sendMessage(message, images, options) {
     if (!this.process || !this.isReady) {
       this.mockResponse(message);
       return;
     }
     this.emitEvent({ type: "stream_start", role: "assistant" });
+    await this.setInteractionMode(options?.planModeEnabled ? "spec" : "auto");
     const msgParams = { text: message };
     if (images && images.length > 0) {
       msgParams.images = images.map((img) => ({
@@ -1740,7 +1746,7 @@ class DroidAgent {
   /** Set model - sends setting update via RPC */
   async setModel(_provider, modelId) {
     if (this.process && this.isReady) {
-      this.sendRpc("droid.update_settings", { modelId });
+      this.sendRpc("droid.update_session_settings", { modelId });
       this.emitEvent({ type: "model_changed", model: { id: modelId, provider: _provider } });
     }
   }
@@ -1754,9 +1760,17 @@ class DroidAgent {
       high: "high"
     };
     if (this.process && this.isReady) {
-      this.sendRpc("droid.update_settings", { reasoningEffort: effortMap[level] || level });
+      this.sendRpc("droid.update_session_settings", { reasoningEffort: effortMap[level] || level });
     }
     this.emitEvent({ type: "thinking_level_changed", level });
+  }
+  async setInteractionMode(mode) {
+    if (this.interactionMode === mode) return;
+    this.interactionMode = mode;
+    if (this.process && this.isReady) {
+      await this.sendRpcAsync("droid.update_session_settings", { interactionMode: mode });
+    }
+    this.emitEvent({ type: "process_event", entryType: "status", title: mode === "spec" ? "Droid 已进入 Spec 模式" : "Droid 已切回 Auto 模式", state: "completed" });
   }
   sendUIResponse(response) {
     if (!this.process || !this.isReady) return;
@@ -1805,6 +1819,11 @@ class DroidAgent {
     if (onResponse) this.pendingResponses.set(id, onResponse);
     this.process?.stdin?.write(JSON.stringify(msg) + "\n");
     return id;
+  }
+  sendRpcAsync(method, params) {
+    return new Promise((resolve) => {
+      this.sendRpc(method, params, resolve);
+    });
   }
   sendRpcResponse(requestId, result) {
     const msg = {
@@ -2018,7 +2037,7 @@ class PiSDKAgent {
       });
     });
   }
-  async sendMessage(message, images) {
+  async sendMessage(message, images, options) {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
     if (this.turnActive) {
@@ -2028,7 +2047,7 @@ class PiSDKAgent {
     }
     const promptId = this.createCommandId();
     this.activePromptIds.add(promptId);
-    this.emitEvent({ type: "message_start", role: "user", content: message });
+    this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
     this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
   }
@@ -2463,12 +2482,12 @@ class CodexSDKAgent {
       });
     });
   }
-  async sendMessage(message, images) {
+  async sendMessage(message, images, options) {
     if (!this.process) throw new Error("Codex SDK worker is not running");
     this.isAborting = false;
     const promptId = this.createCommandId();
-    this.emitEvent({ type: "message_start", role: "user", content: message });
-    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
+    this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
+    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images, planModeEnabled: !!options?.planModeEnabled });
   }
   async abort() {
     this.isAborting = true;
@@ -2645,6 +2664,20 @@ function filterModelsByLocalConfig(models) {
   }
   return result;
 }
+function supportsNativePlanMode(agentId) {
+  return agentId === "codex" || agentId === "opencode" || agentId === "droid";
+}
+function withPromptPlanMode(message) {
+  return [
+    "<plan_mode>",
+    "Plan mode is enabled for this turn.",
+    "Before changing files, running commands, or using tools that modify state, first respond with a concise implementation plan and wait for the user to explicitly confirm.",
+    "You may inspect context that is necessary to make the plan. If the user has already explicitly approved a previous plan in this conversation, proceed with the approved implementation.",
+    "</plan_mode>",
+    "",
+    message
+  ].join("\n");
+}
 class AgentManager {
   sessionAgents = /* @__PURE__ */ new Map();
   sessionAgentTypes = /* @__PURE__ */ new Map();
@@ -2746,11 +2779,17 @@ function registerAgentHandlers(getWindow) {
     agentManager.removeSession(sessionId);
     return { success: true };
   });
-  electron.ipcMain.handle("agent:sendMessage", async (_event, message, images, sessionId) => {
+  electron.ipcMain.handle("agent:sendMessage", async (_event, message, images, sessionId, options) => {
     const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     if (!agent) return { success: false, error: "No active agent" };
     try {
-      await agent.sendMessage(message, images);
+      const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
+      const planModeEnabled = !!options?.planModeEnabled;
+      const effectiveMessage = planModeEnabled && !supportsNativePlanMode(agentType) ? withPromptPlanMode(message) : message;
+      await agent.sendMessage(effectiveMessage, images, {
+        planModeEnabled: planModeEnabled && supportsNativePlanMode(agentType),
+        displayMessage: message
+      });
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };

@@ -18,7 +18,7 @@ interface AgentModel {
 interface AgentBackend {
   setWindow(win: BrowserWindow): void;
   init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
-  sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void>;
+  sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
   abort(): Promise<void>;
   getModels(): Promise<AgentModel[]>;
   setModel(provider: string, modelId: string): Promise<void>;
@@ -26,6 +26,11 @@ interface AgentBackend {
   sendUIResponse(response: any): void;
   dispose(): void;
   readonly sessionFilePath: string | null;
+}
+
+interface AgentSendOptions {
+  planModeEnabled?: boolean;
+  displayMessage?: string;
 }
 
 // ============================================================
@@ -91,6 +96,22 @@ function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
     }
   }
   return result;
+}
+
+function supportsNativePlanMode(agentId?: string): boolean {
+  return agentId === "codex" || agentId === "opencode" || agentId === "droid";
+}
+
+function withPromptPlanMode(message: string): string {
+  return [
+    "<plan_mode>",
+    "Plan mode is enabled for this turn.",
+    "Before changing files, running commands, or using tools that modify state, first respond with a concise implementation plan and wait for the user to explicitly confirm.",
+    "You may inspect context that is necessary to make the plan. If the user has already explicitly approved a previous plan in this conversation, proceed with the approved implementation.",
+    "</plan_mode>",
+    "",
+    message,
+  ].join("\n");
 }
 
 // ============================================================
@@ -217,11 +238,19 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string) => {
+  ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => {
     const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     if (!agent) return { success: false, error: "No active agent" };
     try {
-      await agent.sendMessage(message, images);
+      const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
+      const planModeEnabled = !!options?.planModeEnabled;
+      const effectiveMessage = planModeEnabled && !supportsNativePlanMode(agentType)
+        ? withPromptPlanMode(message)
+        : message;
+      await agent.sendMessage(effectiveMessage, images, {
+        planModeEnabled: planModeEnabled && supportsNativePlanMode(agentType),
+        displayMessage: message,
+      });
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };

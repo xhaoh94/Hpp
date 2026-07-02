@@ -12608,6 +12608,12 @@ function Sidebar() {
     )
   ] }) });
 }
+const AGENT_PLAN_MODE_SUPPORT = {
+  codex: "native",
+  pi: "prompt",
+  opencode: "native",
+  droid: "native"
+};
 const AVAILABLE_AGENTS = [
   { id: "codex", name: "Codex", desc: "OpenAI Codex SDK 编程助手", runtime: "sdk" },
   { id: "pi", name: "Pi Agent", desc: "AI 编程助手", runtime: "sdk" },
@@ -12616,6 +12622,13 @@ const AVAILABLE_AGENTS = [
 ];
 function getAgentName(id) {
   return AVAILABLE_AGENTS.find((a) => a.id === id)?.name || id;
+}
+function supportsNativePlanMode(id) {
+  return AGENT_PLAN_MODE_SUPPORT[id] === "native";
+}
+function getAgentPlanModeTooltip(id) {
+  if (supportsNativePlanMode(id)) return "支持原生 Plan 模式";
+  return "当前 Agent 不支持原生 Plan 模式，将通过提示词要求先计划并等待确认";
 }
 function getInstallHint(command) {
   switch (command) {
@@ -13239,7 +13252,7 @@ function useDataPersistence() {
     };
   }, []);
 }
-const AGENT_SETTINGS_UPDATED_EVENT$1 = "agent-settings-updated";
+const AGENT_SETTINGS_UPDATED_EVENT$2 = "agent-settings-updated";
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 function BrailleSpinner() {
   const [index2, setIndex] = reactExports.useState(0);
@@ -13298,8 +13311,8 @@ function ProjectCard({ project }) {
       if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(detail.enabledAgents);
       setAgentOrder(normalizeAgentOrder(detail?.agentOrder));
     };
-    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT$1, handleAgentSettingsUpdated);
-    return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT$1, handleAgentSettingsUpdated);
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT$2, handleAgentSettingsUpdated);
+    return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT$2, handleAgentSettingsUpdated);
   }, []);
   reactExports.useEffect(() => {
     if (!showAddAgent) return;
@@ -42324,7 +42337,7 @@ let cachedAgentStatuses = {};
 let lastPiSDKCheck = 0;
 let lastAgentChecks = {};
 const VERSION_CACHE_MS = 6e4;
-const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+const AGENT_SETTINGS_UPDATED_EVENT$1 = "agent-settings-updated";
 function SettingsView() {
   const [shortcuts, setShortcuts] = reactExports.useState(DEFAULT_SHORTCUTS);
   const [filters, setFilters] = reactExports.useState(DEFAULT_FILTERS);
@@ -42334,6 +42347,7 @@ function SettingsView() {
   const [showGeneralModal, setShowGeneralModal] = reactExports.useState(false);
   const [tempImagePath, setTempImagePath] = reactExports.useState("");
   const [imageRetentionHours, setImageRetentionHours] = reactExports.useState(12);
+  const [planModeEnabled, setPlanModeEnabled] = reactExports.useState(false);
   const [enabledAgents, setEnabledAgents] = reactExports.useState(["codex", "pi"]);
   const [agentOrder, setAgentOrder] = reactExports.useState(normalizeAgentOrder());
   const [draggingAgentId, setDraggingAgentId] = reactExports.useState(null);
@@ -42433,11 +42447,22 @@ function SettingsView() {
         if (data.general) {
           setTempImagePath(data.general.tempImagePath || "");
           setImageRetentionHours(data.general.imageRetentionHours || 12);
+          setPlanModeEnabled(!!data.general.planModeEnabled);
           if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
           setAgentOrder(normalizeAgentOrder(data.general.agentOrder));
         }
       }
     });
+  }, []);
+  reactExports.useEffect(() => {
+    const handleAgentSettingsUpdated = (event) => {
+      const detail = event.detail;
+      if (typeof detail?.planModeEnabled === "boolean") {
+        setPlanModeEnabled(detail.planModeEnabled);
+      }
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT$1, handleAgentSettingsUpdated);
+    return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT$1, handleAgentSettingsUpdated);
   }, []);
   reactExports.useEffect(() => {
     const now = Date.now();
@@ -42457,24 +42482,24 @@ function SettingsView() {
   }, [refreshPiSDKStatus, refreshAgentStatus]);
   const saveShortcuts = (s) => {
     setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
+    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
   };
   const saveFilters = (f) => {
     setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
+    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
   };
   const saveGeneral = () => {
-    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
-    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, { detail: { enabledAgents, agentOrder } }));
+    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT$1, { detail: { enabledAgents, agentOrder, planModeEnabled } }));
   };
   const saveAgentSettings = (nextEnabledAgents = enabledAgents, nextAgentOrder = agentOrder) => {
     window.electronAPI.saveData("settings", {
       shortcuts,
       filters,
-      general: { tempImagePath, imageRetentionHours, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder }
+      general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder }
     });
-    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
-      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder }
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT$1, {
+      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder, planModeEnabled }
     }));
   };
   const moveAgent = (sourceId, targetId) => {
@@ -42691,6 +42716,7 @@ function SettingsView() {
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "filter-group", children: [
             orderAgents(AVAILABLE_AGENTS, agentOrder).map((agent) => {
               const isPiSDKAgent = agent.id === "pi";
+              const hasNativePlanMode = supportsNativePlanMode(agent.id);
               const agentStatus = agentStatuses[agent.id];
               const isInstalled = isPiSDKAgent ? piSDKStatus?.installed === true : agentStatus?.installed === true;
               const isChecking = isPiSDKAgent ? piSDKChecking || !piSDKStatus : agentChecking[agent.id];
@@ -42759,7 +42785,15 @@ function SettingsView() {
                           (isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-meta", children: [
                             "最新 v",
                             isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion
-                          ] })
+                          ] }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "span",
+                            {
+                              className: `agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`,
+                              title: getAgentPlanModeTooltip(agent.id),
+                              children: "Plan"
+                            }
+                          )
                         ] }),
                         isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "agent-settings-error", children: [
                           "Node v",
@@ -42884,6 +42918,7 @@ const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
 const SCROLL_BOTTOM_THRESHOLD = 50;
+const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 const getThinkingPreview = (value) => {
   const preview = value?.replace(/\s+/g, " ").trim();
   if (!preview) return "思考中";
@@ -43796,6 +43831,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   const [previewFile, setPreviewFile] = reactExports.useState(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = reactExports.useState(false);
   const [questionnairePaneHeight, setQuestionnairePaneHeight] = reactExports.useState(null);
+  const [planModeEnabled, setPlanModeEnabled] = reactExports.useState(false);
   const [pendingUIResponse, setPendingUIResponse] = reactExports.useState(null);
   const pendingUIResponseRef = reactExports.useRef(null);
   const userMsgHistoryRef = reactExports.useRef(null);
@@ -43827,6 +43863,42 @@ function ChatPanel({ sendKey = "Enter" }) {
   reactExports.useEffect(() => {
     pendingUIResponseRef.current = pendingUIResponse;
   }, [pendingUIResponse]);
+  reactExports.useEffect(() => {
+    let cancelled = false;
+    window.electronAPI.loadData("settings").then((data) => {
+      if (!cancelled) setPlanModeEnabled(!!data?.general?.planModeEnabled);
+    });
+    const handleAgentSettingsUpdated = (event) => {
+      const detail = event.detail;
+      if (typeof detail?.planModeEnabled === "boolean") {
+        setPlanModeEnabled(detail.planModeEnabled);
+      }
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+    };
+  }, []);
+  const savePlanModeEnabled = async (nextPlanModeEnabled) => {
+    setPlanModeEnabled(nextPlanModeEnabled);
+    setModelOpen(false);
+    setThinkingOpen(false);
+    setExpandedProvider(null);
+    const data = await window.electronAPI.loadData("settings");
+    const currentSettings = data && typeof data === "object" ? data : {};
+    const nextSettings = {
+      ...currentSettings,
+      general: {
+        ...currentSettings.general || {},
+        planModeEnabled: nextPlanModeEnabled
+      }
+    };
+    await window.electronAPI.saveData("settings", nextSettings);
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
+      detail: { planModeEnabled: nextPlanModeEnabled }
+    }));
+  };
   reactExports.useEffect(() => {
     setQuestionnairePaneHeight(null);
   }, [activeQuestionnaire?.sessionId, activeQuestionnaire?.requestId, activeQuestionnaire?.entryId]);
@@ -44781,7 +44853,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       scrollEl.scrollTop = scrollEl.scrollHeight;
       updateScrollBottomState(scrollEl);
     }
-    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId);
+    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId, { planModeEnabled });
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
       if (runtime?.streamWatchdog) {
@@ -45228,6 +45300,27 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
             )
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-input-toolbar", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                type: "button",
+                onClick: () => savePlanModeEnabled(!planModeEnabled),
+                className: `chat-toolbar-select chat-toolbar-plan-toggle ${planModeEnabled ? "active" : ""}`,
+                title: getAgentPlanModeTooltip(activeSession?.agentId || activeAgentId),
+                "aria-pressed": planModeEnabled,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 6h11" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 12h11" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 18h11" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M4 6l1 1 2-2" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M4 12l1 1 2-2" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M4 18l1 1 2-2" })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Plan 模式" })
+                ]
+              }
+            ),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: modelRef, className: "relative", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs(
                 "button",

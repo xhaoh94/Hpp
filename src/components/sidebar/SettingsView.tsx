@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { GripVertical } from "lucide-react";
-import { AVAILABLE_AGENTS, normalizeAgentOrder, orderAgents } from "@/lib/agents";
+import { AVAILABLE_AGENTS, getAgentPlanModeTooltip, normalizeAgentOrder, orderAgents, supportsNativePlanMode } from "@/lib/agents";
 import type { AgentPackageStatus, PiSDKStatus } from "@/types";
 import "./Settings.css";
 
@@ -81,6 +81,7 @@ export function SettingsView() {
   const [showGeneralModal, setShowGeneralModal] = useState(false);
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
+  const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["codex", "pi"]);
   const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
   const [draggingAgentId, setDraggingAgentId] = useState<string | null>(null);
@@ -187,11 +188,23 @@ export function SettingsView() {
         if (data.general) {
           setTempImagePath(data.general.tempImagePath || "");
           setImageRetentionHours(data.general.imageRetentionHours || 12);
+          setPlanModeEnabled(!!data.general.planModeEnabled);
           if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
           setAgentOrder(normalizeAgentOrder(data.general.agentOrder));
         }
       }
     });
+  }, []);
+
+  useEffect(() => {
+    const handleAgentSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ planModeEnabled?: boolean }>).detail;
+      if (typeof detail?.planModeEnabled === "boolean") {
+        setPlanModeEnabled(detail.planModeEnabled);
+      }
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+    return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
   }, []);
 
   // Check agent package status (with 1-minute cache)
@@ -217,27 +230,27 @@ export function SettingsView() {
   // Save shortcuts when changed
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
+    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
   };
 
   const saveFilters = (f: FilterConfig) => {
     setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
+    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
   };
 
   const saveGeneral = () => {
-    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, enabledAgents, agentOrder } });
-    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, { detail: { enabledAgents, agentOrder } }));
+    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, { detail: { enabledAgents, agentOrder, planModeEnabled } }));
   };
 
   const saveAgentSettings = (nextEnabledAgents = enabledAgents, nextAgentOrder = agentOrder) => {
     window.electronAPI.saveData("settings", {
       shortcuts,
       filters,
-      general: { tempImagePath, imageRetentionHours, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder },
+      general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder },
     });
     window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
-      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder },
+      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder, planModeEnabled },
     }));
   };
 
@@ -486,6 +499,7 @@ export function SettingsView() {
                 <div className="filter-group">
                   {orderAgents(AVAILABLE_AGENTS, agentOrder).map((agent) => {
                     const isPiSDKAgent = agent.id === "pi";
+                    const hasNativePlanMode = supportsNativePlanMode(agent.id);
                     const agentStatus = agentStatuses[agent.id];
                     const isInstalled = isPiSDKAgent
                       ? piSDKStatus?.installed === true
@@ -575,6 +589,12 @@ export function SettingsView() {
                                 最新 v{isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion}
                               </span>
                             )}
+                            <span
+                              className={`agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`}
+                              title={getAgentPlanModeTooltip(agent.id)}
+                            >
+                              Plan
+                            </span>
                           </span>
                           {isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
                             <span className="agent-settings-error">

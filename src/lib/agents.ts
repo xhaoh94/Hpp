@@ -1,3 +1,12 @@
+export type AgentPlanModeSupport = "native" | "prompt";
+
+export const AGENT_PLAN_MODE_SUPPORT: Record<string, AgentPlanModeSupport> = {
+  codex: "native",
+  pi: "prompt",
+  opencode: "native",
+  droid: "native",
+};
+
 // All available agents in the application
 export const AVAILABLE_AGENTS = [
   { id: "codex", name: "Codex", desc: "OpenAI Codex SDK 编程助手", runtime: "sdk" },
@@ -8,6 +17,15 @@ export const AVAILABLE_AGENTS = [
 
 export function getAgentName(id: string): string {
   return AVAILABLE_AGENTS.find((a) => a.id === id)?.name || id;
+}
+
+export function supportsNativePlanMode(id: string): boolean {
+  return AGENT_PLAN_MODE_SUPPORT[id] === "native";
+}
+
+export function getAgentPlanModeTooltip(id: string): string {
+  if (supportsNativePlanMode(id)) return "支持原生 Plan 模式";
+  return "当前 Agent 不支持原生 Plan 模式，将通过提示词要求先计划并等待确认";
 }
 
 export function getInstallHint(command: string): string {

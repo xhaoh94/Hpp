@@ -37,8 +37,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:switchSession", sessionId),
   agentRemoveSession: (sessionId: string) =>
     ipcRenderer.invoke("agent:removeSession", sessionId),
-  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string) =>
-    ipcRenderer.invoke("agent:sendMessage", message, images, sessionId),
+  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean }) =>
+    ipcRenderer.invoke("agent:sendMessage", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
   agentGetModels: (sessionId?: string) => ipcRenderer.invoke("agent:getModels", sessionId),
   agentSetModel: (provider: string, modelId: string) =>

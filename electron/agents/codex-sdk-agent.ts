@@ -12,6 +12,11 @@ interface AgentModel {
   reasoning: boolean;
 }
 
+interface AgentSendOptions {
+  planModeEnabled?: boolean;
+  displayMessage?: string;
+}
+
 const getWorkerPath = () => {
   const candidates = [
     join(__dirname, "codex-sdk-worker.mjs"),
@@ -133,12 +138,12 @@ export class CodexSDKAgent {
     });
   }
 
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void> {
+  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex SDK worker is not running");
     this.isAborting = false;
     const promptId = this.createCommandId();
-    this.emitEvent({ type: "message_start", role: "user", content: message });
-    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images });
+    this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
+    this.sendWorkerCommand({ id: promptId, type: "prompt", message, images, planModeEnabled: !!options?.planModeEnabled });
   }
 
   async abort(): Promise<void> {

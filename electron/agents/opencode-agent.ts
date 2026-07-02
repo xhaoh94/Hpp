@@ -11,6 +11,11 @@ interface AgentModel {
   reasoning: boolean;
 }
 
+interface AgentSendOptions {
+  planModeEnabled?: boolean;
+  displayMessage?: string;
+}
+
 function formatProcessDetail(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value === "string") return value;
@@ -205,7 +210,7 @@ export class OpenCodeAgent {
   }
 
   /** Send a message to the opencode session */
-  async sendMessage(message: string): Promise<void> {
+  async sendMessage(message: string, _images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.sessionId) {
       await this.createSession();
     }
@@ -222,6 +227,9 @@ export class OpenCodeAgent {
 
     try {
       const body: any = { parts: [{ type: "text", text: message }] };
+      if (options?.planModeEnabled) {
+        body.agent = "plan";
+      }
       if (this.currentModelId && this.currentProviderId) {
         body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };
       }

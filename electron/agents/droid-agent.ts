@@ -18,6 +18,11 @@ interface AgentModel {
   reasoning: boolean;
 }
 
+interface AgentSendOptions {
+  planModeEnabled?: boolean;
+  displayMessage?: string;
+}
+
 // ============================================================
 // Factory Droid Agent - JSON-RPC over stdin/stdout
 // ============================================================
@@ -33,6 +38,7 @@ export class DroidAgent {
   private pendingAskUserRequestId: string | null = null;
   private isReady = false;
   private autonomyLevel = "medium";
+  private interactionMode = "auto";
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
@@ -120,6 +126,7 @@ export class DroidAgent {
       machineId: "default",
       cwd: projectPath,
       autonomyLevel: this.autonomyLevel,
+      interactionMode: this.interactionMode,
     });
 
     // Wait for init response
@@ -141,13 +148,14 @@ export class DroidAgent {
   }
 
   /** Send a user message */
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>): Promise<void> {
+  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.process || !this.isReady) {
       this.mockResponse(message);
       return;
     }
 
     this.emitEvent({ type: "stream_start", role: "assistant" });
+    await this.setInteractionMode(options?.planModeEnabled ? "spec" : "auto");
 
     const msgParams: any = { text: message };
     if (images && images.length > 0) {
@@ -223,7 +231,7 @@ export class DroidAgent {
   /** Set model - sends setting update via RPC */
   async setModel(_provider: string, modelId: string) {
     if (this.process && this.isReady) {
-      this.sendRpc("droid.update_settings", { modelId });
+      this.sendRpc("droid.update_session_settings", { modelId });
       this.emitEvent({ type: "model_changed", model: { id: modelId, provider: _provider } });
     }
   }
@@ -234,9 +242,18 @@ export class DroidAgent {
       off: "off", none: "none", low: "low", medium: "medium", high: "high",
     };
     if (this.process && this.isReady) {
-      this.sendRpc("droid.update_settings", { reasoningEffort: effortMap[level] || level });
+      this.sendRpc("droid.update_session_settings", { reasoningEffort: effortMap[level] || level });
     }
     this.emitEvent({ type: "thinking_level_changed", level });
+  }
+
+  private async setInteractionMode(mode: "auto" | "spec") {
+    if (this.interactionMode === mode) return;
+    this.interactionMode = mode;
+    if (this.process && this.isReady) {
+      await this.sendRpcAsync("droid.update_session_settings", { interactionMode: mode });
+    }
+    this.emitEvent({ type: "process_event", entryType: "status", title: mode === "spec" ? "Droid 已进入 Spec 模式" : "Droid 已切回 Auto 模式", state: "completed" });
   }
 
   sendUIResponse(response: any) {
@@ -294,6 +311,12 @@ export class DroidAgent {
     if (onResponse) this.pendingResponses.set(id, onResponse);
     this.process?.stdin?.write(JSON.stringify(msg) + "\n");
     return id;
+  }
+
+  private sendRpcAsync(method: string, params: any): Promise<any> {
+    return new Promise((resolve) => {
+      this.sendRpc(method, params, resolve);
+    });
   }
 
   private sendRpcResponse(requestId: string, result: any) {
