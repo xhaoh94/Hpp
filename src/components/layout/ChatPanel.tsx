@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, type PointerEvent as ReactPointerEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
 import { flushSync } from "react-dom";
 import { useChatStore, type ModelInfo, type FileDiff, type AgentProcess, type AgentProcessEntry, type AgentProcessFile } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -625,8 +625,10 @@ const splitCommandDetail = (detail?: string, command?: string) => {
 
 function CommandDetail({
   entry,
+  onPreserveScroll,
 }: {
   entry: AgentProcessEntry;
+  onPreserveScroll?: (action: () => void, anchor?: HTMLElement | null) => void;
 }) {
   const [outputExpanded, setOutputExpanded] = useState(entry.state === "running");
   const userToggledRef = useRef(false);
@@ -641,16 +643,18 @@ function CommandDetail({
     }
   }, [isRunning]);
 
-  const toggleOutput = () => {
+  const toggleOutput = (anchor?: HTMLElement | null) => {
     userToggledRef.current = true;
-    setOutputExpanded((current) => !current);
+    const action = () => setOutputExpanded((current) => !current);
+    if (onPreserveScroll) onPreserveScroll(action, anchor);
+    else action();
   };
 
   return (
     <div className={`chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`}>
       <button
         className="chat-command-header"
-        onClick={canExpand ? toggleOutput : undefined}
+        onClick={canExpand ? (event) => toggleOutput(event.currentTarget) : undefined}
         disabled={!canExpand}
       >
         <span className="chat-command-prompt">$_</span>
@@ -678,8 +682,10 @@ function CommandDetail({
 
 function CommandGroup({
   entries,
+  onPreserveScroll,
 }: {
   entries: AgentProcessEntry[];
+  onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -691,7 +697,7 @@ function CommandGroup({
       <div className="chat-process-entry-main">
         <button
           className="chat-process-entry-header expandable"
-          onClick={() => setExpanded((current) => !current)}
+          onClick={(event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget)}
         >
           <span className="chat-process-entry-title">已运行 {entries.length} 条命令</span>
           <svg
@@ -705,7 +711,7 @@ function CommandGroup({
         {expanded && (
           <div className="chat-command-group-list">
             {entries.map((entry) => (
-              <CommandDetail key={entry.id} entry={entry} />
+              <CommandDetail key={entry.id} entry={entry} onPreserveScroll={onPreserveScroll} />
             ))}
           </div>
         )}
@@ -719,11 +725,13 @@ function ProcessEntryRow({
   entry,
   onToggleEntry,
   onOpenFile,
+  onPreserveScroll,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
-  onToggleEntry: (messageId: string, entryId: string) => void;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string) => void;
+  onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
 }) {
   const hasDetail = !!entry.detail;
   const files = entry.files || [];
@@ -748,7 +756,7 @@ function ProcessEntryRow({
       <div className="chat-process-entry-main">
         <button
           className={`chat-process-entry-header ${canExpand ? "expandable" : ""}`}
-          onClick={canExpand ? () => onToggleEntry(messageId, entry.id) : undefined}
+          onClick={canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : undefined}
           disabled={!canExpand}
         >
           <span className="chat-process-entry-title">{entry.title}</span>
@@ -764,7 +772,7 @@ function ProcessEntryRow({
         </button>
         {files.length > 0 && <ProcessEntryFiles files={files} onOpenFile={onOpenFile} />}
         {commandVisible && (
-          <CommandDetail entry={entry} />
+          <CommandDetail entry={entry} onPreserveScroll={onPreserveScroll} />
         )}
         {detailVisible && (
           <pre className={`chat-process-entry-detail ${canExpand ? "panel" : ""}`}>{entry.detail}</pre>
@@ -779,11 +787,13 @@ function ProcessEntries({
   messageId,
   onToggleEntry,
   onOpenFile,
+  onPreserveScroll,
 }: {
   entries: AgentProcessEntry[];
   messageId: string;
-  onToggleEntry: (messageId: string, entryId: string) => void;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string) => void;
+  onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
 }) {
   const rows: React.ReactNode[] = [];
   let commandEntries: AgentProcessEntry[] = [];
@@ -794,6 +804,7 @@ function ProcessEntries({
       <CommandGroup
         key={`commands-${commandEntries[0].id}`}
         entries={commandEntries}
+        onPreserveScroll={onPreserveScroll}
       />
     );
     commandEntries = [];
@@ -813,6 +824,7 @@ function ProcessEntries({
         entry={entry}
         onToggleEntry={onToggleEntry}
         onOpenFile={onOpenFile}
+        onPreserveScroll={onPreserveScroll}
       />
     );
   });
@@ -871,12 +883,14 @@ function ProcessBlock({
   onToggle,
   onToggleEntry,
   onOpenFile,
+  onPreserveScroll,
 }: {
   messageId: string;
   process: AgentProcess;
-  onToggle: (messageId: string) => void;
-  onToggleEntry: (messageId: string, entryId: string) => void;
+  onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string) => void;
+  onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
 }) {
   const nowTick = useProcessTicker(!process.endedAt);
   const durationEnd = process.endedAt || nowTick;
@@ -886,7 +900,7 @@ function ProcessBlock({
 
   return (
     <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
-      <button className="chat-process-toggle" onClick={() => onToggle(messageId)}>
+      <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
         <span>{interrupted ? "已中断" : "处理耗时"} {elapsed}</span>
         <span className="chat-process-summary">{summarizeProcessEntries(process.entries)}</span>
         <svg
@@ -906,6 +920,7 @@ function ProcessBlock({
               messageId={messageId}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}
+              onPreserveScroll={onPreserveScroll}
             />
           )}
         </div>
@@ -1190,8 +1205,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeToolFile: Record<string, AgentProcessFile[]>;
     streamWatchdog: ReturnType<typeof setTimeout> | null;
     autoAbortReason: string | null;
+    processTextEntryId: string | null;
+    processTextBuffer: string;
   }>>({});
   const autoFollowBottomRef = useRef(true);
+  const suppressAutoScrollUntilRef = useRef(0);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
@@ -1322,6 +1340,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     return shouldShow;
   }, [getDistanceFromScrollBottom]);
 
+  const handleMessagesScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const awayFromBottom = updateScrollBottomState(event.currentTarget);
+    autoFollowBottomRef.current = !awayFromBottom;
+  }, [updateScrollBottomState]);
+
   // Track scroll position - show scroll-to-bottom button when scrolled up
   useEffect(() => {
     const el = scrollRef.current;
@@ -1338,7 +1361,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (autoFollowBottomRef.current) {
+    if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
       el.scrollTop = el.scrollHeight;
     }
     updateScrollBottomState(el);
@@ -1348,7 +1371,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (autoFollowBottomRef.current) {
+      if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
         el.scrollTop = el.scrollHeight;
       }
       updateScrollBottomState(el);
@@ -1410,6 +1433,42 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
     setUserMsgHistoryOpen(false);
   }, []);
+
+  const preserveScrollDuringLayoutChange = useCallback((action: () => void, anchor?: HTMLElement | null) => {
+    const el = scrollRef.current;
+    if (!el) {
+      action();
+      return;
+    }
+
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const previousScrollTop = el.scrollTop;
+    autoFollowBottomRef.current = false;
+    suppressAutoScrollUntilRef.current = Date.now() + 300;
+
+    action();
+
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      if (anchor && typeof anchorTop === "number") {
+        const nextTop = anchor.getBoundingClientRect().top;
+        current.scrollTop += nextTop - anchorTop;
+      } else {
+        current.scrollTop = previousScrollTop;
+      }
+      const awayFromBottom = updateScrollBottomState(current);
+      autoFollowBottomRef.current = !awayFromBottom;
+    });
+  }, [updateScrollBottomState]);
+
+  const handleToggleAssistantProcess = useCallback((messageId: string, anchor?: HTMLElement | null) => {
+    preserveScrollDuringLayoutChange(() => toggleAssistantProcess(messageId), anchor);
+  }, [preserveScrollDuringLayoutChange, toggleAssistantProcess]);
+
+  const handleToggleAssistantProcessEntry = useCallback((messageId: string, entryId: string, anchor?: HTMLElement | null) => {
+    preserveScrollDuringLayoutChange(() => toggleAssistantProcessEntry(messageId, entryId), anchor);
+  }, [preserveScrollDuringLayoutChange, toggleAssistantProcessEntry]);
 
   // Fetch models for the active session. No local config fallback is used; an
   // empty list should stay visible so backend/model discovery issues are clear.
@@ -1546,6 +1605,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         activeToolFile: {},
         streamWatchdog: null,
         autoAbortReason: null,
+        processTextEntryId: null,
+        processTextBuffer: "",
       };
       sessionRuntimeRef.current[sessionId] = runtime;
       return runtime;
@@ -1607,6 +1668,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
 
       setPendingUIResponseState((current) => current?.sessionId === sessionId ? null : current);
       if (sessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
@@ -1615,6 +1678,53 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       void window.electronAPI.agentAbort(sessionId).catch((err) => {
         console.error("[agent] auto abort repeated thinking failed:", err);
       });
+    };
+
+    const appendAssistantProcessText = (sessionId: string, delta: string) => {
+      if (!delta) return;
+      const runtime = getRuntime(sessionId);
+      runtime.streamBuffer += delta;
+      runtime.processTextBuffer += delta;
+
+      if (runtime.processTextEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
+          title: "正文输出",
+          detail: runtime.processTextBuffer,
+          state: "running",
+        }, sessionId);
+        return;
+      }
+
+      const entryId = createProcessEntryId();
+      runtime.processTextEntryId = entryId;
+      appendProcessEntry(sessionId, {
+        id: entryId,
+        type: "info",
+        title: "正文输出",
+        detail: runtime.processTextBuffer,
+        state: "running",
+      });
+    };
+
+    const finishAssistantProcessText = (sessionId: string) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.processTextEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
+          title: "正文输出",
+          detail: runtime.processTextBuffer,
+          state: "completed",
+        }, sessionId);
+      }
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
+    };
+
+    const replaceAssistantProcessText = (sessionId: string, content: string) => {
+      const runtime = getRuntime(sessionId);
+      const delta = content.startsWith(runtime.streamBuffer)
+        ? content.slice(runtime.streamBuffer.length)
+        : content;
+      if (delta) appendAssistantProcessText(sessionId, delta);
     };
 
     const appendThinkingDelta = (sessionId: string, delta: string) => {
@@ -1716,6 +1826,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     ) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
+      finishAssistantProcessText(currentSessionId);
       const finalContent = (content || runtime.streamBuffer).trim();
       if (finalContent.trim().length > 0) {
         runtime.streamBuffer = finalContent;
@@ -1740,6 +1851,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.activeToolEntry = {};
       runtime.activeToolFile = {};
       runtime.thinkingEntryId = null;
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
       if (currentSessionId) {
         const activeId = useProjectStore.getState().activeSessionId;
         // Only show "completed" notification if the user wasn't watching this session
@@ -1753,6 +1866,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const failAssistantStream = (currentSessionId: string, title: string, detail?: string) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
+      finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
 
       const errorContent = detail?.trim()
@@ -1781,6 +1895,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
       runtime.autoAbortReason = null;
 
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
@@ -1840,6 +1956,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           runtime.activeToolEntry = {};
           runtime.activeToolFile = {};
           runtime.autoAbortReason = null;
+          runtime.processTextEntryId = null;
+          runtime.processTextBuffer = "";
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
           runtime.processActive = true;
@@ -1860,6 +1978,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               runtime.streamBuffer = "";
               runtime.thinkingBuffer = "";
               runtime.thinkingEntryId = null;
+              runtime.processTextEntryId = null;
+              runtime.processTextBuffer = "";
             }
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
             runtime.processActive = true;
@@ -1885,8 +2005,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           if (!event.delta) break;
           ensureAssistantContinuation(currentSessionId);
           finishThinkingEntry(currentSessionId);
-          runtime.streamBuffer += String(event.delta);
-          useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+          appendAssistantProcessText(currentSessionId, String(event.delta));
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_snapshot":
@@ -1895,13 +2014,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             if (!content) break;
             ensureAssistantContinuation(currentSessionId);
             finishThinkingEntry(currentSessionId);
-            runtime.streamBuffer = content;
-            useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+            replaceAssistantProcessText(currentSessionId, content);
             refreshStreamWatchdog(currentSessionId);
           }
           break;
         case "thinking_delta":
           ensureAssistantContinuation(currentSessionId);
+          finishAssistantProcessText(currentSessionId);
           appendThinkingDelta(currentSessionId, String(event.delta || ""));
           break;
         case "thinking_end":
@@ -1912,6 +2031,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "ask_user":
         case "droid.ask_user":
           {
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const entryId = createProcessEntryId();
             setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
@@ -1932,6 +2052,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               ensureAssistantContinuation(currentSessionId);
             }
             if (pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) break;
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
@@ -1944,6 +2065,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "agent_disconnected":
           if (!runtime.processActive) break;
+          finishAssistantProcessText(currentSessionId);
           finishThinkingEntry(currentSessionId);
           completeAssistantStream(currentSessionId, undefined, true);
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
@@ -1951,6 +2073,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "tool_start":
           {
             ensureAssistantContinuation(currentSessionId);
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             if (normalizeToolKind(event.toolKind) === "question") {
@@ -1994,6 +2117,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           break;
         case "tool_end":
           {
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             const entryId = runtime.activeToolEntry[key];
@@ -2040,12 +2164,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         case "diff_update":
           ensureAssistantContinuation(currentSessionId);
           if (event.diffs && event.diffs.length > 0) {
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
           }
           break;
         case "process_event":
           ensureAssistantContinuation(currentSessionId);
+          finishAssistantProcessText(currentSessionId);
           finishThinkingEntry(currentSessionId);
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
@@ -2668,7 +2794,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
       {/* Messages */}
       <div className="chat-messages-area">
-        <div ref={scrollRef} className="chat-messages">
+        <div ref={scrollRef} className="chat-messages" onScroll={handleMessagesScroll}>
           {activeSessionId && !isSessionInitialized(activeSessionId) ? (
             <div className="chat-loading-agent">
               <div className="chat-working-spinner" />
@@ -2692,9 +2818,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                   <ProcessBlock
                     messageId={msg.id}
                     process={msg.process}
-                    onToggle={toggleAssistantProcess}
-                    onToggleEntry={toggleAssistantProcessEntry}
+                    onToggle={handleToggleAssistantProcess}
+                    onToggleEntry={handleToggleAssistantProcessEntry}
                     onOpenFile={setPreviewFile}
+                    onPreserveScroll={preserveScrollDuringLayoutChange}
                   />
                 )}
                 {hasVisibleBubble && (

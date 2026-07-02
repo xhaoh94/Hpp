@@ -43366,7 +43366,8 @@ const splitCommandDetail = (detail, command) => {
   return { command: command || "", output: detail.trim() };
 };
 function CommandDetail({
-  entry
+  entry,
+  onPreserveScroll
 }) {
   const [outputExpanded, setOutputExpanded] = reactExports.useState(entry.state === "running");
   const userToggledRef = reactExports.useRef(false);
@@ -43379,16 +43380,18 @@ function CommandDetail({
       setOutputExpanded(false);
     }
   }, [isRunning]);
-  const toggleOutput = () => {
+  const toggleOutput = (anchor) => {
     userToggledRef.current = true;
-    setOutputExpanded((current) => !current);
+    const action = () => setOutputExpanded((current) => !current);
+    if (onPreserveScroll) onPreserveScroll(action, anchor);
+    else action();
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "button",
       {
         className: "chat-command-header",
-        onClick: canExpand ? toggleOutput : void 0,
+        onClick: canExpand ? (event) => toggleOutput(event.currentTarget) : void 0,
         disabled: !canExpand,
         children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-command-prompt", children: "$_" }),
@@ -43418,7 +43421,8 @@ function CommandDetail({
   ] });
 }
 function CommandGroup({
-  entries
+  entries,
+  onPreserveScroll
 }) {
   const [expanded, setExpanded] = reactExports.useState(false);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-process-entry tool chat-command-group", children: [
@@ -43428,7 +43432,7 @@ function CommandGroup({
         "button",
         {
           className: "chat-process-entry-header expandable",
-          onClick: () => setExpanded((current) => !current),
+          onClick: (event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget),
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "chat-process-entry-title", children: [
               "已运行 ",
@@ -43452,7 +43456,7 @@ function CommandGroup({
           ]
         }
       ),
-      expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-group-list", children: entries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry }, entry.id)) })
+      expanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-command-group-list", children: entries.map((entry) => /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry, onPreserveScroll }, entry.id)) })
     ] })
   ] });
 }
@@ -43460,7 +43464,8 @@ function ProcessEntryRow({
   messageId,
   entry,
   onToggleEntry,
-  onOpenFile
+  onOpenFile,
+  onPreserveScroll
 }) {
   const hasDetail = !!entry.detail;
   const files = entry.files || [];
@@ -43478,7 +43483,7 @@ function ProcessEntryRow({
         "button",
         {
           className: `chat-process-entry-header ${canExpand ? "expandable" : ""}`,
-          onClick: canExpand ? () => onToggleEntry(messageId, entry.id) : void 0,
+          onClick: canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : void 0,
           disabled: !canExpand,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-title", children: entry.title }),
@@ -43500,7 +43505,7 @@ function ProcessEntryRow({
         }
       ),
       files.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ProcessEntryFiles, { files, onOpenFile }),
-      commandVisible && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry }),
+      commandVisible && /* @__PURE__ */ jsxRuntimeExports.jsx(CommandDetail, { entry, onPreserveScroll }),
       detailVisible && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: `chat-process-entry-detail ${canExpand ? "panel" : ""}`, children: entry.detail })
     ] })
   ] });
@@ -43509,7 +43514,8 @@ function ProcessEntries({
   entries,
   messageId,
   onToggleEntry,
-  onOpenFile
+  onOpenFile,
+  onPreserveScroll
 }) {
   const rows = [];
   let commandEntries = [];
@@ -43519,7 +43525,8 @@ function ProcessEntries({
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         CommandGroup,
         {
-          entries: commandEntries
+          entries: commandEntries,
+          onPreserveScroll
         },
         `commands-${commandEntries[0].id}`
       )
@@ -43539,7 +43546,8 @@ function ProcessEntries({
           messageId,
           entry,
           onToggleEntry,
-          onOpenFile
+          onOpenFile,
+          onPreserveScroll
         },
         entry.id
       )
@@ -43582,7 +43590,8 @@ function ProcessBlock({
   process: process2,
   onToggle,
   onToggleEntry,
-  onOpenFile
+  onOpenFile,
+  onPreserveScroll
 }) {
   const nowTick = useProcessTicker(!process2.endedAt);
   const durationEnd = process2.endedAt || nowTick;
@@ -43590,7 +43599,7 @@ function ProcessBlock({
   const expanded = !!process2.expanded;
   const interrupted = process2.entries.some((entry) => entry.state === "interrupted");
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-process ${interrupted ? "interrupted" : ""}`, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-process-toggle", onClick: () => onToggle(messageId), children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "chat-process-toggle", onClick: (event) => onToggle(messageId, event.currentTarget), children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
         interrupted ? "已中断" : "处理耗时",
         " ",
@@ -43617,7 +43626,8 @@ function ProcessBlock({
         entries: mergeProcessEntries(process2.entries),
         messageId,
         onToggleEntry,
-        onOpenFile
+        onOpenFile,
+        onPreserveScroll
       }
     ) })
   ] });
@@ -43851,6 +43861,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   const streamWatchdogRef = reactExports.useRef(null);
   const sessionRuntimeRef = reactExports.useRef({});
   const autoFollowBottomRef = reactExports.useRef(true);
+  const suppressAutoScrollUntilRef = reactExports.useRef(0);
   const [showScrollBottom, setShowScrollBottom] = reactExports.useState(false);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
@@ -43961,6 +43972,10 @@ function ChatPanel({ sendKey = "Enter" }) {
     setShowScrollBottom(shouldShow);
     return shouldShow;
   }, [getDistanceFromScrollBottom]);
+  const handleMessagesScroll = reactExports.useCallback((event) => {
+    const awayFromBottom = updateScrollBottomState(event.currentTarget);
+    autoFollowBottomRef.current = !awayFromBottom;
+  }, [updateScrollBottomState]);
   reactExports.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -43975,7 +43990,7 @@ function ChatPanel({ sendKey = "Enter" }) {
   reactExports.useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (autoFollowBottomRef.current) {
+    if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
       el.scrollTop = el.scrollHeight;
     }
     updateScrollBottomState(el);
@@ -43984,7 +43999,7 @@ function ChatPanel({ sendKey = "Enter" }) {
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (autoFollowBottomRef.current) {
+      if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
         el.scrollTop = el.scrollHeight;
       }
       updateScrollBottomState(el);
@@ -44037,6 +44052,36 @@ function ChatPanel({ sendKey = "Enter" }) {
     }
     setUserMsgHistoryOpen(false);
   }, []);
+  const preserveScrollDuringLayoutChange = reactExports.useCallback((action, anchor) => {
+    const el = scrollRef.current;
+    if (!el) {
+      action();
+      return;
+    }
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const previousScrollTop = el.scrollTop;
+    autoFollowBottomRef.current = false;
+    suppressAutoScrollUntilRef.current = Date.now() + 300;
+    action();
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      if (anchor && typeof anchorTop === "number") {
+        const nextTop = anchor.getBoundingClientRect().top;
+        current.scrollTop += nextTop - anchorTop;
+      } else {
+        current.scrollTop = previousScrollTop;
+      }
+      const awayFromBottom = updateScrollBottomState(current);
+      autoFollowBottomRef.current = !awayFromBottom;
+    });
+  }, [updateScrollBottomState]);
+  const handleToggleAssistantProcess = reactExports.useCallback((messageId, anchor) => {
+    preserveScrollDuringLayoutChange(() => toggleAssistantProcess(messageId), anchor);
+  }, [preserveScrollDuringLayoutChange, toggleAssistantProcess]);
+  const handleToggleAssistantProcessEntry = reactExports.useCallback((messageId, entryId, anchor) => {
+    preserveScrollDuringLayoutChange(() => toggleAssistantProcessEntry(messageId, entryId), anchor);
+  }, [preserveScrollDuringLayoutChange, toggleAssistantProcessEntry]);
   const fetchModels = async (sessionId, fetchRunId) => {
     for (const delay of MODEL_FETCH_RETRY_DELAYS) {
       if (delay > 0) {
@@ -44133,7 +44178,9 @@ function ChatPanel({ sendKey = "Enter" }) {
         activeToolEntry: {},
         activeToolFile: {},
         streamWatchdog: null,
-        autoAbortReason: null
+        autoAbortReason: null,
+        processTextEntryId: null,
+        processTextBuffer: ""
       };
       sessionRuntimeRef.current[sessionId] = runtime;
       return runtime;
@@ -44190,12 +44237,54 @@ ${pattern}`,
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
       setPendingUIResponseState((current) => current?.sessionId === sessionId ? null : current);
       if (sessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
       useProjectStore.getState().setAgentStatus(sessionId, "idle");
       void window.electronAPI.agentAbort(sessionId).catch((err) => {
         console.error("[agent] auto abort repeated thinking failed:", err);
       });
+    };
+    const appendAssistantProcessText = (sessionId, delta) => {
+      if (!delta) return;
+      const runtime = getRuntime(sessionId);
+      runtime.streamBuffer += delta;
+      runtime.processTextBuffer += delta;
+      if (runtime.processTextEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
+          title: "正文输出",
+          detail: runtime.processTextBuffer,
+          state: "running"
+        }, sessionId);
+        return;
+      }
+      const entryId = createProcessEntryId();
+      runtime.processTextEntryId = entryId;
+      appendProcessEntry(sessionId, {
+        id: entryId,
+        type: "info",
+        title: "正文输出",
+        detail: runtime.processTextBuffer,
+        state: "running"
+      });
+    };
+    const finishAssistantProcessText = (sessionId) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.processTextEntryId) {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
+          title: "正文输出",
+          detail: runtime.processTextBuffer,
+          state: "completed"
+        }, sessionId);
+      }
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
+    };
+    const replaceAssistantProcessText = (sessionId, content2) => {
+      const runtime = getRuntime(sessionId);
+      const delta = content2.startsWith(runtime.streamBuffer) ? content2.slice(runtime.streamBuffer.length) : content2;
+      if (delta) appendAssistantProcessText(sessionId, delta);
     };
     const appendThinkingDelta = (sessionId, delta) => {
       if (!delta) return;
@@ -44275,6 +44364,7 @@ ${pattern}`,
     const completeAssistantStream = (currentSessionId, content2, timedOut = false) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
+      finishAssistantProcessText(currentSessionId);
       const finalContent = (content2 || runtime.streamBuffer).trim();
       if (finalContent.trim().length > 0) {
         runtime.streamBuffer = finalContent;
@@ -44299,6 +44389,8 @@ ${pattern}`,
       runtime.activeToolEntry = {};
       runtime.activeToolFile = {};
       runtime.thinkingEntryId = null;
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
       if (currentSessionId) {
         const activeId = useProjectStore.getState().activeSessionId;
         useProjectStore.getState().setAgentStatus(
@@ -44310,6 +44402,7 @@ ${pattern}`,
     const failAssistantStream = (currentSessionId, title, detail) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
+      finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
       const errorContent = detail?.trim() ? `${title}
 
@@ -44335,6 +44428,8 @@ ${detail.trim()}` : title;
       runtime.streamBuffer = "";
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
+      runtime.processTextEntryId = null;
+      runtime.processTextBuffer = "";
       runtime.autoAbortReason = null;
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
       useProjectStore.getState().setAgentStatus(currentSessionId, "error");
@@ -44379,6 +44474,8 @@ ${detail.trim()}` : title;
           runtime.activeToolEntry = {};
           runtime.activeToolFile = {};
           runtime.autoAbortReason = null;
+          runtime.processTextEntryId = null;
+          runtime.processTextBuffer = "";
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
           runtime.processActive = true;
@@ -44397,6 +44494,8 @@ ${detail.trim()}` : title;
               runtime.streamBuffer = "";
               runtime.thinkingBuffer = "";
               runtime.thinkingEntryId = null;
+              runtime.processTextEntryId = null;
+              runtime.processTextBuffer = "";
             }
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);
             runtime.processActive = true;
@@ -44422,8 +44521,7 @@ ${detail.trim()}` : title;
           if (!event.delta) break;
           ensureAssistantContinuation(currentSessionId);
           finishThinkingEntry(currentSessionId);
-          runtime.streamBuffer += String(event.delta);
-          useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+          appendAssistantProcessText(currentSessionId, String(event.delta));
           refreshStreamWatchdog(currentSessionId);
           break;
         case "stream_snapshot":
@@ -44432,13 +44530,13 @@ ${detail.trim()}` : title;
             if (!content2) break;
             ensureAssistantContinuation(currentSessionId);
             finishThinkingEntry(currentSessionId);
-            runtime.streamBuffer = content2;
-            useChatStore.getState().updateLastAssistant(runtime.streamBuffer, currentSessionId);
+            replaceAssistantProcessText(currentSessionId, content2);
             refreshStreamWatchdog(currentSessionId);
           }
           break;
         case "thinking_delta":
           ensureAssistantContinuation(currentSessionId);
+          finishAssistantProcessText(currentSessionId);
           appendThinkingDelta(currentSessionId, String(event.delta || ""));
           break;
         case "thinking_end":
@@ -44449,6 +44547,7 @@ ${detail.trim()}` : title;
         case "ask_user":
         case "droid.ask_user":
           {
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const entryId = createProcessEntryId();
             setPendingUIResponseState(getPendingUIFromEvent(event, currentSessionId, entryId));
@@ -44469,6 +44568,7 @@ ${detail.trim()}` : title;
               ensureAssistantContinuation(currentSessionId);
             }
             if (pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) break;
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const eventContent = event.content ? String(event.content) : "";
             completeAssistantStream(currentSessionId, eventContent, false);
@@ -44479,6 +44579,7 @@ ${detail.trim()}` : title;
           break;
         case "agent_disconnected":
           if (!runtime.processActive) break;
+          finishAssistantProcessText(currentSessionId);
           finishThinkingEntry(currentSessionId);
           completeAssistantStream(currentSessionId, void 0, true);
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
@@ -44486,6 +44587,7 @@ ${detail.trim()}` : title;
         case "tool_start":
           {
             ensureAssistantContinuation(currentSessionId);
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             if (normalizeToolKind(event.toolKind) === "question") {
@@ -44529,6 +44631,7 @@ ${detail.trim()}` : title;
           break;
         case "tool_end":
           {
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             const key = getToolKey(event);
             const entryId = runtime.activeToolEntry[key];
@@ -44572,12 +44675,14 @@ ${detail.trim()}` : title;
         case "diff_update":
           ensureAssistantContinuation(currentSessionId);
           if (event.diffs && event.diffs.length > 0) {
+            finishAssistantProcessText(currentSessionId);
             finishThinkingEntry(currentSessionId);
             useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
           }
           break;
         case "process_event":
           ensureAssistantContinuation(currentSessionId);
+          finishAssistantProcessText(currentSessionId);
           finishThinkingEntry(currentSessionId);
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
@@ -45131,7 +45236,7 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-messages-area", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: scrollRef, className: "chat-messages", children: activeSessionId && !isSessionInitialized(activeSessionId) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-loading-agent", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: scrollRef, className: "chat-messages", onScroll: handleMessagesScroll, children: activeSessionId && !isSessionInitialized(activeSessionId) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "chat-loading-agent", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "chat-working-spinner" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "正在初始化 Agent 会话..." })
       ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
@@ -45148,9 +45253,10 @@ ${fileParts.join("\n\n")}` : fileParts.join("\n\n");
               {
                 messageId: msg.id,
                 process: msg.process,
-                onToggle: toggleAssistantProcess,
-                onToggleEntry: toggleAssistantProcessEntry,
-                onOpenFile: setPreviewFile
+                onToggle: handleToggleAssistantProcess,
+                onToggleEntry: handleToggleAssistantProcessEntry,
+                onOpenFile: setPreviewFile,
+                onPreserveScroll: preserveScrollDuringLayoutChange
               }
             ),
             hasVisibleBubble && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `chat-msg ${msg.role}`, children: [

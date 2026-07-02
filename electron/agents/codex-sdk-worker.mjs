@@ -40,6 +40,25 @@ const stringifyValue = (value) => {
   }
 };
 
+const extractText = (value) => {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => extractText(item?.text ?? item?.content ?? item))
+      .filter(Boolean)
+      .join("");
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.content === "string") return value.content;
+    if (Array.isArray(value.content)) return extractText(value.content);
+    if (typeof value.message === "string") return value.message;
+    return "";
+  }
+  return String(value);
+};
+
 const truncate = (value, maxLength = 1200) => {
   if (!value || value.length <= maxLength) return value;
   return `${value.slice(0, maxLength)}...`;
@@ -347,7 +366,7 @@ const handleItemEvent = (item, phase) => {
 
   switch (item.type) {
     case "agent_message": {
-      const text = item.text || "";
+      const text = extractText(item.text ?? item.content ?? item.message ?? item);
       const delta = getTextDelta(agentTextByItemId, item.id, text);
       if (delta) send({ type: "stream_delta", delta });
       if (phase === "completed") {
@@ -357,7 +376,7 @@ const handleItemEvent = (item, phase) => {
       break;
     }
     case "reasoning": {
-      const text = item.text || "";
+      const text = extractText(item.text ?? item.content ?? item.summary ?? item);
       const delta = getTextDelta(reasoningTextByItemId, item.id, text);
       if (delta) send({ type: "thinking_delta", delta });
       if (phase === "completed") send({ type: "thinking_end" });
