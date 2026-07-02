@@ -6,6 +6,14 @@ import { basename, join } from "node:path";
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const PLAN_MODE_INSTRUCTIONS = [
+  "<plan_mode>",
+  "Plan mode is enabled for this turn.",
+  "Do not modify files, apply patches, run write commands, or otherwise change workspace state.",
+  "You may inspect context that is necessary to make the plan.",
+  "Respond with a concise implementation plan and wait for the user to explicitly confirm before implementation.",
+  "</plan_mode>",
+].join("\n");
 
 let codex = null;
 let planCodex = null;
@@ -202,11 +210,16 @@ const normalizeReasoningEffort = (level) => {
   return VALID_REASONING_EFFORTS.has(normalized) ? normalized : undefined;
 };
 
-const buildThreadOptions = () => {
+const buildThreadOptions = (planModeEnabled = false) => {
   const options = {
     workingDirectory: projectPath,
     skipGitRepoCheck: true,
   };
+
+  if (planModeEnabled) {
+    options.sandboxMode = "read-only";
+    options.approvalPolicy = "never";
+  }
 
   const effort = normalizeReasoningEffort(thinkingLevel);
   if (effort) options.modelReasoningEffort = effort;
@@ -235,14 +248,27 @@ const getCodexClient = () => {
 const createThreadForTurn = () => {
   if (!codex) throw new Error("Codex SDK is not initialized");
 
-  const options = buildThreadOptions();
+  const options = buildThreadOptions(activePlanModeEnabled);
   const activeCodex = getCodexClient();
-  if (threadId) {
-    thread = activeCodex.resumeThread(threadId, options);
-  } else if (!thread) {
-    thread = activeCodex.startThread(options);
-  }
+  thread = threadId ? activeCodex.resumeThread(threadId, options) : activeCodex.startThread(options);
   return thread;
+};
+
+const applyPlanModeInstructions = (input) => {
+  if (!activePlanModeEnabled) return input;
+  if (typeof input === "string") return `${PLAN_MODE_INSTRUCTIONS}\n\n${input}`;
+  if (!Array.isArray(input)) return input;
+
+  let injected = false;
+  const nextInput = input.map((item) => {
+    if (!injected && item?.type === "text") {
+      injected = true;
+      return { ...item, text: `${PLAN_MODE_INSTRUCTIONS}\n\n${item.text || ""}` };
+    }
+    return item;
+  });
+
+  return injected ? nextInput : [{ type: "text", text: PLAN_MODE_INSTRUCTIONS }, ...nextInput];
 };
 
 const startStream = () => {
@@ -505,7 +531,7 @@ const runPrompt = async (command) => {
       : command.message;
 
     const activeThread = createThreadForTurn();
-    const { events } = await activeThread.runStreamed(input, {
+    const { events } = await activeThread.runStreamed(applyPlanModeInstructions(input), {
       signal: activeAbortController.signal,
     });
 
