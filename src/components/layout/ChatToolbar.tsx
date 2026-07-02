@@ -79,7 +79,7 @@ export function ChatToolbar({
           <path d="M4 12l1 1 2-2" />
           <path d="M4 18l1 1 2-2" />
         </svg>
-        <span>Plan 模式</span>
+        <span>Plan</span>
       </button>
 
       <div ref={modelRef} className="relative">

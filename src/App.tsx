@@ -3,11 +3,14 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { ContentArea } from "./components/layout/ContentArea";
 import { ChatPanel } from "./components/layout/ChatPanel";
 import { FileSearch } from "./components/shared/FileSearch";
-import { useDataPersistence } from "./hooks/useDataPersistence";
+import { saveSessionModel, useDataPersistence } from "./hooks/useDataPersistence";
 import { useAppStore } from "./stores/app-store";
-import { useChatStore } from "./stores/chat-store";
+import { useChatStore, type ModelInfo } from "./stores/chat-store";
 import { useProjectStore } from "./stores/project-store";
 import TitleBar from "./components/layout/TitleBar";
+
+const isSameModel = (left: ModelInfo | null | undefined, right: ModelInfo | null | undefined) =>
+  !!left && !!right && left.id === right.id && left.provider === right.provider;
 
 function matchShortcut(event: KeyboardEvent, shortcut: string): boolean {
   const parts = shortcut.split("+").map((s) => s.trim().toLowerCase());
@@ -46,18 +49,27 @@ export default function App() {
   }, []);
 
   const cycleModel = useCallback((direction: "prev" | "next") => {
-    const { favoriteModels, currentModel, setCurrentModel } = useChatStore.getState();
-    if (favoriteModels.length < 2) return;
-    const idx = favoriteModels.findIndex(
-      (m) => m.id === currentModel?.id && m.provider === currentModel?.provider
+    const { favoriteModels, availableModels, currentModel, setCurrentModel } = useChatStore.getState();
+    const availableFavoriteModels = favoriteModels.filter((favorite) =>
+      availableModels.some((model) => isSameModel(model, favorite))
     );
+    if (availableFavoriteModels.length < 2) return;
+
+    const idx = availableFavoriteModels.findIndex((model) => isSameModel(model, currentModel));
     let newIdx: number;
     if (direction === "next") {
-      newIdx = idx < favoriteModels.length - 1 ? idx + 1 : 0;
+      newIdx = idx < availableFavoriteModels.length - 1 ? idx + 1 : 0;
     } else {
-      newIdx = idx > 0 ? idx - 1 : favoriteModels.length - 1;
+      newIdx = idx > 0 ? idx - 1 : availableFavoriteModels.length - 1;
     }
-    setCurrentModel(favoriteModels[newIdx]);
+    const nextModel = availableFavoriteModels[newIdx];
+    setCurrentModel(nextModel);
+
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) saveSessionModel(sessionId, nextModel);
+    void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id).catch((error) => {
+      console.error("[model] shortcut switch failed:", error);
+    });
   }, []);
 
   useEffect(() => {
