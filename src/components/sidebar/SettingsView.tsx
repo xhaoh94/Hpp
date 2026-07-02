@@ -164,7 +164,10 @@ export function SettingsView() {
     setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
     try {
       const result = await window.electronAPI.agentUpdate(agentId);
-      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status }));
+      if (result.status) {
+        const status = result.status;
+        setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
+      }
       if (!result.success) {
         setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
       }

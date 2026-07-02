@@ -16,6 +16,8 @@ import { getAgentName, getAgentPlanModeTooltip } from "@/lib/agents";
 import { applySessionModels, getSessionModel, saveSessionModel, getSessionThinking, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
+import { ChatComposer, type PendingImage } from "./ChatComposer";
+import { ChatToolbar } from "./ChatToolbar";
 import { DiffBlock } from "./DiffBlock";
 import { ProcessBlock } from "./ProcessBlock";
 import {
@@ -222,7 +224,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const inputHasTextRef = useRef(false);
   const [inputHasText, setInputHasText] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
-  const [pendingImages, setPendingImages] = useState<{ id: string; src: string; name: string; file: File }[]>([]);
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
@@ -765,7 +767,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
       if (/Codex is already running/i.test(result.error || "")) {
-        if (runtime?.processActive || agentStatuses[targetSessionId] === "running") {
+        const latestStatus = useProjectStore.getState().agentStatuses[targetSessionId];
+        if (runtime?.processActive || latestStatus === "running") {
           setStreaming(true);
           useProjectStore.getState().setAgentStatus(targetSessionId, "running");
           return;
@@ -916,6 +919,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   ];
   const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel) || thinkingLevels[3];
   const modelProviders = [...new Set(availableModels.map((m) => m.provider))];
+  const flattenModelList = activeSession?.agentId === "codex" || activeAgentId === "codex";
 
   // No project open - show placeholder
   if (!activeProject) {
@@ -1117,220 +1121,56 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           />
         )}
 
-        {/* Combined preview bar for files and images */}
-        {(pendingFiles.length > 0 || pendingImages.length > 0) && (
-          <div className="chat-preview-bar">
-            {pendingFiles.map((pf) => (
-              <div key={pf.id} className="chat-file-card">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="chat-file-icon">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                </svg>
-                <span className="chat-file-name">{pf.fileName}:{pf.startLine}-{pf.endLine}</span>
-                <button className="chat-file-remove" onClick={() => removePendingFile(pf.id)}>×</button>
-              </div>
-            ))}
-            {pendingImages.map((img) => (
-              <div key={img.id} className="chat-image-card-inline">
-                {img.file.type.startsWith("image/") ? (
-                  <img src={img.src} alt={img.name} className="chat-image-thumb-inline" onClick={() => setZoomImage(img.src)} />
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" strokeWidth="2" className="chat-file-icon">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                  </svg>
-                )}
-                <span className="chat-file-name">{img.name}</span>
-                <button className="chat-file-remove" onClick={() => removePendingImage(img.id)}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
+        <ChatComposer
+          activeQuestionnaire={!!activeQuestionnaire}
+          currentSessionRunning={currentSessionRunning}
+          isAwaitingUIResponse={isAwaitingUIResponse}
+          inputHasText={inputHasText}
+          pendingFiles={pendingFiles}
+          pendingImages={pendingImages}
+          sendKey={sendKey}
+          fileInputRef={fileInputRef}
+          textareaRef={textareaRef}
+          onAddPendingImage={addPendingImage}
+          onRemovePendingFile={removePendingFile}
+          onRemovePendingImage={removePendingImage}
+          onOpenImage={setZoomImage}
+          onSyncInputValue={syncInputValue}
+          onResizeTextarea={resizeTextarea}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onSend={handleSend}
+          onAbort={handleAbort}
+        />
 
-        {/* Input container */}
-        <div className="chat-input-container" onDrop={handleDrop} onDragOver={handleDragOver}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => {
-              Array.from(e.target.files || []).forEach(addPendingImage);
-              e.target.value = "";
-            }}
-          />
-          <div className="chat-input-actions-left">
-            <button className="chat-input-btn" title="上传文件" onClick={() => fileInputRef.current?.click()}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-          <textarea
-            ref={textareaRef}
-            defaultValue=""
-            onChange={(e) => {
-              syncInputValue(e.currentTarget.value);
-              resizeTextarea(e.currentTarget);
-            }}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            placeholder={activeQuestionnaire ? "请在上方提交问卷" : sendKey === "Ctrl+Enter" ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)" : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)"}
-            rows={1}
-            className="chat-textarea"
-            disabled={!!activeQuestionnaire}
-          />
-          <button
-            onClick={currentSessionRunning && !isAwaitingUIResponse ? handleAbort : handleSend}
-            disabled={
-              activeQuestionnaire
-                ? true
-                : isAwaitingUIResponse
-                  ? !inputHasText
-                : !currentSessionRunning && !inputHasText && pendingImages.length === 0 && pendingFiles.length === 0
-            }
-            className={`chat-send-btn ${currentSessionRunning && !isAwaitingUIResponse ? "abort" : ""}`}
-            title={activeQuestionnaire ? "请在上方提交问卷" : currentSessionRunning && !isAwaitingUIResponse ? "停止" : isAwaitingUIResponse ? "发送回答" : "发送"}
-          >
-            {currentSessionRunning && !isAwaitingUIResponse ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 19V5" />
-                <path d="M5 12l7-7 7 7" />
-              </svg>
-            )}
-          </button>
-        </div>
-
-        {/* Toolbar below input */}
-        <div className="chat-input-toolbar">
-          <button
-            type="button"
-            onClick={() => savePlanModeEnabled(!planModeEnabled)}
-            className={`chat-toolbar-select chat-toolbar-plan-toggle ${planModeEnabled ? "active" : ""}`}
-            title={getAgentPlanModeTooltip(activeSession?.agentId || activeAgentId)}
-            aria-pressed={planModeEnabled}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <path d="M9 6h11" />
-              <path d="M9 12h11" />
-              <path d="M9 18h11" />
-              <path d="M4 6l1 1 2-2" />
-              <path d="M4 12l1 1 2-2" />
-              <path d="M4 18l1 1 2-2" />
-            </svg>
-            <span>Plan 模式</span>
-          </button>
-
-          {/* Model selector */}
-          <div ref={modelRef} className="relative">
-            <button
-              onClick={() => { setModelOpen(!modelOpen); setThinkingOpen(false); if (modelOpen) setExpandedProvider(null); }}
-              className="chat-toolbar-select"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="3" y="3" width="18" height="18" rx="3" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <circle cx="15.5" cy="8.5" r="1.5" />
-                <path d="M8 14c0 0 1.5 2 4 2s4-2 4-2" />
-              </svg>
-              <span>{currentModel?.name || "选择模型"}</span>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-            {modelOpen && (
-              <div className="chat-dropdown">
-                {modelProviders.length === 0 && (
-                  <div className="chat-dropdown-empty">暂无可用模型</div>
-                )}
-                {modelProviders.map((provider) => {
-                  const providerModels = availableModels.filter((m) => m.provider === provider);
-                  const isExpanded = expandedProvider === provider;
-                  const hasActiveModel = providerModels.some(
-                    (m) => m.id === currentModel?.id && m.provider === currentModel?.provider
-                  );
-                  return (
-                    <div key={provider}>
-                      <div
-                        className={`chat-dropdown-provider ${isExpanded ? "expanded" : ""} ${hasActiveModel ? "has-active" : ""}`}
-                        onClick={() => setExpandedProvider(isExpanded ? null : provider)}
-                      >
-                        <svg
-                          width="10"
-                          height="10"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
-                        >
-                          <path d="M9 18l6-6-6-6" />
-                        </svg>
-                        <span>{provider}</span>
-                        <span className="chat-dropdown-provider-count">{providerModels.length}</span>
-                      </div>
-                      {isExpanded && providerModels.map((model) => {
-                        const isFav = favoriteModels.some((f) => f.id === model.id && f.provider === model.provider);
-                        const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
-                        return (
-                          <div
-                            key={model.id}
-                            className={`chat-dropdown-item ${isActive ? "active" : ""}`}
-                            onClick={() => handleSelectModel(model)}
-                          >
-                            <span className="truncate">{model.name}</span>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); toggleFavorite(model); }}
-                              className={`chat-dropdown-star ${isFav ? "fav" : ""}`}
-                            >
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill={isFav ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2">
-                                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                              </svg>
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Thinking level selector */}
-          <div ref={thinkingRef} className="relative">
-            <button
-              onClick={() => { setThinkingOpen(!thinkingOpen); setModelOpen(false); }}
-              className="chat-toolbar-select"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
-                <path d="M10 21h4" />
-              </svg>
-              <span>思考: {currentThinking.label}</span>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-            {thinkingOpen && (
-              <div className="chat-thinking-dropdown">
-                {thinkingLevels.map((level) => (
-                  <button
-                    key={level.id}
-                    onClick={() => handleSelectThinking(level.id)}
-                    className={`chat-thinking-option ${thinkingLevel === level.id ? "active" : ""}`}
-                  >
-                    {level.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        <ChatToolbar
+          activeAgentId={activeAgentId}
+          activeSessionAgentId={activeSession?.agentId}
+          availableModels={availableModels}
+          currentModel={currentModel}
+          currentThinking={currentThinking}
+          expandedProvider={expandedProvider}
+          favoriteModels={favoriteModels}
+          flattenModelList={flattenModelList}
+          modelOpen={modelOpen}
+          modelProviders={modelProviders}
+          planModeEnabled={planModeEnabled}
+          thinkingLevel={thinkingLevel}
+          thinkingLevels={thinkingLevels}
+          thinkingOpen={thinkingOpen}
+          modelRef={modelRef}
+          thinkingRef={thinkingRef}
+          getPlanModeTooltip={getAgentPlanModeTooltip}
+          onExpandedProviderChange={setExpandedProvider}
+          onModelOpenChange={setModelOpen}
+          onThinkingOpenChange={setThinkingOpen}
+          onPlanModeChange={savePlanModeEnabled}
+          onSelectModel={handleSelectModel}
+          onSelectThinking={handleSelectThinking}
+          onToggleFavorite={toggleFavorite}
+        />
       </div>
 
       {/* Image zoom modal */}

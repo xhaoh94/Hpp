@@ -167,7 +167,9 @@ export function ProjectCard({ project }: Props) {
     setActiveAgent(session.agentId);
     switchSession(session.id);
     // Dismiss completed status so the green dot disappears permanently
-    setAgentStatus(session.id, "idle");
+    if (agentStatuses[session.id] === "completed") {
+      setAgentStatus(session.id, "idle");
+    }
 
     // Create and switch agent session in background (non-blocking)
     window.electronAPI.agentCreateSession(

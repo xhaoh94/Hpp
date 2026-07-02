@@ -12,6 +12,9 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    },
     "outDir": "./dist/web"
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"]

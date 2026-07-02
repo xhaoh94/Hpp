@@ -1,7 +1,8 @@
+import type { ReactNode } from "react";
 import { useAppStore, type SidebarTab } from "@/stores/app-store";
 import "../layout/Layout.css";
 
-const tabs: { id: SidebarTab; label: string; icon: JSX.Element }[] = [
+const tabs: { id: SidebarTab; label: string; icon: ReactNode }[] = [
   {
     id: "projects",
     label: "项目",
