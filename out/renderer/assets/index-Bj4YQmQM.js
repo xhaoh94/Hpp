@@ -12876,6 +12876,25 @@ const useChatStore = create$1((set, get) => ({
       return msgs;
     });
   }),
+  removeLastAssistantProcessEntries: (entryIds, sessionId) => set((s) => {
+    if (entryIds.length === 0) return {};
+    const entryIdSet = new Set(entryIds);
+    return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index2 = findLastAssistantIndex(msgs);
+      if (index2 < 0) return msgs;
+      const msg = msgs[index2];
+      if (!msg.process) return msgs;
+      msgs[index2] = {
+        ...msg,
+        process: {
+          ...msg.process,
+          entries: msg.process.entries.filter((entry) => !entryIdSet.has(entry.id))
+        }
+      };
+      return msgs;
+    });
+  }),
   finishLastAssistantProcess: (endedAt, finalState = "completed", sessionId) => set((s) => {
     return updateSessionMessages(s, sessionId, (messages) => {
       const msgs = [...messages];
@@ -44180,6 +44199,8 @@ function ChatPanel({ sendKey = "Enter" }) {
         streamWatchdog: null,
         autoAbortReason: null,
         processTextEntryId: null,
+        processTextEntryIds: [],
+        processTextHistory: [],
         processTextBuffer: ""
       };
       sessionRuntimeRef.current[sessionId] = runtime;
@@ -44238,6 +44259,8 @@ ${pattern}`,
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
       runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
       runtime.processTextBuffer = "";
       setPendingUIResponseState((current) => current?.sessionId === sessionId ? null : current);
       if (sessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
@@ -44261,6 +44284,7 @@ ${pattern}`,
       }
       const entryId = createProcessEntryId();
       runtime.processTextEntryId = entryId;
+      runtime.processTextEntryIds.push(entryId);
       appendProcessEntry(sessionId, {
         id: entryId,
         type: "info",
@@ -44277,6 +44301,9 @@ ${pattern}`,
           detail: runtime.processTextBuffer,
           state: "completed"
         }, sessionId);
+        if (runtime.processTextBuffer.trim()) {
+          runtime.processTextHistory.push(runtime.processTextBuffer);
+        }
       }
       runtime.processTextEntryId = null;
       runtime.processTextBuffer = "";
@@ -44285,6 +44312,17 @@ ${pattern}`,
       const runtime = getRuntime(sessionId);
       const delta = content2.startsWith(runtime.streamBuffer) ? content2.slice(runtime.streamBuffer.length) : content2;
       if (delta) appendAssistantProcessText(sessionId, delta);
+    };
+    const normalizeStreamText = (value) => value.replace(/\s+/g, " ").trim();
+    const removeFinalAssistantProcessTextIfDuplicated = (sessionId, finalContent) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.processTextEntryIds.length === 0) return;
+      if (normalizeStreamText(runtime.processTextHistory.join("")) !== normalizeStreamText(finalContent)) return;
+      useChatStore.getState().removeLastAssistantProcessEntries(runtime.processTextEntryIds, sessionId);
+      runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
+      runtime.processTextBuffer = "";
     };
     const appendThinkingDelta = (sessionId, delta) => {
       if (!delta) return;
@@ -44369,6 +44407,7 @@ ${pattern}`,
       if (finalContent.trim().length > 0) {
         runtime.streamBuffer = finalContent;
         useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
+        removeFinalAssistantProcessTextIfDuplicated(currentSessionId, finalContent);
         useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
       } else if (timedOut) {
         useChatStore.getState().appendLastAssistantProcessEntry({
@@ -44390,6 +44429,8 @@ ${pattern}`,
       runtime.activeToolFile = {};
       runtime.thinkingEntryId = null;
       runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
       runtime.processTextBuffer = "";
       if (currentSessionId) {
         const activeId = useProjectStore.getState().activeSessionId;
@@ -44429,6 +44470,8 @@ ${detail.trim()}` : title;
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
       runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
       runtime.processTextBuffer = "";
       runtime.autoAbortReason = null;
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(false);
@@ -44475,6 +44518,8 @@ ${detail.trim()}` : title;
           runtime.activeToolFile = {};
           runtime.autoAbortReason = null;
           runtime.processTextEntryId = null;
+          runtime.processTextEntryIds = [];
+          runtime.processTextHistory = [];
           runtime.processTextBuffer = "";
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
@@ -44495,6 +44540,8 @@ ${detail.trim()}` : title;
               runtime.thinkingBuffer = "";
               runtime.thinkingEntryId = null;
               runtime.processTextEntryId = null;
+              runtime.processTextEntryIds = [];
+              runtime.processTextHistory = [];
               runtime.processTextBuffer = "";
             }
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);

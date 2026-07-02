@@ -1206,6 +1206,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     streamWatchdog: ReturnType<typeof setTimeout> | null;
     autoAbortReason: string | null;
     processTextEntryId: string | null;
+    processTextEntryIds: string[];
+    processTextHistory: string[];
     processTextBuffer: string;
   }>>({});
   const autoFollowBottomRef = useRef(true);
@@ -1606,6 +1608,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         streamWatchdog: null,
         autoAbortReason: null,
         processTextEntryId: null,
+        processTextEntryIds: [],
+        processTextHistory: [],
         processTextBuffer: "",
       };
       sessionRuntimeRef.current[sessionId] = runtime;
@@ -1669,6 +1673,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
       runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
       runtime.processTextBuffer = "";
 
       setPendingUIResponseState((current) => current?.sessionId === sessionId ? null : current);
@@ -1697,6 +1703,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
       const entryId = createProcessEntryId();
       runtime.processTextEntryId = entryId;
+      runtime.processTextEntryIds.push(entryId);
       appendProcessEntry(sessionId, {
         id: entryId,
         type: "info",
@@ -1714,6 +1721,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           detail: runtime.processTextBuffer,
           state: "completed",
         }, sessionId);
+        if (runtime.processTextBuffer.trim()) {
+          runtime.processTextHistory.push(runtime.processTextBuffer);
+        }
       }
       runtime.processTextEntryId = null;
       runtime.processTextBuffer = "";
@@ -1725,6 +1735,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         ? content.slice(runtime.streamBuffer.length)
         : content;
       if (delta) appendAssistantProcessText(sessionId, delta);
+    };
+
+    const normalizeStreamText = (value: string) => value.replace(/\s+/g, " ").trim();
+
+    const removeFinalAssistantProcessTextIfDuplicated = (sessionId: string, finalContent: string) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.processTextEntryIds.length === 0) return;
+      if (normalizeStreamText(runtime.processTextHistory.join("")) !== normalizeStreamText(finalContent)) return;
+      useChatStore.getState().removeLastAssistantProcessEntries(runtime.processTextEntryIds, sessionId);
+      runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
+      runtime.processTextBuffer = "";
     };
 
     const appendThinkingDelta = (sessionId: string, delta: string) => {
@@ -1831,6 +1854,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       if (finalContent.trim().length > 0) {
         runtime.streamBuffer = finalContent;
         useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
+        removeFinalAssistantProcessTextIfDuplicated(currentSessionId, finalContent);
         useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
       } else if (timedOut) {
         useChatStore.getState().appendLastAssistantProcessEntry({
@@ -1852,6 +1876,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.activeToolFile = {};
       runtime.thinkingEntryId = null;
       runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
       runtime.processTextBuffer = "";
       if (currentSessionId) {
         const activeId = useProjectStore.getState().activeSessionId;
@@ -1896,6 +1922,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       runtime.thinkingBuffer = "";
       runtime.thinkingEntryId = null;
       runtime.processTextEntryId = null;
+      runtime.processTextEntryIds = [];
+      runtime.processTextHistory = [];
       runtime.processTextBuffer = "";
       runtime.autoAbortReason = null;
 
@@ -1957,6 +1985,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           runtime.activeToolFile = {};
           runtime.autoAbortReason = null;
           runtime.processTextEntryId = null;
+          runtime.processTextEntryIds = [];
+          runtime.processTextHistory = [];
           runtime.processTextBuffer = "";
           setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
           useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
@@ -1979,6 +2009,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               runtime.thinkingBuffer = "";
               runtime.thinkingEntryId = null;
               runtime.processTextEntryId = null;
+              runtime.processTextEntryIds = [];
+              runtime.processTextHistory = [];
               runtime.processTextBuffer = "";
             }
             if (currentSessionId === useProjectStore.getState().activeSessionId) setStreaming(true);

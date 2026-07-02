@@ -82,6 +82,7 @@ interface ChatState {
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
   appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
+  removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;
@@ -253,6 +254,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
           entries: msg.process.entries.map((entry) =>
             entry.id === entryId ? { ...entry, ...patch } : entry
           ),
+        },
+      };
+      return msgs;
+      });
+    }),
+
+  removeLastAssistantProcessEntries: (entryIds, sessionId) =>
+    set((s) => {
+      if (entryIds.length === 0) return {};
+      const entryIdSet = new Set(entryIds);
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index = findLastAssistantIndex(msgs);
+      if (index < 0) return msgs;
+
+      const msg = msgs[index];
+      if (!msg.process) return msgs;
+
+      msgs[index] = {
+        ...msg,
+        process: {
+          ...msg.process,
+          entries: msg.process.entries.filter((entry) => !entryIdSet.has(entry.id)),
         },
       };
       return msgs;
