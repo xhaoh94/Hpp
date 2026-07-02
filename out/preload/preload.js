@@ -22,6 +22,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   // Data persistence
   loadData: (key) => electron.ipcRenderer.invoke("store:load", key),
   saveData: (key, data) => electron.ipcRenderer.invoke("store:save", key, data),
+  // Clipboard
+  writeImageToClipboard: (imageDataUrl) => electron.ipcRenderer.invoke("clipboard:writeImage", imageDataUrl),
   // Agent
   agentCreateSession: (agentId, projectPath, sessionId, sessionFilePath) => electron.ipcRenderer.invoke("agent:createSession", agentId, projectPath, sessionId, sessionFilePath),
   agentSwitchSession: (sessionId) => electron.ipcRenderer.invoke("agent:switchSession", sessionId),

@@ -1,13 +1,18 @@
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
+const CODEX_MODELS = [
+  { id: "gpt-5.5", name: "GPT-5.5", provider: CODEX_PROVIDER, reasoning: true },
+  { id: "gpt-5.4", name: "GPT-5.4", provider: CODEX_PROVIDER, reasoning: true },
+  { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: CODEX_PROVIDER, reasoning: true },
+];
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const PLAN_MODE_INSTRUCTIONS = [
   "<plan_mode>",
@@ -50,7 +55,7 @@ let agentTextByItemId = new Map();
 let completedItemIds = new Set();
 let emittedContextCompactionIds = new Set();
 let pendingUIRequest = null;
-let configuredModelsCache = null;
+let activeImageCleanup = null;
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -79,92 +84,7 @@ const normalizeReasoningEffort = (level) => {
   return VALID_REASONING_EFFORTS.has(normalized) ? normalized : undefined;
 };
 
-const getCodexConfigPath = () => {
-  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
-  return join(codexHome, "config.toml");
-};
-
-const stripTomlComment = (line) => {
-  let inString = false;
-  let quote = "";
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    const previous = index > 0 ? line[index - 1] : "";
-    if ((char === "\"" || char === "'") && previous !== "\\") {
-      if (!inString) {
-        inString = true;
-        quote = char;
-      } else if (quote === char) {
-        inString = false;
-        quote = "";
-      }
-    }
-    if (char === "#" && !inString) return line.slice(0, index);
-  }
-  return line;
-};
-
-const parseTomlString = (value) => {
-  const trimmed = String(value || "").trim();
-  const match = trimmed.match(/^["'](.+)["']$/);
-  return match ? match[1] : trimmed;
-};
-
-const formatModelName = (modelId) =>
-  String(modelId)
-    .split("-")
-    .map((part) => part.toLowerCase() === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1))
-    .join("-");
-
-const parseConfiguredModels = (content) => {
-  const models = [];
-  const seen = new Set();
-  let section = "";
-
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
-    if (!line) continue;
-
-    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
-    if (sectionMatch) {
-      section = sectionMatch[1].trim();
-      continue;
-    }
-
-    const modelMatch = line.match(/^model\s*=\s*(.+)$/);
-    if (!modelMatch) continue;
-    if (section && !section.startsWith("profiles.")) continue;
-
-    const modelId = parseTomlString(modelMatch[1]).trim();
-    if (!modelId || seen.has(modelId)) continue;
-    seen.add(modelId);
-    models.push({
-      id: modelId,
-      name: formatModelName(modelId),
-      provider: CODEX_PROVIDER,
-      reasoning: true,
-    });
-  }
-
-  return models;
-};
-
-const loadConfiguredModels = async () => {
-  try {
-    configuredModelsCache = parseConfiguredModels(await readFile(getCodexConfigPath(), "utf8"));
-  } catch {
-    configuredModelsCache = [];
-  }
-};
-
-const getModels = () => {
-  const seen = new Set();
-  return (configuredModelsCache || []).filter((model) => {
-    if (seen.has(model.id)) return false;
-    seen.add(model.id);
-    return true;
-  });
-};
+const getModels = () => CODEX_MODELS;
 
 const existingDirs = (...dirs) => dirs.filter((dir) => {
   try {
@@ -415,6 +335,14 @@ const materializeImages = async (images) => {
       await rm(dir, { recursive: true, force: true });
     },
   };
+};
+
+const cleanupActiveImages = async () => {
+  const cleanup = activeImageCleanup;
+  activeImageCleanup = null;
+  if (cleanup) {
+    await cleanup();
+  }
 };
 
 const buildInput = (message, images) => {
@@ -1010,6 +938,7 @@ const finishPrompt = () => {
   activePlanModeEnabled = false;
   activePermissionMode = "full-access";
   activeTurnId = null;
+  void cleanupActiveImages();
 };
 
 const runPrompt = async (command) => {
@@ -1024,7 +953,9 @@ const runPrompt = async (command) => {
   send({ type: "accepted", id: command.id });
   startStream();
 
+  await cleanupActiveImages();
   const imagePayload = await materializeImages(command.images);
+  activeImageCleanup = imagePayload.cleanup;
   try {
     const nextThreadId = await ensureThread();
     if (!promptRunning || activePromptId !== command.id) return;
@@ -1055,8 +986,6 @@ const runPrompt = async (command) => {
       });
       finishPrompt();
     }
-  } finally {
-    await imagePayload.cleanup();
   }
 };
 
@@ -1090,19 +1019,19 @@ const abortPrompt = async (command) => {
   activePermissionMode = "full-access";
   activeTurnId = null;
   aborting = false;
+  await cleanupActiveImages();
 };
 
 const init = async ({ projectPath: cwd, sessionFilePath }) => {
-  disposeSession();
+  await disposeSession();
   projectPath = cwd;
   threadId = sessionFilePath || null;
   activeThreadId = threadId;
-  await loadConfiguredModels();
   await startAppServer();
   send({ type: "ready", sessionFilePath: threadId });
 };
 
-const disposeSession = () => {
+const disposeSession = async () => {
   promptRunning = false;
   aborting = true;
   activePromptId = null;
@@ -1112,6 +1041,7 @@ const disposeSession = () => {
   activePermissionMode = "full-access";
   pendingUIRequest = null;
   resetTurnState();
+  await cleanupActiveImages();
   failPendingRpc(new Error("Codex worker disposed"));
   if (appServer) {
     const child = appServer;
@@ -1142,7 +1072,6 @@ const handleCommand = async (command) => {
         await abortPrompt(command);
         break;
       case "getModels":
-        await loadConfiguredModels();
         send({ type: "models", id: command.id, models: getModels() });
         break;
       case "setModel":
@@ -1160,7 +1089,7 @@ const handleCommand = async (command) => {
         runUIResponse(command.response);
         break;
       case "dispose":
-        disposeSession();
+        await disposeSession();
         process.exit(0);
         break;
     }

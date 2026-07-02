@@ -48,6 +48,7 @@ type ChatMessagesViewProps = {
   onMessagesScroll: (event: ReactUIEvent<HTMLDivElement>) => void;
   onScrollToBottom: () => void;
   onEditMessage: (content: string) => void;
+  onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
@@ -65,6 +66,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onMessagesScroll,
   onScrollToBottom,
   onEditMessage,
+  onImageContextMenu,
   onOpenImage,
   onOpenFile,
   onToggleAssistantProcess,
@@ -128,6 +130,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
                               alt={img.name}
                               className="chat-image"
                               onClick={() => onOpenImage(img.src)}
+                              onContextMenu={msg.role === "user" ? (event) => onImageContextMenu(event, img.src) : undefined}
                             />
                           ))}
                         </div>
@@ -236,6 +239,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
+  const [imageContextMenu, setImageContextMenu] = useState<{ x: number; y: number; src: string } | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
@@ -373,6 +377,42 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [userMsgHistoryOpen]);
+
+  useEffect(() => {
+    if (!imageContextMenu) return;
+    const close = () => setImageContextMenu(null);
+    document.addEventListener("mousedown", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [imageContextMenu]);
+
+  useEffect(() => {
+    setImageContextMenu(null);
+  }, [activeSessionId]);
+
+  const handleImageContextMenu = useCallback((event: React.MouseEvent, imageSrc: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setImageContextMenu({ x: event.clientX, y: event.clientY, src: imageSrc });
+  }, []);
+
+  const handleCopyImage = useCallback(async () => {
+    const imageSrc = imageContextMenu?.src;
+    setImageContextMenu(null);
+    if (!imageSrc) return;
+    const result = await window.electronAPI.writeImageToClipboard(imageSrc);
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: `复制图片失败: ${result.error || "未知错误"}`,
+        timestamp: Date.now(),
+      }, activeSessionId);
+    }
+  }, [activeSessionId, addMessage, imageContextMenu]);
 
   const scrollToMessage = useCallback((msgId: string) => {
     scrollToMessageElement(msgId);
@@ -791,6 +831,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         onMessagesScroll={handleMessagesScroll}
         onScrollToBottom={scrollToBottom}
         onEditMessage={setComposerInput}
+        onImageContextMenu={handleImageContextMenu}
         onOpenImage={setZoomImage}
         onOpenFile={setPreviewFile}
         onToggleAssistantProcess={handleToggleAssistantProcess}
@@ -884,6 +925,17 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
+          </button>
+        </div>
+      )}
+      {imageContextMenu && (
+        <div
+          className="chat-image-context-menu"
+          style={{ left: imageContextMenu.x, top: imageContextMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button className="chat-image-context-menu-btn" onClick={handleCopyImage}>
+            复制图片
           </button>
         </div>
       )}

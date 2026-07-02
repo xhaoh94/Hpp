@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   saveData: (key: string, data: unknown) =>
     ipcRenderer.invoke("store:save", key, data),
 
+  // Clipboard
+  writeImageToClipboard: (imageDataUrl: string) =>
+    ipcRenderer.invoke("clipboard:writeImage", imageDataUrl),
+
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) =>
     ipcRenderer.invoke("agent:createSession", agentId, projectPath, sessionId, sessionFilePath),

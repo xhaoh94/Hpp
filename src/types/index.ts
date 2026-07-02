@@ -95,6 +95,9 @@ export interface ElectronAPI {
   loadData: (key: string) => Promise<unknown>;
   saveData: (key: string, data: unknown) => Promise<{ success: boolean; error?: string }>;
 
+  // Clipboard
+  writeImageToClipboard: (imageDataUrl: string) => Promise<{ success: boolean; error?: string }>;
+
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage } from "electron";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
 import { registerFileHandlers } from "./ipc/file-handlers";
@@ -78,3 +78,17 @@ ipcMain.on("window:maximize", () => {
   }
 });
 ipcMain.on("window:close", () => mainWindow?.close());
+
+ipcMain.handle("clipboard:writeImage", async (_event, imageDataUrl: string) => {
+  if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/")) {
+    return { success: false, error: "Invalid image data" };
+  }
+
+  const image = nativeImage.createFromDataURL(imageDataUrl);
+  if (image.isEmpty()) {
+    return { success: false, error: "Invalid image data" };
+  }
+
+  clipboard.writeImage(image);
+  return { success: true };
+});

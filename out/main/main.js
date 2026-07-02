@@ -3095,3 +3095,14 @@ electron.ipcMain.on("window:maximize", () => {
   }
 });
 electron.ipcMain.on("window:close", () => mainWindow?.close());
+electron.ipcMain.handle("clipboard:writeImage", async (_event, imageDataUrl) => {
+  if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/")) {
+    return { success: false, error: "Invalid image data" };
+  }
+  const image = electron.nativeImage.createFromDataURL(imageDataUrl);
+  if (image.isEmpty()) {
+    return { success: false, error: "Invalid image data" };
+  }
+  electron.clipboard.writeImage(image);
+  return { success: true };
+});
