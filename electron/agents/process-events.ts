@@ -25,6 +25,8 @@ export interface NormalizedToolPayload {
   toolName: string;
   toolCallId?: string;
   toolKind: NormalizedToolKind;
+  requestId?: string;
+  method?: string;
   args?: unknown;
   result?: unknown;
   isError?: boolean;
@@ -38,6 +40,11 @@ export interface NormalizedToolPayload {
   deletions?: number;
   command?: string;
   pattern?: string;
+  question?: unknown;
+  prompt?: unknown;
+  message?: unknown;
+  questions?: unknown;
+  options?: unknown;
 }
 
 export interface NormalizedFileDiff {
@@ -80,10 +87,32 @@ const TOOL_KIND_ALIASES: Record<Exclude<NormalizedToolKind, "unknown">, string[]
   search_text: ["grep", "rg", "search", "search_text", "content_search"],
   web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
   web_search: ["websearch", "web_search", "search_web"],
-  question: ["question", "questionnaire", "ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"],
+  question: [
+    "question",
+    "questionnaire",
+    "ask",
+    "ask_question",
+    "ask-followup-question",
+    "ask_followup_question",
+    "ask-user-question",
+    "ask_user",
+    "ask_user_question",
+    "user_ask_question",
+    "request_user",
+    "request_user_input",
+    "request_user_selection",
+    "droid.ask_user",
+  ],
 };
 
 const normalizeName = (value: unknown) => String(value || "").trim().toLowerCase();
+
+const matchesToolAlias = (normalized: string, alias: string) =>
+  normalized === alias ||
+  normalized.endsWith(`.${alias}`) ||
+  normalized.endsWith(`/${alias}`) ||
+  normalized.endsWith(`:${alias}`) ||
+  normalized.endsWith(`__${alias}`);
 
 const getNestedValue = (value: any, path: string[]): any => {
   let current = value;
@@ -197,12 +226,15 @@ const countPatchChanges = (patch: string) => ({
 const getToolKind = (toolName: unknown, command: string, patch: string): NormalizedToolKind => {
   const normalized = normalizeName(toolName);
   for (const [kind, aliases] of Object.entries(TOOL_KIND_ALIASES) as Array<[NormalizedToolKind, string[]]>) {
-    if (aliases.includes(normalized)) return kind;
+    if (aliases.some((alias) => matchesToolAlias(normalized, alias))) return kind;
   }
   if (patch) return "edit_file";
   if (command && !normalized) return "run_command";
   return "unknown";
 };
+
+export const isQuestionToolName = (toolName: unknown): boolean =>
+  getToolKind(toolName, "", "") === "question";
 
 const getToolPath = (toolKind: NormalizedToolKind, data: any, args: any, result: any, patchFilePath: string): string => {
   if (patchFilePath) return patchFilePath;
@@ -359,6 +391,7 @@ export const normalizeToolEvent = (
   const command = getCommand(args || {}, data);
   const pattern = getPattern(args || {}, data);
   const toolKind = getToolKind(toolName, command, patch);
+  const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
   const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
@@ -380,6 +413,8 @@ export const normalizeToolEvent = (
     toolName,
     toolCallId: toolCallId ? String(toolCallId) : undefined,
     toolKind,
+    requestId: toolKind === "question" && toolCallId ? String(toolCallId) : undefined,
+    method: toolKind === "question" ? toolName : undefined,
     args,
     result,
     isError: !!data.isError,
@@ -393,6 +428,11 @@ export const normalizeToolEvent = (
     deletions: changes.deletions,
     command: command || undefined,
     pattern: pattern || undefined,
+    question: data.question || detailObject.question || args?.question || args?.prompt || undefined,
+    prompt: data.prompt || detailObject.prompt || args?.prompt || undefined,
+    message: data.message || detailObject.message || args?.message || undefined,
+    questions: data.questions || detailObject.questions || args?.questions || undefined,
+    options: data.options || detailObject.options || args?.options || args?.choices || undefined,
   };
 };
 
@@ -409,23 +449,44 @@ export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "pa
 
 export const normalizeQuestionProcessEvent = (data: any) => {
   const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
+  const argsObject = data.args && typeof data.args === "object" ? data.args : {};
+  const inputObject = data.input && typeof data.input === "object" ? data.input : {};
   const prompt =
     data.title ||
     data.question ||
     data.prompt ||
     data.message ||
     data.placeholder ||
-    findFirstString(data, [["detail", "title"], ["detail", "message"], ["detail", "question"], ["detail", "prompt"]]);
+    findFirstString(data, [
+      ["detail", "title"],
+      ["detail", "message"],
+      ["detail", "question"],
+      ["detail", "prompt"],
+      ["args", "title"],
+      ["args", "message"],
+      ["args", "question"],
+      ["args", "prompt"],
+      ["input", "title"],
+      ["input", "message"],
+      ["input", "question"],
+      ["input", "prompt"],
+    ]);
   const questions =
     data.questions ||
     detailObject.questions ||
+    detailObject.params?.questions ||
     data.args?.questions ||
     data.input?.questions;
   const options =
     data.options ||
     detailObject.options ||
+    detailObject.choices ||
+    detailObject.params?.options ||
+    detailObject.params?.choices ||
     data.args?.options ||
-    data.input?.options;
+    data.args?.choices ||
+    data.input?.options ||
+    data.input?.choices;
   const detail =
     prompt ||
     unwrapToolText(data.args) ||
@@ -436,12 +497,12 @@ export const normalizeQuestionProcessEvent = (data: any) => {
     type: "process_event",
     entryType: "question",
     kind: "question",
-    requestId: data.id || data.requestId,
-    method: data.method,
+    requestId: data.requestId || data.id || data.toolCallId || data.callId || detailObject.id,
+    method: data.method || data.toolName || data.name || data.type,
     title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
     prompt: prompt || undefined,
-    question: data.question || detailObject.question || undefined,
+    question: data.question || detailObject.question || argsObject.question || inputObject.question || undefined,
     questions,
     options,
     state: data.state || "running",

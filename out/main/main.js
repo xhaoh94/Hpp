@@ -27,6 +27,7 @@ function _interopNamespaceDefault(e) {
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 function registerFileHandlers() {
   electron.ipcMain.handle("fs:readDirectory", async (_event, dirPath) => {
+    if (typeof dirPath !== "string" || !dirPath.trim()) return [];
     try {
       const entries = await promises.readdir(dirPath, { withFileTypes: true });
       const result = [];
@@ -53,14 +54,18 @@ function registerFileHandlers() {
     }
   });
   electron.ipcMain.handle("fs:readFile", async (_event, filePath) => {
+    if (typeof filePath !== "string" || !filePath.trim()) {
+      return { success: false, error: "Invalid file path" };
+    }
     try {
       const content = await promises.readFile(filePath, "utf-8");
       return { success: true, content };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
   electron.ipcMain.handle("fs:fileExists", async (_event, filePath) => {
+    if (typeof filePath !== "string" || !filePath.trim()) return false;
     try {
       await promises.access(filePath);
       return true;
@@ -73,6 +78,9 @@ function registerFileHandlers() {
     async (_event, dirPath, query) => {
       const results = [];
       const maxDepth = 5;
+      if (typeof dirPath !== "string" || !dirPath.trim()) return results;
+      const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
+      if (!normalizedQuery) return results;
       async function walk(dir, depth) {
         if (depth > maxDepth) return;
         try {
@@ -84,7 +92,7 @@ function registerFileHandlers() {
             ))
               continue;
             const fullPath = path.join(dir, entry.name);
-            if (entry.name.toLowerCase().includes(query.toLowerCase())) {
+            if (entry.name.toLowerCase().includes(normalizedQuery)) {
               results.push({
                 name: entry.name,
                 path: fullPath,
@@ -116,10 +124,15 @@ function registerFileHandlers() {
     return os.homedir();
   });
   electron.ipcMain.handle("fs:isCommandAvailable", (_event, command) => {
+    if (typeof command !== "string" || !/^[\w@./:-]+$/.test(command)) return false;
     try {
-      const cmd = process.platform === "win32" ? `where ${command}` : `which -a ${command}`;
-      const result = child_process.execSync(cmd, { encoding: "utf-8" }).trim();
-      const lines = result.split("\n").map((l) => l.trim()).filter(Boolean);
+      const executable = process.platform === "win32" ? "where" : "which";
+      const args = process.platform === "win32" ? [command] : ["-a", command];
+      const result = child_process.spawnSync(executable, args, { encoding: "utf-8", shell: false });
+      if (result.status !== 0 || result.error) return false;
+      const output = result.stdout.trim();
+      if (!output) return false;
+      const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
       return lines.some((p) => !p.includes("node_modules"));
     } catch {
       return false;
@@ -153,7 +166,7 @@ function registerStoreHandlers() {
         await promises.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
         return { success: true };
       } catch (err) {
-        return { success: false, error: err.message };
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
     }
   );
@@ -329,11 +342,11 @@ const CLI_AGENTS = {
     displayName: "Factory Droid"
   }
 };
-const SDK_AGENTS = {
+const PACKAGE_AGENTS = {
   codex: {
-    packageName: "@openai/codex-sdk",
-    displayName: "Codex SDK",
-    packagePath: ["@openai", "codex-sdk"]
+    packageName: "@openai/codex",
+    displayName: "Codex CLI",
+    packagePath: ["@openai", "codex"]
   }
 };
 const updateInProgress = /* @__PURE__ */ new Set();
@@ -500,7 +513,7 @@ async function getCliAgentStatus(config) {
     error
   };
 }
-async function getSDKAgentStatus(config) {
+async function getPackageAgentStatus(config) {
   const packageRoot = await findProjectPackageRoot(config.packageName);
   const packageJsonPath = packageRoot ? path.join(packageRoot, "node_modules", ...config.packagePath, "package.json") : void 0;
   const packageJson = packageJsonPath ? await readJsonFile(packageJsonPath) : null;
@@ -523,8 +536,8 @@ async function getSDKAgentStatus(config) {
   };
 }
 async function getAgentStatus(agentId) {
-  const sdkConfig = SDK_AGENTS[agentId];
-  if (sdkConfig) return getSDKAgentStatus(sdkConfig);
+  const packageConfig = PACKAGE_AGENTS[agentId];
+  if (packageConfig) return getPackageAgentStatus(packageConfig);
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return {
@@ -537,21 +550,21 @@ async function getAgentStatus(agentId) {
   return getCliAgentStatus(config);
 }
 async function updateAgent(agentId) {
-  const sdkConfig = SDK_AGENTS[agentId];
-  if (sdkConfig) {
+  const packageConfig = PACKAGE_AGENTS[agentId];
+  if (packageConfig) {
     if (updateInProgress.has(agentId)) {
-      return { success: false, error: `${sdkConfig.displayName} 正在更新中` };
+      return { success: false, error: `${packageConfig.displayName} 正在更新中` };
     }
-    const packageRoot = await findProjectPackageRoot(sdkConfig.packageName);
+    const packageRoot = await findProjectPackageRoot(packageConfig.packageName);
     if (!packageRoot) {
-      return { success: false, error: `未找到包含 ${sdkConfig.packageName} 的 package.json` };
+      return { success: false, error: `未找到包含 ${packageConfig.packageName} 的 package.json` };
     }
     if (electron.app.isPackaged) {
-      return { success: false, error: `打包版暂不支持自动更新 ${sdkConfig.displayName}` };
+      return { success: false, error: `打包版暂不支持自动更新 ${packageConfig.displayName}` };
     }
     updateInProgress.add(agentId);
     try {
-      await runNpmCommand(["install", `${sdkConfig.packageName}@latest`], {
+      await runNpmCommand(["install", `${packageConfig.packageName}@latest`], {
         cwd: packageRoot,
         timeout: 18e4
       });
@@ -696,9 +709,25 @@ const TOOL_KIND_ALIASES = {
   search_text: ["grep", "rg", "search", "search_text", "content_search"],
   web_fetch: ["webfetch", "web_fetch", "fetch", "fetch_url"],
   web_search: ["websearch", "web_search", "search_web"],
-  question: ["question", "questionnaire", "ask_question", "ask-user-question", "ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"]
+  question: [
+    "question",
+    "questionnaire",
+    "ask",
+    "ask_question",
+    "ask-followup-question",
+    "ask_followup_question",
+    "ask-user-question",
+    "ask_user",
+    "ask_user_question",
+    "user_ask_question",
+    "request_user",
+    "request_user_input",
+    "request_user_selection",
+    "droid.ask_user"
+  ]
 };
 const normalizeName = (value) => String(value || "").trim().toLowerCase();
+const matchesToolAlias = (normalized, alias) => normalized === alias || normalized.endsWith(`.${alias}`) || normalized.endsWith(`/${alias}`) || normalized.endsWith(`:${alias}`) || normalized.endsWith(`__${alias}`);
 const getNestedValue = (value, path2) => {
   let current = value;
   for (const key of path2) {
@@ -790,7 +819,7 @@ const countPatchChanges = (patch) => ({
 const getToolKind = (toolName, command, patch) => {
   const normalized = normalizeName(toolName);
   for (const [kind, aliases] of Object.entries(TOOL_KIND_ALIASES)) {
-    if (aliases.includes(normalized)) return kind;
+    if (aliases.some((alias) => matchesToolAlias(normalized, alias))) return kind;
   }
   if (patch) return "edit_file";
   if (command && !normalized) return "run_command";
@@ -916,6 +945,7 @@ const normalizeToolEvent = (phase, data) => {
   const command = getCommand(args || {}, data);
   const pattern = getPattern(args || {}, data);
   const toolKind = getToolKind(toolName, command, patch);
+  const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
   const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: void 0, deletions: void 0 };
@@ -935,6 +965,8 @@ const normalizeToolEvent = (phase, data) => {
     toolName,
     toolCallId: toolCallId ? String(toolCallId) : void 0,
     toolKind,
+    requestId: toolKind === "question" && toolCallId ? String(toolCallId) : void 0,
+    method: toolKind === "question" ? toolName : void 0,
     args,
     result,
     isError: !!data.isError,
@@ -947,7 +979,12 @@ const normalizeToolEvent = (phase, data) => {
     additions: changes.additions,
     deletions: changes.deletions,
     command: command || void 0,
-    pattern: pattern || void 0
+    pattern: pattern || void 0,
+    question: data.question || detailObject.question || args?.question || args?.prompt || void 0,
+    prompt: data.prompt || detailObject.prompt || args?.prompt || void 0,
+    message: data.message || detailObject.message || args?.message || void 0,
+    questions: data.questions || detailObject.questions || args?.questions || void 0,
+    options: data.options || detailObject.options || args?.options || args?.choices || void 0
   };
 };
 const buildDiffsFromToolEvent = (payload) => {
@@ -962,20 +999,35 @@ const buildDiffsFromToolEvent = (payload) => {
 };
 const normalizeQuestionProcessEvent = (data) => {
   const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
-  const prompt = data.title || data.question || data.prompt || data.message || data.placeholder || findFirstString(data, [["detail", "title"], ["detail", "message"], ["detail", "question"], ["detail", "prompt"]]);
-  const questions = data.questions || detailObject.questions || data.args?.questions || data.input?.questions;
-  const options = data.options || detailObject.options || data.args?.options || data.input?.options;
+  const argsObject = data.args && typeof data.args === "object" ? data.args : {};
+  const inputObject = data.input && typeof data.input === "object" ? data.input : {};
+  const prompt = data.title || data.question || data.prompt || data.message || data.placeholder || findFirstString(data, [
+    ["detail", "title"],
+    ["detail", "message"],
+    ["detail", "question"],
+    ["detail", "prompt"],
+    ["args", "title"],
+    ["args", "message"],
+    ["args", "question"],
+    ["args", "prompt"],
+    ["input", "title"],
+    ["input", "message"],
+    ["input", "question"],
+    ["input", "prompt"]
+  ]);
+  const questions = data.questions || detailObject.questions || detailObject.params?.questions || data.args?.questions || data.input?.questions;
+  const options = data.options || detailObject.options || detailObject.choices || detailObject.params?.options || detailObject.params?.choices || data.args?.options || data.args?.choices || data.input?.options || data.input?.choices;
   const detail = prompt || unwrapToolText(data.args) || unwrapToolText(data.input) || (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
   return {
     type: "process_event",
     entryType: "question",
     kind: "question",
-    requestId: data.id || data.requestId,
-    method: data.method,
+    requestId: data.requestId || data.id || data.toolCallId || data.callId || detailObject.id,
+    method: data.method || data.toolName || data.name || data.type,
     title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
     prompt: prompt || void 0,
-    question: data.question || detailObject.question || void 0,
+    question: data.question || detailObject.question || argsObject.question || inputObject.question || void 0,
     questions,
     options,
     state: data.state || "running"
@@ -1041,6 +1093,7 @@ class OpenCodeAgent {
   idleTimer = null;
   runningToolParts = /* @__PURE__ */ new Set();
   completedToolParts = /* @__PURE__ */ new Set();
+  pendingQuestionToolParts = /* @__PURE__ */ new Set();
   eventBuffer;
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
@@ -1169,6 +1222,7 @@ class OpenCodeAgent {
     this.streamedContent = false;
     this.runningToolParts.clear();
     this.completedToolParts.clear();
+    this.pendingQuestionToolParts.clear();
     const req = http__namespace.get(
       `http://${this.host}:${this.port}/event`,
       (res) => {
@@ -1211,6 +1265,21 @@ class OpenCodeAgent {
         if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
+          if (isAskUserName(tool.toolName)) {
+            if (!this.pendingQuestionToolParts.has(tool.toolCallId)) {
+              this.pendingQuestionToolParts.add(tool.toolCallId);
+              this.runningToolParts.add(tool.toolCallId);
+              this.emitEvent(normalizeQuestionProcessEvent({
+                ...tool,
+                id: tool.toolCallId,
+                requestId: tool.toolCallId,
+                method: tool.toolName,
+                args: tool.args,
+                detail: tool.args || tool.detail
+              }));
+            }
+            break;
+          }
           if (!this.runningToolParts.has(tool.toolCallId)) {
             this.runningToolParts.add(tool.toolCallId);
             this.emitEvent(normalizeToolEvent("tool_start", tool));
@@ -1236,6 +1305,12 @@ class OpenCodeAgent {
         } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
+          if (isAskUserName(tool.toolName)) {
+            this.runningToolParts.delete(tool.toolCallId);
+            this.pendingQuestionToolParts.delete(tool.toolCallId);
+            this.completedToolParts.add(tool.toolCallId);
+            break;
+          }
           const toolEvent = normalizeToolEvent("tool_end", tool);
           this.emitEvent(toolEvent);
           const diffs = buildDiffsFromToolEvent(toolEvent);
@@ -2376,9 +2451,9 @@ class PiSDKAgent {
 }
 const getWorkerPath = () => {
   const candidates = [
-    path.join(__dirname, "codex-sdk-worker.mjs"),
-    path.join(electron.app.getAppPath(), "electron", "agents", "codex-sdk-worker.mjs"),
-    path.join(process.cwd(), "electron", "agents", "codex-sdk-worker.mjs")
+    path.join(__dirname, "codex-worker.mjs"),
+    path.join(electron.app.getAppPath(), "electron", "agents", "codex-worker.mjs"),
+    path.join(process.cwd(), "electron", "agents", "codex-worker.mjs")
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[candidates.length - 1];
 };
@@ -2387,7 +2462,7 @@ const getNodeExecutable = () => {
   if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
   return process.platform === "win32" ? "node.exe" : "node";
 };
-class CodexSDKAgent {
+class CodexAgent {
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
     this.eventBuffer = new AgentEventBuffer(hppSessionId);
@@ -2440,7 +2515,7 @@ class CodexSDKAgent {
       }
     });
     child.stderr?.on("data", (chunk) => {
-      console.log("[codex-sdk-worker]", chunk.toString().trim());
+      console.log("[codex-worker]", chunk.toString().trim());
     });
     child.on("error", (error) => {
       this.emitEvent({
@@ -2464,7 +2539,7 @@ class CodexSDKAgent {
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingResponses.delete(initId);
-        reject(new Error("Codex SDK worker init timed out"));
+        reject(new Error("Codex worker init timed out"));
       }, 12e3);
       const initId = this.sendWorkerCommand({
         type: "init",
@@ -2477,13 +2552,13 @@ class CodexSDKAgent {
           this.emitEvent({ type: "agent_ready", agentId: "codex", mock: false });
           resolve();
         } else {
-          reject(new Error(data.error || "Codex SDK worker init failed"));
+          reject(new Error(data.error || "Codex worker init failed"));
         }
       });
     });
   }
   async sendMessage(message, images, options) {
-    if (!this.process) throw new Error("Codex SDK worker is not running");
+    if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
     const promptId = this.createCommandId();
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
@@ -2597,6 +2672,17 @@ class CodexSDKAgent {
       case "prompt_done":
         break;
       case "error":
+        if (/Codex is already running/i.test(data.error || "")) {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "status",
+            kind: "status",
+            title: "Codex 仍在执行上一条请求",
+            detail: "新的发送请求已忽略；当前 Codex 任务还在运行，后续输出会继续追加到当前处理中块。",
+            state: "running"
+          });
+          break;
+        }
         this.emitEvent({
           type: "process_event",
           entryType: "error",
@@ -2689,7 +2775,7 @@ class AgentManager {
     this.window = win;
   }
   createAgentBackend(agentId, sessionId) {
-    if (agentId === "codex") return new CodexSDKAgent(sessionId);
+    if (agentId === "codex") return new CodexAgent(sessionId);
     if (agentId === "opencode") return new OpenCodeAgent(sessionId);
     if (agentId === "droid") return new DroidAgent(sessionId);
     return new PiSDKAgent(sessionId);

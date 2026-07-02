@@ -19,9 +19,9 @@ interface AgentSendOptions {
 
 const getWorkerPath = () => {
   const candidates = [
-    join(__dirname, "codex-sdk-worker.mjs"),
-    join(app.getAppPath(), "electron", "agents", "codex-sdk-worker.mjs"),
-    join(process.cwd(), "electron", "agents", "codex-sdk-worker.mjs"),
+    join(__dirname, "codex-worker.mjs"),
+    join(app.getAppPath(), "electron", "agents", "codex-worker.mjs"),
+    join(process.cwd(), "electron", "agents", "codex-worker.mjs"),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || candidates[candidates.length - 1];
 };
@@ -32,7 +32,7 @@ const getNodeExecutable = () => {
   return process.platform === "win32" ? "node.exe" : "node";
 };
 
-export class CodexSDKAgent {
+export class CodexAgent {
   private process: ChildProcess | null = null;
   private window: BrowserWindow | null = null;
   private projectPath = "";
@@ -93,7 +93,7 @@ export class CodexSDKAgent {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      console.log("[codex-sdk-worker]", chunk.toString().trim());
+      console.log("[codex-worker]", chunk.toString().trim());
     });
 
     child.on("error", (error) => {
@@ -119,7 +119,7 @@ export class CodexSDKAgent {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingResponses.delete(initId);
-        reject(new Error("Codex SDK worker init timed out"));
+        reject(new Error("Codex worker init timed out"));
       }, 12000);
       const initId = this.sendWorkerCommand({
         type: "init",
@@ -132,14 +132,14 @@ export class CodexSDKAgent {
           this.emitEvent({ type: "agent_ready", agentId: "codex", mock: false });
           resolve();
         } else {
-          reject(new Error(data.error || "Codex SDK worker init failed"));
+          reject(new Error(data.error || "Codex worker init failed"));
         }
       });
     });
   }
 
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
-    if (!this.process) throw new Error("Codex SDK worker is not running");
+    if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
     const promptId = this.createCommandId();
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
@@ -261,6 +261,17 @@ export class CodexSDKAgent {
       case "prompt_done":
         break;
       case "error":
+        if (/Codex is already running/i.test(data.error || "")) {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "status",
+            kind: "status",
+            title: "Codex 仍在执行上一条请求",
+            detail: "新的发送请求已忽略；当前 Codex 任务还在运行，后续输出会继续追加到当前处理中块。",
+            state: "running",
+          });
+          break;
+        }
         this.emitEvent({
           type: "process_event",
           entryType: "error",

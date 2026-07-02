@@ -29,7 +29,7 @@ interface CliAgentConfig {
   displayName: string;
 }
 
-interface SDKAgentConfig {
+interface PackageAgentConfig {
   packageName: string;
   displayName: string;
   packagePath: string[];
@@ -48,11 +48,11 @@ const CLI_AGENTS: Record<string, CliAgentConfig> = {
   },
 };
 
-const SDK_AGENTS: Record<string, SDKAgentConfig> = {
+const PACKAGE_AGENTS: Record<string, PackageAgentConfig> = {
   codex: {
-    packageName: "@openai/codex-sdk",
-    displayName: "Codex SDK",
-    packagePath: ["@openai", "codex-sdk"],
+    packageName: "@openai/codex",
+    displayName: "Codex CLI",
+    packagePath: ["@openai", "codex"],
   },
 };
 
@@ -272,7 +272,7 @@ async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
   };
 }
 
-async function getSDKAgentStatus(config: SDKAgentConfig): Promise<AgentStatus> {
+async function getPackageAgentStatus(config: PackageAgentConfig): Promise<AgentStatus> {
   const packageRoot = await findProjectPackageRoot(config.packageName);
   const packageJsonPath = packageRoot
     ? join(packageRoot, "node_modules", ...config.packagePath, "package.json")
@@ -307,8 +307,8 @@ async function getSDKAgentStatus(config: SDKAgentConfig): Promise<AgentStatus> {
 }
 
 async function getAgentStatus(agentId: string): Promise<AgentStatus> {
-  const sdkConfig = SDK_AGENTS[agentId];
-  if (sdkConfig) return getSDKAgentStatus(sdkConfig);
+  const packageConfig = PACKAGE_AGENTS[agentId];
+  if (packageConfig) return getPackageAgentStatus(packageConfig);
 
   const config = CLI_AGENTS[agentId];
   if (!config) {
@@ -324,23 +324,23 @@ async function getAgentStatus(agentId: string): Promise<AgentStatus> {
 }
 
 async function updateAgent(agentId: string): Promise<{ success: boolean; status?: AgentStatus; error?: string }> {
-  const sdkConfig = SDK_AGENTS[agentId];
-  if (sdkConfig) {
+  const packageConfig = PACKAGE_AGENTS[agentId];
+  if (packageConfig) {
     if (updateInProgress.has(agentId)) {
-      return { success: false, error: `${sdkConfig.displayName} 正在更新中` };
+      return { success: false, error: `${packageConfig.displayName} 正在更新中` };
     }
 
-    const packageRoot = await findProjectPackageRoot(sdkConfig.packageName);
+    const packageRoot = await findProjectPackageRoot(packageConfig.packageName);
     if (!packageRoot) {
-      return { success: false, error: `未找到包含 ${sdkConfig.packageName} 的 package.json` };
+      return { success: false, error: `未找到包含 ${packageConfig.packageName} 的 package.json` };
     }
     if (app.isPackaged) {
-      return { success: false, error: `打包版暂不支持自动更新 ${sdkConfig.displayName}` };
+      return { success: false, error: `打包版暂不支持自动更新 ${packageConfig.displayName}` };
     }
 
     updateInProgress.add(agentId);
     try {
-      await runNpmCommand(["install", `${sdkConfig.packageName}@latest`], {
+      await runNpmCommand(["install", `${packageConfig.packageName}@latest`], {
         cwd: packageRoot,
         timeout: 180000,
       });

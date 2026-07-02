@@ -2,7 +2,7 @@ import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import * as http from "http";
 import { AgentEventBuffer } from "./agent-event-buffer";
-import { buildDiffsFromToolEvent, normalizeToolEvent } from "./process-events";
+import { buildDiffsFromToolEvent, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
 
 interface AgentModel {
   id: string;
@@ -100,6 +100,7 @@ export class OpenCodeAgent {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private runningToolParts = new Set<string>();
   private completedToolParts = new Set<string>();
+  private pendingQuestionToolParts = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
@@ -250,6 +251,7 @@ export class OpenCodeAgent {
     this.streamedContent = false;
     this.runningToolParts.clear();
     this.completedToolParts.clear();
+    this.pendingQuestionToolParts.clear();
 
     const req = http.get(
       `http://${this.host}:${this.port}/event`,
@@ -297,6 +299,22 @@ export class OpenCodeAgent {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
 
+          if (isAskUserName(tool.toolName)) {
+            if (!this.pendingQuestionToolParts.has(tool.toolCallId)) {
+              this.pendingQuestionToolParts.add(tool.toolCallId);
+              this.runningToolParts.add(tool.toolCallId);
+              this.emitEvent(normalizeQuestionProcessEvent({
+                ...tool,
+                id: tool.toolCallId,
+                requestId: tool.toolCallId,
+                method: tool.toolName,
+                args: tool.args,
+                detail: tool.args || tool.detail,
+              }));
+            }
+            break;
+          }
+
           if (!this.runningToolParts.has(tool.toolCallId)) {
             this.runningToolParts.add(tool.toolCallId);
             this.emitEvent(normalizeToolEvent("tool_start", tool));
@@ -323,6 +341,13 @@ export class OpenCodeAgent {
         } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
+
+          if (isAskUserName(tool.toolName)) {
+            this.runningToolParts.delete(tool.toolCallId);
+            this.pendingQuestionToolParts.delete(tool.toolCallId);
+            this.completedToolParts.add(tool.toolCallId);
+            break;
+          }
 
           const toolEvent = normalizeToolEvent("tool_end", tool);
           this.emitEvent(toolEvent);

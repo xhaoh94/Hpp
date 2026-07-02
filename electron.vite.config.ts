@@ -4,12 +4,12 @@ import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-const copySDKWorkerPlugin = () => ({
-  name: "copy-sdk-workers",
+const copyAgentWorkerPlugin = () => ({
+  name: "copy-agent-workers",
   writeBundle() {
     const targetDir = resolve(__dirname, "out/main");
     mkdirSync(targetDir, { recursive: true });
-    for (const worker of ["pi-sdk-worker.mjs", "codex-sdk-worker.mjs"]) {
+    for (const worker of ["pi-sdk-worker.mjs", "codex-worker.mjs"]) {
       copyFileSync(
         resolve(__dirname, "electron/agents", worker),
         resolve(targetDir, worker)
@@ -20,7 +20,7 @@ const copySDKWorkerPlugin = () => ({
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin(), copySDKWorkerPlugin()],
+    plugins: [externalizeDepsPlugin(), copyAgentWorkerPlugin()],
     build: {
       lib: {
         entry: resolve(__dirname, "electron/main.ts"),

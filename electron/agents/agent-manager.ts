@@ -5,7 +5,7 @@ import { homedir } from "os";
 import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
 import { PiSDKAgent } from "./pi-sdk-agent";
-import { CodexSDKAgent } from "./codex-sdk-agent";
+import { CodexAgent } from "./codex-agent";
 
 interface AgentModel {
   id: string;
@@ -127,7 +127,7 @@ class AgentManager {
   setWindow(win: BrowserWindow) { this.window = win; }
 
   private createAgentBackend(agentId: string, sessionId: string): AgentBackend {
-    if (agentId === "codex") return new CodexSDKAgent(sessionId);
+    if (agentId === "codex") return new CodexAgent(sessionId);
     if (agentId === "opencode") return new OpenCodeAgent(sessionId);
     if (agentId === "droid") return new DroidAgent(sessionId);
     return new PiSDKAgent(sessionId); // default
