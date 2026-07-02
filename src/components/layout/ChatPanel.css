@@ -293,9 +293,42 @@
 
 .chat-msg-wrapper + .chat-msg-wrapper,
 .chat-msg-wrapper + .chat-working,
+.chat-msg-wrapper + .chat-context-divider,
+.chat-context-divider + .chat-msg-wrapper,
+.chat-context-divider + .chat-working,
 .chat-empty + .chat-msg-wrapper,
 .chat-loading-agent + .chat-msg-wrapper {
   margin-top: 12px;
+}
+
+.chat-context-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 2px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.chat-context-divider-line {
+  flex: 1;
+  height: 1px;
+  min-width: 24px;
+  background-color: var(--border-color);
+}
+
+.chat-context-divider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.chat-context-divider-label svg {
+  flex-shrink: 0;
 }
 
 .chat-working {

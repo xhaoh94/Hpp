@@ -43,6 +43,8 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   isStreaming?: boolean;
+  systemType?: "context_compaction";
+  eventId?: string;
   images?: Array<{ id: string; src: string; name: string }>;
   diffs?: FileDiff[];
   process?: AgentProcess;
@@ -79,6 +81,7 @@ interface ChatState {
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
   appendLastAssistantDiffs: (diffs: FileDiff[], sessionId?: string | null) => void;
+  appendContextCompactionDivider: (eventId?: string, sessionId?: string | null) => void;
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
   appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
@@ -205,6 +208,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
         msgs[index] = { ...msg, diffs: [...existing, ...diffs] };
       }
       return msgs;
+      });
+    }),
+
+  appendContextCompactionDivider: (eventId, sessionId) =>
+    set((s) => {
+      return updateSessionMessages(s, sessionId, (messages) => {
+        const normalizedEventId = eventId?.trim();
+        if (
+          normalizedEventId &&
+          messages.some((msg) => msg.systemType === "context_compaction" && msg.eventId === normalizedEventId)
+        ) {
+          return messages;
+        }
+
+        return [
+          ...messages,
+          {
+            id: normalizedEventId ? `context-compaction-${normalizedEventId}` : createMessageId(),
+            role: "system",
+            content: "上下文已自动压缩",
+            timestamp: Date.now(),
+            systemType: "context_compaction",
+            eventId: normalizedEventId,
+          },
+        ];
       });
     }),
 

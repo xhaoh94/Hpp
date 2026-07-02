@@ -55,6 +55,32 @@ export interface NormalizedFileDiff {
   status?: "added" | "deleted" | "modified";
 }
 
+const normalizeEventToken = (value: unknown) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s._:-]+/g, "");
+
+export const isContextCompactionLike = (...values: unknown[]) => {
+  const normalized = values.map(normalizeEventToken).filter(Boolean);
+  return normalized.some((value) =>
+    value.includes("contextcompaction") ||
+    value.includes("compactedcontext") ||
+    value.includes("compactcontext") ||
+    value.includes("contextcompact") ||
+    value.includes("contextsummary") ||
+    value.includes("summarizecontext") ||
+    value.includes("contextsummarized") ||
+    value.includes("conversationcompaction") ||
+    value.includes("conversationcompacted") ||
+    value.includes("conversationcompact") ||
+    value.includes("memorycompaction") ||
+    value.includes("压缩上下文") ||
+    value.includes("上下文压缩") ||
+    value.includes("上下文已自动压缩")
+  );
+};
+
 const TOOL_KIND_ALIASES: Record<Exclude<NormalizedToolKind, "unknown">, string[]> = {
   read_file: ["read", "readfile", "read_file", "view", "view_file", "open_file"],
   list_dir: [

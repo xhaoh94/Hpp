@@ -677,6 +677,13 @@ class AgentEventBuffer {
     }
   }
 }
+const normalizeEventToken = (value) => String(value || "").trim().toLowerCase().replace(/[\s._:-]+/g, "");
+const isContextCompactionLike = (...values) => {
+  const normalized = values.map(normalizeEventToken).filter(Boolean);
+  return normalized.some(
+    (value) => value.includes("contextcompaction") || value.includes("compactedcontext") || value.includes("compactcontext") || value.includes("contextcompact") || value.includes("contextsummary") || value.includes("summarizecontext") || value.includes("contextsummarized") || value.includes("conversationcompaction") || value.includes("conversationcompacted") || value.includes("conversationcompact") || value.includes("memorycompaction") || value.includes("压缩上下文") || value.includes("上下文压缩") || value.includes("上下文已自动压缩")
+  );
+};
 const TOOL_KIND_ALIASES = {
   read_file: ["read", "readfile", "read_file", "view", "view_file", "open_file"],
   list_dir: [
@@ -1259,6 +1266,22 @@ class OpenCodeAgent {
   }
   handleSSEEvent(eventType, data) {
     const props = data.properties || data;
+    const part = props.part || props;
+    if (isContextCompactionLike(
+      eventType,
+      props.type,
+      props.name,
+      props.title,
+      props.message,
+      props.status,
+      part.type,
+      part.name,
+      part.title,
+      part.message
+    )) {
+      this.emitEvent({ type: "context_compaction", id: part.id || props.partID || props.partId || props.id || data.id });
+      return;
+    }
     switch (eventType) {
       case "message.part.added":
       case "message.part.updated": {
@@ -1941,6 +1964,18 @@ class DroidAgent {
     const notification = params?.notification || params;
     const notifType = notification?.type || method;
     const notifData = notification?.data || notification;
+    if (isContextCompactionLike(
+      method,
+      notifType,
+      notifData?.type,
+      notifData?.name,
+      notifData?.title,
+      notifData?.message,
+      notifData?.status
+    )) {
+      this.emitEvent({ type: "context_compaction", id: notifData?.id || notification?.id || params?.id });
+      return;
+    }
     switch (notifType) {
       case "assistant_text_delta":
         this.emitEvent({ type: "stream_delta", delta: notifData?.delta || notifData?.text || "" });
@@ -2214,6 +2249,9 @@ class PiSDKAgent {
       }
     }
     switch (data.type) {
+      case "context_compaction":
+        this.emitEvent({ type: "context_compaction", id: data.id });
+        break;
       case "ready":
         for (const handler of this.pendingResponses.values()) handler(data);
         this.pendingResponses.clear();
@@ -2317,6 +2355,10 @@ class PiSDKAgent {
         break;
       case "error":
         if (data.id && !this.activePromptIds.delete(String(data.id))) break;
+        if (isContextCompactionLike(data.error, data.title, data.message)) {
+          this.emitEvent({ type: "context_compaction", id: data.id });
+          break;
+        }
         this.pendingUIRequestIds.clear();
         this.emitEvent({
           type: "process_event",
@@ -2665,6 +2707,7 @@ class CodexAgent {
       case "tool_start":
       case "tool_end":
       case "process_event":
+      case "context_compaction":
       case "diff_update":
       case "agent_end":
         this.emitEvent(data);

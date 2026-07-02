@@ -4,43 +4,38 @@ import {
   useRef,
   useEffect,
   useCallback,
-  type PointerEvent as ReactPointerEvent,
   type RefObject,
   type UIEvent as ReactUIEvent,
 } from "react";
 import { flushSync } from "react-dom";
+import { ListCollapse } from "lucide-react";
 import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip } from "@/lib/agents";
-import { applySessionModels, getSessionModel, saveSessionModel, getSessionThinking, saveSessionThinking } from "@/hooks/useDataPersistence";
+import { saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
-import { ChatComposer, type PendingImage } from "./ChatComposer";
+import { ChatComposer } from "./ChatComposer";
 import { ChatToolbar } from "./ChatToolbar";
 import { DiffBlock } from "./DiffBlock";
 import { ProcessBlock } from "./ProcessBlock";
-import {
-  getQuestionnaireAnswerLabel,
-  QuestionnairePanel,
-  type AskQuestionPayload,
-} from "./QuestionnairePanel";
+import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { useAgentEvents } from "./useAgentEvents";
+import { usePendingImages } from "./usePendingImages";
+import { usePendingUIResponse, usePendingUIResponseActions } from "./usePendingUIResponse";
+import { useQuestionnaireResize } from "./useQuestionnaireResize";
+import { useSessionModels } from "./useSessionModels";
 import {
   asRecord,
   createProcessEntryId,
   getBooleanField,
-  getQuestionTitle,
-  getUIResponsePayload,
   resetSessionRuntimeAfterTurn,
   type SessionRuntime,
 } from "./agentEventUtils";
 import "./ChatPanel.css";
 
-const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
-const QUESTIONNAIRE_RESIZE_MIN_HEIGHT = 180;
-const QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT = 140;
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
 type ChatMessagesViewProps = {
@@ -90,6 +85,19 @@ const ChatMessagesView = memo(function ChatMessagesView({
               <div className="chat-empty">发送消息开始对话</div>
             )}
             {messages.map((msg) => {
+              if (msg.role === "system" && msg.systemType === "context_compaction") {
+                return (
+                  <div key={msg.id} data-msg-id={msg.id} className="chat-context-divider">
+                    <span className="chat-context-divider-line" />
+                    <span className="chat-context-divider-label">
+                      <ListCollapse size={15} strokeWidth={1.8} />
+                      <span>{msg.content || "上下文已自动压缩"}</span>
+                    </span>
+                    <span className="chat-context-divider-line" />
+                  </div>
+                );
+              }
+
               const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
               const hasImages = !!msg.images?.length;
               const hasDiffs = !!msg.diffs?.length && !processRunning;
@@ -214,7 +222,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     toggleAssistantProcessEntry,
   } = useChatStore();
 
-  const { activeProjectId, projects, activeSessionId, agentStatuses, markSessionInitialized, isSessionInitialized } = useProjectStore();
+  const { activeProjectId, projects, activeSessionId, agentStatuses, isSessionInitialized } = useProjectStore();
   const { triggerAddProject } = useAppStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
@@ -224,36 +232,47 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const inputHasTextRef = useRef(false);
   const [inputHasText, setInputHasText] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
-  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
-  const [questionnairePaneHeight, setQuestionnairePaneHeight] = useState<number | null>(null);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
-  const [pendingUIResponse, setPendingUIResponse] = useState<{
-    sessionId: string;
-    requestId?: string;
-    method?: string;
-    entryId?: string;
-    questions?: AskQuestionPayload[];
-  } | null>(null);
-  const pendingUIResponseRef = useRef<typeof pendingUIResponse>(null);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
-  const questionnaireResizeCleanupRef = useRef<(() => void) | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
   const thinkingRef = useRef<HTMLDivElement>(null);
-  const modelFetchRunIdRef = useRef(0);
   const sessionRuntimeRef = useRef<Record<string, SessionRuntime>>({});
+  const {
+    pendingImages,
+    addPendingImage,
+    removePendingImage,
+    clearPendingImages,
+    handlePaste,
+    handleDrop,
+    handleDragOver,
+  } = usePendingImages();
+  const {
+    pendingUIResponse,
+    pendingUIResponseRef,
+    setPendingUIResponseState,
+    isAwaitingUIResponse,
+    activeQuestionnaire,
+  } = usePendingUIResponse(activeSessionId);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
-  const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
-  const activeQuestionnaire = isAwaitingUIResponse && pendingUIResponse?.questions?.length
-    ? pendingUIResponse
+  const questionnaireResetKey = activeQuestionnaire
+    ? `${activeQuestionnaire.sessionId}:${activeQuestionnaire.requestId || ""}:${activeQuestionnaire.entryId || ""}`
     : null;
+  const {
+    questionnairePaneHeight,
+    handleQuestionnaireResizeStart,
+  } = useQuestionnaireResize({
+    panelRef: chatPanelRef,
+    enabled: !!activeQuestionnaire,
+    resetKey: questionnaireResetKey,
+  });
   const {
     scrollRef,
     showScrollBottom,
@@ -269,12 +288,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeSessionInitialized,
     questionnairePaneHeight,
   });
-
-  const setPendingUIResponseState = (next: typeof pendingUIResponse | ((current: typeof pendingUIResponse) => typeof pendingUIResponse)) => {
-    const value = typeof next === "function" ? next(pendingUIResponseRef.current) : next;
-    pendingUIResponseRef.current = value;
-    setPendingUIResponse(value);
-  };
 
   const resizeTextarea = useCallback((textarea = textareaRef.current) => {
     if (!textarea) return;
@@ -299,10 +312,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
     resizeTextarea(textarea);
   }, [resizeTextarea, syncInputValue]);
-
-  useEffect(() => {
-    pendingUIResponseRef.current = pendingUIResponse;
-  }, [pendingUIResponse]);
 
   useEffect(() => {
     let cancelled = false;
@@ -346,69 +355,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }));
   };
 
-  useEffect(() => {
-    setQuestionnairePaneHeight(null);
-  }, [activeQuestionnaire?.sessionId, activeQuestionnaire?.requestId, activeQuestionnaire?.entryId]);
-
-  useEffect(() => {
-    return () => {
-      questionnaireResizeCleanupRef.current?.();
-    };
-  }, []);
-
-  const getQuestionnairePaneHeight = useCallback((clientY: number) => {
-    const panel = chatPanelRef.current;
-    if (!panel) return null;
-
-    const rect = panel.getBoundingClientRect();
-    const header = panel.querySelector<HTMLElement>(".chat-header");
-    const headerHeight = header?.offsetHeight ?? 36;
-    const minHeight = Math.min(
-      QUESTIONNAIRE_RESIZE_MIN_HEIGHT,
-      Math.max(120, rect.height - headerHeight - 80)
-    );
-    const maxHeight = Math.max(
-      minHeight,
-      rect.height - headerHeight - QUESTIONNAIRE_RESIZE_MIN_MESSAGES_HEIGHT
-    );
-    const nextHeight = rect.bottom - clientY;
-
-    return Math.min(Math.max(nextHeight, minHeight), maxHeight);
-  }, []);
-
-  const handleQuestionnaireResizeStart = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!activeQuestionnaire) return;
-    event.preventDefault();
-    questionnaireResizeCleanupRef.current?.();
-
-    const applyHeight = (clientY: number) => {
-      const nextHeight = getQuestionnairePaneHeight(clientY);
-      if (nextHeight !== null) {
-        setQuestionnairePaneHeight(nextHeight);
-      }
-    };
-
-    const handleMove = (moveEvent: PointerEvent) => {
-      moveEvent.preventDefault();
-      applyHeight(moveEvent.clientY);
-    };
-
-    const stopResize = () => {
-      document.body.classList.remove("chat-questionnaire-resizing");
-      window.removeEventListener("pointermove", handleMove);
-      window.removeEventListener("pointerup", stopResize);
-      window.removeEventListener("pointercancel", stopResize);
-      questionnaireResizeCleanupRef.current = null;
-    };
-
-    document.body.classList.add("chat-questionnaire-resizing");
-    questionnaireResizeCleanupRef.current = stopResize;
-    applyHeight(event.clientY);
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", stopResize);
-    window.addEventListener("pointercancel", stopResize);
-  }, [activeQuestionnaire, getQuestionnairePaneHeight]);
-
   // Auto-resize textarea after layout changes; typing resizes directly in onChange.
   useEffect(() => {
     resizeTextarea();
@@ -439,82 +385,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     preserveScrollDuringLayoutChange(() => toggleAssistantProcessEntry(messageId, entryId), anchor);
   }, [preserveScrollDuringLayoutChange, toggleAssistantProcessEntry]);
 
-  // Fetch models for the active session. No local config fallback is used; an
-  // empty list should stay visible so backend/model discovery issues are clear.
-  const fetchModels = async (sessionId: string, fetchRunId: number) => {
-    for (const delay of MODEL_FETCH_RETRY_DELAYS) {
-      if (delay > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-
-      const stillCurrent =
-        modelFetchRunIdRef.current === fetchRunId &&
-        useProjectStore.getState().activeSessionId === sessionId;
-      if (!stillCurrent) return;
-
-      try {
-        const models = await window.electronAPI.agentGetModels(sessionId);
-        const stillCurrentAfterFetch =
-          modelFetchRunIdRef.current === fetchRunId &&
-          useProjectStore.getState().activeSessionId === sessionId;
-        if (!stillCurrentAfterFetch) return;
-
-        if (models && models.length > 0) {
-          setAvailableModels(models);
-          const currentState = useChatStore.getState();
-          const savedModel = currentState.currentModel;
-
-          // Keep current model if available in the new list, otherwise use first
-          if (savedModel && models.some(m => m.id === savedModel.id && m.provider === savedModel.provider)) {
-            setCurrentModel(savedModel);
-          } else {
-            // Try to restore per-session persisted model from cache
-            const persisted = getSessionModel(sessionId);
-            if (persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider)) {
-              setCurrentModel(persisted);
-            } else {
-              setCurrentModel(models[0]);
-            }
-          }
-          return;
-        }
-      } catch {
-        // Retry below; final empty state is handled after all attempts.
-      }
-    }
-
-    if (
-      modelFetchRunIdRef.current === fetchRunId &&
-      useProjectStore.getState().activeSessionId === sessionId
-    ) {
-      setAvailableModels([]);
-      useChatStore.setState({ currentModel: null });
-    }
-  };
-
-  // Re-fetch models and restore thinking level when the active session backend is ready.
-  useEffect(() => {
-    const fetchRunId = ++modelFetchRunIdRef.current;
-
-    if (!activeSessionId || !activeSession) {
-      setAvailableModels([]);
-      useChatStore.setState({ currentModel: null });
-      return;
-    }
-
-    if (!activeSessionInitialized) {
-      setAvailableModels([]);
-      useChatStore.setState({ currentModel: null });
-      return;
-    }
-
-    fetchModels(activeSessionId, fetchRunId);
-    // Restore per-session thinking level (default to "medium" if none persisted)
-    const persistedThinking = getSessionThinking(activeSessionId);
-    const thinkingToSet = persistedThinking || "medium";
-    setThinkingLevel(thinkingToSet);
-    window.electronAPI.agentSetThinkingLevel(thinkingToSet);
-  }, [activeSessionId, activeSession?.agentId, activeSessionInitialized]);
+  const { switchToSession } = useSessionModels({
+    activeSessionId,
+    activeSessionAgentId: activeSession?.agentId,
+    activeSessionInitialized,
+    setAvailableModels,
+    setCurrentModel,
+    setThinkingLevel,
+  });
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -545,127 +423,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setStreaming,
   });
 
-  const handleSendUIResponse = async () => {
-    const text = inputValueRef.current.trim();
-    const targetSessionId = useProjectStore.getState().activeSessionId;
-    if (!targetSessionId || pendingUIResponse?.sessionId !== targetSessionId || !text) return;
-    const pendingResponse = pendingUIResponse;
-
-    enableAutoFollow();
-    flushSync(() => {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "user",
-        content: text,
-        timestamp: Date.now(),
-      }, targetSessionId);
-      setComposerInput("");
-      setPendingUIResponseState(null);
-      finishPendingQuestionTurn(targetSessionId, pendingResponse);
-    });
-
-    const result = await window.electronAPI.agentSendUIResponse(getUIResponsePayload({
-      sessionId: targetSessionId,
-      requestId: pendingResponse.requestId,
-      method: pendingResponse.method,
-      text,
-    }));
-
-    if (!result.success) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: "发送回答失败",
-        timestamp: Date.now(),
-      }, targetSessionId);
-      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
-    }
-  };
-
-  const finishPendingQuestionEntry = (targetSessionId: string, pendingResponse: typeof pendingUIResponse, failed = false) => {
-    if (!pendingResponse?.entryId) return;
-    useChatStore.getState().updateLastAssistantProcessEntry(pendingResponse.entryId, {
-      title: failed ? getQuestionTitle(false, true) : getQuestionTitle(false),
-      state: failed ? "error" : "completed",
-      expanded: false,
-    }, targetSessionId);
-  };
-
-  const resetRuntimeAfterUIResponse = (targetSessionId: string) => {
-    const runtime = sessionRuntimeRef.current[targetSessionId];
-    if (!runtime) return;
-
-    if (runtime.streamWatchdog) {
-      clearTimeout(runtime.streamWatchdog);
-      runtime.streamWatchdog = null;
-    }
-    resetSessionRuntimeAfterTurn(runtime);
-    runtime.autoAbortReason = null;
-  };
-
-  const finishPendingQuestionTurn = (targetSessionId: string, pendingResponse: typeof pendingUIResponse, failed = false) => {
-    finishPendingQuestionEntry(targetSessionId, pendingResponse, failed);
-    useChatStore.getState().finishLastAssistantProcess(Date.now(), failed ? "interrupted" : "completed", targetSessionId);
-    resetRuntimeAfterUIResponse(targetSessionId);
-  };
-
-  const handleSubmitQuestionnaire = async (answers: unknown[]) => {
-    const targetSessionId = useProjectStore.getState().activeSessionId;
-    if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
-    const pendingResponse = activeQuestionnaire;
-    const answerSummary = answers
-      .map(getQuestionnaireAnswerLabel)
-      .filter(Boolean)
-      .join("\n");
-
-    flushSync(() => {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "user",
-        content: answerSummary || "已提交问卷回答",
-        timestamp: Date.now(),
-      }, targetSessionId);
-      setPendingUIResponseState(null);
-      finishPendingQuestionTurn(targetSessionId, pendingResponse);
-    });
-
-    const result = await window.electronAPI.agentSendUIResponse({
-      sessionId: targetSessionId,
-      type: "extension_ui_response",
-      id: pendingResponse.requestId,
-      method: pendingResponse.method,
-      cancelled: false,
-      result: { cancelled: false, answers },
-      value: answerSummary,
-      text: answerSummary,
-      answers,
-    });
-
-    if (!result.success) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: "发送问卷回答失败",
-        timestamp: Date.now(),
-      }, targetSessionId);
-      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
-    }
-  };
-
-  const handleCancelQuestionnaire = async () => {
-    const targetSessionId = useProjectStore.getState().activeSessionId;
-    if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
-    const pendingResponse = activeQuestionnaire;
-    setPendingUIResponseState(null);
-    finishPendingQuestionTurn(targetSessionId, pendingResponse, true);
-    await window.electronAPI.agentSendUIResponse({
-      sessionId: targetSessionId,
-      type: "extension_ui_response",
-      id: pendingResponse.requestId,
-      method: pendingResponse.method,
-      cancelled: true,
-    });
-  };
+  const {
+    handleSendUIResponse,
+    handleSubmitQuestionnaire,
+    handleCancelQuestionnaire,
+  } = usePendingUIResponseActions({
+    activeQuestionnaire,
+    addMessage,
+    enableAutoFollow,
+    inputValueRef,
+    pendingUIResponse,
+    sessionRuntimeRef,
+    setComposerInput,
+    setPendingUIResponseState,
+  });
 
   const handleSend = async () => {
     if (activeQuestionnaire) return;
@@ -742,7 +513,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         images: messageImages,
       }, targetSessionId);
       setComposerInput("");
-      setPendingImages([]);
+      clearPendingImages();
       clearPendingFiles();
       setStreaming(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
@@ -849,48 +620,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     });
   };
 
-  // Image handling
-  const addPendingImage = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      setPendingImages((prev) => [...prev, {
-        id: crypto.randomUUID(),
-        src: reader.result as string,
-        name: file.name,
-        file,
-      }]);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const removePendingImage = (id: string) => {
-    setPendingImages((prev) => prev.filter((img) => img.id !== id));
-  };
-
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = Array.from(e.clipboardData.items);
-    for (const item of items) {
-      if (item.type.startsWith("image/")) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (file) addPendingImage(file);
-        return;
-      }
-    }
-  }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files);
-    for (const file of files) {
-      addPendingImage(file);
-    }
-  }, []);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-  }, []);
-
   const handleSelectModel = async (model: ModelInfo) => {
     setCurrentModel(model);
     setModelOpen(false);
@@ -974,37 +703,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                   <button
                     key={session.id}
                     className="chat-session-item"
-                    onClick={async () => {
-                      // Switch UI immediately
-                      useProjectStore.getState().setActiveSession(session.id);
-                      useChatStore.getState().setActiveAgent(session.agentId);
-                      useChatStore.getState().switchSession(session.id);
-
-                      // Create and switch agent session in background
-                      if (activeProject) {
-                        window.electronAPI.agentCreateSession(
-                          session.agentId, activeProject.path, session.id, session.sessionFilePath
-                        ).then(async (result) => {
-                          if (result.sessionFilePath) {
-                            useProjectStore.getState().setSessionFilePath(activeProject.id, session.id, result.sessionFilePath);
-                          }
-                          if (useProjectStore.getState().activeSessionId === session.id) {
-                            applySessionModels(session.id, result.models);
-                          }
-                          useProjectStore.getState().markSessionInitialized(session.id);
-                          if (useProjectStore.getState().activeSessionId === session.id) {
-                            await window.electronAPI.agentSwitchSession(session.id);
-                            // Update model list only; model selection is handled by ChatPanel useEffect
-                            try {
-                              const models = await window.electronAPI.agentGetModels(session.id);
-                              if (models && models.length > 0) {
-                                useChatStore.getState().setAvailableModels(models);
-                              }
-                            } catch { /* ignore */ }
-                          }
-                        });
-                      }
-                    }}
+                    onClick={() => switchToSession(activeProject, session)}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -1051,7 +750,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                 <div className="chat-user-history-empty">暂无发言</div>
               ) : (
                 <div className="chat-user-history-list">
-                  {messages.filter((m) => m.role === "user").map((msg) => (
+                  {messages.filter((m) => m.role === "user").slice().reverse().map((msg) => (
                     <div
                       key={msg.id}
                       className="chat-user-history-item"

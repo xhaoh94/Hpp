@@ -43,6 +43,32 @@ const normalizeQuestions = (value) => {
 
 const normalizeToolName = (value) => String(value || "").trim().toLowerCase().replace(/-/g, "_");
 
+const normalizeEventToken = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s._:-]+/g, "");
+
+const isContextCompactionLike = (...values) => {
+  const normalized = values.map(normalizeEventToken).filter(Boolean);
+  return normalized.some((value) =>
+    value.includes("contextcompaction") ||
+    value.includes("compactedcontext") ||
+    value.includes("compactcontext") ||
+    value.includes("contextcompact") ||
+    value.includes("contextsummary") ||
+    value.includes("summarizecontext") ||
+    value.includes("contextsummarized") ||
+    value.includes("conversationcompaction") ||
+    value.includes("conversationcompacted") ||
+    value.includes("conversationcompact") ||
+    value.includes("memorycompaction") ||
+    value.includes("压缩上下文") ||
+    value.includes("上下文压缩") ||
+    value.includes("上下文已自动压缩")
+  );
+};
+
 const normalizeQuestionOption = (option) => {
   if (typeof option === "string") return { value: option, label: option };
   if (!isRecord(option)) return { value: String(option), label: String(option) };
@@ -373,6 +399,11 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
 };
 
 const handleSessionEvent = (event) => {
+  if (isContextCompactionLike(event.type, event.name, event.title, event.message)) {
+    send({ type: "context_compaction", id: event.id || event.itemId || event.messageId });
+    return;
+  }
+
   switch (event.type) {
     case "agent_start":
       send({ type: "agent_start" });

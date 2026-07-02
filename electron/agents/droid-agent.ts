@@ -7,6 +7,7 @@ import { homedir } from "os";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import {
   buildDiffsFromToolEvent,
+  isContextCompactionLike,
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
 } from "./process-events";
@@ -368,6 +369,21 @@ export class DroidAgent {
     const notification = params?.notification || params;
     const notifType = notification?.type || method;
     const notifData = notification?.data || notification;
+
+    if (
+      isContextCompactionLike(
+        method,
+        notifType,
+        notifData?.type,
+        notifData?.name,
+        notifData?.title,
+        notifData?.message,
+        notifData?.status
+      )
+    ) {
+      this.emitEvent({ type: "context_compaction", id: notifData?.id || notification?.id || params?.id });
+      return;
+    }
 
     switch (notifType) {
       case "assistant_text_delta":

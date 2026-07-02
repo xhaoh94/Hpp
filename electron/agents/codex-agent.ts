@@ -254,6 +254,7 @@ export class CodexAgent {
       case "tool_start":
       case "tool_end":
       case "process_event":
+      case "context_compaction":
       case "diff_update":
       case "agent_end":
         this.emitEvent(data);

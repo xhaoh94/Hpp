@@ -47,6 +47,7 @@ let commandOutputByItemId = new Map();
 let reasoningTextByItemId = new Map();
 let agentTextByItemId = new Map();
 let completedItemIds = new Set();
+let emittedContextCompactionIds = new Set();
 let pendingUIRequest = null;
 let configuredModelsCache = null;
 
@@ -478,6 +479,7 @@ const resetTurnState = () => {
   reasoningTextByItemId = new Map();
   agentTextByItemId = new Map();
   completedItemIds = new Set();
+  emittedContextCompactionIds = new Set();
 };
 
 const normalizeQuestionOption = (option) => ({
@@ -878,12 +880,13 @@ const handleItem = (item, phase) => {
       });
       break;
     case "contextCompaction":
-      send({
-        type: "process_event",
-        entryType: "status",
-        title: "Codex compacted context",
-        state: "completed",
-      });
+      if (!emittedContextCompactionIds.has(item.id)) {
+        emittedContextCompactionIds.add(item.id);
+        send({
+          type: "context_compaction",
+          id: item.id,
+        });
+      }
       break;
   }
 

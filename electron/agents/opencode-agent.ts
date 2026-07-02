@@ -2,7 +2,7 @@ import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import * as http from "http";
 import { AgentEventBuffer } from "./agent-event-buffer";
-import { buildDiffsFromToolEvent, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
+import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
 
 interface AgentModel {
   id: string;
@@ -291,6 +291,24 @@ export class OpenCodeAgent {
 
   private handleSSEEvent(eventType: string, data: any) {
     const props = data.properties || data;
+    const part = props.part || props;
+    if (
+      isContextCompactionLike(
+        eventType,
+        props.type,
+        props.name,
+        props.title,
+        props.message,
+        props.status,
+        part.type,
+        part.name,
+        part.title,
+        part.message
+      )
+    ) {
+      this.emitEvent({ type: "context_compaction", id: part.id || props.partID || props.partId || props.id || data.id });
+      return;
+    }
 
     switch (eventType) {
       case "message.part.added":

@@ -4,7 +4,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
-import { buildDiffsFromToolEvent, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
+import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
 
 interface AgentModel {
   id: string;
@@ -258,6 +258,9 @@ export class PiSDKAgent {
     }
 
     switch (data.type) {
+      case "context_compaction":
+        this.emitEvent({ type: "context_compaction", id: data.id });
+        break;
       case "ready":
         for (const handler of this.pendingResponses.values()) handler(data);
         this.pendingResponses.clear();
@@ -361,6 +364,10 @@ export class PiSDKAgent {
         break;
       case "error":
         if (data.id && !this.activePromptIds.delete(String(data.id))) break;
+        if (isContextCompactionLike(data.error, data.title, data.message)) {
+          this.emitEvent({ type: "context_compaction", id: data.id });
+          break;
+        }
         this.pendingUIRequestIds.clear();
         this.emitEvent({
           type: "process_event",

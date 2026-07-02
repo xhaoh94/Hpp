@@ -33,6 +33,7 @@ export interface AgentEvent {
   entryType?: string;
   title?: string;
   state?: string;
+  status?: string;
   command?: string;
   filePath?: string;
   detail?: unknown;
