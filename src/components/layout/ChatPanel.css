@@ -1268,6 +1268,44 @@ body.chat-questionnaire-resizing {
   padding: 0 4px;
 }
 
+.chat-attachment-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 4px 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  border-radius: 8px;
+  background-color: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chat-attachment-alert span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-attachment-alert button {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chat-attachment-alert button:hover {
+  background-color: rgba(245, 158, 11, 0.16);
+}
+
 .chat-input-container {
   display: flex;
   align-items: flex-end;
@@ -1525,6 +1563,106 @@ body.chat-questionnaire-resizing {
   text-align: center;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.chat-dropdown-codex {
+  width: min(180px, calc(100vw - 32px));
+  max-height: 360px;
+  padding: 4px;
+}
+
+.chat-codex-model-header {
+  position: sticky;
+  top: -4px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.chat-codex-model-header span:first-child {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.chat-codex-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 4px;
+}
+
+.chat-codex-model-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+
+.chat-codex-model-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.chat-codex-model-item.active {
+  background-color: rgba(0, 122, 204, 0.14);
+  border-color: rgba(0, 122, 204, 0.35);
+}
+
+.chat-codex-model-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--accent-color);
+}
+
+.chat-codex-model-main {
+  min-width: 0;
+  display: block;
+}
+
+.chat-codex-model-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-codex-model-name {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.chat-codex-model-star {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+}
+
+.chat-codex-model-star:hover {
+  background-color: rgba(251, 191, 36, 0.12);
 }
 
 /* Thinking dropdown */

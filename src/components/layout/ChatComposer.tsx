@@ -16,6 +16,7 @@ export type PendingImage = {
 
 type ChatComposerProps = {
   activeQuestionnaire: boolean;
+  attachmentError: string | null;
   currentSessionRunning: boolean;
   isAwaitingUIResponse: boolean;
   inputHasText: boolean;
@@ -25,6 +26,7 @@ type ChatComposerProps = {
   fileInputRef: RefObject<HTMLInputElement | null>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onAddPendingImage: (file: File) => void;
+  onClearAttachmentError: () => void;
   onRemovePendingFile: (id: string) => void;
   onRemovePendingImage: (id: string) => void;
   onOpenImage: (src: string) => void;
@@ -40,6 +42,7 @@ type ChatComposerProps = {
 
 export function ChatComposer({
   activeQuestionnaire,
+  attachmentError,
   currentSessionRunning,
   isAwaitingUIResponse,
   inputHasText,
@@ -49,6 +52,7 @@ export function ChatComposer({
   fileInputRef,
   textareaRef,
   onAddPendingImage,
+  onClearAttachmentError,
   onRemovePendingFile,
   onRemovePendingImage,
   onOpenImage,
@@ -114,6 +118,17 @@ export function ChatComposer({
               <button className="chat-file-remove" onClick={() => onRemovePendingImage(image.id)}>×</button>
             </div>
           ))}
+        </div>
+      )}
+
+      {attachmentError && (
+        <div className="chat-attachment-alert" role="status">
+          <span>{attachmentError}</span>
+          <button type="button" onClick={onClearAttachmentError} aria-label="关闭附件提示">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
         </div>
       )}
 

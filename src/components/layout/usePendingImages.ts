@@ -12,24 +12,33 @@ const SUPPORTED_IMAGE_TYPES = new Set([
 ]);
 const SUPPORTED_IMAGE_NAME_PATTERN = /\.(png|jpe?g|webp|gif|bmp|svg)$/i;
 
-const canAttachImage = (file: File) => {
+const formatBytes = (bytes: number) => {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  return `${Math.round(bytes / 1024 / 1024)}MB`;
+};
+
+const getImageAttachmentRejection = (file: File) => {
   const isImage = SUPPORTED_IMAGE_TYPES.has(file.type) || SUPPORTED_IMAGE_NAME_PATTERN.test(file.name);
   if (!isImage) {
-    console.warn("[chat] ignored non-image attachment:", file.name || file.type || "unknown file");
-    return false;
+    return `仅支持图片附件，已忽略 ${file.name || "该文件"}`;
   }
   if (file.size > MAX_PENDING_IMAGE_BYTES) {
-    console.warn("[chat] ignored oversized image attachment:", file.name || "unknown file");
-    return false;
+    return `图片不能超过 ${formatBytes(MAX_PENDING_IMAGE_BYTES)}，已忽略 ${file.name || "该文件"}`;
   }
-  return true;
+  return null;
 };
 
 export function usePendingImages() {
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   const addPendingImage = useCallback((file: File) => {
-    if (!canAttachImage(file)) return;
+    const rejection = getImageAttachmentRejection(file);
+    if (rejection) {
+      console.warn("[chat] ignored attachment:", file.name || file.type || "unknown file");
+      setAttachmentError(rejection);
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = () => {
@@ -39,6 +48,7 @@ export function usePendingImages() {
         name: file.name,
         file,
       }]);
+      setAttachmentError(null);
     };
     reader.readAsDataURL(file);
   }, []);
@@ -49,6 +59,10 @@ export function usePendingImages() {
 
   const clearPendingImages = useCallback(() => {
     setPendingImages([]);
+  }, []);
+
+  const clearAttachmentError = useCallback(() => {
+    setAttachmentError(null);
   }, []);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -77,9 +91,11 @@ export function usePendingImages() {
 
   return {
     pendingImages,
+    attachmentError,
     addPendingImage,
     removePendingImage,
     clearPendingImages,
+    clearAttachmentError,
     handlePaste,
     handleDrop,
     handleDragOver,

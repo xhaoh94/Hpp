@@ -1,4 +1,5 @@
 import type { RefObject } from "react";
+import { Check, Star } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 
 type ThinkingLevelOption = {
@@ -102,32 +103,48 @@ export function ChatToolbar({
           </svg>
         </button>
         {modelOpen && (
-          <div className="chat-dropdown">
+          <div className={`chat-dropdown ${flattenModelList ? "chat-dropdown-codex" : ""}`}>
             {availableModels.length === 0 && (
               <div className="chat-dropdown-empty">暂无可用模型</div>
             )}
             {flattenModelList ? (
-              availableModels.map((model) => {
-                const isFav = favoriteModels.some((favorite) => favorite.id === model.id && favorite.provider === model.provider);
-                const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
-                return (
-                  <div
-                    key={`${model.provider}:${model.id}`}
-                    className={`chat-dropdown-item ${isActive ? "active" : ""}`}
-                    onClick={() => onSelectModel(model)}
-                  >
-                    <span className="truncate">{model.name}</span>
-                    <button
-                      onClick={(event) => { event.stopPropagation(); onToggleFavorite(model); }}
-                      className={`chat-dropdown-star ${isFav ? "fav" : ""}`}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill={isFav ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2">
-                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                      </svg>
-                    </button>
+              availableModels.length > 0 && (
+                <>
+                  <div className="chat-codex-model-header">
+                    <span>Codex 模型</span>
+                    <span>{availableModels.length} 个可用</span>
                   </div>
-                );
-              })
+                  <div className="chat-codex-model-list">
+                    {availableModels.map((model) => {
+                      const isFav = favoriteModels.some((favorite) => favorite.id === model.id && favorite.provider === model.provider);
+                      const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
+                      return (
+                        <div
+                          key={`${model.provider}:${model.id}`}
+                          className={`chat-codex-model-item ${isActive ? "active" : ""}`}
+                          onClick={() => onSelectModel(model)}
+                          title={model.name}
+                        >
+                          <span className="chat-codex-model-check">
+                            {isActive && <Check size={13} strokeWidth={2.4} />}
+                          </span>
+                          <span className="chat-codex-model-main">
+                            <span className="chat-codex-model-name">{model.name}</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(event) => { event.stopPropagation(); onToggleFavorite(model); }}
+                            className={`chat-dropdown-star chat-codex-model-star ${isFav ? "fav" : ""}`}
+                            title={isFav ? "取消收藏" : "收藏模型"}
+                          >
+                            <Star size={14} fill={isFav ? "currentColor" : "none"} strokeWidth={1.9} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )
             ) : modelProviders.map((provider) => {
               const providerModels = availableModels.filter((model) => model.provider === provider);
               const isExpanded = expandedProvider === provider;

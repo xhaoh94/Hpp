@@ -247,9 +247,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const sessionRuntimeRef = useRef<Record<string, SessionRuntime>>({});
   const {
     pendingImages,
+    attachmentError,
     addPendingImage,
     removePendingImage,
     clearPendingImages,
+    clearAttachmentError,
     handlePaste,
     handleDrop,
     handleDragOver,
@@ -823,6 +825,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         <ChatComposer
           activeQuestionnaire={!!activeQuestionnaire}
           currentSessionRunning={currentSessionRunning}
+          attachmentError={attachmentError}
           isAwaitingUIResponse={isAwaitingUIResponse}
           inputHasText={inputHasText}
           pendingFiles={pendingFiles}
@@ -831,6 +834,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           fileInputRef={fileInputRef}
           textareaRef={textareaRef}
           onAddPendingImage={addPendingImage}
+          onClearAttachmentError={clearAttachmentError}
           onRemovePendingFile={removePendingFile}
           onRemovePendingImage={removePendingImage}
           onOpenImage={setZoomImage}
