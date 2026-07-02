@@ -78,6 +78,39 @@ const getFileEntryTitle = (
   }
 };
 
+const normalizeProcessFileKey = (filePath: string) =>
+  filePath.replace(/\\/g, "/").trim().toLowerCase();
+
+const mergeProcessFileCounts = (left?: number, right?: number) => {
+  if (typeof left !== "number" && typeof right !== "number") return undefined;
+  return (left || 0) + (right || 0);
+};
+
+const mergeProcessFiles = (files: AgentProcessFile[]) => {
+  const byFile = new Map<string, AgentProcessFile>();
+
+  for (const file of files) {
+    if (!file.file?.trim()) continue;
+
+    const key = normalizeProcessFileKey(file.file);
+    const existing = byFile.get(key);
+    if (!existing) {
+      byFile.set(key, { ...file, label: file.label || getFileName(file.file) });
+      continue;
+    }
+
+    byFile.set(key, {
+      ...existing,
+      ...file,
+      label: existing.label || file.label || getFileName(file.file),
+      additions: mergeProcessFileCounts(existing.additions, file.additions),
+      deletions: mergeProcessFileCounts(existing.deletions, file.deletions),
+    });
+  }
+
+  return Array.from(byFile.values());
+};
+
 function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; state?: AgentProcessEntry["state"] }) {
   if (state === "running") {
     return <span className="chat-process-entry-spinner" />;
@@ -314,7 +347,7 @@ function ProcessEntryRow({
   onPreserveScroll: PreserveScroll;
 }) {
   const hasDetail = !!entry.detail;
-  const files = entry.files || [];
+  const files = mergeProcessFiles(entry.files || []);
   const isCommandEntry = entry.toolKind === "run_command";
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
@@ -428,22 +461,23 @@ const mergeProcessEntries = (entries: AgentProcessEntry[]): AgentProcessEntry[] 
 
   for (const entry of entries) {
     const last = merged[merged.length - 1];
+    const entryFiles = entry.files ? mergeProcessFiles(entry.files) : undefined;
 
     if (
       entry.type === "tool" && last?.type === "tool" &&
       entry.toolKind && last.toolKind === entry.toolKind &&
       entry.state === last.state &&
       last.files && last.files.length > 0 &&
-      entry.files && entry.files.length > 0
+      entryFiles && entryFiles.length > 0
     ) {
-      last.files = [...last.files, ...entry.files];
+      last.files = mergeProcessFiles([...last.files, ...entryFiles]);
       const action = toolKindToAction(entry.toolKind);
       last.title = getFileEntryTitle(action, last.files.length, entry.state === "running");
       last.id = entry.id;
       continue;
     }
 
-    merged.push({ ...entry, files: entry.files ? [...entry.files] : undefined });
+    merged.push({ ...entry, files: entryFiles ? [...entryFiles] : undefined });
   }
 
   return merged;

@@ -14,8 +14,47 @@ export interface AgentModel {
 
 export interface AgentEvent {
   type: string;
+  sessionId?: string;
+  agentId?: string;
+  content?: string;
+  delta?: string;
+  force?: boolean;
+  toolCallId?: string;
+  callId?: string;
+  id?: string;
+  requestId?: string;
+  toolName?: string;
+  name?: string;
+  tool?: string;
+  toolKind?: string;
+  kind?: string;
+  mode?: string;
+  method?: string;
+  entryType?: string;
+  title?: string;
+  state?: string;
+  command?: string;
+  filePath?: string;
+  detail?: unknown;
+  args?: Record<string, unknown>;
+  input?: Record<string, unknown>;
+  questions?: unknown;
+  question?: unknown;
+  prompt?: unknown;
+  message?: unknown;
+  files?: unknown;
+  diffs?: unknown;
+  patch?: unknown;
+  additions?: unknown;
+  deletions?: unknown;
+  outputText?: unknown;
+  errorText?: unknown;
+  isError?: boolean;
+  sessionFilePath?: unknown;
   [key: string]: unknown;
 }
+
+export type AgentUIResponse = Record<string, unknown>;
 
 export interface AgentPackageStatus {
   installed: boolean;
@@ -64,7 +103,7 @@ export interface ElectronAPI {
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
   agentSetModel: (provider: string, modelId: string) => Promise<{ success: boolean }>;
   agentSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;
-  agentSendUIResponse: (response: any) => Promise<{ success: boolean }>;
+  agentSendUIResponse: (response: AgentUIResponse) => Promise<{ success: boolean }>;
 
   // Agent events
   onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;

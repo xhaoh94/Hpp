@@ -8,6 +8,7 @@ import { applySessionModels, getSessionModel, saveSessionModel, getSessionThinki
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { ProcessBlock } from "./ProcessBlock";
+import type { AgentEvent } from "@/types";
 import "./ChatPanel.css";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
@@ -44,6 +45,24 @@ type NormalizedToolKind =
   | "web_search"
   | "question"
   | "unknown";
+
+type UnknownRecord = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is UnknownRecord =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+const asRecord = (value: unknown): UnknownRecord =>
+  isRecord(value) ? value : {};
+
+const getStringField = (value: UnknownRecord, key: string): string | undefined => {
+  const found = value[key];
+  return typeof found === "string" ? found : undefined;
+};
+
+const getBooleanField = (value: UnknownRecord, key: string): boolean | undefined => {
+  const found = value[key];
+  return typeof found === "boolean" ? found : undefined;
+};
 
 const stringifyProcessValue = (value: unknown) => {
   if (value === undefined || value === null || value === "") return "";
@@ -104,12 +123,12 @@ const getFileName = (filePath: string) => {
   return parts[parts.length - 1] || filePath;
 };
 
-const getToolKey = (event: any) => {
+const getToolKey = (event: AgentEvent) => {
   const raw = event.toolCallId || event.callId || event.id || event.toolName || event.name || "tool";
   return String(raw);
 };
 
-const getToolName = (event: any) => {
+const getToolName = (event: AgentEvent) => {
   return event.toolName || event.name || event.tool || "tool";
 };
 
@@ -133,17 +152,17 @@ const getFileEntryTitle = (action: AgentProcessFile["action"] | undefined, count
   }
 };
 
-const getToolProcessFiles = (event: any): AgentProcessFile[] => {
+const getToolProcessFiles = (event: AgentEvent): AgentProcessFile[] => {
   if (Array.isArray(event.files)) {
     return event.files
-      .filter((file: AgentProcessFile) => typeof file?.file === "string" && file.file.trim())
-      .map((file: AgentProcessFile) => ({
+      .filter((file): file is AgentProcessFile => isRecord(file) && typeof file.file === "string" && file.file.trim().length > 0)
+      .map((file) => ({
         ...file,
         label: file.label || getFileName(file.file),
       }));
   }
 
-  if (!event.filePath) return [];
+  if (typeof event.filePath !== "string" || !event.filePath) return [];
   const toolKind = normalizeToolKind(event.toolKind);
   const action: AgentProcessFile["action"] =
     toolKind === "read_file" ? "read" :
@@ -158,8 +177,8 @@ const getToolProcessFiles = (event: any): AgentProcessFile[] => {
     file: event.filePath,
     label: getFileName(event.filePath),
     action,
-    additions: event.additions,
-    deletions: event.deletions,
+    additions: typeof event.additions === "number" ? event.additions : undefined,
+    deletions: typeof event.deletions === "number" ? event.deletions : undefined,
     status: event.patch ? "modified" : undefined,
   }];
 };
@@ -235,16 +254,16 @@ type AskQuestionPayload = {
   options?: AskQuestionOption[];
 };
 
-const getNestedQuestionValue = (value: any, path: string[]): any => {
-  let current = value;
+const getNestedQuestionValue = (value: unknown, path: string[]): unknown => {
+  let current: unknown = value;
   for (const key of path) {
-    if (current === undefined || current === null) return undefined;
+    if (!isRecord(current)) return undefined;
     current = current[key];
   }
   return current;
 };
 
-const readFirstQuestionValue = (value: any, paths: string[][]): any => {
+const readFirstQuestionValue = (value: unknown, paths: string[][]): unknown => {
   for (const path of paths) {
     const found = getNestedQuestionValue(value, path);
     if (found !== undefined && found !== null && found !== "") return found;
@@ -265,14 +284,15 @@ const parseJsonQuestionValue = (value: unknown): unknown => {
 
 const normalizeAskOptions = (value: unknown): AskQuestionOption[] => {
   if (!Array.isArray(value)) return [];
-  return value.map((option: any, index) => {
+  return value.map((option, index) => {
     if (typeof option === "string") return { label: option, value: option };
+    const raw = asRecord(option);
     return {
-      label: String(option?.label ?? option?.value ?? option?.text ?? option?.title ?? `选项 ${index + 1}`),
-      value: option?.value === undefined || option?.value === null ? undefined : String(option.value),
-      description: typeof option?.description === "string" ? option.description : undefined,
-      preview: typeof option?.preview === "string" ? option.preview : undefined,
-      hasPreview: !!option?.hasPreview,
+      label: String(raw.label ?? raw.value ?? raw.text ?? raw.title ?? `选项 ${index + 1}`),
+      value: raw.value === undefined || raw.value === null ? undefined : String(raw.value),
+      description: typeof raw.description === "string" ? raw.description : undefined,
+      preview: typeof raw.preview === "string" ? raw.preview : undefined,
+      hasPreview: !!raw.hasPreview,
     };
   });
 };
@@ -281,12 +301,14 @@ const normalizeAskQuestions = (value: unknown): AskQuestionPayload[] => {
   const parsedValue = parseJsonQuestionValue(value);
   const rawQuestions = Array.isArray(parsedValue)
     ? parsedValue
-    : parsedValue && typeof parsedValue === "object" && Array.isArray((parsedValue as any).questions)
-      ? (parsedValue as any).questions
+    : isRecord(parsedValue) && Array.isArray(parsedValue.questions)
+      ? parsedValue.questions
       : [];
 
-  if (rawQuestions.length === 0 && parsedValue && typeof parsedValue === "object") {
-    const raw = parsedValue as any;
+  if (rawQuestions.length === 0 && isRecord(parsedValue)) {
+    const raw = parsedValue;
+    const detail = asRecord(raw.detail);
+    const params = asRecord(raw.params);
     const question = readFirstQuestionValue(raw, [
       ["question"],
       ["title"],
@@ -312,10 +334,10 @@ const normalizeAskQuestions = (value: unknown): AskQuestionPayload[] => {
     ]);
     if (question || Array.isArray(options)) {
       return [{
-        id: typeof raw.id === "string" ? raw.id : undefined,
+        id: getStringField(raw, "id"),
         question: String(question || "请选择答案"),
-        header: typeof raw.header === "string" ? raw.header : undefined,
-        multiSelect: !!(raw.multiSelect ?? raw.multiple ?? raw.detail?.multiSelect ?? raw.params?.multiSelect),
+        header: getStringField(raw, "header"),
+        multiSelect: !!(raw.multiSelect ?? raw.multiple ?? detail.multiSelect ?? params.multiSelect),
         options: normalizeAskOptions(options),
       }];
     }
@@ -325,13 +347,14 @@ const normalizeAskQuestions = (value: unknown): AskQuestionPayload[] => {
     return [{ question: parsedValue.trim(), options: [] }];
   }
 
-  return rawQuestions.map((raw: any, questionIndex) => {
-    const options = normalizeAskOptions(raw?.options ?? raw?.choices);
+  return rawQuestions.map((value, questionIndex) => {
+    const raw = asRecord(value);
+    const options = normalizeAskOptions(raw.options ?? raw.choices);
     return {
-      id: typeof raw?.id === "string" ? raw.id : undefined,
-      question: String(raw?.question ?? raw?.prompt ?? raw?.title ?? raw?.message ?? `问题 ${questionIndex + 1}`),
-      header: typeof raw?.label === "string" ? raw.label : typeof raw?.header === "string" ? raw.header : undefined,
-      multiSelect: !!(raw?.multiSelect ?? raw?.multiple),
+      id: getStringField(raw, "id"),
+      question: String(raw.question ?? raw.prompt ?? raw.title ?? raw.message ?? `问题 ${questionIndex + 1}`),
+      header: getStringField(raw, "label") ?? getStringField(raw, "header"),
+      multiSelect: !!(raw.multiSelect ?? raw.multiple),
       options,
     };
   });
@@ -343,23 +366,28 @@ const normalizeAskQuestionsFromCandidates = (...values: unknown[]): AskQuestionP
     if (questions.length > 0) return questions;
   }
 
-  const optionSource = values.find((value: any) =>
-    Array.isArray(value?.options) ||
-    Array.isArray(value?.choices) ||
-    Array.isArray(value?.detail?.options) ||
-    Array.isArray(value?.params?.options)
-  ) as any;
-  const promptSource = values.find((value: any) =>
-    typeof value === "string" ||
-    typeof value?.question === "string" ||
-    typeof value?.prompt === "string" ||
-    typeof value?.message === "string" ||
-    typeof value?.title === "string" ||
-    typeof value?.detail?.question === "string" ||
-    typeof value?.detail?.prompt === "string" ||
-    typeof value?.detail?.message === "string" ||
-    typeof value?.detail?.title === "string"
-  ) as any;
+  const optionSource = values.find((value) => {
+    const raw = asRecord(value);
+    const detail = asRecord(raw.detail);
+    const params = asRecord(raw.params);
+    return Array.isArray(raw.options) ||
+      Array.isArray(raw.choices) ||
+      Array.isArray(detail.options) ||
+      Array.isArray(params.options);
+  });
+  const promptSource = values.find((value) => {
+    if (typeof value === "string") return true;
+    const raw = asRecord(value);
+    const detail = asRecord(raw.detail);
+    return typeof raw.question === "string" ||
+      typeof raw.prompt === "string" ||
+      typeof raw.message === "string" ||
+      typeof raw.title === "string" ||
+      typeof detail.question === "string" ||
+      typeof detail.prompt === "string" ||
+      typeof detail.message === "string" ||
+      typeof detail.title === "string";
+  });
 
   const question = typeof promptSource === "string"
     ? promptSource
@@ -392,7 +420,15 @@ const normalizeAskQuestionsFromCandidates = (...values: unknown[]): AskQuestionP
   return [];
 };
 
-const getToolDetail = (event: any) => {
+const getQuestionnaireAnswerLabel = (answer: unknown) => {
+  const raw = asRecord(answer);
+  if (typeof raw.label === "string") return raw.label;
+  if (typeof raw.answer === "string") return raw.answer;
+  if (Array.isArray(raw.selected)) return raw.selected.map(String).join(", ");
+  return "";
+};
+
+const getToolDetail = (event: AgentEvent) => {
   const detail = typeof event.detail === "string" ? event.detail : "";
   if (detail.trim()) return truncateProcessDetail(detail);
   if (event.isError && event.errorText) return truncateProcessDetail(String(event.errorText));
@@ -402,7 +438,7 @@ const getToolDetail = (event: any) => {
   return undefined;
 };
 
-const getToolSummary = (event: any, running = false): string => {
+const getToolSummary = (event: AgentEvent, running = false): string => {
   const toolKind = normalizeToolKind(event.toolKind);
   const toolName = getToolName(event);
   const files = getToolProcessFiles(event);
@@ -755,8 +791,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    window.electronAPI.loadData("settings").then((data: any) => {
-      if (!cancelled) setPlanModeEnabled(!!data?.general?.planModeEnabled);
+    window.electronAPI.loadData("settings").then((data) => {
+      const settings = asRecord(data);
+      const general = asRecord(settings.general);
+      if (!cancelled) setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
     });
 
     const handleAgentSettingsUpdated = (event: Event) => {
@@ -777,12 +815,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setModelOpen(false);
     setThinkingOpen(false);
     setExpandedProvider(null);
-    const data = await window.electronAPI.loadData("settings") as any;
-    const currentSettings = data && typeof data === "object" ? data : {};
+    const data = await window.electronAPI.loadData("settings");
+    const currentSettings = asRecord(data);
+    const currentGeneral = asRecord(currentSettings.general);
     const nextSettings = {
       ...currentSettings,
       general: {
-        ...(currentSettings.general || {}),
+        ...currentGeneral,
         planModeEnabled: nextPlanModeEnabled,
       },
     };
@@ -1319,8 +1358,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
     };
 
-    const getPendingUIFromEvent = (event: any, sessionId: string, entryId: string) => {
-      const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+    const getPendingUIFromEvent = (event: AgentEvent, sessionId: string, entryId: string) => {
+      const detail = asRecord(event.detail);
+      const args = asRecord(event.args);
+      const input = asRecord(event.input);
       const method = String(event.method || detail.method || event.kind || event.toolName || "").trim();
       const normalizedMethod =
         method === "custom" && detail.kind === "ask_user_question"
@@ -1329,12 +1370,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       const questions = normalizeAskQuestionsFromCandidates(
         event.questions,
         detail.questions,
-        event.args?.questions,
-        event.input?.questions,
+        args.questions,
+        input.questions,
         event,
         detail,
-        event.args,
-        event.input,
+        args,
+        input,
         event.detail
       );
       const fallbackQuestion =
@@ -1491,7 +1532,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       return runtime;
     };
 
-    const unsubscribe = window.electronAPI.onAgentEvent((event: any) => {
+    const unsubscribe = window.electronAPI.onAgentEvent((event) => {
       // Always read from store to avoid stale closure (useEffect deps=[])
       const currentSessionId = typeof event.sessionId === "string"
         ? event.sessionId
@@ -1902,7 +1943,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
     const pendingResponse = activeQuestionnaire;
     const answerSummary = answers
-      .map((answer: any) => answer?.label || answer?.answer || (Array.isArray(answer?.selected) ? answer.selected.join(", ") : ""))
+      .map(getQuestionnaireAnswerLabel)
       .filter(Boolean)
       .join("\n");
 

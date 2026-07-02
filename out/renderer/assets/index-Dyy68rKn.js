@@ -42994,6 +42994,31 @@ const getFileEntryTitle$1 = (action, count, running = false) => {
       return `已修改 ${count} 个文件`;
   }
 };
+const normalizeProcessFileKey = (filePath) => filePath.replace(/\\/g, "/").trim().toLowerCase();
+const mergeProcessFileCounts = (left, right) => {
+  if (typeof left !== "number" && typeof right !== "number") return void 0;
+  return (left || 0) + (right || 0);
+};
+const mergeProcessFiles = (files) => {
+  const byFile = /* @__PURE__ */ new Map();
+  for (const file of files) {
+    if (!file.file?.trim()) continue;
+    const key = normalizeProcessFileKey(file.file);
+    const existing = byFile.get(key);
+    if (!existing) {
+      byFile.set(key, { ...file, label: file.label || getFileName$1(file.file) });
+      continue;
+    }
+    byFile.set(key, {
+      ...existing,
+      ...file,
+      label: existing.label || file.label || getFileName$1(file.file),
+      additions: mergeProcessFileCounts(existing.additions, file.additions),
+      deletions: mergeProcessFileCounts(existing.deletions, file.deletions)
+    });
+  }
+  return Array.from(byFile.values());
+};
 function ProcessEntryIcon({ type, state }) {
   if (state === "running") {
     return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "chat-process-entry-spinner" });
@@ -43188,7 +43213,7 @@ function ProcessEntryRow({
   onPreserveScroll
 }) {
   const hasDetail = !!entry.detail;
-  const files = entry.files || [];
+  const files = mergeProcessFiles(entry.files || []);
   const isCommandEntry = entry.toolKind === "run_command";
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
@@ -43294,14 +43319,15 @@ const mergeProcessEntries = (entries) => {
   const merged = [];
   for (const entry of entries) {
     const last = merged[merged.length - 1];
-    if (entry.type === "tool" && last?.type === "tool" && entry.toolKind && last.toolKind === entry.toolKind && entry.state === last.state && last.files && last.files.length > 0 && entry.files && entry.files.length > 0) {
-      last.files = [...last.files, ...entry.files];
+    const entryFiles = entry.files ? mergeProcessFiles(entry.files) : void 0;
+    if (entry.type === "tool" && last?.type === "tool" && entry.toolKind && last.toolKind === entry.toolKind && entry.state === last.state && last.files && last.files.length > 0 && entryFiles && entryFiles.length > 0) {
+      last.files = mergeProcessFiles([...last.files, ...entryFiles]);
       const action = toolKindToAction(entry.toolKind);
       last.title = getFileEntryTitle$1(action, last.files.length, entry.state === "running");
       last.id = entry.id;
       continue;
     }
-    merged.push({ ...entry, files: entry.files ? [...entry.files] : void 0 });
+    merged.push({ ...entry, files: entryFiles ? [...entryFiles] : void 0 });
   }
   return merged;
 };
@@ -43378,6 +43404,16 @@ const createProcessEntryId = () => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `process-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
+const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+const asRecord = (value) => isRecord(value) ? value : {};
+const getStringField = (value, key) => {
+  const found = value[key];
+  return typeof found === "string" ? found : void 0;
+};
+const getBooleanField = (value, key) => {
+  const found = value[key];
+  return typeof found === "boolean" ? found : void 0;
+};
 const stringifyProcessValue = (value) => {
   if (value === void 0 || value === null || value === "") return "";
   if (typeof value === "string") return value;
@@ -43453,12 +43489,12 @@ const getFileEntryTitle = (action, count, running = false) => {
 };
 const getToolProcessFiles = (event) => {
   if (Array.isArray(event.files)) {
-    return event.files.filter((file) => typeof file?.file === "string" && file.file.trim()).map((file) => ({
+    return event.files.filter((file) => isRecord(file) && typeof file.file === "string" && file.file.trim().length > 0).map((file) => ({
       ...file,
       label: file.label || getFileName(file.file)
     }));
   }
-  if (!event.filePath) return [];
+  if (typeof event.filePath !== "string" || !event.filePath) return [];
   const toolKind = normalizeToolKind(event.toolKind);
   const action = toolKind === "read_file" ? "read" : toolKind === "list_dir" ? "listed" : toolKind === "write_file" ? "written" : toolKind === "edit_file" ? "edited" : void 0;
   if (!action) return [];
@@ -43466,8 +43502,8 @@ const getToolProcessFiles = (event) => {
     file: event.filePath,
     label: getFileName(event.filePath),
     action,
-    additions: event.additions,
-    deletions: event.deletions,
+    additions: typeof event.additions === "number" ? event.additions : void 0,
+    deletions: typeof event.deletions === "number" ? event.deletions : void 0,
     status: event.patch ? "modified" : void 0
   }];
 };
@@ -43505,7 +43541,7 @@ const getUIResponsePayload = (response) => {
 const getNestedQuestionValue = (value, path2) => {
   let current = value;
   for (const key of path2) {
-    if (current === void 0 || current === null) return void 0;
+    if (!isRecord(current)) return void 0;
     current = current[key];
   }
   return current;
@@ -43531,20 +43567,23 @@ const normalizeAskOptions = (value) => {
   if (!Array.isArray(value)) return [];
   return value.map((option, index2) => {
     if (typeof option === "string") return { label: option, value: option };
+    const raw = asRecord(option);
     return {
-      label: String(option?.label ?? option?.value ?? option?.text ?? option?.title ?? `选项 ${index2 + 1}`),
-      value: option?.value === void 0 || option?.value === null ? void 0 : String(option.value),
-      description: typeof option?.description === "string" ? option.description : void 0,
-      preview: typeof option?.preview === "string" ? option.preview : void 0,
-      hasPreview: !!option?.hasPreview
+      label: String(raw.label ?? raw.value ?? raw.text ?? raw.title ?? `选项 ${index2 + 1}`),
+      value: raw.value === void 0 || raw.value === null ? void 0 : String(raw.value),
+      description: typeof raw.description === "string" ? raw.description : void 0,
+      preview: typeof raw.preview === "string" ? raw.preview : void 0,
+      hasPreview: !!raw.hasPreview
     };
   });
 };
 const normalizeAskQuestions = (value) => {
   const parsedValue = parseJsonQuestionValue(value);
-  const rawQuestions = Array.isArray(parsedValue) ? parsedValue : parsedValue && typeof parsedValue === "object" && Array.isArray(parsedValue.questions) ? parsedValue.questions : [];
-  if (rawQuestions.length === 0 && parsedValue && typeof parsedValue === "object") {
+  const rawQuestions = Array.isArray(parsedValue) ? parsedValue : isRecord(parsedValue) && Array.isArray(parsedValue.questions) ? parsedValue.questions : [];
+  if (rawQuestions.length === 0 && isRecord(parsedValue)) {
     const raw = parsedValue;
+    const detail = asRecord(raw.detail);
+    const params = asRecord(raw.params);
     const question = readFirstQuestionValue(raw, [
       ["question"],
       ["title"],
@@ -43570,10 +43609,10 @@ const normalizeAskQuestions = (value) => {
     ]);
     if (question || Array.isArray(options)) {
       return [{
-        id: typeof raw.id === "string" ? raw.id : void 0,
+        id: getStringField(raw, "id"),
         question: String(question || "请选择答案"),
-        header: typeof raw.header === "string" ? raw.header : void 0,
-        multiSelect: !!(raw.multiSelect ?? raw.multiple ?? raw.detail?.multiSelect ?? raw.params?.multiSelect),
+        header: getStringField(raw, "header"),
+        multiSelect: !!(raw.multiSelect ?? raw.multiple ?? detail.multiSelect ?? params.multiSelect),
         options: normalizeAskOptions(options)
       }];
     }
@@ -43581,13 +43620,14 @@ const normalizeAskQuestions = (value) => {
   if (rawQuestions.length === 0 && typeof parsedValue === "string" && parsedValue.trim()) {
     return [{ question: parsedValue.trim(), options: [] }];
   }
-  return rawQuestions.map((raw, questionIndex) => {
-    const options = normalizeAskOptions(raw?.options ?? raw?.choices);
+  return rawQuestions.map((value2, questionIndex) => {
+    const raw = asRecord(value2);
+    const options = normalizeAskOptions(raw.options ?? raw.choices);
     return {
-      id: typeof raw?.id === "string" ? raw.id : void 0,
-      question: String(raw?.question ?? raw?.prompt ?? raw?.title ?? raw?.message ?? `问题 ${questionIndex + 1}`),
-      header: typeof raw?.label === "string" ? raw.label : typeof raw?.header === "string" ? raw.header : void 0,
-      multiSelect: !!(raw?.multiSelect ?? raw?.multiple),
+      id: getStringField(raw, "id"),
+      question: String(raw.question ?? raw.prompt ?? raw.title ?? raw.message ?? `问题 ${questionIndex + 1}`),
+      header: getStringField(raw, "label") ?? getStringField(raw, "header"),
+      multiSelect: !!(raw.multiSelect ?? raw.multiple),
       options
     };
   });
@@ -43597,12 +43637,18 @@ const normalizeAskQuestionsFromCandidates = (...values) => {
     const questions = normalizeAskQuestions(value);
     if (questions.length > 0) return questions;
   }
-  const optionSource = values.find(
-    (value) => Array.isArray(value?.options) || Array.isArray(value?.choices) || Array.isArray(value?.detail?.options) || Array.isArray(value?.params?.options)
-  );
-  const promptSource = values.find(
-    (value) => typeof value === "string" || typeof value?.question === "string" || typeof value?.prompt === "string" || typeof value?.message === "string" || typeof value?.title === "string" || typeof value?.detail?.question === "string" || typeof value?.detail?.prompt === "string" || typeof value?.detail?.message === "string" || typeof value?.detail?.title === "string"
-  );
+  const optionSource = values.find((value) => {
+    const raw = asRecord(value);
+    const detail = asRecord(raw.detail);
+    const params = asRecord(raw.params);
+    return Array.isArray(raw.options) || Array.isArray(raw.choices) || Array.isArray(detail.options) || Array.isArray(params.options);
+  });
+  const promptSource = values.find((value) => {
+    if (typeof value === "string") return true;
+    const raw = asRecord(value);
+    const detail = asRecord(raw.detail);
+    return typeof raw.question === "string" || typeof raw.prompt === "string" || typeof raw.message === "string" || typeof raw.title === "string" || typeof detail.question === "string" || typeof detail.prompt === "string" || typeof detail.message === "string" || typeof detail.title === "string";
+  });
   const question = typeof promptSource === "string" ? promptSource : readFirstQuestionValue(promptSource, [
     ["question"],
     ["prompt"],
@@ -43628,6 +43674,13 @@ const normalizeAskQuestionsFromCandidates = (...values) => {
     }];
   }
   return [];
+};
+const getQuestionnaireAnswerLabel = (answer) => {
+  const raw = asRecord(answer);
+  if (typeof raw.label === "string") return raw.label;
+  if (typeof raw.answer === "string") return raw.answer;
+  if (Array.isArray(raw.selected)) return raw.selected.map(String).join(", ");
+  return "";
 };
 const getToolDetail = (event) => {
   const detail = typeof event.detail === "string" ? event.detail : "";
@@ -43934,7 +43987,9 @@ function ChatPanel({ sendKey = "Enter" }) {
   reactExports.useEffect(() => {
     let cancelled = false;
     window.electronAPI.loadData("settings").then((data) => {
-      if (!cancelled) setPlanModeEnabled(!!data?.general?.planModeEnabled);
+      const settings = asRecord(data);
+      const general = asRecord(settings.general);
+      if (!cancelled) setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
     });
     const handleAgentSettingsUpdated = (event) => {
       const detail = event.detail;
@@ -43954,11 +44009,12 @@ function ChatPanel({ sendKey = "Enter" }) {
     setThinkingOpen(false);
     setExpandedProvider(null);
     const data = await window.electronAPI.loadData("settings");
-    const currentSettings = data && typeof data === "object" ? data : {};
+    const currentSettings = asRecord(data);
+    const currentGeneral = asRecord(currentSettings.general);
     const nextSettings = {
       ...currentSettings,
       general: {
-        ...currentSettings.general || {},
+        ...currentGeneral,
         planModeEnabled: nextPlanModeEnabled
       }
     };
@@ -44404,18 +44460,20 @@ ${pattern}`,
       }
     };
     const getPendingUIFromEvent = (event, sessionId, entryId) => {
-      const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+      const detail = asRecord(event.detail);
+      const args = asRecord(event.args);
+      const input2 = asRecord(event.input);
       const method = String(event.method || detail.method || event.kind || event.toolName || "").trim();
       const normalizedMethod = method === "custom" && detail.kind === "ask_user_question" ? "ask_user_question" : method;
       const questions = normalizeAskQuestionsFromCandidates(
         event.questions,
         detail.questions,
-        event.args?.questions,
-        event.input?.questions,
+        args.questions,
+        input2.questions,
         event,
         detail,
-        event.args,
-        event.input,
+        args,
+        input2,
         event.detail
       );
       const fallbackQuestion = questions.length > 0 ? questions : normalizeAskQuestionsFromCandidates(
@@ -44928,7 +44986,7 @@ ${detail.trim()}` : title;
     const targetSessionId = useProjectStore.getState().activeSessionId;
     if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
     const pendingResponse = activeQuestionnaire;
-    const answerSummary = answers.map((answer) => answer?.label || answer?.answer || (Array.isArray(answer?.selected) ? answer.selected.join(", ") : "")).filter(Boolean).join("\n");
+    const answerSummary = answers.map(getQuestionnaireAnswerLabel).filter(Boolean).join("\n");
     reactDomExports.flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
