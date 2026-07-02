@@ -8,15 +8,15 @@ import {
   type UIEvent as ReactUIEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { ListCollapse } from "lucide-react";
-import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
+import { CornerDownRight, ListCollapse, Trash2 } from "lucide-react";
+import { useChatStore, type ChatMessage, type ModelInfo, type QueuedMessage, type PendingFile } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentName, getAgentPlanModeTooltip } from "@/lib/agents";
+import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
 import { saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
-import { ChatComposer } from "./ChatComposer";
+import { ChatComposer, type PendingImage } from "./ChatComposer";
 import { ChatToolbar } from "./ChatToolbar";
 import { DiffBlock } from "./DiffBlock";
 import { ProcessBlock } from "./ProcessBlock";
@@ -37,6 +37,82 @@ import {
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+
+type AgentImagePayload = { type: string; data: string; mimeType: string };
+type MessageImagePayload = { id: string; src: string; name: string };
+
+type MessagePayload = {
+  displayContent: string;
+  sendContent: string;
+  messageImages?: MessageImagePayload[];
+  agentImages?: AgentImagePayload[];
+};
+
+type QueuePanelProps = {
+  items: QueuedMessage[];
+  canGuide: boolean;
+  currentSessionRunning: boolean;
+  onGuide: (item: QueuedMessage) => void;
+  onRemove: (itemId: string) => void;
+};
+
+const getQueuePreview = (item: QueuedMessage) => {
+  const content = item.displayContent.trim();
+  if (content) return content.length > 120 ? `${content.slice(0, 120)}...` : content;
+  if (item.messageImages?.length) return `[${item.messageImages.length} 张图片]`;
+  return "空消息";
+};
+
+function MessageQueuePanel({
+  items,
+  canGuide,
+  currentSessionRunning,
+  onGuide,
+  onRemove,
+}: QueuePanelProps) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="chat-queue-panel">
+      <div className="chat-queue-header">
+        <span>发送队列</span>
+        <span>{items.length}</span>
+      </div>
+      <div className="chat-queue-list">
+        {items.map((item, index) => (
+          <div key={item.id} className={`chat-queue-item ${item.status}`}>
+            <div className="chat-queue-index">{index + 1}</div>
+            <div className="chat-queue-main">
+              <div className="chat-queue-preview">{getQueuePreview(item)}</div>
+              {item.error && <div className="chat-queue-error">{item.error}</div>}
+            </div>
+            {canGuide && (
+              <button
+                type="button"
+                className="chat-queue-action"
+                onClick={() => onGuide(item)}
+                disabled={!currentSessionRunning || item.status === "sending"}
+                title={currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
+              >
+                <CornerDownRight size={14} />
+                <span>引导</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="chat-queue-icon-btn"
+              onClick={() => onRemove(item.id)}
+              disabled={item.status === "sending"}
+              title="移除"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 type ChatMessagesViewProps = {
   activeSessionId: string | null;
@@ -219,6 +295,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     pendingFiles,
     removePendingFile,
     clearPendingFiles,
+    messageQueues,
+    enqueueMessage,
+    upsertQueuedMessage,
+    removeQueuedMessage,
+    markQueuedMessageSending,
+    markQueuedMessageFailed,
+    clearQueuedMessageError,
     loadSessionMessages,
     sessionMessages,
     toggleAssistantProcess,
@@ -230,6 +313,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
   const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
+  const activeQueuedMessages = activeSessionId ? messageQueues[activeSessionId] || [] : [];
+  const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
 
   const inputValueRef = useRef("");
   const inputHasTextRef = useRef(false);
@@ -318,6 +403,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
     resizeTextarea(textarea);
   }, [resizeTextarea, syncInputValue]);
+
+  const queueDispatchingRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -480,35 +567,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setPendingUIResponseState,
   });
 
-  const handleSend = async () => {
-    if (activeQuestionnaire) return;
-
-    if (isAwaitingUIResponse) {
-      await handleSendUIResponse();
-      return;
-    }
-
-    const text = inputValueRef.current.trim();
-    const targetSessionId = useProjectStore.getState().activeSessionId;
-    if (!targetSessionId || (!text && pendingImages.length === 0 && pendingFiles.length === 0)) return;
-
-    const existingRuntime = sessionRuntimeRef.current[targetSessionId];
-    if (existingRuntime?.processActive || agentStatuses[targetSessionId] === "running") {
-      setStreaming(true);
-      useProjectStore.getState().setAgentStatus(targetSessionId, "running");
-      return;
-    }
-
-    // Build display content (short refs) and send content (full details)
+  const buildMessagePayload = useCallback(async (
+    text: string,
+    files: PendingFile[],
+    images: PendingImage[]
+  ): Promise<MessagePayload> => {
     let displayContent = text;
     let sendContent = text;
 
     // Handle pending files - read content and build detailed message
-    if (pendingFiles.length > 0) {
+    if (files.length > 0) {
       const fileParts: string[] = [];
       const fileRefs: string[] = [];
 
-      for (const pf of pendingFiles) {
+      for (const pf of files) {
         fileRefs.push(`[${pf.fileName}:${pf.startLine}-${pf.endLine}]`);
         try {
           const result = await window.electronAPI.readFile(pf.filePath);
@@ -532,31 +604,36 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
 
     // Handle pending images
-    let agentImages: Array<{ type: string; data: string; mimeType: string }> | undefined;
-    let messageImages: Array<{ id: string; src: string; name: string }> | undefined;
-    if (pendingImages.length > 0) {
+    let agentImages: AgentImagePayload[] | undefined;
+    let messageImages: MessageImagePayload[] | undefined;
+    if (images.length > 0) {
       // Don't add text refs to displayContent - images are shown visually
-      messageImages = pendingImages.map((img) => ({ id: img.id, src: img.src, name: img.name }));
-      agentImages = pendingImages.map((img) => ({
+      messageImages = images.map((img) => ({ id: img.id, src: img.src, name: img.name }));
+      agentImages = images.map((img) => ({
         type: "image",
         data: img.src.split(",")[1], // Remove data:image/...;base64, prefix
         mimeType: img.file.type || "image/png",
       }));
     }
 
+    return { displayContent, sendContent, messageImages, agentImages };
+  }, []);
+
+  const sendPayloadNow = useCallback(async (
+    targetSessionId: string,
+    payload: MessagePayload,
+    options?: { onSendFailure?: (error: string) => void; planModeEnabled?: boolean }
+  ) => {
     // Force synchronous render so "working..." appears before IPC call
     enableAutoFollow(); // New outgoing messages should keep the latest turn visible.
     flushSync(() => {
       addMessage({
         id: crypto.randomUUID(),
         role: "user",
-        content: displayContent,
+        content: payload.displayContent,
         timestamp: Date.now(),
-        images: messageImages,
+        images: payload.messageImages,
       }, targetSessionId);
-      setComposerInput("");
-      clearPendingImages();
-      clearPendingFiles();
       setStreaming(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
       const runtime = sessionRuntimeRef.current[targetSessionId];
@@ -576,7 +653,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     // Scroll to bottom immediately after sending (user wants to see their message)
     scrollToBottomNow();
 
-    const result = await window.electronAPI.agentSendMessage(sendContent, agentImages, targetSessionId, { planModeEnabled });
+    const result = await window.electronAPI.agentSendMessage(
+      payload.sendContent,
+      payload.agentImages,
+      targetSessionId,
+      { planModeEnabled: !!options?.planModeEnabled }
+    );
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
       if (/Codex is already running/i.test(result.error || "")) {
@@ -597,6 +679,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
       setStreaming(false);
       useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
+      if (options?.onSendFailure) {
+        options.onSendFailure(result.error || "Send failed");
+        return;
+      }
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
@@ -604,7 +690,127 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         timestamp: Date.now(),
       }, targetSessionId);
     }
-  };
+  }, [
+    addMessage,
+    enableAutoFollow,
+    scrollToBottomNow,
+    setStreaming,
+  ]);
+
+  const handleSend = useCallback(async () => {
+    if (activeQuestionnaire) return;
+
+    if (isAwaitingUIResponse) {
+      await handleSendUIResponse();
+      return;
+    }
+
+    const text = inputValueRef.current.trim();
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || (!text && pendingImages.length === 0 && pendingFiles.length === 0)) return;
+
+    const payload = await buildMessagePayload(text, pendingFiles, pendingImages);
+    const existingRuntime = sessionRuntimeRef.current[targetSessionId];
+    const running = existingRuntime?.processActive || useProjectStore.getState().agentStatuses[targetSessionId] === "running";
+
+    if (running) {
+      enqueueMessage({
+        id: crypto.randomUUID(),
+        sessionId: targetSessionId,
+        ...payload,
+        planModeEnabled,
+        createdAt: Date.now(),
+        status: "queued",
+      });
+      setComposerInput("");
+      clearPendingImages();
+      clearPendingFiles();
+      setStreaming(true);
+      useProjectStore.getState().setAgentStatus(targetSessionId, "running");
+      return;
+    }
+
+    setComposerInput("");
+    clearPendingImages();
+    clearPendingFiles();
+    await sendPayloadNow(targetSessionId, payload, { planModeEnabled });
+  }, [
+    activeQuestionnaire,
+    buildMessagePayload,
+    clearPendingFiles,
+    clearPendingImages,
+    enqueueMessage,
+    handleSendUIResponse,
+    isAwaitingUIResponse,
+    pendingFiles,
+    pendingImages,
+    planModeEnabled,
+    sendPayloadNow,
+    setComposerInput,
+    setStreaming,
+  ]);
+
+  useEffect(() => {
+    for (const [sessionId, queue] of Object.entries(messageQueues)) {
+      if (queueDispatchingRef.current.has(sessionId)) continue;
+      if (!isSessionInitialized(sessionId)) continue;
+      const nextItem = queue.find((item) => item.status === "queued");
+      if (!nextItem) continue;
+      const runtime = sessionRuntimeRef.current[sessionId];
+      if (runtime?.processActive || agentStatuses[sessionId] === "running") continue;
+
+      queueDispatchingRef.current.add(sessionId);
+      clearQueuedMessageError(sessionId, nextItem.id);
+      markQueuedMessageSending(sessionId, nextItem.id);
+      removeQueuedMessage(sessionId, nextItem.id);
+      void sendPayloadNow(sessionId, nextItem, {
+        planModeEnabled: !!nextItem.planModeEnabled,
+        onSendFailure: (error) => {
+          upsertQueuedMessage({
+            ...nextItem,
+            status: "failed",
+            error,
+          });
+        },
+      }).finally(() => {
+        queueDispatchingRef.current.delete(sessionId);
+      });
+    }
+  }, [
+    agentStatuses,
+    clearQueuedMessageError,
+    isSessionInitialized,
+    markQueuedMessageSending,
+    messageQueues,
+    removeQueuedMessage,
+    sendPayloadNow,
+    upsertQueuedMessage,
+  ]);
+
+  const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
+    if (!activeSessionSupportsGuidance) return;
+    const runtime = sessionRuntimeRef.current[item.sessionId];
+    const running = runtime?.processActive || useProjectStore.getState().agentStatuses[item.sessionId] === "running";
+    if (!running) return;
+
+    markQueuedMessageSending(item.sessionId, item.id);
+    const result = await window.electronAPI.agentSendGuidance(
+      item.sendContent,
+      item.agentImages,
+      item.sessionId,
+      { planModeEnabled: !!item.planModeEnabled }
+    );
+    if (result.success) {
+      removeQueuedMessage(item.sessionId, item.id);
+      return;
+    }
+    markQueuedMessageFailed(item.sessionId, item.id, result.error || "Guidance failed");
+  }, [
+    activeSessionSupportsGuidance,
+    markQueuedMessageFailed,
+    markQueuedMessageSending,
+    removeQueuedMessage,
+  ]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
@@ -862,6 +1068,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             onCancel={handleCancelQuestionnaire}
           />
         )}
+
+        <MessageQueuePanel
+          items={activeQueuedMessages}
+          canGuide={activeSessionSupportsGuidance}
+          currentSessionRunning={currentSessionRunning}
+          onGuide={handleGuideQueuedMessage}
+          onRemove={(itemId) => activeSessionId && removeQueuedMessage(activeSessionId, itemId)}
+        />
 
         <ChatComposer
           activeQuestionnaire={!!activeQuestionnaire}

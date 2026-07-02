@@ -19,6 +19,7 @@ interface AgentBackend {
   setWindow(win: BrowserWindow): void;
   init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
   sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
+  sendGuidance?(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
   abort(): Promise<void>;
   getModels(): Promise<AgentModel[]>;
   setModel(provider: string, modelId: string): Promise<void>;
@@ -101,6 +102,10 @@ function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
 
 function supportsNativePlanMode(agentId?: string): boolean {
   return agentId === "codex" || agentId === "opencode" || agentId === "droid";
+}
+
+function supportsGuidance(agentId?: string): boolean {
+  return agentId === "pi" || agentId === "codex";
 }
 
 function withPromptPlanMode(message: string): string {
@@ -201,6 +206,16 @@ class AgentManager {
     agent.sendUIResponse(response);
   }
 
+  async sendGuidance(sessionId: string | undefined, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+    const agent = sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
+    if (!agent) throw new Error("No active agent");
+    const agentType = sessionId ? this.getSessionAgentType(sessionId) : this.getActiveAgentType();
+    if (!supportsGuidance(agentType) || typeof agent.sendGuidance !== "function") {
+      throw new Error("Guidance is not supported by this agent");
+    }
+    await agent.sendGuidance(message, images, options);
+  }
+
   removeSession(sessionId: string) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) { agent.dispose(); this.sessionAgents.delete(sessionId); }
@@ -254,6 +269,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         permissionMode,
         displayMessage: message,
       });
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => {
+    try {
+      await agentManager.sendGuidance(sessionId, message, images, options);
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };

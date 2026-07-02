@@ -65,6 +65,21 @@ export interface ModelInfo {
   reasoning: boolean;
 }
 
+export type QueuedMessageStatus = "queued" | "sending" | "failed";
+
+export interface QueuedMessage {
+  id: string;
+  sessionId: string;
+  displayContent: string;
+  sendContent: string;
+  messageImages?: Array<{ id: string; src: string; name: string }>;
+  agentImages?: Array<{ type: string; data: string; mimeType: string }>;
+  planModeEnabled?: boolean;
+  createdAt: number;
+  status: QueuedMessageStatus;
+  error?: string;
+}
+
 interface ChatState {
   messages: ChatMessage[];
   sessionMessages: Record<string, ChatMessage[]>; // sessionId -> messages
@@ -77,6 +92,7 @@ interface ChatState {
   activeAgentId: string;
   highlightedFile: string | null;
   pendingFiles: PendingFile[];
+  messageQueues: Record<string, QueuedMessage[]>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
@@ -101,6 +117,13 @@ interface ChatState {
   addPendingFile: (file: PendingFile) => void;
   removePendingFile: (id: string) => void;
   clearPendingFiles: () => void;
+  enqueueMessage: (item: QueuedMessage) => void;
+  upsertQueuedMessage: (item: QueuedMessage) => void;
+  removeQueuedMessage: (sessionId: string, itemId: string) => void;
+  markQueuedMessageSending: (sessionId: string, itemId: string) => void;
+  markQueuedMessageFailed: (sessionId: string, itemId: string, error: string) => void;
+  clearQueuedMessageError: (sessionId: string, itemId: string) => void;
+  clearSessionQueue: (sessionId: string) => void;
   switchSession: (sessionId: string | null) => void;
   loadSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
 }
@@ -181,6 +204,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeAgentId: "codex",
   highlightedFile: null,
   pendingFiles: [],
+  messageQueues: {},
 
   addMessage: (msg, sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
@@ -408,6 +432,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addPendingFile: (file) => set((s) => ({ pendingFiles: [...s.pendingFiles, file] })),
   removePendingFile: (id) => set((s) => ({ pendingFiles: s.pendingFiles.filter((f) => f.id !== id) })),
   clearPendingFiles: () => set({ pendingFiles: [] }),
+  enqueueMessage: (item) =>
+    set((s) => ({
+      messageQueues: {
+        ...s.messageQueues,
+        [item.sessionId]: [...(s.messageQueues[item.sessionId] || []), item],
+      },
+    })),
+  upsertQueuedMessage: (item) =>
+    set((s) => {
+      const queue = s.messageQueues[item.sessionId] || [];
+      const exists = queue.some((queued) => queued.id === item.id);
+      return {
+        messageQueues: {
+          ...s.messageQueues,
+          [item.sessionId]: exists
+            ? queue.map((queued) => (queued.id === item.id ? item : queued))
+            : [item, ...queue],
+        },
+      };
+    }),
+  removeQueuedMessage: (sessionId, itemId) =>
+    set((s) => ({
+      messageQueues: {
+        ...s.messageQueues,
+        [sessionId]: (s.messageQueues[sessionId] || []).filter((item) => item.id !== itemId),
+      },
+    })),
+  markQueuedMessageSending: (sessionId, itemId) =>
+    set((s) => ({
+      messageQueues: {
+        ...s.messageQueues,
+        [sessionId]: (s.messageQueues[sessionId] || []).map((item) =>
+          item.id === itemId ? { ...item, status: "sending", error: undefined } : item
+        ),
+      },
+    })),
+  markQueuedMessageFailed: (sessionId, itemId, error) =>
+    set((s) => ({
+      messageQueues: {
+        ...s.messageQueues,
+        [sessionId]: (s.messageQueues[sessionId] || []).map((item) =>
+          item.id === itemId ? { ...item, status: "failed", error } : item
+        ),
+      },
+    })),
+  clearQueuedMessageError: (sessionId, itemId) =>
+    set((s) => ({
+      messageQueues: {
+        ...s.messageQueues,
+        [sessionId]: (s.messageQueues[sessionId] || []).map((item) =>
+          item.id === itemId ? { ...item, status: "queued", error: undefined } : item
+        ),
+      },
+    })),
+  clearSessionQueue: (sessionId) =>
+    set((s) => {
+      const next = { ...s.messageQueues };
+      delete next[sessionId];
+      return { messageQueues: next };
+    }),
 
   switchSession: (sessionId) => {
     const state = get();

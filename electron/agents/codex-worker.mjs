@@ -55,7 +55,7 @@ let agentTextByItemId = new Map();
 let completedItemIds = new Set();
 let emittedContextCompactionIds = new Set();
 let pendingUIRequest = null;
-let activeImageCleanup = null;
+let activeImageCleanups = [];
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -280,6 +280,8 @@ const rpcReject = (id, message, code = -32000) => {
   writeRpc({ id, error: { code, message } });
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const handleRpcMessage = (message) => {
   if (Object.prototype.hasOwnProperty.call(message, "id") && !message.method) {
     const pending = pendingRpc.get(message.id);
@@ -338,11 +340,19 @@ const materializeImages = async (images) => {
 };
 
 const cleanupActiveImages = async () => {
-  const cleanup = activeImageCleanup;
-  activeImageCleanup = null;
-  if (cleanup) {
-    await cleanup();
+  const cleanups = activeImageCleanups;
+  activeImageCleanups = [];
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch {
+      // Temporary image cleanup should not affect turn state.
+    }
   }
+};
+
+const registerActiveImageCleanup = (cleanup) => {
+  if (typeof cleanup === "function") activeImageCleanups.push(cleanup);
 };
 
 const buildInput = (message, images) => {
@@ -955,7 +965,7 @@ const runPrompt = async (command) => {
 
   await cleanupActiveImages();
   const imagePayload = await materializeImages(command.images);
-  activeImageCleanup = imagePayload.cleanup;
+  registerActiveImageCleanup(imagePayload.cleanup);
   try {
     const nextThreadId = await ensureThread();
     if (!promptRunning || activePromptId !== command.id) return;
@@ -986,6 +996,43 @@ const runPrompt = async (command) => {
       });
       finishPrompt();
     }
+  }
+};
+
+const waitForActiveTurn = async (timeoutMs = 10000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (promptRunning && !activeTurnId && Date.now() < deadline) {
+    await sleep(100);
+  }
+  return activeTurnId;
+};
+
+const runGuidance = async (command) => {
+  if (!promptRunning) {
+    throw new Error("Codex has no active turn to guide");
+  }
+
+  const turnId = await waitForActiveTurn();
+  const currentThreadId = activeThreadId || threadId;
+  if (!promptRunning || !turnId || !currentThreadId) {
+    throw new Error("Codex has no active turn to guide");
+  }
+
+  const imagePayload = await materializeImages(command.images);
+  let cleanupRegistered = false;
+  try {
+    const result = await rpcRequest("turn/steer", {
+      threadId: currentThreadId,
+      clientUserMessageId: command.id,
+      input: buildInput(command.message, imagePayload.entries),
+      expectedTurnId: turnId,
+    }, 25000);
+    registerActiveImageCleanup(imagePayload.cleanup);
+    cleanupRegistered = true;
+    activeTurnId = result?.turnId || activeTurnId;
+    send({ type: "guidance_done", id: command.id });
+  } finally {
+    if (!cleanupRegistered) await imagePayload.cleanup();
   }
 };
 
@@ -1067,6 +1114,9 @@ const handleCommand = async (command) => {
         break;
       case "prompt":
         void runPrompt(command);
+        break;
+      case "guidance":
+        await runGuidance(command);
         break;
       case "abort":
         await abortPrompt(command);

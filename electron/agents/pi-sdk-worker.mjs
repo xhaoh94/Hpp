@@ -511,6 +511,14 @@ const handleCommand = async (command) => {
             send({ type: "error", id: command.id, error: error?.message || String(error) });
           });
         break;
+      case "guidance":
+        if (!session) throw new Error("Pi SDK session is not initialized");
+        if (typeof session.steer !== "function") {
+          throw new Error("Pi SDK session does not support guidance");
+        }
+        await session.steer(command.message, command.images);
+        send({ type: "guidance_done", id: command.id });
+        break;
       case "abort":
         await session?.abort();
         send({ type: "aborted", id: command.id });

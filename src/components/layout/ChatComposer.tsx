@@ -5,6 +5,7 @@ import type {
   ClipboardEvent,
   RefObject,
 } from "react";
+import { Square, X } from "lucide-react";
 import type { PendingFile } from "@/stores/chat-store";
 
 export type PendingImage = {
@@ -65,13 +66,14 @@ export function ChatComposer({
   onSend,
   onAbort,
 }: ChatComposerProps) {
-  const isAbortMode = currentSessionRunning && !isAwaitingUIResponse;
   const hasPendingContent = inputHasText || pendingImages.length > 0 || pendingFiles.length > 0;
+  const showAbortButton = currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
+  const queueSend = currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
   const sendDisabled = activeQuestionnaire
     ? true
     : isAwaitingUIResponse
       ? !inputHasText
-      : !currentSessionRunning && !hasPendingContent;
+      : !hasPendingContent;
   const placeholder = activeQuestionnaire
     ? "请在上方提交问卷"
     : sendKey === "Ctrl+Enter"
@@ -79,10 +81,10 @@ export function ChatComposer({
       : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)";
   const sendTitle = activeQuestionnaire
     ? "请在上方提交问卷"
-    : isAbortMode
-      ? "停止"
-      : isAwaitingUIResponse
-        ? "发送回答"
+    : isAwaitingUIResponse
+      ? "发送回答"
+      : currentSessionRunning
+        ? "加入发送队列"
         : "发送";
 
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -101,7 +103,9 @@ export function ChatComposer({
                 <polyline points="14 2 14 8 20 8" />
               </svg>
               <span className="chat-file-name">{file.fileName}:{file.startLine}-{file.endLine}</span>
-              <button className="chat-file-remove" onClick={() => onRemovePendingFile(file.id)}>×</button>
+              <button type="button" className="chat-file-remove" onClick={() => onRemovePendingFile(file.id)} title="移除">
+                <X size={12} />
+              </button>
             </div>
           ))}
           {pendingImages.map((image) => (
@@ -115,7 +119,9 @@ export function ChatComposer({
                 </svg>
               )}
               <span className="chat-file-name">{image.name}</span>
-              <button className="chat-file-remove" onClick={() => onRemovePendingImage(image.id)}>×</button>
+              <button type="button" className="chat-file-remove" onClick={() => onRemovePendingImage(image.id)} title="移除">
+                <X size={12} />
+              </button>
             </div>
           ))}
         </div>
@@ -141,7 +147,7 @@ export function ChatComposer({
           onChange={handleFileInputChange}
         />
         <div className="chat-input-actions-left">
-          <button className="chat-input-btn" title="上传文件" onClick={() => fileInputRef.current?.click()}>
+          <button type="button" className="chat-input-btn" title="上传文件" onClick={() => fileInputRef.current?.click()}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M12 5v14M5 12h14" strokeLinecap="round" />
             </svg>
@@ -161,23 +167,29 @@ export function ChatComposer({
           className="chat-textarea"
           disabled={activeQuestionnaire}
         />
-        <button
-          onClick={isAbortMode ? onAbort : onSend}
-          disabled={sendDisabled}
-          className={`chat-send-btn ${isAbortMode ? "abort" : ""}`}
-          title={sendTitle}
-        >
-          {isAbortMode ? (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
-            </svg>
-          ) : (
+        {showAbortButton && (
+          <button
+            type="button"
+            onClick={onAbort}
+            className="chat-send-btn abort"
+            title="停止"
+          >
+            <Square size={14} fill="currentColor" strokeWidth={0} />
+          </button>
+        )}
+        {!showAbortButton && (
+          <button
+            onClick={onSend}
+            disabled={sendDisabled}
+            className={`chat-send-btn ${queueSend ? "queue" : ""}`}
+            title={sendTitle}
+          >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 19V5" />
               <path d="M5 12l7-7 7 7" />
             </svg>
-          )}
-        </button>
+          </button>
+        )}
       </div>
     </>
   );

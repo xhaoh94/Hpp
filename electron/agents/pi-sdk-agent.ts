@@ -172,6 +172,41 @@ export class PiSDKAgent {
     });
   }
 
+  async sendGuidance(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    if (this.isAborting) this.finishAbortState();
+
+    const guidanceId = this.createCommandId();
+    const displayMessage = options?.displayMessage || message;
+    const messagePreview = displayMessage.length > 50 ? `${displayMessage.slice(0, 50)}...` : displayMessage;
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(guidanceId);
+        reject(new Error("Pi SDK guidance timed out"));
+      }, 12000);
+      this.sendWorkerCommand({
+        id: guidanceId,
+        type: "guidance",
+        message,
+        images,
+      }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "accepted" || data.type === "guidance_done") {
+          resolve();
+        } else {
+          reject(new Error(data.error || "Pi SDK guidance failed"));
+        }
+      });
+    });
+    this.emitEvent({
+      type: "process_event",
+      entryType: "status",
+      title: `收到引导: "${messagePreview || "用户引导"}"`,
+      detail: displayMessage || undefined,
+      state: "completed",
+    });
+  }
+
   async abort(): Promise<void> {
     this.pendingAssistantText = "";
     this.streamedText = false;

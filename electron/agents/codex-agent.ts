@@ -154,6 +154,43 @@ export class CodexAgent {
     });
   }
 
+  async sendGuidance(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+    if (!this.process) throw new Error("Codex worker is not running");
+    const guidanceId = this.createCommandId();
+    const displayMessage = options?.displayMessage || message;
+    const messagePreview = displayMessage.length > 50 ? `${displayMessage.slice(0, 50)}...` : displayMessage;
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(guidanceId);
+        reject(new Error("Codex guidance timed out"));
+      }, 30000);
+      this.sendWorkerCommand({
+        id: guidanceId,
+        type: "guidance",
+        message,
+        images,
+        planModeEnabled: !!options?.planModeEnabled,
+      }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "accepted" || data.type === "guidance_done") {
+          resolve();
+        } else {
+          reject(new Error(data.error || "Codex guidance failed"));
+        }
+      });
+    });
+
+    this.emitEvent({
+      type: "process_event",
+      entryType: "status",
+      kind: "status",
+      title: `收到引导: "${messagePreview || "用户引导"}"`,
+      detail: displayMessage || undefined,
+      state: "completed",
+    });
+  }
+
   async abort(): Promise<void> {
     this.isAborting = true;
     this.eventBuffer.clear();

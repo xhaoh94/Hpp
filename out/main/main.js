@@ -2237,6 +2237,39 @@ class PiSDKAgent {
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access")
     });
   }
+  async sendGuidance(message, images, options) {
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    if (this.isAborting) this.finishAbortState();
+    const guidanceId = this.createCommandId();
+    const displayMessage = options?.displayMessage || message;
+    const messagePreview = displayMessage.length > 50 ? `${displayMessage.slice(0, 50)}...` : displayMessage;
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(guidanceId);
+        reject(new Error("Pi SDK guidance timed out"));
+      }, 12e3);
+      this.sendWorkerCommand({
+        id: guidanceId,
+        type: "guidance",
+        message,
+        images
+      }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "accepted" || data.type === "guidance_done") {
+          resolve();
+        } else {
+          reject(new Error(data.error || "Pi SDK guidance failed"));
+        }
+      });
+    });
+    this.emitEvent({
+      type: "process_event",
+      entryType: "status",
+      title: `收到引导: "${messagePreview || "用户引导"}"`,
+      detail: displayMessage || void 0,
+      state: "completed"
+    });
+  }
   async abort() {
     this.pendingAssistantText = "";
     this.streamedText = false;
@@ -2689,6 +2722,40 @@ class CodexAgent {
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access")
     });
   }
+  async sendGuidance(message, images, options) {
+    if (!this.process) throw new Error("Codex worker is not running");
+    const guidanceId = this.createCommandId();
+    const displayMessage = options?.displayMessage || message;
+    const messagePreview = displayMessage.length > 50 ? `${displayMessage.slice(0, 50)}...` : displayMessage;
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(guidanceId);
+        reject(new Error("Codex guidance timed out"));
+      }, 3e4);
+      this.sendWorkerCommand({
+        id: guidanceId,
+        type: "guidance",
+        message,
+        images,
+        planModeEnabled: !!options?.planModeEnabled
+      }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "accepted" || data.type === "guidance_done") {
+          resolve();
+        } else {
+          reject(new Error(data.error || "Codex guidance failed"));
+        }
+      });
+    });
+    this.emitEvent({
+      type: "process_event",
+      entryType: "status",
+      kind: "status",
+      title: `收到引导: "${messagePreview || "用户引导"}"`,
+      detail: displayMessage || void 0,
+      state: "completed"
+    });
+  }
   async abort() {
     this.isAborting = true;
     this.eventBuffer.clear();
@@ -2879,6 +2946,9 @@ function filterModelsByLocalConfig(models) {
 function supportsNativePlanMode(agentId) {
   return agentId === "codex" || agentId === "opencode" || agentId === "droid";
 }
+function supportsGuidance(agentId) {
+  return agentId === "pi" || agentId === "codex";
+}
 function withPromptPlanMode(message) {
   return [
     "<plan_mode>",
@@ -2958,6 +3028,15 @@ class AgentManager {
     if (!agent) return;
     agent.sendUIResponse(response);
   }
+  async sendGuidance(sessionId, message, images, options) {
+    const agent = sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
+    if (!agent) throw new Error("No active agent");
+    const agentType = sessionId ? this.getSessionAgentType(sessionId) : this.getActiveAgentType();
+    if (!supportsGuidance(agentType) || typeof agent.sendGuidance !== "function") {
+      throw new Error("Guidance is not supported by this agent");
+    }
+    await agent.sendGuidance(message, images, options);
+  }
   removeSession(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) {
@@ -3004,6 +3083,14 @@ function registerAgentHandlers(getWindow) {
         permissionMode,
         displayMessage: message
       });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+  electron.ipcMain.handle("agent:sendGuidance", async (_event, message, images, sessionId, options) => {
+    try {
+      await agentManager.sendGuidance(sessionId, message, images, options);
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };

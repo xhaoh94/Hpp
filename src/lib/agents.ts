@@ -23,6 +23,10 @@ export function supportsNativePlanMode(id: string): boolean {
   return AGENT_PLAN_MODE_SUPPORT[id] === "native";
 }
 
+export function supportsGuidance(id: string): boolean {
+  return id === "pi" || id === "codex";
+}
+
 export function getAgentPlanModeTooltip(id: string): string {
   if (supportsNativePlanMode(id)) return "支持原生 Plan 模式";
   return "当前 Agent 不支持原生 Plan 模式，将通过提示词要求先计划并等待确认";
