@@ -29,6 +29,7 @@ import { useQuestionnaireResize } from "./useQuestionnaireResize";
 import { useSessionModels } from "./useSessionModels";
 import {
   asRecord,
+  createSessionRuntime,
   createProcessEntryId,
   getBooleanField,
   resetSessionRuntimeAfterTurn,
@@ -132,6 +133,119 @@ type ChatMessagesViewProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
 };
 
+type ChatMessageItemProps = {
+  msg: ChatMessage;
+  onEditMessage: (content: string) => void;
+  onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
+  onOpenImage: (src: string) => void;
+  onOpenFile: (path: string) => void;
+  onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
+  onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
+};
+
+const ChatMessageItem = memo(function ChatMessageItem({
+  msg,
+  onEditMessage,
+  onImageContextMenu,
+  onOpenImage,
+  onOpenFile,
+  onToggleAssistantProcess,
+  onToggleAssistantProcessEntry,
+  onPreserveScroll,
+}: ChatMessageItemProps) {
+  if (msg.role === "system" && msg.systemType === "context_compaction") {
+    return (
+      <div data-msg-id={msg.id} className="chat-context-divider">
+        <span className="chat-context-divider-line" />
+        <span className="chat-context-divider-label">
+          <ListCollapse size={15} strokeWidth={1.8} />
+          <span>{msg.content || "上下文已自动压缩"}</span>
+        </span>
+        <span className="chat-context-divider-line" />
+      </div>
+    );
+  }
+
+  const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
+  const hasImages = !!msg.images?.length;
+  const hasDiffs = !!msg.diffs?.length && !processRunning;
+  const hasContent = msg.content.trim().length > 0;
+  const hasVisibleBubble =
+    msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
+
+  return (
+    <div data-msg-id={msg.id} className="chat-msg-wrapper">
+      {msg.role === "assistant" && msg.process && (
+        <ProcessBlock
+          messageId={msg.id}
+          process={msg.process}
+          onToggle={onToggleAssistantProcess}
+          onToggleEntry={onToggleAssistantProcessEntry}
+          onOpenFile={onOpenFile}
+          onPreserveScroll={onPreserveScroll}
+        />
+      )}
+      {hasVisibleBubble && (
+        <div className={`chat-msg ${msg.role}`}>
+          {hasImages && msg.images && (
+            <div className="chat-images">
+              {msg.images.map((img) => (
+                <img
+                  key={img.id}
+                  src={img.src}
+                  alt={img.name}
+                  className="chat-image"
+                  onClick={() => onOpenImage(img.src)}
+                  onContextMenu={msg.role === "user" ? (event) => onImageContextMenu(event, img.src) : undefined}
+                />
+              ))}
+            </div>
+          )}
+          {hasContent && (
+            <div className="chat-bubble-row">
+              <div className={`chat-bubble ${msg.role}`}>
+                {msg.role === "assistant" ? (
+                  <MarkdownRenderer content={msg.content} />
+                ) : (
+                  msg.content
+                )}
+              </div>
+              {msg.role === "user" && (
+                <div className="chat-msg-actions">
+                  <button
+                    className="chat-copy-btn"
+                    onClick={() => onEditMessage(msg.content)}
+                    title="编辑"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                    </svg>
+                  </button>
+                  <button
+                    className="chat-copy-btn"
+                    onClick={() => navigator.clipboard.writeText(msg.content)}
+                    title="复制"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" />
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          {hasDiffs && msg.diffs && (
+            <DiffBlock diffs={msg.diffs} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
 const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionId,
   activeSessionInitialized,
@@ -162,98 +276,19 @@ const ChatMessagesView = memo(function ChatMessagesView({
             {messages.length === 0 && (
               <div className="chat-empty">发送消息开始对话</div>
             )}
-            {messages.map((msg) => {
-              if (msg.role === "system" && msg.systemType === "context_compaction") {
-                return (
-                  <div key={msg.id} data-msg-id={msg.id} className="chat-context-divider">
-                    <span className="chat-context-divider-line" />
-                    <span className="chat-context-divider-label">
-                      <ListCollapse size={15} strokeWidth={1.8} />
-                      <span>{msg.content || "上下文已自动压缩"}</span>
-                    </span>
-                    <span className="chat-context-divider-line" />
-                  </div>
-                );
-              }
-
-              const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
-              const hasImages = !!msg.images?.length;
-              const hasDiffs = !!msg.diffs?.length && !processRunning;
-              const hasContent = msg.content.trim().length > 0;
-              const hasVisibleBubble =
-                msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
-
-              return (
-                <div key={msg.id} data-msg-id={msg.id} className="chat-msg-wrapper">
-                  {msg.role === "assistant" && msg.process && (
-                    <ProcessBlock
-                      messageId={msg.id}
-                      process={msg.process}
-                      onToggle={onToggleAssistantProcess}
-                      onToggleEntry={onToggleAssistantProcessEntry}
-                      onOpenFile={onOpenFile}
-                      onPreserveScroll={onPreserveScroll}
-                    />
-                  )}
-                  {hasVisibleBubble && (
-                    <div className={`chat-msg ${msg.role}`}>
-                      {hasImages && msg.images && (
-                        <div className="chat-images">
-                          {msg.images.map((img) => (
-                            <img
-                              key={img.id}
-                              src={img.src}
-                              alt={img.name}
-                              className="chat-image"
-                              onClick={() => onOpenImage(img.src)}
-                              onContextMenu={msg.role === "user" ? (event) => onImageContextMenu(event, img.src) : undefined}
-                            />
-                          ))}
-                        </div>
-                      )}
-                      {hasContent && (
-                        <div className="chat-bubble-row">
-                          <div className={`chat-bubble ${msg.role}`}>
-                            {msg.role === "assistant" ? (
-                              <MarkdownRenderer content={msg.content} />
-                            ) : (
-                              msg.content
-                            )}
-                          </div>
-                          {msg.role === "user" && (
-                            <div className="chat-msg-actions">
-                              <button
-                                className="chat-copy-btn"
-                                onClick={() => onEditMessage(msg.content)}
-                                title="编辑"
-                              >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                                </svg>
-                              </button>
-                              <button
-                                className="chat-copy-btn"
-                                onClick={() => navigator.clipboard.writeText(msg.content)}
-                                title="复制"
-                              >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <rect x="9" y="9" width="13" height="13" rx="2" />
-                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                </svg>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {hasDiffs && msg.diffs && (
-                        <DiffBlock diffs={msg.diffs} />
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {messages.map((msg) => (
+              <ChatMessageItem
+                key={msg.id}
+                msg={msg}
+                onEditMessage={onEditMessage}
+                onImageContextMenu={onImageContextMenu}
+                onOpenImage={onOpenImage}
+                onOpenFile={onOpenFile}
+                onToggleAssistantProcess={onToggleAssistantProcess}
+                onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
+                onPreserveScroll={onPreserveScroll}
+              />
+            ))}
 
             {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
               <div className="chat-working">
@@ -427,7 +462,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     };
   }, []);
 
-  const savePlanModeEnabled = async (nextPlanModeEnabled: boolean) => {
+  const savePlanModeEnabled = useCallback(async (nextPlanModeEnabled: boolean) => {
     setPlanModeEnabled(nextPlanModeEnabled);
     setModelOpen(false);
     setThinkingOpen(false);
@@ -446,7 +481,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
       detail: { planModeEnabled: nextPlanModeEnabled },
     }));
-  };
+  }, []);
 
   // Auto-resize textarea after layout changes; typing resizes directly in onChange.
   useEffect(() => {
@@ -500,6 +535,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }, activeSessionId);
     }
   }, [activeSessionId, addMessage, imageContextMenu]);
+
+  const handleOpenImage = useCallback((src: string) => {
+    setZoomImage(src);
+  }, []);
+
+  const handleOpenFile = useCallback((path: string) => {
+    setPreviewFile(path);
+  }, []);
 
   const scrollToMessage = useCallback((msgId: string) => {
     scrollToMessageElement(msgId);
@@ -812,7 +855,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     removeQueuedMessage,
   ]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
 
     const shouldSend =
@@ -836,12 +879,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         });
       }
     }
-  };
+  }, [handleSend, sendKey, setComposerInput]);
 
-  const handleAbort = () => {
+  const handleAbort = useCallback(() => {
     const currentSessionId = useProjectStore.getState().activeSessionId;
     if (!currentSessionId) return;
-    const runtime = sessionRuntimeRef.current[currentSessionId];
+    const runtime = sessionRuntimeRef.current[currentSessionId] || createSessionRuntime();
+    sessionRuntimeRef.current[currentSessionId] = runtime;
+    if (runtime.manualAbortRequested) {
+      void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
+        console.error("[agent] abort failed:", err);
+      });
+      return;
+    }
+    runtime.manualAbortRequested = true;
     if (runtime?.streamWatchdog) {
       clearTimeout(runtime.streamWatchdog);
       runtime.streamWatchdog = null;
@@ -854,19 +905,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       state: "interrupted",
       expanded: false,
     }, currentSessionId);
-    useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
-    if (runtime) {
-      resetSessionRuntimeAfterTurn(runtime);
-      runtime.autoAbortReason = null;
-    }
     setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
-    setStreaming(false);
-    useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
+    setStreaming(true);
+    useProjectStore.getState().setAgentStatus(currentSessionId, "running");
 
     void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
       console.error("[agent] abort failed:", err);
     });
-  };
+  }, [setPendingUIResponseState, setStreaming]);
 
   const handleSelectModel = async (model: ModelInfo) => {
     setCurrentModel(model);
@@ -1038,8 +1084,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         onScrollToBottom={scrollToBottom}
         onEditMessage={setComposerInput}
         onImageContextMenu={handleImageContextMenu}
-        onOpenImage={setZoomImage}
-        onOpenFile={setPreviewFile}
+        onOpenImage={handleOpenImage}
+        onOpenFile={handleOpenFile}
         onToggleAssistantProcess={handleToggleAssistantProcess}
         onToggleAssistantProcessEntry={handleToggleAssistantProcessEntry}
         onPreserveScroll={preserveScrollDuringLayoutChange}
@@ -1092,7 +1138,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           onClearAttachmentError={clearAttachmentError}
           onRemovePendingFile={removePendingFile}
           onRemovePendingImage={removePendingImage}
-          onOpenImage={setZoomImage}
+          onOpenImage={handleOpenImage}
           onSyncInputValue={syncInputValue}
           onResizeTextarea={resizeTextarea}
           onKeyDown={handleKeyDown}

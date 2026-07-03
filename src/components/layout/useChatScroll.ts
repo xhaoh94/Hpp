@@ -73,8 +73,26 @@ export function useChatScroll({
     });
     observer.observe(el);
     Array.from(el.children).forEach((child) => observer.observe(child));
-    return () => observer.disconnect();
-  }, [messages, activeSessionId, activeSessionInitialized, updateScrollBottomState]);
+
+    const mutationObserver = typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            mutation.addedNodes.forEach((node) => {
+              if (node instanceof Element) observer.observe(node);
+            });
+            mutation.removedNodes.forEach((node) => {
+              if (node instanceof Element) observer.unobserve(node);
+            });
+          }
+        });
+    mutationObserver?.observe(el, { childList: true });
+
+    return () => {
+      mutationObserver?.disconnect();
+      observer.disconnect();
+    };
+  }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);
 
   useEffect(() => {
     const el = scrollRef.current;

@@ -31,6 +31,7 @@ export type SessionRuntime = {
   streamWatchdog: ReturnType<typeof setTimeout> | null;
   streamIdleNoticeEntryId: string | null;
   autoAbortReason: string | null;
+  manualAbortRequested: boolean;
   processTextEntryId: string | null;
   processTextEntryIds: string[];
   processTextHistory: string[];
@@ -69,6 +70,7 @@ export const createSessionRuntime = (): SessionRuntime => ({
   streamWatchdog: null,
   streamIdleNoticeEntryId: null,
   autoAbortReason: null,
+  manualAbortRequested: false,
   processTextEntryId: null,
   processTextEntryIds: [],
   processTextHistory: [],
@@ -91,6 +93,7 @@ export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
 export const resetSessionRuntimeAfterTurn = (runtime: SessionRuntime) => {
   runtime.processActive = false;
   runtime.streamStarted = false;
+  runtime.manualAbortRequested = false;
   resetSessionRuntimeBuffers(runtime);
 };
 

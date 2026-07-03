@@ -198,6 +198,22 @@ export function useAgentEvents({
     const isAlreadyRunningError = (title: string, detail?: string) =>
       /Codex is already running/i.test(`${title}\n${detail || ""}`);
 
+    const finishManualAbort = (sessionId: string) => {
+      const runtime = getRuntime(sessionId);
+      if (!runtime.manualAbortRequested) return;
+      clearStreamWatchdog(sessionId);
+      completeIdleNotice(sessionId);
+      finishAssistantProcessText(sessionId);
+      finishThinkingEntry(sessionId);
+      useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
+      resetSessionRuntimeAfterTurn(runtime);
+      runtime.autoAbortReason = null;
+      runtime.manualAbortRequested = false;
+      setPendingUIResponse((current) => current?.sessionId === sessionId ? null : current);
+      if (sessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
+      useProjectStore.getState().setAgentStatus(sessionId, "idle");
+    };
+
     const finishThinkingEntry = (sessionId: string) => {
       const runtime = getRuntime(sessionId);
       if (runtime.thinkingEntryId) {
@@ -485,7 +501,7 @@ export function useAgentEvents({
     const refreshStreamWatchdog = (currentSessionId: string) => {
       const runtime = getRuntime(currentSessionId);
       clearStreamWatchdog(currentSessionId);
-      if (!runtime.processActive) return;
+      if (!runtime.processActive || runtime.manualAbortRequested) return;
       runtime.streamWatchdog = setTimeout(() => {
         appendOrRefreshIdleNotice(currentSessionId);
         refreshStreamWatchdog(currentSessionId);
@@ -494,6 +510,7 @@ export function useAgentEvents({
 
     const ensureAssistantContinuation = (currentSessionId: string) => {
       const runtime = getRuntime(currentSessionId);
+      if (runtime.manualAbortRequested) return runtime;
       if (runtime.processActive) return runtime;
 
       runtime.processActive = true;
@@ -570,6 +587,9 @@ export function useAgentEvents({
         : useProjectStore.getState().activeSessionId;
       if (!currentSessionId) return;
       const runtime = getRuntime(currentSessionId);
+      if (runtime.manualAbortRequested && event.type !== "aborted" && event.type !== "agent_disconnected") {
+        return;
+      }
       const compactionDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
       if (
         event.type !== "message_start" &&
@@ -634,7 +654,14 @@ export function useAgentEvents({
           // actually complete. stream_end is the UI completion signal.
           break;
         case "agent_disconnected":
+          if (runtime.manualAbortRequested) {
+            finishManualAbort(currentSessionId);
+            break;
+          }
           handleAgentDisconnectedEvent(currentSessionId, runtime, handlerContext);
+          break;
+        case "aborted":
+          finishManualAbort(currentSessionId);
           break;
         case "tool_start":
           handleToolStartEvent(event, currentSessionId, runtime, handlerContext);

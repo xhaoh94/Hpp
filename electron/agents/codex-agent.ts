@@ -194,14 +194,24 @@ export class CodexAgent {
   async abort(): Promise<void> {
     this.isAborting = true;
     this.eventBuffer.clear();
+    for (const [id, handler] of this.pendingResponses.entries()) {
+      handler({ type: "error", id, error: "Codex request interrupted" });
+    }
+    this.pendingResponses.clear();
     if (!this.process) {
+      this.emitEvent({ type: "aborted" });
       this.isAborting = false;
       return;
     }
 
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 5000);
+      let acknowledged = false;
+      const timeout = setTimeout(() => {
+        if (!acknowledged) this.emitEvent({ type: "aborted" });
+        resolve();
+      }, 5000);
       this.sendWorkerCommand({ type: "abort" }, () => {
+        acknowledged = true;
         clearTimeout(timeout);
         resolve();
       });
@@ -305,6 +315,9 @@ export class CodexAgent {
         this.emitEvent(data);
         break;
       case "prompt_done":
+        break;
+      case "aborted":
+        this.emitEvent({ type: "aborted", promptId: data.promptId });
         break;
       case "error":
         if (/Codex is already running/i.test(data.error || "")) {

@@ -47,6 +47,11 @@ let activeTurnId = null;
 let activeThreadId = null;
 let promptRunning = false;
 let aborting = false;
+let abortRequested = false;
+let abortedPromptId = null;
+let interruptedPromptIds = new Set();
+let interruptedTurnIds = new Set();
+let ignoredTurnIds = new Set();
 let streamStarted = false;
 let finalResponse = "";
 let commandOutputByItemId = new Map();
@@ -282,6 +287,63 @@ const rpcReject = (id, message, code = -32000) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const interruptTurn = async (turnId, timeoutMs = 5000) => {
+  if (!turnId || interruptedTurnIds.has(turnId)) return;
+  const targetThreadId = activeThreadId || threadId;
+  if (!targetThreadId) return;
+  interruptedTurnIds.add(turnId);
+  try {
+    await rpcRequest("turn/interrupt", { threadId: targetThreadId, turnId }, timeoutMs);
+  } catch {
+    // The turn may already have completed or the app-server may be shutting down.
+  }
+};
+
+const getTurnId = (params) =>
+  params?.turn?.id ||
+  params?.turnId ||
+  params?.item?.turnId ||
+  params?.item?.turn?.id ||
+  null;
+
+const getTurnClientUserMessageId = (params) =>
+  params?.turn?.clientUserMessageId ||
+  params?.turn?.client_user_message_id ||
+  params?.clientUserMessageId ||
+  params?.client_user_message_id ||
+  params?.item?.clientUserMessageId ||
+  params?.item?.client_user_message_id ||
+  "";
+
+const shouldIgnoreTurnNotification = (params) => {
+  const turnId = getTurnId(params);
+  if (turnId && ignoredTurnIds.has(turnId)) return true;
+
+  const clientUserMessageId = String(getTurnClientUserMessageId(params) || "");
+  if (clientUserMessageId && interruptedPromptIds.has(clientUserMessageId)) {
+    if (turnId) {
+      ignoredTurnIds.add(turnId);
+      void interruptTurn(turnId);
+    }
+    return true;
+  }
+
+  if (clientUserMessageId && activePromptId && clientUserMessageId !== activePromptId) {
+    if (turnId) {
+      ignoredTurnIds.add(turnId);
+      void interruptTurn(turnId);
+    }
+    return true;
+  }
+
+  if (turnId && activeTurnId && turnId !== activeTurnId) {
+    ignoredTurnIds.add(turnId);
+    return true;
+  }
+
+  return false;
+};
+
 const handleRpcMessage = (message) => {
   if (Object.prototype.hasOwnProperty.call(message, "id") && !message.method) {
     const pending = pendingRpc.get(message.id);
@@ -421,6 +483,7 @@ const resetTurnState = () => {
   agentTextByItemId = new Map();
   completedItemIds = new Set();
   emittedContextCompactionIds = new Set();
+  interruptedTurnIds = new Set();
 };
 
 const normalizeQuestionOption = (option) => ({
@@ -443,6 +506,11 @@ const normalizeUserInputQuestions = (questions) => {
 };
 
 const handleServerRequest = (message) => {
+  if (abortRequested && Object.prototype.hasOwnProperty.call(message, "id")) {
+    rpcReject(message.id, "Turn was interrupted");
+    return;
+  }
+
   switch (message.method) {
     case "item/tool/requestUserInput":
       handleRequestUserInput(message);
@@ -770,6 +838,7 @@ const getDelta = (map, id, nextText) => {
 };
 
 const handleItem = (item, phase) => {
+  if (!promptRunning || abortRequested) return;
   if (!item?.id || !item?.type) return;
   if (phase === "completed" && completedItemIds.has(item.id)) return;
 
@@ -835,8 +904,14 @@ const handleItem = (item, phase) => {
 };
 
 const handleTurnStarted = (params) => {
+  if (shouldIgnoreTurnNotification(params)) return;
   activeTurnId = params.turn?.id || activeTurnId;
   activeThreadId = params.threadId || activeThreadId;
+  if (abortRequested) {
+    void interruptTurn(activeTurnId);
+    return;
+  }
+  if (!promptRunning) return;
   startStream();
   send({
     type: "process_event",
@@ -847,6 +922,8 @@ const handleTurnStarted = (params) => {
 };
 
 const handleTurnCompleted = (params) => {
+  if (shouldIgnoreTurnNotification(params)) return;
+  if (!promptRunning || abortRequested) return;
   const turn = params.turn || {};
   if (Array.isArray(turn.items)) {
     for (const item of turn.items) handleItem(item, "completed");
@@ -877,6 +954,7 @@ const handleServerNotification = (method, params) => {
       handleTurnCompleted(params);
       break;
     case "turn/plan/updated":
+      if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.plan)) {
         send({
           type: "process_event",
@@ -888,12 +966,15 @@ const handleServerNotification = (method, params) => {
       }
       break;
     case "item/started":
+      if (!promptRunning || abortRequested) return;
       handleItem(params.item, "started");
       break;
     case "item/completed":
+      if (!promptRunning || abortRequested) return;
       handleItem(params.item, "completed");
       break;
     case "item/agentMessage/delta":
+      if (!promptRunning || abortRequested) return;
       startStream();
       if (params.itemId) {
         const nextText = `${agentTextByItemId.get(params.itemId) || ""}${params.delta || ""}`;
@@ -903,6 +984,7 @@ const handleServerNotification = (method, params) => {
       break;
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/textDelta":
+      if (!promptRunning || abortRequested) return;
       startStream();
       if (params.itemId) {
         const nextText = `${reasoningTextByItemId.get(params.itemId) || ""}${params.delta || ""}`;
@@ -911,21 +993,25 @@ const handleServerNotification = (method, params) => {
       if (params.delta) send({ type: "thinking_delta", delta: params.delta });
       break;
     case "item/reasoning/summaryPartAdded":
+      if (!promptRunning || abortRequested) return;
       startStream();
       if (params.text) send({ type: "thinking_delta", delta: params.text });
       break;
     case "item/commandExecution/outputDelta":
     case "command/exec/outputDelta":
+      if (!promptRunning || abortRequested) return;
       if (params.itemId) {
         commandOutputByItemId.set(params.itemId, `${commandOutputByItemId.get(params.itemId) || ""}${params.delta || ""}`);
       }
       break;
     case "item/fileChange/patchUpdated":
+      if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.changes)) {
         send({ type: "diff_update", diffs: getFilesFromChanges(params.changes).map((file) => ({ file: file.file, patch: "", additions: 0, deletions: 0, status: file.status })) });
       }
       break;
     case "error":
+      if (!promptRunning || abortRequested) return;
       send({
         type: "process_event",
         entryType: "error",
@@ -938,7 +1024,7 @@ const handleServerNotification = (method, params) => {
 };
 
 const finishPrompt = () => {
-  if (!promptRunning || pendingUIRequest) return;
+  if (!promptRunning || pendingUIRequest || abortRequested) return;
   const promptId = activePromptId;
   send({ type: "stream_end", content: finalResponse, force: true });
   send({ type: "agent_end" });
@@ -956,6 +1042,8 @@ const runPrompt = async (command) => {
 
   promptRunning = true;
   aborting = false;
+  abortRequested = false;
+  abortedPromptId = null;
   activePromptId = command.id;
   activePlanModeEnabled = !!command.planModeEnabled;
   activePermissionMode = command.permissionMode === "plan" ? "plan" : "full-access";
@@ -983,10 +1071,18 @@ const runPrompt = async (command) => {
       model: currentModelId && currentModelId !== DEFAULT_MODEL_ID ? currentModelId : undefined,
       effort: normalizeReasoningEffort(thinkingLevel),
     });
+    if (abortRequested) {
+      const startedTurnId = result?.turn?.id || result?.turnId || activeTurnId;
+      if (startedTurnId) {
+        ignoredTurnIds.add(startedTurnId);
+        void interruptTurn(startedTurnId);
+      }
+      return;
+    }
     if (!promptRunning || activePromptId !== command.id) return;
-    activeTurnId = result?.turn?.id || activeTurnId;
+    activeTurnId = result?.turn?.id || result?.turnId || activeTurnId;
   } catch (error) {
-    if (!aborting && promptRunning && activePromptId === command.id) {
+    if (!aborting && !abortRequested && promptRunning && activePromptId === command.id) {
       send({
         type: "process_event",
         entryType: "error",
@@ -1008,19 +1104,20 @@ const waitForActiveTurn = async (timeoutMs = 10000) => {
 };
 
 const runGuidance = async (command) => {
-  if (!promptRunning) {
+  if (!promptRunning || abortRequested) {
     throw new Error("Codex has no active turn to guide");
   }
 
   const turnId = await waitForActiveTurn();
   const currentThreadId = activeThreadId || threadId;
-  if (!promptRunning || !turnId || !currentThreadId) {
+  if (!promptRunning || abortRequested || !turnId || !currentThreadId) {
     throw new Error("Codex has no active turn to guide");
   }
 
   const imagePayload = await materializeImages(command.images);
   let cleanupRegistered = false;
   try {
+    if (!promptRunning || abortRequested) return;
     const result = await rpcRequest("turn/steer", {
       threadId: currentThreadId,
       clientUserMessageId: command.id,
@@ -1029,6 +1126,7 @@ const runGuidance = async (command) => {
     }, 25000);
     registerActiveImageCleanup(imagePayload.cleanup);
     cleanupRegistered = true;
+    if (!promptRunning || abortRequested) return;
     activeTurnId = result?.turnId || activeTurnId;
     send({ type: "guidance_done", id: command.id });
   } finally {
@@ -1037,18 +1135,20 @@ const runGuidance = async (command) => {
 };
 
 const abortPrompt = async (command) => {
+  if (abortRequested) {
+    send({ type: "aborted", id: command.id, promptId: abortedPromptId });
+    return;
+  }
   aborting = true;
-  const abortedPromptId = activePromptId;
+  abortRequested = true;
+  abortedPromptId = activePromptId;
+  if (abortedPromptId) interruptedPromptIds.add(abortedPromptId);
   const turnId = activeTurnId;
+  const pendingRequestRpcId = pendingUIRequest?.rpcId;
   pendingUIRequest = null;
 
-  try {
-    if (turnId) {
-      await rpcRequest("turn/interrupt", { threadId: activeThreadId || threadId, turnId }, 5000);
-    }
-  } catch {
-    // The turn may already have completed.
-  }
+  if (pendingRequestRpcId) rpcReject(pendingRequestRpcId, "Turn was interrupted");
+  if (turnId) void interruptTurn(turnId, 5000);
 
   send({
     type: "process_event",

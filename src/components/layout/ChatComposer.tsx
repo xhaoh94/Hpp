@@ -5,6 +5,7 @@ import type {
   ClipboardEvent,
   RefObject,
 } from "react";
+import { memo } from "react";
 import { Square, X } from "lucide-react";
 import type { PendingFile } from "@/stores/chat-store";
 
@@ -41,7 +42,7 @@ type ChatComposerProps = {
   onAbort: () => void;
 };
 
-export function ChatComposer({
+export const ChatComposer = memo(function ChatComposer({
   activeQuestionnaire,
   attachmentError,
   currentSessionRunning,
@@ -193,4 +194,4 @@ export function ChatComposer({
       </div>
     </>
   );
-}
+});
