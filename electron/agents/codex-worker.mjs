@@ -2,8 +2,8 @@ import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 const DEFAULT_MODEL_ID = "default";
@@ -32,6 +32,37 @@ const PLATFORM_PACKAGE_BY_TARGET = {
   "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
 };
 
+const DEFAULT_THINKING_LEVEL = "medium";
+
+const normalizeDefaultThinkingLevel = (level) => {
+  const normalized = String(level || "").trim().toLowerCase();
+  if (normalized === "none") return "off";
+  if (normalized === "off" || VALID_REASONING_EFFORTS.has(normalized)) return normalized;
+  return undefined;
+};
+
+const getTopLevelConfigValue = (content, key) => {
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("[")) break;
+
+    const match = line.match(new RegExp(`^${key}\\s*=\\s*(?:"([^"]+)"|'([^']+)'|([^\\s#]+))`));
+    if (match) return match[1] || match[2] || match[3];
+  }
+  return undefined;
+};
+
+const getDefaultThinkingLevel = () => {
+  try {
+    const configPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+    const content = readFileSync(configPath, "utf8");
+    return normalizeDefaultThinkingLevel(getTopLevelConfigValue(content, "model_reasoning_effort")) || DEFAULT_THINKING_LEVEL;
+  } catch {
+    return DEFAULT_THINKING_LEVEL;
+  }
+};
+
 let projectPath = "";
 let threadId = null;
 let appServer = null;
@@ -39,7 +70,7 @@ let appServerReady = null;
 let nextRpcId = 0;
 let pendingRpc = new Map();
 let currentModelId = null;
-let thinkingLevel = "medium";
+let thinkingLevel = getDefaultThinkingLevel();
 let activePlanModeEnabled = false;
 let activePermissionMode = "full-access";
 let activePromptId = null;
@@ -85,7 +116,8 @@ const truncate = (value, maxLength = 1200) => {
 };
 
 const normalizeReasoningEffort = (level) => {
-  const normalized = String(level || "").trim();
+  const normalized = String(level || "").trim().toLowerCase();
+  if (normalized === "off" || normalized === "none") return "none";
   return VALID_REASONING_EFFORTS.has(normalized) ? normalized : undefined;
 };
 

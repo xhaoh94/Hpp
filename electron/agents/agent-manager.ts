@@ -186,6 +186,10 @@ class AgentManager {
     return this.sessionAgents.get(sessionId) || null;
   }
 
+  getAgentForSession(sessionId?: string): AgentBackend | null {
+    return sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
+  }
+
   getActiveAgentType(): string | undefined {
     return this.activeSessionId ? this.sessionAgentTypes.get(this.activeSessionId) : undefined;
   }
@@ -303,15 +307,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return filterModelsByLocalConfig(models);
   });
 
-  ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string) => {
-    const agent = agentManager.getActiveAgent();
+  ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string, sessionId?: string) => {
+    const agent = agentManager.getAgentForSession(sessionId);
     if (!agent) return { success: false };
     await agent.setModel(provider, modelId);
     return { success: true };
   });
 
-  ipcMain.handle("agent:setThinkingLevel", async (_event, level: string) => {
-    const agent = agentManager.getActiveAgent();
+  ipcMain.handle("agent:setThinkingLevel", async (_event, level: string, sessionId?: string) => {
+    const agent = agentManager.getAgentForSession(sessionId);
     if (!agent) return { success: false };
     await agent.setThinkingLevel(level);
     return { success: true };

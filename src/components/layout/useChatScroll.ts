@@ -72,24 +72,10 @@ export function useChatScroll({
       updateScrollBottomState(el);
     });
     observer.observe(el);
-    Array.from(el.children).forEach((child) => observer.observe(child));
-
-    const mutationObserver = typeof MutationObserver === "undefined"
-      ? null
-      : new MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            mutation.addedNodes.forEach((node) => {
-              if (node instanceof Element) observer.observe(node);
-            });
-            mutation.removedNodes.forEach((node) => {
-              if (node instanceof Element) observer.unobserve(node);
-            });
-          }
-        });
-    mutationObserver?.observe(el, { childList: true });
+    const lastChild = el.lastElementChild;
+    if (lastChild) observer.observe(lastChild);
 
     return () => {
-      mutationObserver?.disconnect();
       observer.disconnect();
     };
   }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);

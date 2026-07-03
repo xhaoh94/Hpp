@@ -1,8 +1,9 @@
 import { BrowserWindow } from "electron";
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
 import { StringDecoder } from "string_decoder";
+import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { join } from "path";
+import { delimiter, dirname, join } from "path";
 import { homedir } from "os";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import {
@@ -23,6 +24,62 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
+}
+
+function getPathEnvValue() {
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") || "PATH";
+  return process.env[pathKey] || "";
+}
+
+function findOnPath(fileNames: string[]): string | undefined {
+  for (const dir of getPathEnvValue().split(delimiter)) {
+    if (!dir) continue;
+    for (const fileName of fileNames) {
+      const candidate = join(dir, fileName);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function getNodeExecutable() {
+  if (process.env.DROID_NODE_PATH) return process.env.DROID_NODE_PATH;
+  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
+  return process.platform === "win32"
+    ? findOnPath(["node.exe"]) || "node.exe"
+    : "node";
+}
+
+function getNpmDroidShimTarget(shimPath: string): string | undefined {
+  const target = join(dirname(shimPath), "node_modules", "droid", "bin", "droid");
+  return existsSync(target) ? target : undefined;
+}
+
+function isWindowsShellShim(filePath: string): boolean {
+  return /\.(?:cmd|bat)$/i.test(filePath);
+}
+
+function getDroidExecutable(args: string[]): { command: string; args: string[]; shell?: boolean } {
+  if (process.env.DROID_PATH && existsSync(process.env.DROID_PATH)) {
+    if (process.platform === "win32" && isWindowsShellShim(process.env.DROID_PATH)) {
+      return { command: process.env.DROID_PATH, args, shell: true };
+    }
+    return { command: process.env.DROID_PATH, args };
+  }
+
+  if (process.platform !== "win32") {
+    return { command: "droid", args };
+  }
+
+  const exe = findOnPath(["droid.exe"]);
+  if (exe) return { command: exe, args };
+
+  const npmShim = findOnPath(["droid.cmd", "droid.bat"]);
+  const shimTarget = npmShim ? getNpmDroidShimTarget(npmShim) : undefined;
+  if (shimTarget) return { command: getNodeExecutable(), args: [shimTarget, ...args] };
+  if (npmShim) return { command: npmShim, args, shell: true };
+
+  return { command: "droid.exe", args };
 }
 
 // ============================================================
@@ -76,12 +133,13 @@ export class DroidAgent {
       args.push("--session-id", existingSessionId);
     }
 
-    this.process = spawn("droid", args, {
+    const executable = getDroidExecutable(args);
+    this.process = spawn(executable.command, executable.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
+      shell: executable.shell || false,
       env: { ...process.env },
-    });
+    } satisfies SpawnOptions);
 
     const decoder = new StringDecoder("utf8");
     let buffer = "";

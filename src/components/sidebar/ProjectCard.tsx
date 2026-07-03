@@ -1,9 +1,9 @@
-import { useState, useEffect } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AVAILABLE_AGENTS, getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
-import { applySessionModels, getSessionModel, getSessionThinking } from "@/hooks/useDataPersistence";
+import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from "@/hooks/useDataPersistence";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -25,7 +25,16 @@ interface Props {
 
 export function ProjectCard({ project }: Props) {
   const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
-  const { clearMessages, addMessage, sessionMessages, loadSessionMessages, switchSession, setActiveAgent } = useChatStore();
+  const {
+    clearMessages,
+    addMessage,
+    sessionMessages,
+    loadSessionMessages,
+    switchSession,
+    setActiveAgent,
+    deleteSessionMessages,
+    deleteSessionsMessages,
+  } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
   const [enabledAgents, setEnabledAgents] = useState<string[]>(["codex", "pi"]);
   const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
@@ -75,7 +84,7 @@ export function ProjectCard({ project }: Props) {
     const handleAgentSettingsUpdated = (event: Event) => {
       const detail = (event as CustomEvent<{ enabledAgents?: string[]; agentOrder?: string[] }>).detail;
       if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(detail.enabledAgents);
-      setAgentOrder(normalizeAgentOrder(detail?.agentOrder));
+      if (Array.isArray(detail?.agentOrder)) setAgentOrder(normalizeAgentOrder(detail.agentOrder));
     };
     window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
     return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
@@ -129,26 +138,35 @@ export function ProjectCard({ project }: Props) {
       if (result.sessionFilePath) {
         useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
       }
-      applySessionModels(sessionId, result.models);
+
+      const isStillActiveSession = () => useProjectStore.getState().activeSessionId === sessionId;
+      if (isStillActiveSession()) {
+        applySessionModels(sessionId, result.models);
+      }
+
       // Re-fetch models now that agent backend is ready
       try {
         const models = await window.electronAPI.agentGetModels(sessionId);
-        if (models && models.length > 0) {
+        if (isStillActiveSession() && models && models.length > 0) {
           useChatStore.getState().setAvailableModels(models);
           // New session: always use first model for the agent
           useChatStore.getState().setCurrentModel(models[0]);
         }
       } catch { /* ignore */ }
-      // New session: default thinking level to "medium"
-      useChatStore.getState().setThinkingLevel("medium");
-      window.electronAPI.agentSetThinkingLevel("medium");
+      if (isStillActiveSession()) {
+        const thinkingToSet = await getSessionThinkingOrDefault(sessionId, agentId);
+        if (isStillActiveSession()) {
+          useChatStore.getState().setThinkingLevel(thinkingToSet);
+          window.electronAPI.agentSetThinkingLevel(thinkingToSet, sessionId);
+        }
+      }
       if (!result.success) {
         addMessage({
           id: crypto.randomUUID(),
           role: "system",
           content: `Agent 启动失败: ${result.error}`,
           timestamp: Date.now(),
-        });
+        }, sessionId);
       }
     });
   };
@@ -194,11 +212,11 @@ export function ProjectCard({ project }: Props) {
             const match = persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider);
             useChatStore.getState().setCurrentModel(match ? persisted : models[0]);
           }
-          // Restore per-session thinking level (default to "medium" if none persisted)
-          const persistedThinking = getSessionThinking(session.id);
-          const thinkingToSet = persistedThinking || "medium";
-          useChatStore.getState().setThinkingLevel(thinkingToSet);
-          window.electronAPI.agentSetThinkingLevel(thinkingToSet);
+          const thinkingToSet = await getSessionThinkingOrDefault(session.id, session.agentId);
+          if (useProjectStore.getState().activeSessionId === session.id) {
+            useChatStore.getState().setThinkingLevel(thinkingToSet);
+            window.electronAPI.agentSetThinkingLevel(thinkingToSet, session.id);
+          }
         } catch { /* ignore */ }
       }
     });
@@ -216,6 +234,19 @@ export function ProjectCard({ project }: Props) {
     }
   };
 
+  const disposeAgentSessions = (sessionIds: string[]) => {
+    for (const sessionId of sessionIds) {
+      void window.electronAPI.agentRemoveSession(sessionId);
+    }
+  };
+
+  const handleDeleteProject = () => {
+    const sessionIds = project.sessions.map((session) => session.id);
+    disposeAgentSessions(sessionIds);
+    deleteSessionsMessages(sessionIds);
+    removeProject(project.id);
+  };
+
   const handleResumeSession = (session: ProjectSession) => {
     reopenSession(project.id, session.id);
     handleSelectSession(session);
@@ -223,12 +254,30 @@ export function ProjectCard({ project }: Props) {
   };
 
   const handleDeleteHistorySession = (sessionId: string) => {
+    void window.electronAPI.agentRemoveSession(sessionId);
+    deleteSessionMessages(sessionId);
     removeSession(project.id, sessionId);
   };
 
-  const orderedAgents = orderAgents(AVAILABLE_AGENTS, agentOrder);
-  const uncheckedAgents = orderedAgents.filter(
-    (a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true
+  const orderedAgents = useMemo(
+    () => orderAgents(AVAILABLE_AGENTS, agentOrder),
+    [agentOrder]
+  );
+  const uncheckedAgents = useMemo(
+    () => orderedAgents.filter((a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true),
+    [enabledAgents, installedAgents, orderedAgents]
+  );
+  const enabledInstalledAgents = useMemo(
+    () => orderedAgents.filter((agent) => enabledAgents.includes(agent.id) && installedAgents[agent.id] === true),
+    [enabledAgents, installedAgents, orderedAgents]
+  );
+  const openSessions = useMemo(
+    () => project.sessions.filter((session) => !session.closed),
+    [project.sessions]
+  );
+  const closedSessions = useMemo(
+    () => project.sessions.filter((session) => session.closed),
+    [project.sessions]
   );
 
   return (
@@ -237,7 +286,7 @@ export function ProjectCard({ project }: Props) {
         <div className="project-info">
           <button
             className="project-close-btn"
-            onClick={() => removeProject(project.id)}
+            onClick={handleDeleteProject}
             title="删除项目"
           >
             ×
@@ -268,7 +317,7 @@ export function ProjectCard({ project }: Props) {
               </div>
             ) : (
               <>
-                {orderedAgents.filter((a) => enabledAgents.includes(a.id) && installedAgents[a.id] === true).map((a) => (
+                {enabledInstalledAgents.map((a) => (
                   <div
                     key={a.id}
                     className="project-terminal-btn"
@@ -316,9 +365,9 @@ export function ProjectCard({ project }: Props) {
       </div>
 
       {/* Session tabs - tree child nodes (newest at bottom), filtered to non-closed sessions */}
-      {project.sessions.filter(s => !s.closed).length > 0 && (
+      {openSessions.length > 0 && (
         <div className="project-terminal-children">
-          {project.sessions.filter(s => !s.closed).map((session) => {
+          {openSessions.map((session) => {
             const status = agentStatuses[session.id];
             return (
               <div
@@ -366,7 +415,7 @@ export function ProjectCard({ project }: Props) {
       <SessionHistoryModal
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}
-        sessions={project.sessions.filter(s => s.closed)}
+        sessions={closedSessions}
         sessionMessages={sessionMessages}
         onResume={handleResumeSession}
         onDelete={handleDeleteHistorySession}

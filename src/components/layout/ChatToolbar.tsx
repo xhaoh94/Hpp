@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useMemo, type RefObject } from "react";
 import { Check, Star } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 
@@ -61,6 +61,20 @@ export function ChatToolbar({
   onToggleFavorite,
 }: ChatToolbarProps) {
   const agentId = activeSessionAgentId || activeAgentId;
+  const favoriteModelKeys = useMemo(
+    () => new Set(favoriteModels.map((model) => `${model.provider}:${model.id}`)),
+    [favoriteModels]
+  );
+  const modelsByProvider = useMemo(() => {
+    const grouped = new Map<string, ModelInfo[]>();
+    for (const model of availableModels) {
+      const providerModels = grouped.get(model.provider);
+      if (providerModels) providerModels.push(model);
+      else grouped.set(model.provider, [model]);
+    }
+    return grouped;
+  }, [availableModels]);
+  const isFavoriteModel = (model: ModelInfo) => favoriteModelKeys.has(`${model.provider}:${model.id}`);
 
   return (
     <div className="chat-input-toolbar">
@@ -116,7 +130,7 @@ export function ChatToolbar({
                   </div>
                   <div className="chat-codex-model-list">
                     {availableModels.map((model) => {
-                      const isFav = favoriteModels.some((favorite) => favorite.id === model.id && favorite.provider === model.provider);
+                      const isFav = isFavoriteModel(model);
                       const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
                       return (
                         <div
@@ -146,7 +160,7 @@ export function ChatToolbar({
                 </>
               )
             ) : modelProviders.map((provider) => {
-              const providerModels = availableModels.filter((model) => model.provider === provider);
+              const providerModels = modelsByProvider.get(provider) || [];
               const isExpanded = expandedProvider === provider;
               const hasActiveModel = providerModels.some(
                 (model) => model.id === currentModel?.id && model.provider === currentModel?.provider
@@ -172,7 +186,7 @@ export function ChatToolbar({
                     <span className="chat-dropdown-provider-count">{providerModels.length}</span>
                   </div>
                   {isExpanded && providerModels.map((model) => {
-                    const isFav = favoriteModels.some((favorite) => favorite.id === model.id && favorite.provider === model.provider);
+                    const isFav = isFavoriteModel(model);
                     const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
                     return (
                       <div

@@ -3,6 +3,7 @@ import { execFile, exec } from "child_process";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
+import { homedir } from "os";
 
 export interface AgentStatus {
   installed: boolean;
@@ -56,7 +57,45 @@ const PACKAGE_AGENTS: Record<string, PackageAgentConfig> = {
   },
 };
 
+const DEFAULT_THINKING_LEVEL = "medium";
+const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const updateInProgress = new Set<string>();
+
+function normalizeThinkingLevel(value: unknown): string | undefined {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "none") return "off";
+  return VALID_THINKING_LEVELS.has(normalized) ? normalized : undefined;
+}
+
+function extractTopLevelConfigValue(content: string, key: string): string | undefined {
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("[")) break;
+
+    const match = line.match(new RegExp(`^${key}\\s*=\\s*(?:"([^"]+)"|'([^']+)'|([^\\s#]+))`));
+    if (match) return match[1] || match[2] || match[3];
+  }
+  return undefined;
+}
+
+function getCodexConfigPath(): string {
+  return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+}
+
+async function getCodexDefaultThinkingLevel(): Promise<string> {
+  try {
+    const content = await readFile(getCodexConfigPath(), "utf8");
+    return normalizeThinkingLevel(extractTopLevelConfigValue(content, "model_reasoning_effort")) || DEFAULT_THINKING_LEVEL;
+  } catch {
+    return DEFAULT_THINKING_LEVEL;
+  }
+}
+
+async function getDefaultThinkingLevel(agentId: string): Promise<string> {
+  if (agentId === "codex") return getCodexDefaultThinkingLevel();
+  return DEFAULT_THINKING_LEVEL;
+}
 
 function runCommand(
   command: string,
@@ -389,5 +428,9 @@ export function registerAgentStatusHandlers() {
 
   ipcMain.handle("agent:update", async (_event, agentId: string) => {
     return updateAgent(agentId);
+  });
+
+  ipcMain.handle("agent:getDefaultThinkingLevel", async (_event, agentId: string) => {
+    return getDefaultThinkingLevel(agentId);
   });
 }

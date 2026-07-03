@@ -67,7 +67,7 @@ export default function App() {
 
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) saveSessionModel(sessionId, nextModel);
-    void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id).catch((error) => {
+    void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId || undefined).catch((error) => {
       console.error("[model] shortcut switch failed:", error);
     });
   }, []);

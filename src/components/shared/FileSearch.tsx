@@ -56,8 +56,16 @@ export function FileSearch({ isOpen, onClose, onSelect }: FileSearchProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const filesCacheRef = useRef<{ projectPath: string; files: FileItem[] } | null>(null);
+  const searchRequestRef = useRef(0);
   const { projects, activeProjectId } = useProjectStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
+
+  useEffect(() => {
+    filesCacheRef.current = null;
+    searchRequestRef.current += 1;
+    setLoading(false);
+  }, [activeProject?.path]);
 
   // Recursively collect files
   const collectFiles = useCallback(async (dirPath: string, depth = 0): Promise<FileItem[]> => {
@@ -81,13 +89,23 @@ export function FileSearch({ isOpen, onClose, onSelect }: FileSearchProps) {
   // Search when query changes
   useEffect(() => {
     if (!isOpen || !query.trim() || !activeProject) {
+      searchRequestRef.current += 1;
       setResults([]);
       return;
     }
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
     const search = async () => {
       setLoading(true);
       try {
-        const allFiles = await collectFiles(activeProject.path);
+        let allFiles = filesCacheRef.current?.projectPath === activeProject.path
+          ? filesCacheRef.current.files
+          : null;
+        if (!allFiles) {
+          allFiles = await collectFiles(activeProject.path);
+          filesCacheRef.current = { projectPath: activeProject.path, files: allFiles };
+        }
+        if (searchRequestRef.current !== requestId) return;
         const filtered = allFiles.filter((f) => fuzzyMatch(f.name, query));
         filtered.sort((a, b) => {
           if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
@@ -97,7 +115,7 @@ export function FileSearch({ isOpen, onClose, onSelect }: FileSearchProps) {
       } catch {
         setResults([]);
       } finally {
-        setLoading(false);
+        if (searchRequestRef.current === requestId) setLoading(false);
       }
     };
     const timer = setTimeout(search, 150);
@@ -111,6 +129,9 @@ export function FileSearch({ isOpen, onClose, onSelect }: FileSearchProps) {
       setResults([]);
       setSelectedIndex(0);
       setTimeout(() => inputRef.current?.focus(), 50);
+    } else {
+      searchRequestRef.current += 1;
+      setLoading(false);
     }
   }, [isOpen]);
 

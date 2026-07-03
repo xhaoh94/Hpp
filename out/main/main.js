@@ -25,6 +25,21 @@ function _interopNamespaceDefault(e) {
   return Object.freeze(n);
 }
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
+const SEARCH_RESULT_LIMIT = 50;
+const SEARCH_EXCLUDED_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "__pycache__",
+  ".next",
+  ".nuxt",
+  "out",
+  "release",
+  "coverage",
+  "target",
+  "vendor"
+]);
 function registerFileHandlers() {
   electron.ipcMain.handle("fs:readDirectory", async (_event, dirPath) => {
     if (typeof dirPath !== "string" || !dirPath.trim()) return [];
@@ -82,15 +97,14 @@ function registerFileHandlers() {
       const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
       if (!normalizedQuery) return results;
       async function walk(dir, depth) {
+        if (results.length >= SEARCH_RESULT_LIMIT) return;
         if (depth > maxDepth) return;
         try {
           const entries = await promises.readdir(dir, { withFileTypes: true });
           for (const entry of entries) {
+            if (results.length >= SEARCH_RESULT_LIMIT) return;
             if (entry.name.startsWith(".")) continue;
-            if (["node_modules", ".git", "dist", "build", "__pycache__"].includes(
-              entry.name
-            ))
-              continue;
+            if (entry.isDirectory() && SEARCH_EXCLUDED_DIRS.has(entry.name)) continue;
             const fullPath = path.join(dir, entry.name);
             if (entry.name.toLowerCase().includes(normalizedQuery)) {
               results.push({
@@ -107,7 +121,7 @@ function registerFileHandlers() {
         }
       }
       await walk(dirPath, 0);
-      return results.slice(0, 50);
+      return results;
     }
   );
   electron.ipcMain.handle("fs:openDirectory", async (event) => {
@@ -140,6 +154,7 @@ function registerFileHandlers() {
   });
 }
 const dataDir = path.join(electron.app.getPath("userData"), "hpp-data");
+const COMPACT_JSON_KEYS = /* @__PURE__ */ new Set(["sessionMessages"]);
 async function ensureDataDir() {
   try {
     await promises.mkdir(dataDir, { recursive: true });
@@ -163,7 +178,8 @@ function registerStoreHandlers() {
       try {
         await ensureDataDir();
         const filePath = path.join(dataDir, `${key}.json`);
-        await promises.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+        const json = COMPACT_JSON_KEYS.has(key) ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+        await promises.writeFile(filePath, json, "utf-8");
         return { success: true };
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) };
@@ -349,7 +365,39 @@ const PACKAGE_AGENTS = {
     packagePath: ["@openai", "codex"]
   }
 };
+const DEFAULT_THINKING_LEVEL = "medium";
+const VALID_THINKING_LEVELS = /* @__PURE__ */ new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const updateInProgress = /* @__PURE__ */ new Set();
+function normalizeThinkingLevel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "none") return "off";
+  return VALID_THINKING_LEVELS.has(normalized) ? normalized : void 0;
+}
+function extractTopLevelConfigValue(content, key) {
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("[")) break;
+    const match = line.match(new RegExp(`^${key}\\s*=\\s*(?:"([^"]+)"|'([^']+)'|([^\\s#]+))`));
+    if (match) return match[1] || match[2] || match[3];
+  }
+  return void 0;
+}
+function getCodexConfigPath() {
+  return path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml");
+}
+async function getCodexDefaultThinkingLevel() {
+  try {
+    const content = await promises.readFile(getCodexConfigPath(), "utf8");
+    return normalizeThinkingLevel(extractTopLevelConfigValue(content, "model_reasoning_effort")) || DEFAULT_THINKING_LEVEL;
+  } catch {
+    return DEFAULT_THINKING_LEVEL;
+  }
+}
+async function getDefaultThinkingLevel(agentId) {
+  if (agentId === "codex") return getCodexDefaultThinkingLevel();
+  return DEFAULT_THINKING_LEVEL;
+}
 function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     child_process.execFile(
@@ -607,6 +655,9 @@ function registerAgentStatusHandlers() {
   });
   electron.ipcMain.handle("agent:update", async (_event, agentId) => {
     return updateAgent(agentId);
+  });
+  electron.ipcMain.handle("agent:getDefaultThinkingLevel", async (_event, agentId) => {
+    return getDefaultThinkingLevel(agentId);
   });
 }
 const STREAM_FLUSH_INTERVAL_MS = 50;
@@ -1676,6 +1727,50 @@ class OpenCodeAgent {
     this.eventBuffer.send(data);
   }
 }
+function getPathEnvValue() {
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") || "PATH";
+  return process.env[pathKey] || "";
+}
+function findOnPath(fileNames) {
+  for (const dir of getPathEnvValue().split(path.delimiter)) {
+    if (!dir) continue;
+    for (const fileName of fileNames) {
+      const candidate = path.join(dir, fileName);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return void 0;
+}
+function getNodeExecutable$2() {
+  if (process.env.DROID_NODE_PATH) return process.env.DROID_NODE_PATH;
+  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
+  return process.platform === "win32" ? findOnPath(["node.exe"]) || "node.exe" : "node";
+}
+function getNpmDroidShimTarget(shimPath) {
+  const target = path.join(path.dirname(shimPath), "node_modules", "droid", "bin", "droid");
+  return fs.existsSync(target) ? target : void 0;
+}
+function isWindowsShellShim(filePath) {
+  return /\.(?:cmd|bat)$/i.test(filePath);
+}
+function getDroidExecutable(args) {
+  if (process.env.DROID_PATH && fs.existsSync(process.env.DROID_PATH)) {
+    if (process.platform === "win32" && isWindowsShellShim(process.env.DROID_PATH)) {
+      return { command: process.env.DROID_PATH, args, shell: true };
+    }
+    return { command: process.env.DROID_PATH, args };
+  }
+  if (process.platform !== "win32") {
+    return { command: "droid", args };
+  }
+  const exe = findOnPath(["droid.exe"]);
+  if (exe) return { command: exe, args };
+  const npmShim = findOnPath(["droid.cmd", "droid.bat"]);
+  const shimTarget = npmShim ? getNpmDroidShimTarget(npmShim) : void 0;
+  if (shimTarget) return { command: getNodeExecutable$2(), args: [shimTarget, ...args] };
+  if (npmShim) return { command: npmShim, args, shell: true };
+  return { command: "droid.exe", args };
+}
 class DroidAgent {
   process = null;
   window = null;
@@ -1721,10 +1816,11 @@ class DroidAgent {
     if (existingSessionId) {
       args.push("--session-id", existingSessionId);
     }
-    this.process = child_process.spawn("droid", args, {
+    const executable = getDroidExecutable(args);
+    this.process = child_process.spawn(executable.command, executable.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
+      shell: executable.shell || false,
       env: { ...process.env }
     });
     const decoder = new string_decoder.StringDecoder("utf8");
@@ -3026,6 +3122,9 @@ class AgentManager {
   getAgentBySessionId(sessionId) {
     return this.sessionAgents.get(sessionId) || null;
   }
+  getAgentForSession(sessionId) {
+    return sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
+  }
   getActiveAgentType() {
     return this.activeSessionId ? this.sessionAgentTypes.get(this.activeSessionId) : void 0;
   }
@@ -3124,14 +3223,14 @@ function registerAgentHandlers(getWindow) {
     if (agentType === "codex") return models;
     return filterModelsByLocalConfig(models);
   });
-  electron.ipcMain.handle("agent:setModel", async (_event, provider, modelId) => {
-    const agent = agentManager.getActiveAgent();
+  electron.ipcMain.handle("agent:setModel", async (_event, provider, modelId, sessionId) => {
+    const agent = agentManager.getAgentForSession(sessionId);
     if (!agent) return { success: false };
     await agent.setModel(provider, modelId);
     return { success: true };
   });
-  electron.ipcMain.handle("agent:setThinkingLevel", async (_event, level) => {
-    const agent = agentManager.getActiveAgent();
+  electron.ipcMain.handle("agent:setThinkingLevel", async (_event, level, sessionId) => {
+    const agent = agentManager.getAgentForSession(sessionId);
     if (!agent) return { success: false };
     await agent.setThinkingLevel(level);
     return { success: true };

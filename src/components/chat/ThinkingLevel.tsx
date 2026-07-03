@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "@/stores/chat-store";
+import { useProjectStore } from "@/stores/project-store";
 import { Brain, ChevronDown } from "lucide-react";
 
 const LEVELS = [
@@ -29,7 +30,8 @@ export function ThinkingLevel() {
   const handleSelect = async (levelId: string) => {
     setThinkingLevel(levelId);
     setOpen(false);
-    await window.electronAPI.agentSetThinkingLevel(levelId);
+    const sessionId = useProjectStore.getState().activeSessionId;
+    await window.electronAPI.agentSetThinkingLevel(levelId, sessionId || undefined);
   };
 
   return (

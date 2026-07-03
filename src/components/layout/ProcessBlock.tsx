@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AgentProcess, AgentProcessEntry, AgentProcessFile } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
@@ -245,8 +245,11 @@ function CommandDetail({
 }) {
   const [outputExpanded, setOutputExpanded] = useState(entry.state === "running");
   const userToggledRef = useRef(false);
-  const { command, output } = splitCommandDetail(entry.detail, entry.command);
-  const outputLines = output ? output.split("\n") : [];
+  const { command, output } = useMemo(
+    () => splitCommandDetail(entry.detail, entry.command),
+    [entry.detail, entry.command]
+  );
+  const outputLines = useMemo(() => output ? output.split("\n") : [], [output]);
   const isRunning = entry.state === "running";
   const canExpand = outputLines.length > 0;
 
@@ -347,7 +350,7 @@ function ProcessEntryRow({
   onPreserveScroll: PreserveScroll;
 }) {
   const hasDetail = !!entry.detail;
-  const files = mergeProcessFiles(entry.files || []);
+  const files = useMemo(() => mergeProcessFiles(entry.files || []), [entry.files]);
   const isCommandEntry = entry.toolKind === "run_command";
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
@@ -514,13 +517,24 @@ export function ProcessBlock({
   const durationEnd = process.endedAt || nowTick;
   const elapsed = formatProcessDuration(durationEnd - process.startedAt);
   const expanded = !!process.expanded;
-  const interrupted = process.entries.some((entry) => entry.state === "interrupted");
+  const interrupted = useMemo(
+    () => process.entries.some((entry) => entry.state === "interrupted"),
+    [process.entries]
+  );
+  const summary = useMemo(
+    () => summarizeProcessEntries(process.entries),
+    [process.entries]
+  );
+  const mergedEntries = useMemo(
+    () => expanded ? mergeProcessEntries(process.entries) : [],
+    [expanded, process.entries]
+  );
 
   return (
     <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
       <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
         <span>{interrupted ? "已中断" : "处理耗时"} {elapsed}</span>
-        <span className="chat-process-summary">{summarizeProcessEntries(process.entries)}</span>
+        <span className="chat-process-summary">{summary}</span>
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
           style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
@@ -534,7 +548,7 @@ export function ProcessBlock({
             <div className="chat-process-empty">等待 agent 事件...</div>
           ) : (
             <ProcessEntries
-              entries={mergeProcessEntries(process.entries)}
+              entries={mergedEntries}
               messageId={messageId}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}

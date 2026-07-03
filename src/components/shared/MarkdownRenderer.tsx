@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { memo, useCallback, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -60,7 +60,7 @@ function getTextContent(children: ReactNode): string {
   return "";
 }
 
-export function MarkdownRenderer({ content }: { content: string }) {
+function MarkdownRendererImpl({ content }: { content: string }) {
   return (
     <div className="md-content">
       <ReactMarkdown
@@ -135,3 +135,5 @@ export function MarkdownRenderer({ content }: { content: string }) {
     </div>
   );
 }
+
+export const MarkdownRenderer = memo(MarkdownRendererImpl);

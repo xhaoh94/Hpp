@@ -4,6 +4,22 @@ import { join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
 
+const SEARCH_RESULT_LIMIT = 50;
+const SEARCH_EXCLUDED_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "__pycache__",
+  ".next",
+  ".nuxt",
+  "out",
+  "release",
+  "coverage",
+  "target",
+  "vendor",
+]);
+
 interface FileEntry {
   name: string;
   path: string;
@@ -80,17 +96,14 @@ export function registerFileHandlers() {
       if (!normalizedQuery) return results;
 
       async function walk(dir: string, depth: number) {
+        if (results.length >= SEARCH_RESULT_LIMIT) return;
         if (depth > maxDepth) return;
         try {
           const entries = await readdir(dir, { withFileTypes: true });
           for (const entry of entries) {
+            if (results.length >= SEARCH_RESULT_LIMIT) return;
             if (entry.name.startsWith(".")) continue;
-            if (
-              ["node_modules", ".git", "dist", "build", "__pycache__"].includes(
-                entry.name
-              )
-            )
-              continue;
+            if (entry.isDirectory() && SEARCH_EXCLUDED_DIRS.has(entry.name)) continue;
 
             const fullPath = join(dir, entry.name);
 
@@ -112,7 +125,7 @@ export function registerFileHandlers() {
       }
 
       await walk(dirPath, 0);
-      return results.slice(0, 50); // Limit results
+      return results;
     }
   );
 

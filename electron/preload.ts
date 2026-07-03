@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   piSDKUpdate: () => ipcRenderer.invoke("pi-sdk:update"),
   agentGetStatus: (agentId: string) => ipcRenderer.invoke("agent:getStatus", agentId),
   agentUpdate: (agentId: string) => ipcRenderer.invoke("agent:update", agentId),
+  agentGetDefaultThinkingLevel: (agentId: string) =>
+    ipcRenderer.invoke("agent:getDefaultThinkingLevel", agentId),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),
@@ -47,10 +49,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
   agentGetModels: (sessionId?: string) => ipcRenderer.invoke("agent:getModels", sessionId),
-  agentSetModel: (provider: string, modelId: string) =>
-    ipcRenderer.invoke("agent:setModel", provider, modelId),
-  agentSetThinkingLevel: (level: string) =>
-    ipcRenderer.invoke("agent:setThinkingLevel", level),
+  agentSetModel: (provider: string, modelId: string, sessionId?: string) =>
+    ipcRenderer.invoke("agent:setModel", provider, modelId, sessionId),
+  agentSetThinkingLevel: (level: string, sessionId?: string) =>
+    ipcRenderer.invoke("agent:setThinkingLevel", level, sessionId),
   agentSendUIResponse: (response: any) =>
     ipcRenderer.invoke("agent:sendUIResponse", response),
 

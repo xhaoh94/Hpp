@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { GripVertical } from "lucide-react";
-import { AVAILABLE_AGENTS, getAgentPlanModeTooltip, normalizeAgentOrder, orderAgents, supportsNativePlanMode } from "@/lib/agents";
-import type { AgentPackageStatus, PiSDKStatus } from "@/types";
+import { Bot } from "lucide-react";
+import { AgentSettingsView } from "./AgentSettingsView";
 import "./Settings.css";
 
 interface ShortcutConfig {
@@ -64,13 +63,13 @@ function formatKey(e: KeyboardEvent): string {
   return parts.join("+");
 }
 
-// === Module-level version check cache (persists across mounts) ===
-let cachedPiSDKStatus: PiSDKStatus | null = null;
-let cachedAgentStatuses: Record<string, AgentPackageStatus> = {};
-let lastPiSDKCheck = 0;
-let lastAgentChecks: Record<string, number> = {};
-const VERSION_CACHE_MS = 60_000; // 1 minute
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
 
 export function SettingsView() {
   const [shortcuts, setShortcuts] = useState<ShortcutConfig>(DEFAULT_SHORTCUTS);
@@ -79,104 +78,13 @@ export function SettingsView() {
   const [showShortcutModal, setShowShortcutModal] = useState(false);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [showGeneralModal, setShowGeneralModal] = useState(false);
+  const [showAgentSettingsModal, setShowAgentSettingsModal] = useState(false);
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
-  const [enabledAgents, setEnabledAgents] = useState<string[]>(["codex", "pi"]);
-  const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
-  const [draggingAgentId, setDraggingAgentId] = useState<string | null>(null);
-  const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
-  const [piSDKStatus, setPiSDKStatus] = useState<PiSDKStatus | null>(null);
-  const [piSDKChecking, setPiSDKChecking] = useState(false);
-  const [piSDKUpdating, setPiSDKUpdating] = useState(false);
-  const [piSDKUpdateError, setPiSDKUpdateError] = useState<string | null>(null);
-  const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentPackageStatus>>({});
-  const [agentChecking, setAgentChecking] = useState<Record<string, boolean>>({});
-  const [agentUpdating, setAgentUpdating] = useState<Record<string, boolean>>({});
-  const [agentUpdateErrors, setAgentUpdateErrors] = useState<Record<string, string>>({});
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
-
-  const refreshPiSDKStatus = useCallback(async () => {
-    setPiSDKChecking(true);
-    try {
-      const status = await window.electronAPI.piSDKGetStatus();
-      cachedPiSDKStatus = status;
-      lastPiSDKCheck = Date.now();
-      setPiSDKStatus(status);
-      setPiSDKUpdateError(null);
-    } catch (error) {
-      cachedPiSDKStatus = null;
-      setPiSDKStatus({
-        installed: false,
-        updateAvailable: false,
-        canUpdate: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPiSDKChecking(false);
-    }
-  }, []);
-
-  const handlePiSDKUpdate = useCallback(async () => {
-    setPiSDKUpdating(true);
-    setPiSDKUpdateError(null);
-    try {
-      const result = await window.electronAPI.piSDKUpdate();
-      if (result.status) setPiSDKStatus(result.status);
-      if (!result.success) {
-        setPiSDKUpdateError(result.error || "Pi SDK 更新失败");
-      }
-    } catch (error) {
-      setPiSDKUpdateError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPiSDKUpdating(false);
-    }
-  }, []);
-
-  const refreshAgentStatus = useCallback(async (agentId: string) => {
-    setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
-    try {
-      const status = await window.electronAPI.agentGetStatus(agentId);
-      cachedAgentStatuses[agentId] = status;
-      lastAgentChecks[agentId] = Date.now();
-      setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
-      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
-    } catch (error) {
-      delete cachedAgentStatuses[agentId];
-      setAgentStatuses((prev) => ({
-        ...prev,
-        [agentId]: {
-          installed: false,
-          updateAvailable: false,
-          canUpdate: false,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      }));
-    } finally {
-      setAgentChecking((prev) => ({ ...prev, [agentId]: false }));
-    }
-  }, []);
-
-  const handleAgentUpdate = useCallback(async (agentId: string) => {
-    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
-    setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
-    try {
-      const result = await window.electronAPI.agentUpdate(agentId);
-      if (result.status) {
-        const status = result.status;
-        setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
-      }
-      if (!result.success) {
-        setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
-      }
-    } catch (error) {
-      setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: error instanceof Error ? error.message : String(error) }));
-    } finally {
-      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
-    }
-  }, []);
 
   // Load saved settings on mount
   useEffect(() => {
@@ -192,8 +100,6 @@ export function SettingsView() {
           setTempImagePath(data.general.tempImagePath || "");
           setImageRetentionHours(data.general.imageRetentionHours || 12);
           setPlanModeEnabled(!!data.general.planModeEnabled);
-          if (data.general.enabledAgents) setEnabledAgents(data.general.enabledAgents);
-          setAgentOrder(normalizeAgentOrder(data.general.agentOrder));
         }
       }
     });
@@ -210,64 +116,44 @@ export function SettingsView() {
     return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
   }, []);
 
-  // Check agent package status (with 1-minute cache)
-  useEffect(() => {
-    const now = Date.now();
-
-    if (now - lastPiSDKCheck > VERSION_CACHE_MS) {
-      refreshPiSDKStatus();
-    } else if (cachedPiSDKStatus) {
-      setPiSDKStatus(cachedPiSDKStatus);
-    }
-
-    for (const agent of AVAILABLE_AGENTS) {
-      if (agent.id === "pi") continue;
-      if (now - (lastAgentChecks[agent.id] || 0) > VERSION_CACHE_MS) {
-        refreshAgentStatus(agent.id);
-      } else if (cachedAgentStatuses[agent.id]) {
-        setAgentStatuses((prev) => ({ ...prev, [agent.id]: cachedAgentStatuses[agent.id]! }));
-      }
-    }
-  }, [refreshPiSDKStatus, refreshAgentStatus]);
-
   // Save shortcuts when changed
+  const saveSettings = useCallback(async (
+    nextShortcuts = shortcuts,
+    nextFilters = filters,
+    nextGeneral?: { tempImagePath: string; imageRetentionHours: number; planModeEnabled: boolean },
+  ) => {
+    const data = await window.electronAPI.loadData("settings");
+    const currentSettings = asRecord(data);
+    const currentGeneral = asRecord(currentSettings.general);
+    const generalValues = nextGeneral ?? { tempImagePath, imageRetentionHours, planModeEnabled };
+    const nextSettings = {
+      ...currentSettings,
+      shortcuts: nextShortcuts,
+      filters: nextFilters,
+      general: {
+        ...currentGeneral,
+        ...generalValues,
+      },
+    };
+
+    await window.electronAPI.saveData("settings", nextSettings);
+  }, [shortcuts, filters, tempImagePath, imageRetentionHours, planModeEnabled]);
+
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
-    window.electronAPI.saveData("settings", { shortcuts: s, filters, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
+    void saveSettings(s, filters);
   };
 
   const saveFilters = (f: FilterConfig) => {
     setFilters(f);
-    window.electronAPI.saveData("settings", { shortcuts, filters: f, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
+    void saveSettings(shortcuts, f);
   };
 
-  const saveGeneral = () => {
-    window.electronAPI.saveData("settings", { shortcuts, filters, general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents, agentOrder } });
-    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, { detail: { enabledAgents, agentOrder, planModeEnabled } }));
-  };
-
-  const saveAgentSettings = (nextEnabledAgents = enabledAgents, nextAgentOrder = agentOrder) => {
-    window.electronAPI.saveData("settings", {
-      shortcuts,
-      filters,
-      general: { tempImagePath, imageRetentionHours, planModeEnabled, enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder },
-    });
+  const saveGeneral = async () => {
+    await saveSettings(shortcuts, filters, { tempImagePath, imageRetentionHours, planModeEnabled });
     window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
-      detail: { enabledAgents: nextEnabledAgents, agentOrder: nextAgentOrder, planModeEnabled },
+      detail: { planModeEnabled },
     }));
-  };
-
-  const moveAgent = (sourceId: string, targetId: string) => {
-    if (sourceId === targetId) return;
-    const currentOrder = normalizeAgentOrder(agentOrder);
-    const fromIndex = currentOrder.indexOf(sourceId);
-    const toIndex = currentOrder.indexOf(targetId);
-    if (fromIndex < 0 || toIndex < 0) return;
-    const nextOrder = [...currentOrder];
-    const [moved] = nextOrder.splice(fromIndex, 1);
-    nextOrder.splice(toIndex, 0, moved);
-    setAgentOrder(nextOrder);
-    saveAgentSettings(enabledAgents, nextOrder);
   };
 
   // Keyboard recording handler
@@ -324,6 +210,13 @@ export function SettingsView() {
         <div className="settings-section">
           <h3>快速操作</h3>
           <div className="settings-quick-buttons">
+            <button
+              onClick={() => setShowAgentSettingsModal(true)}
+              className="btn-quick-setting"
+            >
+              <Bot size={16} strokeWidth={1.8} />
+              Agent 设置
+            </button>
             <button
               onClick={() => { setShowShortcutModal(true); setRecordingKey(null); }}
               className="btn-quick-setting"
@@ -486,6 +379,19 @@ export function SettingsView() {
           </div>
         </div>
       )}
+      {showAgentSettingsModal && (
+        <div className="settings-modal-overlay" onClick={() => setShowAgentSettingsModal(false)}>
+          <div className="settings-modal settings-modal-agent" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-modal-header">
+              <h3>Agent 设置</h3>
+              <button onClick={() => setShowAgentSettingsModal(false)} className="settings-modal-close">×</button>
+            </div>
+            <div className="settings-modal-content">
+              <AgentSettingsView embedded />
+            </div>
+          </div>
+        </div>
+      )}
       {showGeneralModal && (
         <div className="settings-modal-overlay" onClick={() => setShowGeneralModal(false)}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
@@ -495,151 +401,6 @@ export function SettingsView() {
             </div>
             <div className="settings-modal-content">
               <div className="settings-section">
-                <h3>Agent 设置</h3>
-                <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>
-                  选择启用的 Agent，未启用的不会显示在项目卡片上
-                </p>
-                <div className="filter-group">
-                  {orderAgents(AVAILABLE_AGENTS, agentOrder).map((agent) => {
-                    const isPiSDKAgent = agent.id === "pi";
-                    const hasNativePlanMode = supportsNativePlanMode(agent.id);
-                    const agentStatus = agentStatuses[agent.id];
-                    const isInstalled = isPiSDKAgent
-                      ? piSDKStatus?.installed === true
-                      : agentStatus?.installed === true;
-                    const isChecking = isPiSDKAgent
-                      ? (piSDKChecking || !piSDKStatus)
-                      : agentChecking[agent.id];
-                    const isUnavailable = !isInstalled && !isChecking;
-                    const versionLabel = isPiSDKAgent
-                      ? piSDKStatus?.currentVersion
-                        ? `v${piSDKStatus.currentVersion}`
-                        : isChecking
-                          ? "检查中..."
-                          : isInstalled
-                            ? "版本未知"
-                            : "未安装"
-                      : agentStatus?.currentVersion
-                        ? `v${agentStatus.currentVersion}`
-                        : isChecking
-                          ? "检查中..."
-                          : isInstalled
-                            ? "版本未知"
-                            : "未安装";
-                    return (
-                    <div
-                      key={agent.id}
-                      className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? "agent-settings-row-drop-target" : ""}`}
-                      onDragOver={(event) => {
-                        event.preventDefault();
-                        if (draggingAgentId && draggingAgentId !== agent.id) setDragOverAgentId(agent.id);
-                      }}
-                      onDragLeave={() => setDragOverAgentId((current) => current === agent.id ? null : current)}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        if (draggingAgentId) moveAgent(draggingAgentId, agent.id);
-                        setDraggingAgentId(null);
-                        setDragOverAgentId(null);
-                      }}
-                    >
-                      <button
-                        type="button"
-                        className="agent-settings-drag-handle"
-                        draggable
-                        onDragStart={(event) => {
-                          event.dataTransfer.effectAllowed = "move";
-                          event.dataTransfer.setData("text/plain", agent.id);
-                          setDraggingAgentId(agent.id);
-                        }}
-                        onDragEnd={() => {
-                          setDraggingAgentId(null);
-                          setDragOverAgentId(null);
-                        }}
-                        title="拖动排序"
-                      >
-                        <GripVertical size={14} />
-                      </button>
-                      <label className="agent-settings-main">
-                        <input
-                          type="checkbox"
-                          checked={enabledAgents.includes(agent.id)}
-                          disabled={!isInstalled || isChecking}
-                          onChange={(e) => {
-                            let nextEnabledAgents: string[];
-                            if (e.target.checked) {
-                              nextEnabledAgents = enabledAgents.includes(agent.id) ? enabledAgents : [...enabledAgents, agent.id];
-                            } else {
-                              nextEnabledAgents = enabledAgents.filter((id) => id !== agent.id);
-                            }
-                            setEnabledAgents(nextEnabledAgents);
-                            saveAgentSettings(nextEnabledAgents, agentOrder);
-                          }}
-                          className="agent-settings-checkbox"
-                        />
-                        <span className="agent-settings-copy">
-                          <span className="agent-settings-title-line">
-                            <span className="agent-settings-name">{agent.name}</span>
-                            <span className={`agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`}>
-                              {versionLabel}
-                            </span>
-                            {isUnavailable && versionLabel !== "未安装" && (
-                              <span className="agent-settings-badge agent-settings-badge-warning">
-                                未安装
-                              </span>
-                            )}
-                            {(isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && (
-                              <span className="agent-settings-meta">
-                                最新 v{isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion}
-                              </span>
-                            )}
-                            <span
-                              className={`agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`}
-                              title={getAgentPlanModeTooltip(agent.id)}
-                            >
-                              Plan
-                            </span>
-                          </span>
-                          {isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
-                            <span className="agent-settings-error">
-                              Node v{piSDKStatus.nodeVersion} 过低，需要 22.19.0 或更高版本
-                            </span>
-                          )}
-                          {(isPiSDKAgent ? (piSDKStatus?.error || piSDKUpdateError) : (agentStatus?.error || agentUpdateErrors[agent.id])) && (
-                            <span className="agent-settings-error">
-                              {isPiSDKAgent ? (piSDKUpdateError || piSDKStatus?.error) : (agentUpdateErrors[agent.id] || agentStatus?.error)}
-                            </span>
-                          )}
-                        </span>
-                      </label>
-                      <div className="agent-settings-actions">
-                        {((isPiSDKAgent && piSDKStatus?.updateAvailable) || (!isPiSDKAgent && agentStatus?.updateAvailable)) && (
-                          <button
-                            className="filter-add-btn agent-settings-update-btn"
-                            onClick={() => isPiSDKAgent ? handlePiSDKUpdate() : handleAgentUpdate(agent.id)}
-                            disabled={(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate)}
-                            title={(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新"}
-                          >
-                            {(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"}
-                          </button>
-                        )}
-                        <button
-                          className="btn-action agent-settings-refresh-btn"
-                          onClick={() => isPiSDKAgent ? refreshPiSDKStatus() : refreshAgentStatus(agent.id)}
-                          disabled={isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id])}
-                          title="重新检查版本"
-                        >
-                          {isChecking ? "检查中..." : "刷新"}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                  })}
-                  {AVAILABLE_AGENTS.length === 0 && (
-                    <p style={{ fontSize: 12, color: "var(--text-secondary)" }}>暂无可用 Agent</p>
-                  )}
-                </div>
-              </div>
-              <div className="settings-section" style={{ marginTop: 16 }}>
                 <h3>图片设置</h3>
                 <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>
                   临时图片将在指定时间后自动清理

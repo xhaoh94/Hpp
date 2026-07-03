@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, memo } from "react";
+import { useState, useEffect, useCallback, memo, useRef } from "react";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { FilePreview } from "@/components/shared/FilePreview";
@@ -149,6 +149,7 @@ export function FileExplorer() {
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
   const [searchResults, setSearchResults] = useState<FileEntry[]>([]);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
+  const searchRequestRef = useRef(0);
   const { projects, activeProjectId } = useProjectStore();
   const { highlightedFile } = useChatStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
@@ -165,12 +166,17 @@ export function FileExplorer() {
 
   useEffect(() => {
     if (!search.trim() || !activeProject) {
+      searchRequestRef.current += 1;
       setSearchResults([]);
       return;
     }
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
     const timer = setTimeout(async () => {
       const results = await window.electronAPI.searchFiles(activeProject.path, search);
-      setSearchResults(results);
+      if (searchRequestRef.current === requestId) {
+        setSearchResults(results);
+      }
     }, 300);
     return () => clearTimeout(timer);
   }, [search, activeProject]);

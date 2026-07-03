@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
+import { useProjectStore } from "@/stores/project-store";
 import { ChevronDown, Star } from "lucide-react";
 
 export function ModelSelector() {
@@ -56,7 +57,8 @@ export function ModelSelector() {
   const handleSelectModel = async (model: ModelInfo) => {
     setCurrentModel(model);
     setOpen(false);
-    await window.electronAPI.agentSetModel(model.provider, model.id);
+    const sessionId = useProjectStore.getState().activeSessionId;
+    await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
   };
 
   return (

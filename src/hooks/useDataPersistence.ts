@@ -154,6 +154,11 @@ const parseStringRecord = (value: unknown): Record<string, string> => {
   return result;
 };
 
+const hasStreamingMessages = (sessionMessages: Record<string, ChatMessage[]>) =>
+  Object.values(sessionMessages).some((messages) =>
+    messages.some((message) => message.isStreaming || (!!message.process && !message.process.endedAt))
+  );
+
 const parsePersistedModel = (value: unknown): PersistedModel | null => {
   if (!isRecord(value)) return null;
   return {
@@ -172,6 +177,7 @@ let _cacheDirty = false;
 let _saveTimeout: ReturnType<typeof setTimeout> | null = null;
 let _projectsSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let _messagesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+let _streamingMessagesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
 
@@ -197,6 +203,10 @@ function flushMessagesToDisk() {
     clearTimeout(_messagesSaveTimeout);
     _messagesSaveTimeout = null;
   }
+  if (_streamingMessagesSaveTimeout) {
+    clearTimeout(_streamingMessagesSaveTimeout);
+    _streamingMessagesSaveTimeout = null;
+  }
   if (!_pendingMessagesData) return;
   const data = _pendingMessagesData;
   _pendingMessagesData = null;
@@ -207,6 +217,13 @@ function scheduleMessagesSave(data: PersistedMessages) {
   _pendingMessagesData = data;
   if (_messagesSaveTimeout) clearTimeout(_messagesSaveTimeout);
   _messagesSaveTimeout = setTimeout(flushMessagesToDisk, 1000);
+}
+
+function scheduleStreamingMessagesSave(data: PersistedMessages) {
+  _pendingMessagesData = data;
+  if (!_streamingMessagesSaveTimeout) {
+    _streamingMessagesSaveTimeout = setTimeout(flushMessagesToDisk, 8000);
+  }
 }
 
 function flushPendingDataToDisk() {
@@ -255,6 +272,17 @@ export function saveSessionThinking(sessionId: string, level: string) {
 /** Get persisted thinking level for a session (synchronous, from cache) */
 export function getSessionThinking(sessionId: string): string | null {
   return _sessionThinkingCache[sessionId] || null;
+}
+
+export async function getSessionThinkingOrDefault(sessionId: string, agentId?: string): Promise<string> {
+  const persisted = getSessionThinking(sessionId);
+  if (persisted) return persisted;
+
+  try {
+    return await window.electronAPI.agentGetDefaultThinkingLevel(agentId || "");
+  } catch {
+    return "medium";
+  }
 }
 
 export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
@@ -407,10 +435,13 @@ export function useDataPersistence() {
     const unsubscribe = useChatStore.subscribe((state) => {
       if (state.sessionMessages === lastSessionMessages) return;
       lastSessionMessages = state.sessionMessages;
+      const data = { sessionMessages: state.sessionMessages };
+      if (hasStreamingMessages(state.sessionMessages)) {
+        scheduleStreamingMessagesSave(data);
+        return;
+      }
 
-      scheduleMessagesSave({
-        sessionMessages: state.sessionMessages,
-      });
+      scheduleMessagesSave(data);
     });
     return unsubscribe;
   }, []);

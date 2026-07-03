@@ -14,6 +14,7 @@ import {
   normalizeProcessEntryState,
   normalizeProcessEntryType,
   resetSessionRuntimeAfterTurn,
+  scheduleRuntimeRenderFlush,
   stringifyProcessValue,
   truncateProcessDetail,
   type SessionRuntime,
@@ -111,6 +112,34 @@ export function useAgentEvents({
       return runtime;
     };
 
+    const flushRuntimeRender = (sessionId: string) => {
+      const runtime = getRuntime(sessionId);
+      if (runtime.streamRenderFlushTimer) {
+        clearTimeout(runtime.streamRenderFlushTimer);
+        runtime.streamRenderFlushTimer = null;
+      }
+      runtime.streamRenderBufferedChars = 0;
+
+      if (runtime.processTextEntryId && runtime.pendingProcessTextDetail !== "") {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
+          title: "正文输出",
+          detail: runtime.pendingProcessTextDetail,
+          state: "running",
+        }, sessionId);
+        runtime.pendingProcessTextDetail = "";
+      }
+
+      if (runtime.thinkingEntryId && runtime.pendingThinkingDetail !== "") {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
+          title: runtime.pendingThinkingTitle || `正在思考: ${getThinkingPreview(runtime.pendingThinkingDetail)}`,
+          detail: runtime.pendingThinkingDetail,
+          state: "running",
+        }, sessionId);
+        runtime.pendingThinkingDetail = "";
+        runtime.pendingThinkingTitle = null;
+      }
+    };
+
     const appendProcessEntry = (sessionId: string, entry: Omit<AgentProcessEntry, "id" | "timestamp"> & { id?: string; timestamp?: number }) => {
       const runtime = getRuntime(sessionId);
       if (!runtime.processActive) return;
@@ -129,6 +158,7 @@ export function useAgentEvents({
     };
 
     const completeIdleNotice = (sessionId: string) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (!runtime.streamIdleNoticeEntryId) return;
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
@@ -139,6 +169,7 @@ export function useAgentEvents({
     };
 
     const appendOrRefreshIdleNotice = (sessionId: string) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (!runtime.processActive) return;
 
@@ -167,6 +198,7 @@ export function useAgentEvents({
     };
 
     const appendOrRefreshAlreadyRunningNotice = (sessionId: string) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (!runtime.processActive) return;
 
@@ -199,6 +231,7 @@ export function useAgentEvents({
       /Codex is already running/i.test(`${title}\n${detail || ""}`);
 
     const finishManualAbort = (sessionId: string) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (!runtime.manualAbortRequested) return;
       clearStreamWatchdog(sessionId);
@@ -215,6 +248,7 @@ export function useAgentEvents({
     };
 
     const finishThinkingEntry = (sessionId: string) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (runtime.thinkingEntryId) {
         useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
@@ -226,6 +260,7 @@ export function useAgentEvents({
     };
 
     const abortRepeatedThinking = (sessionId: string, pattern: string, repeatCount: number) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (runtime.autoAbortReason) return;
 
@@ -264,6 +299,12 @@ export function useAgentEvents({
       runtime.processTextBuffer += delta;
 
       if (runtime.processTextEntryId) {
+        runtime.pendingProcessTextDetail = runtime.processTextBuffer;
+        scheduleRuntimeRenderFlush(runtime, () => flushRuntimeRender(sessionId), delta.length);
+        return;
+      }
+
+      if (runtime.processTextEntryId) {
         useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
           title: "正文输出",
           detail: runtime.processTextBuffer,
@@ -285,6 +326,7 @@ export function useAgentEvents({
     };
 
     const finishAssistantProcessText = (sessionId: string) => {
+      flushRuntimeRender(sessionId);
       const runtime = getRuntime(sessionId);
       if (runtime.processTextEntryId) {
         useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
@@ -342,11 +384,9 @@ export function useAgentEvents({
       const thinkingPreview = getThinkingPreview(runtime.thinkingBuffer);
 
       if (runtime.thinkingEntryId) {
-        useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
-          title: `正在思考: ${thinkingPreview}`,
-          detail: runtime.thinkingBuffer,
-          state: "running",
-        }, sessionId);
+        runtime.pendingThinkingDetail = runtime.thinkingBuffer;
+        runtime.pendingThinkingTitle = `正在思考: ${thinkingPreview}`;
+        scheduleRuntimeRenderFlush(runtime, () => flushRuntimeRender(sessionId), delta.length);
       } else {
         const entryId = createProcessEntryId();
         runtime.thinkingEntryId = entryId;

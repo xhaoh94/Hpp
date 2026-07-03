@@ -4,6 +4,7 @@ import {
   useRef,
   useEffect,
   useCallback,
+  useMemo,
   type RefObject,
   type UIEvent as ReactUIEvent,
 } from "react";
@@ -350,6 +351,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
   const activeQueuedMessages = activeSessionId ? messageQueues[activeSessionId] || [] : [];
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
+  const openSessions = useMemo(
+    () => activeProject?.sessions.filter((session) => !session.closed) || [],
+    [activeProject?.sessions]
+  );
+  const userMessagesReversed = useMemo(
+    () => messages.filter((message) => message.role === "user").slice().reverse(),
+    [messages]
+  );
+  const modelProviders = useMemo(
+    () => [...new Set(availableModels.map((model) => model.provider))],
+    [availableModels]
+  );
 
   const inputValueRef = useRef("");
   const inputHasTextRef = useRef(false);
@@ -920,7 +933,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     // Save model selection for this session
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) saveSessionModel(sessionId, model);
-    await window.electronAPI.agentSetModel(model.provider, model.id);
+    await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
   };
 
   const handleSelectThinking = async (levelId: string) => {
@@ -929,7 +942,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     // Save thinking level for this session
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) saveSessionThinking(sessionId, levelId);
-    await window.electronAPI.agentSetThinkingLevel(levelId);
+    await window.electronAPI.agentSetThinkingLevel(levelId, sessionId || undefined);
   };
 
   const thinkingLevels = [
@@ -941,7 +954,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     { id: "xhigh", label: "极高" },
   ];
   const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel) || thinkingLevels[3];
-  const modelProviders = [...new Set(availableModels.map((m) => m.provider))];
   const flattenModelList = activeSession?.agentId === "codex" || activeAgentId === "codex";
 
   // No project open - show placeholder
@@ -986,7 +998,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           <div className="chat-empty-title">选择或创建会话</div>
           <div className="chat-empty-desc">点击项目卡片上的 Agent 按钮新建会话，或点击下方已有会话</div>
           {(() => {
-            const openSessions = activeProject.sessions.filter((s) => !s.closed);
             if (openSessions.length === 0) return null;
             return (
             <div className="chat-session-list">
@@ -1040,11 +1051,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           {userMsgHistoryOpen && (
             <div className="chat-user-history-popup">
               <div className="chat-user-history-header">发言记录</div>
-              {messages.filter((m) => m.role === "user").length === 0 ? (
+              {userMessagesReversed.length === 0 ? (
                 <div className="chat-user-history-empty">暂无发言</div>
               ) : (
                 <div className="chat-user-history-list">
-                  {messages.filter((m) => m.role === "user").slice().reverse().map((msg) => (
+                  {userMessagesReversed.map((msg) => (
                     <div
                       key={msg.id}
                       className="chat-user-history-item"

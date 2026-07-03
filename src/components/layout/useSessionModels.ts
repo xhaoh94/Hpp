@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
-import { applySessionModels, getSessionModel, getSessionThinking } from "@/hooks/useDataPersistence";
+import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from "@/hooks/useDataPersistence";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 
@@ -87,9 +87,16 @@ export function useSessionModels({
 
     void fetchModels(activeSessionId, fetchRunId);
 
-    const thinkingToSet = getSessionThinking(activeSessionId) || "medium";
-    setThinkingLevel(thinkingToSet);
-    void window.electronAPI.agentSetThinkingLevel(thinkingToSet);
+    void getSessionThinkingOrDefault(activeSessionId, activeSessionAgentId).then((thinkingToSet) => {
+      if (
+        modelFetchRunIdRef.current !== fetchRunId ||
+        useProjectStore.getState().activeSessionId !== activeSessionId
+      ) {
+        return;
+      }
+      setThinkingLevel(thinkingToSet);
+      void window.electronAPI.agentSetThinkingLevel(thinkingToSet, activeSessionId);
+    });
   }, [
     activeSessionId,
     activeSessionAgentId,

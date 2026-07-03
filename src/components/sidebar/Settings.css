@@ -605,6 +605,22 @@
   white-space: nowrap;
 }
 
+.settings.agent-settings-panel .filter-group {
+  padding: 8px;
+}
+
+.settings.agent-settings-panel .agent-settings-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 6px;
+}
+
+.settings.agent-settings-panel .agent-settings-actions {
+  grid-column: 2;
+  flex-wrap: wrap;
+}
+
 .filter-custom-list {
   display: flex;
   flex-wrap: wrap;
@@ -700,6 +716,10 @@
   display: flex;
   flex-direction: column;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.settings-modal-agent {
+  width: 640px;
 }
 
 .settings-modal-header {

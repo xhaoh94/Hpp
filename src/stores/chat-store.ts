@@ -124,6 +124,8 @@ interface ChatState {
   markQueuedMessageFailed: (sessionId: string, itemId: string, error: string) => void;
   clearQueuedMessageError: (sessionId: string, itemId: string) => void;
   clearSessionQueue: (sessionId: string) => void;
+  deleteSessionMessages: (sessionId: string) => void;
+  deleteSessionsMessages: (sessionIds: string[]) => void;
   switchSession: (sessionId: string | null) => void;
   loadSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
 }
@@ -407,10 +409,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     })),
 
-  setStreaming: (v) => set({ isStreaming: v }),
-  setCurrentModel: (m) => set({ currentModel: m }),
-  setThinkingLevel: (level) => set({ thinkingLevel: level }),
-  setAvailableModels: (models) => set({ availableModels: models }),
+  setStreaming: (v) => set((s) => (
+    s.isStreaming === v ? {} : { isStreaming: v }
+  )),
+  setCurrentModel: (m) => set((s) => (
+    s.currentModel?.id === m.id && s.currentModel.provider === m.provider
+      ? {}
+      : { currentModel: m }
+  )),
+  setThinkingLevel: (level) => set((s) => (
+    s.thinkingLevel === level ? {} : { thinkingLevel: level }
+  )),
+  setAvailableModels: (models) => set((s) => {
+    if (
+      s.availableModels.length === models.length &&
+      s.availableModels.every((model, index) =>
+        model.id === models[index]?.id &&
+        model.provider === models[index]?.provider &&
+        model.name === models[index]?.name &&
+        model.reasoning === models[index]?.reasoning
+      )
+    ) {
+      return {};
+    }
+    return { availableModels: models };
+  }),
 
   toggleFavorite: (model) =>
     set((s) => {
@@ -491,6 +514,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const next = { ...s.messageQueues };
       delete next[sessionId];
       return { messageQueues: next };
+    }),
+  deleteSessionMessages: (sessionId) =>
+    set((s) => {
+      const nextSessionMessages = { ...s.sessionMessages };
+      delete nextSessionMessages[sessionId];
+      const nextMessageQueues = { ...s.messageQueues };
+      delete nextMessageQueues[sessionId];
+      return {
+        sessionMessages: nextSessionMessages,
+        messageQueues: nextMessageQueues,
+        messages: s.activeSessionId === sessionId ? [] : s.messages,
+        activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
+        pendingFiles: s.activeSessionId === sessionId ? [] : s.pendingFiles,
+      };
+    }),
+  deleteSessionsMessages: (sessionIds) =>
+    set((s) => {
+      if (sessionIds.length === 0) return {};
+      const sessionIdSet = new Set(sessionIds);
+      const nextSessionMessages = { ...s.sessionMessages };
+      const nextMessageQueues = { ...s.messageQueues };
+      for (const sessionId of sessionIdSet) {
+        delete nextSessionMessages[sessionId];
+        delete nextMessageQueues[sessionId];
+      }
+      const deletingActiveSession = !!s.activeSessionId && sessionIdSet.has(s.activeSessionId);
+      return {
+        sessionMessages: nextSessionMessages,
+        messageQueues: nextMessageQueues,
+        messages: deletingActiveSession ? [] : s.messages,
+        activeSessionId: deletingActiveSession ? null : s.activeSessionId,
+        pendingFiles: deletingActiveSession ? [] : s.pendingFiles,
+      };
     }),
 
   switchSession: (sessionId) => {

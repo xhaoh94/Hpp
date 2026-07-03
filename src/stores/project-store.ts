@@ -70,10 +70,25 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }),
 
   removeProject: (id) =>
-    set((s) => ({
-      projects: s.projects.filter((p) => p.id !== id),
-      activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
-    })),
+    set((s) => {
+      const project = s.projects.find((p) => p.id === id);
+      const removedSessionIds = new Set(project?.sessions.map((session) => session.id) || []);
+      const nextAgentStatuses = { ...s.agentStatuses };
+      for (const sessionId of removedSessionIds) {
+        delete nextAgentStatuses[sessionId];
+      }
+      const nextInitializedSessionIds = new Set(s.initializedSessionIds);
+      for (const sessionId of removedSessionIds) {
+        nextInitializedSessionIds.delete(sessionId);
+      }
+      return {
+        projects: s.projects.filter((p) => p.id !== id),
+        activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
+        activeSessionId: s.activeSessionId && removedSessionIds.has(s.activeSessionId) ? null : s.activeSessionId,
+        agentStatuses: nextAgentStatuses,
+        initializedSessionIds: nextInitializedSessionIds,
+      };
+    }),
 
   setActiveProject: (id) => set({ activeProjectId: id }),
 
@@ -86,14 +101,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     })),
 
   removeSession: (projectId, sessionId) =>
-    set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? { ...p, sessions: p.sessions.filter((se) => se.id !== sessionId) }
-          : p
-      ),
-      activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
-    })),
+    set((s) => {
+      const nextAgentStatuses = { ...s.agentStatuses };
+      delete nextAgentStatuses[sessionId];
+      const nextInitializedSessionIds = new Set(s.initializedSessionIds);
+      nextInitializedSessionIds.delete(sessionId);
+      return {
+        projects: s.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, sessions: p.sessions.filter((se) => se.id !== sessionId) }
+            : p
+        ),
+        activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
+        agentStatuses: nextAgentStatuses,
+        initializedSessionIds: nextInitializedSessionIds,
+      };
+    }),
 
   closeSession: (projectId, sessionId) =>
     set((s) => ({
@@ -124,7 +147,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ),
     })),
 
-  setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
+  setActiveSession: (sessionId) => set((s) => (
+    s.activeSessionId === sessionId ? {} : { activeSessionId: sessionId }
+  )),
 
   setSessionFilePath: (projectId, sessionId, sessionFilePath) =>
     set((s) => ({
@@ -143,12 +168,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     })),
 
   setAgentStatus: (sessionId, status) =>
-    set((s) => ({
-      agentStatuses: { ...s.agentStatuses, [sessionId]: status },
-    })),
+    set((s) => (
+      s.agentStatuses[sessionId] === status
+        ? {}
+        : { agentStatuses: { ...s.agentStatuses, [sessionId]: status } }
+    )),
 
   markSessionInitialized: (sessionId) =>
     set((s) => {
+      if (s.initializedSessionIds.has(sessionId)) return {};
       const next = new Set(s.initializedSessionIds);
       next.add(sessionId);
       return { initializedSessionIds: next };

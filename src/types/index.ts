@@ -90,6 +90,7 @@ export interface ElectronAPI {
   piSDKUpdate: () => Promise<{ success: boolean; error?: string; status?: PiSDKStatus }>;
   agentGetStatus: (agentId: string) => Promise<AgentPackageStatus>;
   agentUpdate: (agentId: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
+  agentGetDefaultThinkingLevel: (agentId: string) => Promise<string>;
 
   // Data persistence
   loadData: (key: string) => Promise<unknown>;
@@ -106,8 +107,8 @@ export interface ElectronAPI {
   agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean }) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
-  agentSetModel: (provider: string, modelId: string) => Promise<{ success: boolean }>;
-  agentSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;
+  agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean }>;
+  agentSetThinkingLevel: (level: string, sessionId?: string) => Promise<{ success: boolean }>;
   agentSendUIResponse: (response: AgentUIResponse) => Promise<{ success: boolean }>;
 
   // Agent events

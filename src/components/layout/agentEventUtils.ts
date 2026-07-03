@@ -4,6 +4,8 @@ import type { AgentProcessEntry, AgentProcessFile } from "@/stores/chat-store";
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
+const STREAM_RENDER_FLUSH_INTERVAL_MS = 120;
+const STREAM_RENDER_MAX_BUFFERED_CHARS = 6000;
 
 export type NormalizedToolKind =
   | "read_file"
@@ -36,6 +38,11 @@ export type SessionRuntime = {
   processTextEntryIds: string[];
   processTextHistory: string[];
   processTextBuffer: string;
+  pendingProcessTextDetail: string;
+  pendingThinkingDetail: string;
+  pendingThinkingTitle: string | null;
+  streamRenderFlushTimer: ReturnType<typeof setTimeout> | null;
+  streamRenderBufferedChars: number;
 };
 
 export const createProcessEntryId = () => {
@@ -75,9 +82,43 @@ export const createSessionRuntime = (): SessionRuntime => ({
   processTextEntryIds: [],
   processTextHistory: [],
   processTextBuffer: "",
+  pendingProcessTextDetail: "",
+  pendingThinkingDetail: "",
+  pendingThinkingTitle: null,
+  streamRenderFlushTimer: null,
+  streamRenderBufferedChars: 0,
 });
 
+export const scheduleRuntimeRenderFlush = (
+  runtime: SessionRuntime,
+  flush: () => void,
+  bufferedChars = 0
+) => {
+  runtime.streamRenderBufferedChars += bufferedChars;
+  if (runtime.streamRenderBufferedChars >= STREAM_RENDER_MAX_BUFFERED_CHARS) {
+    if (runtime.streamRenderFlushTimer) {
+      clearTimeout(runtime.streamRenderFlushTimer);
+      runtime.streamRenderFlushTimer = null;
+    }
+    flush();
+    return;
+  }
+
+  if (!runtime.streamRenderFlushTimer) {
+    runtime.streamRenderFlushTimer = setTimeout(flush, STREAM_RENDER_FLUSH_INTERVAL_MS);
+  }
+};
+
+export const clearRuntimeRenderFlush = (runtime: SessionRuntime) => {
+  if (runtime.streamRenderFlushTimer) {
+    clearTimeout(runtime.streamRenderFlushTimer);
+    runtime.streamRenderFlushTimer = null;
+  }
+  runtime.streamRenderBufferedChars = 0;
+};
+
 export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
+  clearRuntimeRenderFlush(runtime);
   runtime.streamBuffer = "";
   runtime.thinkingBuffer = "";
   runtime.thinkingEntryId = null;
@@ -88,6 +129,9 @@ export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
   runtime.processTextEntryIds = [];
   runtime.processTextHistory = [];
   runtime.processTextBuffer = "";
+  runtime.pendingProcessTextDetail = "";
+  runtime.pendingThinkingDetail = "";
+  runtime.pendingThinkingTitle = null;
 };
 
 export const resetSessionRuntimeAfterTurn = (runtime: SessionRuntime) => {
