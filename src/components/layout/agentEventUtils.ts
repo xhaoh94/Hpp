@@ -1,5 +1,11 @@
 import type { AgentEvent } from "@/types";
-import type { AgentProcessEntry, AgentProcessFile } from "@/stores/chat-store";
+import type {
+  AgentProcessChangeSummary,
+  AgentProcessEntry,
+  AgentProcessFile,
+  AgentProcessStep,
+  AgentProcessStepStatus,
+} from "@/stores/chat-store";
 
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
@@ -43,6 +49,18 @@ export type SessionRuntime = {
   pendingThinkingTitle: string | null;
   streamRenderFlushTimer: ReturnType<typeof setTimeout> | null;
   streamRenderBufferedChars: number;
+  nativePlanSteps: boolean;
+  inferredPlanStepsActive: boolean;
+  inferredStepSignal: {
+    analyzed: boolean;
+    operated: boolean;
+    modified: boolean;
+    verified: boolean;
+    failed: boolean;
+    cancelled: boolean;
+  };
+  changeSummaryFiles: Record<string, { file: string; additions: number; deletions: number }>;
+  changeSummarySeenEvents: Record<string, true>;
 };
 
 export const createProcessEntryId = () => {
@@ -66,6 +84,12 @@ export const getBooleanField = (value: UnknownRecord, key: string): boolean | un
   return typeof found === "boolean" ? found : undefined;
 };
 
+const normalizeEventToken = (value: unknown) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s._:-]+/g, "");
+
 export const createSessionRuntime = (): SessionRuntime => ({
   streamBuffer: "",
   thinkingBuffer: "",
@@ -87,6 +111,18 @@ export const createSessionRuntime = (): SessionRuntime => ({
   pendingThinkingTitle: null,
   streamRenderFlushTimer: null,
   streamRenderBufferedChars: 0,
+  nativePlanSteps: false,
+  inferredPlanStepsActive: false,
+  inferredStepSignal: {
+    analyzed: false,
+    operated: false,
+    modified: false,
+    verified: false,
+    failed: false,
+    cancelled: false,
+  },
+  changeSummaryFiles: {},
+  changeSummarySeenEvents: {},
 });
 
 export const scheduleRuntimeRenderFlush = (
@@ -132,6 +168,18 @@ export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
   runtime.pendingProcessTextDetail = "";
   runtime.pendingThinkingDetail = "";
   runtime.pendingThinkingTitle = null;
+  runtime.nativePlanSteps = false;
+  runtime.inferredPlanStepsActive = false;
+  runtime.inferredStepSignal = {
+    analyzed: false,
+    operated: false,
+    modified: false,
+    verified: false,
+    failed: false,
+    cancelled: false,
+  };
+  runtime.changeSummaryFiles = {};
+  runtime.changeSummarySeenEvents = {};
 };
 
 export const resetSessionRuntimeAfterTurn = (runtime: SessionRuntime) => {
@@ -394,4 +442,244 @@ export const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["ty
 export const normalizeProcessEntryState = (value: unknown): AgentProcessEntry["state"] | undefined => {
   if (value === "running" || value === "completed" || value === "error" || value === "interrupted") return value;
   return undefined;
+};
+
+const normalizePlanStepStatus = (value: unknown): AgentProcessStepStatus => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (
+    normalized === "running" ||
+    normalized === "in_progress" ||
+    normalized === "inprogress" ||
+    normalized === "active" ||
+    normalized === "doing"
+  ) {
+    return "running";
+  }
+  if (
+    normalized === "completed" ||
+    normalized === "complete" ||
+    normalized === "done" ||
+    normalized === "success" ||
+    normalized === "succeeded"
+  ) {
+    return "completed";
+  }
+  if (normalized === "failed" || normalized === "error" || normalized === "failure") {
+    return "failed";
+  }
+  if (
+    normalized === "cancelled" ||
+    normalized === "canceled" ||
+    normalized === "skipped" ||
+    normalized === "interrupted"
+  ) {
+    return "cancelled";
+  }
+  return "pending";
+};
+
+const getPlanStepTitle = (step: UnknownRecord, index: number) => {
+  const title =
+    getStringField(step, "title") ||
+    getStringField(step, "text") ||
+    getStringField(step, "content") ||
+    getStringField(step, "description") ||
+    getStringField(step, "name");
+  return title?.trim() || `步骤 ${index + 1}`;
+};
+
+export const normalizePlanSteps = (value: unknown): AgentProcessStep[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item, index) => {
+      if (typeof item === "string") {
+        const rawTitle = item.trim();
+        const statusMatch = rawTitle.match(/^(pending|running|in[_ -]?progress|completed|complete|done|failed|error|cancelled|canceled|skipped|interrupted)\s+(.+)$/i);
+        const checkboxMatch = rawTitle.match(/^\[([ xX-])\]\s+(.+)$/);
+        const title = statusMatch?.[2]?.trim() || checkboxMatch?.[2]?.trim() || rawTitle;
+        if (!title) return null;
+        return {
+          id: `step-${index}-${title.slice(0, 24)}`,
+          title,
+          status: checkboxMatch
+            ? (checkboxMatch[1].toLowerCase() === "x" ? "completed" : "pending")
+            : normalizePlanStepStatus(statusMatch?.[1]),
+        };
+      }
+      if (!isRecord(item)) return null;
+      const title = getPlanStepTitle(item, index);
+      return {
+        id: String(item.id || item.stepId || item.key || `step-${index}-${title.slice(0, 24)}`),
+        title,
+        status: normalizePlanStepStatus(item.status || item.state || item.phase),
+      };
+    })
+    .filter((step): step is AgentProcessStep => !!step && step.title.trim().length > 0);
+};
+
+export const isPlanLikeProcessEvent = (event: AgentEvent) => {
+  const tokens = [
+    event.entryType,
+    event.kind,
+    event.mode,
+    event.name,
+    event.toolName,
+    event.title,
+  ].map((value) => normalizeEventToken(value));
+  return tokens.some((token) =>
+    token === "plan" ||
+    token === "todo" ||
+    token === "step" ||
+    token.includes("planupdate") ||
+    token.includes("todoupdate") ||
+    token.includes("stepupdate")
+  );
+};
+
+export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep[] => {
+  const detail = asRecord(event.detail);
+  const args = asRecord(event.args);
+  const input = asRecord(event.input);
+  const candidates = [
+    event.steps,
+    event.plan,
+    event.todos,
+    event.items,
+    detail.steps,
+    detail.plan,
+    detail.todos,
+    detail.items,
+    args.steps,
+    args.plan,
+    args.todos,
+    args.items,
+    input.steps,
+    input.plan,
+    input.todos,
+    input.items,
+  ];
+
+  for (const candidate of candidates) {
+    const steps = normalizePlanSteps(candidate);
+    if (steps.length > 0) return steps;
+  }
+
+  if (typeof event.detail === "string") {
+    const lines = event.detail
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[-*]\s*/, "").trim())
+      .filter(Boolean);
+    const steps = normalizePlanSteps(lines);
+    if (steps.length > 0) return steps;
+  }
+
+  return [];
+};
+
+export const normalizeChangeSummaryFileKey = (filePath: string) =>
+  filePath.replace(/\\/g, "/").trim().toLowerCase();
+
+export const summarizeRuntimeChanges = (runtime: SessionRuntime): AgentProcessChangeSummary => {
+  const values = Object.values(runtime.changeSummaryFiles);
+  return {
+    filesChanged: values.length,
+    additions: values.reduce((total, file) => total + file.additions, 0),
+    deletions: values.reduce((total, file) => total + file.deletions, 0),
+  };
+};
+
+export const mergeRuntimeChangeFile = (
+  runtime: SessionRuntime,
+  file: { file?: unknown; additions?: unknown; deletions?: unknown; changeKey?: unknown }
+) => {
+  if (typeof file.file !== "string" || !file.file.trim()) return false;
+  const key = normalizeChangeSummaryFileKey(file.file);
+  if (!key) return false;
+
+  const changeKey = typeof file.changeKey === "string" && file.changeKey.trim()
+    ? file.changeKey.trim()
+    : "";
+  if (changeKey && runtime.changeSummarySeenEvents[changeKey]) return false;
+  if (changeKey) runtime.changeSummarySeenEvents[changeKey] = true;
+
+  const additions = typeof file.additions === "number" ? file.additions : 0;
+  const deletions = typeof file.deletions === "number" ? file.deletions : 0;
+  const existing = runtime.changeSummaryFiles[key];
+  if (!existing) {
+    runtime.changeSummaryFiles[key] = { file: file.file, additions, deletions };
+    return true;
+  }
+
+  if (additions === 0 && deletions === 0) return false;
+
+  runtime.changeSummaryFiles[key] = {
+    file: existing.file || file.file,
+    additions: existing.additions + additions,
+    deletions: existing.deletions + deletions,
+  };
+  return true;
+};
+
+export type InferredStepSignal = "analyze" | "operate" | "modify" | "verify" | "failed" | "cancelled";
+
+export const buildInferredPlanSteps = (
+  runtime: SessionRuntime,
+  signal?: InferredStepSignal
+): AgentProcessStep[] | null => {
+  if (runtime.nativePlanSteps) return null;
+
+  if (signal === "analyze") runtime.inferredStepSignal.analyzed = true;
+  if (signal === "operate") {
+    runtime.inferredStepSignal.analyzed = true;
+    runtime.inferredStepSignal.operated = true;
+  }
+  if (signal === "modify") {
+    runtime.inferredStepSignal.analyzed = true;
+    runtime.inferredStepSignal.operated = true;
+    runtime.inferredStepSignal.modified = true;
+  }
+  if (signal === "verify") {
+    runtime.inferredStepSignal.analyzed = true;
+    runtime.inferredStepSignal.operated = true;
+    runtime.inferredStepSignal.verified = true;
+  }
+  if (signal === "failed") runtime.inferredStepSignal.failed = true;
+  if (signal === "cancelled") runtime.inferredStepSignal.cancelled = true;
+
+  const flags = runtime.inferredStepSignal;
+  if (!flags.analyzed && !flags.operated && !flags.modified && !flags.verified) return null;
+  runtime.inferredPlanStepsActive = true;
+
+  const terminalStatus: AgentProcessStepStatus | null =
+    flags.cancelled ? "cancelled" : flags.failed ? "failed" : null;
+  const steps: AgentProcessStep[] = [
+    {
+      id: "inferred-analyze",
+      title: "分析请求",
+      status: flags.analyzed || flags.operated || flags.modified || flags.verified ? "completed" : "running",
+    },
+    {
+      id: "inferred-operate",
+      title: "执行操作",
+      status: flags.modified || flags.verified || terminalStatus ? "completed" : flags.operated ? "running" : flags.analyzed ? "running" : "pending",
+    },
+  ];
+
+  if (flags.modified) {
+    steps.push({
+      id: "inferred-modify",
+      title: "修改文件",
+      status: flags.verified ? "completed" : terminalStatus || "running",
+    });
+  }
+
+  if (flags.verified || terminalStatus) {
+    steps.push({
+      id: "inferred-verify",
+      title: "验证结果",
+      status: terminalStatus || "completed",
+    });
+  }
+
+  return steps;
 };

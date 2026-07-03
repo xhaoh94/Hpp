@@ -31,6 +31,18 @@ export function handleMessageStartEvent(
   runtime.streamStarted = false;
   runtime.activeToolEntry = {};
   runtime.activeToolFile = {};
+  runtime.nativePlanSteps = false;
+  runtime.inferredPlanStepsActive = false;
+  runtime.inferredStepSignal = {
+    analyzed: false,
+    operated: false,
+    modified: false,
+    verified: false,
+    failed: false,
+    cancelled: false,
+  };
+  runtime.changeSummaryFiles = {};
+  runtime.changeSummarySeenEvents = {};
   runtime.autoAbortReason = null;
   runtime.processTextEntryId = null;
   runtime.processTextEntryIds = [];
@@ -73,6 +85,18 @@ export function handleStreamStartEvent(
     runtime.autoAbortReason = null;
     runtime.activeToolEntry = {};
     runtime.activeToolFile = {};
+    runtime.nativePlanSteps = false;
+    runtime.inferredPlanStepsActive = false;
+    runtime.inferredStepSignal = {
+      analyzed: false,
+      operated: false,
+      modified: false,
+      verified: false,
+      failed: false,
+      cancelled: false,
+    };
+    runtime.changeSummaryFiles = {};
+    runtime.changeSummarySeenEvents = {};
     if (!alreadyStarted) {
       useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
     }
@@ -165,5 +189,32 @@ export function handleDiffUpdateEvent(
     ctx.finishAssistantProcessText(currentSessionId);
     ctx.finishThinkingEntry(currentSessionId);
     useChatStore.getState().appendLastAssistantDiffs(event.diffs, currentSessionId);
+    const files = event.diffs
+      .filter((diff): diff is {
+        file: string;
+        patch?: string;
+        additions?: number;
+        deletions?: number;
+        status?: "added" | "deleted" | "modified";
+      } => (
+        !!diff &&
+        typeof diff === "object" &&
+        typeof (diff as { file?: unknown }).file === "string"
+      ))
+      .map((diff) => ({
+        file: diff.file,
+        action: "modified" as const,
+        additions: typeof diff.additions === "number" ? diff.additions : undefined,
+        deletions: typeof diff.deletions === "number" ? diff.deletions : undefined,
+        status: diff.status,
+        changeKey: [
+          "diff",
+          diff.file,
+          typeof diff.patch === "string" ? diff.patch : "",
+          typeof diff.additions === "number" ? diff.additions : "",
+          typeof diff.deletions === "number" ? diff.deletions : "",
+        ].join("|"),
+      }));
+    ctx.recordProcessFiles(currentSessionId, files, "modify");
   }
 }

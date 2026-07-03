@@ -989,11 +989,14 @@ const handleServerNotification = (method, params) => {
       if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.plan)) {
         send({
-          type: "process_event",
-          entryType: "status",
-          title: "Codex plan updated",
-          detail: params.plan.map((step) => `${step.status || "-"} ${step.text || ""}`).join("\n"),
-          state: "running",
+          type: "plan_update",
+          steps: params.plan
+            .map((step, index) => ({
+              id: String(step.id || step.stepId || `codex-plan-${index}`),
+              title: String(step.text || step.title || step.description || `Step ${index + 1}`),
+              status: step.status || step.state || "pending",
+            }))
+            .filter((step) => step.title.trim()),
         });
       }
       break;

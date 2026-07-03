@@ -2963,6 +2963,7 @@ class CodexAgent {
       case "tool_start":
       case "tool_end":
       case "process_event":
+      case "plan_update":
       case "context_compaction":
       case "diff_update":
       case "agent_end":

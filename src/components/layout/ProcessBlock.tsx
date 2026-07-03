@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { AgentProcess, AgentProcessEntry, AgentProcessFile } from "@/stores/chat-store";
+import type {
+  AgentProcess,
+  AgentProcessChangeSummary,
+  AgentProcessEntry,
+  AgentProcessFile,
+  AgentProcessStep,
+} from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
@@ -48,6 +54,84 @@ const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
 
   return `${entries.length} 条事件`;
 };
+
+const getStepProgressIndex = (steps: AgentProcessStep[], ended: boolean) => {
+  if (steps.length === 0) return 0;
+  const runningIndex = steps.findIndex((step) => step.status === "running");
+  if (runningIndex >= 0) return runningIndex + 1;
+
+  const terminalIndex = steps.findIndex((step) => step.status === "failed" || step.status === "cancelled");
+  if (terminalIndex >= 0) return terminalIndex + 1;
+
+  const completed = steps.filter((step) => step.status === "completed").length;
+  if (completed > 0) return Math.min(steps.length, completed);
+  return ended ? steps.length : 1;
+};
+
+const formatChangeSummary = (summary?: AgentProcessChangeSummary) => {
+  if (!summary || summary.filesChanged <= 0) return "";
+  const parts = [`${summary.filesChanged} 个文件已更改`];
+  if (summary.additions > 0) parts.push(`+${summary.additions}`);
+  if (summary.deletions > 0) parts.push(`-${summary.deletions}`);
+  return parts.join(" ");
+};
+
+const getStepStatusLabel = (status: AgentProcessStep["status"]) => {
+  switch (status) {
+    case "running": return "进行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return "待处理";
+  }
+};
+
+function ProcessProgressSummary({
+  process,
+  fallback,
+}: {
+  process: AgentProcess;
+  fallback: string;
+}) {
+  const steps = process.planSteps || [];
+  const changeText = formatChangeSummary(process.changeSummary);
+  const hasProgress = steps.length > 0 || !!changeText;
+
+  if (!hasProgress) {
+    return <span className="chat-process-summary">{fallback}</span>;
+  }
+
+  const stepText = steps.length > 0
+    ? `第 ${getStepProgressIndex(steps, !!process.endedAt)} / ${steps.length} 步`
+    : "";
+
+  return (
+    <span
+      className="chat-process-progress"
+      tabIndex={0}
+      onClick={(event) => event.stopPropagation()}
+      aria-label={[stepText, changeText].filter(Boolean).join(" · ")}
+    >
+      {stepText && <span className="chat-process-progress-step">{stepText}</span>}
+      {stepText && changeText && <span className="chat-process-progress-divider">·</span>}
+      {changeText && <span className="chat-process-progress-change">{changeText}</span>}
+      {steps.length > 0 && (
+        <span className="chat-process-step-popover" role="tooltip">
+          <span className="chat-process-step-popover-title">步骤进度</span>
+          <span className="chat-process-step-list">
+            {steps.map((step, index) => (
+              <span className="chat-process-step-row" key={step.id || `${step.title}-${index}`}>
+                <span className={`chat-process-step-dot ${step.status}`} />
+                <span className="chat-process-step-title">{step.title}</span>
+                <span className="chat-process-step-status">{getStepStatusLabel(step.status)}</span>
+              </span>
+            ))}
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
 
 const getFileName = (filePath: string) => {
   const parts = filePath.split(/[/\\]/);
@@ -534,7 +618,7 @@ export function ProcessBlock({
     <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
       <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
         <span>{interrupted ? "已中断" : "处理耗时"} {elapsed}</span>
-        <span className="chat-process-summary">{summary}</span>
+        <ProcessProgressSummary process={process} fallback={summary} />
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
           style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}

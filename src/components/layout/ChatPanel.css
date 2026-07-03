@@ -241,13 +241,28 @@
   padding: 16px;
 }
 
+.chat-messages-area.has-todo-summary .chat-messages {
+  padding-bottom: 76px;
+}
+
+.chat-floating-status {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
 /* Scroll-to-bottom button */
 .chat-scroll-bottom {
-  position: absolute;
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 10;
+  position: static;
+  transform: none;
+  z-index: 1;
   width: 36px;
   height: 36px;
   display: flex;
@@ -260,6 +275,113 @@
   cursor: pointer;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
   transition: all 0.15s;
+  pointer-events: auto;
+}
+
+.chat-todo-summary {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  max-width: min(360px, calc(100vw - 48px));
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(42, 42, 44, 0.94);
+  color: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(10px);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.chat-todo-summary-dot,
+.chat-todo-summary-status {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #60a5fa;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.14);
+}
+
+.chat-todo-summary-change {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chat-todo-summary-popover {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: min(200px, calc(100vw - 64px));
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(42, 42, 44, 0.97);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.38);
+  color: rgba(255, 255, 255, 0.78);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.chat-todo-summary:hover .chat-todo-summary-popover,
+.chat-todo-summary:focus-within .chat-todo-summary-popover {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.chat-todo-summary-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.chat-todo-summary-status {
+  width: 11px;
+  height: 11px;
+  border-color: rgba(255, 255, 255, 0.72);
+  box-shadow: none;
+}
+
+.chat-todo-summary-status.completed {
+  border-color: #22c55e;
+  background: #22c55e;
+}
+
+.chat-todo-summary-status.failed {
+  border-color: #ef4444;
+  background: #ef4444;
+}
+
+.chat-todo-summary-status.cancelled {
+  border-color: #f59e0b;
+}
+
+.chat-todo-summary-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-todo-summary-label {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 11px;
 }
 
 .chat-scroll-bottom:hover {
@@ -267,11 +389,11 @@
   color: var(--text-primary);
   border-color: var(--accent-color);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
-  transform: translateX(-50%) translateY(-2px);
+  transform: translateY(-2px);
 }
 
 .chat-scroll-bottom:active {
-  transform: translateX(-50%) translateY(0);
+  transform: translateY(0);
 }
 
 .chat-empty {
@@ -575,7 +697,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
   background: none;
   border: none;
@@ -614,6 +737,133 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-process-progress {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(420px, 100%);
+  flex: 0 1 auto;
+  color: var(--text-secondary);
+  opacity: 0.92;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+  outline: none;
+}
+
+.chat-process-progress-step,
+.chat-process-progress-change {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-process-progress-step {
+  color: var(--text-primary);
+}
+
+.chat-process-progress-change {
+  color: var(--text-secondary);
+  opacity: 0.82;
+}
+
+.chat-process-progress-divider {
+  color: var(--text-secondary);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.chat-process-step-popover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: min(320px, calc(100vw - 48px));
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(24, 24, 27, 0.96);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36);
+  color: rgba(255, 255, 255, 0.9);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.chat-process-progress:hover .chat-process-step-popover,
+.chat-process-progress:focus-within .chat-process-step-popover,
+.chat-process-progress:focus .chat-process-step-popover {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.chat-process-step-popover-title {
+  margin-bottom: 6px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chat-process-step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-process-step-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chat-process-step-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.chat-process-step-dot.running {
+  background: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+}
+
+.chat-process-step-dot.completed {
+  background: #22c55e;
+}
+
+.chat-process-step-dot.failed {
+  background: #ef4444;
+}
+
+.chat-process-step-dot.cancelled {
+  background: #f59e0b;
+}
+
+.chat-process-step-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-process-step-status {
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 .chat-process-content {
@@ -692,7 +942,7 @@
 .chat-process-entry-main {
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   width: 100%;
 }

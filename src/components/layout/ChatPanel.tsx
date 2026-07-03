@@ -10,7 +10,15 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { CornerDownRight, ListCollapse, Trash2 } from "lucide-react";
-import { useChatStore, type ChatMessage, type ModelInfo, type QueuedMessage, type PendingFile } from "@/stores/chat-store";
+import {
+  useChatStore,
+  type AgentProcess,
+  type AgentProcessStep,
+  type ChatMessage,
+  type ModelInfo,
+  type QueuedMessage,
+  type PendingFile,
+} from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
@@ -247,6 +255,53 @@ const ChatMessageItem = memo(function ChatMessageItem({
   );
 });
 
+const getTodoStepIndex = (steps: AgentProcessStep[]) => {
+  if (steps.length === 0) return 0;
+  const runningIndex = steps.findIndex((step) => step.status === "running");
+  if (runningIndex >= 0) return runningIndex + 1;
+  const failedIndex = steps.findIndex((step) => step.status === "failed" || step.status === "cancelled");
+  if (failedIndex >= 0) return failedIndex + 1;
+  const completed = steps.filter((step) => step.status === "completed").length;
+  return completed > 0 ? Math.min(steps.length, completed) : 1;
+};
+
+const getTodoStatusText = (status: AgentProcessStep["status"]) => {
+  switch (status) {
+    case "running": return "进行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return "待处理";
+  }
+};
+
+function TodoSummaryPill({ process }: { process: AgentProcess }) {
+  const steps = process.planSteps || [];
+  if (steps.length === 0) return null;
+
+  const changeSummary = process.changeSummary;
+  const changeText = changeSummary && changeSummary.filesChanged > 0
+    ? `${changeSummary.filesChanged} 个文件已更改${changeSummary.additions > 0 ? ` +${changeSummary.additions}` : ""}${changeSummary.deletions > 0 ? ` -${changeSummary.deletions}` : ""}`
+    : "";
+
+  return (
+    <div className="chat-todo-summary">
+      <span className="chat-todo-summary-dot" />
+      <span className="chat-todo-summary-text">第 {getTodoStepIndex(steps)} / {steps.length} 步</span>
+      {changeText && <span className="chat-todo-summary-change">· {changeText}</span>}
+      <div className="chat-todo-summary-popover">
+        {steps.map((step) => (
+          <div className="chat-todo-summary-row" key={step.id}>
+            <span className={`chat-todo-summary-status ${step.status}`} />
+            <span className="chat-todo-summary-title">{step.title}</span>
+            <span className="chat-todo-summary-label">{getTodoStatusText(step.status)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionId,
   activeSessionInitialized,
@@ -264,8 +319,13 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onToggleAssistantProcessEntry,
   onPreserveScroll,
 }: ChatMessagesViewProps) {
+  const activeProcessWithTodos = [...messages]
+    .reverse()
+    .find((msg) => msg.role === "assistant" && !!msg.process && !msg.process.endedAt && !!msg.process.planSteps?.length)
+    ?.process;
+
   return (
-    <div className="chat-messages-area">
+    <div className={`chat-messages-area ${activeProcessWithTodos ? "has-todo-summary" : ""}`}>
       <div ref={scrollRef} className="chat-messages" onScroll={onMessagesScroll}>
         {activeSessionId && !activeSessionInitialized ? (
           <div className="chat-loading-agent">
@@ -301,13 +361,18 @@ const ChatMessagesView = memo(function ChatMessagesView({
         )}
       </div>
 
-      {showScrollBottom && (
+      {(showScrollBottom || activeProcessWithTodos) && (
+        <div className="chat-floating-status">
+          {showScrollBottom && (
         <button className="chat-scroll-bottom" onClick={onScrollToBottom} title="返回底部">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 5v14" />
             <path d="M19 12l-7 7-7-7" />
           </svg>
         </button>
+          )}
+          {activeProcessWithTodos && <TodoSummaryPill process={activeProcessWithTodos} />}
+        </div>
       )}
     </div>
   );

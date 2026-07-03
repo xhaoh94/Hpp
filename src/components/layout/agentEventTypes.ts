@@ -1,7 +1,7 @@
-import type { AgentProcessEntry } from "@/stores/chat-store";
+import type { AgentProcessEntry, AgentProcessFile, AgentProcessStep } from "@/stores/chat-store";
 import type { AgentEvent } from "@/types";
 import type { AskQuestionPayload } from "./QuestionnairePanel";
-import type { SessionRuntime } from "./agentEventUtils";
+import type { InferredStepSignal, SessionRuntime } from "./agentEventUtils";
 
 export type PendingUIResponse = {
   sessionId: string;
@@ -27,6 +27,9 @@ export type AgentEventHandlerContext = {
   setStreamingState: (streaming: boolean) => void;
   getRuntime: (sessionId: string) => SessionRuntime;
   appendProcessEntry: (sessionId: string, entry: ProcessEntryDraft) => void;
+  updateProcessPlanSteps: (sessionId: string, steps: AgentProcessStep[], native?: boolean) => void;
+  updateInferredPlanSteps: (sessionId: string, signal: InferredStepSignal) => void;
+  recordProcessFiles: (sessionId: string, files: AgentProcessFile[], signal?: InferredStepSignal) => void;
   completeIdleNotice: (sessionId: string) => void;
   appendOrRefreshAlreadyRunningNotice: (sessionId: string) => void;
   finishThinkingEntry: (sessionId: string) => void;

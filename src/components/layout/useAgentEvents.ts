@@ -1,22 +1,33 @@
 import { useEffect, useRef } from "react";
 import { getAgentName } from "@/lib/agents";
-import { useChatStore, type AgentProcessEntry } from "@/stores/chat-store";
+import {
+  useChatStore,
+  type AgentProcessEntry,
+  type AgentProcessFile,
+  type AgentProcessStep,
+} from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import type { AgentEvent } from "@/types";
 import { normalizeAskQuestionsFromCandidates } from "./QuestionnairePanel";
 import {
   asRecord,
+  buildInferredPlanSteps,
   createProcessEntryId,
   createSessionRuntime,
   getRepeatedThinkingPattern,
   getThinkingPreview,
   getToolProcessFiles,
+  isPlanLikeProcessEvent,
+  mergeRuntimeChangeFile,
+  normalizePlanStepsFromEvent,
   normalizeProcessEntryState,
   normalizeProcessEntryType,
   resetSessionRuntimeAfterTurn,
   scheduleRuntimeRenderFlush,
+  summarizeRuntimeChanges,
   stringifyProcessValue,
   truncateProcessDetail,
+  type InferredStepSignal,
   type SessionRuntime,
 } from "./agentEventUtils";
 import {
@@ -49,32 +60,6 @@ type UseAgentEventsOptions = {
   pendingUIResponseRef: { current: PendingUIResponse };
   setPendingUIResponseState: (next: PendingUIResponseUpdate) => void;
   setStreaming: (streaming: boolean) => void;
-};
-
-const normalizeEventToken = (value: unknown) =>
-  String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s._:-]+/g, "");
-
-const isContextCompactionLike = (...values: unknown[]) => {
-  const normalized = values.map(normalizeEventToken).filter(Boolean);
-  return normalized.some((value) =>
-    value.includes("contextcompaction") ||
-    value.includes("compactedcontext") ||
-    value.includes("compactcontext") ||
-    value.includes("contextcompact") ||
-    value.includes("contextsummary") ||
-    value.includes("summarizecontext") ||
-    value.includes("contextsummarized") ||
-    value.includes("conversationcompaction") ||
-    value.includes("conversationcompacted") ||
-    value.includes("conversationcompact") ||
-    value.includes("memorycompaction") ||
-    value.includes("压缩上下文") ||
-    value.includes("上下文压缩") ||
-    value.includes("上下文已自动压缩")
-  );
 };
 
 export function useAgentEvents({
@@ -154,6 +139,37 @@ export function useAgentEvents({
         command: entry.command,
         state: entry.state,
         expanded: entry.expanded,
+      }, sessionId);
+    };
+
+    const updateProcessPlanSteps = (sessionId: string, steps: AgentProcessStep[], native = true) => {
+      if (steps.length === 0) return;
+      const runtime = getRuntime(sessionId);
+      if (native) runtime.nativePlanSteps = true;
+      useChatStore.getState().updateLastAssistantProcessMeta({ planSteps: steps }, sessionId);
+    };
+
+    const updateInferredPlanSteps = (sessionId: string, signal: InferredStepSignal) => {
+      const runtime = getRuntime(sessionId);
+      const steps = buildInferredPlanSteps(runtime, signal);
+      if (!steps || steps.length === 0) return;
+      updateProcessPlanSteps(sessionId, steps, false);
+    };
+
+    const recordProcessFiles = (
+      sessionId: string,
+      files: AgentProcessFile[],
+      signal: InferredStepSignal = "modify"
+    ) => {
+      const runtime = getRuntime(sessionId);
+      let changed = false;
+      for (const file of files) {
+        if (mergeRuntimeChangeFile(runtime, file)) changed = true;
+      }
+      updateInferredPlanSteps(sessionId, signal);
+      if (!changed) return;
+      useChatStore.getState().updateLastAssistantProcessMeta({
+        changeSummary: summarizeRuntimeChanges(runtime),
       }, sessionId);
     };
 
@@ -238,6 +254,7 @@ export function useAgentEvents({
       completeIdleNotice(sessionId);
       finishAssistantProcessText(sessionId);
       finishThinkingEntry(sessionId);
+      updateInferredPlanSteps(sessionId, "cancelled");
       useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
       resetSessionRuntimeAfterTurn(runtime);
       runtime.autoAbortReason = null;
@@ -474,6 +491,7 @@ export function useAgentEvents({
       clearStreamWatchdog(currentSessionId);
       completeIdleNotice(currentSessionId);
       finishAssistantProcessText(currentSessionId);
+      updateInferredPlanSteps(currentSessionId, timedOut ? "failed" : "verify");
       const finalContent = stripProcessTextPrefixFromFinal(currentSessionId, content || runtime.streamBuffer);
       if (finalContent.trim().length > 0) {
         runtime.streamBuffer = finalContent;
@@ -511,6 +529,7 @@ export function useAgentEvents({
       completeIdleNotice(currentSessionId);
       finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
+      updateInferredPlanSteps(currentSessionId, "failed");
 
       const errorContent = detail?.trim()
         ? `${title}\n\n${detail.trim()}`
@@ -569,22 +588,17 @@ export function useAgentEvents({
         completeIdleNotice(currentSessionId);
         finishAssistantProcessText(currentSessionId);
         finishThinkingEntry(currentSessionId);
-        useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
-        runtime.processActive = false;
-        runtime.streamStarted = false;
-        runtime.streamBuffer = "";
-        runtime.thinkingBuffer = "";
-        runtime.thinkingEntryId = null;
-        runtime.activeToolEntry = {};
-        runtime.activeToolFile = {};
-        runtime.processTextEntryId = null;
-        runtime.processTextEntryIds = [];
-        runtime.processTextHistory = [];
-        runtime.processTextBuffer = "";
-        if (runtime.streamWatchdog) {
-          clearTimeout(runtime.streamWatchdog);
-          runtime.streamWatchdog = null;
-        }
+        appendProcessEntry(currentSessionId, {
+          id: eventId ? `context-compaction-entry-${eventId}` : undefined,
+          type: "status",
+          title: "上下文已自动压缩",
+          state: "completed",
+          expanded: false,
+        });
+        if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(true);
+        useProjectStore.getState().setAgentStatus(currentSessionId, "running");
+        refreshStreamWatchdog(currentSessionId);
+        return;
       }
 
       useChatStore.getState().appendContextCompactionDivider(eventId, currentSessionId);
@@ -604,6 +618,9 @@ export function useAgentEvents({
       setStreamingState,
       getRuntime,
       appendProcessEntry,
+      updateProcessPlanSteps,
+      updateInferredPlanSteps,
+      recordProcessFiles,
       completeIdleNotice,
       appendOrRefreshAlreadyRunningNotice,
       finishThinkingEntry,
@@ -628,25 +645,6 @@ export function useAgentEvents({
       if (!currentSessionId) return;
       const runtime = getRuntime(currentSessionId);
       if (runtime.manualAbortRequested && event.type !== "aborted" && event.type !== "agent_disconnected") {
-        return;
-      }
-      const compactionDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
-      if (
-        event.type !== "message_start" &&
-        isContextCompactionLike(
-          event.type,
-          event.kind,
-          event.mode,
-          event.name,
-          event.toolName,
-          event.title,
-          event.message,
-          event.status,
-          event.state,
-          compactionDetail
-        )
-      ) {
-        appendContextCompactionDivider(currentSessionId, typeof event.id === "string" ? event.id : undefined);
         return;
       }
       if (
@@ -715,11 +713,31 @@ export function useAgentEvents({
         case "context_compaction":
           appendContextCompactionDivider(currentSessionId, typeof event.id === "string" ? event.id : undefined);
           break;
+        case "plan_update":
+          {
+            const steps = normalizePlanStepsFromEvent(event);
+            if (steps.length === 0) break;
+            ensureAssistantContinuation(currentSessionId);
+            finishAssistantProcessText(currentSessionId);
+            finishThinkingEntry(currentSessionId);
+            updateProcessPlanSteps(currentSessionId, steps, true);
+          }
+          break;
         case "process_event":
           const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
           const eventTitle = String(event.title || "Agent 事件");
           const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
           const eventState = normalizeProcessEntryState(event.state);
+          if (isPlanLikeProcessEvent(event)) {
+            const steps = normalizePlanStepsFromEvent(event);
+            if (steps.length > 0) {
+              ensureAssistantContinuation(currentSessionId);
+              finishAssistantProcessText(currentSessionId);
+              finishThinkingEntry(currentSessionId);
+              updateProcessPlanSteps(currentSessionId, steps, true);
+              break;
+            }
+          }
           if (
             (eventType === "error" || eventState === "error") &&
             isAlreadyRunningError(eventTitle, eventDetail) &&
@@ -742,6 +760,19 @@ export function useAgentEvents({
             questionEntryId = createProcessEntryId();
             setPendingUIResponse(getPendingUIFromEvent(event, currentSessionId, questionEntryId));
           }
+          const processFiles = Array.isArray(event.files) ? getToolProcessFiles(event) : undefined;
+          const changedProcessFiles = (processFiles || []).filter((file) =>
+            file.action === "edited" ||
+            file.action === "written" ||
+            file.action === "modified" ||
+            typeof file.additions === "number" ||
+            typeof file.deletions === "number"
+          );
+          if (changedProcessFiles.length > 0) {
+            recordProcessFiles(currentSessionId, changedProcessFiles, "modify");
+          } else if (eventType === "tool" || eventType === "diff") {
+            updateInferredPlanSteps(currentSessionId, eventType === "diff" ? "modify" : "operate");
+          }
 
           let processedTitle = eventTitle;
           if (eventType === "tool" && !eventTitle.includes("运行") && !eventTitle.includes("已完成") && !eventTitle.includes("失败")) {
@@ -759,7 +790,7 @@ export function useAgentEvents({
             type: eventType,
             title: processedTitle,
             detail: eventType === "question" ? undefined : eventDetail,
-            files: Array.isArray(event.files) ? getToolProcessFiles(event) : undefined,
+            files: processFiles,
             state: eventType === "question" ? eventState || "running" : eventState,
           });
           break;

@@ -15,6 +15,7 @@ export interface AgentProcessFile {
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";
+  changeKey?: string;
 }
 
 export interface AgentProcessEntry {
@@ -30,10 +31,26 @@ export interface AgentProcessEntry {
   expanded?: boolean;
 }
 
+export type AgentProcessStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export interface AgentProcessStep {
+  id: string;
+  title: string;
+  status: AgentProcessStepStatus;
+}
+
+export interface AgentProcessChangeSummary {
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+}
+
 export interface AgentProcess {
   startedAt: number;
   endedAt?: number;
   expanded?: boolean;
+  planSteps?: AgentProcessStep[];
+  changeSummary?: AgentProcessChangeSummary;
   entries: AgentProcessEntry[];
 }
 
@@ -102,6 +119,7 @@ interface ChatState {
   appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
+  updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;
@@ -331,6 +349,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         process: {
           ...msg.process,
           entries: msg.process.entries.filter((entry) => !entryIdSet.has(entry.id)),
+        },
+      };
+      return msgs;
+      });
+    }),
+
+  updateLastAssistantProcessMeta: (patch, sessionId) =>
+    set((s) => {
+      return updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index = findLastAssistantIndex(msgs);
+      if (index < 0) return msgs;
+
+      const msg = msgs[index];
+      if (!msg.process) return msgs;
+
+      msgs[index] = {
+        ...msg,
+        process: {
+          ...msg.process,
+          ...patch,
         },
       };
       return msgs;

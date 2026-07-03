@@ -37,9 +37,18 @@ const tabs: { id: SidebarTab; label: string; icon: ReactNode }[] = [
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({
+  onCollapse,
+  onExpand,
+}: {
+  onCollapse?: () => void;
+  onExpand?: () => void;
+}) {
   const { sidebarTab, sidebarCollapsed, setSidebarTab, toggleSidebar } =
     useAppStore();
+  const handleToggleSidebar = sidebarCollapsed
+    ? (onExpand || toggleSidebar)
+    : (onCollapse || toggleSidebar);
 
   return (
     <>
@@ -58,7 +67,7 @@ export function Sidebar() {
         <div style={{ flex: 1 }} />
 
         <button
-          onClick={toggleSidebar}
+          onClick={handleToggleSidebar}
           title={sidebarCollapsed ? "展开侧边栏" : "收缩侧边栏"}
           className="activity-btn"
         >

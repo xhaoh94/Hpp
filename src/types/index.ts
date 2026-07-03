@@ -45,6 +45,7 @@ export interface AgentEvent {
   message?: unknown;
   files?: unknown;
   diffs?: unknown;
+  steps?: unknown;
   patch?: unknown;
   additions?: unknown;
   deletions?: unknown;

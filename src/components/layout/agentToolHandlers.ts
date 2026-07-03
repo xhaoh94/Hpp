@@ -20,6 +20,7 @@ export function handleToolStartEvent(
   ctx: AgentEventHandlerContext
 ) {
   ctx.ensureAssistantContinuation(currentSessionId);
+  ctx.updateInferredPlanSteps(currentSessionId, "operate");
   ctx.finishAssistantProcessText(currentSessionId);
   ctx.finishThinkingEntry(currentSessionId);
   const key = getToolKey(event);
@@ -42,6 +43,9 @@ export function handleToolStartEvent(
   const existingEntryId = runtime.activeToolEntry[key];
   const toolFiles = getToolProcessFiles(event);
   if (toolFiles.length > 0) runtime.activeToolFile[key] = toolFiles;
+  if (toolFiles.some((file) => file.action === "edited" || file.action === "written" || file.action === "modified")) {
+    ctx.updateInferredPlanSteps(currentSessionId, "modify");
+  }
   const toolDetail = getToolDetail(event);
   const toolKind = normalizeToolKind(event.toolKind);
   const entryType: AgentProcessEntry["type"] = toolKind === "question" ? "question" : "tool";
@@ -100,6 +104,29 @@ export function handleToolEndEvent(
   const toolName = getToolName(event);
   const toolFiles = getToolProcessFiles(event);
   const preservedToolFiles = toolFiles.length > 0 ? toolFiles : runtime.activeToolFile[key] || [];
+  const changedToolFiles = preservedToolFiles
+    .filter((file) =>
+      file.action === "edited" ||
+      file.action === "written" ||
+      file.action === "modified" ||
+      typeof file.additions === "number" ||
+      typeof file.deletions === "number"
+    )
+    .map((file) => ({
+      ...file,
+      changeKey: [
+        "diff",
+        file.file,
+        typeof event.patch === "string" ? event.patch : "",
+        typeof file.additions === "number" ? file.additions : "",
+        typeof file.deletions === "number" ? file.deletions : "",
+      ].join("|"),
+    }));
+  if (changedToolFiles.length > 0 && !event.isError) {
+    ctx.recordProcessFiles(currentSessionId, changedToolFiles, "modify");
+  } else {
+    ctx.updateInferredPlanSteps(currentSessionId, event.isError ? "failed" : "operate");
+  }
   const toolDetail = getToolDetail(event);
   const toolSummary = getToolSummary({
     ...event,
