@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, memo, useRef } from "react";
+import { useState, useEffect, useCallback, memo, useRef, type DragEvent } from "react";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { FilePreview } from "@/components/shared/FilePreview";
+import { PATH_ATTACHMENT_DRAG_MIME } from "@/lib/path-attachments";
 import type { FileEntry } from "@/types";
 import "./FileTree.css";
 
@@ -114,12 +115,25 @@ const FileTreeItem = memo(function FileTreeItem({
     }
   }, [entry, expanded, children.length, onFileClick]);
 
+  const handleDragStart = useCallback((event: DragEvent<HTMLDivElement>) => {
+    const payload = JSON.stringify({
+      name: entry.name,
+      path: entry.path,
+      kind: entry.type,
+    });
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData(PATH_ATTACHMENT_DRAG_MIME, payload);
+    event.dataTransfer.setData("text/plain", entry.path);
+  }, [entry]);
+
   const isHighlighted = highlightedPath === entry.path;
   const fileInfo = entry.type === 'file' ? getFileIcon(entry.name) : null;
 
   return (
     <div>
       <div
+        draggable
+        onDragStart={handleDragStart}
         onClick={handleToggle}
         className={`file-tree-item ${entry.type === 'file' ? 'is-file' : ''} ${isHighlighted ? 'highlighted' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}

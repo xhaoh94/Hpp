@@ -10,6 +10,16 @@ export interface ProjectSession {
   lastActiveAt: string;
   sessionFilePath?: string;
   closed?: boolean;
+  references?: SessionReference[];
+}
+
+export interface SessionReference {
+  sourceSessionId: string;
+  sourceAgentId: string;
+  sourceTitle: string;
+  sourceUpdatedAt: string;
+  addedAt: string;
+  summary: string;
 }
 
 export interface Project {
@@ -37,6 +47,8 @@ interface ProjectState {
   closeSession: (projectId: string, sessionId: string) => void;
   reopenSession: (projectId: string, sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
+  upsertSessionReference: (projectId: string, sessionId: string, reference: SessionReference) => void;
+  removeSessionReference: (projectId: string, sessionId: string, sourceSessionId: string) => void;
   setSessionFilePath: (projectId: string, sessionId: string, sessionFilePath: string) => void;
   setAgentStatus: (sessionId: string, status: AgentStatus) => void;
   markSessionInitialized: (sessionId: string) => void;
@@ -109,7 +121,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return {
         projects: s.projects.map((p) =>
           p.id === projectId
-            ? { ...p, sessions: p.sessions.filter((se) => se.id !== sessionId) }
+            ? {
+                ...p,
+                sessions: p.sessions
+                  .filter((se) => se.id !== sessionId)
+                  .map((se) => ({
+                    ...se,
+                    references: se.references?.filter((ref) => ref.sourceSessionId !== sessionId),
+                  })),
+              }
             : p
         ),
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
@@ -150,6 +170,45 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setActiveSession: (sessionId) => set((s) => (
     s.activeSessionId === sessionId ? {} : { activeSessionId: sessionId }
   )),
+
+  upsertSessionReference: (projectId, sessionId, reference) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((se) => {
+                if (se.id !== sessionId) return se;
+                const existing = se.references || [];
+                const nextReferences = [
+                  ...existing.filter((ref) => ref.sourceSessionId !== reference.sourceSessionId),
+                  reference,
+                ];
+                return { ...se, references: nextReferences };
+              }),
+            }
+          : p
+      ),
+    })),
+
+  removeSessionReference: (projectId, sessionId, sourceSessionId) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((se) =>
+                se.id === sessionId
+                  ? {
+                      ...se,
+                      references: se.references?.filter((ref) => ref.sourceSessionId !== sourceSessionId),
+                    }
+                  : se
+              ),
+            }
+          : p
+      ),
+    })),
 
   setSessionFilePath: (projectId, sessionId, sessionFilePath) =>
     set((s) => ({

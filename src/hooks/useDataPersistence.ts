@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
+import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 
 interface PersistedData {
@@ -29,6 +29,25 @@ const getString = (value: unknown): string | undefined =>
 const getStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
+const parseSessionReference = (value: unknown): SessionReference | null => {
+  if (!isRecord(value)) return null;
+  const sourceSessionId = getString(value.sourceSessionId);
+  const sourceAgentId = getString(value.sourceAgentId);
+  const sourceTitle = getString(value.sourceTitle);
+  const sourceUpdatedAt = getString(value.sourceUpdatedAt);
+  const addedAt = getString(value.addedAt);
+  const summary = getString(value.summary);
+  if (!sourceSessionId || !sourceAgentId || !sourceTitle || !sourceUpdatedAt || !addedAt || !summary) return null;
+  return {
+    sourceSessionId,
+    sourceAgentId,
+    sourceTitle,
+    sourceUpdatedAt,
+    addedAt,
+    summary,
+  };
+};
+
 const parseProjectSession = (value: unknown): ProjectSession | null => {
   if (!isRecord(value)) return null;
   const id = getString(value.id);
@@ -48,6 +67,9 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
     lastActiveAt,
     sessionFilePath: getString(value.sessionFilePath),
     closed: typeof value.closed === "boolean" ? value.closed : undefined,
+    references: Array.isArray(value.references)
+      ? value.references.map(parseSessionReference).filter((ref): ref is SessionReference => !!ref)
+      : undefined,
   };
 };
 

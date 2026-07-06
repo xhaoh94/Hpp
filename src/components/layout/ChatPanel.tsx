@@ -6,10 +6,11 @@ import {
   useCallback,
   useMemo,
   type RefObject,
+  type DragEvent as ReactDragEvent,
   type UIEvent as ReactUIEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { CornerDownRight, ListCollapse, Trash2 } from "lucide-react";
+import { CornerDownRight, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -18,10 +19,17 @@ import {
   type ModelInfo,
   type QueuedMessage,
   type PendingFile,
+  type PendingPathAttachment,
 } from "@/stores/chat-store";
-import { useProjectStore } from "@/stores/project-store";
+import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
+import {
+  buildSessionReferencesContext,
+  createSessionReferenceSnapshot,
+  getSessionReferenceTitle,
+} from "@/lib/session-references";
+import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
 import { saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
@@ -32,7 +40,7 @@ import { ProcessBlock } from "./ProcessBlock";
 import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { useAgentEvents } from "./useAgentEvents";
-import { usePendingImages } from "./usePendingImages";
+import { isSupportedImageAttachment, usePendingImages } from "./usePendingImages";
 import { usePendingUIResponse, usePendingUIResponseActions } from "./usePendingUIResponse";
 import { useQuestionnaireResize } from "./useQuestionnaireResize";
 import { useSessionModels } from "./useSessionModels";
@@ -50,12 +58,30 @@ const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
 type AgentImagePayload = { type: string; data: string; mimeType: string };
 type MessageImagePayload = { id: string; src: string; name: string };
+type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: string };
 
 type MessagePayload = {
   displayContent: string;
   sendContent: string;
   messageImages?: MessageImagePayload[];
+  sessionReferences?: MessageSessionReferencePayload[];
   agentImages?: AgentImagePayload[];
+};
+
+const escapeXmlAttribute = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const buildPathAttachmentBlock = (attachments: PendingPathAttachment[]) => {
+  if (attachments.length === 0) return "";
+  const lines = attachments.map((attachment) => {
+    const tag = attachment.kind === "folder" ? "folder" : "file";
+    return `<${tag} path="${escapeXmlAttribute(attachment.path)}" />`;
+  });
+  return ["<attached_paths>", ...lines, "</attached_paths>"].join("\n");
 };
 
 type QueuePanelProps = {
@@ -69,6 +95,7 @@ type QueuePanelProps = {
 const getQueuePreview = (item: QueuedMessage) => {
   const content = item.displayContent.trim();
   if (content) return content.length > 120 ? `${content.slice(0, 120)}...` : content;
+  if (item.sessionReferences?.length) return `[引用会话: ${item.sessionReferences.map((reference) => reference.sourceTitle).join(", ")}]`;
   if (item.messageImages?.length) return `[${item.messageImages.length} 张图片]`;
   return "空消息";
 };
@@ -120,6 +147,124 @@ function MessageQueuePanel({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+type SessionReferenceControlProps = {
+  project: Project;
+  activeSession: ProjectSession;
+  sessionMessages: Record<string, ChatMessage[]>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAddOrRefresh: (session: ProjectSession) => void;
+  onRemove: (sourceSessionId: string) => void;
+};
+
+function SessionReferenceControl({
+  project,
+  activeSession,
+  sessionMessages,
+  open,
+  onOpenChange,
+  onAddOrRefresh,
+  onRemove,
+}: SessionReferenceControlProps) {
+  const references = activeSession.references || [];
+  const referencedSessionIds = new Set(references.map((reference) => reference.sourceSessionId));
+  const availableSessions = project.sessions.filter((session) => session.id !== activeSession.id);
+  const unreferencedSessions = availableSessions.filter((session) => !referencedSessionIds.has(session.id));
+
+  return (
+    <div className="chat-reference-control">
+      <button
+        type="button"
+        className={`chat-header-reference-btn ${references.length > 0 ? "active" : ""}`}
+        onClick={() => onOpenChange(!open)}
+        title="引用其他会话上下文"
+      >
+        <Link2 size={14} />
+        {references.length > 0 && <span>{references.length}</span>}
+      </button>
+
+      {open && (
+        <div className="chat-reference-popup">
+          <div className="chat-reference-header">
+            <span>引用会话</span>
+            <button type="button" onClick={() => onOpenChange(false)} title="关闭">
+              <X size={13} />
+            </button>
+          </div>
+
+          <div className="chat-reference-section">
+            <div className="chat-reference-section-title">已引用</div>
+            {references.length === 0 ? (
+              <div className="chat-reference-empty">暂无引用</div>
+            ) : (
+              references.map((reference) => {
+                const sourceSession = project.sessions.find((session) => session.id === reference.sourceSessionId);
+                return (
+                  <div className="chat-reference-item" key={reference.sourceSessionId}>
+                    <div className="chat-reference-item-main">
+                      <div className="chat-reference-item-title">{reference.sourceTitle}</div>
+                      <div className="chat-reference-item-meta">
+                        {getAgentName(reference.sourceAgentId)}
+                        {sourceSession?.closed ? " · 已关闭" : ""}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="chat-reference-icon-btn"
+                      onClick={() => sourceSession && onAddOrRefresh(sourceSession)}
+                      disabled={!sourceSession}
+                      title="刷新快照"
+                    >
+                      <RefreshCw size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-reference-icon-btn"
+                      onClick={() => onRemove(reference.sourceSessionId)}
+                      title="移除引用"
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="chat-reference-section">
+            <div className="chat-reference-section-title">可添加</div>
+            {unreferencedSessions.length === 0 ? (
+              <div className="chat-reference-empty">没有其他可引用会话</div>
+            ) : (
+              unreferencedSessions.map((session) => {
+                const messages = sessionMessages[session.id] || [];
+                return (
+                  <button
+                    type="button"
+                    className="chat-reference-add-item"
+                    key={session.id}
+                    onClick={() => onAddOrRefresh(session)}
+                  >
+                    <Plus size={13} />
+                    <span className="chat-reference-add-main">
+                      <span className="chat-reference-item-title">
+                        {getSessionReferenceTitle(session, messages)}
+                      </span>
+                      <span className="chat-reference-item-meta">
+                        {getAgentName(session.agentId)} · {messages.length} 条消息{session.closed ? " · 已关闭" : ""}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -178,10 +323,25 @@ const ChatMessageItem = memo(function ChatMessageItem({
 
   const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
   const hasImages = !!msg.images?.length;
+  const hasSessionReferences = !!msg.sessionReferences?.length;
   const hasDiffs = !!msg.diffs?.length && !processRunning;
   const hasContent = msg.content.trim().length > 0;
   const hasVisibleBubble =
-    msg.role === "assistant" ? !processRunning && (hasContent || hasImages || hasDiffs) : hasContent || hasImages || hasDiffs;
+    msg.role === "assistant"
+      ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences)
+      : hasContent || hasImages || hasDiffs || hasSessionReferences;
+  const renderSessionReferences = () => (
+    hasSessionReferences && msg.sessionReferences ? (
+      <div className="chat-message-references" aria-label="引用会话">
+        {msg.sessionReferences.map((reference) => (
+          <div key={reference.sourceSessionId} className="chat-message-reference-chip">
+            <Link2 size={12} strokeWidth={2} />
+            <span>引用会话: {reference.sourceTitle}</span>
+          </div>
+        ))}
+      </div>
+    ) : null
+  );
 
   return (
     <div data-msg-id={msg.id} className="chat-msg-wrapper">
@@ -213,12 +373,15 @@ const ChatMessageItem = memo(function ChatMessageItem({
           )}
           {hasContent && (
             <div className="chat-bubble-row">
-              <div className={`chat-bubble ${msg.role}`}>
-                {msg.role === "assistant" ? (
-                  <MarkdownRenderer content={msg.content} />
-                ) : (
-                  msg.content
-                )}
+              <div className="chat-bubble-stack">
+                <div className={`chat-bubble ${msg.role}`}>
+                  {msg.role === "assistant" ? (
+                    <MarkdownRenderer content={msg.content} />
+                  ) : (
+                    msg.content
+                  )}
+                </div>
+                {msg.role === "user" && renderSessionReferences()}
               </div>
               {msg.role === "user" && (
                 <div className="chat-msg-actions">
@@ -246,6 +409,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
               )}
             </div>
           )}
+          {(!hasContent || msg.role !== "user") && renderSessionReferences()}
           {hasDiffs && msg.diffs && (
             <DiffBlock diffs={msg.diffs} />
           )}
@@ -396,6 +560,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     pendingFiles,
     removePendingFile,
     clearPendingFiles,
+    pendingPathAttachments,
+    addPendingPathAttachment,
+    removePendingPathAttachment,
+    clearPendingPathAttachments,
     messageQueues,
     enqueueMessage,
     upsertQueuedMessage,
@@ -409,10 +577,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     toggleAssistantProcessEntry,
   } = useChatStore();
 
-  const { activeProjectId, projects, activeSessionId, agentStatuses, isSessionInitialized } = useProjectStore();
+  const {
+    activeProjectId,
+    projects,
+    activeSessionId,
+    agentStatuses,
+    isSessionInitialized,
+    upsertSessionReference,
+    removeSessionReference,
+  } = useProjectStore();
   const { triggerAddProject } = useAppStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+  const activeSessionReferences = useMemo(() => activeSession?.references || [], [activeSession?.references]);
   const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
   const activeQueuedMessages = activeSessionId ? messageQueues[activeSessionId] || [] : [];
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
@@ -440,8 +617,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [imageContextMenu, setImageContextMenu] = useState<{ x: number; y: number; src: string } | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
+  const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
+  const referenceRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
@@ -454,9 +633,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     removePendingImage,
     clearPendingImages,
     clearAttachmentError,
+    showAttachmentError,
     handlePaste,
-    handleDrop,
-    handleDragOver,
   } = usePendingImages();
   const {
     pendingUIResponse,
@@ -579,6 +757,21 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, [userMsgHistoryOpen]);
 
   useEffect(() => {
+    if (!referenceOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (referenceRef.current && !referenceRef.current.contains(e.target as Node)) {
+        setReferenceOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [referenceOpen]);
+
+  useEffect(() => {
+    setReferenceOpen(false);
+  }, [activeSessionId]);
+
+  useEffect(() => {
     if (!imageContextMenu) return;
     const close = () => setImageContextMenu(null);
     document.addEventListener("mousedown", close);
@@ -626,6 +819,118 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     scrollToMessageElement(msgId);
     setUserMsgHistoryOpen(false);
   }, [scrollToMessageElement]);
+
+  const handleAddOrRefreshReference = useCallback((sourceSession: ProjectSession) => {
+    if (!activeProject || !activeSessionId || sourceSession.id === activeSessionId) return;
+    const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || []);
+    upsertSessionReference(activeProject.id, activeSessionId, reference);
+  }, [activeProject, activeSessionId, sessionMessages, upsertSessionReference]);
+
+  const handleRemoveReference = useCallback((sourceSessionId: string) => {
+    if (!activeProject || !activeSessionId) return;
+    removeSessionReference(activeProject.id, activeSessionId, sourceSessionId);
+  }, [activeProject, activeSessionId, removeSessionReference]);
+
+  const clearSessionReferences = useCallback((sessionId: string, references: MessageSessionReferencePayload[]) => {
+    if (!activeProject || references.length === 0) return;
+    references.forEach((reference) => {
+      removeSessionReference(activeProject.id, sessionId, reference.sourceSessionId);
+    });
+  }, [activeProject, removeSessionReference]);
+
+  const addPathAttachmentFromPath = useCallback(async (path: string) => {
+    if (!path) {
+      showAttachmentError("无法获取文件路径");
+      return;
+    }
+
+    const result = await window.electronAPI.statPath(path);
+    if (!result.success || !result.attachment) {
+      showAttachmentError(result.error ? `无法添加路径：${result.error}` : "无法添加路径");
+      return;
+    }
+
+    addPendingPathAttachment({
+      id: crypto.randomUUID(),
+      ...result.attachment,
+    });
+    clearAttachmentError();
+  }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
+
+  const getDroppedFilePath = useCallback((file: File) => {
+    try {
+      return window.electronAPI.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const getPathAttachmentDragData = useCallback((dataTransfer: DataTransfer): PathAttachmentDragData | null => {
+    const raw = dataTransfer.getData(PATH_ATTACHMENT_DRAG_MIME);
+    if (!raw) return null;
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<PathAttachmentDragData>;
+      if (
+        typeof parsed.name === "string" &&
+        typeof parsed.path === "string" &&
+        (parsed.kind === "file" || parsed.kind === "folder")
+      ) {
+        return parsed as PathAttachmentDragData;
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }, []);
+
+  const handleAddInputFiles = useCallback((files: File[]) => {
+    void (async () => {
+      for (const file of files) {
+        if (isSupportedImageAttachment(file)) {
+          addPendingImage(file);
+          continue;
+        }
+
+        await addPathAttachmentFromPath(getDroppedFilePath(file));
+      }
+    })();
+  }, [addPathAttachmentFromPath, addPendingImage, getDroppedFilePath]);
+
+  const handleOpenAttachmentFolder = useCallback(() => {
+    void (async () => {
+      const result = await window.electronAPI.openAttachmentFolder();
+      if (result.canceled) return;
+      if (!result.attachment) {
+        showAttachmentError(result.error ? `无法添加文件夹：${result.error}` : "无法添加文件夹");
+        return;
+      }
+
+      addPendingPathAttachment({
+        id: crypto.randomUUID(),
+        ...result.attachment,
+      });
+      clearAttachmentError();
+    })();
+  }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
+
+  const handleDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const pathAttachment = getPathAttachmentDragData(event.dataTransfer);
+    if (pathAttachment) {
+      void addPathAttachmentFromPath(pathAttachment.path);
+      return;
+    }
+
+    const files = Array.from(event.dataTransfer.files);
+    handleAddInputFiles(files);
+  }, [addPathAttachmentFromPath, getPathAttachmentDragData, handleAddInputFiles]);
+
+  const handleDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }, []);
 
   const handleToggleAssistantProcess = useCallback((messageId: string, anchor?: HTMLElement | null) => {
     preserveScrollDuringLayoutChange(() => toggleAssistantProcess(messageId), anchor);
@@ -691,7 +996,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const buildMessagePayload = useCallback(async (
     text: string,
     files: PendingFile[],
-    images: PendingImage[]
+    images: PendingImage[],
+    pathAttachments: PendingPathAttachment[]
   ): Promise<MessagePayload> => {
     let displayContent = text;
     let sendContent = text;
@@ -724,6 +1030,30 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       sendContent = text ? `${text}\n\n${fileParts.join("\n\n")}` : fileParts.join("\n\n");
     }
 
+    if (pathAttachments.length > 0) {
+      const pathRefStr = pathAttachments
+        .map((attachment) => `[${attachment.kind}: ${attachment.name}]`)
+        .join(" ");
+      const pathBlock = buildPathAttachmentBlock(pathAttachments);
+      displayContent = displayContent ? `${displayContent}\n${pathRefStr}` : pathRefStr;
+      sendContent = sendContent ? `${sendContent}\n\n${pathBlock}` : pathBlock;
+    }
+
+    const referencesContext = buildSessionReferencesContext(activeSessionReferences);
+    const messageSessionReferences = activeSessionReferences.map((reference) => ({
+      sourceSessionId: reference.sourceSessionId,
+      sourceTitle: reference.sourceTitle,
+    }));
+    if (referencesContext) {
+      sendContent = [
+        referencesContext,
+        "",
+        "<current_user_message>",
+        sendContent,
+        "</current_user_message>",
+      ].join("\n");
+    }
+
     // Handle pending images
     let agentImages: AgentImagePayload[] | undefined;
     let messageImages: MessageImagePayload[] | undefined;
@@ -737,8 +1067,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }));
     }
 
-    return { displayContent, sendContent, messageImages, agentImages };
-  }, []);
+    return {
+      displayContent,
+      sendContent,
+      messageImages,
+      sessionReferences: messageSessionReferences.length > 0 ? messageSessionReferences : undefined,
+      agentImages,
+    };
+  }, [activeSessionReferences]);
 
   const sendPayloadNow = useCallback(async (
     targetSessionId: string,
@@ -754,6 +1090,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         content: payload.displayContent,
         timestamp: Date.now(),
         images: payload.messageImages,
+        sessionReferences: payload.sessionReferences,
       }, targetSessionId);
       setStreaming(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
@@ -828,9 +1165,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
     const text = inputValueRef.current.trim();
     const targetSessionId = useProjectStore.getState().activeSessionId;
-    if (!targetSessionId || (!text && pendingImages.length === 0 && pendingFiles.length === 0)) return;
+    if (
+      !targetSessionId ||
+      (!text &&
+        pendingImages.length === 0 &&
+        pendingFiles.length === 0 &&
+        pendingPathAttachments.length === 0 &&
+        activeSessionReferences.length === 0)
+    ) {
+      return;
+    }
 
-    const payload = await buildMessagePayload(text, pendingFiles, pendingImages);
+    const payload = await buildMessagePayload(text, pendingFiles, pendingImages, pendingPathAttachments);
     const existingRuntime = sessionRuntimeRef.current[targetSessionId];
     const running = existingRuntime?.processActive || useProjectStore.getState().agentStatuses[targetSessionId] === "running";
 
@@ -846,6 +1192,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       setComposerInput("");
       clearPendingImages();
       clearPendingFiles();
+      clearPendingPathAttachments();
+      clearSessionReferences(targetSessionId, payload.sessionReferences || []);
       setStreaming(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
       return;
@@ -854,17 +1202,23 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setComposerInput("");
     clearPendingImages();
     clearPendingFiles();
+    clearPendingPathAttachments();
+    clearSessionReferences(targetSessionId, payload.sessionReferences || []);
     await sendPayloadNow(targetSessionId, payload, { planModeEnabled });
   }, [
     activeQuestionnaire,
+    activeSessionReferences.length,
     buildMessagePayload,
     clearPendingFiles,
     clearPendingImages,
+    clearPendingPathAttachments,
+    clearSessionReferences,
     enqueueMessage,
     handleSendUIResponse,
     isAwaitingUIResponse,
     pendingFiles,
     pendingImages,
+    pendingPathAttachments,
     planModeEnabled,
     sendPayloadNow,
     setComposerInput,
@@ -1093,25 +1447,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }
 
   return (
-    <div ref={chatPanelRef} className="chat-panel">
+    <div ref={chatPanelRef} className="chat-panel" onDrop={handleDrop} onDragOver={handleDragOver}>
       {/* Header */}
       <div className="chat-header">
         <div className="chat-agent-dot" />
         <span className="chat-agent-name">{activeProject.name}</span>
         <span className="chat-agent-tag">{getAgentName(activeAgentId)}</span>
-        <div style={{ flex: 1 }} />
-        <div ref={userMsgHistoryRef} className="relative">
+        <div ref={userMsgHistoryRef} className="relative chat-header-history-anchor">
           <button
             className="chat-header-history-btn"
             onClick={() => setUserMsgHistoryOpen(!userMsgHistoryOpen)}
             title="发言记录"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-              <circle cx="9" cy="7" r="4" />
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-            </svg>
+            <MessageCircle size={14} strokeWidth={1.8} />
           </button>
           {userMsgHistoryOpen && (
             <div className="chat-user-history-popup">
@@ -1146,6 +1494,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             </div>
           )}
         </div>
+        <div style={{ flex: 1 }} />
       </div>
 
       {/* Messages */}
@@ -1207,13 +1556,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           inputHasText={inputHasText}
           pendingFiles={pendingFiles}
           pendingImages={pendingImages}
+          pendingPathAttachments={pendingPathAttachments}
+          sessionReferences={activeSessionReferences}
           sendKey={sendKey}
           fileInputRef={fileInputRef}
           textareaRef={textareaRef}
-          onAddPendingImage={addPendingImage}
+          onAddInputFiles={handleAddInputFiles}
+          onOpenAttachmentFolder={handleOpenAttachmentFolder}
           onClearAttachmentError={clearAttachmentError}
           onRemovePendingFile={removePendingFile}
           onRemovePendingImage={removePendingImage}
+          onRemovePathAttachment={removePendingPathAttachment}
+          onRemoveSessionReference={handleRemoveReference}
           onOpenImage={handleOpenImage}
           onSyncInputValue={syncInputValue}
           onResizeTextarea={resizeTextarea}
@@ -1242,6 +1596,21 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           thinkingOpen={thinkingOpen}
           modelRef={modelRef}
           thinkingRef={thinkingRef}
+          leadingContent={
+            activeProject && activeSession ? (
+              <div ref={referenceRef} className="relative">
+                <SessionReferenceControl
+                  project={activeProject}
+                  activeSession={activeSession}
+                  sessionMessages={sessionMessages}
+                  open={referenceOpen}
+                  onOpenChange={setReferenceOpen}
+                  onAddOrRefresh={handleAddOrRefreshReference}
+                  onRemove={handleRemoveReference}
+                />
+              </div>
+            ) : null
+          }
           getPlanModeTooltip={getAgentPlanModeTooltip}
           onExpandedProviderChange={setExpandedProvider}
           onModelOpenChange={setModelOpen}

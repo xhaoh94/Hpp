@@ -5,9 +5,10 @@ import type {
   ClipboardEvent,
   RefObject,
 } from "react";
-import { memo } from "react";
-import { Square, X } from "lucide-react";
-import type { PendingFile } from "@/stores/chat-store";
+import { memo, useEffect, useRef, useState } from "react";
+import { FileText, Folder, Image as ImageIcon, Link2, Square, X } from "lucide-react";
+import type { PendingFile, PendingPathAttachment } from "@/stores/chat-store";
+import type { SessionReference } from "@/stores/project-store";
 
 export type PendingImage = {
   id: string;
@@ -24,13 +25,18 @@ type ChatComposerProps = {
   inputHasText: boolean;
   pendingFiles: PendingFile[];
   pendingImages: PendingImage[];
+  pendingPathAttachments: PendingPathAttachment[];
+  sessionReferences: SessionReference[];
   sendKey: string;
   fileInputRef: RefObject<HTMLInputElement | null>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
-  onAddPendingImage: (file: File) => void;
+  onAddInputFiles: (files: File[]) => void;
+  onOpenAttachmentFolder: () => void;
   onClearAttachmentError: () => void;
   onRemovePendingFile: (id: string) => void;
   onRemovePendingImage: (id: string) => void;
+  onRemovePathAttachment: (id: string) => void;
+  onRemoveSessionReference: (sourceSessionId: string) => void;
   onOpenImage: (src: string) => void;
   onSyncInputValue: (value: string) => void;
   onResizeTextarea: (textarea?: HTMLTextAreaElement | null) => void;
@@ -50,13 +56,18 @@ export const ChatComposer = memo(function ChatComposer({
   inputHasText,
   pendingFiles,
   pendingImages,
+  pendingPathAttachments,
+  sessionReferences,
   sendKey,
   fileInputRef,
   textareaRef,
-  onAddPendingImage,
+  onAddInputFiles,
+  onOpenAttachmentFolder,
   onClearAttachmentError,
   onRemovePendingFile,
   onRemovePendingImage,
+  onRemovePathAttachment,
+  onRemoveSessionReference,
   onOpenImage,
   onSyncInputValue,
   onResizeTextarea,
@@ -67,7 +78,12 @@ export const ChatComposer = memo(function ChatComposer({
   onSend,
   onAbort,
 }: ChatComposerProps) {
-  const hasPendingContent = inputHasText || pendingImages.length > 0 || pendingFiles.length > 0;
+  const hasPendingContent =
+    inputHasText ||
+    pendingImages.length > 0 ||
+    pendingFiles.length > 0 ||
+    pendingPathAttachments.length > 0 ||
+    sessionReferences.length > 0;
   const showAbortButton = currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
   const queueSend = currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
   const sendDisabled = activeQuestionnaire
@@ -87,40 +103,103 @@ export const ChatComposer = memo(function ChatComposer({
       : currentSessionRunning
         ? "加入发送队列"
         : "发送";
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const uploadMenuRef = useRef<HTMLDivElement>(null);
 
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    Array.from(event.target.files || []).forEach(onAddPendingImage);
+    onAddInputFiles(Array.from(event.target.files || []));
     event.target.value = "";
+  };
+
+  useEffect(() => {
+    if (!uploadMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
+        setUploadMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [uploadMenuOpen]);
+
+  const handleChooseFiles = () => {
+    setUploadMenuOpen(false);
+    fileInputRef.current?.click();
+  };
+
+  const handleChooseFolder = () => {
+    setUploadMenuOpen(false);
+    onOpenAttachmentFolder();
   };
 
   return (
     <>
-      {(pendingFiles.length > 0 || pendingImages.length > 0) && (
+      {(sessionReferences.length > 0 || pendingFiles.length > 0 || pendingImages.length > 0 || pendingPathAttachments.length > 0) && (
         <div className="chat-preview-bar">
+          {sessionReferences.map((reference) => (
+            <div key={reference.sourceSessionId} className="chat-preview-chip chat-preview-chip-reference">
+              <Link2 size={12} strokeWidth={2} className="chat-preview-icon" />
+              <span className="chat-preview-label">{reference.sourceTitle} 会话</span>
+              <button
+                type="button"
+                className="chat-preview-remove"
+                onClick={() => onRemoveSessionReference(reference.sourceSessionId)}
+                title="移除"
+                aria-label="移除引用会话"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
           {pendingFiles.map((file) => (
-            <div key={file.id} className="chat-file-card">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="chat-file-icon">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-              <span className="chat-file-name">{file.fileName}:{file.startLine}-{file.endLine}</span>
-              <button type="button" className="chat-file-remove" onClick={() => onRemovePendingFile(file.id)} title="移除">
+            <div key={file.id} className="chat-preview-chip">
+              <FileText size={12} strokeWidth={2} className="chat-preview-icon" />
+              <span className="chat-preview-label">{file.fileName}:{file.startLine}-{file.endLine}</span>
+              <button
+                type="button"
+                className="chat-preview-remove"
+                onClick={() => onRemovePendingFile(file.id)}
+                title="移除"
+                aria-label="移除文件片段"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          {pendingPathAttachments.map((attachment) => (
+            <div key={attachment.id} className="chat-preview-chip" title={attachment.path}>
+              {attachment.kind === "folder" ? (
+                <Folder size={12} strokeWidth={2} className="chat-preview-icon" />
+              ) : (
+                <FileText size={12} strokeWidth={2} className="chat-preview-icon" />
+              )}
+              <span className="chat-preview-label">{attachment.name}</span>
+              <button
+                type="button"
+                className="chat-preview-remove"
+                onClick={() => onRemovePathAttachment(attachment.id)}
+                title="移除"
+                aria-label={`移除${attachment.kind === "folder" ? "文件夹" : "文件"}`}
+              >
                 <X size={12} />
               </button>
             </div>
           ))}
           {pendingImages.map((image) => (
-            <div key={image.id} className="chat-image-card-inline">
-              {image.file.type.startsWith("image/") ? (
-                <img src={image.src} alt={image.name} className="chat-image-thumb-inline" onClick={() => onOpenImage(image.src)} />
+            <div key={image.id} className="chat-preview-chip">
+              {image.src.startsWith("data:image/") || image.file.type.startsWith("image/") ? (
+                <img src={image.src} alt={image.name} className="chat-preview-thumb" onClick={() => onOpenImage(image.src)} />
               ) : (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" strokeWidth="2" className="chat-file-icon">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                </svg>
+                <ImageIcon size={12} strokeWidth={2} className="chat-preview-icon" />
               )}
-              <span className="chat-file-name">{image.name}</span>
-              <button type="button" className="chat-file-remove" onClick={() => onRemovePendingImage(image.id)} title="移除">
+              <span className="chat-preview-label">{image.name}</span>
+              <button
+                type="button"
+                className="chat-preview-remove"
+                onClick={() => onRemovePendingImage(image.id)}
+                title="移除"
+                aria-label="移除图片"
+              >
                 <X size={12} />
               </button>
             </div>
@@ -139,7 +218,17 @@ export const ChatComposer = memo(function ChatComposer({
         </div>
       )}
 
-      <div className="chat-input-container" onDrop={onDrop} onDragOver={onDragOver}>
+      <div
+        className="chat-input-container"
+        onDrop={(event) => {
+          event.stopPropagation();
+          onDrop(event);
+        }}
+        onDragOver={(event) => {
+          event.stopPropagation();
+          onDragOver(event);
+        }}
+      >
         <input
           ref={fileInputRef}
           type="file"
@@ -148,11 +237,32 @@ export const ChatComposer = memo(function ChatComposer({
           onChange={handleFileInputChange}
         />
         <div className="chat-input-actions-left">
-          <button type="button" className="chat-input-btn" title="上传文件" onClick={() => fileInputRef.current?.click()}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-            </svg>
-          </button>
+          <div ref={uploadMenuRef} className="chat-upload-control">
+            <button
+              type="button"
+              className="chat-input-btn"
+              title="添加附件"
+              aria-haspopup="menu"
+              aria-expanded={uploadMenuOpen}
+              onClick={() => setUploadMenuOpen((open) => !open)}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+              </svg>
+            </button>
+            {uploadMenuOpen && (
+              <div className="chat-upload-menu" role="menu">
+                <button type="button" role="menuitem" onClick={handleChooseFiles}>
+                  <FileText size={13} />
+                  <span>文件</span>
+                </button>
+                <button type="button" role="menuitem" onClick={handleChooseFolder}>
+                  <Folder size={13} />
+                  <span>文件夹</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <textarea
           ref={textareaRef}

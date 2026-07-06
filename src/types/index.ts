@@ -5,6 +5,12 @@ export interface FileEntry {
   children?: FileEntry[];
 }
 
+export interface PathAttachmentInfo {
+  name: string;
+  path: string;
+  kind: "file" | "folder";
+}
+
 export interface AgentModel {
   id: string;
   name: string;
@@ -82,9 +88,12 @@ export interface ElectronAPI {
   // File system
   readDirectory: (dirPath: string) => Promise<FileEntry[]>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
+  statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
+  getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
   searchFiles: (dirPath: string, query: string) => Promise<FileEntry[]>;
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
+  openAttachmentFolder: () => Promise<{ canceled: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getHomeDir: () => Promise<string>;
   isCommandAvailable: (command: string) => Promise<boolean>;
   piSDKGetStatus: () => Promise<PiSDKStatus>;

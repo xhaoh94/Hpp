@@ -1,4 +1,4 @@
-import { useMemo, type RefObject } from "react";
+import { useMemo, type ReactNode, type RefObject } from "react";
 import { Check, Star } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 
@@ -24,6 +24,7 @@ type ChatToolbarProps = {
   thinkingOpen: boolean;
   modelRef: RefObject<HTMLDivElement | null>;
   thinkingRef: RefObject<HTMLDivElement | null>;
+  leadingContent?: ReactNode;
   getPlanModeTooltip: (agentId: string) => string;
   onExpandedProviderChange: (provider: string | null) => void;
   onModelOpenChange: (open: boolean) => void;
@@ -51,6 +52,7 @@ export function ChatToolbar({
   thinkingOpen,
   modelRef,
   thinkingRef,
+  leadingContent,
   getPlanModeTooltip,
   onExpandedProviderChange,
   onModelOpenChange,
@@ -78,6 +80,8 @@ export function ChatToolbar({
 
   return (
     <div className="chat-input-toolbar">
+      {leadingContent}
+
       <button
         type="button"
         onClick={() => onPlanModeChange(!planModeEnabled)}

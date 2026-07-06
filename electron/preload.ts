@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   // Window controls
@@ -13,11 +13,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   readDirectory: (dirPath: string) =>
     ipcRenderer.invoke("fs:readDirectory", dirPath),
   readFile: (filePath: string) => ipcRenderer.invoke("fs:readFile", filePath),
+  statPath: (filePath: string) => ipcRenderer.invoke("fs:statPath", filePath),
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
     ipcRenderer.invoke("fs:fileExists", filePath),
   searchFiles: (dirPath: string, query: string) =>
     ipcRenderer.invoke("fs:searchFiles", dirPath, query),
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),
+  openAttachmentFolder: () => ipcRenderer.invoke("fs:openAttachmentFolder"),
   getHomeDir: () => ipcRenderer.invoke("fs:getHomeDir"),
   isCommandAvailable: (command: string) => ipcRenderer.invoke("fs:isCommandAvailable", command),
   piSDKGetStatus: () => ipcRenderer.invoke("pi-sdk:getStatus"),

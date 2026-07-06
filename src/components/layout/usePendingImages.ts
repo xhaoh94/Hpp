@@ -1,4 +1,4 @@
-import { useCallback, useState, type ClipboardEvent, type DragEvent } from "react";
+import { useCallback, useState, type ClipboardEvent } from "react";
 import type { PendingImage } from "./ChatComposer";
 
 const MAX_PENDING_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -17,11 +17,10 @@ const formatBytes = (bytes: number) => {
   return `${Math.round(bytes / 1024 / 1024)}MB`;
 };
 
+export const isSupportedImageAttachment = (file: File) =>
+  SUPPORTED_IMAGE_TYPES.has(file.type) || SUPPORTED_IMAGE_NAME_PATTERN.test(file.name);
+
 const getImageAttachmentRejection = (file: File) => {
-  const isImage = SUPPORTED_IMAGE_TYPES.has(file.type) || SUPPORTED_IMAGE_NAME_PATTERN.test(file.name);
-  if (!isImage) {
-    return `仅支持图片附件，已忽略 ${file.name || "该文件"}`;
-  }
   if (file.size > MAX_PENDING_IMAGE_BYTES) {
     return `图片不能超过 ${formatBytes(MAX_PENDING_IMAGE_BYTES)}，已忽略 ${file.name || "该文件"}`;
   }
@@ -33,6 +32,11 @@ export function usePendingImages() {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   const addPendingImage = useCallback((file: File) => {
+    if (!isSupportedImageAttachment(file)) {
+      setAttachmentError(`不支持的图片附件：${file.name || "该文件"}`);
+      return;
+    }
+
     const rejection = getImageAttachmentRejection(file);
     if (rejection) {
       console.warn("[chat] ignored attachment:", file.name || file.type || "unknown file");
@@ -65,6 +69,10 @@ export function usePendingImages() {
     setAttachmentError(null);
   }, []);
 
+  const showAttachmentError = useCallback((message: string) => {
+    setAttachmentError(message);
+  }, []);
+
   const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(event.clipboardData.items);
     for (const item of items) {
@@ -77,18 +85,6 @@ export function usePendingImages() {
     }
   }, [addPendingImage]);
 
-  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const files = Array.from(event.dataTransfer.files);
-    for (const file of files) {
-      addPendingImage(file);
-    }
-  }, [addPendingImage]);
-
-  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-  }, []);
-
   return {
     pendingImages,
     attachmentError,
@@ -96,8 +92,7 @@ export function usePendingImages() {
     removePendingImage,
     clearPendingImages,
     clearAttachmentError,
+    showAttachmentError,
     handlePaste,
-    handleDrop,
-    handleDragOver,
   };
 }

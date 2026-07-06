@@ -1,6 +1,6 @@
 import { ipcMain, dialog, BrowserWindow } from "electron";
-import { readdir, readFile, access } from "fs/promises";
-import { join } from "path";
+import { readdir, readFile, access, stat } from "fs/promises";
+import { basename, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
 
@@ -26,6 +26,24 @@ interface FileEntry {
   type: "file" | "folder";
   children?: FileEntry[];
 }
+
+interface PathAttachmentInfo {
+  name: string;
+  path: string;
+  kind: "file" | "folder";
+}
+
+const getPathAttachmentInfo = async (targetPath: string): Promise<PathAttachmentInfo> => {
+  const info = await stat(targetPath);
+  if (!info.isFile() && !info.isDirectory()) {
+    throw new Error("Path is not a file or folder");
+  }
+  return {
+    name: basename(targetPath) || targetPath,
+    path: targetPath,
+    kind: info.isDirectory() ? "folder" : "file",
+  };
+};
 
 export function registerFileHandlers() {
   ipcMain.handle("fs:readDirectory", async (_event, dirPath: string) => {
@@ -71,6 +89,17 @@ export function registerFileHandlers() {
     try {
       const content = await readFile(filePath, "utf-8");
       return { success: true, content };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("fs:statPath", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || !filePath.trim()) {
+      return { success: false, error: "Invalid file path" };
+    }
+    try {
+      return { success: true, attachment: await getPathAttachmentInfo(filePath) };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -138,6 +167,21 @@ export function registerFileHandlers() {
       return { canceled: true, path: "" };
     }
     return { canceled: false, path: result.filePaths[0] };
+  });
+
+  ipcMain.handle("fs:openAttachmentFolder", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+    try {
+      return { canceled: false, attachment: await getPathAttachmentInfo(result.filePaths[0]) };
+    } catch (err: unknown) {
+      return { canceled: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   ipcMain.handle("fs:getHomeDir", () => {

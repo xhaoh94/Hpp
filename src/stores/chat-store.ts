@@ -63,6 +63,7 @@ export interface ChatMessage {
   systemType?: "context_compaction";
   eventId?: string;
   images?: Array<{ id: string; src: string; name: string }>;
+  sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   diffs?: FileDiff[];
   process?: AgentProcess;
 }
@@ -73,6 +74,13 @@ export interface PendingFile {
   filePath: string;
   startLine: number;
   endLine: number;
+}
+
+export interface PendingPathAttachment {
+  id: string;
+  name: string;
+  path: string;
+  kind: "file" | "folder";
 }
 
 export interface ModelInfo {
@@ -90,6 +98,7 @@ export interface QueuedMessage {
   displayContent: string;
   sendContent: string;
   messageImages?: Array<{ id: string; src: string; name: string }>;
+  sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   agentImages?: Array<{ type: string; data: string; mimeType: string }>;
   planModeEnabled?: boolean;
   createdAt: number;
@@ -109,6 +118,7 @@ interface ChatState {
   activeAgentId: string;
   highlightedFile: string | null;
   pendingFiles: PendingFile[];
+  pendingPathAttachments: PendingPathAttachment[];
   messageQueues: Record<string, QueuedMessage[]>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
@@ -135,6 +145,9 @@ interface ChatState {
   addPendingFile: (file: PendingFile) => void;
   removePendingFile: (id: string) => void;
   clearPendingFiles: () => void;
+  addPendingPathAttachment: (attachment: PendingPathAttachment) => void;
+  removePendingPathAttachment: (id: string) => void;
+  clearPendingPathAttachments: () => void;
   enqueueMessage: (item: QueuedMessage) => void;
   upsertQueuedMessage: (item: QueuedMessage) => void;
   removeQueuedMessage: (sessionId: string, itemId: string) => void;
@@ -224,6 +237,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeAgentId: "codex",
   highlightedFile: null,
   pendingFiles: [],
+  pendingPathAttachments: [],
   messageQueues: {},
 
   addMessage: (msg, sessionId) =>
@@ -494,6 +508,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addPendingFile: (file) => set((s) => ({ pendingFiles: [...s.pendingFiles, file] })),
   removePendingFile: (id) => set((s) => ({ pendingFiles: s.pendingFiles.filter((f) => f.id !== id) })),
   clearPendingFiles: () => set({ pendingFiles: [] }),
+  addPendingPathAttachment: (attachment) =>
+    set((s) => {
+      const exists = s.pendingPathAttachments.some(
+        (item) => item.path === attachment.path && item.kind === attachment.kind
+      );
+      if (exists) return {};
+      return { pendingPathAttachments: [...s.pendingPathAttachments, attachment] };
+    }),
+  removePendingPathAttachment: (id) =>
+    set((s) => ({
+      pendingPathAttachments: s.pendingPathAttachments.filter((attachment) => attachment.id !== id),
+    })),
+  clearPendingPathAttachments: () => set({ pendingPathAttachments: [] }),
   enqueueMessage: (item) =>
     set((s) => ({
       messageQueues: {
@@ -566,6 +593,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: s.activeSessionId === sessionId ? [] : s.messages,
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
         pendingFiles: s.activeSessionId === sessionId ? [] : s.pendingFiles,
+        pendingPathAttachments: s.activeSessionId === sessionId ? [] : s.pendingPathAttachments,
       };
     }),
   deleteSessionsMessages: (sessionIds) =>
@@ -585,6 +613,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: deletingActiveSession ? [] : s.messages,
         activeSessionId: deletingActiveSession ? null : s.activeSessionId,
         pendingFiles: deletingActiveSession ? [] : s.pendingFiles,
+        pendingPathAttachments: deletingActiveSession ? [] : s.pendingPathAttachments,
       };
     }),
 
@@ -595,9 +624,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       : state.sessionMessages;
     if (sessionId) {
       const sessionMsgs = nextSessionMessages[sessionId] || [];
-      set({ messages: sessionMsgs, sessionMessages: nextSessionMessages, activeSessionId: sessionId, pendingFiles: [] });
+      set({
+        messages: sessionMsgs,
+        sessionMessages: nextSessionMessages,
+        activeSessionId: sessionId,
+        pendingFiles: [],
+        pendingPathAttachments: [],
+      });
     } else {
-      set({ messages: [], sessionMessages: nextSessionMessages, activeSessionId: null, pendingFiles: [] });
+      set({
+        messages: [],
+        sessionMessages: nextSessionMessages,
+        activeSessionId: null,
+        pendingFiles: [],
+        pendingPathAttachments: [],
+      });
     }
   },
 
