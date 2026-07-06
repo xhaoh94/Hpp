@@ -268,6 +268,15 @@ export class OpenCodeAgent {
     }
   }
 
+  isIdle(): boolean {
+    return (
+      !this.eventSource &&
+      !this.idleTimer &&
+      this.runningToolParts.size === 0 &&
+      this.pendingQuestionToolParts.size === 0
+    );
+  }
+
   /** Listen to SSE events for streaming responses */
   private startSSEListener() {
     this.stopSSEListener();
@@ -555,6 +564,8 @@ export class OpenCodeAgent {
       }
     }
     this.stopSSEListener();
+    this.runningToolParts.clear();
+    this.pendingQuestionToolParts.clear();
   }
 
   /** Get available models from providers */
@@ -643,6 +654,8 @@ export class OpenCodeAgent {
       this.process = null;
     }
     this.sessionId = null;
+    this.runningToolParts.clear();
+    this.pendingQuestionToolParts.clear();
   }
 
   // ---- HTTP helpers ----

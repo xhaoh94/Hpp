@@ -359,17 +359,18 @@ export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
   const chatState = useChatStore.getState();
   chatState.setAvailableModels(models);
 
+  const persisted = getSessionModel(sessionId);
+  if (persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider)) {
+    chatState.setCurrentModel(persisted);
+    return;
+  }
+
   const currentModel = chatState.currentModel;
   if (currentModel && models.some(m => m.id === currentModel.id && m.provider === currentModel.provider)) {
     return;
   }
 
-  const persisted = getSessionModel(sessionId);
-  if (persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider)) {
-    chatState.setCurrentModel(persisted);
-  } else {
-    chatState.setCurrentModel(models[0]);
-  }
+  chatState.setCurrentModel(models[0]);
 }
 
 export function useDataPersistence() {

@@ -18,6 +18,7 @@ interface AgentModel {
 interface AgentBackend {
   setWindow(win: BrowserWindow): void;
   init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
+  isIdle(): boolean;
   sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
   sendGuidance?(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
   forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
@@ -53,6 +54,13 @@ interface AgentForkResult {
   nativeEntryId?: string;
   error?: string;
   reason?: string;
+}
+
+interface AgentReloadConfigResult {
+  success: boolean;
+  error?: string;
+  models?: AgentModel[];
+  reloadedSessionIds?: string[];
 }
 
 // ============================================================
@@ -120,6 +128,11 @@ function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
   return result;
 }
 
+function resetLocalModelsConfigCache() {
+  _localModelsConfig = null;
+  _localModelsConfigMtime = 0;
+}
+
 function supportsNativePlanMode(agentId?: string): boolean {
   return agentId === "codex" || agentId === "opencode" || agentId === "droid";
 }
@@ -147,6 +160,7 @@ class AgentManager {
   private sessionAgents = new Map<string, AgentBackend>();
   private sessionAgentTypes = new Map<string, string>(); // sessionId -> agentId ("pi" | "opencode")
   private sessionFilePaths = new Map<string, string>();
+  private sessionProjectPaths = new Map<string, string>();
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
 
@@ -174,6 +188,7 @@ class AgentManager {
     } else {
       console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
     }
+    this.sessionProjectPaths.set(sessionId, projectPath);
     if (this.window) agent.setWindow(this.window);
     await agent.init(projectPath, existingSessionFilePath);
 
@@ -254,11 +269,102 @@ class AgentManager {
     });
   }
 
+  async reloadConfig(agentId: string, sessionId?: string): Promise<AgentReloadConfigResult> {
+    const entries = Array.from(this.sessionAgents.entries());
+    const targetEntries = sessionId
+      ? entries.filter(([sid]) => sid === sessionId)
+      : entries.filter(([sid]) => this.sessionAgentTypes.get(sid) === agentId);
+
+    if (sessionId && targetEntries.length === 0) {
+      return { success: false, error: "目标 Agent 会话尚未初始化。", reloadedSessionIds: [] };
+    }
+
+    if (targetEntries.length === 0) {
+      return { success: true, models: [], reloadedSessionIds: [] };
+    }
+
+    for (const [sid] of targetEntries) {
+      if (this.sessionAgentTypes.get(sid) !== agentId) {
+        return { success: false, error: "目标会话不是指定 Agent。", reloadedSessionIds: [] };
+      }
+    }
+
+    const busySession = targetEntries.find(([, agent]) => !agent.isIdle());
+    if (busySession) {
+      return {
+        success: false,
+        error: "当前 Agent 会话正在运行，请等待空闲后再重载配置。",
+        reloadedSessionIds: [],
+      };
+    }
+
+    const targets = targetEntries.map(([sid, agent]) => {
+      const projectPath = this.sessionProjectPaths.get(sid);
+      if (!projectPath) {
+        throw new Error(`会话 ${sid} 缺少项目路径，无法重载配置。`);
+      }
+      return {
+        sessionId: sid,
+        agent,
+        agentType: this.sessionAgentTypes.get(sid) || agentId,
+        projectPath,
+        sessionFilePath: agent.sessionFilePath || this.sessionFilePaths.get(sid),
+      };
+    });
+
+    resetLocalModelsConfigCache();
+
+    const initializedTargets: Array<{
+      target: (typeof targets)[number];
+      nextAgent: AgentBackend;
+      nextSessionFilePath?: string;
+    }> = [];
+
+    try {
+      for (const target of targets) {
+        const nextAgent = this.createAgentBackend(target.agentType, target.sessionId);
+        if (this.window) nextAgent.setWindow(this.window);
+        await nextAgent.init(target.projectPath, target.sessionFilePath);
+        initializedTargets.push({
+          target,
+          nextAgent,
+          nextSessionFilePath: nextAgent.sessionFilePath || target.sessionFilePath,
+        });
+      }
+    } catch (error) {
+      for (const initialized of initializedTargets) {
+        initialized.nextAgent.dispose();
+      }
+      throw error;
+    }
+
+    for (const { target, nextAgent, nextSessionFilePath } of initializedTargets) {
+      target.agent.dispose();
+      this.sessionAgents.set(target.sessionId, nextAgent);
+      this.sessionAgentTypes.set(target.sessionId, target.agentType);
+      if (nextSessionFilePath) {
+        this.sessionFilePaths.set(target.sessionId, nextSessionFilePath);
+      } else {
+        this.sessionFilePaths.delete(target.sessionId);
+      }
+    }
+
+    const reloadedSessionIds = targets.map((target) => target.sessionId);
+    const modelSessionId =
+      this.activeSessionId && reloadedSessionIds.includes(this.activeSessionId)
+        ? this.activeSessionId
+        : reloadedSessionIds[0];
+    const models = modelSessionId ? await this.getModelsBySessionId(modelSessionId) : [];
+
+    return { success: true, models, reloadedSessionIds };
+  }
+
   removeSession(sessionId: string) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) { agent.dispose(); this.sessionAgents.delete(sessionId); }
     this.sessionAgentTypes.delete(sessionId);
     this.sessionFilePaths.delete(sessionId);
+    this.sessionProjectPaths.delete(sessionId);
     if (this.activeSessionId === sessionId) this.activeSessionId = null;
   }
 }
@@ -319,6 +425,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return await agentManager.forkSession(sessionId, target);
     } catch (err: any) {
       return { supported: true, success: false, error: err.message || String(err) };
+    }
+  });
+
+  ipcMain.handle("agent:reloadConfig", async (_event, agentId: string, sessionId?: string) => {
+    try {
+      return await agentManager.reloadConfig(agentId, sessionId);
+    } catch (err: any) {
+      return { success: false, error: err.message || String(err), reloadedSessionIds: [] };
     }
   });
 

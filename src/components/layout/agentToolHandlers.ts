@@ -109,19 +109,26 @@ export function handleToolEndEvent(
       file.action === "edited" ||
       file.action === "written" ||
       file.action === "modified" ||
+      typeof file.patch === "string" ||
       typeof file.additions === "number" ||
       typeof file.deletions === "number"
     )
-    .map((file) => ({
-      ...file,
-      changeKey: [
-        "diff",
-        file.file,
-        typeof event.patch === "string" ? event.patch : "",
-        typeof file.additions === "number" ? file.additions : "",
-        typeof file.deletions === "number" ? file.deletions : "",
-      ].join("|"),
-    }));
+    .map((file) => {
+      const patch = typeof file.patch === "string"
+        ? file.patch
+        : typeof event.patch === "string" ? event.patch : "";
+      return {
+        ...file,
+        patch: patch || undefined,
+        changeKey: [
+          "diff",
+          file.file,
+          patch,
+          typeof file.additions === "number" ? file.additions : "",
+          typeof file.deletions === "number" ? file.deletions : "",
+        ].join("|"),
+      };
+    });
   if (changedToolFiles.length > 0 && !event.isError) {
     ctx.recordProcessFiles(currentSessionId, changedToolFiles, "modify");
   } else {

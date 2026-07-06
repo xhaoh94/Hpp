@@ -534,14 +534,6 @@ export function useAgentEvents({
       finishThinkingEntry(currentSessionId);
       updateInferredPlanSteps(currentSessionId, "failed");
 
-      const errorContent = detail?.trim()
-        ? `${title}\n\n${detail.trim()}`
-        : title;
-      if (errorContent.trim()) {
-        runtime.streamBuffer = errorContent;
-        useChatStore.getState().updateLastAssistant(errorContent, currentSessionId);
-      }
-
       useChatStore.getState().appendLastAssistantProcessEntry({
         id: createProcessEntryId(),
         timestamp: Date.now(),

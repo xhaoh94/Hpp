@@ -36,6 +36,13 @@ export interface AgentForkResult {
   reason?: string;
 }
 
+export interface AgentReloadConfigResult {
+  success: boolean;
+  error?: string;
+  models?: AgentModel[];
+  reloadedSessionIds?: string[];
+}
+
 export interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
@@ -139,6 +146,7 @@ export interface ElectronAPI {
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
+  agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
   agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;

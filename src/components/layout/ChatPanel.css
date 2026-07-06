@@ -652,6 +652,12 @@
   transition: background-color 0.3s ease;
 }
 
+.chat-msg-wrapper:has(.chat-diff-popover) {
+  position: relative;
+  z-index: 8;
+  content-visibility: visible;
+}
+
 .chat-msg-wrapper + .chat-msg-wrapper,
 .chat-msg-wrapper + .chat-working,
 .chat-msg-wrapper + .chat-context-divider,
@@ -1418,6 +1424,28 @@
   opacity: 1;
 }
 
+.chat-process-error-markdown {
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: normal;
+  color: var(--text-primary);
+}
+
+.chat-process-error-markdown .md-content {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.chat-process-error-markdown .md-content ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.chat-process-error-markdown .md-content li {
+  margin: 3px 0;
+}
+
 .chat-command-detail {
   width: 100%;
   min-width: 0;
@@ -1548,10 +1576,11 @@
 
 /* Diff view */
 .chat-diff-card {
+  position: relative;
   width: 100%;
   max-width: none;
   margin-top: 10px;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 14px;
   background-color: #171717;
@@ -1571,6 +1600,7 @@
   min-width: 0;
   padding: 12px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px 14px 0 0;
   background-color: #242424;
 }
 
@@ -1739,6 +1769,10 @@
   cursor: pointer;
 }
 
+.chat-diff-card > .chat-diff-more-btn:last-of-type {
+  border-radius: 0 0 14px 14px;
+}
+
 .chat-diff-more-btn:hover {
   background-color: #282828;
 }
@@ -1759,25 +1793,98 @@
   line-height: 1.45;
 }
 
-.chat-diff-content {
-  max-height: min(48vh, 520px);
-  margin: 4px 16px 10px;
-  padding: 8px 0;
-  overflow: auto;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  background-color: #101010;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
 .chat-diff-line {
   display: block;
   min-width: max-content;
   padding: 0 12px;
   white-space: pre;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+
+.chat-diff-popover-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: auto;
+}
+
+.chat-diff-popover {
+  position: absolute;
+  left: clamp(8px, 4%, 56px);
+  right: clamp(8px, 4%, 56px);
+  bottom: calc(100% - 78px);
+  display: flex;
+  flex-direction: column;
+  max-height: min(62vh, 620px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background-color: #111;
+  color: var(--text-secondary);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.48);
+}
+
+.chat-diff-popover-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  padding: 0 12px 0 16px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: #2a2a2a;
+}
+
+.chat-diff-popover-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 14px;
+  font-weight: 560;
+}
+
+.chat-diff-popover-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.chat-diff-popover-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-diff-popover-close:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.chat-diff-popover-content {
+  margin: 0;
+  padding: 8px 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background-color: #111;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .chat-diff-add-line {

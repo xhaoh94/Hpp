@@ -205,6 +205,7 @@ export function handleDiffUpdateEvent(
       .map((diff) => ({
         file: diff.file,
         action: "modified" as const,
+        patch: typeof diff.patch === "string" ? diff.patch : undefined,
         additions: typeof diff.additions === "number" ? diff.additions : undefined,
         deletions: typeof diff.deletions === "number" ? diff.deletions : undefined,
         status: diff.status,

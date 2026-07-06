@@ -191,6 +191,16 @@ export class PiSDKAgent {
     });
   }
 
+  isIdle(): boolean {
+    return (
+      !this.isAborting &&
+      !this.turnActive &&
+      this.activePromptIds.size === 0 &&
+      this.pendingUIRequestIds.size === 0 &&
+      this.pendingResponses.size === 0
+    );
+  }
+
   async sendGuidance(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
@@ -332,6 +342,9 @@ export class PiSDKAgent {
     this.clearTurnFallback();
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
+    this.isAborting = false;
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;

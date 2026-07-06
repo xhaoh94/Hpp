@@ -62,6 +62,7 @@ export class CodexAgent {
   private requestId = 0;
   private models: AgentModel[] = [];
   private isAborting = false;
+  private activePromptIds = new Set<string>();
 
   constructor(private readonly hppSessionId = "default") {
     this.eventBuffer = new AgentEventBuffer(hppSessionId);
@@ -127,10 +128,12 @@ export class CodexAgent {
       });
       for (const handler of this.pendingResponses.values()) handler({ type: "error", error: error.message });
       this.pendingResponses.clear();
+      this.activePromptIds.clear();
     });
 
     child.on("exit", () => {
       if (this.process === child) this.process = null;
+      this.activePromptIds.clear();
       if (!this.isAborting) {
         this.emitEvent({ type: "agent_disconnected" });
       }
@@ -162,6 +165,7 @@ export class CodexAgent {
     if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
     const promptId = options?.clientMessageId || this.createCommandId();
+    this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.sendWorkerCommand({
       id: promptId,
@@ -171,6 +175,10 @@ export class CodexAgent {
       planModeEnabled: !!options?.planModeEnabled,
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
     });
+  }
+
+  isIdle(): boolean {
+    return !this.isAborting && this.activePromptIds.size === 0 && this.pendingResponses.size === 0;
   }
 
   async sendGuidance(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
@@ -247,6 +255,7 @@ export class CodexAgent {
       handler({ type: "error", id, error: "Codex request interrupted" });
     }
     this.pendingResponses.clear();
+    this.activePromptIds.clear();
     if (!this.process) {
       this.emitEvent({ type: "aborted" });
       this.isAborting = false;
@@ -307,6 +316,7 @@ export class CodexAgent {
 
   dispose(): void {
     this.pendingResponses.clear();
+    this.activePromptIds.clear();
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;
@@ -361,15 +371,24 @@ export class CodexAgent {
       case "plan_update":
       case "context_compaction":
       case "diff_update":
+        this.emitEvent(data);
+        break;
       case "agent_end":
+        this.activePromptIds.clear();
         this.emitEvent(data);
         break;
       case "prompt_done":
+        if (data.id) this.activePromptIds.delete(String(data.id));
+        else this.activePromptIds.clear();
         break;
       case "aborted":
+        if (data.promptId) this.activePromptIds.delete(String(data.promptId));
+        else this.activePromptIds.clear();
         this.emitEvent({ type: "aborted", promptId: data.promptId });
         break;
       case "error":
+        if (data.id) this.activePromptIds.delete(String(data.id));
+        else this.activePromptIds.clear();
         if (/Codex is already running/i.test(data.error || "")) {
           this.emitEvent({
             type: "process_event",

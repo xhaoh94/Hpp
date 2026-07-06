@@ -15,6 +15,7 @@ export interface NormalizedProcessFile {
   file: string;
   label?: string;
   action?: "read" | "listed" | "edited" | "modified" | "written";
+  patch?: string;
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";
@@ -359,6 +360,7 @@ const buildFiles = (
     file: filePath,
     label: getFileName(filePath),
     action,
+    patch: patch || undefined,
     additions,
     deletions,
     status: patch ? "modified" : undefined,

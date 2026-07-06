@@ -40,7 +40,7 @@ import {
   getForkSessionTitle,
 } from "@/lib/session-forks";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
-import { saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
+import { getSessionModel, saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { ChatComposer } from "./ChatComposer";
@@ -334,11 +334,27 @@ const PROCESS_DIFF_ACTIONS = new Set<AgentProcessFile["action"]>(["edited", "mod
 const collectProcessDiffs = (process?: AgentProcess): FileDiff[] => {
   if (!process?.entries?.length) return [];
   const byFile = new Map<string, FileDiff & { seenKeys: Set<string> }>();
+  const patchDiffs: FileDiff[] = [];
+  const seenPatchKeys = new Set<string>();
 
   process.entries.forEach((entry) => {
     entry.files?.forEach((file, index) => {
-      if (!file.file || !PROCESS_DIFF_ACTIONS.has(file.action)) return;
+      const patch = typeof file.patch === "string" ? file.patch : "";
+      if (!file.file || (!PROCESS_DIFF_ACTIONS.has(file.action) && !patch.trim())) return;
       const key = String(file.changeKey || `${entry.id}:${file.file}:${index}`);
+      if (patch.trim()) {
+        if (seenPatchKeys.has(key)) return;
+        seenPatchKeys.add(key);
+        patchDiffs.push({
+          file: file.file,
+          patch,
+          additions: Math.max(0, file.additions || 0),
+          deletions: Math.max(0, file.deletions || 0),
+          status: file.status || "modified",
+        });
+        return;
+      }
+
       const existing = byFile.get(file.file) || {
         file: file.file,
         patch: "",
@@ -357,7 +373,10 @@ const collectProcessDiffs = (process?: AgentProcess): FileDiff[] => {
     });
   });
 
-  return Array.from(byFile.values()).map(({ seenKeys, ...diff }) => diff);
+  return [
+    ...patchDiffs,
+    ...Array.from(byFile.values()).map(({ seenKeys, ...diff }) => diff),
+  ];
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
@@ -1447,6 +1466,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
     // Scroll to bottom immediately after sending (user wants to see their message)
     scrollToBottomNow();
+
+    const activeSessionIdAtSend = useProjectStore.getState().activeSessionId;
+    const modelToSync = getSessionModel(targetSessionId) || (
+      activeSessionIdAtSend === targetSessionId ? useChatStore.getState().currentModel : null
+    );
+    if (modelToSync) {
+      await window.electronAPI.agentSetModel(modelToSync.provider, modelToSync.id, targetSessionId);
+    }
 
     const result = await window.electronAPI.agentSendMessage(
       payload.sendContent,

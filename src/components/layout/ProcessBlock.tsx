@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   AgentProcess,
-  AgentProcessChangeSummary,
   AgentProcessEntry,
   AgentProcessFile,
   AgentProcessStep,
@@ -116,14 +115,6 @@ const normalizeInferredStepsForDisplay = (
   ];
 };
 
-const formatChangeSummary = (summary?: AgentProcessChangeSummary) => {
-  if (!summary || summary.filesChanged <= 0) return "";
-  const parts = [`${summary.filesChanged} 个文件已更改`];
-  if (summary.additions > 0) parts.push(`+${summary.additions}`);
-  if (summary.deletions > 0) parts.push(`-${summary.deletions}`);
-  return parts.join(" ");
-};
-
 const getStepStatusLabel = (status: AgentProcessStep["status"]) => {
   switch (status) {
     case "running": return "进行中";
@@ -142,8 +133,7 @@ function ProcessProgressSummary({
   fallback: string;
 }) {
   const steps = normalizeInferredStepsForDisplay(process, process.planSteps || []);
-  const changeText = formatChangeSummary(process.changeSummary);
-  const hasProgress = steps.length > 0 || !!changeText;
+  const hasProgress = steps.length > 0;
 
   if (!hasProgress) {
     return <span className="chat-process-summary">{fallback}</span>;
@@ -158,11 +148,9 @@ function ProcessProgressSummary({
       className="chat-process-progress"
       tabIndex={0}
       onClick={(event) => event.stopPropagation()}
-      aria-label={[stepText, changeText].filter(Boolean).join(" · ")}
+      aria-label={stepText}
     >
       {stepText && <span className="chat-process-progress-step">{stepText}</span>}
-      {stepText && changeText && <span className="chat-process-progress-divider">·</span>}
-      {changeText && <span className="chat-process-progress-change">{changeText}</span>}
       {steps.length > 0 && (
         <span className="chat-process-step-popover" role="tooltip">
           <span className="chat-process-step-popover-title">步骤进度</span>
@@ -368,6 +356,72 @@ const splitCommandDetail = (detail?: string, command?: string) => {
   return { command: command || "", output: detail.trim() };
 };
 
+const tryParseJson = (value: string): unknown | null => {
+  const text = value.trim();
+  if (!text || (!text.startsWith("{") && !text.startsWith("["))) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+const escapeInlineCode = (value: string) => value.replace(/`/g, "\\`");
+
+const escapeMarkdownLabel = (value: string) =>
+  value.replace(/([\\`*_{}[\]()#+.!|-])/g, "\\$1");
+
+const formatMarkdownValue = (value: unknown) => {
+  if (value === null) return "`null`";
+  if (value === undefined) return "`undefined`";
+  if (typeof value === "number" || typeof value === "boolean") return `\`${String(value)}\``;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return '`""`';
+    if (text.length <= 140 && !text.includes("\n")) return text;
+    return `\n\n\`\`\`text\n${text}\n\`\`\``;
+  }
+  return `\n\n\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+};
+
+const formatEmbeddedErrorMessage = (message: string): string | null => {
+  const match = message.match(/^(.*?):\s*(\{.*\})(?:,\s*url:\s*(.*?))?(?:,\s*request id:\s*(.*))?$/);
+  if (!match) return null;
+
+  const [, prefix, jsonText, url, requestId] = match;
+  const embedded = tryParseJson(jsonText);
+  if (!embedded || typeof embedded !== "object" || Array.isArray(embedded)) return null;
+
+  const lines = [
+    `- **错误**: ${prefix.trim()}`,
+    ...Object.entries(embedded).map(([key, value]) =>
+      `- **${escapeMarkdownLabel(key)}**: ${formatMarkdownValue(value)}`
+    ),
+  ];
+  if (url?.trim()) lines.push(`- **url**: ${url.trim()}`);
+  if (requestId?.trim()) lines.push(`- **request id**: \`${escapeInlineCode(requestId.trim())}\``);
+  return lines.join("\n");
+};
+
+const formatErrorDetailAsMarkdown = (detail?: string) => {
+  if (!detail?.trim()) return null;
+  const parsed = tryParseJson(detail);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key === "message" && typeof value === "string") {
+      const embedded = formatEmbeddedErrorMessage(value);
+      if (embedded) {
+        lines.push(embedded);
+        continue;
+      }
+    }
+    lines.push(`- **${escapeMarkdownLabel(key)}**: ${formatMarkdownValue(value)}`);
+  }
+  return lines.join("\n");
+};
+
 function CommandDetail({
   entry,
   onPreserveScroll,
@@ -487,6 +541,10 @@ function ProcessEntryRow({
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
   const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
+  const errorDetailMarkdown =
+    detailVisible && (entry.type === "error" || entry.state === "error")
+      ? formatErrorDetailAsMarkdown(entry.detail)
+      : null;
 
   if (entry.type === "info") {
     return (
@@ -522,7 +580,12 @@ function ProcessEntryRow({
         {commandVisible && (
           <CommandDetail entry={entry} onPreserveScroll={onPreserveScroll} />
         )}
-        {detailVisible && (
+        {detailVisible && errorDetailMarkdown && (
+          <div className={`chat-process-entry-detail chat-process-error-markdown ${canExpand ? "panel" : ""}`}>
+            <MarkdownRenderer content={errorDetailMarkdown} />
+          </div>
+        )}
+        {detailVisible && !errorDetailMarkdown && (
           <pre className={`chat-process-entry-detail ${canExpand ? "panel" : ""}`}>{entry.detail}</pre>
         )}
       </div>

@@ -8,6 +8,21 @@ const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 const hasModel = (models: ModelInfo[], model: ModelInfo | null): model is ModelInfo =>
   !!model && models.some((item) => item.id === model.id && item.provider === model.provider);
 
+const selectSessionModel = (sessionId: string, models: ModelInfo[]): ModelInfo => {
+  const persisted = getSessionModel(sessionId);
+  if (hasModel(models, persisted)) return persisted;
+
+  const currentModel = useChatStore.getState().currentModel;
+  if (hasModel(models, currentModel)) return currentModel;
+
+  return models[0];
+};
+
+const applyAndSyncSessionModel = async (sessionId: string, model: ModelInfo, setCurrentModel: (model: ModelInfo) => void) => {
+  setCurrentModel(model);
+  await window.electronAPI.agentSetModel(model.provider, model.id, sessionId);
+};
+
 type UseSessionModelsOptions = {
   activeSessionId: string | null;
   activeSessionAgentId?: string;
@@ -52,16 +67,7 @@ export function useSessionModels({
 
         if (models && models.length > 0) {
           setAvailableModels(models);
-          const savedModel = useChatStore.getState().currentModel;
-          const persisted = getSessionModel(sessionId);
-
-          if (hasModel(models, savedModel)) {
-            setCurrentModel(savedModel);
-          } else if (hasModel(models, persisted)) {
-            setCurrentModel(persisted);
-          } else {
-            setCurrentModel(models[0]);
-          }
+          await applyAndSyncSessionModel(sessionId, selectSessionModel(sessionId, models), setCurrentModel);
           return;
         }
       } catch {
@@ -122,6 +128,11 @@ export function useSessionModels({
       }
       if (useProjectStore.getState().activeSessionId === session.id) {
         applySessionModels(session.id, result.models);
+        if (result.models && result.models.length > 0) {
+          const selectedModel = selectSessionModel(session.id, result.models);
+          useChatStore.getState().setCurrentModel(selectedModel);
+          await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
+        }
       }
       useProjectStore.getState().markSessionInitialized(session.id);
       if (useProjectStore.getState().activeSessionId === session.id) {
@@ -130,6 +141,9 @@ export function useSessionModels({
           const models = await window.electronAPI.agentGetModels(session.id);
           if (models && models.length > 0) {
             useChatStore.getState().setAvailableModels(models);
+            const selectedModel = selectSessionModel(session.id, models);
+            useChatStore.getState().setCurrentModel(selectedModel);
+            await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
           }
         } catch {
           // The active-session model effect will retry and show an empty list if needed.

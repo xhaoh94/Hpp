@@ -590,6 +590,12 @@
   white-space: pre-wrap;
 }
 
+.agent-settings-success {
+  font-size: 11px;
+  color: #10b981;
+  white-space: pre-wrap;
+}
+
 .agent-settings-actions {
   display: flex;
   align-items: center;
@@ -598,6 +604,7 @@
 }
 
 .agent-settings-update-btn,
+.agent-settings-reload-btn,
 .agent-settings-refresh-btn {
   height: 26px;
   padding: 4px 10px;

@@ -13,6 +13,7 @@ export interface AgentProcessFile {
   file: string;
   label?: string;
   action?: "read" | "listed" | "edited" | "modified" | "written";
+  patch?: string;
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";

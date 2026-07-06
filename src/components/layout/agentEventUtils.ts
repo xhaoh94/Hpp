@@ -312,6 +312,7 @@ export const getToolProcessFiles = (event: AgentEvent): AgentProcessFile[] => {
       .map((file) => ({
         ...file,
         label: file.label || getFileName(file.file),
+        patch: typeof file.patch === "string" ? file.patch : undefined,
       }));
   }
 
@@ -330,6 +331,7 @@ export const getToolProcessFiles = (event: AgentEvent): AgentProcessFile[] => {
     file: event.filePath,
     label: getFileName(event.filePath),
     action,
+    patch: typeof event.patch === "string" ? event.patch : undefined,
     additions: typeof event.additions === "number" ? event.additions : undefined,
     deletions: typeof event.deletions === "number" ? event.deletions : undefined,
     status: event.patch ? "modified" : undefined,

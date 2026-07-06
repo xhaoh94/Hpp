@@ -100,6 +100,8 @@ export class DroidAgent {
   private autonomyLevel: "low" | "medium" | "high" = "high";
   private interactionMode = "auto";
   private planModeEnabled = false;
+  private turnActive = false;
+  private isAborting = false;
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default") {
@@ -212,10 +214,12 @@ export class DroidAgent {
   /** Send a user message */
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.process || !this.isReady) {
-      this.mockResponse(message);
+      void this.mockResponse(message);
       return;
     }
 
+    this.turnActive = true;
+    this.isAborting = false;
     this.emitEvent({ type: "stream_start", role: "assistant" });
     const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
     await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
@@ -232,7 +236,19 @@ export class DroidAgent {
     this.sendRpc("droid.add_user_message", msgParams);
   }
 
+  isIdle(): boolean {
+    return (
+      !this.isAborting &&
+      !this.turnActive &&
+      this.pendingResponses.size === 0 &&
+      !this.pendingAskUserRequestId &&
+      !this.pendingPermissionRequestId
+    );
+  }
+
   private async mockResponse(message: string) {
+    this.turnActive = true;
+    this.isAborting = false;
     this.emitEvent({ type: "stream_start", role: "assistant" });
     const response = `收到消息: "${message}"\n\n这是离线模拟回复。如需使用 Factory Droid，请安装 droid CLI 并设置 FACTORY_API_KEY 环境变量。\n\n安装: curl -fsSL https://app.factory.ai/cli | sh`;
     for (let i = 0; i < response.length; i += 4) {
@@ -241,10 +257,12 @@ export class DroidAgent {
     }
     this.emitEvent({ type: "stream_end" });
     this.emitEvent({ type: "agent_end" });
+    this.turnActive = false;
   }
 
   /** Abort current response */
   async abort() {
+    this.isAborting = true;
     if (this.pendingPermissionRequestId) {
       this.sendRpcResponse(this.pendingPermissionRequestId, { selectedOption: "deny" });
       this.pendingPermissionRequestId = null;
@@ -256,6 +274,8 @@ export class DroidAgent {
     if (this.process) {
       this.sendRpc("droid.interrupt_session", {});
     }
+    this.turnActive = false;
+    this.isAborting = false;
   }
 
   /** Get available models - Factory provides a curated set + local custom models */
@@ -394,6 +414,8 @@ export class DroidAgent {
     this.pendingResponses.clear();
     this.pendingAskUserRequestId = null;
     this.pendingPermissionRequestId = null;
+    this.turnActive = false;
+    this.isAborting = false;
     this.eventBuffer.flush();
   }
 
@@ -506,6 +528,7 @@ export class DroidAgent {
       case "assistant_text_complete":
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
+        this.turnActive = false;
         break;
       case "thinking_text_delta":
         this.emitEvent({ type: "thinking_delta", delta: notifData?.delta || notifData?.text || "" });
@@ -542,8 +565,19 @@ export class DroidAgent {
         }
         break;
       case "droid_working_state_changed":
+        {
+          const state = String(notifData?.state || notifData?.status || "").toLowerCase();
+          if (typeof notifData?.working === "boolean") {
+            this.turnActive = notifData.working;
+          } else if (["idle", "completed", "complete", "done"].includes(state)) {
+            this.turnActive = false;
+          } else if (["running", "working", "busy"].includes(state)) {
+            this.turnActive = true;
+          }
+        }
         break;
       case "error":
+        this.turnActive = false;
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${notifData?.message || "未知错误"}` });
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
