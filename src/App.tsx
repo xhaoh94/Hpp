@@ -155,12 +155,17 @@ export default function App() {
     setSidebarResizing(false);
   }, []);
 
+  const isSidebarToggleTarget = useCallback((target: EventTarget | null) => (
+    target instanceof Element && !!target.closest("[data-sidebar-toggle]")
+  ), []);
+
   const handleLayoutPointerEnter = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!useAppStore.getState().sidebarCollapsed) return;
+    if (isSidebarToggleTarget(event.target)) return;
     const rect = layoutContentRef.current?.getBoundingClientRect();
     if (!rect) return;
     if (event.clientX - rect.left <= ACTIVITY_BAR_WIDTH) setSidebarHoverExpanded(true);
-  }, []);
+  }, [isSidebarToggleTarget]);
 
   const handleLayoutPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!useAppStore.getState().sidebarCollapsed) return;
@@ -168,6 +173,11 @@ export default function App() {
     if (!rect) return;
 
     const localX = event.clientX - rect.left;
+    if (isSidebarToggleTarget(event.target)) {
+      setSidebarHoverExpanded(false);
+      return;
+    }
+
     if (localX <= ACTIVITY_BAR_WIDTH) {
       setSidebarHoverExpanded(true);
       return;
@@ -179,7 +189,7 @@ export default function App() {
     ) {
       setSidebarHoverExpanded(false);
     }
-  }, [sidebarHoverExpanded, sidebarWidth]);
+  }, [isSidebarToggleTarget, sidebarHoverExpanded, sidebarWidth]);
 
   const handleLayoutPointerLeave = useCallback(() => {
     setSidebarHoverExpanded(false);

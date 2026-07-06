@@ -51,41 +51,40 @@ export function Sidebar({
     : (onCollapse || toggleSidebar);
 
   return (
-    <>
-      <nav className="activity-bar">
-        {tabs.map(({ id, label, icon }) => (
-          <button
-            key={id}
-            onClick={() => setSidebarTab(id)}
-            title={label}
-            className={`activity-btn ${sidebarTab === id ? "active" : ""}`}
-          >
-            {icon}
-          </button>
-        ))}
-
-        <div style={{ flex: 1 }} />
-
+    <nav className="activity-bar">
+      {tabs.map(({ id, label, icon }) => (
         <button
-          onClick={handleToggleSidebar}
-          title={sidebarCollapsed ? "展开侧边栏" : "收缩侧边栏"}
-          className="activity-btn"
+          key={id}
+          onClick={() => setSidebarTab(id)}
+          title={label}
+          className={`activity-btn ${sidebarTab === id ? "active" : ""}`}
         >
-          {sidebarCollapsed ? (
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M9 4v16" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M12 10l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          ) : (
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M9 4v16" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M14 10l-2 2 2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          )}
+          {icon}
         </button>
-      </nav>
-    </>
+      ))}
+
+      <div style={{ flex: 1 }} />
+
+      <button
+        data-sidebar-toggle
+        onClick={handleToggleSidebar}
+        title={sidebarCollapsed ? "展开侧边栏" : "收缩侧边栏"}
+        className="activity-btn activity-sidebar-toggle"
+      >
+        {sidebarCollapsed ? (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M9 4v16" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M12 10l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M9 4v16" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M14 10l-2 2 2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </button>
+    </nav>
   );
 }
