@@ -17,6 +17,25 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   permissionMode?: "plan" | "full-access";
   displayMessage?: string;
+  clientMessageId?: string;
+}
+
+interface AgentForkTarget {
+  newSessionId: string;
+  sourceSessionFilePath?: string;
+  sourceUserMessageIndex: number;
+  rollbackUserMessageCount?: number;
+  sourceMessageContent?: string;
+  throughMessageId?: string;
+}
+
+interface AgentForkResult {
+  supported: boolean;
+  success: boolean;
+  sessionFilePath?: string;
+  nativeEntryId?: string;
+  error?: string;
+  reason?: string;
 }
 
 const getWorkerPath = () => {
@@ -158,7 +177,7 @@ export class PiSDKAgent {
       this.prepareNewTurn();
     }
 
-    const promptId = this.createCommandId();
+    const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
@@ -204,6 +223,36 @@ export class PiSDKAgent {
       title: `收到引导: "${messagePreview || "用户引导"}"`,
       detail: displayMessage || undefined,
       state: "completed",
+    });
+  }
+
+  async forkSession(target: AgentForkTarget): Promise<AgentForkResult> {
+    if (!this.process) {
+      return { supported: true, success: false, error: "Pi SDK worker is not running" };
+    }
+
+    const requestId = this.createCommandId();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(requestId);
+        resolve({ supported: true, success: false, error: "Pi SDK fork timed out" });
+      }, 12000);
+      this.sendWorkerCommand({
+        id: requestId,
+        type: "forkSession",
+        ...target,
+        sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || undefined,
+      }, (data) => {
+        clearTimeout(timeout);
+        resolve({
+          supported: data.supported !== false,
+          success: !!data.success,
+          sessionFilePath: data.sessionFilePath,
+          nativeEntryId: data.nativeEntryId,
+          error: data.error,
+          reason: data.reason,
+        });
+      });
     });
   }
 

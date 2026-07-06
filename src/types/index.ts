@@ -18,6 +18,29 @@ export interface AgentModel {
   reasoning: boolean;
 }
 
+export interface AgentForkTarget {
+  newSessionId: string;
+  sourceSessionFilePath?: string;
+  sourceUserMessageIndex: number;
+  rollbackUserMessageCount?: number;
+  sourceMessageContent?: string;
+  throughMessageId?: string;
+}
+
+export interface AgentForkResult {
+  supported: boolean;
+  success: boolean;
+  sessionFilePath?: string;
+  nativeEntryId?: string;
+  error?: string;
+  reason?: string;
+}
+
+export interface AgentSendOptions {
+  planModeEnabled?: boolean;
+  clientMessageId?: string;
+}
+
 export interface AgentEvent {
   type: string;
   sessionId?: string;
@@ -113,8 +136,9 @@ export interface ElectronAPI {
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
-  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean }) => Promise<{ success: boolean; error?: string }>;
-  agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean }) => Promise<{ success: boolean; error?: string }>;
+  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
+  agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
+  agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean }>;

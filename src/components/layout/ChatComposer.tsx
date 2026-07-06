@@ -32,6 +32,7 @@ type ChatComposerProps = {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onAddInputFiles: (files: File[]) => void;
   onOpenAttachmentFolder: () => void;
+  onOpenSessionReferences: () => void;
   onClearAttachmentError: () => void;
   onRemovePendingFile: (id: string) => void;
   onRemovePendingImage: (id: string) => void;
@@ -63,6 +64,7 @@ export const ChatComposer = memo(function ChatComposer({
   textareaRef,
   onAddInputFiles,
   onOpenAttachmentFolder,
+  onOpenSessionReferences,
   onClearAttachmentError,
   onRemovePendingFile,
   onRemovePendingImage,
@@ -130,6 +132,11 @@ export const ChatComposer = memo(function ChatComposer({
   const handleChooseFolder = () => {
     setUploadMenuOpen(false);
     onOpenAttachmentFolder();
+  };
+
+  const handleChooseSession = () => {
+    setUploadMenuOpen(false);
+    onOpenSessionReferences();
   };
 
   return (
@@ -259,6 +266,10 @@ export const ChatComposer = memo(function ChatComposer({
                 <button type="button" role="menuitem" onClick={handleChooseFolder}>
                   <Folder size={13} />
                   <span>文件夹</span>
+                </button>
+                <button type="button" role="menuitem" onClick={handleChooseSession}>
+                  <Link2 size={13} />
+                  <span>会话</span>
                 </button>
               </div>
             )}

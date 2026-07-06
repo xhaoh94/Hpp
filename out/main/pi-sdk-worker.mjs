@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "questionnaire"];
@@ -68,6 +69,66 @@ const isContextCompactionLike = (...values) => {
     value.includes("上下文压缩") ||
     value.includes("上下文已自动压缩")
   );
+};
+
+const normalizeForkText = (value) =>
+  String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const findForkTargetMessage = (messages, command) => {
+  const index = Number.isInteger(command.sourceUserMessageIndex)
+    ? command.sourceUserMessageIndex
+    : Number(command.sourceUserMessageIndex);
+  if (Number.isInteger(index) && index >= 0 && index < messages.length) {
+    return messages[index];
+  }
+
+  const sourceText = normalizeForkText(command.sourceMessageContent);
+  if (!sourceText) return null;
+  return messages.find((message) => {
+    const text = normalizeForkText(message.text);
+    return text === sourceText || text.includes(sourceText) || sourceText.includes(text);
+  }) || null;
+};
+
+const forkSessionAtMessage = async (command) => {
+  if (!sdk || !session) {
+    return { supported: true, success: false, error: "Pi SDK session is not initialized" };
+  }
+
+  const sourcePath = command.sourceSessionFilePath || session.sessionFile;
+  if (!sourcePath) {
+    return { supported: true, success: false, reason: "source session is not persisted" };
+  }
+
+  const forkMessages = session.getUserMessagesForForking?.() || [];
+  const targetMessage = findForkTargetMessage(forkMessages, command);
+  if (!targetMessage?.entryId) {
+    return {
+      supported: true,
+      success: false,
+      reason: "could not map UI message to Pi session tree entry",
+    };
+  }
+
+  const sessionManager = sdk.SessionManager.open(sourcePath, undefined, projectPath);
+  const sessionFilePath = sessionManager.createBranchedSession(targetMessage.entryId);
+  if (!sessionFilePath || !existsSync(sessionFilePath)) {
+    return {
+      supported: true,
+      success: false,
+      nativeEntryId: targetMessage.entryId,
+      reason: "forked Pi session file was not created yet",
+    };
+  }
+
+  return {
+    supported: true,
+    success: true,
+    sessionFilePath,
+    nativeEntryId: targetMessage.entryId,
+  };
 };
 
 const normalizeQuestionOption = (option) => {
@@ -519,6 +580,11 @@ const handleCommand = async (command) => {
         await session.steer(command.message, command.images);
         send({ type: "guidance_done", id: command.id });
         break;
+      case "forkSession": {
+        const result = await forkSessionAtMessage(command);
+        send({ type: "fork_session_result", id: command.id, ...result });
+        break;
+      }
       case "abort":
         await session?.abort();
         send({ type: "aborted", id: command.id });

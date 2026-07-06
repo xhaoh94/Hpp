@@ -60,6 +60,7 @@ export function handleMessageStartEvent(
     detail: event.content ? truncateProcessDetail(String(event.content)) : undefined,
     state: "completed",
   });
+  ctx.updateInferredPlanSteps(currentSessionId, "analyze");
 }
 
 export function handleStreamStartEvent(

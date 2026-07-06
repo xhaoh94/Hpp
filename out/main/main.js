@@ -40,6 +40,17 @@ const SEARCH_EXCLUDED_DIRS = /* @__PURE__ */ new Set([
   "target",
   "vendor"
 ]);
+const getPathAttachmentInfo = async (targetPath) => {
+  const info = await promises.stat(targetPath);
+  if (!info.isFile() && !info.isDirectory()) {
+    throw new Error("Path is not a file or folder");
+  }
+  return {
+    name: path.basename(targetPath) || targetPath,
+    path: targetPath,
+    kind: info.isDirectory() ? "folder" : "file"
+  };
+};
 function registerFileHandlers() {
   electron.ipcMain.handle("fs:readDirectory", async (_event, dirPath) => {
     if (typeof dirPath !== "string" || !dirPath.trim()) return [];
@@ -75,6 +86,16 @@ function registerFileHandlers() {
     try {
       const content = await promises.readFile(filePath, "utf-8");
       return { success: true, content };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  electron.ipcMain.handle("fs:statPath", async (_event, filePath) => {
+    if (typeof filePath !== "string" || !filePath.trim()) {
+      return { success: false, error: "Invalid file path" };
+    }
+    try {
+      return { success: true, attachment: await getPathAttachmentInfo(filePath) };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -133,6 +154,20 @@ function registerFileHandlers() {
       return { canceled: true, path: "" };
     }
     return { canceled: false, path: result.filePaths[0] };
+  });
+  electron.ipcMain.handle("fs:openAttachmentFolder", async (event) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const result = await electron.dialog.showOpenDialog(win, {
+      properties: ["openDirectory"]
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+    try {
+      return { canceled: false, attachment: await getPathAttachmentInfo(result.filePaths[0]) };
+    } catch (err) {
+      return { canceled: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
   electron.ipcMain.handle("fs:getHomeDir", () => {
     return os.homedir();
@@ -2320,7 +2355,7 @@ class PiSDKAgent {
     } else {
       this.prepareNewTurn();
     }
-    const promptId = this.createCommandId();
+    const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
@@ -2364,6 +2399,34 @@ class PiSDKAgent {
       title: `收到引导: "${messagePreview || "用户引导"}"`,
       detail: displayMessage || void 0,
       state: "completed"
+    });
+  }
+  async forkSession(target) {
+    if (!this.process) {
+      return { supported: true, success: false, error: "Pi SDK worker is not running" };
+    }
+    const requestId = this.createCommandId();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(requestId);
+        resolve({ supported: true, success: false, error: "Pi SDK fork timed out" });
+      }, 12e3);
+      this.sendWorkerCommand({
+        id: requestId,
+        type: "forkSession",
+        ...target,
+        sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || void 0
+      }, (data) => {
+        clearTimeout(timeout);
+        resolve({
+          supported: data.supported !== false,
+          success: !!data.success,
+          sessionFilePath: data.sessionFilePath,
+          nativeEntryId: data.nativeEntryId,
+          error: data.error,
+          reason: data.reason
+        });
+      });
     });
   }
   async abort() {
@@ -2807,7 +2870,7 @@ class CodexAgent {
   async sendMessage(message, images, options) {
     if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
-    const promptId = this.createCommandId();
+    const promptId = options?.clientMessageId || this.createCommandId();
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.sendWorkerCommand({
       id: promptId,
@@ -2850,6 +2913,34 @@ class CodexAgent {
       title: `收到引导: "${messagePreview || "用户引导"}"`,
       detail: displayMessage || void 0,
       state: "completed"
+    });
+  }
+  async forkSession(target) {
+    if (!this.process) {
+      return { supported: true, success: false, error: "Codex worker is not running" };
+    }
+    const requestId = this.createCommandId();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(requestId);
+        resolve({ supported: true, success: false, error: "Codex fork timed out" });
+      }, 3e4);
+      this.sendWorkerCommand({
+        id: requestId,
+        type: "forkSession",
+        ...target,
+        sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || void 0
+      }, (data) => {
+        clearTimeout(timeout);
+        resolve({
+          supported: data.supported !== false,
+          success: !!data.success,
+          sessionFilePath: data.sessionFilePath,
+          nativeEntryId: data.nativeEntryId,
+          error: data.error,
+          reason: data.reason
+        });
+      });
     });
   }
   async abort() {
@@ -3150,6 +3241,19 @@ class AgentManager {
     }
     await agent.sendGuidance(message, images, options);
   }
+  async forkSession(sessionId, target) {
+    const agent = this.getAgentBySessionId(sessionId);
+    if (!agent) {
+      return { supported: false, success: false, reason: "source session is not initialized" };
+    }
+    if (typeof agent.forkSession !== "function") {
+      return { supported: false, success: false, reason: "agent does not support native fork" };
+    }
+    return agent.forkSession({
+      ...target,
+      sourceSessionFilePath: target.sourceSessionFilePath || agent.sessionFilePath || void 0
+    });
+  }
   removeSession(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) {
@@ -3194,11 +3298,19 @@ function registerAgentHandlers(getWindow) {
       await agent.sendMessage(effectiveMessage, images, {
         planModeEnabled: planModeEnabled && supportsNativePlanMode(agentType),
         permissionMode,
-        displayMessage: message
+        displayMessage: message,
+        clientMessageId: options?.clientMessageId
       });
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
+    }
+  });
+  electron.ipcMain.handle("agent:forkSession", async (_event, sessionId, target) => {
+    try {
+      return await agentManager.forkSession(sessionId, target);
+    } catch (err) {
+      return { supported: true, success: false, error: err.message || String(err) };
     }
   });
   electron.ipcMain.handle("agent:sendGuidance", async (_event, message, images, sessionId, options) => {

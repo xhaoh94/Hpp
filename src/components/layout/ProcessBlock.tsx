@@ -68,6 +68,54 @@ const getStepProgressIndex = (steps: AgentProcessStep[], ended: boolean) => {
   return ended ? steps.length : 1;
 };
 
+const isTerminalStepStatus = (status?: AgentProcessStep["status"]) =>
+  status === "failed" || status === "cancelled";
+
+const getStepById = (steps: AgentProcessStep[], id: string) =>
+  steps.find((step) => step.id === id);
+
+const normalizeInferredStepsForDisplay = (
+  process: AgentProcess,
+  steps: AgentProcessStep[]
+): AgentProcessStep[] => {
+  const hasInferredSteps = process.planStepsSource === "inferred" || steps.some((step) => step.id.startsWith("inferred-"));
+  if (!hasInferredSteps) return steps;
+
+  const analyze = getStepById(steps, "inferred-analyze");
+  const operate = getStepById(steps, "inferred-operate");
+  const modify = getStepById(steps, "inferred-modify");
+  const verify = getStepById(steps, "inferred-verify");
+
+  const analyzeStatus: AgentProcessStep["status"] =
+    isTerminalStepStatus(analyze?.status)
+      ? analyze!.status
+      : operate || modify || verify
+        ? "completed"
+        : analyze?.status || "pending";
+
+  const operateStatus: AgentProcessStep["status"] =
+    isTerminalStepStatus(operate?.status)
+      ? operate!.status
+      : isTerminalStepStatus(modify?.status)
+        ? modify!.status
+        : verify || modify?.status === "completed"
+          ? "completed"
+          : modify?.status === "running" || operate?.status === "running"
+            ? "running"
+            : operate?.status === "completed"
+              ? "completed"
+              : "pending";
+
+  const verifyStatus: AgentProcessStep["status"] =
+    verify?.status || (process.endedAt && !isTerminalStepStatus(operateStatus) ? "completed" : "pending");
+
+  return [
+    { id: "inferred-analyze", title: "分析请求", status: analyzeStatus },
+    { id: "inferred-operate", title: "执行操作", status: operateStatus },
+    { id: "inferred-verify", title: "验证总结", status: verifyStatus },
+  ];
+};
+
 const formatChangeSummary = (summary?: AgentProcessChangeSummary) => {
   if (!summary || summary.filesChanged <= 0) return "";
   const parts = [`${summary.filesChanged} 个文件已更改`];
@@ -93,7 +141,7 @@ function ProcessProgressSummary({
   process: AgentProcess;
   fallback: string;
 }) {
-  const steps = process.planSteps || [];
+  const steps = normalizeInferredStepsForDisplay(process, process.planSteps || []);
   const changeText = formatChangeSummary(process.changeSummary);
   const hasProgress = steps.length > 0 || !!changeText;
 

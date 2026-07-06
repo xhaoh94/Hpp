@@ -10,7 +10,7 @@ import {
   type UIEvent as ReactUIEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { CornerDownRight, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Copy, CornerDownRight, GitBranch, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -29,6 +29,11 @@ import {
   createSessionReferenceSnapshot,
   getSessionReferenceTitle,
 } from "@/lib/session-references";
+import {
+  cloneMessagesForFork,
+  createSessionForkContext,
+  getForkSessionTitle,
+} from "@/lib/session-forks";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
 import { saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
@@ -66,6 +71,7 @@ type MessagePayload = {
   messageImages?: MessageImagePayload[];
   sessionReferences?: MessageSessionReferencePayload[];
   agentImages?: AgentImagePayload[];
+  forkContextUsed?: boolean;
 };
 
 const escapeXmlAttribute = (value: string) =>
@@ -156,6 +162,7 @@ type SessionReferenceControlProps = {
   activeSession: ProjectSession;
   sessionMessages: Record<string, ChatMessage[]>;
   open: boolean;
+  showTrigger?: boolean;
   onOpenChange: (open: boolean) => void;
   onAddOrRefresh: (session: ProjectSession) => void;
   onRemove: (sourceSessionId: string) => void;
@@ -166,6 +173,7 @@ function SessionReferenceControl({
   activeSession,
   sessionMessages,
   open,
+  showTrigger = true,
   onOpenChange,
   onAddOrRefresh,
   onRemove,
@@ -175,17 +183,21 @@ function SessionReferenceControl({
   const availableSessions = project.sessions.filter((session) => session.id !== activeSession.id);
   const unreferencedSessions = availableSessions.filter((session) => !referencedSessionIds.has(session.id));
 
+  if (!showTrigger && !open) return null;
+
   return (
     <div className="chat-reference-control">
-      <button
-        type="button"
-        className={`chat-header-reference-btn ${references.length > 0 ? "active" : ""}`}
-        onClick={() => onOpenChange(!open)}
-        title="引用其他会话上下文"
-      >
-        <Link2 size={14} />
-        {references.length > 0 && <span>{references.length}</span>}
-      </button>
+      {showTrigger && (
+        <button
+          type="button"
+          className={`chat-header-reference-btn ${references.length > 0 ? "active" : ""}`}
+          onClick={() => onOpenChange(!open)}
+          title="引用其他会话上下文"
+        >
+          <Link2 size={14} />
+          {references.length > 0 && <span>{references.length}</span>}
+        </button>
+      )}
 
       {open && (
         <div className="chat-reference-popup">
@@ -285,6 +297,7 @@ type ChatMessagesViewProps = {
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
+  onForkMessage: (message: ChatMessage) => void;
 };
 
 type ChatMessageItemProps = {
@@ -296,6 +309,7 @@ type ChatMessageItemProps = {
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
+  onForkMessage: (message: ChatMessage) => void;
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
@@ -307,6 +321,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   onToggleAssistantProcess,
   onToggleAssistantProcessEntry,
   onPreserveScroll,
+  onForkMessage,
 }: ChatMessageItemProps) {
   if (msg.role === "system" && msg.systemType === "context_compaction") {
     return (
@@ -330,6 +345,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences)
       : hasContent || hasImages || hasDiffs || hasSessionReferences;
+  const showAssistantActions = msg.role === "assistant" && hasVisibleBubble && !processRunning;
   const renderSessionReferences = () => (
     hasSessionReferences && msg.sessionReferences ? (
       <div className="chat-message-references" aria-label="引用会话">
@@ -413,21 +429,40 @@ const ChatMessageItem = memo(function ChatMessageItem({
           {hasDiffs && msg.diffs && (
             <DiffBlock diffs={msg.diffs} />
           )}
+          {showAssistantActions && (
+            <div className="chat-assistant-actions">
+              <button
+                type="button"
+                className="chat-assistant-action-btn"
+                onClick={() => void navigator.clipboard.writeText(msg.content)}
+                title="复制回复"
+                aria-label="复制回复"
+                disabled={!hasContent}
+              >
+                <Copy size={15} strokeWidth={1.9} />
+              </button>
+              <button
+                type="button"
+                className="chat-assistant-action-btn"
+                onClick={() => onForkMessage(msg)}
+                title="从这里新建会话"
+                aria-label="从这里新建会话"
+              >
+                <GitBranch size={15} strokeWidth={1.9} />
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 });
 
-const getTodoStepIndex = (steps: AgentProcessStep[]) => {
-  if (steps.length === 0) return 0;
-  const runningIndex = steps.findIndex((step) => step.status === "running");
-  if (runningIndex >= 0) return runningIndex + 1;
-  const failedIndex = steps.findIndex((step) => step.status === "failed" || step.status === "cancelled");
-  if (failedIndex >= 0) return failedIndex + 1;
-  const completed = steps.filter((step) => step.status === "completed").length;
-  return completed > 0 ? Math.min(steps.length, completed) : 1;
-};
+const getCompletedTodoCount = (steps: AgentProcessStep[]) =>
+  steps.filter((step) => step.status === "completed").length;
+
+const hasNativeTodoSteps = (process?: AgentProcess) =>
+  !!process && process.planStepsSource === "native" && !!process.planSteps?.length;
 
 const getTodoStatusText = (status: AgentProcessStep["status"]) => {
   switch (status) {
@@ -441,7 +476,7 @@ const getTodoStatusText = (status: AgentProcessStep["status"]) => {
 
 function TodoSummaryPill({ process }: { process: AgentProcess }) {
   const steps = process.planSteps || [];
-  if (steps.length === 0) return null;
+  if (!hasNativeTodoSteps(process)) return null;
 
   const changeSummary = process.changeSummary;
   const changeText = changeSummary && changeSummary.filesChanged > 0
@@ -451,7 +486,7 @@ function TodoSummaryPill({ process }: { process: AgentProcess }) {
   return (
     <div className="chat-todo-summary">
       <span className="chat-todo-summary-dot" />
-      <span className="chat-todo-summary-text">第 {getTodoStepIndex(steps)} / {steps.length} 步</span>
+      <span className="chat-todo-summary-text">Todo {getCompletedTodoCount(steps)} / {steps.length}</span>
       {changeText && <span className="chat-todo-summary-change">· {changeText}</span>}
       <div className="chat-todo-summary-popover">
         {steps.map((step) => (
@@ -482,10 +517,11 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onToggleAssistantProcess,
   onToggleAssistantProcessEntry,
   onPreserveScroll,
+  onForkMessage,
 }: ChatMessagesViewProps) {
   const activeProcessWithTodos = [...messages]
     .reverse()
-    .find((msg) => msg.role === "assistant" && !!msg.process && !msg.process.endedAt && !!msg.process.planSteps?.length)
+    .find((msg) => msg.role === "assistant" && !!msg.process && !msg.process.endedAt && hasNativeTodoSteps(msg.process))
     ?.process;
 
   return (
@@ -512,6 +548,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
                 onToggleAssistantProcess={onToggleAssistantProcess}
                 onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
                 onPreserveScroll={onPreserveScroll}
+                onForkMessage={onForkMessage}
               />
             ))}
 
@@ -582,6 +619,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     projects,
     activeSessionId,
     agentStatuses,
+    addSession,
     isSessionInitialized,
     upsertSessionReference,
     removeSessionReference,
@@ -590,6 +628,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
   const activeSessionReferences = useMemo(() => activeSession?.references || [], [activeSession?.references]);
+  const activeSessionForkContext = activeSession?.forkContext;
   const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
   const activeQueuedMessages = activeSessionId ? messageQueues[activeSessionId] || [] : [];
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
@@ -949,6 +988,114 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setThinkingLevel,
   });
 
+  const createNativeFork = useCallback(async (
+    sourceSession: ProjectSession,
+    sessionId: string,
+    sourceUserMessageIndex: number,
+    rollbackUserMessageCount: number,
+    sourceMessage: ChatMessage
+  ) => {
+    try {
+      const nativeFork = await window.electronAPI.agentForkSession(sourceSession.id, {
+        newSessionId: sessionId,
+        sourceSessionFilePath: sourceSession.sessionFilePath,
+        sourceUserMessageIndex,
+        rollbackUserMessageCount,
+        sourceMessageContent: sourceMessage.content,
+        throughMessageId: sourceMessage.id,
+      });
+      return nativeFork.success && nativeFork.sessionFilePath ? nativeFork.sessionFilePath : undefined;
+    } catch {
+      return undefined;
+    }
+  }, []);
+
+  const applyNativeForkToSession = useCallback(async (
+    sessionId: string,
+    agentId: string,
+    sessionFilePath: string
+  ) => {
+    const project = useProjectStore.getState().projects.find((item) =>
+      item.sessions.some((session) => session.id === sessionId)
+    );
+    if (!project) return;
+
+    const projectState = useProjectStore.getState();
+    if (projectState.agentStatuses[sessionId] === "running") return;
+    projectState.setSessionFilePath(project.id, sessionId, sessionFilePath);
+    projectState.setSessionForkContext(project.id, sessionId, undefined);
+
+    await window.electronAPI.agentRemoveSession(sessionId);
+    const result = await window.electronAPI.agentCreateSession(agentId, project.path, sessionId, sessionFilePath);
+    if (result.sessionFilePath) {
+      useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
+    }
+    useProjectStore.getState().markSessionInitialized(sessionId);
+  }, []);
+
+  const handleForkFromMessage = useCallback(async (msg: ChatMessage) => {
+    if (!activeProject || !activeSession) return;
+
+    const messageIndex = messages.findIndex((message) => message.id === msg.id);
+    if (messageIndex < 0) return;
+
+    const sourceMessages = messages.slice(0, messageIndex + 1);
+    const forkMessages = cloneMessagesForFork(sourceMessages);
+    const sessionId = crypto.randomUUID();
+    const sourceUserMessageCount = sourceMessages.filter((message) => message.role === "user").length;
+    const sourceUserMessageIndex = sourceUserMessageCount - 1;
+    const totalUserMessageCount = messages.filter((message) => message.role === "user").length;
+    const rollbackUserMessageCount = Math.max(0, totalUserMessageCount - sourceUserMessageCount);
+    const now = new Date().toISOString();
+    const session: ProjectSession = {
+      id: sessionId,
+      agentId: activeSession.agentId,
+      agentSessionId: sessionId,
+      title: getForkSessionTitle(msg),
+      createdAt: now,
+      lastActiveAt: now,
+      forkContext: createSessionForkContext(activeSession, sourceMessages, msg.id),
+    };
+
+    loadSessionMessages(activeSession.id, messages);
+    loadSessionMessages(sessionId, forkMessages);
+    addSession(activeProject.id, session);
+    switchToSession(activeProject, session);
+    setUserMsgHistoryOpen(false);
+    window.setTimeout(() => scrollToBottomNow(), 0);
+
+    if (sourceUserMessageIndex >= 0) {
+      void createNativeFork(
+        activeSession,
+        sessionId,
+        sourceUserMessageIndex,
+        rollbackUserMessageCount,
+        msg
+      ).then((nativeSessionFilePath) => {
+        if (!nativeSessionFilePath) return;
+        void applyNativeForkToSession(sessionId, activeSession.agentId, nativeSessionFilePath);
+      });
+    }
+  }, [
+    activeProject,
+    activeSession,
+    addSession,
+    applyNativeForkToSession,
+    createNativeFork,
+    loadSessionMessages,
+    messages,
+    scrollToBottomNow,
+    switchToSession,
+  ]);
+
+  const clearForkContextForSession = useCallback((sessionId: string) => {
+    const project = useProjectStore.getState().projects.find((item) =>
+      item.sessions.some((session) => session.id === sessionId)
+    );
+    if (!project) return;
+    useProjectStore.getState().setSessionForkContext(project.id, sessionId, undefined);
+  }, []);
+
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -1039,14 +1186,17 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       sendContent = sendContent ? `${sendContent}\n\n${pathBlock}` : pathBlock;
     }
 
-    const referencesContext = buildSessionReferencesContext(activeSessionReferences);
     const messageSessionReferences = activeSessionReferences.map((reference) => ({
       sourceSessionId: reference.sourceSessionId,
       sourceTitle: reference.sourceTitle,
     }));
-    if (referencesContext) {
+    const contextBlocks = [
+      activeSessionForkContext?.context,
+      buildSessionReferencesContext(activeSessionReferences),
+    ].filter((context): context is string => !!context);
+    if (contextBlocks.length > 0) {
       sendContent = [
-        referencesContext,
+        ...contextBlocks,
         "",
         "<current_user_message>",
         sendContent,
@@ -1073,8 +1223,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       messageImages,
       sessionReferences: messageSessionReferences.length > 0 ? messageSessionReferences : undefined,
       agentImages,
+      forkContextUsed: !!activeSessionForkContext?.context,
     };
-  }, [activeSessionReferences]);
+  }, [activeSessionForkContext?.context, activeSessionReferences]);
 
   const sendPayloadNow = useCallback(async (
     targetSessionId: string,
@@ -1083,9 +1234,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   ) => {
     // Force synchronous render so "working..." appears before IPC call
     enableAutoFollow(); // New outgoing messages should keep the latest turn visible.
+    const userMessageId = crypto.randomUUID();
     flushSync(() => {
       addMessage({
-        id: crypto.randomUUID(),
+        id: userMessageId,
         role: "user",
         content: payload.displayContent,
         timestamp: Date.now(),
@@ -1115,7 +1267,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       payload.sendContent,
       payload.agentImages,
       targetSessionId,
-      { planModeEnabled: !!options?.planModeEnabled }
+      { planModeEnabled: !!options?.planModeEnabled, clientMessageId: userMessageId }
     );
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
@@ -1177,6 +1329,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
 
     const payload = await buildMessagePayload(text, pendingFiles, pendingImages, pendingPathAttachments);
+    const { forkContextUsed, ...queuedPayload } = payload;
     const existingRuntime = sessionRuntimeRef.current[targetSessionId];
     const running = existingRuntime?.processActive || useProjectStore.getState().agentStatuses[targetSessionId] === "running";
 
@@ -1184,7 +1337,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       enqueueMessage({
         id: crypto.randomUUID(),
         sessionId: targetSessionId,
-        ...payload,
+        ...queuedPayload,
         planModeEnabled,
         createdAt: Date.now(),
         status: "queued",
@@ -1194,6 +1347,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       clearPendingFiles();
       clearPendingPathAttachments();
       clearSessionReferences(targetSessionId, payload.sessionReferences || []);
+      if (forkContextUsed) clearForkContextForSession(targetSessionId);
       setStreaming(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
       return;
@@ -1204,11 +1358,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     clearPendingFiles();
     clearPendingPathAttachments();
     clearSessionReferences(targetSessionId, payload.sessionReferences || []);
+    if (forkContextUsed) clearForkContextForSession(targetSessionId);
     await sendPayloadNow(targetSessionId, payload, { planModeEnabled });
   }, [
     activeQuestionnaire,
     activeSessionReferences.length,
     buildMessagePayload,
+    clearForkContextForSession,
     clearPendingFiles,
     clearPendingImages,
     clearPendingPathAttachments,
@@ -1514,6 +1670,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         onToggleAssistantProcess={handleToggleAssistantProcess}
         onToggleAssistantProcessEntry={handleToggleAssistantProcessEntry}
         onPreserveScroll={preserveScrollDuringLayoutChange}
+        onForkMessage={handleForkFromMessage}
       />
 
       {activeQuestionnaire && (
@@ -1563,6 +1720,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           textareaRef={textareaRef}
           onAddInputFiles={handleAddInputFiles}
           onOpenAttachmentFolder={handleOpenAttachmentFolder}
+          onOpenSessionReferences={() => {
+            setModelOpen(false);
+            setThinkingOpen(false);
+            setReferenceOpen(true);
+          }}
           onClearAttachmentError={clearAttachmentError}
           onRemovePendingFile={removePendingFile}
           onRemovePendingImage={removePendingImage}
@@ -1597,13 +1759,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           modelRef={modelRef}
           thinkingRef={thinkingRef}
           leadingContent={
-            activeProject && activeSession ? (
+            activeProject && activeSession && (activeSessionReferences.length > 0 || referenceOpen) ? (
               <div ref={referenceRef} className="relative">
                 <SessionReferenceControl
                   project={activeProject}
                   activeSession={activeSession}
                   sessionMessages={sessionMessages}
                   open={referenceOpen}
+                  showTrigger={activeSessionReferences.length > 0}
                   onOpenChange={setReferenceOpen}
                   onAddOrRefresh={handleAddOrRefreshReference}
                   onRemove={handleRemoveReference}

@@ -50,6 +50,7 @@ export interface AgentProcess {
   endedAt?: number;
   expanded?: boolean;
   planSteps?: AgentProcessStep[];
+  planStepsSource?: "native" | "inferred";
   changeSummary?: AgentProcessChangeSummary;
   entries: AgentProcessEntry[];
 }
@@ -129,7 +130,7 @@ interface ChatState {
   appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
-  updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
+  updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;

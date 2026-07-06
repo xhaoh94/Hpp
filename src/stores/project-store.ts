@@ -11,6 +11,16 @@ export interface ProjectSession {
   sessionFilePath?: string;
   closed?: boolean;
   references?: SessionReference[];
+  forkContext?: SessionForkContext;
+}
+
+export interface SessionForkContext {
+  sourceSessionId: string;
+  sourceTitle: string;
+  throughMessageId: string;
+  createdAt: string;
+  messageCount: number;
+  context: string;
 }
 
 export interface SessionReference {
@@ -49,6 +59,7 @@ interface ProjectState {
   setActiveSession: (sessionId: string | null) => void;
   upsertSessionReference: (projectId: string, sessionId: string, reference: SessionReference) => void;
   removeSessionReference: (projectId: string, sessionId: string, sourceSessionId: string) => void;
+  setSessionForkContext: (projectId: string, sessionId: string, forkContext?: SessionForkContext) => void;
   setSessionFilePath: (projectId: string, sessionId: string, sessionFilePath: string) => void;
   setAgentStatus: (sessionId: string, status: AgentStatus) => void;
   markSessionInitialized: (sessionId: string) => void;
@@ -205,6 +216,24 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
                     }
                   : se
               ),
+            }
+          : p
+      ),
+    })),
+
+  setSessionForkContext: (projectId, sessionId, forkContext) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((se) => {
+                if (se.id !== sessionId) return se;
+                if (forkContext) return { ...se, forkContext };
+                const next = { ...se };
+                delete next.forkContext;
+                return next;
+              }),
             }
           : p
       ),

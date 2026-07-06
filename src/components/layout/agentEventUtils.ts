@@ -652,34 +652,40 @@ export const buildInferredPlanSteps = (
 
   const terminalStatus: AgentProcessStepStatus | null =
     flags.cancelled ? "cancelled" : flags.failed ? "failed" : null;
+  const hasWorked = flags.operated || flags.modified || Object.keys(runtime.changeSummaryFiles).length > 0;
+  const hasFinished = flags.verified;
+  const terminalAtAnalyze = !!terminalStatus && !hasWorked && !flags.verified;
+  const terminalAtOperate = !!terminalStatus && hasWorked && !flags.verified;
+  const terminalAtVerify = !!terminalStatus && flags.verified;
   const steps: AgentProcessStep[] = [
     {
       id: "inferred-analyze",
       title: "分析请求",
-      status: flags.analyzed || flags.operated || flags.modified || flags.verified ? "completed" : "running",
+      status: terminalAtAnalyze
+        ? terminalStatus
+        : hasWorked || hasFinished || terminalAtOperate || terminalAtVerify
+        ? "completed"
+        : flags.analyzed
+          ? "running"
+          : "pending",
     },
     {
       id: "inferred-operate",
       title: "执行操作",
-      status: flags.modified || flags.verified || terminalStatus ? "completed" : flags.operated ? "running" : flags.analyzed ? "running" : "pending",
+      status: terminalAtOperate
+        ? terminalStatus
+        : hasFinished || terminalAtVerify
+        ? "completed"
+        : hasWorked
+          ? "running"
+          : "pending",
+    },
+    {
+      id: "inferred-verify",
+      title: "验证总结",
+      status: terminalAtVerify ? terminalStatus : hasFinished ? "completed" : "pending",
     },
   ];
-
-  if (flags.modified) {
-    steps.push({
-      id: "inferred-modify",
-      title: "修改文件",
-      status: flags.verified ? "completed" : terminalStatus || "running",
-    });
-  }
-
-  if (flags.verified || terminalStatus) {
-    steps.push({
-      id: "inferred-verify",
-      title: "验证结果",
-      status: terminalStatus || "completed",
-    });
-  }
 
   return steps;
 };

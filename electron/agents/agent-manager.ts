@@ -20,6 +20,7 @@ interface AgentBackend {
   init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
   sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
   sendGuidance?(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
+  forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
   abort(): Promise<void>;
   getModels(): Promise<AgentModel[]>;
   setModel(provider: string, modelId: string): Promise<void>;
@@ -33,6 +34,25 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
+  clientMessageId?: string;
+}
+
+interface AgentForkTarget {
+  newSessionId: string;
+  sourceSessionFilePath?: string;
+  sourceUserMessageIndex: number;
+  rollbackUserMessageCount?: number;
+  sourceMessageContent?: string;
+  throughMessageId?: string;
+}
+
+interface AgentForkResult {
+  supported: boolean;
+  success: boolean;
+  sessionFilePath?: string;
+  nativeEntryId?: string;
+  error?: string;
+  reason?: string;
 }
 
 // ============================================================
@@ -220,6 +240,20 @@ class AgentManager {
     await agent.sendGuidance(message, images, options);
   }
 
+  async forkSession(sessionId: string, target: AgentForkTarget): Promise<AgentForkResult> {
+    const agent = this.getAgentBySessionId(sessionId);
+    if (!agent) {
+      return { supported: false, success: false, reason: "source session is not initialized" };
+    }
+    if (typeof agent.forkSession !== "function") {
+      return { supported: false, success: false, reason: "agent does not support native fork" };
+    }
+    return agent.forkSession({
+      ...target,
+      sourceSessionFilePath: target.sourceSessionFilePath || agent.sessionFilePath || undefined,
+    });
+  }
+
   removeSession(sessionId: string) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) { agent.dispose(); this.sessionAgents.delete(sessionId); }
@@ -272,10 +306,19 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         planModeEnabled: planModeEnabled && supportsNativePlanMode(agentType),
         permissionMode,
         displayMessage: message,
+        clientMessageId: options?.clientMessageId,
       });
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("agent:forkSession", async (_event, sessionId: string, target: AgentForkTarget) => {
+    try {
+      return await agentManager.forkSession(sessionId, target);
+    } catch (err: any) {
+      return { supported: true, success: false, error: err.message || String(err) };
     }
   });
 

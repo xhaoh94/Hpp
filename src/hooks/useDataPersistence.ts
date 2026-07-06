@@ -1,5 +1,11 @@
 import { useEffect } from "react";
-import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
+import {
+  useProjectStore,
+  type Project,
+  type ProjectSession,
+  type SessionForkContext,
+  type SessionReference,
+} from "@/stores/project-store";
 import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 
 interface PersistedData {
@@ -48,6 +54,27 @@ const parseSessionReference = (value: unknown): SessionReference | null => {
   };
 };
 
+const parseSessionForkContext = (value: unknown): SessionForkContext | undefined => {
+  if (!isRecord(value)) return undefined;
+  const sourceSessionId = getString(value.sourceSessionId);
+  const sourceTitle = getString(value.sourceTitle);
+  const throughMessageId = getString(value.throughMessageId);
+  const createdAt = getString(value.createdAt);
+  const context = getString(value.context);
+  const messageCount = typeof value.messageCount === "number" ? value.messageCount : undefined;
+  if (!sourceSessionId || !sourceTitle || !throughMessageId || !createdAt || !context || messageCount === undefined) {
+    return undefined;
+  }
+  return {
+    sourceSessionId,
+    sourceTitle,
+    throughMessageId,
+    createdAt,
+    messageCount,
+    context,
+  };
+};
+
 const parseProjectSession = (value: unknown): ProjectSession | null => {
   if (!isRecord(value)) return null;
   const id = getString(value.id);
@@ -70,6 +97,7 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
     references: Array.isArray(value.references)
       ? value.references.map(parseSessionReference).filter((ref): ref is SessionReference => !!ref)
       : undefined,
+    forkContext: parseSessionForkContext(value.forkContext),
   };
 };
 

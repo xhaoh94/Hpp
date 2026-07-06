@@ -16,6 +16,25 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
+  clientMessageId?: string;
+}
+
+interface AgentForkTarget {
+  newSessionId: string;
+  sourceSessionFilePath?: string;
+  sourceUserMessageIndex: number;
+  rollbackUserMessageCount?: number;
+  sourceMessageContent?: string;
+  throughMessageId?: string;
+}
+
+interface AgentForkResult {
+  supported: boolean;
+  success: boolean;
+  sessionFilePath?: string;
+  nativeEntryId?: string;
+  error?: string;
+  reason?: string;
 }
 
 const getWorkerPath = () => {
@@ -142,7 +161,7 @@ export class CodexAgent {
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
-    const promptId = this.createCommandId();
+    const promptId = options?.clientMessageId || this.createCommandId();
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.sendWorkerCommand({
       id: promptId,
@@ -188,6 +207,36 @@ export class CodexAgent {
       title: `收到引导: "${messagePreview || "用户引导"}"`,
       detail: displayMessage || undefined,
       state: "completed",
+    });
+  }
+
+  async forkSession(target: AgentForkTarget): Promise<AgentForkResult> {
+    if (!this.process) {
+      return { supported: true, success: false, error: "Codex worker is not running" };
+    }
+
+    const requestId = this.createCommandId();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(requestId);
+        resolve({ supported: true, success: false, error: "Codex fork timed out" });
+      }, 30000);
+      this.sendWorkerCommand({
+        id: requestId,
+        type: "forkSession",
+        ...target,
+        sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || undefined,
+      }, (data) => {
+        clearTimeout(timeout);
+        resolve({
+          supported: data.supported !== false,
+          success: !!data.success,
+          sessionFilePath: data.sessionFilePath,
+          nativeEntryId: data.nativeEntryId,
+          error: data.error,
+          reason: data.reason,
+        });
+      });
     });
   }
 

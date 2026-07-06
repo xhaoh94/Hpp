@@ -146,7 +146,10 @@ export function useAgentEvents({
       if (steps.length === 0) return;
       const runtime = getRuntime(sessionId);
       if (native) runtime.nativePlanSteps = true;
-      useChatStore.getState().updateLastAssistantProcessMeta({ planSteps: steps }, sessionId);
+      useChatStore.getState().updateLastAssistantProcessMeta({
+        planSteps: steps,
+        planStepsSource: native ? "native" : "inferred",
+      }, sessionId);
     };
 
     const updateInferredPlanSteps = (sessionId: string, signal: InferredStepSignal) => {

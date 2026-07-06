@@ -92,6 +92,7 @@ let completedItemIds = new Set();
 let emittedContextCompactionIds = new Set();
 let pendingUIRequest = null;
 let activeImageCleanups = [];
+let forkRequestActive = false;
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -303,6 +304,89 @@ const rpcRequest = (method, params, timeoutMs = 120000) => {
     }, timeoutMs);
     pendingRpc.set(id, { method, resolve, reject, timeout });
   });
+};
+
+const getThreadIdFromResult = (result) =>
+  result?.thread?.id ||
+  result?.threadId ||
+  result?.id ||
+  result?.thread?.threadId ||
+  "";
+
+const requestThreadFork = async (sourceThreadId) => {
+  const params = buildThreadParams();
+  const attempts = [
+    { threadId: sourceThreadId, ...params },
+    { sourceThreadId, ...params },
+    { threadId: sourceThreadId },
+    { sourceThreadId },
+  ];
+  let lastError = null;
+  for (const forkParams of attempts) {
+    try {
+      const result = await rpcRequest("thread/fork", forkParams, 30000);
+      const forkedThreadId = getThreadIdFromResult(result);
+      if (forkedThreadId) return forkedThreadId;
+      lastError = new Error("Codex app-server did not return a forked thread id");
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Codex thread/fork failed");
+};
+
+const rollbackThreadOnce = async (targetThreadId) => {
+  const attempts = [
+    { threadId: targetThreadId },
+    { targetThreadId },
+  ];
+  let lastError = null;
+  for (const rollbackParams of attempts) {
+    try {
+      await rpcRequest("thread/rollback", rollbackParams, 30000);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Codex thread/rollback failed");
+};
+
+const forkCodexSession = async (command) => {
+  await startAppServer();
+  const sourceThreadId = command.sourceSessionFilePath || threadId;
+  if (!sourceThreadId) {
+    return { supported: true, success: false, reason: "source Codex thread is not initialized" };
+  }
+
+  const originalThreadId = threadId;
+  const originalActiveThreadId = activeThreadId;
+  forkRequestActive = true;
+  try {
+    const forkedThreadId = await requestThreadFork(sourceThreadId);
+    const rollbackCount = Math.max(0, Number(command.rollbackUserMessageCount || 0));
+    for (let index = 0; index < rollbackCount; index += 1) {
+      await rollbackThreadOnce(forkedThreadId);
+    }
+    return {
+      supported: true,
+      success: true,
+      sessionFilePath: forkedThreadId,
+    };
+  } catch (error) {
+    const message = error?.message || String(error);
+    const unsupported = /unknown method|method not found|unsupported|not found/i.test(message);
+    return {
+      supported: !unsupported,
+      success: false,
+      reason: unsupported ? "Codex app-server does not expose thread/fork in this version" : undefined,
+      error: message,
+    };
+  } finally {
+    forkRequestActive = false;
+    threadId = originalThreadId;
+    activeThreadId = originalActiveThreadId;
+  }
 };
 
 const rpcNotify = (method, params) => {
@@ -975,6 +1059,7 @@ const handleTurnCompleted = (params) => {
 const handleServerNotification = (method, params) => {
   switch (method) {
     case "thread/started":
+      if (forkRequestActive) break;
       threadId = params.thread?.id || params.threadId || threadId;
       activeThreadId = threadId;
       if (threadId) send({ type: "session_file_path", sessionFilePath: threadId, threadId });
@@ -1253,6 +1338,11 @@ const handleCommand = async (command) => {
       case "guidance":
         await runGuidance(command);
         break;
+      case "forkSession": {
+        const result = await forkCodexSession(command);
+        send({ type: "fork_session_result", id: command.id, ...result });
+        break;
+      }
       case "abort":
         await abortPrompt(command);
         break;
