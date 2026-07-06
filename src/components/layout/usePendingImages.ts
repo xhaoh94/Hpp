@@ -1,5 +1,5 @@
 import { useCallback, useState, type ClipboardEvent } from "react";
-import type { PendingImage } from "./ChatComposer";
+import type { PendingImage } from "@/stores/chat-store";
 
 const MAX_PENDING_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set([
@@ -27,8 +27,7 @@ const getImageAttachmentRejection = (file: File) => {
   return null;
 };
 
-export function usePendingImages() {
-  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+export function usePendingImages(onAddImage: (image: PendingImage) => void) {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   const addPendingImage = useCallback((file: File) => {
@@ -46,24 +45,16 @@ export function usePendingImages() {
 
     const reader = new FileReader();
     reader.onload = () => {
-      setPendingImages((prev) => [...prev, {
+      onAddImage({
         id: crypto.randomUUID(),
         src: reader.result as string,
         name: file.name,
         file,
-      }]);
+      });
       setAttachmentError(null);
     };
     reader.readAsDataURL(file);
-  }, []);
-
-  const removePendingImage = useCallback((id: string) => {
-    setPendingImages((prev) => prev.filter((image) => image.id !== id));
-  }, []);
-
-  const clearPendingImages = useCallback(() => {
-    setPendingImages([]);
-  }, []);
+  }, [onAddImage]);
 
   const clearAttachmentError = useCallback(() => {
     setAttachmentError(null);
@@ -86,11 +77,8 @@ export function usePendingImages() {
   }, [addPendingImage]);
 
   return {
-    pendingImages,
     attachmentError,
     addPendingImage,
-    removePendingImage,
-    clearPendingImages,
     clearAttachmentError,
     showAttachmentError,
     handlePaste,

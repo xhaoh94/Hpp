@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { SessionReference } from "./project-store";
 
 export interface FileDiff {
   file: string;
@@ -84,6 +85,21 @@ export interface PendingPathAttachment {
   kind: "file" | "folder";
 }
 
+export interface PendingImage {
+  id: string;
+  src: string;
+  name: string;
+  file: File;
+}
+
+export interface ChatDraft {
+  text: string;
+  pendingImages: PendingImage[];
+  pendingFiles: PendingFile[];
+  pendingPathAttachments: PendingPathAttachment[];
+  sessionReferences: SessionReference[];
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -118,8 +134,7 @@ interface ChatState {
   favoriteModels: ModelInfo[];
   activeAgentId: string;
   highlightedFile: string | null;
-  pendingFiles: PendingFile[];
-  pendingPathAttachments: PendingPathAttachment[];
+  sessionDrafts: Record<string, ChatDraft>;
   messageQueues: Record<string, QueuedMessage[]>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
@@ -143,12 +158,20 @@ interface ChatState {
   setActiveAgent: (id: string) => void;
   clearMessages: () => void;
   setHighlightedFile: (path: string | null) => void;
-  addPendingFile: (file: PendingFile) => void;
-  removePendingFile: (id: string) => void;
-  clearPendingFiles: () => void;
-  addPendingPathAttachment: (attachment: PendingPathAttachment) => void;
-  removePendingPathAttachment: (id: string) => void;
-  clearPendingPathAttachments: () => void;
+  setDraftText: (sessionId: string, text: string) => void;
+  addPendingImage: (image: PendingImage, sessionId?: string | null) => void;
+  removePendingImage: (id: string, sessionId?: string | null) => void;
+  clearPendingImages: (sessionId?: string | null) => void;
+  addPendingFile: (file: PendingFile, sessionId?: string | null) => void;
+  removePendingFile: (id: string, sessionId?: string | null) => void;
+  clearPendingFiles: (sessionId?: string | null) => void;
+  addPendingPathAttachment: (attachment: PendingPathAttachment, sessionId?: string | null) => void;
+  removePendingPathAttachment: (id: string, sessionId?: string | null) => void;
+  clearPendingPathAttachments: (sessionId?: string | null) => void;
+  upsertSessionReference: (reference: SessionReference, sessionId?: string | null) => void;
+  removeSessionReference: (sourceSessionId: string, sessionId?: string | null) => void;
+  clearSessionReferences: (sessionId?: string | null) => void;
+  clearSessionDraft: (sessionId: string) => void;
   enqueueMessage: (item: QueuedMessage) => void;
   upsertQueuedMessage: (item: QueuedMessage) => void;
   removeQueuedMessage: (sessionId: string, itemId: string) => void;
@@ -226,6 +249,33 @@ const updateSessionMessages = (
     : { sessionMessages: nextSessionMessages };
 };
 
+export const createEmptyChatDraft = (): ChatDraft => ({
+  text: "",
+  pendingImages: [],
+  pendingFiles: [],
+  pendingPathAttachments: [],
+  sessionReferences: [],
+});
+
+export const EMPTY_CHAT_DRAFT = createEmptyChatDraft();
+
+const updateSessionDraft = (
+  state: ChatState,
+  sessionId: string | null | undefined,
+  updater: (draft: ChatDraft) => ChatDraft
+) => {
+  const targetSessionId = sessionId || state.activeSessionId;
+  if (!targetSessionId) return {};
+  const currentDraft = state.sessionDrafts[targetSessionId] || createEmptyChatDraft();
+  const nextDraft = updater(currentDraft);
+  return {
+    sessionDrafts: {
+      ...state.sessionDrafts,
+      [targetSessionId]: nextDraft,
+    },
+  };
+};
+
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   sessionMessages: {},
@@ -237,8 +287,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   favoriteModels: [],
   activeAgentId: "codex",
   highlightedFile: null,
-  pendingFiles: [],
-  pendingPathAttachments: [],
+  sessionDrafts: {},
   messageQueues: {},
 
   addMessage: (msg, sessionId) =>
@@ -506,22 +555,82 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setActiveAgent: (id) => set({ activeAgentId: id }),
   clearMessages: () => set({ messages: [] }),
   setHighlightedFile: (path) => set({ highlightedFile: path }),
-  addPendingFile: (file) => set((s) => ({ pendingFiles: [...s.pendingFiles, file] })),
-  removePendingFile: (id) => set((s) => ({ pendingFiles: s.pendingFiles.filter((f) => f.id !== id) })),
-  clearPendingFiles: () => set({ pendingFiles: [] }),
-  addPendingPathAttachment: (attachment) =>
-    set((s) => {
-      const exists = s.pendingPathAttachments.some(
+  setDraftText: (sessionId, text) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => (
+      draft.text === text ? draft : { ...draft, text }
+    ))),
+  addPendingImage: (image, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingImages: [...draft.pendingImages, image],
+    }))),
+  removePendingImage: (id, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingImages: draft.pendingImages.filter((image) => image.id !== id),
+    }))),
+  clearPendingImages: (sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => (
+      draft.pendingImages.length === 0 ? draft : { ...draft, pendingImages: [] }
+    ))),
+  addPendingFile: (file, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingFiles: [...draft.pendingFiles, file],
+    }))),
+  removePendingFile: (id, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingFiles: draft.pendingFiles.filter((file) => file.id !== id),
+    }))),
+  clearPendingFiles: (sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => (
+      draft.pendingFiles.length === 0 ? draft : { ...draft, pendingFiles: [] }
+    ))),
+  addPendingPathAttachment: (attachment, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => {
+      const exists = draft.pendingPathAttachments.some(
         (item) => item.path === attachment.path && item.kind === attachment.kind
       );
-      if (exists) return {};
-      return { pendingPathAttachments: [...s.pendingPathAttachments, attachment] };
-    }),
-  removePendingPathAttachment: (id) =>
-    set((s) => ({
-      pendingPathAttachments: s.pendingPathAttachments.filter((attachment) => attachment.id !== id),
+      if (exists) return draft;
+      return {
+        ...draft,
+        pendingPathAttachments: [...draft.pendingPathAttachments, attachment],
+      };
     })),
-  clearPendingPathAttachments: () => set({ pendingPathAttachments: [] }),
+  removePendingPathAttachment: (id, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingPathAttachments: draft.pendingPathAttachments.filter((attachment) => attachment.id !== id),
+    }))),
+  clearPendingPathAttachments: (sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => (
+      draft.pendingPathAttachments.length === 0 ? draft : { ...draft, pendingPathAttachments: [] }
+    ))),
+  upsertSessionReference: (reference, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => {
+      const nextReferences = [
+        ...draft.sessionReferences.filter((item) => item.sourceSessionId !== reference.sourceSessionId),
+        reference,
+      ];
+      return { ...draft, sessionReferences: nextReferences };
+    })),
+  removeSessionReference: (sourceSessionId, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      sessionReferences: draft.sessionReferences.filter((reference) => reference.sourceSessionId !== sourceSessionId),
+    }))),
+  clearSessionReferences: (sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => (
+      draft.sessionReferences.length === 0 ? draft : { ...draft, sessionReferences: [] }
+    ))),
+  clearSessionDraft: (sessionId) =>
+    set((s) => {
+      if (!s.sessionDrafts[sessionId]) return {};
+      const nextSessionDrafts = { ...s.sessionDrafts };
+      delete nextSessionDrafts[sessionId];
+      return { sessionDrafts: nextSessionDrafts };
+    }),
   enqueueMessage: (item) =>
     set((s) => ({
       messageQueues: {
@@ -588,13 +697,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextSessionMessages[sessionId];
       const nextMessageQueues = { ...s.messageQueues };
       delete nextMessageQueues[sessionId];
+      const nextSessionDrafts = { ...s.sessionDrafts };
+      delete nextSessionDrafts[sessionId];
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
+        sessionDrafts: nextSessionDrafts,
         messages: s.activeSessionId === sessionId ? [] : s.messages,
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
-        pendingFiles: s.activeSessionId === sessionId ? [] : s.pendingFiles,
-        pendingPathAttachments: s.activeSessionId === sessionId ? [] : s.pendingPathAttachments,
       };
     }),
   deleteSessionsMessages: (sessionIds) =>
@@ -603,18 +713,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessionIdSet = new Set(sessionIds);
       const nextSessionMessages = { ...s.sessionMessages };
       const nextMessageQueues = { ...s.messageQueues };
+      const nextSessionDrafts = { ...s.sessionDrafts };
       for (const sessionId of sessionIdSet) {
         delete nextSessionMessages[sessionId];
         delete nextMessageQueues[sessionId];
+        delete nextSessionDrafts[sessionId];
       }
       const deletingActiveSession = !!s.activeSessionId && sessionIdSet.has(s.activeSessionId);
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
+        sessionDrafts: nextSessionDrafts,
         messages: deletingActiveSession ? [] : s.messages,
         activeSessionId: deletingActiveSession ? null : s.activeSessionId,
-        pendingFiles: deletingActiveSession ? [] : s.pendingFiles,
-        pendingPathAttachments: deletingActiveSession ? [] : s.pendingPathAttachments,
       };
     }),
 
@@ -629,16 +740,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: sessionMsgs,
         sessionMessages: nextSessionMessages,
         activeSessionId: sessionId,
-        pendingFiles: [],
-        pendingPathAttachments: [],
       });
     } else {
       set({
         messages: [],
         sessionMessages: nextSessionMessages,
         activeSessionId: null,
-        pendingFiles: [],
-        pendingPathAttachments: [],
       });
     }
   },

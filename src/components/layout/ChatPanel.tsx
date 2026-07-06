@@ -15,13 +15,16 @@ import {
   useChatStore,
   type AgentProcess,
   type AgentProcessStep,
+  type ChatDraft,
   type ChatMessage,
   type ModelInfo,
   type QueuedMessage,
   type PendingFile,
+  type PendingImage,
   type PendingPathAttachment,
+  EMPTY_CHAT_DRAFT,
 } from "@/stores/chat-store";
-import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
+import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
 import {
@@ -38,7 +41,7 @@ import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/pa
 import { saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
-import { ChatComposer, type PendingImage } from "./ChatComposer";
+import { ChatComposer } from "./ChatComposer";
 import { ChatToolbar } from "./ChatToolbar";
 import { DiffBlock } from "./DiffBlock";
 import { ProcessBlock } from "./ProcessBlock";
@@ -167,6 +170,7 @@ function MessageQueuePanel({
 type SessionReferenceControlProps = {
   project: Project;
   activeSession: ProjectSession;
+  references: SessionReference[];
   sessionMessages: Record<string, ChatMessage[]>;
   open: boolean;
   showTrigger?: boolean;
@@ -178,6 +182,7 @@ type SessionReferenceControlProps = {
 function SessionReferenceControl({
   project,
   activeSession,
+  references,
   sessionMessages,
   open,
   showTrigger = true,
@@ -185,7 +190,6 @@ function SessionReferenceControl({
   onAddOrRefresh,
   onRemove,
 }: SessionReferenceControlProps) {
-  const references = activeSession.references || [];
   const referencedSessionIds = new Set(references.map((reference) => reference.sourceSessionId));
   const availableSessions = project.sessions.filter((session) => session.id !== activeSession.id);
   const unreferencedSessions = availableSessions.filter((session) => !referencedSessionIds.has(session.id));
@@ -608,13 +612,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     toggleFavorite,
     thinkingLevel,
     setThinkingLevel,
-    pendingFiles,
+    sessionDrafts,
+    setDraftText,
+    addPendingImage: addPendingImageToDraft,
+    removePendingImage,
     removePendingFile,
-    clearPendingFiles,
-    pendingPathAttachments,
     addPendingPathAttachment,
     removePendingPathAttachment,
-    clearPendingPathAttachments,
+    upsertSessionReference: upsertDraftSessionReference,
+    removeSessionReference: removeDraftSessionReference,
+    clearSessionDraft,
     messageQueues,
     enqueueMessage,
     upsertQueuedMessage,
@@ -635,13 +642,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     agentStatuses,
     addSession,
     isSessionInitialized,
-    upsertSessionReference,
-    removeSessionReference,
+    removeSessionReference: removePersistedSessionReference,
   } = useProjectStore();
   const { triggerAddProject } = useAppStore();
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
-  const activeSessionReferences = useMemo(() => activeSession?.references || [], [activeSession?.references]);
+  const activeDraft: ChatDraft = activeSessionId ? sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT : EMPTY_CHAT_DRAFT;
+  const pendingImages = activeDraft.pendingImages;
+  const pendingFiles = activeDraft.pendingFiles;
+  const pendingPathAttachments = activeDraft.pendingPathAttachments;
+  const legacySessionReferences = activeSession?.references || [];
+  const activeSessionReferences = useMemo(
+    () => activeDraft.sessionReferences.length > 0 ? activeDraft.sessionReferences : legacySessionReferences,
+    [activeDraft.sessionReferences, legacySessionReferences]
+  );
   const activeSessionForkContext = activeSession?.forkContext;
   const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
   const activeQueuedMessages = activeSessionId ? messageQueues[activeSessionId] || [] : [];
@@ -682,15 +696,30 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const sessionRuntimeRef = useRef<Record<string, SessionRuntime>>({});
   const forkingMessageIdRef = useRef<string | null>(null);
   const {
-    pendingImages,
     attachmentError,
-    addPendingImage,
-    removePendingImage,
-    clearPendingImages,
+    addPendingImage: addPendingImageFile,
     clearAttachmentError,
     showAttachmentError,
     handlePaste,
-  } = usePendingImages();
+  } = usePendingImages(addPendingImageToDraft);
+
+  useEffect(() => {
+    if (!activeProject || !activeSessionId || legacySessionReferences.length === 0) return;
+    const currentDraft = useChatStore.getState().sessionDrafts[activeSessionId];
+    if (currentDraft?.sessionReferences.length) return;
+
+    legacySessionReferences.forEach((reference) => {
+      upsertDraftSessionReference(reference, activeSessionId);
+      removePersistedSessionReference(activeProject.id, activeSessionId, reference.sourceSessionId);
+    });
+  }, [
+    activeProject,
+    activeSessionId,
+    legacySessionReferences,
+    removePersistedSessionReference,
+    upsertDraftSessionReference,
+  ]);
+
   const {
     pendingUIResponse,
     pendingUIResponseRef,
@@ -740,7 +769,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       inputHasTextRef.current = hasText;
       setInputHasText(hasText);
     }
-  }, []);
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) setDraftText(sessionId, value);
+  }, [setDraftText]);
 
   const setComposerInput = useCallback((value: string) => {
     syncInputValue(value);
@@ -750,6 +781,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
     resizeTextarea(textarea);
   }, [resizeTextarea, syncInputValue]);
+
+  useEffect(() => {
+    setComposerInput(activeDraft.text);
+    clearAttachmentError();
+  }, [activeSessionId, setComposerInput, clearAttachmentError]);
 
   const queueDispatchingRef = useRef<Set<string>>(new Set());
 
@@ -879,20 +915,21 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const handleAddOrRefreshReference = useCallback((sourceSession: ProjectSession) => {
     if (!activeProject || !activeSessionId || sourceSession.id === activeSessionId) return;
     const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || []);
-    upsertSessionReference(activeProject.id, activeSessionId, reference);
-  }, [activeProject, activeSessionId, sessionMessages, upsertSessionReference]);
+    upsertDraftSessionReference(reference, activeSessionId);
+  }, [activeProject, activeSessionId, sessionMessages, upsertDraftSessionReference]);
 
   const handleRemoveReference = useCallback((sourceSessionId: string) => {
     if (!activeProject || !activeSessionId) return;
-    removeSessionReference(activeProject.id, activeSessionId, sourceSessionId);
-  }, [activeProject, activeSessionId, removeSessionReference]);
+    removeDraftSessionReference(sourceSessionId, activeSessionId);
+    removePersistedSessionReference(activeProject.id, activeSessionId, sourceSessionId);
+  }, [activeProject, activeSessionId, removeDraftSessionReference, removePersistedSessionReference]);
 
-  const clearSessionReferences = useCallback((sessionId: string, references: MessageSessionReferencePayload[]) => {
+  const clearLegacySessionReferences = useCallback((sessionId: string, references: MessageSessionReferencePayload[]) => {
     if (!activeProject || references.length === 0) return;
     references.forEach((reference) => {
-      removeSessionReference(activeProject.id, sessionId, reference.sourceSessionId);
+      removePersistedSessionReference(activeProject.id, sessionId, reference.sourceSessionId);
     });
-  }, [activeProject, removeSessionReference]);
+  }, [activeProject, removePersistedSessionReference]);
 
   const addPathAttachmentFromPath = useCallback(async (path: string) => {
     if (!path) {
@@ -945,14 +982,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     void (async () => {
       for (const file of files) {
         if (isSupportedImageAttachment(file)) {
-          addPendingImage(file);
+          addPendingImageFile(file);
           continue;
         }
 
         await addPathAttachmentFromPath(getDroppedFilePath(file));
       }
     })();
-  }, [addPathAttachmentFromPath, addPendingImage, getDroppedFilePath]);
+  }, [addPathAttachmentFromPath, addPendingImageFile, getDroppedFilePath]);
 
   const handleOpenAttachmentFolder = useCallback(() => {
     void (async () => {
@@ -1451,22 +1488,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         createdAt: Date.now(),
         status: "queued",
       });
-      setComposerInput("");
-      clearPendingImages();
-      clearPendingFiles();
-      clearPendingPathAttachments();
-      clearSessionReferences(targetSessionId, payload.sessionReferences || []);
+      if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
+      clearSessionDraft(targetSessionId);
+      clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
       if (forkContextUsed) clearForkContextForSession(targetSessionId);
       setStreaming(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
       return;
     }
 
-    setComposerInput("");
-    clearPendingImages();
-    clearPendingFiles();
-    clearPendingPathAttachments();
-    clearSessionReferences(targetSessionId, payload.sessionReferences || []);
+    if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
+    clearSessionDraft(targetSessionId);
+    clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
     if (forkContextUsed) clearForkContextForSession(targetSessionId);
     await sendPayloadNow(targetSessionId, payload, { planModeEnabled });
   }, [
@@ -1474,10 +1507,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeSessionReferences.length,
     buildMessagePayload,
     clearForkContextForSession,
-    clearPendingFiles,
-    clearPendingImages,
-    clearPendingPathAttachments,
-    clearSessionReferences,
+    clearLegacySessionReferences,
+    clearSessionDraft,
     enqueueMessage,
     handleSendUIResponse,
     isAwaitingUIResponse,
@@ -1881,6 +1912,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                 <SessionReferenceControl
                   project={activeProject}
                   activeSession={activeSession}
+                  references={activeSessionReferences}
                   sessionMessages={sessionMessages}
                   open={referenceOpen}
                   showTrigger={activeSessionReferences.length > 0}

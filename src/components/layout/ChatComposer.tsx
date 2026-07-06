@@ -7,15 +7,8 @@ import type {
 } from "react";
 import { memo, useEffect, useRef, useState } from "react";
 import { FileText, Folder, Image as ImageIcon, Link2, Square, X } from "lucide-react";
-import type { PendingFile, PendingPathAttachment } from "@/stores/chat-store";
+import type { PendingFile, PendingImage, PendingPathAttachment } from "@/stores/chat-store";
 import type { SessionReference } from "@/stores/project-store";
-
-export type PendingImage = {
-  id: string;
-  src: string;
-  name: string;
-  file: File;
-};
 
 type ChatComposerProps = {
   activeQuestionnaire: boolean;
