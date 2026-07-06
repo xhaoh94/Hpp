@@ -81,6 +81,13 @@ const escapeXmlAttribute = (value: string) =>
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
+const getCompatibleForkSessionTitle = (message: ChatMessage) => {
+  const title = getForkSessionTitle(message);
+  return title.startsWith("分叉 - ")
+    ? title.replace(/^分叉 - /, "兼容分叉 - ")
+    : `兼容分叉 - ${title}`;
+};
+
 const buildPathAttachmentBlock = (attachments: PendingPathAttachment[]) => {
   if (attachments.length === 0) return "";
   const lines = attachments.map((attachment) => {
@@ -298,6 +305,7 @@ type ChatMessagesViewProps = {
   onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
+  forkingMessageId: string | null;
 };
 
 type ChatMessageItemProps = {
@@ -310,6 +318,7 @@ type ChatMessageItemProps = {
   onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
+  forkingMessageId: string | null;
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
@@ -322,6 +331,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   onToggleAssistantProcessEntry,
   onPreserveScroll,
   onForkMessage,
+  forkingMessageId,
 }: ChatMessageItemProps) {
   if (msg.role === "system" && msg.systemType === "context_compaction") {
     return (
@@ -346,6 +356,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences)
       : hasContent || hasImages || hasDiffs || hasSessionReferences;
   const showAssistantActions = msg.role === "assistant" && hasVisibleBubble && !processRunning;
+  const isForkingThisMessage = forkingMessageId === msg.id;
   const renderSessionReferences = () => (
     hasSessionReferences && msg.sessionReferences ? (
       <div className="chat-message-references" aria-label="引用会话">
@@ -445,8 +456,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
                 type="button"
                 className="chat-assistant-action-btn"
                 onClick={() => onForkMessage(msg)}
-                title="从这里新建会话"
-                aria-label="从这里新建会话"
+                title={isForkingThisMessage ? "正在创建分叉会话" : "从这里新建会话"}
+                aria-label={isForkingThisMessage ? "正在创建分叉会话" : "从这里新建会话"}
+                disabled={isForkingThisMessage}
               >
                 <GitBranch size={15} strokeWidth={1.9} />
               </button>
@@ -518,6 +530,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onToggleAssistantProcessEntry,
   onPreserveScroll,
   onForkMessage,
+  forkingMessageId,
 }: ChatMessagesViewProps) {
   const activeProcessWithTodos = [...messages]
     .reverse()
@@ -549,6 +562,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
                 onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
                 onPreserveScroll={onPreserveScroll}
                 onForkMessage={onForkMessage}
+                forkingMessageId={forkingMessageId}
               />
             ))}
 
@@ -658,6 +672,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
+  const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const referenceRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -665,6 +680,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const modelRef = useRef<HTMLDivElement>(null);
   const thinkingRef = useRef<HTMLDivElement>(null);
   const sessionRuntimeRef = useRef<Record<string, SessionRuntime>>({});
+  const forkingMessageIdRef = useRef<string | null>(null);
   const {
     pendingImages,
     attachmentError,
@@ -683,6 +699,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeQuestionnaire,
   } = usePendingUIResponse(activeSessionId);
   const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
+  const isForkingSession = forkingMessageId !== null;
   const questionnaireResetKey = activeQuestionnaire
     ? `${activeQuestionnaire.sessionId}:${activeQuestionnaire.requestId || ""}:${activeQuestionnaire.entryId || ""}`
     : null;
@@ -956,6 +973,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   const handleDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (forkingMessageIdRef.current) return;
+
     const pathAttachment = getPathAttachmentDragData(event.dataTransfer);
     if (pathAttachment) {
       void addPathAttachmentFromPath(pathAttachment.path);
@@ -968,6 +987,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   const handleDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (forkingMessageIdRef.current) {
+      event.dataTransfer.dropEffect = "none";
+      return;
+    }
     event.dataTransfer.dropEffect = "copy";
   }, []);
 
@@ -996,7 +1019,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     sourceMessage: ChatMessage
   ) => {
     try {
-      const nativeFork = await window.electronAPI.agentForkSession(sourceSession.id, {
+      return await window.electronAPI.agentForkSession(sourceSession.id, {
         newSessionId: sessionId,
         sourceSessionFilePath: sourceSession.sessionFilePath,
         sourceUserMessageIndex,
@@ -1004,9 +1027,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         sourceMessageContent: sourceMessage.content,
         throughMessageId: sourceMessage.id,
       });
-      return nativeFork.success && nativeFork.sessionFilePath ? nativeFork.sessionFilePath : undefined;
-    } catch {
-      return undefined;
+    } catch (error) {
+      return {
+        supported: true,
+        success: false,
+        sessionFilePath: undefined,
+        error: error instanceof Error ? error.message : String(error),
+        reason: undefined,
+      };
     }
   }, []);
 
@@ -1034,7 +1062,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, []);
 
   const handleForkFromMessage = useCallback(async (msg: ChatMessage) => {
-    if (!activeProject || !activeSession) return;
+    if (!activeProject || !activeSession || forkingMessageIdRef.current) return;
 
     const messageIndex = messages.findIndex((message) => message.id === msg.id);
     if (messageIndex < 0) return;
@@ -1047,34 +1075,105 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const totalUserMessageCount = messages.filter((message) => message.role === "user").length;
     const rollbackUserMessageCount = Math.max(0, totalUserMessageCount - sourceUserMessageCount);
     const now = new Date().toISOString();
-    const session: ProjectSession = {
-      id: sessionId,
-      agentId: activeSession.agentId,
-      agentSessionId: sessionId,
-      title: getForkSessionTitle(msg),
+    const forkedFrom = {
+      sourceSessionId: activeSession.id,
+      sourceTitle: activeSession.title,
+      throughMessageId: msg.id,
       createdAt: now,
-      lastActiveAt: now,
-      forkContext: createSessionForkContext(activeSession, sourceMessages, msg.id),
     };
 
-    loadSessionMessages(activeSession.id, messages);
-    loadSessionMessages(sessionId, forkMessages);
-    addSession(activeProject.id, session);
-    switchToSession(activeProject, session);
-    setUserMsgHistoryOpen(false);
-    window.setTimeout(() => scrollToBottomNow(), 0);
+    const createForkSession = (session: ProjectSession, visibleMessages: ChatMessage[]) => {
+      loadSessionMessages(activeSession.id, messages);
+      loadSessionMessages(sessionId, visibleMessages);
+      addSession(activeProject.id, session);
+      switchToSession(activeProject, session);
+      setUserMsgHistoryOpen(false);
+      window.setTimeout(() => scrollToBottomNow(), 0);
+    };
 
-    if (sourceUserMessageIndex >= 0) {
-      void createNativeFork(
-        activeSession,
-        sessionId,
-        sourceUserMessageIndex,
-        rollbackUserMessageCount,
-        msg
-      ).then((nativeSessionFilePath) => {
-        if (!nativeSessionFilePath) return;
-        void applyNativeForkToSession(sessionId, activeSession.agentId, nativeSessionFilePath);
-      });
+    const createFallbackForkSession = (warning?: string) => {
+      const session: ProjectSession = {
+        id: sessionId,
+        agentId: activeSession.agentId,
+        agentSessionId: sessionId,
+        title: warning ? getCompatibleForkSessionTitle(msg) : getForkSessionTitle(msg),
+        createdAt: now,
+        lastActiveAt: now,
+        forkedFrom,
+        forkContext: createSessionForkContext(activeSession, sourceMessages, msg.id),
+      };
+      const visibleMessages: ChatMessage[] = warning
+        ? [
+            ...forkMessages,
+            {
+              id: crypto.randomUUID(),
+              role: "system",
+              content: warning,
+              timestamp: Date.now(),
+            },
+          ]
+        : forkMessages;
+      createForkSession(session, visibleMessages);
+    };
+
+    forkingMessageIdRef.current = msg.id;
+    setForkingMessageId(msg.id);
+
+    try {
+      const isCodexFork = activeSession.agentId === "codex";
+      if (isCodexFork) {
+        if (sourceUserMessageIndex >= 0) {
+          const nativeFork = await createNativeFork(
+            activeSession,
+            sessionId,
+            sourceUserMessageIndex,
+            rollbackUserMessageCount,
+            msg
+          );
+          if (nativeFork.success && nativeFork.sessionFilePath) {
+            const session: ProjectSession = {
+              id: sessionId,
+              agentId: activeSession.agentId,
+              agentSessionId: sessionId,
+              title: getForkSessionTitle(msg),
+              createdAt: now,
+              lastActiveAt: now,
+              sessionFilePath: nativeFork.sessionFilePath,
+              forkedFrom,
+            };
+            createForkSession(session, forkMessages);
+            return;
+          }
+
+          const detail = nativeFork.error || nativeFork.reason;
+          createFallbackForkSession(
+            detail
+              ? `Codex 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：${detail}`
+              : "Codex 原生分叉失败，当前会话使用隐藏上下文兼容模式。"
+          );
+          return;
+        }
+
+        createFallbackForkSession("Codex 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：没有可定位的用户消息");
+        return;
+      }
+
+      createFallbackForkSession();
+      if (sourceUserMessageIndex >= 0) {
+        void createNativeFork(
+          activeSession,
+          sessionId,
+          sourceUserMessageIndex,
+          rollbackUserMessageCount,
+          msg
+        ).then((nativeFork) => {
+          if (!nativeFork.success || !nativeFork.sessionFilePath) return;
+          void applyNativeForkToSession(sessionId, activeSession.agentId, nativeFork.sessionFilePath);
+        });
+      }
+    } finally {
+      forkingMessageIdRef.current = null;
+      setForkingMessageId(null);
     }
   }, [
     activeProject,
@@ -1105,6 +1204,15 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  useEffect(() => {
+    if (!isForkingSession) return;
+    setModelOpen(false);
+    setThinkingOpen(false);
+    setReferenceOpen(false);
+    setUserMsgHistoryOpen(false);
+    setImageContextMenu(null);
+  }, [isForkingSession]);
 
   // Persist messages to sessionMessages whenever messages change (for restart survival)
   useEffect(() => {
@@ -1308,6 +1416,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   ]);
 
   const handleSend = useCallback(async () => {
+    if (forkingMessageIdRef.current) return;
     if (activeQuestionnaire) return;
 
     if (isAwaitingUIResponse) {
@@ -1603,7 +1712,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }
 
   return (
-    <div ref={chatPanelRef} className="chat-panel" onDrop={handleDrop} onDragOver={handleDragOver}>
+    <div
+      ref={chatPanelRef}
+      className={`chat-panel${isForkingSession ? " chat-panel-forking" : ""}`}
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      aria-busy={isForkingSession}
+    >
       {/* Header */}
       <div className="chat-header">
         <div className="chat-agent-dot" />
@@ -1671,6 +1786,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         onToggleAssistantProcessEntry={handleToggleAssistantProcessEntry}
         onPreserveScroll={preserveScrollDuringLayoutChange}
         onForkMessage={handleForkFromMessage}
+        forkingMessageId={forkingMessageId}
       />
 
       {activeQuestionnaire && (
@@ -1708,6 +1824,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         <ChatComposer
           activeQuestionnaire={!!activeQuestionnaire}
           currentSessionRunning={currentSessionRunning}
+          interactionDisabled={isForkingSession}
           attachmentError={attachmentError}
           isAwaitingUIResponse={isAwaitingUIResponse}
           inputHasText={inputHasText}
@@ -1784,6 +1901,28 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           onToggleFavorite={toggleFavorite}
         />
       </div>
+
+      {isForkingSession && (
+        <div
+          className="chat-forking-overlay"
+          role="status"
+          aria-live="polite"
+          onDrop={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "none";
+          }}
+        >
+          <div className="chat-forking-card">
+            <div className="chat-working-spinner" />
+            <span>正在创建分叉会话...</span>
+          </div>
+        </div>
+      )}
 
       {/* Image zoom modal */}
       {zoomImage && (

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { GitBranch } from "lucide-react";
 import type { ProjectSession } from "@/stores/project-store";
 import type { ChatMessage } from "@/stores/chat-store";
 import "./SessionHistory.css";
@@ -28,6 +29,28 @@ function formatTime(timestamp: string): string {
     return timestamp;
   }
 }
+
+const isForkedSession = (session: ProjectSession) => !!(session.forkedFrom || session.forkContext);
+
+const stripForkTitlePrefix = (title: string) =>
+  title.replace(/^(兼容分叉|分叉)\s*-\s*/u, "").trim();
+
+const getSessionPreviewText = (
+  session: ProjectSession,
+  sessionMessages: Record<string, ChatMessage[]>
+) => {
+  if (isForkedSession(session)) {
+    return stripForkTitlePrefix(session.title) || session.title;
+  }
+
+  const msgs = sessionMessages[session.id];
+  const firstUserMsg = msgs?.find((m) => m.role === "user");
+  return firstUserMsg
+    ? firstUserMsg.content.length > 50
+      ? firstUserMsg.content.substring(0, 50) + "..."
+      : firstUserMsg.content
+    : session.title;
+};
 
 export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onResume, onDelete }: Props) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -67,15 +90,17 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
                     </div>
                   </div>
                   <div className="session-preview">
-                    {(() => {
-                      const msgs = sessionMessages[session.id];
-                      const firstUserMsg = msgs?.find((m) => m.role === "user");
-                      return firstUserMsg
-                        ? firstUserMsg.content.length > 50
-                          ? firstUserMsg.content.substring(0, 50) + "..."
-                          : firstUserMsg.content
-                        : session.title;
-                    })()}
+                    {isForkedSession(session) && (
+                      <span
+                        className="session-fork-badge"
+                        title={`Fork 自 ${session.forkedFrom?.sourceTitle || session.forkContext?.sourceTitle || "原会话"}`}
+                      >
+                        <GitBranch size={12} strokeWidth={2} />
+                      </span>
+                    )}
+                    <span className="session-preview-text">
+                      {getSessionPreviewText(session, sessionMessages)}
+                    </span>
                   </div>
                 </div>
               ))}

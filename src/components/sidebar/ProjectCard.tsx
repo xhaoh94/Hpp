@@ -4,6 +4,7 @@ import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AVAILABLE_AGENTS, getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from "@/hooks/useDataPersistence";
+import { GitBranch } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -395,6 +396,14 @@ export function ProjectCard({ project }: Props) {
                       : session.title;
                   })()}
                 </span>
+                {(session.forkedFrom || session.forkContext) && (
+                  <span
+                    className="terminal-child-fork-badge"
+                    title={`Fork 自 ${session.forkedFrom?.sourceTitle || session.forkContext?.sourceTitle || "原会话"}`}
+                  >
+                    <GitBranch size={11} strokeWidth={2} />
+                  </span>
+                )}
                 {status === "completed" && session.id !== activeSessionId && (
                   <span className="terminal-child-dot" />
                 )}

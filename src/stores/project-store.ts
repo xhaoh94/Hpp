@@ -11,7 +11,15 @@ export interface ProjectSession {
   sessionFilePath?: string;
   closed?: boolean;
   references?: SessionReference[];
+  forkedFrom?: SessionForkOrigin;
   forkContext?: SessionForkContext;
+}
+
+export interface SessionForkOrigin {
+  sourceSessionId: string;
+  sourceTitle: string;
+  throughMessageId: string;
+  createdAt: string;
 }
 
 export interface SessionForkContext {

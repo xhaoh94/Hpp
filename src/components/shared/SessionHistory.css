@@ -197,10 +197,41 @@
 }
 
 .session-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   color: #aaa;
   margin-top: 4px;
   line-height: 1.4;
+  min-width: 0;
+}
+
+.session-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-fork-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 122, 204, 0.35);
+  border-radius: 4px;
+  background: rgba(0, 122, 204, 0.1);
+  color: #4aa3ff;
+}
+
+.session-fork-badge svg {
+  flex-shrink: 0;
+}
+
+.session-preview {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

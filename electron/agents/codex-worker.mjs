@@ -317,9 +317,7 @@ const requestThreadFork = async (sourceThreadId) => {
   const params = buildThreadParams();
   const attempts = [
     { threadId: sourceThreadId, ...params },
-    { sourceThreadId, ...params },
     { threadId: sourceThreadId },
-    { sourceThreadId },
   ];
   let lastError = null;
   for (const forkParams of attempts) {
@@ -335,21 +333,13 @@ const requestThreadFork = async (sourceThreadId) => {
   throw lastError || new Error("Codex thread/fork failed");
 };
 
-const rollbackThreadOnce = async (targetThreadId) => {
-  const attempts = [
-    { threadId: targetThreadId },
-    { targetThreadId },
-  ];
-  let lastError = null;
-  for (const rollbackParams of attempts) {
-    try {
-      await rpcRequest("thread/rollback", rollbackParams, 30000);
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError || new Error("Codex thread/rollback failed");
+const requestThreadRollback = async (targetThreadId, numTurns) => {
+  if (numTurns <= 0) return targetThreadId;
+  const result = await rpcRequest("thread/rollback", {
+    threadId: targetThreadId,
+    numTurns,
+  }, 30000);
+  return getThreadIdFromResult(result) || targetThreadId;
 };
 
 const forkCodexSession = async (command) => {
@@ -358,20 +348,21 @@ const forkCodexSession = async (command) => {
   if (!sourceThreadId) {
     return { supported: true, success: false, reason: "source Codex thread is not initialized" };
   }
+  const rollbackTurnCount = Math.max(0, Number(command.rollbackUserMessageCount || 0));
+  if (!Number.isInteger(rollbackTurnCount)) {
+    return { supported: true, success: false, reason: "source Codex rollback turn count is invalid" };
+  }
 
   const originalThreadId = threadId;
   const originalActiveThreadId = activeThreadId;
   forkRequestActive = true;
   try {
     const forkedThreadId = await requestThreadFork(sourceThreadId);
-    const rollbackCount = Math.max(0, Number(command.rollbackUserMessageCount || 0));
-    for (let index = 0; index < rollbackCount; index += 1) {
-      await rollbackThreadOnce(forkedThreadId);
-    }
+    const sessionFilePath = await requestThreadRollback(forkedThreadId, rollbackTurnCount);
     return {
       supported: true,
       success: true,
-      sessionFilePath: forkedThreadId,
+      sessionFilePath,
     };
   } catch (error) {
     const message = error?.message || String(error);

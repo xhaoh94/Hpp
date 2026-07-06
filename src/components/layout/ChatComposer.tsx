@@ -21,6 +21,7 @@ type ChatComposerProps = {
   activeQuestionnaire: boolean;
   attachmentError: string | null;
   currentSessionRunning: boolean;
+  interactionDisabled?: boolean;
   isAwaitingUIResponse: boolean;
   inputHasText: boolean;
   pendingFiles: PendingFile[];
@@ -53,6 +54,7 @@ export const ChatComposer = memo(function ChatComposer({
   activeQuestionnaire,
   attachmentError,
   currentSessionRunning,
+  interactionDisabled = false,
   isAwaitingUIResponse,
   inputHasText,
   pendingFiles,
@@ -86,29 +88,40 @@ export const ChatComposer = memo(function ChatComposer({
     pendingFiles.length > 0 ||
     pendingPathAttachments.length > 0 ||
     sessionReferences.length > 0;
-  const showAbortButton = currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
-  const queueSend = currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
-  const sendDisabled = activeQuestionnaire
+  const inputDisabled = activeQuestionnaire || interactionDisabled;
+  const showAbortButton = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
+  const queueSend = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
+  const sendDisabled = interactionDisabled
     ? true
-    : isAwaitingUIResponse
-      ? !inputHasText
-      : !hasPendingContent;
-  const placeholder = activeQuestionnaire
-    ? "请在上方提交问卷"
-    : sendKey === "Ctrl+Enter"
-      ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)"
-      : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)";
-  const sendTitle = activeQuestionnaire
-    ? "请在上方提交问卷"
-    : isAwaitingUIResponse
-      ? "发送回答"
-      : currentSessionRunning
-        ? "加入发送队列"
-        : "发送";
+    : activeQuestionnaire
+      ? true
+      : isAwaitingUIResponse
+        ? !inputHasText
+        : !hasPendingContent;
+  const placeholder = interactionDisabled
+    ? "正在创建分叉会话..."
+    : activeQuestionnaire
+      ? "请在上方提交问卷"
+      : sendKey === "Ctrl+Enter"
+        ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)"
+        : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)";
+  const sendTitle = interactionDisabled
+    ? "正在创建分叉会话"
+    : activeQuestionnaire
+      ? "请在上方提交问卷"
+      : isAwaitingUIResponse
+        ? "发送回答"
+        : currentSessionRunning
+          ? "加入发送队列"
+          : "发送";
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const uploadMenuRef = useRef<HTMLDivElement>(null);
 
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (interactionDisabled) {
+      event.target.value = "";
+      return;
+    }
     onAddInputFiles(Array.from(event.target.files || []));
     event.target.value = "";
   };
@@ -124,17 +137,24 @@ export const ChatComposer = memo(function ChatComposer({
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [uploadMenuOpen]);
 
+  useEffect(() => {
+    if (interactionDisabled) setUploadMenuOpen(false);
+  }, [interactionDisabled]);
+
   const handleChooseFiles = () => {
+    if (interactionDisabled) return;
     setUploadMenuOpen(false);
     fileInputRef.current?.click();
   };
 
   const handleChooseFolder = () => {
+    if (interactionDisabled) return;
     setUploadMenuOpen(false);
     onOpenAttachmentFolder();
   };
 
   const handleChooseSession = () => {
+    if (interactionDisabled) return;
     setUploadMenuOpen(false);
     onOpenSessionReferences();
   };
@@ -151,6 +171,7 @@ export const ChatComposer = memo(function ChatComposer({
                 type="button"
                 className="chat-preview-remove"
                 onClick={() => onRemoveSessionReference(reference.sourceSessionId)}
+                disabled={interactionDisabled}
                 title="移除"
                 aria-label="移除引用会话"
               >
@@ -166,6 +187,7 @@ export const ChatComposer = memo(function ChatComposer({
                 type="button"
                 className="chat-preview-remove"
                 onClick={() => onRemovePendingFile(file.id)}
+                disabled={interactionDisabled}
                 title="移除"
                 aria-label="移除文件片段"
               >
@@ -185,6 +207,7 @@ export const ChatComposer = memo(function ChatComposer({
                 type="button"
                 className="chat-preview-remove"
                 onClick={() => onRemovePathAttachment(attachment.id)}
+                disabled={interactionDisabled}
                 title="移除"
                 aria-label={`移除${attachment.kind === "folder" ? "文件夹" : "文件"}`}
               >
@@ -204,6 +227,7 @@ export const ChatComposer = memo(function ChatComposer({
                 type="button"
                 className="chat-preview-remove"
                 onClick={() => onRemovePendingImage(image.id)}
+                disabled={interactionDisabled}
                 title="移除"
                 aria-label="移除图片"
               >
@@ -242,6 +266,7 @@ export const ChatComposer = memo(function ChatComposer({
           multiple
           style={{ display: "none" }}
           onChange={handleFileInputChange}
+          disabled={interactionDisabled}
         />
         <div className="chat-input-actions-left">
           <div ref={uploadMenuRef} className="chat-upload-control">
@@ -252,6 +277,7 @@ export const ChatComposer = memo(function ChatComposer({
               aria-haspopup="menu"
               aria-expanded={uploadMenuOpen}
               onClick={() => setUploadMenuOpen((open) => !open)}
+              disabled={interactionDisabled}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M12 5v14M5 12h14" strokeLinecap="round" />
@@ -287,7 +313,7 @@ export const ChatComposer = memo(function ChatComposer({
           placeholder={placeholder}
           rows={1}
           className="chat-textarea"
-          disabled={activeQuestionnaire}
+          disabled={inputDisabled}
         />
         {showAbortButton && (
           <button

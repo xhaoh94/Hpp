@@ -329,6 +329,24 @@
   font-weight: 500;
 }
 
+.terminal-child-fork-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid rgba(0, 122, 204, 0.35);
+  border-radius: 4px;
+  background: rgba(0, 122, 204, 0.1);
+  color: var(--accent-color);
+}
+
+.terminal-child-fork-badge svg {
+  flex-shrink: 0;
+}
+
 .terminal-child-close {
   flex-shrink: 0;
   display: flex;

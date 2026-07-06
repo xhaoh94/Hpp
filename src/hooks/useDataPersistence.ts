@@ -4,6 +4,7 @@ import {
   type Project,
   type ProjectSession,
   type SessionForkContext,
+  type SessionForkOrigin,
   type SessionReference,
 } from "@/stores/project-store";
 import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
@@ -75,6 +76,21 @@ const parseSessionForkContext = (value: unknown): SessionForkContext | undefined
   };
 };
 
+const parseSessionForkOrigin = (value: unknown): SessionForkOrigin | undefined => {
+  if (!isRecord(value)) return undefined;
+  const sourceSessionId = getString(value.sourceSessionId);
+  const sourceTitle = getString(value.sourceTitle);
+  const throughMessageId = getString(value.throughMessageId);
+  const createdAt = getString(value.createdAt);
+  if (!sourceSessionId || !sourceTitle || !throughMessageId || !createdAt) return undefined;
+  return {
+    sourceSessionId,
+    sourceTitle,
+    throughMessageId,
+    createdAt,
+  };
+};
+
 const parseProjectSession = (value: unknown): ProjectSession | null => {
   if (!isRecord(value)) return null;
   const id = getString(value.id);
@@ -84,6 +100,8 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
   const createdAt = getString(value.createdAt);
   const lastActiveAt = getString(value.lastActiveAt);
   if (!id || !agentId || !agentSessionId || !title || !createdAt || !lastActiveAt) return null;
+
+  const forkContext = parseSessionForkContext(value.forkContext);
 
   return {
     id,
@@ -97,7 +115,8 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
     references: Array.isArray(value.references)
       ? value.references.map(parseSessionReference).filter((ref): ref is SessionReference => !!ref)
       : undefined,
-    forkContext: parseSessionForkContext(value.forkContext),
+    forkedFrom: parseSessionForkOrigin(value.forkedFrom) || (forkContext ? parseSessionForkOrigin(forkContext) : undefined),
+    forkContext,
   };
 };
 
