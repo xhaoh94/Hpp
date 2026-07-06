@@ -115,6 +115,54 @@ export function registerFileHandlers() {
     }
   });
 
+  ipcMain.handle("fs:reverseApplyPatch", async (_event, projectPath: string, patches: string[]) => {
+    if (typeof projectPath !== "string" || !projectPath.trim()) {
+      return { success: false, error: "Invalid project path" };
+    }
+    if (!Array.isArray(patches) || patches.length === 0) {
+      return { success: false, error: "No patch content to revert" };
+    }
+
+    try {
+      const projectInfo = await stat(projectPath);
+      if (!projectInfo.isDirectory()) {
+        return { success: false, error: "Project path is not a directory" };
+      }
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    const patchInput = patches
+      .filter((patch): patch is string => typeof patch === "string" && patch.trim().length > 0)
+      .map((patch) => patch.trimEnd())
+      .join("\n");
+
+    if (!patchInput.trim()) {
+      return { success: false, error: "No patch content to revert" };
+    }
+
+    try {
+      const result = spawnSync("git", ["apply", "--reverse", "--whitespace=nowarn", "-"], {
+        cwd: projectPath,
+        input: `${patchInput}\n`,
+        encoding: "utf-8",
+        shell: false,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+
+      if (result.error) {
+        return { success: false, error: result.error.message };
+      }
+      if (result.status !== 0) {
+        const detail = (result.stderr || result.stdout || "").trim();
+        return { success: false, error: detail || `git apply exited with code ${result.status}` };
+      }
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   ipcMain.handle(
     "fs:searchFiles",
     async (_event, dirPath: string, query: string) => {

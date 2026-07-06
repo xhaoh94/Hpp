@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
     ipcRenderer.invoke("fs:fileExists", filePath),
+  reverseApplyPatch: (projectPath: string, patches: string[]) =>
+    ipcRenderer.invoke("fs:reverseApplyPatch", projectPath, patches),
   searchFiles: (dirPath: string, query: string) =>
     ipcRenderer.invoke("fs:searchFiles", dirPath, query),
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),

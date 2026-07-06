@@ -748,6 +748,11 @@
   justify-content: flex-start;
 }
 
+.chat-msg.assistant:has(.chat-diff-card) {
+  width: 96%;
+  max-width: 96%;
+}
+
 .chat-msg-actions {
   display: flex;
   gap: 2px;
@@ -1542,98 +1547,252 @@
 }
 
 /* Diff view */
-.chat-diffs {
-  margin-top: 8px;
+.chat-diff-card {
   width: 100%;
-  max-width: 720px;
-}
-
-.chat-diff-file {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
+  max-width: none;
+  margin-top: 10px;
   overflow: hidden;
-  margin-bottom: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background-color: #171717;
+  color: var(--text-primary);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
 }
 
-.chat-diff-file-header {
+.chat-diff-card.reverted {
+  opacity: 0.78;
+}
+
+.chat-diff-card-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
   width: 100%;
-  padding: 6px 10px;
-  background: var(--bg-secondary);
-  border: none;
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 12px;
-  font-family: monospace;
-  text-align: left;
+  min-width: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: #242424;
 }
 
-.chat-diff-file-header:hover {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.chat-diff-file-icon {
-  font-size: 11px;
-  font-weight: bold;
-  width: 14px;
-  text-align: center;
+.chat-diff-icon-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border-radius: 10px;
+  background-color: rgba(0, 0, 0, 0.32);
   color: var(--accent-color);
 }
 
-.chat-diff-file-name {
+.chat-diff-title-group {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-diff-title {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.chat-diff-total-stats {
+  display: flex;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 13px;
+  font-weight: 560;
+  line-height: 1.2;
+}
+
+.chat-diff-revert-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.chat-diff-revert-btn:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.chat-diff-revert-btn:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: 0.62;
+}
+
+.chat-diff-spin {
+  animation: spin 0.8s linear infinite;
+}
+
+.chat-diff-file-list {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0;
+  background-color: #171717;
+}
+
+.chat-diff-file-item {
+  min-width: 0;
+}
+
+.chat-diff-file-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 16px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.chat-diff-file-row:hover:not(:disabled),
+.chat-diff-file-item.active .chat-diff-file-row {
+  background-color: rgba(255, 255, 255, 0.055);
+}
+
+.chat-diff-file-row:disabled {
+  cursor: default;
+}
+
+.chat-diff-file-path {
+  min-width: 0;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: rgba(255, 255, 255, 0.76);
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+
+.chat-diff-file-path::first-letter {
+  color: inherit;
 }
 
 .chat-diff-file-stats {
   display: flex;
-  gap: 6px;
-  font-size: 11px;
-  margin-left: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  flex: 0 0 auto;
+  min-width: 64px;
+  font-size: 13px;
+  font-weight: 560;
+  line-height: 1.2;
+}
+
+.chat-diff-file-chevron {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.chat-diff-file-chevron.expanded {
+  transform: rotate(180deg);
 }
 
 .chat-diff-add {
-  color: #4ade80;
+  color: #24e193;
 }
 
 .chat-diff-del {
+  color: #ff4f5e;
+}
+
+.chat-diff-more-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 16px;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  background-color: #202020;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 560;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-diff-more-btn:hover {
+  background-color: #282828;
+}
+
+.chat-diff-more-btn svg {
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+}
+
+.chat-diff-more-btn svg.expanded {
+  transform: rotate(180deg);
+}
+
+.chat-diff-error {
+  padding: 0 18px 14px;
   color: #f87171;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .chat-diff-content {
-  margin: 0;
-  padding: 4px 0;
+  max-height: min(48vh, 520px);
+  margin: 4px 16px 10px;
+  padding: 8px 0;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background-color: #101010;
+  color: var(--text-secondary);
   font-size: 12px;
-  line-height: 1.5;
-  overflow-x: auto;
-  background: rgba(0, 0, 0, 0.15);
+  line-height: 1.55;
 }
 
 .chat-diff-line {
   display: block;
-  padding: 0 10px;
+  min-width: max-content;
+  padding: 0 12px;
   white-space: pre;
-  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
 }
 
 .chat-diff-add-line {
-  background: rgba(74, 222, 128, 0.12);
-  color: #4ade80;
+  background-color: rgba(36, 225, 147, 0.11);
+  color: #55e6ad;
 }
 
 .chat-diff-del-line {
-  background: rgba(248, 113, 113, 0.12);
-  color: #f87171;
+  background-color: rgba(255, 79, 94, 0.11);
+  color: #ff7a85;
 }
 
 .chat-diff-header-line {
-  background: rgba(96, 165, 250, 0.08);
-  color: var(--text-secondary);
-  font-style: italic;
+  background-color: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.58);
 }
 
 /* Input area */

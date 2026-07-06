@@ -114,6 +114,7 @@ export interface ElectronAPI {
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
+  reverseApplyPatch: (projectPath: string, patches: string[]) => Promise<{ success: boolean; error?: string }>;
   searchFiles: (dirPath: string, query: string) => Promise<FileEntry[]>;
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
   openAttachmentFolder: () => Promise<{ canceled: boolean; attachment?: PathAttachmentInfo; error?: string }>;

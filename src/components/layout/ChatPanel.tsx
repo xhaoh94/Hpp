@@ -13,9 +13,11 @@ import { flushSync } from "react-dom";
 import { Copy, CornerDownRight, GitBranch, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   useChatStore,
+  type AgentProcessFile,
   type AgentProcess,
   type AgentProcessStep,
   type ChatDraft,
+  type FileDiff,
   type ChatMessage,
   type ModelInfo,
   type QueuedMessage,
@@ -296,6 +298,7 @@ type ChatMessagesViewProps = {
   activeSessionId: string | null;
   activeSessionInitialized: boolean;
   currentSessionRunning: boolean;
+  projectPath?: string;
   messages: ChatMessage[];
   scrollRef: RefObject<HTMLDivElement | null>;
   showScrollBottom: boolean;
@@ -314,6 +317,7 @@ type ChatMessagesViewProps = {
 
 type ChatMessageItemProps = {
   msg: ChatMessage;
+  projectPath?: string;
   onEditMessage: (content: string) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
@@ -325,8 +329,40 @@ type ChatMessageItemProps = {
   forkingMessageId: string | null;
 };
 
+const PROCESS_DIFF_ACTIONS = new Set<AgentProcessFile["action"]>(["edited", "modified", "written"]);
+
+const collectProcessDiffs = (process?: AgentProcess): FileDiff[] => {
+  if (!process?.entries?.length) return [];
+  const byFile = new Map<string, FileDiff & { seenKeys: Set<string> }>();
+
+  process.entries.forEach((entry) => {
+    entry.files?.forEach((file, index) => {
+      if (!file.file || !PROCESS_DIFF_ACTIONS.has(file.action)) return;
+      const key = String(file.changeKey || `${entry.id}:${file.file}:${index}`);
+      const existing = byFile.get(file.file) || {
+        file: file.file,
+        patch: "",
+        additions: 0,
+        deletions: 0,
+        status: file.status || "modified",
+        seenKeys: new Set<string>(),
+      };
+      if (existing.seenKeys.has(key)) return;
+
+      existing.seenKeys.add(key);
+      existing.additions += Math.max(0, file.additions || 0);
+      existing.deletions += Math.max(0, file.deletions || 0);
+      existing.status = file.status || existing.status;
+      byFile.set(file.file, existing);
+    });
+  });
+
+  return Array.from(byFile.values()).map(({ seenKeys, ...diff }) => diff);
+};
+
 const ChatMessageItem = memo(function ChatMessageItem({
   msg,
+  projectPath,
   onEditMessage,
   onImageContextMenu,
   onOpenImage,
@@ -353,7 +389,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
   const hasImages = !!msg.images?.length;
   const hasSessionReferences = !!msg.sessionReferences?.length;
-  const hasDiffs = !!msg.diffs?.length && !processRunning;
+  const processDiffs = collectProcessDiffs(msg.process);
+  const visibleDiffs = !processRunning ? [...(msg.diffs || []), ...processDiffs] : [];
+  const hasDiffs = visibleDiffs.length > 0;
   const hasContent = msg.content.trim().length > 0;
   const hasVisibleBubble =
     msg.role === "assistant"
@@ -441,8 +479,8 @@ const ChatMessageItem = memo(function ChatMessageItem({
             </div>
           )}
           {(!hasContent || msg.role !== "user") && renderSessionReferences()}
-          {hasDiffs && msg.diffs && (
-            <DiffBlock diffs={msg.diffs} />
+          {hasDiffs && (
+            <DiffBlock diffs={visibleDiffs} projectPath={projectPath} />
           )}
           {showAssistantActions && (
             <div className="chat-assistant-actions">
@@ -521,6 +559,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionId,
   activeSessionInitialized,
   currentSessionRunning,
+  projectPath,
   messages,
   scrollRef,
   showScrollBottom,
@@ -558,6 +597,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
               <ChatMessageItem
                 key={msg.id}
                 msg={msg}
+                projectPath={projectPath}
                 onEditMessage={onEditMessage}
                 onImageContextMenu={onImageContextMenu}
                 onOpenImage={onOpenImage}
@@ -1804,6 +1844,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         activeSessionId={activeSessionId}
         activeSessionInitialized={activeSessionInitialized}
         currentSessionRunning={currentSessionRunning}
+        projectPath={activeProject.path}
         messages={messages}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}

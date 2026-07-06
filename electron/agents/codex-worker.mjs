@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
@@ -872,18 +872,113 @@ const emitCommandItem = (item, phase) => {
   });
 };
 
+const countPatchChanges = (patch) => ({
+  additions: (String(patch || "").match(/^\+[^+]/gm) || []).length,
+  deletions: (String(patch || "").match(/^-[^-]/gm) || []).length,
+});
+
+const normalizeDiffPath = (filePath) => String(filePath || "").replace(/\\/g, "/");
+
+const toProjectRelativePath = (filePath) => {
+  const value = String(filePath || "");
+  if (!value || !projectPath || !isAbsolute(value)) return value;
+  try {
+    const relativePath = relative(projectPath, value);
+    if (relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath)) {
+      return relativePath;
+    }
+  } catch {
+    // Fall through to the original path.
+  }
+  return value;
+};
+
+const getChangeFilePath = (change) => toProjectRelativePath(
+  change?.path ||
+  change?.file ||
+  change?.filePath ||
+  change?.file_path ||
+  change?.move_path ||
+  change?.movePath ||
+  ""
+);
+
+const getChangeKind = (change) => change?.kind || change?.type || change?.status || "update";
+
+const firstChangeString = (change, keys) => {
+  for (const key of keys) {
+    const value = change?.[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return "";
+};
+
+const splitContentLines = (content) => {
+  const lines = String(content || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+};
+
+const buildWholeFilePatch = (filePath, kind, content) => {
+  const pathForDiff = normalizeDiffPath(filePath);
+  const lines = splitContentLines(content);
+  const lineCount = lines.length;
+  if (kind === "add") {
+    return [
+      `diff --git a/${pathForDiff} b/${pathForDiff}`,
+      "new file mode 100644",
+      "--- /dev/null",
+      `+++ b/${pathForDiff}`,
+      `@@ -0,0 +1,${lineCount} @@`,
+      ...lines.map((line) => `+${line}`),
+    ].join("\n");
+  }
+  if (kind === "delete") {
+    return [
+      `diff --git a/${pathForDiff} b/${pathForDiff}`,
+      "deleted file mode 100644",
+      `--- a/${pathForDiff}`,
+      "+++ /dev/null",
+      `@@ -1,${lineCount} +0,0 @@`,
+      ...lines.map((line) => `-${line}`),
+    ].join("\n");
+  }
+  return "";
+};
+
+const getPatchFromChange = (change, filePath, kind) => {
+  const directPatch = firstChangeString(change, [
+    "unified_diff",
+    "unifiedDiff",
+    "patch",
+    "diff",
+  ]);
+  if (directPatch) return directPatch;
+
+  const content = firstChangeString(change, ["content", "old_content", "oldContent", "new_content", "newContent"]);
+  if ((kind === "add" || kind === "delete") && content) {
+    return buildWholeFilePatch(filePath, kind, content);
+  }
+  return "";
+};
+
 const getFilesFromChanges = (changes) => {
   if (!Array.isArray(changes)) return [];
   return changes
     .map((change) => {
-      const filePath = change?.path || change?.file || change?.filePath;
+      const filePath = getChangeFilePath(change);
       if (!filePath) return null;
-      const kind = change?.kind || change?.type || change?.status;
+      const kind = getChangeKind(change);
+      const patch = getPatchFromChange(change, filePath, kind);
+      const stats = countPatchChanges(patch);
       return {
         file: filePath,
         label: basename(filePath),
         action: kind === "add" ? "written" : "edited",
         status: kind === "add" ? "added" : kind === "delete" ? "deleted" : "modified",
+        patch,
+        additions: stats.additions,
+        deletions: stats.deletions,
       };
     })
     .filter(Boolean);
@@ -1118,7 +1213,16 @@ const handleServerNotification = (method, params) => {
     case "item/fileChange/patchUpdated":
       if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.changes)) {
-        send({ type: "diff_update", diffs: getFilesFromChanges(params.changes).map((file) => ({ file: file.file, patch: "", additions: 0, deletions: 0, status: file.status })) });
+        send({
+          type: "diff_update",
+          diffs: getFilesFromChanges(params.changes).map((file) => ({
+            file: file.file,
+            patch: file.patch || "",
+            additions: file.additions || 0,
+            deletions: file.deletions || 0,
+            status: file.status,
+          })),
+        });
       }
       break;
     case "error":
