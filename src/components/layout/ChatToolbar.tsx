@@ -1,6 +1,7 @@
 import { useMemo, type ReactNode, type RefObject } from "react";
-import { Check, Star } from "lucide-react";
+import { Check, Settings, Star } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
+import { getAgentName } from "@/lib/agents";
 
 type ThinkingLevelOption = {
   id: string;
@@ -30,6 +31,7 @@ type ChatToolbarProps = {
   onModelOpenChange: (open: boolean) => void;
   onThinkingOpenChange: (open: boolean) => void;
   onPlanModeChange: (enabled: boolean) => void;
+  onOpenModelConfig: () => void;
   onSelectModel: (model: ModelInfo) => void;
   onSelectThinking: (levelId: string) => void;
   onToggleFavorite: (model: ModelInfo) => void;
@@ -58,6 +60,7 @@ export function ChatToolbar({
   onModelOpenChange,
   onThinkingOpenChange,
   onPlanModeChange,
+  onOpenModelConfig,
   onSelectModel,
   onSelectThinking,
   onToggleFavorite,
@@ -122,16 +125,28 @@ export function ChatToolbar({
         </button>
         {modelOpen && (
           <div className={`chat-dropdown ${flattenModelList ? "chat-dropdown-codex" : ""}`}>
+            <div className="chat-model-dropdown-header">
+              <span className="chat-model-dropdown-title">{getAgentName(agentId)} 模型</span>
+              <span className="chat-model-dropdown-meta">{availableModels.length} 个可用</span>
+              <button
+                type="button"
+                className="chat-model-config-btn"
+                title="配置模型"
+                aria-label="配置模型"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenModelConfig();
+                }}
+              >
+                <Settings size={13} />
+              </button>
+            </div>
             {availableModels.length === 0 && (
               <div className="chat-dropdown-empty">暂无可用模型</div>
             )}
             {flattenModelList ? (
               availableModels.length > 0 && (
                 <>
-                  <div className="chat-codex-model-header">
-                    <span>Codex 模型</span>
-                    <span>{availableModels.length} 个可用</span>
-                  </div>
                   <div className="chat-codex-model-list">
                     {availableModels.map((model) => {
                       const isFav = isFavoriteModel(model);
@@ -198,7 +213,9 @@ export function ChatToolbar({
                         className={`chat-dropdown-item ${isActive ? "active" : ""}`}
                         onClick={() => onSelectModel(model)}
                       >
-                        <span className="truncate">{model.name}</span>
+                        <span className="chat-dropdown-model-main">
+                          <span className="truncate">{model.name}</span>
+                        </span>
                         <button
                           onClick={(event) => { event.stopPropagation(); onToggleFavorite(model); }}
                           className={`chat-dropdown-star ${isFav ? "fav" : ""}`}

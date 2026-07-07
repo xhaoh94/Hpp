@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { GripVertical } from "lucide-react";
+import { GripVertical, Settings } from "lucide-react";
 import {
   AVAILABLE_AGENTS,
   getAgentPlanModeTooltip,
@@ -10,6 +10,7 @@ import {
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import type { AgentPackageStatus, PiSDKStatus } from "@/types";
+import { AgentConfigModal } from "./AgentConfigModal";
 import "./Settings.css";
 
 const DEFAULT_ENABLED_AGENTS = ["codex", "pi"];
@@ -37,21 +38,6 @@ async function loadSettings() {
   return asRecord(await window.electronAPI.loadData("settings"));
 }
 
-function getAgentReloadTooltip(agentId: string) {
-  switch (agentId) {
-    case "codex":
-      return "重新读取 ~/.codex/config.toml，并重启已初始化的 Codex 会话进程";
-    case "pi":
-      return "重新读取 Pi Agent 配置和模型注册表，并重启已初始化的 Pi 会话进程";
-    case "opencode":
-      return "重新读取 OpenCode provider 配置，并重启已初始化的 OpenCode 会话进程";
-    case "droid":
-      return "重新读取 ~/.factory/settings.json，并重启已初始化的 Droid 会话进程";
-    default:
-      return "重启已初始化的 Agent 会话进程并重新读取本地配置";
-  }
-}
-
 function getActiveSessionAgentId() {
   const projectState = useProjectStore.getState();
   const activeProject = projectState.projects.find((project) => project.id === projectState.activeProjectId);
@@ -59,17 +45,19 @@ function getActiveSessionAgentId() {
   return activeSession?.agentId || useChatStore.getState().activeAgentId;
 }
 
-function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; name: string; provider: string; reasoning: boolean }>) {
+function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; name: string; provider: string; reasoning: boolean; supportsImages?: boolean }>) {
   if (!models || models.length === 0) return;
   if (getActiveSessionAgentId() !== agentId) return;
 
   const chatStore = useChatStore.getState();
   chatStore.setAvailableModels(models);
   const currentModel = chatStore.currentModel;
-  const hasCurrentModel = !!currentModel && models.some((model) =>
+  const matchingCurrentModel = currentModel ? models.find((model) =>
     model.id === currentModel.id && model.provider === currentModel.provider
-  );
-  if (!hasCurrentModel) {
+  ) : undefined;
+  if (matchingCurrentModel) {
+    chatStore.setCurrentModel(matchingCurrentModel);
+  } else {
     chatStore.setCurrentModel(models[0]);
   }
 }
@@ -91,9 +79,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const [agentChecking, setAgentChecking] = useState<Record<string, boolean>>({});
   const [agentUpdating, setAgentUpdating] = useState<Record<string, boolean>>({});
   const [agentUpdateErrors, setAgentUpdateErrors] = useState<Record<string, string>>({});
-  const [agentReloading, setAgentReloading] = useState<Record<string, boolean>>({});
-  const [agentReloadErrors, setAgentReloadErrors] = useState<Record<string, string>>({});
-  const [agentReloadSuccess, setAgentReloadSuccess] = useState<Record<string, string>>({});
+  const [configAgentId, setConfigAgentId] = useState<string | null>(null);
 
   const refreshPiSDKStatus = useCallback(async () => {
     setPiSDKChecking(true);
@@ -181,36 +167,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     }
   }, []);
 
-  const handleAgentReload = useCallback(async (agentId: string) => {
-    setAgentReloading((prev) => ({ ...prev, [agentId]: true }));
-    setAgentReloadErrors((prev) => ({ ...prev, [agentId]: "" }));
-    setAgentReloadSuccess((prev) => ({ ...prev, [agentId]: "" }));
-    try {
-      const result = await window.electronAPI.agentReloadConfig(agentId);
-      if (!result.success) {
-        const error = result.error?.includes("正在运行")
-          ? "请等待当前任务结束后再重载配置"
-          : result.error || "重载配置失败";
-        setAgentReloadErrors((prev) => ({ ...prev, [agentId]: error }));
-        return;
-      }
-
-      syncActiveAgentModels(agentId, result.models);
-      const count = result.reloadedSessionIds?.length || 0;
-      setAgentReloadSuccess((prev) => ({
-        ...prev,
-        [agentId]: count > 0 ? `已重载 ${count} 个会话` : "暂无已初始化会话，下次启动会话时会读取新配置",
-      }));
-    } catch (error) {
-      setAgentReloadErrors((prev) => ({
-        ...prev,
-        [agentId]: error instanceof Error ? error.message : String(error),
-      }));
-    } finally {
-      setAgentReloading((prev) => ({ ...prev, [agentId]: false }));
-    }
-  }, []);
-
   const saveAgentSettings = useCallback(async (
     nextEnabledAgents = enabledAgents,
     nextAgentOrder = agentOrder,
@@ -295,10 +251,31 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     }
   }, [refreshPiSDKStatus, refreshAgentStatus]);
 
+  const openAgentConfig = useCallback(() => {
+    setConfigAgentId(getActiveSessionAgentId() || "codex");
+  }, []);
+
+  const configAgent = configAgentId
+    ? AVAILABLE_AGENTS.find((agent) => agent.id === configAgentId) || null
+    : null;
+
   const content = (
     <>
         <div className="settings-section">
-          {!embedded && <h3>Agent 设置</h3>}
+          {!embedded && (
+            <div className="agent-settings-section-header">
+              <h3>Agent 设置</h3>
+              <button
+                type="button"
+                className="btn-icon agent-settings-config-icon"
+                onClick={openAgentConfig}
+                title="配置 Agent 渠道和模型"
+                aria-label="配置 Agent 渠道和模型"
+              >
+                <Settings size={15} />
+              </button>
+            </div>
+          )}
           <p className="section-desc">
             选择启用的 Agent，未启用的不会显示在项目卡片上。拖动左侧手柄可以调整显示顺序。
           </p>
@@ -315,7 +292,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 ? (piSDKChecking || !piSDKStatus)
                 : agentChecking[agent.id];
               const isUnavailable = !isInstalled && !isChecking;
-              const isReloading = !!agentReloading[agent.id];
               const versionLabel = isPiSDKAgent
                 ? piSDKStatus?.currentVersion
                   ? `v${piSDKStatus.currentVersion}`
@@ -415,16 +391,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                           {isPiSDKAgent ? (piSDKUpdateError || piSDKStatus?.error) : (agentUpdateErrors[agent.id] || agentStatus?.error)}
                         </span>
                       )}
-                      {agentReloadErrors[agent.id] && (
-                        <span className="agent-settings-error">
-                          {agentReloadErrors[agent.id]}
-                        </span>
-                      )}
-                      {agentReloadSuccess[agent.id] && !agentReloadErrors[agent.id] && (
-                        <span className="agent-settings-success">
-                          {agentReloadSuccess[agent.id]}
-                        </span>
-                      )}
                     </span>
                   </label>
 
@@ -439,14 +405,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                         {(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"}
                       </button>
                     )}
-                    <button
-                      className="btn-action agent-settings-reload-btn"
-                      onClick={() => void handleAgentReload(agent.id)}
-                      disabled={isReloading || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id])}
-                      title={getAgentReloadTooltip(agent.id)}
-                    >
-                      {isReloading ? "重载中..." : "重载配置"}
-                    </button>
                     <button
                       className="btn-action agent-settings-refresh-btn"
                       onClick={() => isPiSDKAgent ? void refreshPiSDKStatus() : void refreshAgentStatus(agent.id)}
@@ -468,14 +426,28 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     </>
   );
 
+  const contentWithModal = (
+    <>
+      {content}
+      {configAgent && (
+        <AgentConfigModal
+          agentId={configAgent.id}
+          agentName={configAgent.name}
+          onClose={() => setConfigAgentId(null)}
+          onModelsUpdated={syncActiveAgentModels}
+        />
+      )}
+    </>
+  );
+
   if (embedded) {
-    return <div className="agent-settings-panel">{content}</div>;
+    return <div className="agent-settings-panel">{contentWithModal}</div>;
   }
 
   return (
     <div className="settings agent-settings-panel">
       <div className="settings-header">Agent</div>
-      <div className="settings-content">{content}</div>
+      <div className="settings-content">{contentWithModal}</div>
     </div>
   );
 }

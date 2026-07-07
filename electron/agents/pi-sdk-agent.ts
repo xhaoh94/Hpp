@@ -11,6 +11,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  supportsImages?: boolean;
 }
 
 interface AgentSendOptions {

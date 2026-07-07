@@ -109,6 +109,46 @@ function registerFileHandlers() {
       return false;
     }
   });
+  electron.ipcMain.handle("fs:reverseApplyPatch", async (_event, projectPath, patches) => {
+    if (typeof projectPath !== "string" || !projectPath.trim()) {
+      return { success: false, error: "Invalid project path" };
+    }
+    if (!Array.isArray(patches) || patches.length === 0) {
+      return { success: false, error: "No patch content to revert" };
+    }
+    try {
+      const projectInfo = await promises.stat(projectPath);
+      if (!projectInfo.isDirectory()) {
+        return { success: false, error: "Project path is not a directory" };
+      }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const patchInput = patches.filter((patch) => typeof patch === "string" && patch.trim().length > 0).map((patch) => patch.trimEnd()).join("\n");
+    if (!patchInput.trim()) {
+      return { success: false, error: "No patch content to revert" };
+    }
+    try {
+      const result = child_process.spawnSync("git", ["apply", "--reverse", "--whitespace=nowarn", "-"], {
+        cwd: projectPath,
+        input: `${patchInput}
+`,
+        encoding: "utf-8",
+        shell: false,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      if (result.error) {
+        return { success: false, error: result.error.message };
+      }
+      if (result.status !== 0) {
+        const detail = (result.stderr || result.stdout || "").trim();
+        return { success: false, error: detail || `git apply exited with code ${result.status}` };
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
   electron.ipcMain.handle(
     "fs:searchFiles",
     async (_event, dirPath, query) => {
@@ -418,12 +458,12 @@ function extractTopLevelConfigValue(content, key) {
   }
   return void 0;
 }
-function getCodexConfigPath() {
+function getCodexConfigPath$1() {
   return path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml");
 }
 async function getCodexDefaultThinkingLevel() {
   try {
-    const content = await promises.readFile(getCodexConfigPath(), "utf8");
+    const content = await promises.readFile(getCodexConfigPath$1(), "utf8");
     return normalizeThinkingLevel(extractTopLevelConfigValue(content, "model_reasoning_effort")) || DEFAULT_THINKING_LEVEL;
   } catch {
     return DEFAULT_THINKING_LEVEL;
@@ -763,6 +803,726 @@ class AgentEventBuffer {
     }
   }
 }
+const SUPPORTED_CONFIG_AGENTS = /* @__PURE__ */ new Set(["codex", "pi", "droid", "opencode"]);
+const SETTINGS_KEY = "agentConfigs";
+const CODEX_FALLBACK_MODEL_ID = "gpt-5.5";
+function isRecord(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function asString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function getDataDir() {
+  return path.join(electron.app.getPath("userData"), "hpp-data");
+}
+function getSettingsPath() {
+  return path.join(getDataDir(), "settings.json");
+}
+async function readTextFile(filePath) {
+  try {
+    return await promises.readFile(filePath, "utf-8");
+  } catch {
+    return "";
+  }
+}
+async function readJsonObject(filePath) {
+  try {
+    const content = (await promises.readFile(filePath, "utf-8")).replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(content);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+async function writeJsonObject(filePath, value) {
+  await promises.mkdir(path.dirname(filePath), { recursive: true });
+  await promises.writeFile(filePath, `${JSON.stringify(value, null, 2)}
+`, "utf-8");
+}
+async function readSettings() {
+  return readJsonObject(getSettingsPath());
+}
+async function writeSettings(settings) {
+  await promises.mkdir(getDataDir(), { recursive: true });
+  await promises.writeFile(getSettingsPath(), `${JSON.stringify(settings, null, 2)}
+`, "utf-8");
+}
+function normalizeModel(value) {
+  if (!isRecord(value)) return null;
+  const id = String(value.id || "").trim();
+  if (!id) return null;
+  const name = String(value.name || id).trim() || id;
+  return {
+    id,
+    name,
+    reasoning: value.reasoning === true,
+    imageInput: value.imageInput === true
+  };
+}
+function normalizeProvider(value) {
+  if (!isRecord(value)) return null;
+  const providerId = String(value.providerId || "").trim();
+  if (!providerId) return null;
+  const displayName = String(value.displayName || providerId).trim() || providerId;
+  const baseUrl = String(value.baseUrl || "").trim();
+  const apiKey = String(value.apiKey || "").trim();
+  const models = Array.isArray(value.models) ? value.models.map(normalizeModel).filter((model) => !!model) : [];
+  return { providerId, displayName, baseUrl, apiKey, models, hppManaged: value.hppManaged === true };
+}
+function getOriginalProviderId(value) {
+  if (!isRecord(value)) return void 0;
+  const originalProviderId = String(value.originalProviderId || "").trim();
+  return originalProviderId || void 0;
+}
+function normalizeState(value) {
+  const record = isRecord(value) ? value : {};
+  const providers = Array.isArray(record.providers) ? record.providers.map(normalizeProvider).filter((provider) => !!provider) : [];
+  const activeProviderId = typeof record.activeProviderId === "string" ? record.activeProviderId : void 0;
+  return {
+    activeProviderId: activeProviderId && providers.some((provider) => provider.providerId === activeProviderId) ? activeProviderId : void 0,
+    providers
+  };
+}
+async function readSavedAgentConfigEntry(agentId) {
+  const settings = await readSettings();
+  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
+  return {
+    exists: Object.prototype.hasOwnProperty.call(allConfigs, agentId),
+    state: normalizeState(allConfigs[agentId])
+  };
+}
+function isSameCodexNativeProvider(provider, nativeProvider) {
+  return provider.providerId === nativeProvider.providerId && provider.displayName === nativeProvider.displayName && provider.baseUrl === nativeProvider.baseUrl;
+}
+function isLegacyCodexNativeProvider(provider, nativeProviders, savedActiveProviderId) {
+  if (provider.hppManaged === true) return false;
+  if (provider.providerId === "custom" && provider.displayName === "custom" && provider.providerId !== savedActiveProviderId) {
+    return true;
+  }
+  const nativeProvider = nativeProviders.find((item) => item.providerId === provider.providerId);
+  return !!nativeProvider && provider.providerId !== savedActiveProviderId && isSameCodexNativeProvider(provider, nativeProvider);
+}
+async function readSavedCodexConfigState() {
+  const savedEntry = await readSavedAgentConfigEntry("codex");
+  if (!savedEntry.exists) {
+    const native2 = await readCodexNativeConfigState();
+    const nativeProvider = native2.providers.find((provider) => provider.providerId === native2.activeProviderId) || native2.providers[0];
+    const nextState2 = nativeProvider ? {
+      activeProviderId: nativeProvider.providerId,
+      providers: [{ ...nativeProvider, hppManaged: true }]
+    } : { providers: [] };
+    await writeAgentConfigState("codex", nextState2);
+    return nextState2;
+  }
+  const saved = savedEntry.state;
+  if (saved.providers.every((provider) => provider.hppManaged === true)) return saved;
+  const native = await readCodexNativeConfigState();
+  const providers = saved.providers.filter((provider) => !isLegacyCodexNativeProvider(provider, native.providers, saved.activeProviderId)).map((provider) => ({ ...provider, hppManaged: true }));
+  const nextState = {
+    activeProviderId: saved.activeProviderId && providers.some((provider) => provider.providerId === saved.activeProviderId) ? saved.activeProviderId : void 0,
+    providers
+  };
+  await writeAgentConfigState("codex", nextState);
+  return nextState;
+}
+async function writeAgentConfigState(agentId, state) {
+  const settings = await readSettings();
+  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
+  settings[SETTINGS_KEY] = {
+    ...allConfigs,
+    [agentId]: state
+  };
+  await writeSettings(settings);
+}
+function ensureSupportedAgent(agentId) {
+  if (!SUPPORTED_CONFIG_AGENTS.has(agentId)) {
+    throw new Error("当前 Agent 暂不支持自定义渠道配置。");
+  }
+}
+function validateProviderConfig(provider) {
+  if (!/^[a-zA-Z0-9._:-]+$/.test(provider.providerId)) {
+    throw new Error("渠道 ID 只能包含字母、数字、点、下划线、冒号和短横线。");
+  }
+  if (!provider.baseUrl) throw new Error("请填写渠道 URL。");
+  if (!provider.apiKey) throw new Error("请填写 sk-key。");
+  if (provider.models.length === 0) throw new Error("至少需要添加一个模型。");
+  for (const model of provider.models) {
+    if (!model.id.trim()) throw new Error("模型 ID 不能为空。");
+  }
+}
+function uniqueById(items) {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+}
+function mergeModels(saved, native) {
+  return uniqueById([
+    ...saved.map((model) => ({ ...model })),
+    ...native.map((model) => ({ ...model }))
+  ]);
+}
+function sanitizeProviderId(value, fallback) {
+  const normalized = value.trim().replace(/^https?:\/\//i, "").replace(/[^a-zA-Z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+function uniqueProviderId(baseId, usedIds) {
+  let providerId = sanitizeProviderId(baseId, "custom");
+  let index = 2;
+  while (usedIds.has(providerId)) {
+    providerId = `${sanitizeProviderId(baseId, "custom")}-${index}`;
+    index += 1;
+  }
+  usedIds.add(providerId);
+  return providerId;
+}
+function providerIdFromUrl(baseUrl, fallback, usedIds) {
+  try {
+    const url = new URL(baseUrl);
+    return uniqueProviderId(url.hostname.replace(/^api\./i, ""), usedIds);
+  } catch {
+    return uniqueProviderId(fallback, usedIds);
+  }
+}
+function modelSupportsImages$1(value) {
+  if (value.imageInput === true || value.supportsImages === true || value.attachment === true) return true;
+  if (Array.isArray(value.input) && value.input.includes("image")) return true;
+  const modalities = isRecord(value.modalities) ? value.modalities : {};
+  return Array.isArray(modalities.input) && modalities.input.includes("image");
+}
+function normalizeNativeModel(value, fallbackId) {
+  if (!isRecord(value)) {
+    const id2 = String(fallbackId || value || "").trim();
+    return id2 ? { id: id2, name: id2, reasoning: false, imageInput: false } : null;
+  }
+  const id = asString(value.id) || asString(value.model) || asString(value.name) || fallbackId || "";
+  if (!id) return null;
+  return {
+    id,
+    name: asString(value.name) || asString(value.displayName) || id,
+    reasoning: value.reasoning === true,
+    imageInput: modelSupportsImages$1(value)
+  };
+}
+function getPiModelsPath() {
+  return path.join(os.homedir(), ".pi", "agent", "models.json");
+}
+function getDroidSettingsPath() {
+  return path.join(os.homedir(), ".factory", "settings.json");
+}
+function getOpenCodeConfigPath() {
+  return process.env.OPENCODE_CONFIG || path.join(os.homedir(), ".config", "opencode", "opencode.json");
+}
+function getCodexHomeDir() {
+  return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+}
+function getCodexConfigPath() {
+  return path.join(getCodexHomeDir(), "config.toml");
+}
+function getCodexAuthPath() {
+  return path.join(getCodexHomeDir(), "auth.json");
+}
+async function readPiNativeConfigState() {
+  const config = await readJsonObject(getPiModelsPath());
+  const providersRecord = isRecord(config.providers) ? config.providers : {};
+  const providers = [];
+  for (const [providerId, value] of Object.entries(providersRecord)) {
+    if (!isRecord(value)) continue;
+    const models = Array.isArray(value.models) ? value.models.map((model) => normalizeNativeModel(model)).filter((model) => !!model) : [];
+    providers.push({
+      providerId,
+      displayName: asString(value.name) || providerId,
+      baseUrl: asString(value.baseUrl) || asString(value.baseURL) || asString(value.url),
+      apiKey: asString(value.apiKey) || asString(value.api_key),
+      models
+    });
+  }
+  return {
+    activeProviderId: asString(config.activeProviderId) || asString(config.activeProvider),
+    providers
+  };
+}
+async function readDroidNativeConfigState() {
+  const config = await readJsonObject(getDroidSettingsPath());
+  const customModels = Array.isArray(config.customModels) ? config.customModels : [];
+  const groups = /* @__PURE__ */ new Map();
+  const keyToProviderId = /* @__PURE__ */ new Map();
+  const usedIds = /* @__PURE__ */ new Set();
+  for (const model of customModels) {
+    if (!isRecord(model)) continue;
+    const baseUrl = asString(model.baseUrl) || asString(model.baseURL);
+    const apiKey = asString(model.apiKey);
+    const providerName = asString(model.hppProviderId) || asString(model.provider) || "custom";
+    const groupKey = asString(model.hppProviderId) || `${providerName}|${baseUrl}|${apiKey}`;
+    let providerId = keyToProviderId.get(groupKey);
+    if (!providerId) {
+      providerId = asString(model.hppProviderId) || providerIdFromUrl(baseUrl, providerName, usedIds);
+      keyToProviderId.set(groupKey, providerId);
+      groups.set(providerId, {
+        providerId,
+        displayName: asString(model.hppProviderId) || providerName,
+        baseUrl,
+        apiKey,
+        models: []
+      });
+    }
+    const group = groups.get(providerId);
+    if (!group) continue;
+    const modelId = asString(model.model) || asString(model.id) || asString(model.displayName);
+    if (!modelId) continue;
+    group.models.push({
+      id: modelId,
+      name: asString(model.displayName) || modelId,
+      reasoning: model.reasoning === true,
+      imageInput: model.noImageSupport !== true
+    });
+  }
+  const activeModel = asString(isRecord(config.sessionDefaultSettings) ? config.sessionDefaultSettings.model : void 0).replace(/^custom:/, "");
+  const providers = Array.from(groups.values()).map((provider) => ({
+    ...provider,
+    models: uniqueById(provider.models)
+  }));
+  const activeProvider = activeModel ? providers.find((provider) => provider.models.some((model) => model.id === activeModel))?.providerId : void 0;
+  return { activeProviderId: activeProvider, providers };
+}
+function parseOpenCodeModels(rawModels) {
+  if (Array.isArray(rawModels)) {
+    return rawModels.map((model) => normalizeNativeModel(model)).filter((model) => !!model);
+  }
+  if (!isRecord(rawModels)) return [];
+  return Object.entries(rawModels).map(([modelId, value]) => normalizeNativeModel(value, modelId)).filter((model) => !!model);
+}
+async function readOpenCodeNativeConfigState() {
+  const config = await readJsonObject(getOpenCodeConfigPath());
+  const providersRecord = isRecord(config.provider) ? config.provider : {};
+  const providers = [];
+  for (const [providerId, value] of Object.entries(providersRecord)) {
+    if (!isRecord(value)) continue;
+    const options = isRecord(value.options) ? value.options : {};
+    providers.push({
+      providerId,
+      displayName: asString(value.name) || providerId,
+      baseUrl: asString(options.baseURL) || asString(options.baseUrl) || asString(value.baseURL) || asString(value.baseUrl),
+      apiKey: asString(options.apiKey) || asString(value.apiKey),
+      models: parseOpenCodeModels(value.models)
+    });
+  }
+  const configuredModel = asString(config.model);
+  const activeProviderId = configuredModel.includes("/") ? configuredModel.split("/")[0] : asString(config.providerID) || asString(config.providerId);
+  return { activeProviderId, providers };
+}
+function unquoteTomlValue(rawValue) {
+  const value = rawValue.trim();
+  if (!value) return "";
+  if (value.startsWith('"')) {
+    const match = value.match(/^"((?:\\.|[^"\\])*)"/);
+    if (!match) return "";
+    try {
+      return JSON.parse(`"${match[1]}"`);
+    } catch {
+      return match[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    }
+  }
+  if (value.startsWith("'")) {
+    const match = value.match(/^'([^']*)'/);
+    return match ? match[1] : "";
+  }
+  return value.split(/\s+#/)[0].trim();
+}
+function parseTomlKeyValue(line) {
+  const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+?)\s*$/);
+  if (!match) return null;
+  return { key: match[1], value: unquoteTomlValue(match[2]) };
+}
+function unescapeTomlKey(rawKey) {
+  const key = rawKey.trim();
+  if (key.startsWith('"') && key.endsWith('"')) {
+    try {
+      return JSON.parse(key);
+    } catch {
+      return key.slice(1, -1);
+    }
+  }
+  if (key.startsWith("'") && key.endsWith("'")) return key.slice(1, -1);
+  return key;
+}
+function parseCodexProviderSection(line) {
+  const match = line.match(/^\s*\[\s*model_providers\.(.+?)\s*\]\s*$/);
+  return match ? unescapeTomlKey(match[1]) : null;
+}
+async function readCodexNativeConfigState() {
+  const content = await readTextFile(getCodexConfigPath());
+  const auth = await readJsonObject(getCodexAuthPath());
+  const providers = /* @__PURE__ */ new Map();
+  let activeProviderId = "";
+  let activeModelId = "";
+  let currentProviderId = null;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const providerSection = parseCodexProviderSection(line);
+    if (providerSection) {
+      currentProviderId = providerSection;
+      providers.set(providerSection, {
+        providerId: providerSection,
+        displayName: providerSection,
+        baseUrl: "",
+        apiKey: asString(auth.OPENAI_API_KEY),
+        models: []
+      });
+      continue;
+    }
+    if (line.startsWith("[")) {
+      currentProviderId = null;
+      continue;
+    }
+    const pair = parseTomlKeyValue(rawLine);
+    if (!pair) continue;
+    if (!currentProviderId) {
+      if (pair.key === "model_provider") activeProviderId = pair.value;
+      if (pair.key === "model") activeModelId = pair.value;
+      continue;
+    }
+    const provider = providers.get(currentProviderId);
+    if (!provider) continue;
+    if (pair.key === "name") provider.displayName = pair.value || currentProviderId;
+    if (pair.key === "base_url") provider.baseUrl = pair.value;
+  }
+  if (activeProviderId && !providers.has(activeProviderId)) {
+    providers.set(activeProviderId, {
+      providerId: activeProviderId,
+      displayName: activeProviderId,
+      baseUrl: "",
+      apiKey: asString(auth.OPENAI_API_KEY),
+      models: []
+    });
+  }
+  const modelId = activeModelId || CODEX_FALLBACK_MODEL_ID;
+  const modelDefaults = [
+    { id: modelId, name: modelId, reasoning: true, imageInput: true }
+  ];
+  for (const provider of providers.values()) {
+    provider.apiKey = asString(auth.OPENAI_API_KEY);
+    provider.models = provider.models.length > 0 ? mergeModels(modelDefaults, provider.models) : modelDefaults;
+  }
+  return { activeProviderId, providers: Array.from(providers.values()) };
+}
+async function readNativeAgentConfigState(agentId) {
+  if (agentId === "codex") return readCodexNativeConfigState();
+  if (agentId === "pi") return readPiNativeConfigState();
+  if (agentId === "droid") return readDroidNativeConfigState();
+  if (agentId === "opencode") return readOpenCodeNativeConfigState();
+  return { providers: [] };
+}
+async function readCurrentAgentConfigState(agentId) {
+  return agentId === "codex" ? readSavedCodexConfigState() : readNativeAgentConfigState(agentId);
+}
+async function listAgentConfig(agentId) {
+  try {
+    if (!SUPPORTED_CONFIG_AGENTS.has(agentId)) {
+      return { success: true, config: { providers: [] } };
+    }
+    return { success: true, config: await readCurrentAgentConfigState(agentId) };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function saveAgentProviderConfig(agentId, providerValue) {
+  try {
+    ensureSupportedAgent(agentId);
+    const normalizedProvider = normalizeProvider(providerValue);
+    if (!normalizedProvider) throw new Error("渠道配置无效。");
+    const provider = agentId === "codex" ? { ...normalizedProvider, hppManaged: true } : normalizedProvider;
+    validateProviderConfig(provider);
+    const originalProviderId = getOriginalProviderId(providerValue);
+    const state = await readCurrentAgentConfigState(agentId);
+    const providers = state.providers.filter(
+      (item) => item.providerId !== provider.providerId && item.providerId !== originalProviderId
+    );
+    providers.push(provider);
+    const nextState = {
+      activeProviderId: state.activeProviderId === originalProviderId ? provider.providerId : state.activeProviderId,
+      providers
+    };
+    if (agentId === "codex") {
+      await writeAgentConfigState(agentId, nextState);
+    } else {
+      await writeNativeAgentConfig(agentId, nextState);
+    }
+    return { success: true, config: nextState };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function deleteAgentProviderConfig(agentId, providerId) {
+  try {
+    ensureSupportedAgent(agentId);
+    const state = agentId === "codex" ? await readSavedCodexConfigState() : await readNativeAgentConfigState(agentId);
+    const nextProviders = state.providers.filter((provider) => provider.providerId !== providerId);
+    const nextState = {
+      activeProviderId: state.activeProviderId === providerId ? void 0 : state.activeProviderId,
+      providers: nextProviders
+    };
+    if (agentId === "codex") {
+      await writeAgentConfigState(agentId, nextState);
+    } else {
+      await writeNativeAgentConfig(agentId, nextState);
+    }
+    return { success: true, config: nextState };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function setActiveAgentProviderConfig(agentId, providerId) {
+  if (agentId !== "codex") {
+    throw new Error("只有 Codex 需要启用渠道。");
+  }
+  const state = await readSavedCodexConfigState();
+  if (!state.providers.some((provider) => provider.providerId === providerId)) {
+    throw new Error("未找到要启用的渠道。");
+  }
+  const nextState = { ...state, activeProviderId: providerId };
+  await writeAgentConfigState(agentId, nextState);
+  return nextState;
+}
+async function snapshotFile(filePath) {
+  if (!fs.existsSync(filePath)) return { filePath, existed: false, content: "" };
+  return { filePath, existed: true, content: await promises.readFile(filePath, "utf-8") };
+}
+async function restoreNativeConfigSnapshot(snapshot) {
+  if (snapshot.existed) {
+    await promises.mkdir(path.dirname(snapshot.filePath), { recursive: true });
+    await promises.writeFile(snapshot.filePath, snapshot.content, "utf-8");
+  } else {
+    await promises.rm(snapshot.filePath, { force: true });
+  }
+}
+async function restoreNativeConfigSnapshots(snapshots) {
+  for (const snapshot of snapshots) {
+    await restoreNativeConfigSnapshot(snapshot);
+  }
+}
+function toPiProviderConfig(provider, existingProvider = {}) {
+  return {
+    ...existingProvider,
+    baseUrl: provider.baseUrl,
+    api: existingProvider.api || "openai-completions",
+    apiKey: provider.apiKey,
+    models: provider.models.map((model) => ({
+      id: model.id,
+      name: model.name || model.id,
+      reasoning: !!model.reasoning,
+      input: model.imageInput ? ["text", "image"] : ["text"]
+    }))
+  };
+}
+async function writePiNativeConfigProviders(state) {
+  const filePath = getPiModelsPath();
+  const snapshot = await snapshotFile(filePath);
+  const config = await readJsonObject(filePath);
+  const providers = {};
+  for (const provider of state.providers) {
+    const existingProvider = isRecord(providers[provider.providerId]) ? providers[provider.providerId] : {};
+    providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
+  }
+  await writeJsonObject(filePath, { ...config, providers });
+  return [snapshot];
+}
+async function writeDroidNativeConfigProviders(state) {
+  const filePath = getDroidSettingsPath();
+  const snapshot = await snapshotFile(filePath);
+  const config = await readJsonObject(filePath);
+  const customModels = [];
+  for (const provider of state.providers) {
+    for (const model of provider.models) {
+      customModels.push({
+        hppManaged: true,
+        hppProviderId: provider.providerId,
+        provider: "generic-chat-completion-api",
+        model: model.id,
+        id: `custom:${model.id}`,
+        displayName: model.name || model.id,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        reasoning: !!model.reasoning,
+        noImageSupport: !model.imageInput
+      });
+    }
+  }
+  await writeJsonObject(filePath, { ...config, customModels });
+  return [snapshot];
+}
+function toOpenCodeProviderConfig(provider) {
+  const models = {};
+  for (const model of provider.models) {
+    models[model.id] = {
+      name: model.name || model.id,
+      reasoning: !!model.reasoning,
+      attachment: !!model.imageInput,
+      modalities: {
+        input: model.imageInput ? ["text", "image"] : ["text"],
+        output: ["text"]
+      }
+    };
+  }
+  return {
+    npm: "@ai-sdk/openai-compatible",
+    name: provider.displayName || provider.providerId,
+    options: {
+      baseURL: provider.baseUrl,
+      apiKey: provider.apiKey
+    },
+    models
+  };
+}
+async function writeOpenCodeNativeConfigProviders(state) {
+  const filePath = getOpenCodeConfigPath();
+  const snapshot = await snapshotFile(filePath);
+  const config = await readJsonObject(filePath);
+  const providers = {};
+  for (const provider of state.providers) {
+    providers[provider.providerId] = toOpenCodeProviderConfig(provider);
+  }
+  await writeJsonObject(filePath, { ...config, provider: providers });
+  return [snapshot];
+}
+function escapeTomlString(value) {
+  return JSON.stringify(value);
+}
+function tomlKey(key) {
+  return /^[A-Za-z0-9_-]+$/.test(key) ? key : escapeTomlString(key);
+}
+function setTopLevelTomlValue(content, key, value) {
+  const lines = content ? content.split(/\r?\n/) : [];
+  const firstSectionIndex = lines.findIndex((line) => /^\s*\[/.test(line));
+  const scanEnd = firstSectionIndex === -1 ? lines.length : firstSectionIndex;
+  const nextLine = `${key} = ${escapeTomlString(value)}`;
+  for (let index = 0; index < scanEnd; index += 1) {
+    if (new RegExp(`^\\s*${key}\\s*=`).test(lines[index])) {
+      lines[index] = nextLine;
+      return lines.join("\n");
+    }
+  }
+  const insertIndex = firstSectionIndex === -1 ? lines.length : firstSectionIndex;
+  lines.splice(insertIndex, 0, nextLine);
+  return lines.join("\n");
+}
+function getTopLevelTomlValue(content, key) {
+  const lines = content ? content.split(/\r?\n/) : [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("[")) return "";
+    if (!line || line.startsWith("#")) continue;
+    const pair = parseTomlKeyValue(rawLine);
+    if (pair?.key === key) return pair.value;
+  }
+  return "";
+}
+function providerSectionHeader(providerId) {
+  return `[model_providers.${tomlKey(providerId)}]`;
+}
+function getFirstCodexProviderSectionId(content) {
+  for (const rawLine of content.split(/\r?\n/)) {
+    const providerId = parseCodexProviderSection(rawLine);
+    if (providerId) return providerId;
+  }
+  return "";
+}
+function upsertCodexProviderBaseUrl(content, providerId, baseUrl) {
+  const lines = content ? content.split(/\r?\n/) : [];
+  const nextLine = `base_url = ${escapeTomlString(baseUrl)}`;
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (parseCodexProviderSection(lines[index]) === providerId) {
+      start = index;
+      break;
+    }
+  }
+  if (start === -1) {
+    const suffix = lines.length > 0 && lines[lines.length - 1].trim() ? [""] : [];
+    return [...lines, ...suffix, providerSectionHeader(providerId), nextLine, ""].join("\n");
+  }
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) end += 1;
+  for (let index = start + 1; index < end; index += 1) {
+    const pair = parseTomlKeyValue(lines[index]);
+    if (pair?.key === "base_url") {
+      lines[index] = nextLine;
+      return lines.join("\n");
+    }
+  }
+  let insertIndex = end;
+  while (insertIndex > start + 1 && !lines[insertIndex - 1].trim()) insertIndex -= 1;
+  lines.splice(insertIndex, 0, nextLine);
+  return lines.join("\n");
+}
+async function writeCodexNativeConfig(_state, provider) {
+  const configPath = getCodexConfigPath();
+  const authPath = getCodexAuthPath();
+  const snapshots = await Promise.all([snapshotFile(configPath), snapshotFile(authPath)]);
+  let configContent = await readTextFile(configPath);
+  const activeNativeProviderId = getTopLevelTomlValue(configContent, "model_provider");
+  const firstNativeProviderId = getFirstCodexProviderSectionId(configContent);
+  const targetProviderId = activeNativeProviderId || firstNativeProviderId || "openai";
+  const selectedModel = provider.models[0]?.id || CODEX_FALLBACK_MODEL_ID;
+  if (!activeNativeProviderId && !firstNativeProviderId) {
+    configContent = setTopLevelTomlValue(configContent, "model_provider", targetProviderId);
+  }
+  configContent = setTopLevelTomlValue(configContent, "model", selectedModel);
+  configContent = upsertCodexProviderBaseUrl(configContent, targetProviderId, provider.baseUrl);
+  await promises.mkdir(path.dirname(configPath), { recursive: true });
+  await promises.writeFile(configPath, configContent.endsWith("\n") ? configContent : `${configContent}
+`, "utf-8");
+  const auth = await readJsonObject(authPath);
+  auth.OPENAI_API_KEY = provider.apiKey;
+  await writeJsonObject(authPath, auth);
+  return snapshots;
+}
+async function writeNativeAgentProviderConfig(agentId, providerId) {
+  ensureSupportedAgent(agentId);
+  if (agentId !== "codex") {
+    throw new Error("只有 Codex 需要启用指定渠道。");
+  }
+  const state = await readSavedCodexConfigState();
+  const provider = state.providers.find((item) => item.providerId === providerId);
+  if (!provider) throw new Error("未找到要启用的渠道。");
+  validateProviderConfig(provider);
+  const snapshots = await writeCodexNativeConfig(state, provider);
+  return { state, provider, snapshots };
+}
+async function writeNativeAgentConfig(agentId, stateOverride) {
+  ensureSupportedAgent(agentId);
+  if (agentId === "codex") {
+    throw new Error("Codex 需要启用指定渠道后才能写入当前渠道。");
+  }
+  const state = stateOverride || await readNativeAgentConfigState(agentId);
+  for (const provider of state.providers) {
+    validateProviderConfig(provider);
+  }
+  const snapshots = agentId === "pi" ? await writePiNativeConfigProviders(state) : agentId === "droid" ? await writeDroidNativeConfigProviders(state) : await writeOpenCodeNativeConfigProviders(state);
+  return { state, snapshots };
+}
+async function getConfiguredAgentModels(agentId) {
+  if (!SUPPORTED_CONFIG_AGENTS.has(agentId)) return [];
+  const state = agentId === "codex" ? await readSavedCodexConfigState() : await readNativeAgentConfigState(agentId);
+  const providers = agentId === "codex" ? [
+    state.providers.find((provider) => provider.providerId === state.activeProviderId) || state.providers[0]
+  ].filter((provider) => !!provider) : state.providers;
+  return providers.flatMap((provider) => {
+    const providerName = agentId === "codex" ? "codex" : provider.providerId;
+    return provider.models.map((model) => ({
+      id: model.id,
+      name: model.name || model.id,
+      provider: providerName,
+      reasoning: !!model.reasoning,
+      supportsImages: !!model.imageInput
+    }));
+  });
+}
 const normalizeEventToken = (value) => String(value || "").trim().toLowerCase().replace(/[\s._:-]+/g, "");
 const isContextCompactionLike = (...values) => {
   const normalized = values.map(normalizeEventToken).filter(Boolean);
@@ -994,6 +1754,7 @@ const buildFiles = (toolKind, filePath, patch, additions, deletions) => {
     file: filePath,
     label: getFileName(filePath),
     action,
+    patch: patch || void 0,
     additions,
     deletions,
     status: patch ? "modified" : void 0
@@ -1169,18 +1930,39 @@ function isToolPartComplete(props) {
   const normalizedState = typeof state === "string" ? state.toLowerCase() : "";
   return part.output !== void 0 || part.result !== void 0 || part.error !== void 0 || props.output !== void 0 || props.result !== void 0 || props.error !== void 0 || ["done", "completed", "complete", "success", "error", "failed"].includes(normalizedState);
 }
+function readOpenCodeConfigContent() {
+  try {
+    return fs.readFileSync(getOpenCodeConfigPath(), "utf-8");
+  } catch {
+    return void 0;
+  }
+}
 function buildOpenCodeConfigContent(existing) {
-  if (!existing?.trim()) {
+  const source = existing?.trim() ? existing : readOpenCodeConfigContent();
+  if (!source?.trim()) {
     return JSON.stringify({ permission: "allow" });
   }
   try {
-    const parsed = JSON.parse(existing);
+    const parsed = JSON.parse(source);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !("permission" in parsed)) {
       return JSON.stringify({ ...parsed, permission: "allow" });
     }
   } catch {
   }
-  return existing;
+  return source;
+}
+function modelSupportsImages(modelInfo) {
+  if (!modelInfo || typeof modelInfo !== "object") return false;
+  if (modelInfo.attachment === true || modelInfo.supportsImages === true || modelInfo.imageInput === true) return true;
+  const input = modelInfo.input || modelInfo.modalities?.input;
+  return Array.isArray(input) && input.includes("image");
+}
+function imageExtension(mimeType) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  return "png";
 }
 class OpenCodeAgent {
   process = null;
@@ -1293,7 +2075,7 @@ class OpenCodeAgent {
     return null;
   }
   /** Send a message to the opencode session */
-  async sendMessage(message, _images, options) {
+  async sendMessage(message, images, options) {
     if (!this.sessionId) {
       await this.createSession();
     }
@@ -1307,7 +2089,19 @@ class OpenCodeAgent {
     this.emitEvent({ type: "stream_start", role: "assistant" });
     this.startSSEListener();
     try {
-      const body = { parts: [{ type: "text", text: message }] };
+      const parts = [{ type: "text", text: message }];
+      if (images?.length) {
+        images.forEach((image, index) => {
+          const mimeType = image.mimeType || "image/png";
+          parts.push({
+            type: "file",
+            mime: mimeType,
+            filename: `image-${index + 1}.${imageExtension(mimeType)}`,
+            url: `data:${mimeType};base64,${image.data}`
+          });
+        });
+      }
+      const body = { parts };
       if (options?.planModeEnabled || options?.permissionMode === "plan") {
         body.agent = "plan";
       } else {
@@ -1326,6 +2120,9 @@ class OpenCodeAgent {
       this.emitEvent({ type: "agent_end" });
       this.stopSSEListener();
     }
+  }
+  isIdle() {
+    return !this.eventSource && !this.idleTimer && this.runningToolParts.size === 0 && this.pendingQuestionToolParts.size === 0;
   }
   /** Listen to SSE events for streaming responses */
   startSSEListener() {
@@ -1592,6 +2389,8 @@ class OpenCodeAgent {
       }
     }
     this.stopSSEListener();
+    this.runningToolParts.clear();
+    this.pendingQuestionToolParts.clear();
   }
   /** Get available models from providers */
   async getModels() {
@@ -1609,7 +2408,8 @@ class OpenCodeAgent {
                 id: m.id || m.name,
                 name: m.name || m.id,
                 provider: providerId,
-                reasoning: m.reasoning ?? false
+                reasoning: m.reasoning ?? false,
+                supportsImages: modelSupportsImages(m)
               });
             }
           } else if (provider.models && typeof provider.models === "object") {
@@ -1618,7 +2418,8 @@ class OpenCodeAgent {
                 id: modelId,
                 name: modelInfo?.name || modelId,
                 provider: providerId,
-                reasoning: modelInfo?.reasoning ?? false
+                reasoning: modelInfo?.reasoning ?? false,
+                supportsImages: modelSupportsImages(modelInfo)
               });
             }
           } else if (result.default?.[providerId]) {
@@ -1626,7 +2427,8 @@ class OpenCodeAgent {
               id: result.default[providerId],
               name: result.default[providerId],
               provider: providerId,
-              reasoning: false
+              reasoning: false,
+              supportsImages: false
             });
           }
         }
@@ -1670,6 +2472,8 @@ class OpenCodeAgent {
       this.process = null;
     }
     this.sessionId = null;
+    this.runningToolParts.clear();
+    this.pendingQuestionToolParts.clear();
   }
   // ---- HTTP helpers ----
   httpGet(path2) {
@@ -1821,6 +2625,8 @@ class DroidAgent {
   autonomyLevel = "high";
   interactionMode = "auto";
   planModeEnabled = false;
+  turnActive = false;
+  isAborting = false;
   eventBuffer;
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
@@ -1924,9 +2730,11 @@ class DroidAgent {
   /** Send a user message */
   async sendMessage(message, images, options) {
     if (!this.process || !this.isReady) {
-      this.mockResponse(message);
+      void this.mockResponse(message);
       return;
     }
+    this.turnActive = true;
+    this.isAborting = false;
     this.emitEvent({ type: "stream_start", role: "assistant" });
     const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
     await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
@@ -1940,7 +2748,12 @@ class DroidAgent {
     }
     this.sendRpc("droid.add_user_message", msgParams);
   }
+  isIdle() {
+    return !this.isAborting && !this.turnActive && this.pendingResponses.size === 0 && !this.pendingAskUserRequestId && !this.pendingPermissionRequestId;
+  }
   async mockResponse(message) {
+    this.turnActive = true;
+    this.isAborting = false;
     this.emitEvent({ type: "stream_start", role: "assistant" });
     const response = `收到消息: "${message}"
 
@@ -1953,9 +2766,11 @@ class DroidAgent {
     }
     this.emitEvent({ type: "stream_end" });
     this.emitEvent({ type: "agent_end" });
+    this.turnActive = false;
   }
   /** Abort current response */
   async abort() {
+    this.isAborting = true;
     if (this.pendingPermissionRequestId) {
       this.sendRpcResponse(this.pendingPermissionRequestId, { selectedOption: "deny" });
       this.pendingPermissionRequestId = null;
@@ -1967,18 +2782,20 @@ class DroidAgent {
     if (this.process) {
       this.sendRpc("droid.interrupt_session", {});
     }
+    this.turnActive = false;
+    this.isAborting = false;
   }
   /** Get available models - Factory provides a curated set + local custom models */
   async getModels() {
     if (this.models.length > 0) return this.models;
     this.models = [
-      { id: "claude-opus-4-7", name: "Claude Opus 4", provider: "factory", reasoning: true },
-      { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "factory", reasoning: true },
-      { id: "claude-sonnet-4-6-20250514", name: "Claude Sonnet 4.6", provider: "factory", reasoning: true },
-      { id: "gpt-5-codex", name: "GPT-5 Codex", provider: "factory", reasoning: true },
-      { id: "gpt-5.1-codex", name: "GPT-5.1 Codex", provider: "factory", reasoning: true },
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "factory", reasoning: true },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "factory", reasoning: false }
+      { id: "claude-opus-4-7", name: "Claude Opus 4", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "claude-sonnet-4-6-20250514", name: "Claude Sonnet 4.6", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gpt-5-codex", name: "GPT-5 Codex", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gpt-5.1-codex", name: "GPT-5.1 Codex", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "factory", reasoning: false, supportsImages: true }
     ];
     try {
       const configPath = path.join(os.homedir(), ".factory", "settings.json");
@@ -1989,8 +2806,9 @@ class DroidAgent {
           this.models.push({
             id: m.id || m.model || m.displayName,
             name: m.displayName || m.model || m.id,
-            provider: m.provider || "factory-custom",
-            reasoning: false
+            provider: m.hppProviderId || m.provider || "factory-custom",
+            reasoning: !!m.reasoning,
+            supportsImages: m.noImageSupport !== true
           });
         }
       }
@@ -2086,6 +2904,8 @@ class DroidAgent {
     this.pendingResponses.clear();
     this.pendingAskUserRequestId = null;
     this.pendingPermissionRequestId = null;
+    this.turnActive = false;
+    this.isAborting = false;
     this.eventBuffer.flush();
   }
   // ---- JSON-RPC (Factory protocol) ----
@@ -2183,6 +3003,7 @@ class DroidAgent {
       case "assistant_text_complete":
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
+        this.turnActive = false;
         break;
       case "thinking_text_delta":
         this.emitEvent({ type: "thinking_delta", delta: notifData?.delta || notifData?.text || "" });
@@ -2217,8 +3038,19 @@ class DroidAgent {
         }
         break;
       case "droid_working_state_changed":
+        {
+          const state = String(notifData?.state || notifData?.status || "").toLowerCase();
+          if (typeof notifData?.working === "boolean") {
+            this.turnActive = notifData.working;
+          } else if (["idle", "completed", "complete", "done"].includes(state)) {
+            this.turnActive = false;
+          } else if (["running", "working", "busy"].includes(state)) {
+            this.turnActive = true;
+          }
+        }
         break;
       case "error":
+        this.turnActive = false;
         this.emitEvent({ type: "stream_delta", delta: `
 
 错误: ${notifData?.message || "未知错误"}` });
@@ -2368,6 +3200,9 @@ class PiSDKAgent {
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access")
     });
   }
+  isIdle() {
+    return !this.isAborting && !this.turnActive && this.activePromptIds.size === 0 && this.pendingUIRequestIds.size === 0 && this.pendingResponses.size === 0;
+  }
   async sendGuidance(message, images, options) {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
@@ -2499,6 +3334,9 @@ class PiSDKAgent {
     this.clearTurnFallback();
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    this.turnActive = false;
+    this.isAborting = false;
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;
@@ -2786,6 +3624,7 @@ class CodexAgent {
   requestId = 0;
   models = [];
   isAborting = false;
+  activePromptIds = /* @__PURE__ */ new Set();
   get sessionFilePath() {
     return this._sessionFilePath;
   }
@@ -2839,9 +3678,11 @@ class CodexAgent {
       });
       for (const handler of this.pendingResponses.values()) handler({ type: "error", error: error.message });
       this.pendingResponses.clear();
+      this.activePromptIds.clear();
     });
     child.on("exit", () => {
       if (this.process === child) this.process = null;
+      this.activePromptIds.clear();
       if (!this.isAborting) {
         this.emitEvent({ type: "agent_disconnected" });
       }
@@ -2871,6 +3712,7 @@ class CodexAgent {
     if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
     const promptId = options?.clientMessageId || this.createCommandId();
+    this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.sendWorkerCommand({
       id: promptId,
@@ -2880,6 +3722,9 @@ class CodexAgent {
       planModeEnabled: !!options?.planModeEnabled,
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access")
     });
+  }
+  isIdle() {
+    return !this.isAborting && this.activePromptIds.size === 0 && this.pendingResponses.size === 0;
   }
   async sendGuidance(message, images, options) {
     if (!this.process) throw new Error("Codex worker is not running");
@@ -2950,6 +3795,7 @@ class CodexAgent {
       handler({ type: "error", id, error: "Codex request interrupted" });
     }
     this.pendingResponses.clear();
+    this.activePromptIds.clear();
     if (!this.process) {
       this.emitEvent({ type: "aborted" });
       this.isAborting = false;
@@ -3004,6 +3850,7 @@ class CodexAgent {
   }
   dispose() {
     this.pendingResponses.clear();
+    this.activePromptIds.clear();
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;
@@ -3057,15 +3904,24 @@ class CodexAgent {
       case "plan_update":
       case "context_compaction":
       case "diff_update":
+        this.emitEvent(data);
+        break;
       case "agent_end":
+        this.activePromptIds.clear();
         this.emitEvent(data);
         break;
       case "prompt_done":
+        if (data.id) this.activePromptIds.delete(String(data.id));
+        else this.activePromptIds.clear();
         break;
       case "aborted":
+        if (data.promptId) this.activePromptIds.delete(String(data.promptId));
+        else this.activePromptIds.clear();
         this.emitEvent({ type: "aborted", promptId: data.promptId });
         break;
       case "error":
+        if (data.id) this.activePromptIds.delete(String(data.id));
+        else this.activePromptIds.clear();
         if (/Codex is already running/i.test(data.error || "")) {
           this.emitEvent({
             type: "process_event",
@@ -3137,12 +3993,31 @@ function filterModelsByLocalConfig(models) {
         result.push({
           ...model,
           name: configuredModel?.name ?? model.name,
-          reasoning: configuredModel?.reasoning ?? model.reasoning
+          reasoning: configuredModel?.reasoning ?? model.reasoning,
+          supportsImages: Array.isArray(configuredModel?.input) ? configuredModel.input.includes("image") : model.supportsImages
         });
       }
     }
   }
   return result;
+}
+async function mergeModelsWithConfiguredAgentModels(agentId, models) {
+  if (!agentId) return models;
+  const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
+  if (configuredModels.length === 0) return models;
+  if (agentId === "codex") return configuredModels;
+  const merged = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    merged.set(`${model.provider}:${model.id}`, model);
+  }
+  for (const model of configuredModels) {
+    merged.set(`${model.provider}:${model.id}`, model);
+  }
+  return Array.from(merged.values());
+}
+function resetLocalModelsConfigCache() {
+  _localModelsConfig = null;
+  _localModelsConfigMtime = 0;
 }
 function supportsNativePlanMode(agentId) {
   return agentId === "codex" || agentId === "opencode" || agentId === "droid";
@@ -3166,6 +4041,7 @@ class AgentManager {
   sessionAgentTypes = /* @__PURE__ */ new Map();
   // sessionId -> agentId ("pi" | "opencode")
   sessionFilePaths = /* @__PURE__ */ new Map();
+  sessionProjectPaths = /* @__PURE__ */ new Map();
   activeSessionId = null;
   window = null;
   setWindow(win) {
@@ -3189,6 +4065,7 @@ class AgentManager {
     } else {
       console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
     }
+    this.sessionProjectPaths.set(sessionId, projectPath);
     if (this.window) agent.setWindow(this.window);
     await agent.init(projectPath, existingSessionFilePath);
     const fp = agent.sessionFilePath;
@@ -3220,12 +4097,34 @@ class AgentManager {
   getActiveAgentType() {
     return this.activeSessionId ? this.sessionAgentTypes.get(this.activeSessionId) : void 0;
   }
+  canReloadConfig(agentId, sessionId) {
+    const entries = Array.from(this.sessionAgents.entries());
+    const targetEntries = sessionId ? entries.filter(([sid]) => sid === sessionId) : entries.filter(([sid]) => this.sessionAgentTypes.get(sid) === agentId);
+    if (sessionId && targetEntries.length === 0) {
+      return { success: false, error: "目标 Agent 会话尚未初始化。", reloadedSessionIds: [] };
+    }
+    for (const [sid] of targetEntries) {
+      if (this.sessionAgentTypes.get(sid) !== agentId) {
+        return { success: false, error: "目标会话不是指定 Agent。", reloadedSessionIds: [] };
+      }
+    }
+    const busySession = targetEntries.find(([, agent]) => !agent.isIdle());
+    if (busySession) {
+      return {
+        success: false,
+        error: "当前 Agent 会话正在运行，请等待空闲后再重载配置。",
+        reloadedSessionIds: []
+      };
+    }
+    return { success: true, reloadedSessionIds: targetEntries.map(([sid]) => sid) };
+  }
   async getModelsBySessionId(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (!agent) return [];
     const models = await agent.getModels();
-    if (this.sessionAgentTypes.get(sessionId) === "codex") return models;
-    return filterModelsByLocalConfig(models);
+    const agentType = this.sessionAgentTypes.get(sessionId);
+    const filteredModels = agentType === "pi" ? filterModelsByLocalConfig(models) : models;
+    return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
   }
   sendUIResponse(response) {
     const agent = response?.sessionId ? this.getAgentBySessionId(response.sessionId) : this.getActiveAgent();
@@ -3254,6 +4153,81 @@ class AgentManager {
       sourceSessionFilePath: target.sourceSessionFilePath || agent.sessionFilePath || void 0
     });
   }
+  async reloadConfig(agentId, sessionId) {
+    const entries = Array.from(this.sessionAgents.entries());
+    const targetEntries = sessionId ? entries.filter(([sid]) => sid === sessionId) : entries.filter(([sid]) => this.sessionAgentTypes.get(sid) === agentId);
+    if (sessionId && targetEntries.length === 0) {
+      return { success: false, error: "目标 Agent 会话尚未初始化。", reloadedSessionIds: [] };
+    }
+    if (targetEntries.length === 0) {
+      return {
+        success: true,
+        models: await mergeModelsWithConfiguredAgentModels(agentId, []),
+        reloadedSessionIds: []
+      };
+    }
+    const idleCheck = this.canReloadConfig(agentId, sessionId);
+    if (!idleCheck.success) return idleCheck;
+    for (const [sid] of targetEntries) {
+      if (this.sessionAgentTypes.get(sid) !== agentId) {
+        return { success: false, error: "目标会话不是指定 Agent。", reloadedSessionIds: [] };
+      }
+    }
+    const busySession = targetEntries.find(([, agent]) => !agent.isIdle());
+    if (busySession) {
+      return {
+        success: false,
+        error: "当前 Agent 会话正在运行，请等待空闲后再重载配置。",
+        reloadedSessionIds: []
+      };
+    }
+    const targets = targetEntries.map(([sid, agent]) => {
+      const projectPath = this.sessionProjectPaths.get(sid);
+      if (!projectPath) {
+        throw new Error(`会话 ${sid} 缺少项目路径，无法重载配置。`);
+      }
+      return {
+        sessionId: sid,
+        agent,
+        agentType: this.sessionAgentTypes.get(sid) || agentId,
+        projectPath,
+        sessionFilePath: agent.sessionFilePath || this.sessionFilePaths.get(sid)
+      };
+    });
+    resetLocalModelsConfigCache();
+    const initializedTargets = [];
+    try {
+      for (const target of targets) {
+        const nextAgent = this.createAgentBackend(target.agentType, target.sessionId);
+        if (this.window) nextAgent.setWindow(this.window);
+        await nextAgent.init(target.projectPath, target.sessionFilePath);
+        initializedTargets.push({
+          target,
+          nextAgent,
+          nextSessionFilePath: nextAgent.sessionFilePath || target.sessionFilePath
+        });
+      }
+    } catch (error) {
+      for (const initialized of initializedTargets) {
+        initialized.nextAgent.dispose();
+      }
+      throw error;
+    }
+    for (const { target, nextAgent, nextSessionFilePath } of initializedTargets) {
+      target.agent.dispose();
+      this.sessionAgents.set(target.sessionId, nextAgent);
+      this.sessionAgentTypes.set(target.sessionId, target.agentType);
+      if (nextSessionFilePath) {
+        this.sessionFilePaths.set(target.sessionId, nextSessionFilePath);
+      } else {
+        this.sessionFilePaths.delete(target.sessionId);
+      }
+    }
+    const reloadedSessionIds = targets.map((target) => target.sessionId);
+    const modelSessionId = this.activeSessionId && reloadedSessionIds.includes(this.activeSessionId) ? this.activeSessionId : reloadedSessionIds[0];
+    const models = modelSessionId ? await this.getModelsBySessionId(modelSessionId) : [];
+    return { success: true, models, reloadedSessionIds };
+  }
   removeSession(sessionId) {
     const agent = this.sessionAgents.get(sessionId);
     if (agent) {
@@ -3262,6 +4236,7 @@ class AgentManager {
     }
     this.sessionAgentTypes.delete(sessionId);
     this.sessionFilePaths.delete(sessionId);
+    this.sessionProjectPaths.delete(sessionId);
     if (this.activeSessionId === sessionId) this.activeSessionId = null;
   }
 }
@@ -3313,6 +4288,98 @@ function registerAgentHandlers(getWindow) {
       return { supported: true, success: false, error: err.message || String(err) };
     }
   });
+  electron.ipcMain.handle("agent:reloadConfig", async (_event, agentId, sessionId) => {
+    try {
+      return await agentManager.reloadConfig(agentId, sessionId);
+    } catch (err) {
+      return { success: false, error: err.message || String(err), reloadedSessionIds: [] };
+    }
+  });
+  electron.ipcMain.handle("agentConfig:list", async (_event, agentId) => {
+    return listAgentConfig(agentId);
+  });
+  electron.ipcMain.handle("agentConfig:save", async (_event, agentId, config) => {
+    const saveResult = await saveAgentProviderConfig(agentId, config);
+    if (!saveResult.success || !saveResult.config) {
+      return saveResult;
+    }
+    if (agentId === "codex") {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return { ...saveResult, models };
+    }
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return {
+        ...saveResult,
+        models,
+        error: `配置已保存到本地文件；${idleCheck.error || "当前 Agent 会话不是空闲状态，暂未重载。"}`,
+        reloadedSessionIds: []
+      };
+    }
+    try {
+      resetLocalModelsConfigCache();
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      return { ...reloadResult, config: saveResult.config };
+    } catch (err) {
+      return { success: false, error: err.message || String(err), config: saveResult.config, reloadedSessionIds: [] };
+    }
+  });
+  electron.ipcMain.handle("agentConfig:delete", async (_event, agentId, providerId) => {
+    const deleteResult = await deleteAgentProviderConfig(agentId, providerId);
+    if (!deleteResult.success || !deleteResult.config) {
+      return deleteResult;
+    }
+    if (agentId === "codex") {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return { ...deleteResult, models };
+    }
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return {
+        ...deleteResult,
+        models,
+        error: `渠道已从本地配置删除；${idleCheck.error || "当前 Agent 会话不是空闲状态，暂未重载。"}`,
+        reloadedSessionIds: []
+      };
+    }
+    try {
+      resetLocalModelsConfigCache();
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      return { ...reloadResult, config: deleteResult.config };
+    } catch (err) {
+      return { success: false, error: err.message || String(err), config: deleteResult.config, reloadedSessionIds: [] };
+    }
+  });
+  electron.ipcMain.handle("agentConfig:activate", async (_event, agentId, providerId) => {
+    if (agentId !== "codex") {
+      return { success: false, error: "只有 Codex 需要启用渠道；其它 Agent 保存后会以多渠道形式写入配置。", reloadedSessionIds: [] };
+    }
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) return idleCheck;
+    let snapshots = [];
+    try {
+      const written = await writeNativeAgentProviderConfig(agentId, providerId);
+      snapshots = written.snapshots;
+      resetLocalModelsConfigCache();
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      if (!reloadResult.success) {
+        await restoreNativeConfigSnapshots(snapshots);
+        resetLocalModelsConfigCache();
+        return reloadResult;
+      }
+      const config = await setActiveAgentProviderConfig(agentId, providerId);
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, reloadResult.models || []);
+      return { ...reloadResult, models, config };
+    } catch (err) {
+      if (snapshots.length > 0) {
+        await restoreNativeConfigSnapshots(snapshots).catch(() => void 0);
+        resetLocalModelsConfigCache();
+      }
+      return { success: false, error: err.message || String(err), reloadedSessionIds: [] };
+    }
+  });
   electron.ipcMain.handle("agent:sendGuidance", async (_event, message, images, sessionId, options) => {
     try {
       await agentManager.sendGuidance(sessionId, message, images, options);
@@ -3333,8 +4400,8 @@ function registerAgentHandlers(getWindow) {
     if (!agent) return [];
     const models = await agent.getModels();
     const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
-    if (agentType === "codex") return models;
-    return filterModelsByLocalConfig(models);
+    const filteredModels = agentType === "pi" ? filterModelsByLocalConfig(models) : models;
+    return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
   });
   electron.ipcMain.handle("agent:setModel", async (_event, provider, modelId, sessionId) => {
     const agent = agentManager.getAgentForSession(sessionId);

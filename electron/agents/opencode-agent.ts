@@ -1,7 +1,9 @@
 import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import * as http from "http";
+import { readFileSync } from "fs";
 import { AgentEventBuffer } from "./agent-event-buffer";
+import { getOpenCodeConfigPath } from "./agent-config";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
 
 interface AgentModel {
@@ -9,6 +11,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  supportsImages?: boolean;
 }
 
 interface AgentSendOptions {
@@ -81,13 +84,22 @@ function isToolPartComplete(props: any) {
   );
 }
 
+function readOpenCodeConfigContent(): string | undefined {
+  try {
+    return readFileSync(getOpenCodeConfigPath(), "utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
 function buildOpenCodeConfigContent(existing?: string): string {
-  if (!existing?.trim()) {
+  const source = existing?.trim() ? existing : readOpenCodeConfigContent();
+  if (!source?.trim()) {
     return JSON.stringify({ permission: "allow" });
   }
 
   try {
-    const parsed = JSON.parse(existing);
+    const parsed = JSON.parse(source);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !("permission" in parsed)) {
       return JSON.stringify({ ...parsed, permission: "allow" });
     }
@@ -95,7 +107,22 @@ function buildOpenCodeConfigContent(existing?: string): string {
     // Preserve caller-provided inline config if it is not plain JSON.
   }
 
-  return existing;
+  return source;
+}
+
+function modelSupportsImages(modelInfo: any): boolean {
+  if (!modelInfo || typeof modelInfo !== "object") return false;
+  if (modelInfo.attachment === true || modelInfo.supportsImages === true || modelInfo.imageInput === true) return true;
+  const input = modelInfo.input || modelInfo.modalities?.input;
+  return Array.isArray(input) && input.includes("image");
+}
+
+function imageExtension(mimeType: string) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  return "png";
 }
 
 // ============================================================
@@ -233,7 +260,7 @@ export class OpenCodeAgent {
   }
 
   /** Send a message to the opencode session */
-  async sendMessage(message: string, _images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
     if (!this.sessionId) {
       await this.createSession();
     }
@@ -249,7 +276,19 @@ export class OpenCodeAgent {
     this.startSSEListener();
 
     try {
-      const body: any = { parts: [{ type: "text", text: message }] };
+      const parts: any[] = [{ type: "text", text: message }];
+      if (images?.length) {
+        images.forEach((image, index) => {
+          const mimeType = image.mimeType || "image/png";
+          parts.push({
+            type: "file",
+            mime: mimeType,
+            filename: `image-${index + 1}.${imageExtension(mimeType)}`,
+            url: `data:${mimeType};base64,${image.data}`,
+          });
+        });
+      }
+      const body: any = { parts };
       if (options?.planModeEnabled || options?.permissionMode === "plan") {
         body.agent = "plan";
       } else {
@@ -586,6 +625,7 @@ export class OpenCodeAgent {
                 name: m.name || m.id,
                 provider: providerId,
                 reasoning: m.reasoning ?? false,
+                supportsImages: modelSupportsImages(m),
               });
             }
           } else if (provider.models && typeof provider.models === "object") {
@@ -596,6 +636,7 @@ export class OpenCodeAgent {
                 name: modelInfo?.name || modelId,
                 provider: providerId,
                 reasoning: modelInfo?.reasoning ?? false,
+                supportsImages: modelSupportsImages(modelInfo),
               });
             }
           } else if (result.default?.[providerId]) {
@@ -604,6 +645,7 @@ export class OpenCodeAgent {
               name: result.default[providerId],
               provider: providerId,
               reasoning: false,
+              supportsImages: false,
             });
           }
         }

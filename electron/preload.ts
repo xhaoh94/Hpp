@@ -54,6 +54,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:forkSession", sessionId, target),
   agentReloadConfig: (agentId: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:reloadConfig", agentId, sessionId),
+  agentConfigList: (agentId: string) =>
+    ipcRenderer.invoke("agentConfig:list", agentId),
+  agentConfigSave: (agentId: string, config: unknown) =>
+    ipcRenderer.invoke("agentConfig:save", agentId, config),
+  agentConfigActivate: (agentId: string, providerId: string) =>
+    ipcRenderer.invoke("agentConfig:activate", agentId, providerId),
+  agentConfigDelete: (agentId: string, providerId: string) =>
+    ipcRenderer.invoke("agentConfig:delete", agentId, providerId),
   agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean; clientMessageId?: string }) =>
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),

@@ -9,9 +9,9 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
 const CODEX_MODELS = [
-  { id: "gpt-5.5", name: "GPT-5.5", provider: CODEX_PROVIDER, reasoning: true },
-  { id: "gpt-5.4", name: "GPT-5.4", provider: CODEX_PROVIDER, reasoning: true },
-  { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: CODEX_PROVIDER, reasoning: true },
+  { id: "gpt-5.5", name: "GPT-5.5", provider: CODEX_PROVIDER, reasoning: true, supportsImages: true },
+  { id: "gpt-5.4", name: "GPT-5.4", provider: CODEX_PROVIDER, reasoning: true, supportsImages: true },
+  { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: CODEX_PROVIDER, reasoning: true, supportsImages: true },
 ];
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const PLAN_MODE_INSTRUCTIONS = [

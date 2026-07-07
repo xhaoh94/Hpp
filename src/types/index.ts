@@ -16,6 +16,36 @@ export interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  supportsImages?: boolean;
+}
+
+export interface AgentCustomModelConfig {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  imageInput: boolean;
+}
+
+export interface AgentProviderConfig {
+  providerId: string;
+  displayName: string;
+  baseUrl: string;
+  apiKey: string;
+  models: AgentCustomModelConfig[];
+  hppManaged?: boolean;
+}
+
+export interface AgentConfigState {
+  activeProviderId?: string;
+  providers: AgentProviderConfig[];
+}
+
+export interface AgentConfigResult {
+  success: boolean;
+  error?: string;
+  config?: AgentConfigState;
+  models?: AgentModel[];
+  reloadedSessionIds?: string[];
 }
 
 export interface AgentForkTarget {
@@ -147,6 +177,10 @@ export interface ElectronAPI {
   agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
+  agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
+  agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
+  agentConfigActivate: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
+  agentConfigDelete: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;

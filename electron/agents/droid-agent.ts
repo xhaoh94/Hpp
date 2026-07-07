@@ -18,6 +18,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  supportsImages?: boolean;
 }
 
 interface AgentSendOptions {
@@ -284,13 +285,13 @@ export class DroidAgent {
 
     // Factory Droid's built-in model list (from docs.factory.ai/models)
     this.models = [
-      { id: "claude-opus-4-7", name: "Claude Opus 4", provider: "factory", reasoning: true },
-      { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "factory", reasoning: true },
-      { id: "claude-sonnet-4-6-20250514", name: "Claude Sonnet 4.6", provider: "factory", reasoning: true },
-      { id: "gpt-5-codex", name: "GPT-5 Codex", provider: "factory", reasoning: true },
-      { id: "gpt-5.1-codex", name: "GPT-5.1 Codex", provider: "factory", reasoning: true },
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "factory", reasoning: true },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "factory", reasoning: false },
+      { id: "claude-opus-4-7", name: "Claude Opus 4", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "claude-sonnet-4-6-20250514", name: "Claude Sonnet 4.6", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gpt-5-codex", name: "GPT-5 Codex", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gpt-5.1-codex", name: "GPT-5.1 Codex", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "factory", reasoning: true, supportsImages: true },
+      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "factory", reasoning: false, supportsImages: true },
     ];
 
     // Read custom models from ~/.factory/settings.json
@@ -303,8 +304,9 @@ export class DroidAgent {
           this.models.push({
             id: m.id || m.model || m.displayName,
             name: m.displayName || m.model || m.id,
-            provider: m.provider || "factory-custom",
-            reasoning: false,
+            provider: m.hppProviderId || m.provider || "factory-custom",
+            reasoning: !!m.reasoning,
+            supportsImages: m.noImageSupport !== true,
           });
         }
       }

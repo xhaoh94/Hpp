@@ -43,6 +43,7 @@ import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/pa
 import { getSessionModel, saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
+import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ChatComposer } from "./ChatComposer";
 import { ChatToolbar } from "./ChatToolbar";
 import { DiffBlock } from "./DiffBlock";
@@ -746,6 +747,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
+  const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const referenceRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -1541,6 +1543,17 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       return;
     }
 
+    const modelForSend = getSessionModel(targetSessionId) || useChatStore.getState().currentModel;
+    if (pendingImages.length > 0 && modelForSend?.supportsImages === false) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "当前模型未标记支持图片输入，请切换支持图片的模型，或在 Agent 配置中启用该模型的图片能力。",
+        timestamp: Date.now(),
+      }, targetSessionId);
+      return;
+    }
+
     const payload = await buildMessagePayload(text, pendingFiles, pendingImages, pendingPathAttachments);
     const { forkContextUsed, ...queuedPayload } = payload;
     const existingRuntime = sessionRuntimeRef.current[targetSessionId];
@@ -1572,6 +1585,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, [
     activeQuestionnaire,
     activeSessionReferences.length,
+    addMessage,
     buildMessagePayload,
     clearForkContextForSession,
     clearLegacySessionReferences,
@@ -1717,6 +1731,26 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (sessionId) saveSessionModel(sessionId, model);
     await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
   };
+
+  const handleModelConfigModelsUpdated = useCallback((agentId: string, models?: ModelInfo[]) => {
+    if (!models || models.length === 0) return;
+    const currentAgentId = activeSession?.agentId || activeAgentId;
+    if (currentAgentId !== agentId) return;
+
+    const chatState = useChatStore.getState();
+    chatState.setAvailableModels(models);
+    const current = chatState.currentModel;
+    const nextModel = current
+      ? models.find((model) => model.id === current.id && model.provider === current.provider) || models[0]
+      : models[0];
+    chatState.setCurrentModel(nextModel);
+
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (sessionId) {
+      saveSessionModel(sessionId, nextModel);
+      void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId);
+    }
+  }, [activeAgentId, activeSession?.agentId]);
 
   const handleSelectThinking = async (levelId: string) => {
     setThinkingLevel(levelId);
@@ -1996,6 +2030,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           onModelOpenChange={setModelOpen}
           onThinkingOpenChange={setThinkingOpen}
           onPlanModeChange={savePlanModeEnabled}
+          onOpenModelConfig={() => {
+            const agentId = activeSession?.agentId || activeAgentId;
+            setModelOpen(false);
+            setThinkingOpen(false);
+            setModelConfigAgentId(agentId);
+          }}
           onSelectModel={handleSelectModel}
           onSelectThinking={handleSelectThinking}
           onToggleFavorite={toggleFavorite}
@@ -2047,6 +2087,14 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         </div>
       )}
       <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />
+      {modelConfigAgentId && (
+        <AgentConfigModal
+          agentId={modelConfigAgentId}
+          agentName={getAgentName(modelConfigAgentId)}
+          onClose={() => setModelConfigAgentId(null)}
+          onModelsUpdated={handleModelConfigModelsUpdated}
+        />
+      )}
     </div>
   );
 }

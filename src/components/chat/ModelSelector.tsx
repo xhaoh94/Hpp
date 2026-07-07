@@ -25,12 +25,12 @@ export function ModelSelector() {
         
         // Check if saved model is still available
         if (savedModel) {
-          const isModelAvailable = models.some(
+          const modelMatch = models.find(
             (m) => m.id === savedModel.id && m.provider === savedModel.provider
           );
-          if (isModelAvailable) {
+          if (modelMatch) {
             // Use saved model
-            setCurrentModel(savedModel);
+            setCurrentModel(modelMatch);
           } else {
             // Saved model not available, use first model
             setCurrentModel(models[0]);
@@ -106,7 +106,9 @@ export function ModelSelector() {
                         className="flex-1 text-left text-xs truncate"
                         onClick={() => handleSelectModel(model)}
                       >
-                        {model.name}
+                        <span className="inline-flex min-w-0 items-center gap-1.5">
+                          <span className="truncate">{model.name}</span>
+                        </span>
                       </button>
                       <button
                         onClick={(e) => {

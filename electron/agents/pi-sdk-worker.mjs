@@ -548,6 +548,7 @@ const getModels = () => {
     name: model.name || model.id || model.modelId,
     provider: model.provider,
     reasoning: !!model.reasoning,
+    supportsImages: Array.isArray(model.input) ? model.input.includes("image") : false,
   }));
 };
 

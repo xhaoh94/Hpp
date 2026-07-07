@@ -6,12 +6,22 @@ import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
 import { PiSDKAgent } from "./pi-sdk-agent";
 import { CodexAgent } from "./codex-agent";
+import {
+  deleteAgentProviderConfig,
+  getConfiguredAgentModels,
+  listAgentConfig,
+  restoreNativeConfigSnapshots,
+  saveAgentProviderConfig,
+  setActiveAgentProviderConfig,
+  writeNativeAgentProviderConfig,
+} from "./agent-config";
 
 interface AgentModel {
   id: string;
   name: string;
   provider: string;
   reasoning: boolean;
+  supportsImages?: boolean;
 }
 
 /** Common interface for all agent backends */
@@ -69,7 +79,7 @@ interface AgentReloadConfigResult {
 
 interface LocalModelsConfig {
   providers?: Record<string, {
-    models?: Array<{ id: string; name?: string; reasoning?: boolean }>;
+    models?: Array<{ id: string; name?: string; reasoning?: boolean; input?: string[] }>;
   }>;
 }
 
@@ -121,11 +131,30 @@ function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
           ...model,
           name: configuredModel?.name ?? model.name,
           reasoning: configuredModel?.reasoning ?? model.reasoning,
+          supportsImages: Array.isArray(configuredModel?.input)
+            ? configuredModel.input.includes("image")
+            : model.supportsImages,
         });
       }
     }
   }
   return result;
+}
+
+async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
+  if (!agentId) return models;
+  const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
+  if (configuredModels.length === 0) return models;
+  if (agentId === "codex") return configuredModels;
+
+  const merged = new Map<string, AgentModel>();
+  for (const model of models) {
+    merged.set(`${model.provider}:${model.id}`, model);
+  }
+  for (const model of configuredModels) {
+    merged.set(`${model.provider}:${model.id}`, model);
+  }
+  return Array.from(merged.values());
 }
 
 function resetLocalModelsConfigCache() {
@@ -229,12 +258,41 @@ class AgentManager {
     return this.activeSessionId ? this.sessionAgentTypes.get(this.activeSessionId) : undefined;
   }
 
+  canReloadConfig(agentId: string, sessionId?: string): AgentReloadConfigResult {
+    const entries = Array.from(this.sessionAgents.entries());
+    const targetEntries = sessionId
+      ? entries.filter(([sid]) => sid === sessionId)
+      : entries.filter(([sid]) => this.sessionAgentTypes.get(sid) === agentId);
+
+    if (sessionId && targetEntries.length === 0) {
+      return { success: false, error: "目标 Agent 会话尚未初始化。", reloadedSessionIds: [] };
+    }
+
+    for (const [sid] of targetEntries) {
+      if (this.sessionAgentTypes.get(sid) !== agentId) {
+        return { success: false, error: "目标会话不是指定 Agent。", reloadedSessionIds: [] };
+      }
+    }
+
+    const busySession = targetEntries.find(([, agent]) => !agent.isIdle());
+    if (busySession) {
+      return {
+        success: false,
+        error: "当前 Agent 会话正在运行，请等待空闲后再重载配置。",
+        reloadedSessionIds: [],
+      };
+    }
+
+    return { success: true, reloadedSessionIds: targetEntries.map(([sid]) => sid) };
+  }
+
   async getModelsBySessionId(sessionId: string): Promise<AgentModel[]> {
     const agent = this.sessionAgents.get(sessionId);
     if (!agent) return [];
     const models = await agent.getModels();
-    if (this.sessionAgentTypes.get(sessionId) === "codex") return models;
-    return filterModelsByLocalConfig(models);
+    const agentType = this.sessionAgentTypes.get(sessionId);
+    const filteredModels = agentType === "pi" ? filterModelsByLocalConfig(models) : models;
+    return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
   }
 
   sendUIResponse(response: any) {
@@ -280,8 +338,15 @@ class AgentManager {
     }
 
     if (targetEntries.length === 0) {
-      return { success: true, models: [], reloadedSessionIds: [] };
+      return {
+        success: true,
+        models: await mergeModelsWithConfiguredAgentModels(agentId, []),
+        reloadedSessionIds: [],
+      };
     }
+
+    const idleCheck = this.canReloadConfig(agentId, sessionId);
+    if (!idleCheck.success) return idleCheck;
 
     for (const [sid] of targetEntries) {
       if (this.sessionAgentTypes.get(sid) !== agentId) {
@@ -436,6 +501,103 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
   });
 
+  ipcMain.handle("agentConfig:list", async (_event, agentId: string) => {
+    return listAgentConfig(agentId);
+  });
+
+  ipcMain.handle("agentConfig:save", async (_event, agentId: string, config: unknown) => {
+    const saveResult = await saveAgentProviderConfig(agentId, config);
+    if (!saveResult.success || !saveResult.config) {
+      return saveResult;
+    }
+    if (agentId === "codex") {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return { ...saveResult, models };
+    }
+
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return {
+        ...saveResult,
+        models,
+        error: `配置已保存到本地文件；${idleCheck.error || "当前 Agent 会话不是空闲状态，暂未重载。"}`,
+        reloadedSessionIds: [],
+      };
+    }
+
+    try {
+      resetLocalModelsConfigCache();
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      return { ...reloadResult, config: saveResult.config };
+    } catch (err: any) {
+      return { success: false, error: err.message || String(err), config: saveResult.config, reloadedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agentConfig:delete", async (_event, agentId: string, providerId: string) => {
+    const deleteResult = await deleteAgentProviderConfig(agentId, providerId);
+    if (!deleteResult.success || !deleteResult.config) {
+      return deleteResult;
+    }
+    if (agentId === "codex") {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return { ...deleteResult, models };
+    }
+
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return {
+        ...deleteResult,
+        models,
+        error: `渠道已从本地配置删除；${idleCheck.error || "当前 Agent 会话不是空闲状态，暂未重载。"}`,
+        reloadedSessionIds: [],
+      };
+    }
+
+    try {
+      resetLocalModelsConfigCache();
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      return { ...reloadResult, config: deleteResult.config };
+    } catch (err: any) {
+      return { success: false, error: err.message || String(err), config: deleteResult.config, reloadedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agentConfig:activate", async (_event, agentId: string, providerId: string) => {
+    if (agentId !== "codex") {
+      return { success: false, error: "只有 Codex 需要启用渠道；其它 Agent 保存后会以多渠道形式写入配置。", reloadedSessionIds: [] };
+    }
+
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) return idleCheck;
+
+    let snapshots: Awaited<ReturnType<typeof writeNativeAgentProviderConfig>>["snapshots"] = [];
+    try {
+      const written = await writeNativeAgentProviderConfig(agentId, providerId);
+      snapshots = written.snapshots;
+      resetLocalModelsConfigCache();
+
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      if (!reloadResult.success) {
+        await restoreNativeConfigSnapshots(snapshots);
+        resetLocalModelsConfigCache();
+        return reloadResult;
+      }
+
+      const config = await setActiveAgentProviderConfig(agentId, providerId);
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, reloadResult.models || []);
+      return { ...reloadResult, models, config };
+    } catch (err: any) {
+      if (snapshots.length > 0) {
+        await restoreNativeConfigSnapshots(snapshots).catch(() => undefined);
+        resetLocalModelsConfigCache();
+      }
+      return { success: false, error: err.message || String(err), reloadedSessionIds: [] };
+    }
+  });
+
   ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => {
     try {
       await agentManager.sendGuidance(sessionId, message, images, options);
@@ -460,8 +622,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     if (!agent) return [];
     const models = await agent.getModels();
     const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
-    if (agentType === "codex") return models;
-    return filterModelsByLocalConfig(models);
+    const filteredModels = agentType === "pi" ? filterModelsByLocalConfig(models) : models;
+    return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
   });
 
   ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string, sessionId?: string) => {

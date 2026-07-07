@@ -5,15 +5,19 @@ import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 
-const hasModel = (models: ModelInfo[], model: ModelInfo | null): model is ModelInfo =>
-  !!model && models.some((item) => item.id === model.id && item.provider === model.provider);
+const findMatchingModel = (models: ModelInfo[], model: ModelInfo | null): ModelInfo | undefined =>
+  model
+    ? models.find((item) => item.id === model.id && item.provider === model.provider)
+    : undefined;
 
 const selectSessionModel = (sessionId: string, models: ModelInfo[]): ModelInfo => {
   const persisted = getSessionModel(sessionId);
-  if (hasModel(models, persisted)) return persisted;
+  const persistedMatch = findMatchingModel(models, persisted);
+  if (persistedMatch) return persistedMatch;
 
   const currentModel = useChatStore.getState().currentModel;
-  if (hasModel(models, currentModel)) return currentModel;
+  const currentMatch = findMatchingModel(models, currentModel);
+  if (currentMatch) return currentMatch;
 
   return models[0];
 };

@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot } from "lucide-react";
+import { Bot, Settings } from "lucide-react";
 import { AgentSettingsView } from "./AgentSettingsView";
+import { AgentConfigModal } from "./AgentConfigModal";
+import { AVAILABLE_AGENTS } from "@/lib/agents";
+import { useChatStore } from "@/stores/chat-store";
+import { useProjectStore } from "@/stores/project-store";
 import "./Settings.css";
 
 interface ShortcutConfig {
@@ -71,6 +75,26 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function getActiveSessionAgentId() {
+  const projectState = useProjectStore.getState();
+  const activeProject = projectState.projects.find((project) => project.id === projectState.activeProjectId);
+  const activeSession = activeProject?.sessions.find((session) => session.id === projectState.activeSessionId);
+  return activeSession?.agentId || useChatStore.getState().activeAgentId;
+}
+
+function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; name: string; provider: string; reasoning: boolean; supportsImages?: boolean }>) {
+  if (!models || models.length === 0) return;
+  if (getActiveSessionAgentId() !== agentId) return;
+
+  const chatStore = useChatStore.getState();
+  chatStore.setAvailableModels(models);
+  const currentModel = chatStore.currentModel;
+  const matchingCurrentModel = currentModel ? models.find((model) =>
+    model.id === currentModel.id && model.provider === currentModel.provider
+  ) : undefined;
+  chatStore.setCurrentModel(matchingCurrentModel || models[0]);
+}
+
 export function SettingsView() {
   const [shortcuts, setShortcuts] = useState<ShortcutConfig>(DEFAULT_SHORTCUTS);
   const [filters, setFilters] = useState<FilterConfig>(DEFAULT_FILTERS);
@@ -79,6 +103,7 @@ export function SettingsView() {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [showGeneralModal, setShowGeneralModal] = useState(false);
   const [showAgentSettingsModal, setShowAgentSettingsModal] = useState(false);
+  const [configAgentId, setConfigAgentId] = useState<string | null>(null);
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
@@ -155,6 +180,14 @@ export function SettingsView() {
       detail: { planModeEnabled },
     }));
   };
+
+  const openAgentConfig = () => {
+    setConfigAgentId(getActiveSessionAgentId() || "codex");
+  };
+
+  const configAgent = configAgentId
+    ? AVAILABLE_AGENTS.find((agent) => agent.id === configAgentId) || null
+    : null;
 
   // Keyboard recording handler
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -383,7 +416,18 @@ export function SettingsView() {
         <div className="settings-modal-overlay" onClick={() => setShowAgentSettingsModal(false)}>
           <div className="settings-modal settings-modal-agent" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
-              <h3>Agent 设置</h3>
+              <div className="settings-modal-title-actions">
+                <h3>Agent 设置</h3>
+                <button
+                  type="button"
+                  className="btn-icon settings-modal-header-icon"
+                  onClick={openAgentConfig}
+                  title="配置 Agent 渠道和模型"
+                  aria-label="配置 Agent 渠道和模型"
+                >
+                  <Settings size={15} />
+                </button>
+              </div>
               <button onClick={() => setShowAgentSettingsModal(false)} className="settings-modal-close">×</button>
             </div>
             <div className="settings-modal-content">
@@ -391,6 +435,14 @@ export function SettingsView() {
             </div>
           </div>
         </div>
+      )}
+      {configAgent && (
+        <AgentConfigModal
+          agentId={configAgent.id}
+          agentName={configAgent.name}
+          onClose={() => setConfigAgentId(null)}
+          onModelsUpdated={syncActiveAgentModels}
+        />
       )}
       {showGeneralModal && (
         <div className="settings-modal-overlay" onClick={() => setShowGeneralModal(false)}>

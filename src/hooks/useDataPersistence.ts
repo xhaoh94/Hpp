@@ -201,6 +201,7 @@ const parseModelInfo = (value: unknown): ModelInfo | null => {
     name,
     provider,
     reasoning: typeof value.reasoning === "boolean" ? value.reasoning : false,
+    supportsImages: typeof value.supportsImages === "boolean" ? value.supportsImages : undefined,
   };
 };
 
@@ -360,13 +361,20 @@ export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
   chatState.setAvailableModels(models);
 
   const persisted = getSessionModel(sessionId);
-  if (persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider)) {
-    chatState.setCurrentModel(persisted);
+  const persistedMatch = persisted
+    ? models.find(m => m.id === persisted.id && m.provider === persisted.provider)
+    : undefined;
+  if (persistedMatch) {
+    chatState.setCurrentModel(persistedMatch);
     return;
   }
 
   const currentModel = chatState.currentModel;
-  if (currentModel && models.some(m => m.id === currentModel.id && m.provider === currentModel.provider)) {
+  const currentMatch = currentModel
+    ? models.find(m => m.id === currentModel.id && m.provider === currentModel.provider)
+    : undefined;
+  if (currentMatch) {
+    chatState.setCurrentModel(currentMatch);
     return;
   }
 

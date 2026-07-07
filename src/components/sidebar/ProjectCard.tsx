@@ -210,8 +210,10 @@ export function ProjectCard({ project }: Props) {
             useChatStore.getState().setAvailableModels(models);
             // Restore per-session persisted model if available, otherwise use first
             const persisted = getSessionModel(session.id);
-            const match = persisted && models.some(m => m.id === persisted.id && m.provider === persisted.provider);
-            useChatStore.getState().setCurrentModel(match ? persisted : models[0]);
+            const match = persisted
+              ? models.find(m => m.id === persisted.id && m.provider === persisted.provider)
+              : undefined;
+            useChatStore.getState().setCurrentModel(match || models[0]);
           }
           const thinkingToSet = await getSessionThinkingOrDefault(session.id, session.agentId);
           if (useProjectStore.getState().activeSessionId === session.id) {

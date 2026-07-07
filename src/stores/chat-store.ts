@@ -106,6 +106,7 @@ export interface ModelInfo {
   name: string;
   provider: string;
   reasoning: boolean;
+  supportsImages?: boolean;
 }
 
 export type QueuedMessageStatus = "queued" | "sending" | "failed";
@@ -517,7 +518,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     s.isStreaming === v ? {} : { isStreaming: v }
   )),
   setCurrentModel: (m) => set((s) => (
-    s.currentModel?.id === m.id && s.currentModel.provider === m.provider
+    s.currentModel?.id === m.id &&
+    s.currentModel.provider === m.provider &&
+    s.currentModel.name === m.name &&
+    s.currentModel.reasoning === m.reasoning &&
+    s.currentModel.supportsImages === m.supportsImages
       ? {}
       : { currentModel: m }
   )),
@@ -531,7 +536,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         model.id === models[index]?.id &&
         model.provider === models[index]?.provider &&
         model.name === models[index]?.name &&
-        model.reasoning === models[index]?.reasoning
+        model.reasoning === models[index]?.reasoning &&
+        model.supportsImages === models[index]?.supportsImages
       )
     ) {
       return {};
