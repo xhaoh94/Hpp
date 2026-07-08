@@ -1,6 +1,6 @@
 {
   "name": "hpp",
-  "version": "0.0.2",
+  "version": "0.0.1",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
