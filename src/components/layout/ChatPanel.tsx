@@ -3,6 +3,7 @@ import {
   useState,
   useRef,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useMemo,
   type RefObject,
@@ -10,6 +11,7 @@ import {
   type UIEvent as ReactUIEvent,
 } from "react";
 import { flushSync } from "react-dom";
+import { useShallow } from "zustand/react/shallow";
 import { Copy, CornerDownRight, GitBranch, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   useChatStore,
@@ -29,6 +31,7 @@ import {
 import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
+import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import {
   buildSessionReferencesContext,
   createSessionReferenceSnapshot,
@@ -66,6 +69,7 @@ import {
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+const CONFIGURED_PROVIDER_ORDER_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
 
 type AgentImagePayload = { type: string; data: string; mimeType: string };
 type MessageImagePayload = { id: string; src: string; name: string };
@@ -78,6 +82,19 @@ type MessagePayload = {
   sessionReferences?: MessageSessionReferencePayload[];
   agentImages?: AgentImagePayload[];
   forkContextUsed?: boolean;
+};
+
+const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+
+type SendPayloadNow = (
+  targetSessionId: string,
+  payload: MessagePayload,
+  options?: { onSendFailure?: (error: string) => void; planModeEnabled?: boolean }
+) => Promise<void>;
+
+type MessageQueueDispatcherProps = {
+  sessionRuntimeRef: { current: Record<string, SessionRuntime> };
+  sendPayloadNow: SendPayloadNow;
 };
 
 const escapeXmlAttribute = (value: string) =>
@@ -174,7 +191,6 @@ type SessionReferenceControlProps = {
   project: Project;
   activeSession: ProjectSession;
   references: SessionReference[];
-  sessionMessages: Record<string, ChatMessage[]>;
   open: boolean;
   showTrigger?: boolean;
   onOpenChange: (open: boolean) => void;
@@ -186,13 +202,13 @@ function SessionReferenceControl({
   project,
   activeSession,
   references,
-  sessionMessages,
   open,
   showTrigger = true,
   onOpenChange,
   onAddOrRefresh,
   onRemove,
 }: SessionReferenceControlProps) {
+  const sessionMessages = useChatStore((state) => state.sessionMessages);
   const referencedSessionIds = new Set(references.map((reference) => reference.sourceSessionId));
   const availableSessions = project.sessions.filter((session) => session.id !== activeSession.id);
   const unreferencedSessions = availableSessions.filter((session) => !referencedSessionIds.has(session.id));
@@ -295,16 +311,119 @@ function SessionReferenceControl({
   );
 }
 
+type UserMessageHistoryControlProps = {
+  open: boolean;
+  anchorRef: RefObject<HTMLDivElement | null>;
+  onOpenChange: (open: boolean) => void;
+  onScrollToMessage: (messageId: string) => void;
+};
+
+const formatHistoryMessageTime = (timestamp: number) => {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (isToday) return time;
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month}/${day} ${time}`;
+};
+
+const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
+  open,
+  anchorRef,
+  onOpenChange,
+  onScrollToMessage,
+}: UserMessageHistoryControlProps) {
+  const userMessagesReversed = useChatStore(useShallow((state) =>
+    state.messages.filter((message) => message.role === "user").slice().reverse()
+  ));
+
+  return (
+    <div ref={anchorRef} className="relative chat-header-history-anchor">
+      <button
+        className="chat-header-history-btn"
+        onClick={() => onOpenChange(!open)}
+        title="发言记录"
+      >
+        <MessageCircle size={14} strokeWidth={1.8} />
+      </button>
+      {open && (
+        <div className="chat-user-history-popup">
+          <div className="chat-user-history-header">发言记录</div>
+          {userMessagesReversed.length === 0 ? (
+            <div className="chat-user-history-empty">暂无发言</div>
+          ) : (
+            <div className="chat-user-history-list">
+              {userMessagesReversed.map((msg) => (
+                <div
+                  key={msg.id}
+                  className="chat-user-history-item"
+                  onClick={() => onScrollToMessage(msg.id)}
+                >
+                  <span className="chat-user-history-text">{msg.content}</span>
+                  <span className="chat-user-history-time">
+                    {formatHistoryMessageTime(msg.timestamp)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
+type SessionStarterListProps = {
+  activeProject: Project;
+  openSessions: ProjectSession[];
+  onSwitchSession: (project: Project, session: ProjectSession) => void;
+};
+
+const SessionStarterList = memo(function SessionStarterList({
+  activeProject,
+  openSessions,
+  onSwitchSession,
+}: SessionStarterListProps) {
+  const sessionMessages = useChatStore((state) => state.sessionMessages);
+
+  if (openSessions.length === 0) return null;
+
+  return (
+    <div className="chat-session-list">
+      {openSessions.map((session) => {
+        const messages = sessionMessages[session.id];
+        const firstUserMsg = messages?.find((message) => message.role === "user");
+        return (
+          <button
+            key={session.id}
+            className="chat-session-item"
+            onClick={() => onSwitchSession(activeProject, session)}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            <span>{firstUserMsg ? (firstUserMsg.content.length > 30 ? `${firstUserMsg.content.substring(0, 30)}...` : firstUserMsg.content) : session.title}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+});
+
 type ChatMessagesViewProps = {
   activeSessionId: string | null;
   activeSessionInitialized: boolean;
   currentSessionRunning: boolean;
   projectPath?: string;
-  messages: ChatMessage[];
   scrollRef: RefObject<HTMLDivElement | null>;
   showScrollBottom: boolean;
   onMessagesScroll: (event: ReactUIEvent<HTMLDivElement>) => void;
   onScrollToBottom: () => void;
+  onContentChange: () => void;
   onEditMessage: (content: string) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
@@ -580,11 +699,11 @@ const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionInitialized,
   currentSessionRunning,
   projectPath,
-  messages,
   scrollRef,
   showScrollBottom,
   onMessagesScroll,
   onScrollToBottom,
+  onContentChange,
   onEditMessage,
   onImageContextMenu,
   onOpenImage,
@@ -595,10 +714,15 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onForkMessage,
   forkingMessageId,
 }: ChatMessagesViewProps) {
+  const messages = useChatStore((state) => state.messages);
   const activeProcessWithTodos = [...messages]
     .reverse()
     .find((msg) => msg.role === "assistant" && !!msg.process && !msg.process.endedAt && hasNativeTodoSteps(msg.process))
     ?.process;
+
+  useLayoutEffect(() => {
+    onContentChange();
+  }, [messages, onContentChange]);
 
   return (
     <div className={`chat-messages-area ${activeProcessWithTodos ? "has-todo-summary" : ""}`}>
@@ -657,22 +781,81 @@ const ChatMessagesView = memo(function ChatMessagesView({
   );
 });
 
-export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
+const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
+  sessionRuntimeRef,
+  sendPayloadNow,
+}: MessageQueueDispatcherProps) {
+  const messageQueues = useChatStore((state) => state.messageQueues);
   const {
-    messages,
-    isStreaming,
-    activeAgentId,
+    clearQueuedMessageError,
+    markQueuedMessageSending,
+    removeQueuedMessage,
+    upsertQueuedMessage,
+  } = useChatStore(useShallow((state) => ({
+    clearQueuedMessageError: state.clearQueuedMessageError,
+    markQueuedMessageSending: state.markQueuedMessageSending,
+    removeQueuedMessage: state.removeQueuedMessage,
+    upsertQueuedMessage: state.upsertQueuedMessage,
+  })));
+  const agentStatuses = useProjectStore((state) => state.agentStatuses);
+  const initializedSessionIds = useProjectStore((state) => state.initializedSessionIds);
+  const queueDispatchingRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    for (const [sessionId, queue] of Object.entries(messageQueues)) {
+      if (queueDispatchingRef.current.has(sessionId)) continue;
+      if (!initializedSessionIds.has(sessionId)) continue;
+      const nextItem = queue.find((item) => item.status === "queued");
+      if (!nextItem) continue;
+      const runtime = sessionRuntimeRef.current[sessionId];
+      if (runtime?.processActive || agentStatuses[sessionId] === "running") continue;
+
+      queueDispatchingRef.current.add(sessionId);
+      clearQueuedMessageError(sessionId, nextItem.id);
+      markQueuedMessageSending(sessionId, nextItem.id);
+      removeQueuedMessage(sessionId, nextItem.id);
+      void sendPayloadNow(sessionId, nextItem, {
+        planModeEnabled: !!nextItem.planModeEnabled,
+        onSendFailure: (error) => {
+          upsertQueuedMessage({
+            ...nextItem,
+            status: "failed",
+            error,
+          });
+        },
+      }).finally(() => {
+        queueDispatchingRef.current.delete(sessionId);
+      });
+    }
+  }, [
+    agentStatuses,
+    clearQueuedMessageError,
+    initializedSessionIds,
+    markQueuedMessageSending,
+    messageQueues,
+    removeQueuedMessage,
+    sendPayloadNow,
+    sessionRuntimeRef,
+    upsertQueuedMessage,
+  ]);
+
+  return null;
+});
+
+export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
+  const isStreaming = useChatStore((state) => state.isStreaming);
+  const activeAgentId = useChatStore((state) => state.activeAgentId);
+  const currentModel = useChatStore((state) => state.currentModel);
+  const availableModels = useChatStore((state) => state.availableModels);
+  const favoriteModels = useChatStore((state) => state.favoriteModels);
+  const thinkingLevel = useChatStore((state) => state.thinkingLevel);
+  const {
     addMessage,
     setStreaming,
-    currentModel,
     setCurrentModel,
-    availableModels,
     setAvailableModels,
-    favoriteModels,
     toggleFavorite,
-    thinkingLevel,
     setThinkingLevel,
-    sessionDrafts,
     setDraftText,
     addPendingImage: addPendingImageToDraft,
     removePendingImage,
@@ -682,32 +865,61 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     upsertSessionReference: upsertDraftSessionReference,
     removeSessionReference: removeDraftSessionReference,
     clearSessionDraft,
-    messageQueues,
     enqueueMessage,
-    upsertQueuedMessage,
     removeQueuedMessage,
     markQueuedMessageSending,
     markQueuedMessageFailed,
-    clearQueuedMessageError,
     loadSessionMessages,
-    sessionMessages,
     toggleAssistantProcess,
     toggleAssistantProcessEntry,
-  } = useChatStore();
+  } = useChatStore(useShallow((state) => ({
+    addMessage: state.addMessage,
+    setStreaming: state.setStreaming,
+    setCurrentModel: state.setCurrentModel,
+    setAvailableModels: state.setAvailableModels,
+    toggleFavorite: state.toggleFavorite,
+    setThinkingLevel: state.setThinkingLevel,
+    setDraftText: state.setDraftText,
+    addPendingImage: state.addPendingImage,
+    removePendingImage: state.removePendingImage,
+    removePendingFile: state.removePendingFile,
+    addPendingPathAttachment: state.addPendingPathAttachment,
+    removePendingPathAttachment: state.removePendingPathAttachment,
+    upsertSessionReference: state.upsertSessionReference,
+    removeSessionReference: state.removeSessionReference,
+    clearSessionDraft: state.clearSessionDraft,
+    enqueueMessage: state.enqueueMessage,
+    removeQueuedMessage: state.removeQueuedMessage,
+    markQueuedMessageSending: state.markQueuedMessageSending,
+    markQueuedMessageFailed: state.markQueuedMessageFailed,
+    loadSessionMessages: state.loadSessionMessages,
+    toggleAssistantProcess: state.toggleAssistantProcess,
+    toggleAssistantProcessEntry: state.toggleAssistantProcessEntry,
+  })));
 
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const projects = useProjectStore((state) => state.projects);
+  const activeSessionId = useProjectStore((state) => state.activeSessionId);
+  const activeSessionAgentStatus = useProjectStore((state) =>
+    activeSessionId ? state.agentStatuses[activeSessionId] : undefined
+  );
+  const activeSessionInitialized = useProjectStore((state) =>
+    activeSessionId ? state.initializedSessionIds.has(activeSessionId) : false
+  );
   const {
-    activeProjectId,
-    projects,
-    activeSessionId,
-    agentStatuses,
     addSession,
-    isSessionInitialized,
     removeSessionReference: removePersistedSessionReference,
-  } = useProjectStore();
-  const { triggerAddProject } = useAppStore();
+  } = useProjectStore(useShallow((state) => ({
+    addSession: state.addSession,
+    removeSessionReference: state.removeSessionReference,
+  })));
+  const triggerAddProject = useAppStore((state) => state.triggerAddProject);
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
-  const activeDraft: ChatDraft = activeSessionId ? sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT : EMPTY_CHAT_DRAFT;
+  const currentAgentId = activeSession?.agentId || activeAgentId;
+  const activeDraft: ChatDraft = useChatStore(useShallow((state) =>
+    activeSessionId ? state.sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT : EMPTY_CHAT_DRAFT
+  ));
   const pendingImages = activeDraft.pendingImages;
   const pendingFiles = activeDraft.pendingFiles;
   const pendingPathAttachments = activeDraft.pendingPathAttachments;
@@ -717,21 +929,53 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     [activeDraft.sessionReferences, legacySessionReferences]
   );
   const activeSessionForkContext = activeSession?.forkContext;
-  const activeSessionInitialized = activeSessionId ? isSessionInitialized(activeSessionId) : false;
-  const activeQueuedMessages = activeSessionId ? messageQueues[activeSessionId] || [] : [];
+  const activeQueuedMessages = useChatStore(useShallow((state) =>
+    activeSessionId ? state.messageQueues[activeSessionId] || EMPTY_QUEUED_MESSAGES : EMPTY_QUEUED_MESSAGES
+  ));
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
   const openSessions = useMemo(
     () => activeProject?.sessions.filter((session) => !session.closed) || [],
     [activeProject?.sessions]
   );
-  const userMessagesReversed = useMemo(
-    () => messages.filter((message) => message.role === "user").slice().reverse(),
-    [messages]
-  );
+  const [modelProviderOrder, setModelProviderOrder] = useState<string[]>([]);
   const modelProviders = useMemo(
-    () => [...new Set(availableModels.map((model) => model.provider))],
-    [availableModels]
+    () => {
+      const providers = [...new Set(availableModels.map((model) => model.provider))];
+      if (modelProviderOrder.length === 0) return providers;
+
+      const originalIndex = new Map(providers.map((provider, index) => [provider, index]));
+      const orderedIndex = new Map(modelProviderOrder.map((provider, index) => [provider, index]));
+      return providers.slice().sort((left, right) => {
+        const leftIndex = orderedIndex.get(left) ?? Number.MAX_SAFE_INTEGER;
+        const rightIndex = orderedIndex.get(right) ?? Number.MAX_SAFE_INTEGER;
+        if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+        return (originalIndex.get(left) ?? 0) - (originalIndex.get(right) ?? 0);
+      });
+    },
+    [availableModels, modelProviderOrder]
   );
+
+  const refreshModelProviderOrder = useCallback(async (agentId: string) => {
+    if (!CONFIGURED_PROVIDER_ORDER_AGENTS.has(agentId)) {
+      setModelProviderOrder([]);
+      return;
+    }
+
+    try {
+      const result = await window.electronAPI.agentConfigList(agentId);
+      if (!result.success || !result.config) {
+        setModelProviderOrder([]);
+        return;
+      }
+      setModelProviderOrder(result.config.providers.map((provider) => provider.providerId));
+    } catch {
+      setModelProviderOrder([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshModelProviderOrder(currentAgentId);
+  }, [currentAgentId, refreshModelProviderOrder]);
 
   const inputValueRef = useRef("");
   const inputHasTextRef = useRef(false);
@@ -765,6 +1009,25 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   } = usePendingImages(addPendingImageToDraft);
 
   useEffect(() => {
+    const openSessionIds = new Set<string>();
+    for (const project of projects) {
+      for (const session of project.sessions) {
+        if (!session.closed) openSessionIds.add(session.id);
+      }
+    }
+
+    for (const [sessionId, runtime] of Object.entries(sessionRuntimeRef.current)) {
+      if (openSessionIds.has(sessionId)) continue;
+      if (runtime.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
+      }
+      resetSessionRuntimeAfterTurn(runtime);
+      delete sessionRuntimeRef.current[sessionId];
+    }
+  }, [projects]);
+
+  useEffect(() => {
     if (!activeProject || !activeSessionId || legacySessionReferences.length === 0) return;
     const currentDraft = useChatStore.getState().sessionDrafts[activeSessionId];
     if (currentDraft?.sessionReferences.length) return;
@@ -788,7 +1051,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     isAwaitingUIResponse,
     activeQuestionnaire,
   } = usePendingUIResponse(activeSessionId);
-  const currentSessionRunning = activeSessionId ? agentStatuses[activeSessionId] === "running" : isStreaming;
+  const currentSessionRunning = activeSessionId ? activeSessionAgentStatus === "running" : isStreaming;
   const isForkingSession = forkingMessageId !== null;
   const questionnaireResetKey = activeQuestionnaire
     ? `${activeQuestionnaire.sessionId}:${activeQuestionnaire.requestId || ""}:${activeQuestionnaire.entryId || ""}`
@@ -810,8 +1073,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     scrollToMessage: scrollToMessageElement,
     preserveScrollDuringLayoutChange,
     enableAutoFollow,
+    handleContentChange,
   } = useChatScroll({
-    messages,
     activeSessionId,
     activeSessionInitialized,
     questionnairePaneHeight,
@@ -847,8 +1110,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setComposerInput(activeDraft.text);
     clearAttachmentError();
   }, [activeSessionId, setComposerInput, clearAttachmentError]);
-
-  const queueDispatchingRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -922,6 +1183,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   useEffect(() => {
     setReferenceOpen(false);
+    setModelOpen(false);
+    setThinkingOpen(false);
+    setExpandedProvider(null);
+    setUserMsgHistoryOpen(false);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -975,9 +1240,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   const handleAddOrRefreshReference = useCallback((sourceSession: ProjectSession) => {
     if (!activeProject || !activeSessionId || sourceSession.id === activeSessionId) return;
+    const sessionMessages = useChatStore.getState().sessionMessages;
     const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || []);
     upsertDraftSessionReference(reference, activeSessionId);
-  }, [activeProject, activeSessionId, sessionMessages, upsertDraftSessionReference]);
+  }, [activeProject, activeSessionId, upsertDraftSessionReference]);
 
   const handleRemoveReference = useCallback((sourceSessionId: string) => {
     if (!activeProject || !activeSessionId) return;
@@ -1152,25 +1418,50 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     projectState.setSessionForkContext(project.id, sessionId, undefined);
 
     await window.electronAPI.agentRemoveSession(sessionId);
-    const result = await window.electronAPI.agentCreateSession(agentId, project.path, sessionId, sessionFilePath);
-    if (result.sessionFilePath) {
-      useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
+    try {
+      const result = await window.electronAPI.agentCreateSession(agentId, project.path, sessionId, sessionFilePath);
+      if (result.sessionFilePath) {
+        useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
+      }
+      if (!result.success) {
+        const chatStore = useChatStore.getState();
+        chatStore.clearAgentStartupErrors(sessionId);
+        chatStore.addMessage({
+          id: crypto.randomUUID(),
+          role: "system",
+          content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
+          timestamp: Date.now(),
+          systemType: "agent_startup_error",
+        }, sessionId);
+      }
+    } catch (error) {
+      const chatStore = useChatStore.getState();
+      chatStore.clearAgentStartupErrors(sessionId);
+      chatStore.addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: `Agent 启动失败: ${error instanceof Error ? error.message : String(error)}`,
+        timestamp: Date.now(),
+        systemType: "agent_startup_error",
+      }, sessionId);
+    } finally {
+      useProjectStore.getState().markSessionInitialized(sessionId);
     }
-    useProjectStore.getState().markSessionInitialized(sessionId);
   }, []);
 
   const handleForkFromMessage = useCallback(async (msg: ChatMessage) => {
     if (!activeProject || !activeSession || forkingMessageIdRef.current) return;
 
-    const messageIndex = messages.findIndex((message) => message.id === msg.id);
+    const currentMessages = useChatStore.getState().messages;
+    const messageIndex = currentMessages.findIndex((message) => message.id === msg.id);
     if (messageIndex < 0) return;
 
-    const sourceMessages = messages.slice(0, messageIndex + 1);
+    const sourceMessages = currentMessages.slice(0, messageIndex + 1);
     const forkMessages = cloneMessagesForFork(sourceMessages);
     const sessionId = crypto.randomUUID();
     const sourceUserMessageCount = sourceMessages.filter((message) => message.role === "user").length;
     const sourceUserMessageIndex = sourceUserMessageCount - 1;
-    const totalUserMessageCount = messages.filter((message) => message.role === "user").length;
+    const totalUserMessageCount = currentMessages.filter((message) => message.role === "user").length;
     const rollbackUserMessageCount = Math.max(0, totalUserMessageCount - sourceUserMessageCount);
     const now = new Date().toISOString();
     const forkedFrom = {
@@ -1181,7 +1472,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     };
 
     const createForkSession = (session: ProjectSession, visibleMessages: ChatMessage[]) => {
-      loadSessionMessages(activeSession.id, messages);
+      loadSessionMessages(activeSession.id, currentMessages);
       loadSessionMessages(sessionId, visibleMessages);
       addSession(activeProject.id, session);
       switchToSession(activeProject, session);
@@ -1280,7 +1571,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     applyNativeForkToSession,
     createNativeFork,
     loadSessionMessages,
-    messages,
     scrollToBottomNow,
     switchToSession,
   ]);
@@ -1307,21 +1597,29 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (!isForkingSession) return;
     setModelOpen(false);
     setThinkingOpen(false);
+    setExpandedProvider(null);
     setReferenceOpen(false);
     setUserMsgHistoryOpen(false);
     setImageContextMenu(null);
   }, [isForkingSession]);
 
-  // Persist messages to sessionMessages whenever messages change (for restart survival)
+  // Persist active messages to sessionMessages without subscribing this component to every stream update.
   useEffect(() => {
-    if (
-      activeSessionId &&
-      messages.length > 0 &&
-      sessionMessages[activeSessionId] !== messages
-    ) {
-      loadSessionMessages(activeSessionId, messages);
-    }
-  }, [messages, activeSessionId, sessionMessages, loadSessionMessages]);
+    let lastMessages = useChatStore.getState().messages;
+    const unsubscribe = useChatStore.subscribe((state) => {
+      if (state.messages === lastMessages) return;
+      lastMessages = state.messages;
+      const sessionId = state.activeSessionId;
+      if (
+        sessionId &&
+        state.messages.length > 0 &&
+        state.sessionMessages[sessionId] !== state.messages
+      ) {
+        state.loadSessionMessages(sessionId, state.messages);
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   useAgentEvents({
     activeAgentId,
@@ -1438,6 +1736,33 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     payload: MessagePayload,
     options?: { onSendFailure?: (error: string) => void; planModeEnabled?: boolean }
   ) => {
+    const setStreamingForTargetSession = (streaming: boolean) => {
+      if (useProjectStore.getState().activeSessionId === targetSessionId) {
+        setStreaming(streaming);
+      }
+    };
+    const targetSessionExists = () =>
+      useProjectStore.getState().projects.some((project) =>
+        project.sessions.some((session) => session.id === targetSessionId)
+      );
+    const cleanupAbandonedTargetSession = () => {
+      const runtime = sessionRuntimeRef.current[targetSessionId];
+      if (runtime?.streamWatchdog) {
+        clearTimeout(runtime.streamWatchdog);
+        runtime.streamWatchdog = null;
+      }
+      if (runtime) {
+        resetSessionRuntimeAfterTurn(runtime);
+      }
+      delete sessionRuntimeRef.current[targetSessionId];
+      setStreamingForTargetSession(false);
+    };
+    const abortIfTargetSessionMissing = () => {
+      if (targetSessionExists()) return false;
+      cleanupAbandonedTargetSession();
+      return true;
+    };
+
     // Force synchronous render so "working..." appears before IPC call
     enableAutoFollow(); // New outgoing messages should keep the latest turn visible.
     const userMessageId = crypto.randomUUID();
@@ -1450,7 +1775,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         images: payload.messageImages,
         sessionReferences: payload.sessionReferences,
       }, targetSessionId);
-      setStreaming(true);
+      setStreamingForTargetSession(true);
       useProjectStore.getState().setAgentStatus(targetSessionId, "running");
       const runtime = sessionRuntimeRef.current[targetSessionId];
       if (runtime) {
@@ -1475,6 +1800,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     );
     if (modelToSync) {
       const modelResult = await window.electronAPI.agentSetModel(modelToSync.provider, modelToSync.id, targetSessionId);
+      if (abortIfTargetSessionMissing()) return;
       if (!modelResult.success) {
         const runtime = sessionRuntimeRef.current[targetSessionId];
         if (runtime?.streamWatchdog) {
@@ -1485,7 +1811,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         if (runtime) {
           resetSessionRuntimeAfterTurn(runtime);
         }
-        setStreaming(false);
+        setStreamingForTargetSession(false);
         useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
         if (options?.onSendFailure) {
           options.onSendFailure(modelResult.error || "Model switch failed");
@@ -1501,18 +1827,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       }
     }
 
+    if (abortIfTargetSessionMissing()) return;
     const result = await window.electronAPI.agentSendMessage(
       payload.sendContent,
       payload.agentImages,
       targetSessionId,
       { planModeEnabled: !!options?.planModeEnabled, clientMessageId: userMessageId }
     );
+    if (abortIfTargetSessionMissing()) return;
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
       if (/Codex is already running/i.test(result.error || "")) {
         const latestStatus = useProjectStore.getState().agentStatuses[targetSessionId];
         if (runtime?.processActive || latestStatus === "running") {
-          setStreaming(true);
+          setStreamingForTargetSession(true);
           useProjectStore.getState().setAgentStatus(targetSessionId, "running");
           return;
         }
@@ -1525,7 +1853,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       if (runtime) {
         resetSessionRuntimeAfterTurn(runtime);
       }
-      setStreaming(false);
+      setStreamingForTargetSession(false);
       useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
       if (options?.onSendFailure) {
         options.onSendFailure(result.error || "Send failed");
@@ -1626,43 +1954,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setStreaming,
   ]);
 
-  useEffect(() => {
-    for (const [sessionId, queue] of Object.entries(messageQueues)) {
-      if (queueDispatchingRef.current.has(sessionId)) continue;
-      if (!isSessionInitialized(sessionId)) continue;
-      const nextItem = queue.find((item) => item.status === "queued");
-      if (!nextItem) continue;
-      const runtime = sessionRuntimeRef.current[sessionId];
-      if (runtime?.processActive || agentStatuses[sessionId] === "running") continue;
-
-      queueDispatchingRef.current.add(sessionId);
-      clearQueuedMessageError(sessionId, nextItem.id);
-      markQueuedMessageSending(sessionId, nextItem.id);
-      removeQueuedMessage(sessionId, nextItem.id);
-      void sendPayloadNow(sessionId, nextItem, {
-        planModeEnabled: !!nextItem.planModeEnabled,
-        onSendFailure: (error) => {
-          upsertQueuedMessage({
-            ...nextItem,
-            status: "failed",
-            error,
-          });
-        },
-      }).finally(() => {
-        queueDispatchingRef.current.delete(sessionId);
-      });
-    }
-  }, [
-    agentStatuses,
-    clearQueuedMessageError,
-    isSessionInitialized,
-    markQueuedMessageSending,
-    messageQueues,
-    removeQueuedMessage,
-    sendPayloadNow,
-    upsertQueuedMessage,
-  ]);
-
   const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
     if (!activeSessionSupportsGuidance) return;
     const runtime = sessionRuntimeRef.current[item.sessionId];
@@ -1720,9 +2011,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const runtime = sessionRuntimeRef.current[currentSessionId] || createSessionRuntime();
     sessionRuntimeRef.current[currentSessionId] = runtime;
     if (runtime.manualAbortRequested) {
-      void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
-        console.error("[agent] abort failed:", err);
-      });
       return;
     }
     runtime.manualAbortRequested = true;
@@ -1742,15 +2030,48 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setStreaming(true);
     useProjectStore.getState().setAgentStatus(currentSessionId, "running");
 
-    void window.electronAPI.agentAbort(currentSessionId).catch((err) => {
-      console.error("[agent] abort failed:", err);
-    });
+    void window.electronAPI.agentAbort(currentSessionId)
+      .then((result) => {
+        if (!result.success) {
+          useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
+          resetSessionRuntimeAfterTurn(runtime);
+          if (useProjectStore.getState().activeSessionId === currentSessionId) setStreaming(false);
+          useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
+          console.error("[agent] abort failed: no active agent");
+        }
+      })
+      .catch((err) => {
+        runtime.manualAbortRequested = false;
+        console.error("[agent] abort failed:", err);
+      });
   }, [setPendingUIResponseState, setStreaming]);
 
   const handleSelectModel = async (model: ModelInfo) => {
     const previousModel = useChatStore.getState().currentModel;
     setModelOpen(false);
     const sessionId = useProjectStore.getState().activeSessionId;
+    const agentId = activeSession?.agentId || activeAgentId;
+    const switchingCodexProvider =
+      agentId === "codex" &&
+      !!previousModel &&
+      previousModel.provider !== model.provider;
+
+    if (switchingCodexProvider) {
+      if (currentSessionRunning) {
+        window.alert("切换 Codex 渠道需要等当前 Agent 运行结束后再操作。");
+        return;
+      }
+
+      const activateResult = await window.electronAPI.agentConfigActivate("codex", model.provider);
+      if (!activateResult.success) {
+        window.alert(activateResult.error || "切换 Codex 渠道失败，请稍后重试。");
+        return;
+      }
+      if (activateResult.models && activateResult.models.length > 0) {
+        setAvailableModels(activateResult.models);
+      }
+    }
+
     const result = await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
     if (!result.success) {
       if (previousModel) setCurrentModel(previousModel);
@@ -1766,13 +2087,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setCurrentModel(model);
     // Save model selection for this session
     if (sessionId) saveSessionModel(sessionId, model);
+    const modelChanged =
+      !previousModel ||
+      previousModel.id !== model.id ||
+      previousModel.provider !== model.provider;
+    if (modelChanged) {
+      showFloatingToastMessage(getModelSwitchToastText(agentId, model.provider, model.name || model.id));
+    }
   };
 
   const handleModelConfigModelsUpdated = useCallback((agentId: string, models?: ModelInfo[]) => {
     if (!models || models.length === 0) return;
-    const currentAgentId = activeSession?.agentId || activeAgentId;
     if (currentAgentId !== agentId) return;
 
+    void refreshModelProviderOrder(agentId);
     const chatState = useChatStore.getState();
     chatState.setAvailableModels(models);
     const current = chatState.currentModel;
@@ -1786,7 +2114,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       saveSessionModel(sessionId, nextModel);
       void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId);
     }
-  }, [activeAgentId, activeSession?.agentId]);
+  }, [currentAgentId, refreshModelProviderOrder]);
 
   const handleSelectThinking = async (levelId: string) => {
     setThinkingLevel(levelId);
@@ -1806,7 +2134,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     { id: "xhigh", label: "极高" },
   ];
   const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel) || thinkingLevels[3];
-  const flattenModelList = activeSession?.agentId === "codex" || activeAgentId === "codex";
 
   // No project open - show placeholder
   if (!activeProject) {
@@ -1849,90 +2176,40 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           </svg>
           <div className="chat-empty-title">选择或创建会话</div>
           <div className="chat-empty-desc">点击项目卡片上的 Agent 按钮新建会话，或点击下方已有会话</div>
-          {(() => {
-            if (openSessions.length === 0) return null;
-            return (
-            <div className="chat-session-list">
-              {openSessions.map((session) => {
-                const msgs = sessionMessages[session.id];
-                const firstUserMsg = msgs?.find((m) => m.role === "user");
-                return (
-                  <button
-                    key={session.id}
-                    className="chat-session-item"
-                    onClick={() => switchToSession(activeProject, session)}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                      <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                      <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                    </svg>
-                    <span>{firstUserMsg ? (firstUserMsg.content.length > 30 ? firstUserMsg.content.substring(0, 30) + "..." : firstUserMsg.content) : session.title}</span>
-                  </button>
-                );
-              })}
-            </div>
-            );
-          })()}
+          <SessionStarterList
+            activeProject={activeProject}
+            openSessions={openSessions}
+            onSwitchSession={switchToSession}
+          />
         </div>
       </div>
     );
   }
 
   return (
-    <div
-      ref={chatPanelRef}
-      className={`chat-panel${isForkingSession ? " chat-panel-forking" : ""}`}
-      onDrop={handleDrop}
-      onDragOver={handleDragOver}
-      aria-busy={isForkingSession}
-    >
+    <>
+      <MessageQueueDispatcher
+        sessionRuntimeRef={sessionRuntimeRef}
+        sendPayloadNow={sendPayloadNow}
+      />
+      <div
+        ref={chatPanelRef}
+        className={`chat-panel${isForkingSession ? " chat-panel-forking" : ""}`}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        aria-busy={isForkingSession}
+      >
       {/* Header */}
       <div className="chat-header">
         <div className="chat-agent-dot" />
         <span className="chat-agent-name">{activeProject.name}</span>
         <span className="chat-agent-tag">{getAgentName(activeAgentId)}</span>
-        <div ref={userMsgHistoryRef} className="relative chat-header-history-anchor">
-          <button
-            className="chat-header-history-btn"
-            onClick={() => setUserMsgHistoryOpen(!userMsgHistoryOpen)}
-            title="发言记录"
-          >
-            <MessageCircle size={14} strokeWidth={1.8} />
-          </button>
-          {userMsgHistoryOpen && (
-            <div className="chat-user-history-popup">
-              <div className="chat-user-history-header">发言记录</div>
-              {userMessagesReversed.length === 0 ? (
-                <div className="chat-user-history-empty">暂无发言</div>
-              ) : (
-                <div className="chat-user-history-list">
-                  {userMessagesReversed.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className="chat-user-history-item"
-                      onClick={() => scrollToMessage(msg.id)}
-                    >
-                      <span className="chat-user-history-text">{msg.content}</span>
-                      <span className="chat-user-history-time">
-                        {(() => {
-                          const d = new Date(msg.timestamp);
-                          const now = new Date();
-                          const isToday = d.toDateString() === now.toDateString();
-                          const time = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-                          if (isToday) return time;
-                          const mm = String(d.getMonth() + 1).padStart(2, "0");
-                          const dd = String(d.getDate()).padStart(2, "0");
-                          return `${mm}/${dd} ${time}`;
-                        })()}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        <UserMessageHistoryControl
+          open={userMsgHistoryOpen}
+          anchorRef={userMsgHistoryRef}
+          onOpenChange={setUserMsgHistoryOpen}
+          onScrollToMessage={scrollToMessage}
+        />
         <div style={{ flex: 1 }} />
       </div>
 
@@ -1942,11 +2219,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         activeSessionInitialized={activeSessionInitialized}
         currentSessionRunning={currentSessionRunning}
         projectPath={activeProject.path}
-        messages={messages}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}
         onMessagesScroll={handleMessagesScroll}
         onScrollToBottom={scrollToBottom}
+        onContentChange={handleContentChange}
         onEditMessage={setComposerInput}
         onImageContextMenu={handleImageContextMenu}
         onOpenImage={handleOpenImage}
@@ -2035,7 +2312,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           currentThinking={currentThinking}
           expandedProvider={expandedProvider}
           favoriteModels={favoriteModels}
-          flattenModelList={flattenModelList}
           modelOpen={modelOpen}
           modelProviders={modelProviders}
           planModeEnabled={planModeEnabled}
@@ -2051,7 +2327,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
                   project={activeProject}
                   activeSession={activeSession}
                   references={activeSessionReferences}
-                  sessionMessages={sessionMessages}
                   open={referenceOpen}
                   showTrigger={activeSessionReferences.length > 0}
                   onOpenChange={setReferenceOpen}
@@ -2131,6 +2406,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           onModelsUpdated={handleModelConfigModelsUpdated}
         />
       )}
-    </div>
+      </div>
+    </>
   );
 }

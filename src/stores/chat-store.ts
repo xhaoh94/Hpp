@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { SessionReference } from "./project-store";
+import type { AgentImagePayload } from "@/types";
 
 export interface FileDiff {
   file: string;
@@ -118,7 +119,7 @@ export interface QueuedMessage {
   sendContent: string;
   messageImages?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
-  agentImages?: Array<{ type: string; data: string; mimeType: string }>;
+  agentImages?: AgentImagePayload;
   planModeEnabled?: boolean;
   createdAt: number;
   status: QueuedMessageStatus;

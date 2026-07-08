@@ -1100,6 +1100,21 @@
   background: color-mix(in srgb, var(--bg-primary) 90%, var(--text-primary));
 }
 
+.agent-config-provider-item.dragging {
+  opacity: 0.55;
+  border-style: dashed;
+  cursor: grabbing;
+}
+
+.agent-config-provider-item.drop-target {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px rgba(0, 120, 212, 0.28);
+}
+
+.agent-config-provider-item.reordering {
+  opacity: 0.72;
+}
+
 .agent-config-provider-item.selected {
   border-color: rgba(255, 255, 255, 0.22);
   background: color-mix(in srgb, var(--bg-primary) 82%, var(--text-primary));
@@ -1129,6 +1144,27 @@
   background:
     linear-gradient(0deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)),
     rgba(0, 120, 212, 0.10);
+}
+
+.agent-config-provider-drag {
+  width: 14px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  cursor: grab;
+  opacity: 0.72;
+}
+
+.agent-config-provider-item:hover .agent-config-provider-drag,
+.agent-config-provider-item.selected .agent-config-provider-drag {
+  opacity: 1;
+}
+
+.agent-config-provider-item.dragging .agent-config-provider-drag {
+  cursor: grabbing;
 }
 
 .agent-config-provider-avatar {

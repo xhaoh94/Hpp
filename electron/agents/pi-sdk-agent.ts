@@ -4,6 +4,8 @@ import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
 import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
+import { isRecord } from "../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -38,6 +40,35 @@ interface AgentForkResult {
   reason?: string;
 }
 
+type WorkerCommand = UnknownRecord & {
+  type: string;
+  id?: string;
+};
+
+const asRecord = (value: unknown): UnknownRecord =>
+  isRecord(value) ? value : {};
+
+const optionalString = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
+
+const normalizeModels = (value: unknown): AgentModel[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((rawModel) => {
+    const model = asRecord(rawModel);
+    const id = optionalString(model.id);
+    const name = optionalString(model.name) || id;
+    const provider = optionalString(model.provider);
+    if (!id || !name || !provider) return [];
+    return [{
+      id,
+      name,
+      provider,
+      reasoning: model.reasoning === true,
+      supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
+    }];
+  });
+};
+
 const getWorkerPath = () => {
   return getBundledWorkerPath("pi-sdk-worker.mjs", __dirname);
 };
@@ -50,7 +81,7 @@ export class PiSDKAgent {
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
-  private pendingResponses = new Map<string, (data: any) => void>();
+  private pendingResponses = new Map<string, (data: UnknownRecord) => void>();
   private requestId = 0;
   private models: AgentModel[] = [];
   private pendingAssistantText = "";
@@ -174,11 +205,11 @@ export class PiSDKAgent {
       }, (data) => {
         clearTimeout(timeout);
         if (data.type === "ready") {
-          this._sessionFilePath = data.sessionFilePath || existingSessionFilePath || null;
+          this._sessionFilePath = optionalString(data.sessionFilePath) || existingSessionFilePath || null;
           this.emitEvent({ type: "agent_ready", agentId: "pi", mock: false });
           resolve();
         } else {
-          reject(new Error(data.error || "Pi SDK worker init failed"));
+          reject(new Error(optionalString(data.error) || "Pi SDK worker init failed"));
         }
       });
     });
@@ -193,7 +224,7 @@ export class PiSDKAgent {
     }
   }
 
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
 
@@ -227,7 +258,7 @@ export class PiSDKAgent {
     );
   }
 
-  async sendGuidance(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
 
@@ -249,7 +280,7 @@ export class PiSDKAgent {
         if (data.type === "accepted" || data.type === "guidance_done") {
           resolve();
         } else {
-          reject(new Error(data.error || "Pi SDK guidance failed"));
+          reject(new Error(optionalString(data.error) || "Pi SDK guidance failed"));
         }
       });
     });
@@ -283,10 +314,10 @@ export class PiSDKAgent {
         resolve({
           supported: data.supported !== false,
           success: !!data.success,
-          sessionFilePath: data.sessionFilePath,
-          nativeEntryId: data.nativeEntryId,
-          error: data.error,
-          reason: data.reason,
+          sessionFilePath: optionalString(data.sessionFilePath),
+          nativeEntryId: optionalString(data.nativeEntryId),
+          error: optionalString(data.error),
+          reason: optionalString(data.reason),
         });
       });
     });
@@ -326,7 +357,7 @@ export class PiSDKAgent {
       const timeout = setTimeout(() => resolve([]), 4000);
       this.sendWorkerCommand({ type: "getModels" }, (data) => {
         clearTimeout(timeout);
-        this.models = Array.isArray(data.models) ? data.models : [];
+        this.models = normalizeModels(data.models);
         resolve(this.models);
       });
     });
@@ -347,7 +378,7 @@ export class PiSDKAgent {
           resolve();
           return;
         }
-        reject(new Error(data.error || "Pi SDK set model failed"));
+        reject(new Error(optionalString(data.error) || "Pi SDK set model failed"));
       });
     });
   }
@@ -358,8 +389,8 @@ export class PiSDKAgent {
     });
   }
 
-  sendUIResponse(response: any): void {
-    const id = response?.id;
+  sendUIResponse(response: AgentUIResponse): void {
+    const id = response.id;
     if (id) {
       this.pendingUIRequestIds.delete(String(id));
       if (this.pendingUIRequestIds.size === 0 && (this.pendingAssistantText || this.streamedText)) {
@@ -370,10 +401,10 @@ export class PiSDKAgent {
       type: "uiResponse",
       response: {
         id,
-        value: response?.value ?? response?.text,
-        confirmed: response?.confirmed,
-        cancelled: !!response?.cancelled,
-        result: response?.result ?? (response?.answers ? { cancelled: false, answers: response.answers } : undefined),
+        value: response.value ?? response.text,
+        confirmed: response.confirmed,
+        cancelled: !!response.cancelled,
+        result: response.result ?? (response.answers ? { cancelled: false, answers: response.answers } : undefined),
       },
     });
   }
@@ -396,21 +427,23 @@ export class PiSDKAgent {
     }
   }
 
-  private handleWorkerMessage(data: any) {
-    if (data.id) {
-      const handler = this.pendingResponses.get(data.id);
+  private handleWorkerMessage(data: unknown) {
+    const record = asRecord(data);
+    const messageId = record.id !== undefined && record.id !== null ? String(record.id) : "";
+    if (messageId) {
+      const handler = this.pendingResponses.get(messageId);
       if (handler) {
-        this.pendingResponses.delete(data.id);
-        handler(data);
+        this.pendingResponses.delete(messageId);
+        handler(record);
       }
     }
 
-    switch (data.type) {
+    switch (record.type) {
       case "context_compaction":
-        this.emitEvent({ type: "context_compaction", id: data.id });
+        this.emitEvent({ type: "context_compaction", id: record.id });
         break;
       case "ready":
-        for (const handler of this.pendingResponses.values()) handler(data);
+        for (const handler of this.pendingResponses.values()) handler(record);
         this.pendingResponses.clear();
         break;
       case "agent_start":
@@ -420,26 +453,28 @@ export class PiSDKAgent {
         if (!this.turnActive && this.activePromptIds.size > 0) this.beginTurn();
         if (!this.turnActive) break;
         this.clearTurnFallback();
-        const assistantEvent = data.assistantMessageEvent;
-        if (assistantEvent?.type === "text_delta") {
-          const delta = assistantEvent.delta || "";
+        const assistantEvent = asRecord(record.assistantMessageEvent);
+        if (assistantEvent.type === "text_delta") {
+          const delta = String(assistantEvent.delta || "");
           if (delta) {
             this.streamedText = true;
             this.streamedTextBuffer += delta;
           }
           this.emitEventThrottled({ type: "stream_delta", delta });
-        } else if (assistantEvent?.type === "thinking_delta") {
-          this.emitEventThrottled({ type: "thinking_delta", delta: assistantEvent.delta || "" });
+        } else if (assistantEvent.type === "thinking_delta") {
+          this.emitEventThrottled({ type: "thinking_delta", delta: String(assistantEvent.delta || "") });
         }
         break;
       }
       case "message_end":
         if (!this.turnActive && this.activePromptIds.size === 0) break;
         if (!this.turnActive) this.beginTurn();
-        if (data.message?.role === "assistant") {
-          if (data.message.thinking) this.emitEvent({ type: "thinking_end" });
-          const stopReason = String(data.message.stopReason || "");
-          const errorMessage = String(data.message.errorMessage || "").trim();
+        {
+          const message = asRecord(record.message);
+          if (message.role !== "assistant") break;
+          if (message.thinking) this.emitEvent({ type: "thinking_end" });
+          const stopReason = String(message.stopReason || "");
+          const errorMessage = String(message.errorMessage || "").trim();
           if (stopReason === "error" || errorMessage) {
             this.pendingAssistantText = "";
             this.streamedText = false;
@@ -459,8 +494,8 @@ export class PiSDKAgent {
             this.completeTurn(true);
             break;
           }
-          if (data.message.text) {
-            this.pendingAssistantText = data.message.text;
+          if (typeof message.text === "string" && message.text) {
+            this.pendingAssistantText = message.text;
             this.emitPendingAssistantText();
             if (this.pendingUIRequestIds.size === 0) {
               this.scheduleTurnFallback(4000, true);
@@ -470,28 +505,28 @@ export class PiSDKAgent {
         break;
       case "tool_execution_start":
         this.clearTurnFallback();
-        this.emitEvent(normalizeToolEvent("tool_start", { ...data, args: data.args, name: data.toolName }));
+        this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
         break;
       case "tool_execution_update": {
-        const detail = unwrapToolText(data.partialResult);
+        const detail = unwrapToolText(record.partialResult);
         if (detail) {
           this.emitEvent(normalizeToolEvent("tool_start", {
-            ...data,
-            args: data.args,
-            result: data.partialResult,
+            ...record,
+            args: record.args,
+            result: record.partialResult,
             detail,
-            name: data.toolName,
+            name: record.toolName,
           }));
         }
         break;
       }
       case "tool_execution_end": {
         const toolEvent = normalizeToolEvent("tool_end", {
-          ...data,
-          args: data.args,
-          result: data.result,
-          output: data.result,
-          name: data.toolName,
+          ...record,
+          args: record.args,
+          result: record.result,
+          output: record.result,
+          name: record.toolName,
         });
         this.emitEvent(toolEvent);
         const diffs = buildDiffsFromToolEvent(toolEvent);
@@ -499,11 +534,11 @@ export class PiSDKAgent {
         break;
       }
       case "extension_ui_request":
-        this.handleUIRequest(data.request);
+        this.handleUIRequest(record.request);
         break;
       case "prompt_done":
-        if (data.id && !this.activePromptIds.delete(String(data.id))) break;
-        if (!data.id) this.activePromptIds.clear();
+        if (messageId && !this.activePromptIds.delete(messageId)) break;
+        if (!messageId) this.activePromptIds.clear();
         this.pendingUIRequestIds.clear();
         this.completeTurn(true);
         break;
@@ -511,9 +546,9 @@ export class PiSDKAgent {
         if (this.activePromptIds.size === 0) this.scheduleTurnFallback(250, true);
         break;
       case "error":
-        if (data.id && !this.activePromptIds.delete(String(data.id))) break;
-        if (isContextCompactionLike(data.error, data.title, data.message)) {
-          this.emitEvent({ type: "context_compaction", id: data.id });
+        if (messageId && !this.activePromptIds.delete(messageId)) break;
+        if (isContextCompactionLike(record.error, record.title, record.message)) {
+          this.emitEvent({ type: "context_compaction", id: record.id });
           break;
         }
         this.pendingUIRequestIds.clear();
@@ -522,7 +557,7 @@ export class PiSDKAgent {
           entryType: "error",
           kind: "error",
           title: "Pi 运行失败",
-          detail: data.error || "Unknown error",
+          detail: record.error || "Unknown error",
           state: "error",
         });
         this.completeTurn(true);
@@ -530,25 +565,34 @@ export class PiSDKAgent {
     }
   }
 
-  private handleUIRequest(request: any) {
-    if (!request || request.method === "notify") return;
-    this.pendingUIRequestIds.add(String(request.id));
+  private handleUIRequest(request: unknown) {
+    const requestRecord = asRecord(request);
+    const method = optionalString(requestRecord.method) || "";
+    if (!method || method === "notify") return;
+    const requestId = requestRecord.id !== undefined && requestRecord.id !== null ? String(requestRecord.id) : "";
+    if (!requestId) return;
+    const kind = optionalString(requestRecord.kind) || "";
+    const title =
+      method === "custom" && kind === "ask_user_question"
+        ? "请选择答案"
+        : optionalString(requestRecord.title) || optionalString(requestRecord.message) || "正在询问用户";
+    this.pendingUIRequestIds.add(requestId);
     this.clearTurnFallback();
     this.emitPendingAssistantText();
     this.emitEvent(normalizeQuestionProcessEvent({
       type: "extension_ui_request",
-      id: request.id,
-      requestId: request.id,
-      method: request.method === "custom" ? request.kind : request.method,
-      title: request.method === "custom" && request.kind === "ask_user_question" ? "请选择答案" : request.title || request.message || "正在询问用户",
+      id: requestId,
+      requestId,
+      method: method === "custom" ? kind : method,
+      title,
       detail: request,
-      questions: request.method === "custom" ? request.questions : undefined,
-      toolName: request.toolName,
+      questions: method === "custom" ? requestRecord.questions : undefined,
+      toolName: requestRecord.toolName,
       state: "running",
     }));
   }
 
-  private sendWorkerCommand(command: any, onResponse?: (data: any) => void): string {
+  private sendWorkerCommand(command: WorkerCommand, onResponse?: (data: UnknownRecord) => void): string {
     const id = command.id || this.createCommandId();
     const fullCommand = { ...command, id };
     if (onResponse) this.pendingResponses.set(id, onResponse);

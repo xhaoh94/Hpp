@@ -6,10 +6,16 @@ import { OpenCodeAgent } from "./opencode-agent";
 import { DroidAgent } from "./droid-agent";
 import { PiSDKAgent } from "./pi-sdk-agent";
 import { CodexAgent } from "./codex-agent";
+import type {
+  AgentImagePayload,
+  AgentSendOptions as BaseAgentSendOptions,
+  AgentUIResponse,
+} from "../../src/types/ipc";
 import {
   deleteAgentProviderConfig,
   getConfiguredAgentModels,
   listAgentConfig,
+  reorderAgentProviderConfigs,
   restoreNativeConfigSnapshots,
   saveAgentProviderConfig,
   setActiveAgentProviderConfig,
@@ -29,23 +35,22 @@ interface AgentBackend {
   setWindow(win: BrowserWindow): void;
   init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
   isIdle(): boolean;
-  sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
-  sendGuidance?(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void>;
+  sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
+  sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
   forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
   abort(): Promise<void>;
   getModels(): Promise<AgentModel[]>;
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
-  sendUIResponse(response: any): void;
+  sendUIResponse(response: AgentUIResponse): void;
   dispose(): void;
   readonly sessionFilePath: string | null;
 }
 
-interface AgentSendOptions {
+interface AgentSendOptions extends BaseAgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
-  clientMessageId?: string;
 }
 
 interface AgentForkTarget {
@@ -73,14 +78,25 @@ interface AgentReloadConfigResult {
   reloadedSessionIds?: string[];
 }
 
+const AGENT_SESSION_INIT_TIMEOUT_MS = 90_000;
+
 // ============================================================
 // Local models.json config support
 // ============================================================
 
+interface ProviderModelConfig {
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  input?: string[];
+}
+
+interface ProviderConfig {
+  models?: ProviderModelConfig[];
+}
+
 interface LocalModelsConfig {
-  providers?: Record<string, {
-    models?: Array<{ id: string; name?: string; reasoning?: boolean; input?: string[] }>;
-  }>;
+  providers?: Record<string, ProviderConfig>;
 }
 
 let _localModelsConfig: LocalModelsConfig | null = null;
@@ -118,19 +134,22 @@ function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
   const result: AgentModel[] = [];
   for (const model of models) {
     const providerConfig = config.providers[model.provider];
-    if (!providerConfig?.models) {
+    const configuredModels = Array.isArray(providerConfig?.models)
+      ? providerConfig.models.filter((configuredModel) => typeof configuredModel?.id === "string")
+      : undefined;
+    if (!configuredModels) {
       // Provider not configured — keep all models
       result.push(model);
     } else {
       // Provider is configured — only include models whose id matches
-      const configuredIds = new Set(providerConfig.models.map((m: any) => m.id));
+      const configuredIds = new Set(configuredModels.map((configuredModel) => configuredModel.id));
       if (configuredIds.has(model.id)) {
         // Use the config's model info as-is (id, name, reasoning) to respect custom overrides
-        const configuredModel = providerConfig.models.find((m: any) => m.id === model.id);
+        const configuredModel = configuredModels.find((candidate) => candidate.id === model.id);
         result.push({
           ...model,
-          name: configuredModel?.name ?? model.name,
-          reasoning: configuredModel?.reasoning ?? model.reasoning,
+          name: typeof configuredModel?.name === "string" ? configuredModel.name : model.name,
+          reasoning: typeof configuredModel?.reasoning === "boolean" ? configuredModel.reasoning : model.reasoning,
           supportsImages: Array.isArray(configuredModel?.input)
             ? configuredModel.input.includes("image")
             : model.supportsImages,
@@ -183,6 +202,25 @@ function withPromptPlanMode(message: string): string {
   ].join("\n");
 }
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return String(error);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 // ============================================================
 // Agent Manager - supports Pi SDK, OpenCode, and Droid per session
 // ============================================================
@@ -203,6 +241,18 @@ class AgentManager {
     return new PiSDKAgent(sessionId); // default
   }
 
+  private async initAgentBackend(
+    agent: AgentBackend,
+    projectPath: string,
+    existingSessionFilePath?: string
+  ): Promise<void> {
+    await withTimeout(
+      agent.init(projectPath, existingSessionFilePath),
+      AGENT_SESSION_INIT_TIMEOUT_MS,
+      "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
+    );
+  }
+
   /** Create or resume a session */
   async createSession(
     sessionId: string, agentId: string, projectPath: string,
@@ -220,7 +270,19 @@ class AgentManager {
     }
     this.sessionProjectPaths.set(sessionId, projectPath);
     if (this.window) agent.setWindow(this.window);
-    await agent.init(projectPath, existingSessionFilePath);
+    try {
+      await this.initAgentBackend(agent, projectPath, existingSessionFilePath);
+    } catch (error) {
+      if (this.sessionAgents.get(sessionId) === agent) {
+        agent.dispose();
+        this.sessionAgents.delete(sessionId);
+        this.sessionAgentTypes.delete(sessionId);
+        this.sessionFilePaths.delete(sessionId);
+        this.sessionProjectPaths.delete(sessionId);
+      }
+      if (this.activeSessionId === sessionId) this.activeSessionId = null;
+      throw error;
+    }
 
     const fp = agent.sessionFilePath;
     console.log("[agent-manager] After init, sessionFilePath:", fp);
@@ -296,15 +358,16 @@ class AgentManager {
     return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
   }
 
-  sendUIResponse(response: any) {
-    const agent = response?.sessionId
-      ? this.getAgentBySessionId(response.sessionId)
+  sendUIResponse(response: AgentUIResponse) {
+    const sessionId = typeof response.sessionId === "string" ? response.sessionId : undefined;
+    const agent = sessionId
+      ? this.getAgentBySessionId(sessionId)
       : this.getActiveAgent();
     if (!agent) return;
     agent.sendUIResponse(response);
   }
 
-  async sendGuidance(sessionId: string | undefined, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendGuidance(sessionId: string | undefined, message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     const agent = sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
     if (!agent) throw new Error("No active agent");
     const agentType = sessionId ? this.getSessionAgentType(sessionId) : this.getActiveAgentType();
@@ -390,7 +453,7 @@ class AgentManager {
       for (const target of targets) {
         const nextAgent = this.createAgentBackend(target.agentType, target.sessionId);
         if (this.window) nextAgent.setWindow(this.window);
-        await nextAgent.init(target.projectPath, target.sessionFilePath);
+        await this.initAgentBackend(nextAgent, target.projectPath, target.sessionFilePath);
         initializedTargets.push({
           target,
           nextAgent,
@@ -405,7 +468,6 @@ class AgentManager {
     }
 
     for (const { target, nextAgent, nextSessionFilePath } of initializedTargets) {
-      target.agent.dispose();
       this.sessionAgents.set(target.sessionId, nextAgent);
       this.sessionAgentTypes.set(target.sessionId, target.agentType);
       if (nextSessionFilePath) {
@@ -413,6 +475,7 @@ class AgentManager {
       } else {
         this.sessionFilePaths.delete(target.sessionId);
       }
+      target.agent.dispose();
     }
 
     const reloadedSessionIds = targets.map((target) => target.sessionId);
@@ -449,8 +512,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       await agentManager.createSession(sid, agentId, projectPath, sessionFilePath);
       const models = await agentManager.getModelsBySessionId(sid);
       return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid), models };
-    } catch (err: any) {
-      return { success: false, error: err.message };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
     }
   });
 
@@ -464,7 +527,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => {
+  ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
     const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     if (!agent) return { success: false, error: "No active agent" };
     try {
@@ -481,24 +544,24 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         clientMessageId: options?.clientMessageId,
       });
       return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
     }
   });
 
   ipcMain.handle("agent:forkSession", async (_event, sessionId: string, target: AgentForkTarget) => {
     try {
       return await agentManager.forkSession(sessionId, target);
-    } catch (err: any) {
-      return { supported: true, success: false, error: err.message || String(err) };
+    } catch (err: unknown) {
+      return { supported: true, success: false, error: getErrorMessage(err) };
     }
   });
 
   ipcMain.handle("agent:reloadConfig", async (_event, agentId: string, sessionId?: string) => {
     try {
       return await agentManager.reloadConfig(agentId, sessionId);
-    } catch (err: any) {
-      return { success: false, error: err.message || String(err), reloadedSessionIds: [] };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), reloadedSessionIds: [] };
     }
   });
 
@@ -512,7 +575,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return saveResult;
     }
     if (agentId === "codex") {
-      return saveResult;
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return { ...saveResult, models };
     }
 
     const idleCheck = agentManager.canReloadConfig(agentId);
@@ -530,8 +594,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       resetLocalModelsConfigCache();
       const reloadResult = await agentManager.reloadConfig(agentId);
       return { ...reloadResult, config: saveResult.config };
-    } catch (err: any) {
-      return { success: false, error: err.message || String(err), config: saveResult.config, reloadedSessionIds: [] };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), config: saveResult.config, reloadedSessionIds: [] };
     }
   });
 
@@ -560,8 +624,38 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       resetLocalModelsConfigCache();
       const reloadResult = await agentManager.reloadConfig(agentId);
       return { ...reloadResult, config: deleteResult.config };
-    } catch (err: any) {
-      return { success: false, error: err.message || String(err), config: deleteResult.config, reloadedSessionIds: [] };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), config: deleteResult.config, reloadedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agentConfig:reorder", async (_event, agentId: string, providerIds: unknown) => {
+    const reorderResult = await reorderAgentProviderConfigs(agentId, providerIds);
+    if (!reorderResult.success || !reorderResult.config) {
+      return reorderResult;
+    }
+    if (agentId === "codex") {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return { ...reorderResult, models };
+    }
+
+    const idleCheck = agentManager.canReloadConfig(agentId);
+    if (!idleCheck.success) {
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+      return {
+        ...reorderResult,
+        models,
+        error: `渠道顺序已保存到本地配置，${idleCheck.error || "当前 Agent 会话不是空闲状态，暂未重载。"}`,
+        reloadedSessionIds: [],
+      };
+    }
+
+    try {
+      resetLocalModelsConfigCache();
+      const reloadResult = await agentManager.reloadConfig(agentId);
+      return { ...reloadResult, config: reorderResult.config };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), config: reorderResult.config, reloadedSessionIds: [] };
     }
   });
 
@@ -589,21 +683,21 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       const config = await setActiveAgentProviderConfig(agentId, providerId);
       const models = await mergeModelsWithConfiguredAgentModels(agentId, reloadResult.models || []);
       return { ...reloadResult, models, config };
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (snapshots.length > 0) {
         await restoreNativeConfigSnapshots(snapshots).catch(() => undefined);
         resetLocalModelsConfigCache();
       }
-      return { success: false, error: err.message || String(err), reloadedSessionIds: [] };
+      return { success: false, error: getErrorMessage(err), reloadedSessionIds: [] };
     }
   });
 
-  ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => {
+  ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
     try {
       await agentManager.sendGuidance(sessionId, message, images, options);
       return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
     }
   });
 
@@ -630,10 +724,13 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     try {
       const agent = agentManager.getAgentForSession(sessionId);
       if (!agent) return { success: false, error: "No active agent" };
-      await agent.setModel(provider, modelId);
+      const agentType = sessionId
+        ? agentManager.getSessionAgentType(sessionId)
+        : agentManager.getActiveAgentType();
+      await agent.setModel(agentType === "codex" ? "codex" : provider, modelId);
       return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message || String(err) };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
     }
   });
 
@@ -644,7 +741,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle("agent:sendUIResponse", async (_event, response: any) => {
+  ipcMain.handle("agent:sendUIResponse", async (_event, response: AgentUIResponse) => {
     agentManager.sendUIResponse(response);
     return { success: true };
   });

@@ -1,7 +1,8 @@
 import type { BrowserWindow } from "electron";
+import type { AgentEvent } from "../../src/types/ipc";
+import { isAgentEvent } from "../../src/types/ipc";
 
 type StreamEventType = "stream_delta" | "thinking_delta";
-type AgentEvent = { type: string; [key: string]: unknown };
 
 const STREAM_FLUSH_INTERVAL_MS = 50;
 const MAX_BUFFERED_CHARS = 4000;
@@ -68,16 +69,15 @@ export class AgentEventBuffer {
   }
 
   private sendNow(data: unknown) {
+    if (!isAgentEvent(data)) return;
     const payload =
-      data && typeof data === "object"
-        ? { ...(data as Record<string, unknown>), sessionId: this.hppSessionId }
-        : data;
+      { ...data, sessionId: this.hppSessionId };
     this.window?.webContents.send("agent:event", payload);
   }
 
   private isStreamDelta(data: unknown): data is { type: StreamEventType; delta?: unknown } {
-    if (!data || typeof data !== "object") return false;
-    const type = (data as AgentEvent).type;
+    if (!isAgentEvent(data)) return false;
+    const type = data.type;
     return type === "stream_delta" || type === "thinking_delta";
   }
 

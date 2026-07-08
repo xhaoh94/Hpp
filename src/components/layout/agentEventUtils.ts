@@ -6,6 +6,15 @@ import type {
   AgentProcessStep,
   AgentProcessStepStatus,
 } from "@/stores/chat-store";
+import {
+  getPlanStepFallbackTitle,
+  getProcessFileEntryTitle,
+  getQuestionTitle as getLocalizedQuestionTitle,
+  getToolActionSummary,
+  getToolErrorSummary,
+  isNegativeConfirmResponse,
+  uiText,
+} from "@/i18n/text";
 
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
@@ -208,7 +217,7 @@ export const truncateProcessDetail = (value: string) => {
 
 export const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\s+/g, " ").trim();
-  if (!preview) return "思考中";
+  if (!preview) return uiText.process.thinking;
   return preview.length > THINKING_PREVIEW_CHAR_LIMIT
     ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
     : preview;
@@ -265,26 +274,6 @@ export const getToolName = (event: AgentEvent) => {
   return event.toolName || event.name || event.tool || "tool";
 };
 
-const getFileEntryTitle = (action: AgentProcessFile["action"] | undefined, count: number, running = false) => {
-  if (running) {
-    switch (action) {
-      case "read": return `正在读取 ${count} 个文件`;
-      case "listed": return `正在查看 ${count} 个目录`;
-      case "written": return `正在写入 ${count} 个文件`;
-      case "edited": return `正在编辑 ${count} 个文件`;
-      default: return `正在修改 ${count} 个文件`;
-    }
-  }
-
-  switch (action) {
-    case "read": return `已读取 ${count} 个文件`;
-    case "listed": return `已查看 ${count} 个目录`;
-    case "written": return `已写入 ${count} 个文件`;
-    case "edited": return `已编辑 ${count} 个文件`;
-    default: return `已修改 ${count} 个文件`;
-  }
-};
-
 export const normalizeToolKind = (value: unknown): NormalizedToolKind => {
   const normalized = String(value || "").trim();
   if (
@@ -339,8 +328,7 @@ export const getToolProcessFiles = (event: AgentEvent): AgentProcessFile[] => {
 };
 
 export const getQuestionTitle = (running = false, isError = false) => {
-  if (isError) return "用户选择处理失败";
-  return running ? "等待用户选择" : "已提交选择";
+  return getLocalizedQuestionTitle(running, isError);
 };
 
 export const getUIResponsePayload = (response: {
@@ -367,7 +355,7 @@ export const getUIResponsePayload = (response: {
   }
 
   if (response.method === "confirm") {
-    base.confirmed = !["no", "n", "false", "否", "取消"].includes(response.text.trim().toLowerCase());
+    base.confirmed = !isNegativeConfirmResponse(response.text);
   }
 
   return base;
@@ -388,42 +376,12 @@ export const getToolSummary = (event: AgentEvent, running = false): string => {
   const toolName = getToolName(event);
   const files = getToolProcessFiles(event);
   if (event.isError) {
-    switch (toolKind) {
-      case "read_file": return "读取文件失败";
-      case "list_dir": return "读取目录失败";
-      case "write_file": return "写入文件失败";
-      case "edit_file": return "编辑文件失败";
-      case "run_command": return "命令执行失败";
-      case "search_files": return "文件搜索失败";
-      case "search_text": return "内容搜索失败";
-      case "web_fetch": return "网页获取失败";
-      case "web_search": return "网络搜索失败";
-      case "question": return getQuestionTitle(false, true);
-      default: return `${toolName} 执行失败`;
-    }
+    return getToolErrorSummary(toolKind, toolName);
   }
 
-  if (files.length > 0) return getFileEntryTitle(files[0].action, files.length, running);
+  if (files.length > 0) return getProcessFileEntryTitle(files[0].action, files.length, running);
 
-  const prefix = running ? "正在运行" : "已运行";
-  const completedPrefix = running ? "正在" : "已完成";
-
-  switch (toolKind) {
-    case "run_command":
-      return toolName ? `${prefix} ${toolName}` : `${prefix}命令`;
-    case "search_files":
-      return `${completedPrefix}搜索文件`;
-    case "search_text":
-      return `${completedPrefix}搜索内容`;
-    case "web_fetch":
-      return `${completedPrefix}获取网页内容`;
-    case "web_search":
-      return `${completedPrefix}搜索网络`;
-    case "question":
-      return getQuestionTitle(running, false);
-    default:
-      return toolName ? `${prefix} ${toolName}` : `${prefix}工具`;
-  }
+  return getToolActionSummary(toolKind, toolName, running);
 };
 
 export const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["type"] => {
@@ -487,7 +445,7 @@ const getPlanStepTitle = (step: UnknownRecord, index: number) => {
     getStringField(step, "content") ||
     getStringField(step, "description") ||
     getStringField(step, "name");
-  return title?.trim() || `步骤 ${index + 1}`;
+  return title?.trim() || getPlanStepFallbackTitle(index);
 };
 
 export const normalizePlanSteps = (value: unknown): AgentProcessStep[] => {
@@ -654,18 +612,20 @@ export const buildInferredPlanSteps = (
 
   const terminalStatus: AgentProcessStepStatus | null =
     flags.cancelled ? "cancelled" : flags.failed ? "failed" : null;
-  const hasWorked = flags.operated || flags.modified || Object.keys(runtime.changeSummaryFiles).length > 0;
+  const hasModified = flags.modified || Object.keys(runtime.changeSummaryFiles).length > 0;
+  const hasOperated = flags.operated || hasModified || flags.verified;
   const hasFinished = flags.verified;
-  const terminalAtAnalyze = !!terminalStatus && !hasWorked && !flags.verified;
-  const terminalAtOperate = !!terminalStatus && hasWorked && !flags.verified;
+  const terminalAtAnalyze = !!terminalStatus && !hasOperated && !hasModified && !flags.verified;
+  const terminalAtOperate = !!terminalStatus && hasOperated && !hasModified && !flags.verified;
+  const terminalAtModify = !!terminalStatus && hasModified && !flags.verified;
   const terminalAtVerify = !!terminalStatus && flags.verified;
   const steps: AgentProcessStep[] = [
     {
       id: "inferred-analyze",
-      title: "分析请求",
+      title: uiText.process.inferredSteps.analyze,
       status: terminalAtAnalyze
         ? terminalStatus
-        : hasWorked || hasFinished || terminalAtOperate || terminalAtVerify
+        : hasOperated || hasModified || hasFinished || terminalAtOperate || terminalAtModify || terminalAtVerify
         ? "completed"
         : flags.analyzed
           ? "running"
@@ -673,21 +633,32 @@ export const buildInferredPlanSteps = (
     },
     {
       id: "inferred-operate",
-      title: "执行操作",
+      title: uiText.process.inferredSteps.operate,
       status: terminalAtOperate
         ? terminalStatus
-        : hasFinished || terminalAtVerify
+        : hasModified || hasFinished || terminalAtModify || terminalAtVerify
         ? "completed"
-        : hasWorked
+        : hasOperated
           ? "running"
           : "pending",
     },
-    {
-      id: "inferred-verify",
-      title: "验证总结",
-      status: terminalAtVerify ? terminalStatus : hasFinished ? "completed" : "pending",
-    },
   ];
+  if (hasModified) {
+    steps.push({
+      id: "inferred-modify",
+      title: uiText.process.inferredSteps.modify,
+      status: terminalAtModify
+        ? terminalStatus
+        : hasFinished || terminalAtVerify
+          ? "completed"
+          : "running",
+    });
+  }
+  steps.push({
+    id: "inferred-verify",
+    title: uiText.process.inferredSteps.verify,
+    status: terminalAtVerify ? terminalStatus : hasFinished ? "completed" : "pending",
+  });
 
   return steps;
 };

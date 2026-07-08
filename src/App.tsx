@@ -15,6 +15,12 @@ import { saveSessionModel, useDataPersistence } from "./hooks/useDataPersistence
 import { DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useAppStore } from "./stores/app-store";
 import { useChatStore, type ModelInfo } from "./stores/chat-store";
 import { useProjectStore } from "./stores/project-store";
+import {
+  getFloatingToastText,
+  getModelSwitchToastText,
+  HPP_FLOATING_TOAST_EVENT,
+  showFloatingToastMessage,
+} from "./lib/floating-toast";
 import TitleBar from "./components/layout/TitleBar";
 
 const isSameModel = (left: ModelInfo | null | undefined, right: ModelInfo | null | undefined) =>
@@ -26,6 +32,27 @@ const SIDEBAR_MAX_WIDTH = 520;
 const CHAT_MIN_WIDTH = 360;
 const SIDEBAR_KEYBOARD_STEP = 16;
 const SIDEBAR_KEYBOARD_LARGE_STEP = 48;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function getShortcutPatch(value: unknown): Partial<typeof DEFAULT_SHORTCUTS> {
+  const shortcuts = asRecord(value);
+  return Object.fromEntries(
+    Object.entries(shortcuts).filter(([, shortcut]) => typeof shortcut === "string")
+  ) as Partial<typeof DEFAULT_SHORTCUTS>;
+}
+
+const DEFAULT_SHORTCUTS = {
+  sendKey: "Enter",
+  fileSearch: "Ctrl+P",
+  switchToFiles: "Ctrl+Shift+F",
+  prevModel: "Ctrl+[",
+  nextModel: "Ctrl+]",
+};
 
 function matchShortcut(event: KeyboardEvent, shortcut: string): boolean {
   const parts = shortcut.split("+").map((s) => s.trim().toLowerCase());
@@ -43,8 +70,10 @@ function matchShortcut(event: KeyboardEvent, shortcut: string): boolean {
 export default function App() {
   useDataPersistence();
   const [showFileSearch, setShowFileSearch] = useState(false);
+  const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);
   const layoutContentRef = useRef<HTMLDivElement>(null);
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
+  const floatingToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [sidebarHoverExpanded, setSidebarHoverExpanded] = useState(false);
   const sidebarCollapsed = useAppStore((s) => s.sidebarCollapsed);
@@ -53,25 +82,50 @@ export default function App() {
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed);
 
   // Load shortcuts from settings
-  const [shortcuts, setShortcuts] = useState({
-    sendKey: "Enter",
-    fileSearch: "Ctrl+P",
-    switchToFiles: "Ctrl+Shift+F",
-    prevModel: "Ctrl+[",
-    nextModel: "Ctrl+]",
-  });
+  const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
 
   useEffect(() => {
-    window.electronAPI.loadData("settings").then((data: any) => {
-      if (data?.shortcuts) {
-        const { cycleModel, ...rest } = data.shortcuts;
-        setShortcuts((prev) => ({ ...prev, ...rest }));
+    window.electronAPI.loadData("settings").then((data) => {
+      const settings = asRecord(data);
+      const savedShortcuts = asRecord(settings.shortcuts);
+      if (Object.keys(savedShortcuts).length > 0) {
+        const { cycleModel: _cycleModel, ...rest } = savedShortcuts;
+        setShortcuts((prev) => ({ ...prev, ...getShortcutPatch(rest) }));
       }
     });
   }, []);
 
-  const cycleModel = useCallback((direction: "prev" | "next") => {
-    const { favoriteModels, availableModels, currentModel, setCurrentModel } = useChatStore.getState();
+  const showFloatingToast = useCallback((text: string) => {
+    if (floatingToastTimerRef.current) {
+      clearTimeout(floatingToastTimerRef.current);
+      floatingToastTimerRef.current = null;
+    }
+    setFloatingToast({ id: Date.now(), text });
+    floatingToastTimerRef.current = setTimeout(() => {
+      setFloatingToast(null);
+      floatingToastTimerRef.current = null;
+    }, 2200);
+  }, []);
+
+  useEffect(() => {
+    const handleFloatingToast = (event: Event) => {
+      const text = getFloatingToastText(event);
+      if (text) showFloatingToast(text);
+    };
+
+    window.addEventListener(HPP_FLOATING_TOAST_EVENT, handleFloatingToast);
+    return () => window.removeEventListener(HPP_FLOATING_TOAST_EVENT, handleFloatingToast);
+  }, [showFloatingToast]);
+
+  const cycleModel = useCallback(async (direction: "prev" | "next") => {
+    const {
+      activeAgentId,
+      favoriteModels,
+      availableModels,
+      currentModel,
+      setAvailableModels,
+      setCurrentModel,
+    } = useChatStore.getState();
     const availableFavoriteModels = favoriteModels.filter((favorite) =>
       availableModels.some((model) => isSameModel(model, favorite))
     );
@@ -85,13 +139,49 @@ export default function App() {
       newIdx = idx > 0 ? idx - 1 : availableFavoriteModels.length - 1;
     }
     const nextModel = availableFavoriteModels[newIdx];
-    setCurrentModel(nextModel);
 
-    const sessionId = useProjectStore.getState().activeSessionId;
-    if (sessionId) saveSessionModel(sessionId, nextModel);
-    void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId || undefined).catch((error) => {
+    const projectState = useProjectStore.getState();
+    const sessionId = projectState.activeSessionId;
+    const activeProject = projectState.projects.find((project) => project.id === projectState.activeProjectId);
+    const activeSession = activeProject?.sessions.find((session) => session.id === sessionId);
+    const agentId = activeSession?.agentId || activeAgentId;
+    const switchingCodexProvider =
+      agentId === "codex" &&
+      !!currentModel &&
+      currentModel.provider !== nextModel.provider;
+
+    try {
+      if (switchingCodexProvider) {
+        const currentSessionRunning = sessionId
+          ? projectState.agentStatuses[sessionId] === "running"
+          : useChatStore.getState().isStreaming;
+        if (currentSessionRunning) {
+          window.alert("切换 Codex 渠道需要等当前 Agent 运行结束后再操作。");
+          return;
+        }
+
+        const activateResult = await window.electronAPI.agentConfigActivate("codex", nextModel.provider);
+        if (!activateResult.success) {
+          window.alert(activateResult.error || "切换 Codex 渠道失败，请稍后重试。");
+          return;
+        }
+        if (activateResult.models && activateResult.models.length > 0) {
+          setAvailableModels(activateResult.models);
+        }
+      }
+
+      const result = await window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId || undefined);
+      if (!result.success) {
+        console.error("[model] shortcut switch failed:", result.error || "Unknown error");
+        return;
+      }
+
+      setCurrentModel(nextModel);
+      if (sessionId) saveSessionModel(sessionId, nextModel);
+      showFloatingToastMessage(getModelSwitchToastText(agentId, nextModel.provider, nextModel.name || nextModel.id));
+    } catch (error) {
       console.error("[model] shortcut switch failed:", error);
-    });
+    }
   }, []);
 
   useEffect(() => {
@@ -270,6 +360,7 @@ export default function App() {
 
   useEffect(() => () => {
     sidebarResizeCleanupRef.current?.();
+    if (floatingToastTimerRef.current) clearTimeout(floatingToastTimerRef.current);
     document.body.classList.remove("layout-sidebar-resizing");
   }, []);
 
@@ -311,6 +402,16 @@ export default function App() {
         onClose={() => setShowFileSearch(false)}
         onSelect={handleFileSelect}
       />
+      {floatingToast && (
+        <div
+          key={floatingToast.id}
+          className="app-floating-toast"
+          role="status"
+          aria-live="polite"
+        >
+          {floatingToast.text}
+        </div>
+      )}
     </div>
   );
 }

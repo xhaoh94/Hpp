@@ -21,6 +21,13 @@ interface FilterConfig {
   excludeFiles: string[];
 }
 
+interface GeneralSettings {
+  tempImagePath: string;
+  imageRetentionHours: number;
+  planModeEnabled: boolean;
+  closeToTray: boolean;
+}
+
 const SHORTCUT_LABELS: Record<string, string> = {
   fileSearch: "文件搜索",
   switchToFiles: "切换到资源管理器",
@@ -75,6 +82,44 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function getStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : undefined;
+}
+
+function normalizeShortcuts(value: unknown): ShortcutConfig {
+  const shortcuts = asRecord(value);
+  return {
+    ...DEFAULT_SHORTCUTS,
+    ...Object.fromEntries(
+      Object.entries(shortcuts).filter(([, shortcut]) => typeof shortcut === "string")
+    ),
+  };
+}
+
+function normalizeFilters(value: unknown): FilterConfig {
+  const filters = asRecord(value);
+  return {
+    excludeFolders: getStringArray(filters.excludeFolders) || DEFAULT_FILTERS.excludeFolders,
+    excludeExtensions: getStringArray(filters.excludeExtensions) || DEFAULT_FILTERS.excludeExtensions,
+    excludeFiles: getStringArray(filters.excludeFiles) || DEFAULT_FILTERS.excludeFiles,
+  };
+}
+
+function normalizeGeneral(value: unknown): GeneralSettings {
+  const general = asRecord(value);
+  const imageRetentionHours = typeof general.imageRetentionHours === "number"
+    ? general.imageRetentionHours
+    : 12;
+  return {
+    tempImagePath: typeof general.tempImagePath === "string" ? general.tempImagePath : "",
+    imageRetentionHours,
+    planModeEnabled: general.planModeEnabled === true,
+    closeToTray: typeof general.closeToTray === "boolean" ? general.closeToTray : true,
+  };
+}
+
 function getActiveSessionAgentId() {
   const projectState = useProjectStore.getState();
   const activeProject = projectState.projects.find((project) => project.id === projectState.activeProjectId);
@@ -115,20 +160,16 @@ export function SettingsView() {
 
   // Load saved settings on mount
   useEffect(() => {
-    window.electronAPI.loadData("settings").then((data: any) => {
-      if (data) {
-        if (data.shortcuts) {
-          // Filter out deprecated keys like cycleModel
-          const { cycleModel, ...rest } = data.shortcuts;
-          setShortcuts({ ...DEFAULT_SHORTCUTS, ...rest });
-        }
-        if (data.filters) setFilters({ ...DEFAULT_FILTERS, ...data.filters });
-        if (data.general) {
-          setTempImagePath(data.general.tempImagePath || "");
-          setImageRetentionHours(data.general.imageRetentionHours || 12);
-          setPlanModeEnabled(!!data.general.planModeEnabled);
-          setCloseToTray(typeof data.general.closeToTray === "boolean" ? data.general.closeToTray : true);
-        }
+    window.electronAPI.loadData("settings").then((data) => {
+      const settings = asRecord(data);
+      if (settings.shortcuts) setShortcuts(normalizeShortcuts(settings.shortcuts));
+      if (settings.filters) setFilters(normalizeFilters(settings.filters));
+      if (settings.general) {
+        const general = normalizeGeneral(settings.general);
+        setTempImagePath(general.tempImagePath);
+        setImageRetentionHours(general.imageRetentionHours);
+        setPlanModeEnabled(general.planModeEnabled);
+        setCloseToTray(general.closeToTray);
       }
     });
   }, []);
@@ -164,7 +205,7 @@ export function SettingsView() {
   const saveSettings = useCallback(async (
     nextShortcuts = shortcuts,
     nextFilters = filters,
-    nextGeneral?: { tempImagePath: string; imageRetentionHours: number; planModeEnabled: boolean; closeToTray: boolean },
+    nextGeneral?: GeneralSettings,
   ) => {
     const data = await window.electronAPI.loadData("settings");
     const currentSettings = asRecord(data);
@@ -521,7 +562,7 @@ export function SettingsView() {
                       <button
                         className="filter-add-btn"
                         onClick={async () => {
-                          const result = await (window as any).electronAPI.openDirectory();
+                          const result = await window.electronAPI.openDirectory();
                           if (!result.canceled && result.path) {
                             setTempImagePath(result.path);
                           }

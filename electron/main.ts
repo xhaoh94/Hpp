@@ -8,6 +8,7 @@ import { registerStoreHandlers } from "./ipc/store-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers } from "./agents/agent-manager";
+import type { AppUpdateState, AppUpdateStatus } from "../src/types/ipc";
 
 // Enable IME support on Linux Wayland
 if (process.platform === "linux") {
@@ -22,33 +23,6 @@ if (process.platform === "win32") {
 }
 
 const DEFAULT_CLOSE_TO_TRAY = true;
-
-type AppUpdateState =
-  | "idle"
-  | "checking"
-  | "available"
-  | "not-available"
-  | "downloading"
-  | "downloaded"
-  | "error";
-
-interface AppUpdateStatus {
-  state: AppUpdateState;
-  currentVersion: string;
-  version?: string;
-  releaseDate?: string;
-  releaseName?: string;
-  releaseNotes?: string;
-  percent?: number;
-  bytesPerSecond?: number;
-  transferred?: number;
-  total?: number;
-  error?: string;
-  feedUrl?: string;
-  canCheck: boolean;
-  canDownload: boolean;
-  canInstall: boolean;
-}
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -121,13 +95,14 @@ function getUpdateFeedLabel() {
 }
 
 function updateStatusPatch(patch: Partial<AppUpdateStatus>) {
+  const nextState = patch.state ?? updateStatus.state;
   updateStatus = {
     ...updateStatus,
     currentVersion: app.getVersion(),
     feedUrl: getUpdateFeedLabel(),
     canCheck: app.isPackaged,
-    canDownload: patch.state === "available" || (patch.state === undefined && updateStatus.state === "available"),
-    canInstall: patch.state === "downloaded" || (patch.state === undefined && updateStatus.state === "downloaded"),
+    canDownload: nextState === "available",
+    canInstall: nextState === "downloaded",
     ...patch,
   };
   mainWindow?.webContents.send("app:update-status", updateStatus);
@@ -161,11 +136,25 @@ function updateStatusFromInfo(state: AppUpdateState, info?: UpdateInfo, extra?: 
   });
 }
 
-function notifyUpdate(title: string, body: string) {
-  if (!Notification.isSupported()) return;
+function shouldShowSystemNotification() {
+  return !BrowserWindow.getFocusedWindow();
+}
+
+function showSystemNotification(title: string, body: string) {
+  if (!Notification.isSupported()) {
+    return { success: false, error: "System notifications are not supported on this platform." };
+  }
+  if (!shouldShowSystemNotification()) {
+    return { success: true };
+  }
   const notification = new Notification({ title, body, icon: getIconPath() });
   notification.on("click", focusMainWindow);
   notification.show();
+  return { success: true };
+}
+
+function notifyUpdate(title: string, body: string) {
+  showSystemNotification(title, body);
 }
 
 function initAutoUpdater() {
@@ -388,18 +377,7 @@ ipcMain.handle("app:setCloseToTray", (_event, enabled: boolean) => {
   return { success: true };
 });
 ipcMain.handle("app:showNotification", (_event, options: { title?: string; body?: string }) => {
-  if (!Notification.isSupported()) {
-    return { success: false, error: "System notifications are not supported on this platform." };
-  }
-
-  const notification = new Notification({
-    title: options.title || "Hpp",
-    body: options.body || "",
-    icon: getIconPath(),
-  });
-  notification.on("click", focusMainWindow);
-  notification.show();
-  return { success: true };
+  return showSystemNotification(options.title || "Hpp", options.body || "");
 });
 
 ipcMain.handle("clipboard:writeImage", async (_event, imageDataUrl: string) => {

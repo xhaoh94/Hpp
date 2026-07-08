@@ -1,4 +1,4 @@
-import { memo, useCallback, useState, type ReactNode } from "react";
+import { isValidElement, memo, useCallback, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -42,9 +42,8 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function getLanguage(children: ReactNode): string {
-  if (!children || typeof children !== "object") return "";
-  const props = (children as any).props;
-  if (!props) return "";
+  if (!isValidElement<{ className?: string }>(children)) return "";
+  const props = children.props;
   const cls = props.className || "";
   const match = String(cls).match(/language-(\w+)/);
   return match ? match[1] : "";
@@ -54,8 +53,8 @@ function getTextContent(children: ReactNode): string {
   if (children === null || children === undefined) return "";
   if (typeof children === "string" || typeof children === "number") return String(children);
   if (Array.isArray(children)) return children.map(getTextContent).join("");
-  if (typeof children === "object" && "props" in children) {
-    return getTextContent((children as any).props.children);
+  if (isValidElement<{ children?: ReactNode }>(children)) {
+    return getTextContent(children.props.children);
   }
   return "";
 }

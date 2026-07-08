@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Copy, Eye, EyeOff, Pencil, Plus, RefreshCw, Save, Trash2, Undo2, X, Zap } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { CheckCircle2, Copy, Eye, EyeOff, GripVertical, Pencil, Plus, RefreshCw, Save, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig } from "@/types";
 import { AVAILABLE_AGENTS, getAgentName } from "@/lib/agents";
 import { useChatStore } from "@/stores/chat-store";
@@ -99,6 +99,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [activatingProviderId, setActivatingProviderId] = useState<string>("");
   const [deletingProviderId, setDeletingProviderId] = useState<string>("");
   const [reloading, setReloading] = useState(false);
+  const [reorderingProviderId, setReorderingProviderId] = useState<string>("");
+  const [dragProviderId, setDragProviderId] = useState<string>("");
+  const [dragOverProviderId, setDragOverProviderId] = useState<string>("");
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -115,7 +118,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   );
 
   const getPreferredProviderId = useCallback((state: AgentConfigState) => {
-    if (usesActivation) return state.activeProviderId || "";
+    if (usesActivation) return state.providers[0]?.providerId || "";
 
     const currentProviderId = agentId === activeAgentId ? currentModelProvider : "";
     if (currentProviderId && state.providers.some((provider) => provider.providerId === currentProviderId)) {
@@ -129,6 +132,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setStatus(null);
     setActivatingProviderId("");
     setDeletingProviderId("");
+    setReorderingProviderId("");
+    setDragProviderId("");
+    setDragOverProviderId("");
     setApiKeyVisible(false);
     setApiKeyCopied(false);
     try {
@@ -310,14 +316,14 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       );
       setSelectedProviderId(
         usesActivation && isNewProvider
-          ? (keepSelectedProviderId ? selectedProviderId : result.config.activeProviderId || "")
+          ? (keepSelectedProviderId ? selectedProviderId : result.config.providers[0]?.providerId || "")
           : normalizedDraft.providerId
       );
       setDraft(cloneProvider(normalizedDraft));
       setEditorBaseline(null);
       setEditorOriginalProviderId("");
       setEditorOpen(false);
-      if (!usesActivation && result.models && result.models.length > 0) {
+      if (result.models && result.models.length > 0) {
         onModelsUpdated(agentId, result.models);
       }
       const count = result.reloadedSessionIds?.length || 0;
@@ -374,9 +380,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         return;
       }
       setConfig(result.config);
-      const nextSelected = usesActivation
-        ? result.config.activeProviderId || result.config.providers[0]?.providerId || ""
-        : result.config.providers[0]?.providerId || "";
+      const nextSelected = result.config.providers[0]?.providerId || "";
       setSelectedProviderId(nextSelected);
       setDraft(null);
       setEditorBaseline(null);
@@ -397,6 +401,86 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setDeletingProviderId("");
     }
   }, [agentId, onModelsUpdated, usesActivation]);
+
+  const handleProviderDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
+    if (config.providers.length < 2 || reorderingProviderId) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", providerId);
+    setDragProviderId(providerId);
+    setDragOverProviderId("");
+  }, [config.providers.length, reorderingProviderId]);
+
+  const handleProviderDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
+    if (!dragProviderId || dragProviderId === providerId || reorderingProviderId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverProviderId(providerId);
+  }, [dragProviderId, reorderingProviderId]);
+
+  const handleProviderDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+    setDragOverProviderId((current) => current === providerId ? "" : current);
+  }, []);
+
+  const handleProviderDragEnd = useCallback(() => {
+    setDragProviderId("");
+    setDragOverProviderId("");
+  }, []);
+
+  const handleProviderDrop = useCallback(async (event: ReactDragEvent<HTMLDivElement>, targetProviderId: string) => {
+    event.preventDefault();
+    const sourceProviderId = event.dataTransfer.getData("text/plain") || dragProviderId;
+    setDragProviderId("");
+    setDragOverProviderId("");
+    if (!sourceProviderId || sourceProviderId === targetProviderId || reorderingProviderId) return;
+
+    const fromIndex = config.providers.findIndex((provider) => provider.providerId === sourceProviderId);
+    const rawTargetIndex = config.providers.findIndex((provider) => provider.providerId === targetProviderId);
+    if (fromIndex < 0 || rawTargetIndex < 0) return;
+
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    const dropAfterTarget = event.clientY > targetRect.top + targetRect.height / 2;
+    let targetIndex = rawTargetIndex + (dropAfterTarget ? 1 : 0);
+    if (fromIndex < targetIndex) targetIndex -= 1;
+    if (targetIndex === fromIndex) return;
+
+    const previousConfig = config;
+    const nextProviders = [...config.providers];
+    const [movedProvider] = nextProviders.splice(fromIndex, 1);
+    nextProviders.splice(targetIndex, 0, movedProvider);
+    const nextConfig = { ...config, providers: nextProviders };
+    const nextProviderIds = nextProviders.map((provider) => provider.providerId);
+
+    setConfig(nextConfig);
+    setStatus(null);
+    setReorderingProviderId(sourceProviderId);
+
+    try {
+      const result = await window.electronAPI.agentConfigReorder(agentId, nextProviderIds);
+      if (!result.success || !result.config) {
+        setConfig(previousConfig);
+        setStatus({ type: "error", text: result.error || "保存渠道顺序失败" });
+        return;
+      }
+      setConfig(result.config);
+      if (result.models) {
+        onModelsUpdated(agentId, result.models);
+      }
+      setStatus({
+        type: "success",
+        text: result.error || "渠道顺序已保存",
+      });
+    } catch (error) {
+      setConfig(previousConfig);
+      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setReorderingProviderId("");
+    }
+  }, [agentId, config, dragProviderId, onModelsUpdated, reorderingProviderId]);
 
   const handleCopyApiKey = useCallback(async () => {
     const apiKey = draft?.apiKey || "";
@@ -470,6 +554,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     const active = usesActivation && provider.providerId === config.activeProviderId;
                     const selected = provider.providerId === selectedProviderId;
                     const activating = activatingProviderId === provider.providerId;
+                    const dragging = dragProviderId === provider.providerId;
+                    const dropTarget = dragOverProviderId === provider.providerId;
+                    const reordering = reorderingProviderId === provider.providerId;
                     const title = provider.displayName || provider.providerId;
                     const initial = title.trim().slice(0, 1).toUpperCase() || "C";
                     return (
@@ -478,9 +565,18 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         ref={(element) => {
                           providerItemRefs.current[provider.providerId] = element;
                         }}
-                        className={`agent-config-provider-item ${selected ? "selected" : ""} ${active ? "active" : ""}`}
+                        className={`agent-config-provider-item ${selected ? "selected" : ""} ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""} ${reordering ? "reordering" : ""}`}
+                        draggable={config.providers.length > 1 && !reorderingProviderId}
+                        onDragStart={(event) => handleProviderDragStart(event, provider.providerId)}
+                        onDragOver={(event) => handleProviderDragOver(event, provider.providerId)}
+                        onDragLeave={(event) => handleProviderDragLeave(event, provider.providerId)}
+                        onDrop={(event) => void handleProviderDrop(event, provider.providerId)}
+                        onDragEnd={handleProviderDragEnd}
                         onClick={() => handleSelectProvider(provider)}
                       >
+                        <span className="agent-config-provider-drag" title="拖动调整渠道顺序" aria-hidden="true">
+                          <GripVertical size={14} />
+                        </span>
                         <div className="agent-config-provider-avatar">{initial}</div>
                         <div className="agent-config-provider-main">
                           <div className="agent-config-provider-title-line">
@@ -504,7 +600,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                                   event.stopPropagation();
                                   void handleActivate(provider.providerId);
                                 }}
-                                disabled={!!activatingProviderId}
+                                disabled={!!activatingProviderId || !!reorderingProviderId}
                               >
                                 {activating ? "启用中..." : "启用"}
                               </button>
@@ -515,7 +611,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     );
                   })}
                 </div>
-                <button type="button" className="filter-add-btn agent-config-add-provider" onClick={handleAddProvider}>
+                <button type="button" className="filter-add-btn agent-config-add-provider" onClick={handleAddProvider} disabled={!!reorderingProviderId}>
                   <Plus size={13} />
                   新增渠道
                 </button>
@@ -549,7 +645,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                           type="button"
                           className="btn-action"
                           onClick={() => void handleDelete(selectedSavedProvider.providerId)}
-                          disabled={!!deletingProviderId || (usesActivation && selectedSavedProvider.providerId === config.activeProviderId)}
+                          disabled={!!deletingProviderId || !!reorderingProviderId || (usesActivation && selectedSavedProvider.providerId === config.activeProviderId)}
                           title={usesActivation && selectedSavedProvider.providerId === config.activeProviderId ? "请先启用其它渠道再删除当前渠道" : undefined}
                         >
                           <Trash2 size={13} />
@@ -595,7 +691,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         type="button"
                         className="filter-add-btn agent-config-activate-wide"
                         onClick={() => void handleActivate(selectedSavedProvider.providerId)}
-                        disabled={!!activatingProviderId}
+                        disabled={!!activatingProviderId || !!reorderingProviderId}
                       >
                         <Zap size={13} />
                         {activatingProviderId

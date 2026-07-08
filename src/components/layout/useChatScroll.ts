@@ -10,12 +10,10 @@ import {
 const SCROLL_BOTTOM_THRESHOLD = 50;
 
 export function useChatScroll({
-  messages,
   activeSessionId,
   activeSessionInitialized,
   questionnairePaneHeight,
 }: {
-  messages: unknown[];
   activeSessionId: string | null;
   activeSessionInitialized: boolean;
   questionnairePaneHeight: number | null;
@@ -53,14 +51,22 @@ export function useChatScroll({
     return () => el.removeEventListener("scroll", handleScroll);
   }, [updateScrollBottomState]);
 
-  useLayoutEffect(() => {
+  const handleContentChange = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
       el.scrollTop = el.scrollHeight;
     }
     updateScrollBottomState(el);
-  }, [messages, activeSessionId, activeSessionInitialized, questionnairePaneHeight, updateScrollBottomState]);
+    if (autoFollowBottomRef.current && getDistanceFromScrollBottom(el) < 100) {
+      el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(() => updateScrollBottomState(el));
+    }
+  }, [getDistanceFromScrollBottom, updateScrollBottomState]);
+
+  useLayoutEffect(() => {
+    handleContentChange();
+  }, [activeSessionId, activeSessionInitialized, questionnairePaneHeight, handleContentChange]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -79,15 +85,6 @@ export function useChatScroll({
       observer.disconnect();
     };
   }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !autoFollowBottomRef.current) return;
-    if (getDistanceFromScrollBottom(el) < 100) {
-      el.scrollTop = el.scrollHeight;
-      requestAnimationFrame(() => updateScrollBottomState(el));
-    }
-  }, [messages, getDistanceFromScrollBottom, updateScrollBottomState]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -176,5 +173,6 @@ export function useChatScroll({
     scrollToMessage,
     preserveScrollDuringLayoutChange,
     enableAutoFollow,
+    handleContentChange,
   };
 }

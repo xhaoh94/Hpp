@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode, type RefObject } from "react";
-import { Check, Settings, Star } from "lucide-react";
+import { Settings } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
 
@@ -16,7 +16,6 @@ type ChatToolbarProps = {
   currentThinking: ThinkingLevelOption;
   expandedProvider: string | null;
   favoriteModels: ModelInfo[];
-  flattenModelList: boolean;
   modelOpen: boolean;
   modelProviders: string[];
   planModeEnabled: boolean;
@@ -45,7 +44,6 @@ export function ChatToolbar({
   currentThinking,
   expandedProvider,
   favoriteModels,
-  flattenModelList,
   modelOpen,
   modelProviders,
   planModeEnabled,
@@ -124,7 +122,7 @@ export function ChatToolbar({
           </svg>
         </button>
         {modelOpen && (
-          <div className={`chat-dropdown ${flattenModelList ? "chat-dropdown-codex" : ""}`}>
+          <div className="chat-dropdown">
             <div className="chat-model-dropdown-header">
               <span className="chat-model-dropdown-title">{getAgentName(agentId)} 模型</span>
               <span className="chat-model-dropdown-meta">{availableModels.length} 个可用</span>
@@ -144,48 +142,14 @@ export function ChatToolbar({
             {availableModels.length === 0 && (
               <div className="chat-dropdown-empty">暂无可用模型</div>
             )}
-            {flattenModelList ? (
-              availableModels.length > 0 && (
-                <>
-                  <div className="chat-codex-model-list">
-                    {availableModels.map((model) => {
-                      const isFav = isFavoriteModel(model);
-                      const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
-                      return (
-                        <div
-                          key={`${model.provider}:${model.id}`}
-                          className={`chat-codex-model-item ${isActive ? "active" : ""}`}
-                          onClick={() => onSelectModel(model)}
-                          title={model.name}
-                        >
-                          <span className="chat-codex-model-check">
-                            {isActive && <Check size={13} strokeWidth={2.4} />}
-                          </span>
-                          <span className="chat-codex-model-main">
-                            <span className="chat-codex-model-name">{model.name}</span>
-                          </span>
-                          <button
-                            type="button"
-                            onClick={(event) => { event.stopPropagation(); onToggleFavorite(model); }}
-                            className={`chat-dropdown-star chat-codex-model-star ${isFav ? "fav" : ""}`}
-                            title={isFav ? "取消收藏" : "收藏模型"}
-                          >
-                            <Star size={14} fill={isFav ? "currentColor" : "none"} strokeWidth={1.9} />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              )
-            ) : modelProviders.map((provider) => {
+            {modelProviders.map((provider) => {
               const providerModels = modelsByProvider.get(provider) || [];
               const isExpanded = expandedProvider === provider;
               const hasActiveModel = providerModels.some(
                 (model) => model.id === currentModel?.id && model.provider === currentModel?.provider
               );
               return (
-                <div key={provider}>
+                <div key={provider} className={`chat-dropdown-provider-group ${isExpanded ? "expanded" : ""}`}>
                   <div
                     className={`chat-dropdown-provider ${isExpanded ? "expanded" : ""} ${hasActiveModel ? "has-active" : ""}`}
                     onClick={() => onExpandedProviderChange(isExpanded ? null : provider)}
@@ -201,7 +165,7 @@ export function ChatToolbar({
                     >
                       <path d="M9 18l6-6-6-6" />
                     </svg>
-                    <span>{provider}</span>
+                    <span className="chat-dropdown-provider-name">{provider}</span>
                     <span className="chat-dropdown-provider-count">{providerModels.length}</span>
                   </div>
                   {isExpanded && providerModels.map((model) => {
@@ -215,6 +179,7 @@ export function ChatToolbar({
                       >
                         <span className="chat-dropdown-model-main">
                           <span className="truncate">{model.name}</span>
+                          {isActive && <span className="chat-dropdown-current-badge">当前</span>}
                         </span>
                         <button
                           onClick={(event) => { event.stopPropagation(); onToggleFavorite(model); }}

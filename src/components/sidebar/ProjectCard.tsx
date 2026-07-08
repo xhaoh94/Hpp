@@ -11,6 +11,22 @@ const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 // Braille Spinner
 const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function getStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : undefined;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function BrailleSpinner() {
   const [index, setIndex] = useState(0);
   useEffect(() => {
@@ -50,11 +66,13 @@ export function ProjectCard({ project }: Props) {
     const run = async () => {
       setLoading(true);
       // Load settings
-      const data: any = await window.electronAPI.loadData("settings");
+      const data = await window.electronAPI.loadData("settings");
       if (cancelled) return;
-      const enabled = data?.general?.enabledAgents || ["codex", "pi"];
+      const settings = asRecord(data);
+      const general = asRecord(settings.general);
+      const enabled = getStringArray(general.enabledAgents) || ["codex", "pi"];
       setEnabledAgents(enabled);
-      setAgentOrder(normalizeAgentOrder(data?.general?.agentOrder));
+      setAgentOrder(normalizeAgentOrder(getStringArray(general.agentOrder)));
       // Check all agents in parallel
       const checks = AVAILABLE_AGENTS.map(async (agent) => {
         if (agent.runtime === "sdk") {
@@ -163,20 +181,34 @@ export function ProjectCard({ project }: Props) {
         }
       }
       if (!result.success) {
+        clearAgentStartupErrors(sessionId);
         addMessage({
           id: crypto.randomUUID(),
           role: "system",
-          content: `Agent 启动失败: ${result.error}`,
+          content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
           timestamp: Date.now(),
           systemType: "agent_startup_error",
         }, sessionId);
       } else {
         clearAgentStartupErrors(sessionId);
       }
+    }).catch((error: unknown) => {
+      markSessionInitialized(sessionId);
+      clearAgentStartupErrors(sessionId);
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: `Agent 启动失败: ${getErrorMessage(error)}`,
+        timestamp: Date.now(),
+        systemType: "agent_startup_error",
+      }, sessionId);
     });
   };
 
   const handleSelectSession = async (session: ProjectSession) => {
+    setShowAddAgent(false);
+    setShowHistory(false);
+
     // Save current session's messages before switching
     const prevSessionId = activeSessionId;
     if (prevSessionId) {
@@ -208,6 +240,16 @@ export function ProjectCard({ project }: Props) {
         applySessionModels(session.id, result.models);
       }
       markSessionInitialized(session.id);
+      if (!result.success) {
+        clearAgentStartupErrors(session.id);
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "system",
+          content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
+          timestamp: Date.now(),
+          systemType: "agent_startup_error",
+        }, session.id);
+      }
       // Only update if this session is still the active one
       if (useProjectStore.getState().activeSessionId === session.id) {
         await window.electronAPI.agentSwitchSession(session.id);
@@ -229,6 +271,16 @@ export function ProjectCard({ project }: Props) {
           }
         } catch { /* ignore */ }
       }
+    }).catch((error: unknown) => {
+      markSessionInitialized(session.id);
+      clearAgentStartupErrors(session.id);
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: `Agent 启动失败: ${getErrorMessage(error)}`,
+        timestamp: Date.now(),
+        systemType: "agent_startup_error",
+      }, session.id);
     });
   };
 

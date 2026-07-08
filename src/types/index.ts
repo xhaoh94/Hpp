@@ -1,3 +1,23 @@
+import type {
+  AgentEvent,
+  AgentImagePayload,
+  AgentSendOptions,
+  AgentUIResponse,
+  AppUpdateResult,
+  AppUpdateStatus,
+} from "./ipc";
+
+export type {
+  AgentEvent,
+  AgentImagePayload,
+  AgentImagePayloadItem,
+  AgentSendOptions,
+  AgentUIResponse,
+  AppUpdateResult,
+  AppUpdateState,
+  AppUpdateStatus,
+} from "./ipc";
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -73,90 +93,6 @@ export interface AgentReloadConfigResult {
   reloadedSessionIds?: string[];
 }
 
-export type AppUpdateState =
-  | "idle"
-  | "checking"
-  | "available"
-  | "not-available"
-  | "downloading"
-  | "downloaded"
-  | "error";
-
-export interface AppUpdateStatus {
-  state: AppUpdateState;
-  currentVersion: string;
-  version?: string;
-  releaseDate?: string;
-  releaseName?: string;
-  releaseNotes?: string;
-  percent?: number;
-  bytesPerSecond?: number;
-  transferred?: number;
-  total?: number;
-  error?: string;
-  feedUrl?: string;
-  canCheck: boolean;
-  canDownload: boolean;
-  canInstall: boolean;
-}
-
-export interface AppUpdateResult {
-  success: boolean;
-  error?: string;
-  status?: AppUpdateStatus;
-}
-
-export interface AgentSendOptions {
-  planModeEnabled?: boolean;
-  clientMessageId?: string;
-}
-
-export interface AgentEvent {
-  type: string;
-  sessionId?: string;
-  agentId?: string;
-  content?: string;
-  delta?: string;
-  force?: boolean;
-  toolCallId?: string;
-  callId?: string;
-  id?: string;
-  requestId?: string;
-  toolName?: string;
-  name?: string;
-  tool?: string;
-  toolKind?: string;
-  kind?: string;
-  mode?: string;
-  method?: string;
-  entryType?: string;
-  title?: string;
-  state?: string;
-  status?: string;
-  command?: string;
-  filePath?: string;
-  detail?: unknown;
-  args?: Record<string, unknown>;
-  input?: Record<string, unknown>;
-  questions?: unknown;
-  question?: unknown;
-  prompt?: unknown;
-  message?: unknown;
-  files?: unknown;
-  diffs?: unknown;
-  steps?: unknown;
-  patch?: unknown;
-  additions?: unknown;
-  deletions?: unknown;
-  outputText?: unknown;
-  errorText?: unknown;
-  isError?: boolean;
-  sessionFilePath?: unknown;
-  [key: string]: unknown;
-}
-
-export type AgentUIResponse = Record<string, unknown>;
-
 export interface AgentPackageStatus {
   installed: boolean;
   currentVersion?: string;
@@ -215,14 +151,15 @@ export interface ElectronAPI {
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
-  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
+  agentSendMessage: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
   agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
   agentConfigActivate: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigDelete: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
-  agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
+  agentConfigReorder: (agentId: string, providerIds: string[]) => Promise<AgentConfigResult>;
+  agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;

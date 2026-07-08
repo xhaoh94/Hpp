@@ -6,6 +6,8 @@ import { AgentEventBuffer } from "./agent-event-buffer";
 import { getOpenCodeConfigPath } from "./agent-config";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
 import { getCommandEnv, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
+import { isRecord } from "../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -21,6 +23,19 @@ interface AgentSendOptions {
   permissionMode?: "plan" | "full-access";
 }
 
+type OpenCodePromptPart =
+  | { type: "text"; text: string }
+  | { type: "file"; mime: string; filename: string; url: string };
+
+interface OpenCodePromptBody {
+  parts: OpenCodePromptPart[];
+  agent?: "plan" | "build";
+  model?: { providerID: string; modelID: string };
+}
+
+const asRecord = (value: unknown): UnknownRecord =>
+  isRecord(value) ? value : {};
+
 function formatProcessDetail(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value === "string") return value;
@@ -32,14 +47,15 @@ function formatProcessDetail(value: unknown): string | undefined {
   }
 }
 
-function summarizeToolPart(props: any) {
-  const part = props.part || props;
+function summarizeToolPart(props: unknown) {
+  const propsRecord = asRecord(props);
+  const part = asRecord(propsRecord.part || propsRecord);
   const toolName =
-    part.tool || part.toolName || part.name || part.type || props.tool || props.toolName || "tool";
-  const toolCallId = part.id || part.callID || part.callId || props.partID || props.partId || props.id || toolName;
-  const args = part.input || part.args || props.input || props.args;
-  const output = part.output || part.result || props.output || props.result;
-  const error = part.error || props.error;
+    part.tool || part.toolName || part.name || part.type || propsRecord.tool || propsRecord.toolName || "tool";
+  const toolCallId = part.id || part.callID || part.callId || propsRecord.partID || propsRecord.partId || propsRecord.id || toolName;
+  const args = part.input || part.args || propsRecord.input || propsRecord.args;
+  const output = part.output || part.result || propsRecord.output || propsRecord.result;
+  const error = part.error || propsRecord.error;
 
   return {
     toolName,
@@ -59,10 +75,11 @@ function isAskUserName(value: unknown) {
   return ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"].includes(normalizeEventName(value));
 }
 
-function isToolLikePart(props: any) {
-  const part = props.part || props;
-  const partType = part.type || props.type;
-  const toolName = part.tool || part.toolName || part.name || props.tool || props.toolName || partType;
+function isToolLikePart(props: unknown) {
+  const propsRecord = asRecord(props);
+  const part = asRecord(propsRecord.part || propsRecord);
+  const partType = part.type || propsRecord.type;
+  const toolName = part.tool || part.toolName || part.name || propsRecord.tool || propsRecord.toolName || partType;
   return (
     (partType && String(partType).startsWith("tool")) ||
     isAskUserName(partType) ||
@@ -70,17 +87,19 @@ function isToolLikePart(props: any) {
   );
 }
 
-function isToolPartComplete(props: any) {
-  const part = props.part || props;
-  const state = part.state?.status || part.state || part.status || props.status;
+function isToolPartComplete(props: unknown) {
+  const propsRecord = asRecord(props);
+  const part = asRecord(propsRecord.part || propsRecord);
+  const partState = asRecord(part.state);
+  const state = partState.status || part.state || part.status || propsRecord.status;
   const normalizedState = typeof state === "string" ? state.toLowerCase() : "";
   return (
     part.output !== undefined ||
     part.result !== undefined ||
     part.error !== undefined ||
-    props.output !== undefined ||
-    props.result !== undefined ||
-    props.error !== undefined ||
+    propsRecord.output !== undefined ||
+    propsRecord.result !== undefined ||
+    propsRecord.error !== undefined ||
     ["done", "completed", "complete", "success", "error", "failed"].includes(normalizedState)
   );
 }
@@ -111,10 +130,11 @@ function buildOpenCodeConfigContent(existing?: string): string {
   return source;
 }
 
-function modelSupportsImages(modelInfo: any): boolean {
-  if (!modelInfo || typeof modelInfo !== "object") return false;
-  if (modelInfo.attachment === true || modelInfo.supportsImages === true || modelInfo.imageInput === true) return true;
-  const input = modelInfo.input || modelInfo.modalities?.input;
+function modelSupportsImages(modelInfo: unknown): boolean {
+  const info = asRecord(modelInfo);
+  if (info.attachment === true || info.supportsImages === true || info.imageInput === true) return true;
+  const modalities = asRecord(info.modalities);
+  const input = info.input || modalities.input;
   return Array.isArray(input) && input.includes("image");
 }
 
@@ -220,7 +240,7 @@ export class OpenCodeAgent {
   private async verifySession(sessionId: string): Promise<boolean> {
     try {
       const result = await this.httpGet(`/session/${sessionId}`);
-      return !!(result && (result as any).id);
+      return asRecord(result).id !== undefined;
     } catch {
       return false;
     }
@@ -231,7 +251,7 @@ export class OpenCodeAgent {
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const result = await this.httpGet("/global/health");
-        if (result && (result as any).healthy) {
+        if (asRecord(result).healthy) {
           this.emitEvent({ type: "agent_ready", agentId: "opencode", mock: false });
           return;
         }
@@ -250,8 +270,9 @@ export class OpenCodeAgent {
 
     try {
       const result = await this.httpPost("/session", {});
-      if (result && (result as any).id) {
-        this.sessionId = (result as any).id;
+      const sessionId = asRecord(result).id;
+      if (sessionId !== undefined && sessionId !== null) {
+        this.sessionId = String(sessionId);
         return this.sessionId;
       }
     } catch (e) {
@@ -261,7 +282,7 @@ export class OpenCodeAgent {
   }
 
   /** Send a message to the opencode session */
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.sessionId) {
       await this.createSession();
     }
@@ -277,7 +298,7 @@ export class OpenCodeAgent {
     this.startSSEListener();
 
     try {
-      const parts: any[] = [{ type: "text", text: message }];
+      const parts: OpenCodePromptPart[] = [{ type: "text", text: message }];
       if (images?.length) {
         images.forEach((image, index) => {
           const mimeType = image.mimeType || "image/png";
@@ -289,7 +310,7 @@ export class OpenCodeAgent {
           });
         });
       }
-      const body: any = { parts };
+      const body: OpenCodePromptBody = { parts };
       if (options?.planModeEnabled || options?.permissionMode === "plan") {
         body.agent = "plan";
       } else {
@@ -353,18 +374,19 @@ export class OpenCodeAgent {
       if (line.startsWith("data: ")) {
         const jsonStr = line.slice(6).trim();
         if (!jsonStr) continue;
-        let parsed: any;
+        let parsed: unknown;
         try { parsed = JSON.parse(jsonStr); } catch { continue; }
-        if (parsed.type) {
+        if (isRecord(parsed) && typeof parsed.type === "string") {
           this.handleSSEEvent(parsed.type, parsed);
         }
       }
     }
   }
 
-  private handleSSEEvent(eventType: string, data: any) {
-    const props = data.properties || data;
-    const part = props.part || props;
+  private handleSSEEvent(eventType: string, data: unknown) {
+    const dataRecord = asRecord(data);
+    const props = asRecord(dataRecord.properties || dataRecord);
+    const part = asRecord(props.part || props);
     if (
       isContextCompactionLike(
         eventType,
@@ -379,7 +401,7 @@ export class OpenCodeAgent {
         part.message
       )
     ) {
-      this.emitEvent({ type: "context_compaction", id: part.id || props.partID || props.partId || props.id || data.id });
+      this.emitEvent({ type: "context_compaction", id: part.id || props.partID || props.partId || props.id || dataRecord.id });
       return;
     }
 
@@ -426,7 +448,7 @@ export class OpenCodeAgent {
       }
       case "message.part.done":
       case "message.part.removed": {
-        const partType = props.part?.type || props.type;
+        const partType = part.type || props.type;
         if (partType === "thinking") {
           this.emitEvent({ type: "thinking_end" });
         } else if (isToolLikePart(props)) {
@@ -450,19 +472,20 @@ export class OpenCodeAgent {
         break;
       }
       case "message.part.delta": {
-        // Cancel any pending idle - main agent may still be processing
+        // Cancel pending idle handling - main agent may still be processing
         this.cancelIdleTimer();
         if (props.field === "text" && props.delta) {
           this.streamedContent = true;
-          this.emitEvent({ type: "stream_delta", delta: props.delta });
+          this.emitEvent({ type: "stream_delta", delta: String(props.delta) });
         } else if (props.field === "thinking" && props.delta) {
           this.streamedContent = true;
-          this.emitEvent({ type: "thinking_delta", delta: props.delta });
+          this.emitEvent({ type: "thinking_delta", delta: String(props.delta) });
         }
         break;
       }
       case "session.status": {
-        const statusType = props.status?.type || props.status;
+        const status = asRecord(props.status);
+        const statusType = status.type || props.status;
         if (statusType === "busy") {
           this.emitEvent({
             type: "process_event",
@@ -470,7 +493,7 @@ export class OpenCodeAgent {
             title: "OpenCode 正在处理",
             state: "running",
           });
-          // Session is busy - cancel any pending idle timer (sub-agent done but main agent continues)
+          // Session is busy - cancel pending idle timer (sub-agent done but main agent continues)
           this.cancelIdleTimer();
         } else if (statusType === "idle") {
           this.emitEvent({
@@ -480,23 +503,27 @@ export class OpenCodeAgent {
             state: "completed",
           });
           // Session is truly idle - schedule stream end with a small delay
-          // to catch any trailing message.part.delta events
+          // to catch trailing message.part.delta events
           this.scheduleIdleEnd();
         }
         break;
       }
       case "session.error": {
         this.cancelIdleTimer();
-        const err = props.error;
+        const err = asRecord(props.error);
+        const errData = asRecord(err.data);
+        const message =
+          typeof errData.message === "string" ? errData.message :
+          typeof err.message === "string" ? err.message :
+          "OpenCode request failed";
         this.emitEvent({
           type: "process_event",
           entryType: "error",
           title: "OpenCode 错误",
-          detail: err?.data?.message || err?.message || "OpenCode request failed",
+          detail: message,
           state: "error",
         });
-        const msg = err?.data?.message || err?.message || "未知错误";
-        this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${msg}` });
+        this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${message || "未知错误"}` });
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
         this.stopSSEListener();
@@ -556,22 +583,32 @@ export class OpenCodeAgent {
     }
 
     try {
-      const messages = (await this.httpGet(`/session/${this.sessionId}/message`)) as any[];
+      const messages = await this.httpGet(`/session/${this.sessionId}/message`);
       if (Array.isArray(messages)) {
         // Find the last assistant message
-        const assistantMsg = [...messages].reverse().find((m: any) => m.info?.role === "assistant");
-        if (assistantMsg && assistantMsg.parts && assistantMsg.parts.length > 0) {
-          for (const part of assistantMsg.parts) {
-            if (part.type === "text" && part.text) {
+        const assistantMsg = [...messages]
+          .reverse()
+          .map((message) => asRecord(message))
+          .find((message) => asRecord(message.info).role === "assistant");
+        const assistantParts = Array.isArray(assistantMsg?.parts) ? assistantMsg.parts : [];
+        if (assistantParts.length > 0) {
+          for (const rawPart of assistantParts) {
+            const part = asRecord(rawPart);
+            if (part.type === "text" && typeof part.text === "string") {
               this.emitEvent({ type: "stream_delta", delta: part.text });
-            } else if (part.type === "thinking" && part.text) {
+            } else if (part.type === "thinking" && typeof part.text === "string") {
               this.emitEvent({ type: "thinking_delta", delta: part.text });
               this.emitEvent({ type: "thinking_end" });
             }
           }
-        } else if (assistantMsg?.info?.error) {
+        } else if (asRecord(assistantMsg?.info).error) {
           // Message completed with error
-          const errMsg = assistantMsg.info.error.data?.message || assistantMsg.info.error.message || "请求失败";
+          const error = asRecord(asRecord(assistantMsg?.info).error);
+          const errorData = asRecord(error.data);
+          const errMsg =
+            typeof errorData.message === "string" ? errorData.message :
+            typeof error.message === "string" ? error.message :
+            "请求失败";
           this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${errMsg}` });
         } else {
           this.emitEvent({ type: "stream_delta", delta: "\n\n(无响应内容)" });
@@ -614,36 +651,46 @@ export class OpenCodeAgent {
     if (this.models.length > 0) return this.models;
 
     try {
-      const result = (await this.httpGet("/config/providers")) as any;
-      if (result && result.providers) {
+      const result = asRecord(await this.httpGet("/config/providers"));
+      if (Array.isArray(result.providers)) {
         const models: AgentModel[] = [];
-        for (const provider of result.providers) {
-          const providerId = provider.id || provider.name;
+        for (const rawProvider of result.providers) {
+          const provider = asRecord(rawProvider);
+          const providerIdValue = provider.id || provider.name;
+          if (providerIdValue === undefined || providerIdValue === null) continue;
+          const providerId = String(providerIdValue);
           if (Array.isArray(provider.models)) {
-            for (const m of provider.models) {
+            for (const rawModel of provider.models) {
+              const model = asRecord(rawModel);
+              const modelId = model.id || model.name;
+              if (modelId === undefined || modelId === null) continue;
               models.push({
-                id: m.id || m.name,
-                name: m.name || m.id,
+                id: String(modelId),
+                name: String(model.name || model.id || modelId),
                 provider: providerId,
-                reasoning: m.reasoning ?? false,
-                supportsImages: modelSupportsImages(m),
+                reasoning: typeof model.reasoning === "boolean" ? model.reasoning : false,
+                supportsImages: modelSupportsImages(model),
               });
             }
-          } else if (provider.models && typeof provider.models === "object") {
+          } else if (isRecord(provider.models)) {
             // models may be a record: { modelId: modelInfo }
-            for (const [modelId, modelInfo] of Object.entries(provider.models as Record<string, any>)) {
+            for (const [modelId, modelInfo] of Object.entries(provider.models)) {
+              const model = asRecord(modelInfo);
               models.push({
                 id: modelId,
-                name: modelInfo?.name || modelId,
+                name: typeof model.name === "string" ? model.name : modelId,
                 provider: providerId,
-                reasoning: modelInfo?.reasoning ?? false,
+                reasoning: typeof model.reasoning === "boolean" ? model.reasoning : false,
                 supportsImages: modelSupportsImages(modelInfo),
               });
             }
-          } else if (result.default?.[providerId]) {
+          } else {
+            const defaults = asRecord(result.default);
+            const defaultModel = defaults[providerId];
+            if (defaultModel === undefined || defaultModel === null) continue;
             models.push({
-              id: result.default[providerId],
-              name: result.default[providerId],
+              id: String(defaultModel),
+              name: String(defaultModel),
               provider: providerId,
               reasoning: false,
               supportsImages: false,
@@ -674,7 +721,7 @@ export class OpenCodeAgent {
     this.emitEvent({ type: "thinking_level_changed", level: _level });
   }
 
-  sendUIResponse(_response: any) {
+  sendUIResponse(_response: AgentUIResponse) {
     // OpenCode ask-user style events are surfaced in the process trace; the
     // current HTTP/SSE bridge does not expose a matching UI response endpoint.
   }

@@ -56,6 +56,14 @@ export interface NormalizedFileDiff {
   status?: "added" | "deleted" | "modified";
 }
 
+type UnknownRecord = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is UnknownRecord =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const asRecord = (value: unknown): UnknownRecord =>
+  isRecord(value) ? value : {};
+
 const normalizeEventToken = (value: unknown) =>
   String(value || "")
     .trim()
@@ -141,16 +149,16 @@ const matchesToolAlias = (normalized: string, alias: string) =>
   normalized.endsWith(`:${alias}`) ||
   normalized.endsWith(`__${alias}`);
 
-const getNestedValue = (value: any, path: string[]): any => {
-  let current = value;
+const getNestedValue = (value: unknown, path: string[]): unknown => {
+  let current: unknown = value;
   for (const key of path) {
-    if (current === undefined || current === null) return undefined;
+    if (!isRecord(current)) return undefined;
     current = current[key];
   }
   return current;
 };
 
-const findFirstString = (value: any, paths: string[][]): string => {
+const findFirstString = (value: unknown, paths: string[][]): string => {
   for (const path of paths) {
     const found = getNestedValue(value, path);
     if (typeof found === "string" && found.trim()) return found;
@@ -180,13 +188,15 @@ export const unwrapToolText = (value: unknown, depth = 0): string | undefined =>
   }
   if (typeof value !== "object") return undefined;
 
-  const anyValue = value as any;
-  if (Array.isArray(anyValue.content)) {
-    const text = anyValue.content
-      .map((item: any) => {
+  const record = asRecord(value);
+  const content = record.content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((item) => {
         if (typeof item === "string") return item;
-        if (item?.type === "text" && typeof item.text === "string") return item.text;
-        if (typeof item?.text === "string") return item.text;
+        const itemRecord = asRecord(item);
+        if (itemRecord.type === "text" && typeof itemRecord.text === "string") return itemRecord.text;
+        if (typeof itemRecord.text === "string") return itemRecord.text;
         return "";
       })
       .filter(Boolean)
@@ -194,16 +204,17 @@ export const unwrapToolText = (value: unknown, depth = 0): string | undefined =>
     if (text.trim()) return text;
   }
 
-  if (typeof anyValue.text === "string" && (!anyValue.type || anyValue.type === "text")) {
-    return anyValue.text;
+  if (typeof record.text === "string" && (!record.type || record.type === "text")) {
+    return record.text;
   }
 
-  const stdout = typeof anyValue.stdout === "string" ? anyValue.stdout : "";
-  const stderr = typeof anyValue.stderr === "string" ? anyValue.stderr : "";
+  const stdout = typeof record.stdout === "string" ? record.stdout : "";
+  const stderr = typeof record.stderr === "string" ? record.stderr : "";
   if (stdout || stderr) return [stdout, stderr].filter(Boolean).join("\n");
 
   for (const key of ["output", "result", "message"]) {
-    if (typeof anyValue[key] === "string") return anyValue[key];
+    const text = record[key];
+    if (typeof text === "string") return text;
   }
 
   return undefined;
@@ -263,7 +274,13 @@ const getToolKind = (toolName: unknown, command: string, patch: string): Normali
 export const isQuestionToolName = (toolName: unknown): boolean =>
   getToolKind(toolName, "", "") === "question";
 
-const getToolPath = (toolKind: NormalizedToolKind, data: any, args: any, result: any, patchFilePath: string): string => {
+const getToolPath = (
+  toolKind: NormalizedToolKind,
+  data: unknown,
+  args: unknown,
+  result: unknown,
+  patchFilePath: string
+): string => {
   if (patchFilePath) return patchFilePath;
   if (!["read_file", "list_dir", "write_file", "edit_file"].includes(toolKind)) return "";
 
@@ -296,7 +313,7 @@ const getToolPath = (toolKind: NormalizedToolKind, data: any, args: any, result:
   );
 };
 
-const getPatch = (data: any, args: any, result: any): string => {
+const getPatch = (data: unknown, args: unknown, result: unknown): string => {
   return findFirstString(
     { data, args, result },
     [
@@ -312,7 +329,7 @@ const getPatch = (data: any, args: any, result: any): string => {
   );
 };
 
-const getCommand = (args: any, data: any): string =>
+const getCommand = (args: unknown, data: unknown): string =>
   findFirstString(
     { args, data },
     [
@@ -325,7 +342,7 @@ const getCommand = (args: any, data: any): string =>
     ]
   );
 
-const getPattern = (args: any, data: any): string =>
+const getPattern = (args: unknown, data: unknown): string =>
   findFirstString(
     { args, data },
     [
@@ -367,7 +384,7 @@ const buildFiles = (
   }];
 };
 
-const getErrorText = (data: any) => {
+const getErrorText = (data: UnknownRecord) => {
   const direct = unwrapToolText(data.error);
   if (direct) return direct;
   if (typeof data.message === "string") return data.message;
@@ -409,22 +426,30 @@ const buildDetail = (payload: {
 
 export const normalizeToolEvent = (
   phase: "tool_start" | "tool_end",
-  data: any
+  data: unknown
 ): NormalizedToolPayload => {
-  const args = data.args || data.input || data.parameters || data.toolInput || data.tool_input || data.arguments;
-  const result = data.result !== undefined ? data.result : data.output;
-  const toolName = String(data.toolName || data.name || data.tool || "tool");
-  const toolCallId = data.toolCallId || data.callId || data.callID || data.id;
+  const dataRecord = asRecord(data);
+  const args =
+    dataRecord.args ||
+    dataRecord.input ||
+    dataRecord.parameters ||
+    dataRecord.toolInput ||
+    dataRecord.tool_input ||
+    dataRecord.arguments;
+  const result = dataRecord.result !== undefined ? dataRecord.result : dataRecord.output;
+  const toolName = String(dataRecord.toolName || dataRecord.name || dataRecord.tool || "tool");
+  const toolCallId = dataRecord.toolCallId || dataRecord.callId || dataRecord.callID || dataRecord.id;
   const patch = getPatch(data, args || {}, result || {});
   const command = getCommand(args || {}, data);
   const pattern = getPattern(args || {}, data);
   const toolKind = getToolKind(toolName, command, patch);
-  const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
+  const detailObject = asRecord(dataRecord.detail);
+  const argsObject = asRecord(args);
   const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
   const outputText = unwrapToolText(result);
-  const errorText = data.isError ? getErrorText(data) : undefined;
+  const errorText = dataRecord.isError ? getErrorText(dataRecord) : undefined;
   const files = buildFiles(toolKind, filePath, patch, changes.additions, changes.deletions);
   const detail = buildDetail({
     phase,
@@ -432,8 +457,8 @@ export const normalizeToolEvent = (
     command,
     outputText,
     errorText,
-    rawDetail: data.detail,
-    isError: data.isError,
+    rawDetail: dataRecord.detail,
+    isError: !!dataRecord.isError,
   });
 
   return {
@@ -445,7 +470,7 @@ export const normalizeToolEvent = (
     method: toolKind === "question" ? toolName : undefined,
     args,
     result,
-    isError: !!data.isError,
+    isError: !!dataRecord.isError,
     detail,
     outputText,
     errorText,
@@ -456,11 +481,11 @@ export const normalizeToolEvent = (
     deletions: changes.deletions,
     command: command || undefined,
     pattern: pattern || undefined,
-    question: data.question || detailObject.question || args?.question || args?.prompt || undefined,
-    prompt: data.prompt || detailObject.prompt || args?.prompt || undefined,
-    message: data.message || detailObject.message || args?.message || undefined,
-    questions: data.questions || detailObject.questions || args?.questions || undefined,
-    options: data.options || detailObject.options || args?.options || args?.choices || undefined,
+    question: dataRecord.question || detailObject.question || argsObject.question || argsObject.prompt || undefined,
+    prompt: dataRecord.prompt || detailObject.prompt || argsObject.prompt || undefined,
+    message: dataRecord.message || detailObject.message || argsObject.message || undefined,
+    questions: dataRecord.questions || detailObject.questions || argsObject.questions || undefined,
+    options: dataRecord.options || detailObject.options || argsObject.options || argsObject.choices || undefined,
   };
 };
 
@@ -475,16 +500,18 @@ export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "pa
   }];
 };
 
-export const normalizeQuestionProcessEvent = (data: any) => {
-  const detailObject = data.detail && typeof data.detail === "object" ? data.detail : {};
-  const argsObject = data.args && typeof data.args === "object" ? data.args : {};
-  const inputObject = data.input && typeof data.input === "object" ? data.input : {};
+export const normalizeQuestionProcessEvent = (data: unknown) => {
+  const dataRecord = asRecord(data);
+  const detailObject = asRecord(dataRecord.detail);
+  const argsObject = asRecord(dataRecord.args);
+  const inputObject = asRecord(dataRecord.input);
+  const detailParams = asRecord(detailObject.params);
   const prompt =
-    data.title ||
-    data.question ||
-    data.prompt ||
-    data.message ||
-    data.placeholder ||
+    dataRecord.title ||
+    dataRecord.question ||
+    dataRecord.prompt ||
+    dataRecord.message ||
+    dataRecord.placeholder ||
     findFirstString(data, [
       ["detail", "title"],
       ["detail", "message"],
@@ -500,39 +527,39 @@ export const normalizeQuestionProcessEvent = (data: any) => {
       ["input", "prompt"],
     ]);
   const questions =
-    data.questions ||
+    dataRecord.questions ||
     detailObject.questions ||
-    detailObject.params?.questions ||
-    data.args?.questions ||
-    data.input?.questions;
+    detailParams.questions ||
+    argsObject.questions ||
+    inputObject.questions;
   const options =
-    data.options ||
+    dataRecord.options ||
     detailObject.options ||
     detailObject.choices ||
-    detailObject.params?.options ||
-    detailObject.params?.choices ||
-    data.args?.options ||
-    data.args?.choices ||
-    data.input?.options ||
-    data.input?.choices;
+    detailParams.options ||
+    detailParams.choices ||
+    argsObject.options ||
+    argsObject.choices ||
+    inputObject.options ||
+    inputObject.choices;
   const detail =
     prompt ||
-    unwrapToolText(data.args) ||
-    unwrapToolText(data.input) ||
-    (typeof data.detail === "string" ? data.detail : stringifyProcessValue(data.detail || data));
+    unwrapToolText(dataRecord.args) ||
+    unwrapToolText(dataRecord.input) ||
+    (typeof dataRecord.detail === "string" ? dataRecord.detail : stringifyProcessValue(dataRecord.detail || data));
 
   return {
     type: "process_event",
     entryType: "question",
     kind: "question",
-    requestId: data.requestId || data.id || data.toolCallId || data.callId || detailObject.id,
-    method: data.method || data.toolName || data.name || data.type,
+    requestId: dataRecord.requestId || dataRecord.id || dataRecord.toolCallId || dataRecord.callId || detailObject.id,
+    method: dataRecord.method || dataRecord.toolName || dataRecord.name || dataRecord.type,
     title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
     detail,
     prompt: prompt || undefined,
-    question: data.question || detailObject.question || argsObject.question || inputObject.question || undefined,
+    question: dataRecord.question || detailObject.question || argsObject.question || inputObject.question || undefined,
     questions,
     options,
-    state: data.state || "running",
+    state: dataRecord.state || "running",
   };
 };

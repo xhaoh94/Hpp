@@ -22,6 +22,21 @@ const selectSessionModel = (sessionId: string, models: ModelInfo[]): ModelInfo =
   return models[0];
 };
 
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const addAgentStartupError = (sessionId: string, error: unknown) => {
+  const chatStore = useChatStore.getState();
+  chatStore.clearAgentStartupErrors(sessionId);
+  chatStore.addMessage({
+    id: crypto.randomUUID(),
+    role: "system",
+    content: `Agent 启动失败: ${getErrorMessage(error)}`,
+    timestamp: Date.now(),
+    systemType: "agent_startup_error",
+  }, sessionId);
+};
+
 const applyAndSyncSessionModel = async (sessionId: string, model: ModelInfo, setCurrentModel: (model: ModelInfo) => void) => {
   setCurrentModel(model);
   await window.electronAPI.agentSetModel(model.provider, model.id, sessionId);
@@ -129,6 +144,8 @@ export function useSessionModels({
     ).then(async (result) => {
       if (result.success) {
         useChatStore.getState().clearAgentStartupErrors(session.id);
+      } else {
+        addAgentStartupError(session.id, result.error || "Agent 会话初始化失败");
       }
       if (result.sessionFilePath) {
         useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
@@ -156,6 +173,9 @@ export function useSessionModels({
           // The active-session model effect will retry and show an empty list if needed.
         }
       }
+    }).catch((error: unknown) => {
+      useProjectStore.getState().markSessionInitialized(session.id);
+      addAgentStartupError(session.id, error);
     });
   }, []);
 

@@ -3,6 +3,8 @@ import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
+import { isRecord } from "../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -37,6 +39,35 @@ interface AgentForkResult {
   reason?: string;
 }
 
+type WorkerCommand = UnknownRecord & {
+  type: string;
+  id?: string;
+};
+
+const asRecord = (value: unknown): UnknownRecord =>
+  isRecord(value) ? value : {};
+
+const optionalString = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
+
+const normalizeModels = (value: unknown): AgentModel[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((rawModel) => {
+    const model = asRecord(rawModel);
+    const id = optionalString(model.id);
+    const name = optionalString(model.name) || id;
+    const provider = optionalString(model.provider);
+    if (!id || !name || !provider) return [];
+    return [{
+      id,
+      name,
+      provider,
+      reasoning: model.reasoning === true,
+      supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
+    }];
+  });
+};
+
 const getWorkerPath = () => {
   return getBundledWorkerPath("codex-worker.mjs", __dirname);
 };
@@ -49,7 +80,7 @@ export class CodexAgent {
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
-  private pendingResponses = new Map<string, (data: any) => void>();
+  private pendingResponses = new Map<string, (data: UnknownRecord) => void>();
   private requestId = 0;
   private models: AgentModel[] = [];
   private isAborting = false;
@@ -168,11 +199,11 @@ export class CodexAgent {
       }, (data) => {
         clearTimeout(timeout);
         if (data.type === "ready") {
-          this._sessionFilePath = data.sessionFilePath || existingSessionFilePath || null;
+          this._sessionFilePath = optionalString(data.sessionFilePath) || existingSessionFilePath || null;
           this.emitEvent({ type: "agent_ready", agentId: "codex", mock: false });
           resolve();
         } else {
-          reject(new Error(data.error || "Codex worker init failed"));
+          reject(new Error(optionalString(data.error) || "Codex worker init failed"));
         }
       });
     });
@@ -187,7 +218,7 @@ export class CodexAgent {
     }
   }
 
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
     const promptId = options?.clientMessageId || this.createCommandId();
@@ -207,7 +238,7 @@ export class CodexAgent {
     return !this.isAborting && this.activePromptIds.size === 0 && this.pendingResponses.size === 0;
   }
 
-  async sendGuidance(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
     const guidanceId = this.createCommandId();
     const displayMessage = options?.displayMessage || message;
@@ -229,7 +260,7 @@ export class CodexAgent {
         if (data.type === "accepted" || data.type === "guidance_done") {
           resolve();
         } else {
-          reject(new Error(data.error || "Codex guidance failed"));
+          reject(new Error(optionalString(data.error) || "Codex guidance failed"));
         }
       });
     });
@@ -265,10 +296,10 @@ export class CodexAgent {
         resolve({
           supported: data.supported !== false,
           success: !!data.success,
-          sessionFilePath: data.sessionFilePath,
-          nativeEntryId: data.nativeEntryId,
-          error: data.error,
-          reason: data.reason,
+          sessionFilePath: optionalString(data.sessionFilePath),
+          nativeEntryId: optionalString(data.nativeEntryId),
+          error: optionalString(data.error),
+          reason: optionalString(data.reason),
         });
       });
     });
@@ -309,7 +340,7 @@ export class CodexAgent {
       const timeout = setTimeout(() => resolve([]), 4000);
       this.sendWorkerCommand({ type: "getModels" }, (data) => {
         clearTimeout(timeout);
-        this.models = Array.isArray(data.models) ? data.models : [];
+        this.models = normalizeModels(data.models);
         resolve(this.models);
       });
     });
@@ -327,15 +358,15 @@ export class CodexAgent {
     });
   }
 
-  sendUIResponse(response: any): void {
+  sendUIResponse(response: AgentUIResponse): void {
     this.sendWorkerCommand({
       type: "uiResponse",
       response: {
-        id: response?.id,
-        value: response?.value ?? response?.text,
-        confirmed: response?.confirmed,
-        cancelled: !!response?.cancelled,
-        result: response?.result ?? (response?.answers ? { cancelled: false, answers: response.answers } : undefined),
+        id: response.id,
+        value: response.value ?? response.text,
+        confirmed: response.confirmed,
+        cancelled: !!response.cancelled,
+        result: response.result ?? (response.answers ? { cancelled: false, answers: response.answers } : undefined),
       },
     });
   }
@@ -354,41 +385,43 @@ export class CodexAgent {
     }
   }
 
-  private handleWorkerMessage(data: any) {
-    if (data.id) {
-      const handler = this.pendingResponses.get(data.id);
+  private handleWorkerMessage(data: unknown) {
+    const record = asRecord(data);
+    const messageId = record.id !== undefined && record.id !== null ? String(record.id) : "";
+    if (messageId) {
+      const handler = this.pendingResponses.get(messageId);
       if (handler) {
-        this.pendingResponses.delete(data.id);
-        handler(data);
+        this.pendingResponses.delete(messageId);
+        handler(record);
       }
     }
 
-    switch (data.type) {
+    switch (record.type) {
       case "ready":
-        for (const handler of this.pendingResponses.values()) handler(data);
+        for (const handler of this.pendingResponses.values()) handler(record);
         this.pendingResponses.clear();
         break;
       case "session_file_path":
-        this._sessionFilePath = data.sessionFilePath || data.threadId || this._sessionFilePath;
-        this.emitEvent({ type: "session_file_path", sessionFilePath: this._sessionFilePath, threadId: data.threadId });
+        this._sessionFilePath = optionalString(record.sessionFilePath) || optionalString(record.threadId) || this._sessionFilePath;
+        this.emitEvent({ type: "session_file_path", sessionFilePath: this._sessionFilePath, threadId: record.threadId });
         break;
       case "agent_start":
         this.emitEvent({ type: "agent_start" });
         break;
       case "stream_start":
-        this.emitEvent({ type: "stream_start", role: data.role || "assistant" });
+        this.emitEvent({ type: "stream_start", role: record.role || "assistant" });
         break;
       case "stream_delta":
-        this.emitEvent({ type: "stream_delta", delta: data.delta || "" });
+        this.emitEvent({ type: "stream_delta", delta: String(record.delta || "") });
         break;
       case "stream_snapshot":
-        this.emitEvent({ type: "stream_snapshot", content: data.content || "" });
+        this.emitEvent({ type: "stream_snapshot", content: String(record.content || "") });
         break;
       case "stream_end":
-        this.emitEvent({ type: "stream_end", content: data.content || "", force: data.force });
+        this.emitEvent({ type: "stream_end", content: String(record.content || ""), force: record.force });
         break;
       case "thinking_delta":
-        this.emitEvent({ type: "thinking_delta", delta: data.delta || "" });
+        this.emitEvent({ type: "thinking_delta", delta: String(record.delta || "") });
         break;
       case "thinking_end":
         this.emitEvent({ type: "thinking_end" });
@@ -399,25 +432,25 @@ export class CodexAgent {
       case "plan_update":
       case "context_compaction":
       case "diff_update":
-        this.emitEvent(data);
+        this.emitEvent(record);
         break;
       case "agent_end":
         this.activePromptIds.clear();
-        this.emitEvent(data);
+        this.emitEvent(record);
         break;
       case "prompt_done":
-        if (data.id) this.activePromptIds.delete(String(data.id));
+        if (messageId) this.activePromptIds.delete(messageId);
         else this.activePromptIds.clear();
         break;
       case "aborted":
-        if (data.promptId) this.activePromptIds.delete(String(data.promptId));
+        if (record.promptId) this.activePromptIds.delete(String(record.promptId));
         else this.activePromptIds.clear();
-        this.emitEvent({ type: "aborted", promptId: data.promptId });
+        this.emitEvent({ type: "aborted", promptId: record.promptId });
         break;
       case "error":
-        if (data.id) this.activePromptIds.delete(String(data.id));
+        if (messageId) this.activePromptIds.delete(messageId);
         else this.activePromptIds.clear();
-        if (/Codex is already running/i.test(data.error || "")) {
+        if (/Codex is already running/i.test(String(record.error || ""))) {
           this.emitEvent({
             type: "process_event",
             entryType: "status",
@@ -433,14 +466,14 @@ export class CodexAgent {
           entryType: "error",
           kind: "error",
           title: "Codex 运行失败",
-          detail: data.error || "Unknown error",
+          detail: record.error || "Unknown error",
           state: "error",
         });
         break;
     }
   }
 
-  private sendWorkerCommand(command: any, onResponse?: (data: any) => void): string {
+  private sendWorkerCommand(command: WorkerCommand, onResponse?: (data: UnknownRecord) => void): string {
     const id = command.id || this.createCommandId();
     const fullCommand = { ...command, id };
     if (onResponse) this.pendingResponses.set(id, onResponse);

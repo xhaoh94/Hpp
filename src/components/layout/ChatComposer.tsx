@@ -9,6 +9,12 @@ import { memo, useEffect, useRef, useState } from "react";
 import { FileText, Folder, Image as ImageIcon, Link2, Square, X } from "lucide-react";
 import type { PendingFile, PendingImage, PendingPathAttachment } from "@/stores/chat-store";
 import type { SessionReference } from "@/stores/project-store";
+import {
+  getChatComposerPlaceholder,
+  getChatComposerSendTitle,
+  getRemovePathAttachmentLabel,
+  uiText,
+} from "@/i18n/text";
 
 type ChatComposerProps = {
   activeQuestionnaire: boolean;
@@ -91,22 +97,13 @@ export const ChatComposer = memo(function ChatComposer({
       : isAwaitingUIResponse
         ? !inputHasText
         : !hasPendingContent;
-  const placeholder = interactionDisabled
-    ? "正在创建分叉会话..."
-    : activeQuestionnaire
-      ? "请在上方提交问卷"
-      : sendKey === "Ctrl+Enter"
-        ? "输入消息... (Ctrl+Enter 发送, Enter 换行, 粘贴图片)"
-        : "输入消息... (Enter 发送, Ctrl+Enter 换行, 粘贴图片)";
-  const sendTitle = interactionDisabled
-    ? "正在创建分叉会话"
-    : activeQuestionnaire
-      ? "请在上方提交问卷"
-      : isAwaitingUIResponse
-        ? "发送回答"
-        : currentSessionRunning
-          ? "加入发送队列"
-          : "发送";
+  const placeholder = getChatComposerPlaceholder(interactionDisabled, activeQuestionnaire, sendKey);
+  const sendTitle = getChatComposerSendTitle(
+    interactionDisabled,
+    activeQuestionnaire,
+    isAwaitingUIResponse,
+    currentSessionRunning
+  );
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const uploadMenuRef = useRef<HTMLDivElement>(null);
 
@@ -126,8 +123,17 @@ export const ChatComposer = memo(function ChatComposer({
         setUploadMenuOpen(false);
       }
     };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setUploadMenuOpen(false);
+      }
+    };
     document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
   }, [uploadMenuOpen]);
 
   useEffect(() => {
@@ -159,14 +165,14 @@ export const ChatComposer = memo(function ChatComposer({
           {sessionReferences.map((reference) => (
             <div key={reference.sourceSessionId} className="chat-preview-chip chat-preview-chip-reference">
               <Link2 size={12} strokeWidth={2} className="chat-preview-icon" />
-              <span className="chat-preview-label">{reference.sourceTitle} 会话</span>
+              <span className="chat-preview-label">{reference.sourceTitle} {uiText.chatComposer.session}</span>
               <button
                 type="button"
                 className="chat-preview-remove"
                 onClick={() => onRemoveSessionReference(reference.sourceSessionId)}
                 disabled={interactionDisabled}
-                title="移除"
-                aria-label="移除引用会话"
+                title={uiText.chatComposer.remove}
+                aria-label={uiText.chatComposer.removeReferenceSession}
               >
                 <X size={12} />
               </button>
@@ -181,8 +187,8 @@ export const ChatComposer = memo(function ChatComposer({
                 className="chat-preview-remove"
                 onClick={() => onRemovePendingFile(file.id)}
                 disabled={interactionDisabled}
-                title="移除"
-                aria-label="移除文件片段"
+                title={uiText.chatComposer.remove}
+                aria-label={uiText.chatComposer.removeFileSnippet}
               >
                 <X size={12} />
               </button>
@@ -201,8 +207,8 @@ export const ChatComposer = memo(function ChatComposer({
                 className="chat-preview-remove"
                 onClick={() => onRemovePathAttachment(attachment.id)}
                 disabled={interactionDisabled}
-                title="移除"
-                aria-label={`移除${attachment.kind === "folder" ? "文件夹" : "文件"}`}
+                title={uiText.chatComposer.remove}
+                aria-label={getRemovePathAttachmentLabel(attachment.kind)}
               >
                 <X size={12} />
               </button>
@@ -221,8 +227,8 @@ export const ChatComposer = memo(function ChatComposer({
                 className="chat-preview-remove"
                 onClick={() => onRemovePendingImage(image.id)}
                 disabled={interactionDisabled}
-                title="移除"
-                aria-label="移除图片"
+                title={uiText.chatComposer.remove}
+                aria-label={uiText.chatComposer.removeImage}
               >
                 <X size={12} />
               </button>
@@ -234,7 +240,7 @@ export const ChatComposer = memo(function ChatComposer({
       {attachmentError && (
         <div className="chat-attachment-alert" role="status">
           <span>{attachmentError}</span>
-          <button type="button" onClick={onClearAttachmentError} aria-label="关闭附件提示">
+          <button type="button" onClick={onClearAttachmentError} aria-label={uiText.chatComposer.closeAttachmentNotice}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
@@ -266,7 +272,7 @@ export const ChatComposer = memo(function ChatComposer({
             <button
               type="button"
               className="chat-input-btn"
-              title="添加附件"
+              title={uiText.chatComposer.addAttachment}
               aria-haspopup="menu"
               aria-expanded={uploadMenuOpen}
               onClick={() => setUploadMenuOpen((open) => !open)}
@@ -280,15 +286,15 @@ export const ChatComposer = memo(function ChatComposer({
               <div className="chat-upload-menu" role="menu">
                 <button type="button" role="menuitem" onClick={handleChooseFiles}>
                   <FileText size={13} />
-                  <span>文件</span>
+                  <span>{uiText.chatComposer.file}</span>
                 </button>
                 <button type="button" role="menuitem" onClick={handleChooseFolder}>
                   <Folder size={13} />
-                  <span>文件夹</span>
+                  <span>{uiText.chatComposer.folder}</span>
                 </button>
                 <button type="button" role="menuitem" onClick={handleChooseSession}>
                   <Link2 size={13} />
-                  <span>会话</span>
+                  <span>{uiText.chatComposer.session}</span>
                 </button>
               </div>
             )}
@@ -313,7 +319,7 @@ export const ChatComposer = memo(function ChatComposer({
             type="button"
             onClick={onAbort}
             className="chat-send-btn abort"
-            title="停止"
+            title={uiText.chatComposer.stop}
           >
             <Square size={14} fill="currentColor" strokeWidth={0} />
           </button>

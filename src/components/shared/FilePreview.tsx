@@ -79,9 +79,9 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
         } else {
           setError(result.error || "无法读取文件");
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (cancelled) return;
-        setError(err.message || "无法读取文件");
+        setError(err instanceof Error ? err.message : "无法读取文件");
       } finally {
         if (!cancelled) setLoading(false);
       }

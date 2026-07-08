@@ -29,6 +29,14 @@ export interface AgentConfigResult {
   success: boolean;
   error?: string;
   config?: AgentConfigState;
+  models?: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    reasoning: boolean;
+    supportsImages?: boolean;
+  }>;
+  reloadedSessionIds?: string[];
 }
 
 export interface FileSnapshot {
@@ -37,7 +45,7 @@ export interface FileSnapshot {
   content: string;
 }
 
-type JsonRecord = Record<string, any>;
+type JsonRecord = Record<string, unknown>;
 
 const SUPPORTED_CONFIG_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
 const SETTINGS_KEY = "agentConfigs";
@@ -590,10 +598,16 @@ export async function saveAgentProviderConfig(agentId: string, providerValue: un
     const originalProviderId = getOriginalProviderId(providerValue);
 
     const state = await readCurrentAgentConfigState(agentId);
+    const replaceProviderId = originalProviderId || provider.providerId;
+    const existingIndex = state.providers.findIndex((item) => item.providerId === replaceProviderId);
     const providers = state.providers.filter((item) =>
       item.providerId !== provider.providerId && item.providerId !== originalProviderId
     );
-    providers.push(provider);
+    if (existingIndex >= 0) {
+      providers.splice(Math.min(existingIndex, providers.length), 0, provider);
+    } else {
+      providers.push(provider);
+    }
     const nextState = {
       activeProviderId: state.activeProviderId === originalProviderId ? provider.providerId : state.activeProviderId,
       providers,
@@ -630,6 +644,43 @@ export async function deleteAgentProviderConfig(agentId: string, providerId: str
     } else {
       await writeNativeAgentConfig(agentId, nextState);
     }
+    return { success: true, config: nextState };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function reorderAgentProviderConfigs(agentId: string, providerOrderValue: unknown): Promise<AgentConfigResult> {
+  try {
+    ensureSupportedAgent(agentId);
+    if (!Array.isArray(providerOrderValue)) throw new Error("渠道顺序无效。");
+    const providerOrder = providerOrderValue.map((item) => String(item || "").trim());
+    if (providerOrder.some((providerId) => !providerId)) throw new Error("渠道顺序包含空 ID。");
+
+    const state = await readCurrentAgentConfigState(agentId);
+    if (providerOrder.length !== state.providers.length) {
+      throw new Error("渠道顺序必须包含全部渠道。");
+    }
+
+    const providerById = new Map(state.providers.map((provider) => [provider.providerId, provider]));
+    const seen = new Set<string>();
+    for (const providerId of providerOrder) {
+      if (seen.has(providerId)) throw new Error("渠道顺序包含重复 ID。");
+      if (!providerById.has(providerId)) throw new Error(`未找到渠道：${providerId}`);
+      seen.add(providerId);
+    }
+
+    const nextState = {
+      activeProviderId: state.activeProviderId,
+      providers: providerOrder.map((providerId) => providerById.get(providerId)!),
+    };
+
+    if (agentId === "codex") {
+      await writeAgentConfigState(agentId, nextState);
+    } else {
+      await writeNativeAgentConfig(agentId, nextState);
+    }
+
     return { success: true, config: nextState };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -694,7 +745,8 @@ async function writePiNativeConfig(state: AgentConfigState, provider: AgentProvi
   const config = await readJsonObject(filePath);
   const providers = isRecord(config.providers) ? { ...config.providers } : {};
 
-  const existingProvider = isRecord(providers[provider.providerId]) ? providers[provider.providerId] : {};
+  const existingProviderValue = providers[provider.providerId];
+  const existingProvider = isRecord(existingProviderValue) ? existingProviderValue : {};
   providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
 
   await writeJsonObject(filePath, { ...config, providers });
@@ -709,7 +761,8 @@ async function writePiNativeConfigProviders(state: AgentConfigState): Promise<Fi
   const providers: JsonRecord = {};
 
   for (const provider of state.providers) {
-    const existingProvider = isRecord(existingProviders[provider.providerId]) ? existingProviders[provider.providerId] : {};
+    const existingProviderValue = existingProviders[provider.providerId];
+    const existingProvider = isRecord(existingProviderValue) ? existingProviderValue : {};
     providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
   }
 
@@ -986,18 +1039,13 @@ export async function getConfiguredAgentModels(agentId: string): Promise<Array<{
   const state = agentId === "codex"
     ? await readSavedCodexConfigState()
     : await readNativeAgentConfigState(agentId);
-  const providers = agentId === "codex"
-    ? [
-        state.providers.find((provider) => provider.providerId === state.activeProviderId),
-      ].filter((provider): provider is AgentProviderConfig => !!provider)
-    : state.providers;
+  const providers = state.providers;
 
   return providers.flatMap((provider) => {
-    const providerName = agentId === "codex" ? "codex" : provider.providerId;
     return provider.models.map((model) => ({
       id: model.id,
       name: model.name || model.id,
-      provider: providerName,
+      provider: provider.providerId,
       reasoning: !!model.reasoning,
       supportsImages: !!model.imageInput,
     }));

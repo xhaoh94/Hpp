@@ -8,6 +8,7 @@ import {
   type SessionReference,
 } from "@/stores/project-store";
 import { isAgentStartupFailureMessage, useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
+import { PersistenceFlushScheduler } from "./persistenceScheduler";
 
 interface PersistedData {
   projects: Project[];
@@ -32,6 +33,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const getString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 const getStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -167,8 +171,9 @@ const parseChatMessage = (value: unknown): ChatMessage | null => {
     return null;
   }
 
+  const persistedMessage = value as Partial<ChatMessage>;
   return {
-    ...(value as unknown as ChatMessage),
+    ...persistedMessage,
     id,
     role,
     content,
@@ -252,18 +257,12 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
 let _sessionModelsCache: Record<string, ModelInfo> = {};
 let _sessionThinkingCache: Record<string, string> = {};
 let _cacheDirty = false;
-let _saveTimeout: ReturnType<typeof setTimeout> | null = null;
-let _projectsSaveTimeout: ReturnType<typeof setTimeout> | null = null;
-let _messagesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
-let _streamingMessagesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
+const saveScheduler = new PersistenceFlushScheduler();
 
 function flushProjectsToDisk() {
-  if (_projectsSaveTimeout) {
-    clearTimeout(_projectsSaveTimeout);
-    _projectsSaveTimeout = null;
-  }
+  saveScheduler.clear("projects");
   if (!_pendingProjectsData) return;
   const data = _pendingProjectsData;
   _pendingProjectsData = null;
@@ -272,19 +271,11 @@ function flushProjectsToDisk() {
 
 function scheduleProjectsSave(data: PersistedData) {
   _pendingProjectsData = data;
-  if (_projectsSaveTimeout) clearTimeout(_projectsSaveTimeout);
-  _projectsSaveTimeout = setTimeout(flushProjectsToDisk, 500);
+  saveScheduler.schedule("projects", 500, flushProjectsToDisk);
 }
 
 function flushMessagesToDisk() {
-  if (_messagesSaveTimeout) {
-    clearTimeout(_messagesSaveTimeout);
-    _messagesSaveTimeout = null;
-  }
-  if (_streamingMessagesSaveTimeout) {
-    clearTimeout(_streamingMessagesSaveTimeout);
-    _streamingMessagesSaveTimeout = null;
-  }
+  saveScheduler.clearMany(["messages", "streamingMessages"]);
   if (!_pendingMessagesData) return;
   const data = _pendingMessagesData;
   _pendingMessagesData = null;
@@ -293,15 +284,12 @@ function flushMessagesToDisk() {
 
 function scheduleMessagesSave(data: PersistedMessages) {
   _pendingMessagesData = data;
-  if (_messagesSaveTimeout) clearTimeout(_messagesSaveTimeout);
-  _messagesSaveTimeout = setTimeout(flushMessagesToDisk, 1000);
+  saveScheduler.schedule("messages", 1000, flushMessagesToDisk);
 }
 
 function scheduleStreamingMessagesSave(data: PersistedMessages) {
   _pendingMessagesData = data;
-  if (!_streamingMessagesSaveTimeout) {
-    _streamingMessagesSaveTimeout = setTimeout(flushMessagesToDisk, 8000);
-  }
+  saveScheduler.schedule("streamingMessages", 8000, flushMessagesToDisk, { reset: false });
 }
 
 function flushPendingDataToDisk() {
@@ -313,10 +301,7 @@ function flushPendingDataToDisk() {
 }
 
 function flushModelsToDisk() {
-  if (_saveTimeout) {
-    clearTimeout(_saveTimeout);
-    _saveTimeout = null;
-  }
+  saveScheduler.clear("models");
   if (!_cacheDirty) return;
   _cacheDirty = false;
   window.electronAPI.saveData("currentModel", {
@@ -330,8 +315,7 @@ function flushModelsToDisk() {
 export function saveSessionModel(sessionId: string, model: ModelInfo) {
   _sessionModelsCache[sessionId] = model;
   _cacheDirty = true;
-  if (_saveTimeout) clearTimeout(_saveTimeout);
-  _saveTimeout = setTimeout(flushModelsToDisk, 500);
+  saveScheduler.schedule("models", 500, flushModelsToDisk);
 }
 
 /** Get persisted model for a session (synchronous, from cache) */
@@ -343,8 +327,7 @@ export function getSessionModel(sessionId: string): ModelInfo | null {
 export function saveSessionThinking(sessionId: string, level: string) {
   _sessionThinkingCache[sessionId] = level;
   _cacheDirty = true;
-  if (_saveTimeout) clearTimeout(_saveTimeout);
-  _saveTimeout = setTimeout(flushModelsToDisk, 500);
+  saveScheduler.schedule("models", 500, flushModelsToDisk);
 }
 
 /** Get persisted thinking level for a session (synchronous, from cache) */
@@ -473,6 +456,16 @@ export function useDataPersistence() {
           const projectState = useProjectStore.getState();
           if (result.success) {
             useChatStore.getState().clearAgentStartupErrors(activeSessionId!);
+          } else {
+            const chatStore = useChatStore.getState();
+            chatStore.clearAgentStartupErrors(activeSessionId!);
+            chatStore.addMessage({
+              id: crypto.randomUUID(),
+              role: "system",
+              content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
+              timestamp: Date.now(),
+              systemType: "agent_startup_error",
+            }, activeSessionId);
           }
           if (result.sessionFilePath) {
             projectState.setSessionFilePath(activeProject!.id, activeSessionId!, result.sessionFilePath);
@@ -481,6 +474,18 @@ export function useDataPersistence() {
             applySessionModels(activeSessionId!, result.models);
           }
           projectState.markSessionInitialized(activeSessionId!);
+        }).catch((error: unknown) => {
+          const projectState = useProjectStore.getState();
+          projectState.markSessionInitialized(activeSessionId!);
+          const chatStore = useChatStore.getState();
+          chatStore.clearAgentStartupErrors(activeSessionId!);
+          chatStore.addMessage({
+            id: crypto.randomUUID(),
+            role: "system",
+            content: `Agent 启动失败: ${getErrorMessage(error)}`,
+            timestamp: Date.now(),
+            systemType: "agent_startup_error",
+          }, activeSessionId);
         });
       }
     });

@@ -4,21 +4,26 @@ import type {
   AgentProcess,
   AgentProcessEntry,
   AgentProcessFile,
-  AgentProcessStep,
 } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
+import {
+  formatCommandGroupTitle,
+  getCommandStateLabel,
+  getProcessFileActionLabel,
+  getProcessStepStatusLabel,
+  uiText,
+} from "@/i18n/text";
+import {
+  getStepProgressText,
+  normalizeInferredStepsForDisplay,
+  summarizeProcessEntries,
+} from "./processBlockUtils";
+import {
+  createProcessEntryMerger,
+  getProcessFileName,
+} from "./processEntryMerge";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
-
-const THINKING_PREVIEW_CHAR_LIMIT = 240;
-
-const getThinkingPreview = (value?: string) => {
-  const preview = value?.replace(/\s+/g, " ").trim();
-  if (!preview) return "思考中";
-  return preview.length > THINKING_PREVIEW_CHAR_LIMIT
-    ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
-    : preview;
-};
 
 const formatProcessDuration = (ms: number) => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -26,111 +31,6 @@ const formatProcessDuration = (ms: number) => {
   const rest = seconds % 60;
   if (minutes > 0) return `${minutes}m ${rest}s`;
   return `${rest}s`;
-};
-
-const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
-  if (entries.length === 0) return "等待事件";
-
-  if (entries.some((entry) => entry.state === "interrupted")) return "已中断";
-
-  const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "question" || entry.type === "error").length;
-  const diffCount = entries.filter((entry) => entry.type === "diff").length;
-  const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
-  const thinkingEntry = entries.find((entry) => entry.type === "thinking" && entry.state === "running");
-  const runningTool = entries.find((entry) => (entry.type === "tool" || entry.type === "question") && entry.state === "running");
-
-  if (isThinking && thinkingEntry) {
-    return `正在思考: ${getThinkingPreview(thinkingEntry.detail)}`;
-  }
-
-  if (runningTool) {
-    return runningTool.title;
-  }
-
-  if (toolCount > 0 && diffCount > 0) return `已执行 ${toolCount} 个操作, 修改 ${diffCount} 个文件`;
-  if (toolCount > 0) return `已执行 ${toolCount} 个操作`;
-  if (diffCount > 0) return `已修改 ${diffCount} 个文件`;
-
-  return `${entries.length} 条事件`;
-};
-
-const getStepProgressText = (steps: AgentProcessStep[]) => {
-  const total = steps.length;
-  if (total === 0) return "";
-
-  const terminalIndex = steps.findIndex((step) => step.status === "failed" || step.status === "cancelled");
-  if (terminalIndex >= 0) return `第 ${terminalIndex + 1} / ${total} 步`;
-
-  const completed = Math.min(total, steps.filter((step) => step.status === "completed").length);
-  return `已完成 ${completed} / ${total}`;
-};
-
-const isTerminalStepStatus = (status?: AgentProcessStep["status"]) =>
-  status === "failed" || status === "cancelled";
-
-const getStepById = (steps: AgentProcessStep[], id: string) =>
-  steps.find((step) => step.id === id);
-
-const isActiveStepStatus = (status?: AgentProcessStep["status"]) =>
-  !!status && status !== "pending";
-
-const normalizeInferredStepsForDisplay = (
-  process: AgentProcess,
-  steps: AgentProcessStep[]
-): AgentProcessStep[] => {
-  const hasInferredSteps = process.planStepsSource === "inferred" || steps.some((step) => step.id.startsWith("inferred-"));
-  if (!hasInferredSteps) return steps;
-
-  const analyze = getStepById(steps, "inferred-analyze");
-  const operate = getStepById(steps, "inferred-operate");
-  const modify = getStepById(steps, "inferred-modify");
-  const verify = getStepById(steps, "inferred-verify");
-  const hasLaterActiveStep = [operate, modify, verify].some((step) => isActiveStepStatus(step?.status));
-  const hasModifyActiveStep = isActiveStepStatus(modify?.status);
-  const hasVerifyActiveStep = isActiveStepStatus(verify?.status);
-
-  const analyzeStatus: AgentProcessStep["status"] =
-    isTerminalStepStatus(analyze?.status)
-      ? analyze!.status
-      : hasLaterActiveStep
-        ? "completed"
-        : analyze?.status || "pending";
-
-  let operateStatus: AgentProcessStep["status"] = "pending";
-  if (isTerminalStepStatus(operate?.status)) {
-    operateStatus = operate!.status;
-  } else if (isTerminalStepStatus(modify?.status)) {
-    operateStatus = modify!.status;
-  } else if (hasVerifyActiveStep || verify?.status === "completed" || modify?.status === "completed") {
-    operateStatus = "completed";
-  } else if (hasModifyActiveStep || operate?.status === "running") {
-    operateStatus = "running";
-  } else if (operate?.status === "completed") {
-    operateStatus = "completed";
-  }
-
-  const verifyStatus: AgentProcessStep["status"] =
-    verify?.status && verify.status !== "pending"
-      ? verify.status
-      : process.endedAt && !isTerminalStepStatus(operateStatus)
-        ? "completed"
-        : "pending";
-
-  return [
-    { id: "inferred-analyze", title: "分析请求", status: analyzeStatus },
-    { id: "inferred-operate", title: "执行操作", status: operateStatus },
-    { id: "inferred-verify", title: "验证总结", status: verifyStatus },
-  ];
-};
-
-const getStepStatusLabel = (status: AgentProcessStep["status"]) => {
-  switch (status) {
-    case "running": return "进行中";
-    case "completed": return "已完成";
-    case "failed": return "失败";
-    case "cancelled": return "已取消";
-    default: return "待处理";
-  }
 };
 
 function ProcessProgressSummary({
@@ -159,13 +59,13 @@ function ProcessProgressSummary({
       {stepText && <span className="chat-process-progress-step">{stepText}</span>}
       {steps.length > 0 && (
         <span className="chat-process-step-popover" role="tooltip">
-          <span className="chat-process-step-popover-title">步骤进度</span>
+          <span className="chat-process-step-popover-title">{uiText.process.progressTitle}</span>
           <span className="chat-process-step-list">
             {steps.map((step, index) => (
               <span className="chat-process-step-row" key={step.id || `${step.title}-${index}`}>
                 <span className={`chat-process-step-dot ${step.status}`} />
                 <span className="chat-process-step-title">{step.title}</span>
-                <span className="chat-process-step-status">{getStepStatusLabel(step.status)}</span>
+                <span className="chat-process-step-status">{getProcessStepStatusLabel(step.status)}</span>
               </span>
             ))}
           </span>
@@ -174,68 +74,6 @@ function ProcessProgressSummary({
     </span>
   );
 }
-
-const getFileName = (filePath: string) => {
-  const parts = filePath.split(/[/\\]/);
-  return parts[parts.length - 1] || filePath;
-};
-
-const getFileEntryTitle = (
-  action: AgentProcessFile["action"] | undefined,
-  count: number,
-  running = false
-) => {
-  if (running) {
-    switch (action) {
-      case "read": return `正在读取 ${count} 个文件`;
-      case "listed": return `正在查看 ${count} 个目录`;
-      case "written": return `正在写入 ${count} 个文件`;
-      case "edited": return `正在编辑 ${count} 个文件`;
-      default: return `正在修改 ${count} 个文件`;
-    }
-  }
-
-  switch (action) {
-    case "read": return `已读取 ${count} 个文件`;
-    case "listed": return `已查看 ${count} 个目录`;
-    case "written": return `已写入 ${count} 个文件`;
-    case "edited": return `已编辑 ${count} 个文件`;
-    default: return `已修改 ${count} 个文件`;
-  }
-};
-
-const normalizeProcessFileKey = (filePath: string) =>
-  filePath.replace(/\\/g, "/").trim().toLowerCase();
-
-const mergeProcessFileCounts = (left?: number, right?: number) => {
-  if (typeof left !== "number" && typeof right !== "number") return undefined;
-  return (left || 0) + (right || 0);
-};
-
-const mergeProcessFiles = (files: AgentProcessFile[]) => {
-  const byFile = new Map<string, AgentProcessFile>();
-
-  for (const file of files) {
-    if (!file.file?.trim()) continue;
-
-    const key = normalizeProcessFileKey(file.file);
-    const existing = byFile.get(key);
-    if (!existing) {
-      byFile.set(key, { ...file, label: file.label || getFileName(file.file) });
-      continue;
-    }
-
-    byFile.set(key, {
-      ...existing,
-      ...file,
-      label: existing.label || file.label || getFileName(file.file),
-      additions: mergeProcessFileCounts(existing.additions, file.additions),
-      deletions: mergeProcessFileCounts(existing.deletions, file.deletions),
-    });
-  }
-
-  return Array.from(byFile.values());
-};
 
 function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; state?: AgentProcessEntry["state"] }) {
   if (state === "running") {
@@ -317,13 +155,8 @@ function ProcessEntryFiles({
   return (
     <div className="chat-process-files">
       {files.map((file, index) => {
-        const action =
-          file.action === "read" ? "已读取" :
-          file.action === "listed" ? "已查看" :
-          file.action === "written" ? "已写入" :
-          file.action === "edited" ? "已编辑" :
-          "已修改";
-        const label = file.label || getFileName(file.file);
+        const action = getProcessFileActionLabel(file.action);
+        const label = file.label || getProcessFileName(file.file);
         const canOpen = file.action !== "listed";
         return (
           <div className="chat-process-file" key={`${file.file}-${index}`}>
@@ -399,7 +232,7 @@ const formatEmbeddedErrorMessage = (message: string): string | null => {
   if (!embedded || typeof embedded !== "object" || Array.isArray(embedded)) return null;
 
   const lines = [
-    `- **错误**: ${prefix.trim()}`,
+    `- **${uiText.process.errorLabel}**: ${prefix.trim()}`,
     ...Object.entries(embedded).map(([key, value]) =>
       `- **${escapeMarkdownLabel(key)}**: ${formatMarkdownValue(value)}`
     ),
@@ -467,7 +300,7 @@ function CommandDetail({
       >
         <span className="chat-command-prompt">$_</span>
         <span className="chat-command-text">{command || entry.title}</span>
-        <span className="chat-command-state">{isRunning ? "运行中" : entry.state === "error" ? "失败" : entry.state === "interrupted" ? "已中断" : "完成"}</span>
+        <span className="chat-command-state">{getCommandStateLabel(entry.state)}</span>
         {canExpand && (
           <svg
             className="chat-command-chevron"
@@ -507,7 +340,7 @@ function CommandGroup({
           className="chat-process-entry-header expandable"
           onClick={(event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget)}
         >
-          <span className="chat-process-entry-title">已运行 {entries.length} 条命令</span>
+          <span className="chat-process-entry-title">{formatCommandGroupTitle(entries.length)}</span>
           <svg
             className="chat-process-entry-chevron"
             width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
@@ -542,7 +375,7 @@ function ProcessEntryRow({
   onPreserveScroll: PreserveScroll;
 }) {
   const hasDetail = !!entry.detail;
-  const files = useMemo(() => mergeProcessFiles(entry.files || []), [entry.files]);
+  const files = entry.files || [];
   const isCommandEntry = entry.toolKind === "run_command";
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
@@ -650,43 +483,6 @@ function ProcessEntries({
   return <>{rows}</>;
 }
 
-const toolKindToAction = (toolKind: string): AgentProcessFile["action"] => {
-  switch (toolKind) {
-    case "read_file": return "read";
-    case "list_dir": return "listed";
-    case "write_file": return "written";
-    case "edit_file": return "edited";
-    default: return undefined;
-  }
-};
-
-const mergeProcessEntries = (entries: AgentProcessEntry[]): AgentProcessEntry[] => {
-  const merged: AgentProcessEntry[] = [];
-
-  for (const entry of entries) {
-    const last = merged[merged.length - 1];
-    const entryFiles = entry.files ? mergeProcessFiles(entry.files) : undefined;
-
-    if (
-      entry.type === "tool" && last?.type === "tool" &&
-      entry.toolKind && last.toolKind === entry.toolKind &&
-      entry.state === last.state &&
-      last.files && last.files.length > 0 &&
-      entryFiles && entryFiles.length > 0
-    ) {
-      last.files = mergeProcessFiles([...last.files, ...entryFiles]);
-      const action = toolKindToAction(entry.toolKind);
-      last.title = getFileEntryTitle(action, last.files.length, entry.state === "running");
-      last.id = entry.id;
-      continue;
-    }
-
-    merged.push({ ...entry, files: entryFiles ? [...entryFiles] : undefined });
-  }
-
-  return merged;
-};
-
 function useProcessTicker(enabled: boolean) {
   const [now, setNow] = useState(Date.now());
 
@@ -726,15 +522,16 @@ export function ProcessBlock({
     () => summarizeProcessEntries(process.entries),
     [process.entries]
   );
+  const mergeProcessEntriesRef = useRef(createProcessEntryMerger());
   const mergedEntries = useMemo(
-    () => expanded ? mergeProcessEntries(process.entries) : [],
+    () => expanded ? mergeProcessEntriesRef.current(process.entries) : [],
     [expanded, process.entries]
   );
 
   return (
     <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
       <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
-        <span>{interrupted ? "已中断" : "处理耗时"} {elapsed}</span>
+        <span>{interrupted ? uiText.process.interrupted : uiText.process.elapsed} {elapsed}</span>
         <ProcessProgressSummary process={process} fallback={summary} />
         <svg
           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
@@ -746,7 +543,7 @@ export function ProcessBlock({
       {expanded && (
         <div className="chat-process-content">
           {process.entries.length === 0 ? (
-            <div className="chat-process-empty">等待 agent 事件...</div>
+            <div className="chat-process-empty">{uiText.process.emptyEvents}</div>
           ) : (
             <ProcessEntries
               entries={mergedEntries}

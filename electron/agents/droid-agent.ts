@@ -19,6 +19,8 @@ import {
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
 } from "./process-events";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
+import { isRecord } from "../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -33,6 +35,14 @@ interface AgentSendOptions {
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
 }
+
+interface DroidUserMessageParams {
+  text: string;
+  images?: Array<{ type: "image"; mediaType: string; data: string }>;
+}
+
+const asRecord = (value: unknown): UnknownRecord =>
+  isRecord(value) ? value : {};
 
 function getDroidExecutable(args: string[]): { command: string; args: string[]; shell?: boolean } {
   if (process.env.DROID_PATH && existsSync(process.env.DROID_PATH)) {
@@ -62,7 +72,7 @@ export class DroidAgent {
   private sessionId: string | null = null;
   private models: AgentModel[] = [];
   private rpcId = 0;
-  private pendingResponses = new Map<string, (data: any) => void>();
+  private pendingResponses = new Map<string, (data: unknown) => void>();
   private pendingAskUserRequestId: string | null = null;
   private pendingPermissionRequestId: string | null = null;
   private isReady = false;
@@ -134,14 +144,16 @@ export class DroidAgent {
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (line.length > 0) {
           try {
-            const data = JSON.parse(line);
+            const data: unknown = JSON.parse(line);
             this.handleMessage(data);
             // Detect session initialization response
-            if (!initResolved && data.type === "response" && data.id === "init-1" && data.result) {
+            const message = asRecord(data);
+            const result = asRecord(message.result);
+            if (!initResolved && message.type === "response" && message.id === "init-1" && message.result) {
               initResolved = true;
               this.isReady = true;
-              if (data.result?.sessionId) {
-                this.sessionId = data.result.sessionId;
+              if (result.sessionId !== undefined && result.sessionId !== null) {
+                this.sessionId = String(result.sessionId);
               }
               this.emitEvent({ type: "agent_ready", agentId: "droid", mock: false });
             }
@@ -181,7 +193,7 @@ export class DroidAgent {
   }
 
   /** Send a user message */
-  async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
+  async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process || !this.isReady) {
       void this.mockResponse(message);
       return;
@@ -193,7 +205,7 @@ export class DroidAgent {
     const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
     await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
 
-    const msgParams: any = { text: message };
+    const msgParams: DroidUserMessageParams = { text: message };
     if (images && images.length > 0) {
       msgParams.images = images.map((img) => ({
         type: "image",
@@ -266,15 +278,18 @@ export class DroidAgent {
     try {
       const configPath = join(homedir(), ".factory", "settings.json");
       const content = await readFile(configPath, "utf-8");
-      const config = JSON.parse(content);
+      const config = asRecord(JSON.parse(content));
       if (Array.isArray(config.customModels)) {
-        for (const m of config.customModels) {
+        for (const rawModel of config.customModels) {
+          const model = asRecord(rawModel);
+          const id = model.id || model.model || model.displayName;
+          if (id === undefined || id === null) continue;
           this.models.push({
-            id: m.id || m.model || m.displayName,
-            name: m.displayName || m.model || m.id,
-            provider: m.hppProviderId || m.provider || "factory-custom",
-            reasoning: !!m.reasoning,
-            supportsImages: m.noImageSupport !== true,
+            id: String(id),
+            name: String(model.displayName || model.model || model.id || id),
+            provider: String(model.hppProviderId || model.provider || "factory-custom"),
+            reasoning: !!model.reasoning,
+            supportsImages: model.noImageSupport !== true,
           });
         }
       }
@@ -330,17 +345,17 @@ export class DroidAgent {
     });
   }
 
-  sendUIResponse(response: any) {
+  sendUIResponse(response: AgentUIResponse) {
     if (!this.process || !this.isReady) return;
     if (this.pendingPermissionRequestId) {
-      const answers = Array.isArray(response?.answers) ? response.answers : [];
-      const firstAnswer = answers[0] || {};
+      const answers = Array.isArray(response.answers) ? response.answers : [];
+      const firstAnswer = asRecord(answers[0]);
       const selectedValue = String(
         firstAnswer.value ||
         firstAnswer.answer ||
         firstAnswer.label ||
-        response?.value ||
-        response?.text ||
+        response.value ||
+        response.text ||
         ""
       );
       this.sendRpcResponse(this.pendingPermissionRequestId, {
@@ -351,12 +366,12 @@ export class DroidAgent {
     }
     if (this.pendingAskUserRequestId) {
       const text =
-        typeof response?.text === "string" ? response.text :
-        typeof response?.value === "string" ? response.value :
+        typeof response.text === "string" ? response.text :
+        typeof response.value === "string" ? response.value :
         "";
       this.sendRpcResponse(this.pendingAskUserRequestId, {
         cancelled: false,
-        answers: Array.isArray(response?.answers) && response.answers.length > 0
+        answers: Array.isArray(response.answers) && response.answers.length > 0
           ? response.answers
           : [{ value: text }],
       });
@@ -391,7 +406,7 @@ export class DroidAgent {
 
   // ---- JSON-RPC (Factory protocol) ----
 
-  private sendRpc(method: string, params: any, onResponse?: (data: any) => void): string {
+  private sendRpc(method: string, params: unknown, onResponse?: (data: unknown) => void): string {
     const id = `rpc-${++this.rpcId}`;
     const msg = {
       jsonrpc: "2.0",
@@ -407,13 +422,13 @@ export class DroidAgent {
     return id;
   }
 
-  private sendRpcAsync(method: string, params: any): Promise<any> {
+  private sendRpcAsync(method: string, params: unknown): Promise<unknown> {
     return new Promise((resolve) => {
       this.sendRpc(method, params, resolve);
     });
   }
 
-  private sendRpcResponse(requestId: string, result: any) {
+  private sendRpcResponse(requestId: string, result: unknown) {
     const msg = {
       jsonrpc: "2.0",
       factoryApiVersion: "1.0.0",
@@ -425,27 +440,34 @@ export class DroidAgent {
     this.process?.stdin?.write(JSON.stringify(msg) + "\n");
   }
 
-  private handleMessage(data: any) {
-    const msgType = data.type;
+  private handleMessage(data: unknown) {
+    const message = asRecord(data);
+    const msgType = message.type;
 
     if (msgType === "response") {
       // Response to our RPC call
-      if (data.id && this.pendingResponses.has(data.id)) {
-        const handler = this.pendingResponses.get(data.id)!;
+      const id = typeof message.id === "string" ? message.id : "";
+      if (id && this.pendingResponses.has(id)) {
+        const handler = this.pendingResponses.get(id)!;
         handler(data);
-        this.pendingResponses.delete(data.id);
+        this.pendingResponses.delete(id);
       }
     } else if (msgType === "notification") {
       // Server-to-client notification
-      const method = data.method || data.params?.notification?.type;
-      this.handleNotification(method, data.params || data);
+      const params = asRecord(message.params);
+      const notification = asRecord(params.notification);
+      const method = message.method || notification.type;
+      this.handleNotification(String(method || ""), message.params || message);
     } else if (msgType === "request") {
       // Server-to-client request (permission, ask_user)
-      this.handleServerRequest(data.method, data.id, data.params);
+      const id = typeof message.id === "string" ? message.id : "";
+      const method = typeof message.method === "string" ? message.method : "";
+      if (id && method) this.handleServerRequest(method, id, message.params);
     }
   }
 
-  private handleServerRequest(method: string, requestId: string, params: any) {
+  private handleServerRequest(method: string, requestId: string, params: unknown) {
+    const paramsRecord = asRecord(params);
     switch (method) {
       case "droid.request_permission":
         if (!this.planModeEnabled) {
@@ -456,7 +478,7 @@ export class DroidAgent {
             type: method,
             requestId,
             detail: params,
-            title: params?.title || params?.message || "Droid 请求权限",
+            title: paramsRecord.title || paramsRecord.message || "Droid 请求权限",
             options: [
               { label: "允许", value: "proceed_once" },
               { label: "拒绝", value: "deny" },
@@ -471,29 +493,30 @@ export class DroidAgent {
     }
   }
 
-  private handleNotification(method: string, params: any) {
-    const notification = params?.notification || params;
-    const notifType = notification?.type || method;
-    const notifData = notification?.data || notification;
+  private handleNotification(method: string, params: unknown) {
+    const paramsRecord = asRecord(params);
+    const notification = asRecord(paramsRecord.notification || paramsRecord);
+    const notifType = String(notification.type || method);
+    const notifData = asRecord(notification.data || notification);
 
     if (
       isContextCompactionLike(
         method,
         notifType,
-        notifData?.type,
-        notifData?.name,
-        notifData?.title,
-        notifData?.message,
-        notifData?.status
+        notifData.type,
+        notifData.name,
+        notifData.title,
+        notifData.message,
+        notifData.status
       )
     ) {
-      this.emitEvent({ type: "context_compaction", id: notifData?.id || notification?.id || params?.id });
+      this.emitEvent({ type: "context_compaction", id: notifData.id || notification.id || paramsRecord.id });
       return;
     }
 
     switch (notifType) {
       case "assistant_text_delta":
-        this.emitEvent({ type: "stream_delta", delta: notifData?.delta || notifData?.text || "" });
+        this.emitEvent({ type: "stream_delta", delta: String(notifData.delta || notifData.text || "") });
         break;
       case "assistant_text_complete":
         this.emitEvent({ type: "stream_end" });
@@ -501,7 +524,7 @@ export class DroidAgent {
         this.turnActive = false;
         break;
       case "thinking_text_delta":
-        this.emitEvent({ type: "thinking_delta", delta: notifData?.delta || notifData?.text || "" });
+        this.emitEvent({ type: "thinking_delta", delta: String(notifData.delta || notifData.text || "") });
         break;
       case "thinking_text_complete":
         this.emitEvent({ type: "thinking_end" });
@@ -515,15 +538,15 @@ export class DroidAgent {
       case "tool_progress_update":
         {
           const normalizedInput = {
-            toolName: notifData?.toolName || notifData?.name || "tool",
-            toolCallId: notifData?.toolCallId || notifData?.id || notifData?.name,
-            args: notifData?.args || notifData?.input,
-            result: notifData?.result,
-            detail: notifData?.message || notifData?.status,
-            patch: notifData?.patch || notifData?.diff,
-            isError: notifData?.isError || notifData?.status === "error",
+            toolName: notifData.toolName || notifData.name || "tool",
+            toolCallId: notifData.toolCallId || notifData.id || notifData.name,
+            args: notifData.args || notifData.input,
+            result: notifData.result,
+            detail: notifData.message || notifData.status,
+            patch: notifData.patch || notifData.diff,
+            isError: notifData.isError || notifData.status === "error",
           };
-          const phase = notifData?.result || notifData?.patch || notifData?.diff || notifData?.status === "completed" || notifData?.status === "error"
+          const phase = notifData.result || notifData.patch || notifData.diff || notifData.status === "completed" || notifData.status === "error"
             ? "tool_end"
             : "tool_start";
           const toolEvent = normalizeToolEvent(phase, normalizedInput);
@@ -536,8 +559,8 @@ export class DroidAgent {
         break;
       case "droid_working_state_changed":
         {
-          const state = String(notifData?.state || notifData?.status || "").toLowerCase();
-          if (typeof notifData?.working === "boolean") {
+          const state = String(notifData.state || notifData.status || "").toLowerCase();
+          if (typeof notifData.working === "boolean") {
             this.turnActive = notifData.working;
           } else if (["idle", "completed", "complete", "done"].includes(state)) {
             this.turnActive = false;
@@ -548,7 +571,7 @@ export class DroidAgent {
         break;
       case "error":
         this.turnActive = false;
-        this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${notifData?.message || "未知错误"}` });
+        this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${notifData.message || "未知错误"}` });
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
         break;

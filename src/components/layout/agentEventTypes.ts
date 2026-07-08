@@ -45,3 +45,12 @@ export type AgentEventHandlerContext = {
   ensureAssistantContinuation: (currentSessionId: string) => SessionRuntime;
   isAlreadyRunningError: (title: string, detail?: string) => boolean;
 };
+
+export type AgentEventRuntimeController = AgentEventHandlerContext & {
+  getActiveAgentId: () => string;
+  isOpenProjectSession: (sessionId: string) => boolean;
+  discardRuntime: (sessionId: string) => void;
+  finishManualAbort: (sessionId: string) => void;
+  appendContextCompactionDivider: (currentSessionId: string, eventId?: string) => void;
+  clearAllStreamWatchdogs: () => void;
+};

@@ -1,4 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type {
+  AgentEvent,
+  AgentImagePayload,
+  AgentSendOptions,
+  AgentUIResponse,
+  AppUpdateStatus,
+} from "../src/types/ipc";
+import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   // Window controls
@@ -57,7 +65,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:switchSession", sessionId),
   agentRemoveSession: (sessionId: string) =>
     ipcRenderer.invoke("agent:removeSession", sessionId),
-  agentSendMessage: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean; clientMessageId?: string }) =>
+  agentSendMessage: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) =>
     ipcRenderer.invoke("agent:sendMessage", message, images, sessionId, options),
   agentForkSession: (sessionId: string, target: unknown) =>
     ipcRenderer.invoke("agent:forkSession", sessionId, target),
@@ -71,7 +79,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:activate", agentId, providerId),
   agentConfigDelete: (agentId: string, providerId: string) =>
     ipcRenderer.invoke("agentConfig:delete", agentId, providerId),
-  agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: { planModeEnabled?: boolean; clientMessageId?: string }) =>
+  agentConfigReorder: (agentId: string, providerIds: string[]) =>
+    ipcRenderer.invoke("agentConfig:reorder", agentId, providerIds),
+  agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) =>
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
   agentGetModels: (sessionId?: string) => ipcRenderer.invoke("agent:getModels", sessionId),
@@ -79,17 +89,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:setModel", provider, modelId, sessionId),
   agentSetThinkingLevel: (level: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:setThinkingLevel", level, sessionId),
-  agentSendUIResponse: (response: any) =>
+  agentSendUIResponse: (response: AgentUIResponse) =>
     ipcRenderer.invoke("agent:sendUIResponse", response),
 
   // Agent events
-  onAgentEvent: (callback: (event: unknown) => void) => {
-    const handler = (_event: unknown, data: unknown) => callback(data);
+  onAgentEvent: (callback: (event: AgentEvent) => void) => {
+    const handler = (_event: unknown, data: unknown) => {
+      if (isAgentEvent(data)) callback(data);
+    };
     ipcRenderer.on("agent:event", handler);
     return () => ipcRenderer.removeListener("agent:event", handler);
   },
-  onAppUpdateStatus: (callback: (status: unknown) => void) => {
-    const handler = (_event: unknown, data: unknown) => callback(data);
+  onAppUpdateStatus: (callback: (status: AppUpdateStatus) => void) => {
+    const handler = (_event: unknown, data: unknown) => {
+      if (isAppUpdateStatus(data)) callback(data);
+    };
     ipcRenderer.on("app:update-status", handler);
     return () => ipcRenderer.removeListener("app:update-status", handler);
   },
