@@ -48,6 +48,8 @@ const getWorkerPath = () => {
   return candidates.find((candidate) => existsSync(candidate)) || candidates[candidates.length - 1];
 };
 
+const CODEX_WORKER_INIT_TIMEOUT_MS = 45_000;
+
 export class CodexAgent {
   private process: ChildProcess | null = null;
   private window: BrowserWindow | null = null;
@@ -127,9 +129,13 @@ export class CodexAgent {
       this.activePromptIds.clear();
     });
 
-    child.on("exit", () => {
+    child.on("exit", (code, signal) => {
       if (this.process === child) this.process = null;
       this.activePromptIds.clear();
+      const exitReason = signal || (code ?? "unknown");
+      const error = `Codex worker exited before completing the request (${exitReason})`;
+      for (const handler of this.pendingResponses.values()) handler({ type: "error", error });
+      this.pendingResponses.clear();
       if (!this.isAborting) {
         this.emitEvent({ type: "agent_disconnected" });
       }
@@ -138,8 +144,11 @@ export class CodexAgent {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingResponses.delete(initId);
+        try {
+          child.kill();
+        } catch {}
         reject(new Error("Codex worker init timed out"));
-      }, 12000);
+      }, CODEX_WORKER_INIT_TIMEOUT_MS);
       const initId = this.sendWorkerCommand({
         type: "init",
         projectPath,

@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -152,16 +152,40 @@ const getWindowsCommandNames = (command) => {
   return [...extensions.map((ext) => `${command}${ext}`), command];
 };
 
-const findCommandOnPath = (command) => {
+const findCommandsOnPath = (command) => {
   const key = pathEnvKey(process.env);
+  const matches = [];
+  const seen = new Set();
   const dirs = String(process.env[key] || "").split(delimiter).filter(Boolean);
   for (const dir of dirs) {
     for (const name of getWindowsCommandNames(command)) {
       const candidate = join(dir, name);
-      if (existsSync(candidate)) return candidate;
+      const cacheKey = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+      if (!seen.has(cacheKey) && existsSync(candidate)) {
+        seen.add(cacheKey);
+        matches.push(candidate);
+      }
     }
   }
-  return null;
+  return matches;
+};
+
+const isWindowsShellShim = (filePath) => process.platform === "win32" && /\.(?:cmd|bat)$/i.test(filePath);
+
+const checkCodexExecutable = (candidate) => {
+  const result = spawnSync(candidate, ["--version"], {
+    env: process.env,
+    encoding: "utf8",
+    shell: isWindowsShellShim(candidate),
+    timeout: 5000,
+  });
+  if (!result.error && result.status === 0) return { usable: true };
+  const detail = [
+    result.error?.message,
+    result.stderr,
+    result.stdout,
+  ].filter(Boolean).join("\n").trim();
+  return { usable: false, error: detail || `exit code ${result.status ?? "unknown"}` };
 };
 
 const resolveCodexExecutable = () => {
@@ -169,8 +193,17 @@ const resolveCodexExecutable = () => {
     return process.env.CODEX_PATH;
   }
 
-  const executablePath = findCommandOnPath("codex");
-  if (executablePath) return executablePath;
+  const candidates = findCommandsOnPath("codex");
+  const errors = [];
+  for (const candidate of candidates) {
+    const check = checkCodexExecutable(candidate);
+    if (check.usable) return candidate;
+    errors.push(`${candidate}: ${check.error}`);
+  }
+
+  if (candidates.length > 0) {
+    throw new Error(`Unable to launch Codex CLI. Checked ${candidates.length} candidate(s).\n${errors.slice(0, 3).join("\n")}`);
+  }
 
   if (process.platform === "win32") {
     throw new Error("Unable to locate Codex CLI. Install it with `npm install -g @openai/codex`, or set CODEX_PATH to codex.exe.");
@@ -178,8 +211,6 @@ const resolveCodexExecutable = () => {
 
   throw new Error("Unable to locate Codex CLI. Install it with `npm install -g @openai/codex`, or set CODEX_PATH to the codex executable.");
 };
-
-const isWindowsShellShim = (filePath) => process.platform === "win32" && /\.(?:cmd|bat)$/i.test(filePath);
 
 const startAppServer = async () => {
   if (appServerReady) return appServerReady;
@@ -279,13 +310,19 @@ const writeRpc = (message) => {
 
 const rpcRequest = (method, params, timeoutMs = 120000) => {
   const id = ++nextRpcId;
-  writeRpc({ id, method, params });
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pendingRpc.delete(id);
       reject(new Error(`Codex app-server request timed out: ${method}`));
     }, timeoutMs);
     pendingRpc.set(id, { method, resolve, reject, timeout });
+    try {
+      writeRpc({ id, method, params });
+    } catch (error) {
+      clearTimeout(timeout);
+      pendingRpc.delete(id);
+      reject(error);
+    }
   });
 };
 

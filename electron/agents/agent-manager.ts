@@ -144,8 +144,8 @@ function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
 async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
   if (!agentId) return models;
   const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
-  if (configuredModels.length === 0) return models;
   if (agentId === "codex") return configuredModels;
+  if (configuredModels.length === 0) return models;
   if (agentId === "pi") return models;
 
   const merged = new Map<string, AgentModel>();
@@ -512,8 +512,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return saveResult;
     }
     if (agentId === "codex") {
-      const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
-      return { ...saveResult, models };
+      return saveResult;
     }
 
     const idleCheck = agentManager.canReloadConfig(agentId);

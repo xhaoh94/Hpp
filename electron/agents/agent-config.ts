@@ -617,6 +617,9 @@ export async function deleteAgentProviderConfig(agentId: string, providerId: str
     const state = agentId === "codex"
       ? await readSavedCodexConfigState()
       : await readNativeAgentConfigState(agentId);
+    if (agentId === "codex" && state.activeProviderId === providerId) {
+      throw new Error("当前启用的 Codex 渠道不能直接删除，请先启用其它渠道。");
+    }
     const nextProviders = state.providers.filter((provider) => provider.providerId !== providerId);
     const nextState = {
       activeProviderId: state.activeProviderId === providerId ? undefined : state.activeProviderId,
@@ -985,8 +988,7 @@ export async function getConfiguredAgentModels(agentId: string): Promise<Array<{
     : await readNativeAgentConfigState(agentId);
   const providers = agentId === "codex"
     ? [
-        state.providers.find((provider) => provider.providerId === state.activeProviderId)
-          || state.providers[0],
+        state.providers.find((provider) => provider.providerId === state.activeProviderId),
       ].filter((provider): provider is AgentProviderConfig => !!provider)
     : state.providers;
 

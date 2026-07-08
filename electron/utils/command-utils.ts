@@ -53,6 +53,34 @@ export function findCommandOnPath(
   return undefined;
 }
 
+export function findCommandsOnPath(
+  command: string,
+  options: { env?: NodeJS.ProcessEnv; excludeNodeModules?: boolean } = {}
+): string[] {
+  const env = options.env || process.env;
+  if (!command.trim()) return [];
+
+  if (commandHasPath(command)) {
+    const normalized = normalize(command);
+    return existsSync(normalized) ? [normalized] : [];
+  }
+
+  const matches: string[] = [];
+  const seen = new Set<string>();
+  const dirs = getPathEnvValue(env).split(delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    for (const name of getCommandNames(command, env)) {
+      const candidate = join(dir, name);
+      const key = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+      if (seen.has(key) || !existsSync(candidate)) continue;
+      if (options.excludeNodeModules && candidate.includes(`${sep}node_modules${sep}`)) continue;
+      seen.add(key);
+      matches.push(candidate);
+    }
+  }
+  return matches;
+}
+
 export function resolveCommand(command: string, env: NodeJS.ProcessEnv = process.env): string {
   return findCommandOnPath(command, { env }) || command;
 }

@@ -5,6 +5,7 @@ import { join } from "path";
 import { homedir } from "os";
 import {
   commandExists as commandExistsOnPath,
+  findCommandsOnPath,
   getCommandEnv,
   isWindowsShellShim,
   resolveCommand,
@@ -195,10 +196,34 @@ async function commandExists(command: string): Promise<boolean> {
   return commandExistsOnPath(command, { excludeNodeModules: true });
 }
 
-async function getCommandVersion(command: string): Promise<string | undefined> {
+async function getCommandVersion(command: string): Promise<{ version?: string; error?: string }> {
+  const candidates = findCommandsOnPath(command);
+  const commandsToTry = candidates.length > 0 ? candidates : [command];
+  let lastError: string | undefined;
+
+  for (const candidate of commandsToTry) {
+    try {
+      const { stdout, stderr } = await runCommand(candidate, ["--version"], { timeout: 5000 });
+      const output = `${stdout}\n${stderr}`;
+      const version = extractVersion(output);
+      if (version) return { version };
+      lastError = `无法解析版本输出：${output.trim().split(/\r?\n/).slice(-1)[0] || "(empty)"}`;
+    } catch (err) {
+      lastError = formatError(err);
+    }
+  }
+
+  return { error: lastError };
+}
+
+async function getInstalledPackageVersion(packageName: string): Promise<string | undefined> {
   try {
-    const { stdout, stderr } = await runCommand(command, ["--version"], { timeout: 5000 });
-    return extractVersion(`${stdout}\n${stderr}`);
+    const { stdout } = await runNpmCommand(["root", "-g"], { timeout: 10000 });
+    const packageRoot = stdout.trim();
+    if (!packageRoot) return undefined;
+    const packageJson = await readFile(join(packageRoot, ...packageName.split("/"), "package.json"), "utf8");
+    const parsed = JSON.parse(packageJson) as { version?: unknown };
+    return typeof parsed.version === "string" ? parsed.version : undefined;
   } catch {
     return undefined;
   }
@@ -218,9 +243,13 @@ async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
     };
   }
 
-  const currentVersion = await getCommandVersion(config.command);
+  const versionResult = await getCommandVersion(config.command);
+  const packageVersion = versionResult.version ? undefined : await getInstalledPackageVersion(config.packageName);
+  const currentVersion = versionResult.version || packageVersion;
   let latestVersion: string | undefined;
-  let error: string | undefined;
+  let error = packageVersion && versionResult.error
+    ? `${config.displayName} 命令无法执行或无法返回版本：${versionResult.error}`
+    : undefined;
 
   try {
     latestVersion = await getLatestPackageVersion(config.packageName);

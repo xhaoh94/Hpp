@@ -115,11 +115,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   );
 
   const getPreferredProviderId = useCallback((state: AgentConfigState) => {
+    if (usesActivation) return state.activeProviderId || "";
+
     const currentProviderId = agentId === activeAgentId ? currentModelProvider : "";
     if (currentProviderId && state.providers.some((provider) => provider.providerId === currentProviderId)) {
       return currentProviderId;
     }
-    if (usesActivation && state.activeProviderId) return state.activeProviderId;
     return state.providers[0]?.providerId || "";
   }, [activeAgentId, agentId, currentModelProvider, usesActivation]);
 
@@ -207,13 +208,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     if (agentId === "codex") {
       provider.models = [{ ...provider.models[0], reasoning: true, imageInput: true }];
     }
-    setSelectedProviderId(provider.providerId);
+    if (!usesActivation) setSelectedProviderId(provider.providerId);
     setDraft(provider);
     setEditorBaseline(cloneProvider(provider));
     setEditorOriginalProviderId("");
     setEditorOpen(true);
     setStatus(null);
-  }, [agentId, config.providers]);
+  }, [agentId, config.providers, usesActivation]);
 
   const handleSelectProvider = useCallback((provider: AgentProviderConfig) => {
     setSelectedProviderId(provider.providerId);
@@ -233,13 +234,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const handleCopyProvider = useCallback((provider: AgentProviderConfig) => {
     const existingIds = new Set(config.providers.map((item) => item.providerId));
     const copiedProvider = createCopiedProvider(provider, existingIds);
-    setSelectedProviderId(copiedProvider.providerId);
+    if (!usesActivation) setSelectedProviderId(copiedProvider.providerId);
     setDraft(copiedProvider);
     setEditorBaseline(cloneProvider(copiedProvider));
     setEditorOriginalProviderId("");
     setEditorOpen(true);
     setStatus({ type: "success", text: "已复制为新渠道草稿，保存后写入配置" });
-  }, [config.providers]);
+  }, [config.providers, usesActivation]);
 
   const handleUndoDraft = useCallback(() => {
     if (!editorBaseline) return;
@@ -303,19 +304,29 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         return;
       }
       setConfig(result.config);
-      setSelectedProviderId(normalizedDraft.providerId);
+      const isNewProvider = !editorOriginalProviderId;
+      const keepSelectedProviderId = selectedProviderId && result.config.providers.some((provider) =>
+        provider.providerId === selectedProviderId
+      );
+      setSelectedProviderId(
+        usesActivation && isNewProvider
+          ? (keepSelectedProviderId ? selectedProviderId : result.config.activeProviderId || "")
+          : normalizedDraft.providerId
+      );
       setDraft(cloneProvider(normalizedDraft));
       setEditorBaseline(null);
       setEditorOriginalProviderId("");
       setEditorOpen(false);
-      if (result.models && result.models.length > 0) {
+      if (!usesActivation && result.models && result.models.length > 0) {
         onModelsUpdated(agentId, result.models);
       }
       const count = result.reloadedSessionIds?.length || 0;
       setStatus({
         type: "success",
         text: usesActivation
-          ? "配置已保存，点击启用后写入本地配置并重载"
+          ? normalizedDraft.providerId === result.config.activeProviderId
+            ? "配置已保存，点击重新应用后写入本地配置并重载"
+            : "配置已保存，点击启用后写入本地配置并重载"
           : result.error || (count > 0
             ? `本地配置已保存，已重载 ${count} 个会话`
             : "本地配置已保存，暂无已初始化会话"),
@@ -325,7 +336,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setSaving(false);
     }
-  }, [agentId, draft, editorOriginalProviderId, onModelsUpdated, usesActivation]);
+  }, [agentId, draft, editorOriginalProviderId, onModelsUpdated, selectedProviderId, usesActivation]);
 
   const handleActivate = useCallback(async (providerId: string) => {
     setActivatingProviderId(providerId);
@@ -385,7 +396,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setDeletingProviderId("");
     }
-  }, [agentId, usesActivation]);
+  }, [agentId, onModelsUpdated, usesActivation]);
 
   const handleCopyApiKey = useCallback(async () => {
     const apiKey = draft?.apiKey || "";
@@ -538,7 +549,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                           type="button"
                           className="btn-action"
                           onClick={() => void handleDelete(selectedSavedProvider.providerId)}
-                          disabled={!!deletingProviderId}
+                          disabled={!!deletingProviderId || (usesActivation && selectedSavedProvider.providerId === config.activeProviderId)}
+                          title={usesActivation && selectedSavedProvider.providerId === config.activeProviderId ? "请先启用其它渠道再删除当前渠道" : undefined}
                         >
                           <Trash2 size={13} />
                           {deletingProviderId ? "删除中..." : "删除"}
@@ -578,7 +590,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         ))
                       )}
                     </div>
-                    {usesActivation && selectedSavedProvider.providerId !== config.activeProviderId && (
+                    {usesActivation && (
                       <button
                         type="button"
                         className="filter-add-btn agent-config-activate-wide"
@@ -586,7 +598,11 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         disabled={!!activatingProviderId}
                       >
                         <Zap size={13} />
-                        {activatingProviderId ? "启用中..." : "启用此渠道并重载"}
+                        {activatingProviderId
+                          ? "启用中..."
+                          : selectedSavedProvider.providerId === config.activeProviderId
+                            ? "重新应用当前渠道并重载"
+                            : "启用此渠道并重载"}
                       </button>
                     )}
                   </>
@@ -613,7 +629,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           <div className="settings-modal agent-provider-editor-modal" onMouseDown={(event) => event.stopPropagation()}>
             <div className="settings-modal-header">
               <div>
-                <h3>{selectedSavedProvider ? "编辑渠道" : "新增渠道"}</h3>
+                <h3>{editorOriginalProviderId ? "编辑渠道" : "新增渠道"}</h3>
                 <div className="agent-config-subtitle">{draft.providerId || "new-provider"}</div>
               </div>
               <div className="agent-config-form-actions">
