@@ -1,10 +1,9 @@
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, isAbsolute, join, relative } from "node:path";
 
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
@@ -22,15 +21,6 @@ const PLAN_MODE_INSTRUCTIONS = [
   "Respond with a concise implementation plan and wait for the user to explicitly confirm before implementation.",
   "</plan_mode>",
 ].join("\n");
-
-const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
-  "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
-  "x86_64-apple-darwin": "@openai/codex-darwin-x64",
-  "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
-  "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
-  "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
-};
 
 const DEFAULT_THINKING_LEVEL = "medium";
 
@@ -147,88 +137,57 @@ const normalizeReasoningEffort = (level) => {
 
 const getModels = () => CODEX_MODELS;
 
-const existingDirs = (...dirs) => dirs.filter((dir) => {
-  try {
-    return statSync(dir).isDirectory();
-  } catch {
-    return false;
-  }
-});
-
-const resolveCodexExecutable = () => {
-  if (process.env.CODEX_PATH && existsSync(process.env.CODEX_PATH)) {
-    return { executablePath: process.env.CODEX_PATH, pathDirs: [] };
-  }
-
-  const moduleRequire = createRequire(import.meta.url);
-  const { platform, arch } = process;
-  let targetTriple = null;
-  if (platform === "linux" || platform === "android") {
-    if (arch === "x64") targetTriple = "x86_64-unknown-linux-musl";
-    if (arch === "arm64") targetTriple = "aarch64-unknown-linux-musl";
-  } else if (platform === "darwin") {
-    if (arch === "x64") targetTriple = "x86_64-apple-darwin";
-    if (arch === "arm64") targetTriple = "aarch64-apple-darwin";
-  } else if (platform === "win32") {
-    if (arch === "x64") targetTriple = "x86_64-pc-windows-msvc";
-    if (arch === "arm64") targetTriple = "aarch64-pc-windows-msvc";
-  }
-
-  if (!targetTriple || !PLATFORM_PACKAGE_BY_TARGET[targetTriple]) {
-    throw new Error(`Unsupported platform for Codex CLI: ${platform}/${arch}`);
-  }
-
-  const codexPackageJsonPath = moduleRequire.resolve("@openai/codex/package.json");
-  const codexRequire = createRequire(codexPackageJsonPath);
-  const platformPackageJsonPath = codexRequire.resolve(`${PLATFORM_PACKAGE_BY_TARGET[targetTriple]}/package.json`);
-  const vendorRoot = join(dirname(platformPackageJsonPath), "vendor");
-  const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
-  const packageRoot = join(vendorRoot, targetTriple);
-  const executablePath = join(packageRoot, "bin", codexBinaryName);
-  if (existsSync(executablePath)) {
-    return {
-      executablePath,
-      pathDirs: existingDirs(join(packageRoot, "codex-path")),
-    };
-  }
-
-  const legacyPath = join(packageRoot, "codex", codexBinaryName);
-  if (existsSync(legacyPath)) {
-    return {
-      executablePath: legacyPath,
-      pathDirs: existingDirs(join(packageRoot, "path")),
-    };
-  }
-
-  throw new Error("Unable to locate Codex CLI binary. Ensure @openai/codex is installed.");
-};
-
 const pathEnvKey = (env, platform = process.platform) => {
   if (platform !== "win32") return "PATH";
   const matchingKeys = Object.keys(env).filter((key) => key.toLowerCase() === "path");
   return matchingKeys.includes("Path") ? "Path" : matchingKeys.at(-1) ?? "PATH";
 };
 
-const prependPathDirs = (env, pathDirs) => {
-  if (!pathDirs.length) return;
-  const key = pathEnvKey(env);
-  if (process.platform === "win32") {
-    for (const envKey of Object.keys(env)) {
-      if (envKey.toLowerCase() === "path" && envKey !== key) delete env[envKey];
+const getWindowsCommandNames = (command) => {
+  if (process.platform !== "win32") return [command];
+  const configured = process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM";
+  const extensions = configured.split(";").map((ext) => ext.trim()).filter(Boolean);
+  const lower = command.toLowerCase();
+  if (extensions.some((ext) => lower.endsWith(ext.toLowerCase()))) return [command];
+  return [...extensions.map((ext) => `${command}${ext}`), command];
+};
+
+const findCommandOnPath = (command) => {
+  const key = pathEnvKey(process.env);
+  const dirs = String(process.env[key] || "").split(delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    for (const name of getWindowsCommandNames(command)) {
+      const candidate = join(dir, name);
+      if (existsSync(candidate)) return candidate;
     }
   }
-  const existing = String(env[key] || "").split(delimiter).filter((item) => item && !pathDirs.includes(item));
-  env[key] = [...pathDirs, ...existing].join(delimiter);
+  return null;
 };
+
+const resolveCodexExecutable = () => {
+  if (process.env.CODEX_PATH && existsSync(process.env.CODEX_PATH)) {
+    return process.env.CODEX_PATH;
+  }
+
+  const executablePath = findCommandOnPath("codex");
+  if (executablePath) return executablePath;
+
+  if (process.platform === "win32") {
+    throw new Error("Unable to locate Codex CLI. Install it with `npm install -g @openai/codex`, or set CODEX_PATH to codex.exe.");
+  }
+
+  throw new Error("Unable to locate Codex CLI. Install it with `npm install -g @openai/codex`, or set CODEX_PATH to the codex executable.");
+};
+
+const isWindowsShellShim = (filePath) => process.platform === "win32" && /\.(?:cmd|bat)$/i.test(filePath);
 
 const startAppServer = async () => {
   if (appServerReady) return appServerReady;
 
   appServerReady = new Promise((resolve, reject) => {
     let settled = false;
-    const { executablePath, pathDirs } = resolveCodexExecutable();
+    const executablePath = resolveCodexExecutable();
     const env = { ...process.env };
-    prependPathDirs(env, pathDirs);
     if (!env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE) {
       env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE = "codex_sdk_ts";
     }
@@ -237,6 +196,7 @@ const startAppServer = async () => {
       cwd: projectPath || process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
       env,
+      shell: isWindowsShellShim(executablePath),
     });
     appServer = child;
 

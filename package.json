@@ -28,7 +28,6 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@electron-toolkit/utils": "^4.0.0",
-    "@openai/codex": "^0.142.5",
     "electron-updater": "^6.8.9",
     "electron-vite": "^5.0.0",
     "lucide-react": "^1.21.0",

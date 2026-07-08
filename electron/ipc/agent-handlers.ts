@@ -1,10 +1,14 @@
-import { app, ipcMain } from "electron";
-import { execFile, exec } from "child_process";
-import { existsSync } from "fs";
+import { ipcMain } from "electron";
+import { exec, execFile } from "child_process";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import { commandExists as commandExistsOnPath, getCommandEnv, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
+import {
+  commandExists as commandExistsOnPath,
+  getCommandEnv,
+  isWindowsShellShim,
+  resolveCommand,
+} from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 
 export interface AgentStatus {
@@ -32,13 +36,12 @@ interface CliAgentConfig {
   displayName: string;
 }
 
-interface PackageAgentConfig {
-  packageName: string;
-  displayName: string;
-  packagePath: string[];
-}
-
 const CLI_AGENTS: Record<string, CliAgentConfig> = {
+  codex: {
+    command: "codex",
+    packageName: "@openai/codex",
+    displayName: "Codex CLI",
+  },
   opencode: {
     command: "opencode",
     packageName: "opencode-ai",
@@ -48,14 +51,6 @@ const CLI_AGENTS: Record<string, CliAgentConfig> = {
     command: "droid",
     packageName: "droid",
     displayName: "Factory Droid",
-  },
-};
-
-const PACKAGE_AGENTS: Record<string, PackageAgentConfig> = {
-  codex: {
-    packageName: "@openai/codex",
-    displayName: "Codex CLI",
-    packagePath: ["@openai", "codex"],
   },
 };
 
@@ -136,15 +131,7 @@ function runShellCommand(
   args: string[],
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
-  // Join command and args into a single shell string.
-  // Using exec() ensures proper PATH resolution and shell semantics on all platforms.
-  const parts = [command, ...args].map((a) => {
-    // Quote arguments containing spaces
-    if (/[\s"]/.test(a)) {
-      return JSON.stringify(a);
-    }
-    return a;
-  });
+  const parts = [command, ...args].map((arg) => (/[\s"]/.test(arg) ? JSON.stringify(arg) : arg));
   const fullCommand = parts.join(" ");
 
   return new Promise((resolve, reject) => {
@@ -171,10 +158,7 @@ function runShellCommand(
   });
 }
 
-function runNpmCommand(
-  args: string[],
-  options: { cwd?: string; timeout?: number } = {}
-): Promise<CommandResult> {
+function runNpmCommand(args: string[], options: { cwd?: string; timeout?: number } = {}): Promise<CommandResult> {
   return runShellCommand("npm", args, options);
 }
 
@@ -207,44 +191,13 @@ function extractVersion(output: string): string | undefined {
   return output.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
 }
 
-async function readJsonFile<T>(filePath: string): Promise<T | null> {
-  try {
-    return JSON.parse(await readFile(filePath, "utf8")) as T;
-  } catch {
-    return null;
-  }
-}
-
-async function findProjectPackageRoot(packageName: string): Promise<string | undefined> {
-  const candidates = Array.from(new Set([
-    process.cwd(),
-    app.getAppPath(),
-  ]));
-
-  for (const candidate of candidates) {
-    const packageJsonPath = join(candidate, "package.json");
-    if (!existsSync(packageJsonPath)) continue;
-
-    const packageJson = await readJsonFile<{
-      dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-    }>(packageJsonPath);
-
-    if (packageJson?.dependencies?.[packageName] || packageJson?.devDependencies?.[packageName]) {
-      return candidate;
-    }
-  }
-
-  return undefined;
-}
-
 async function commandExists(command: string): Promise<boolean> {
   return commandExistsOnPath(command, { excludeNodeModules: true });
 }
 
 async function getCommandVersion(command: string): Promise<string | undefined> {
   try {
-    const { stdout, stderr } = await runShellCommand(command, ["--version"], { timeout: 5000 });
+    const { stdout, stderr } = await runCommand(command, ["--version"], { timeout: 5000 });
     return extractVersion(`${stdout}\n${stderr}`);
   } catch {
     return undefined;
@@ -261,7 +214,7 @@ async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
     return {
       installed: false,
       updateAvailable: false,
-      canUpdate: false,
+      canUpdate: await commandExists("npm"),
     };
   }
 
@@ -275,7 +228,6 @@ async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
     error = `无法检查 ${config.displayName} 最新版本：${formatError(err)}`;
   }
 
-  const canUpdate = await commandExists("npm");
   const updateAvailable = !!(
     currentVersion &&
     latestVersion &&
@@ -287,49 +239,12 @@ async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
     currentVersion,
     latestVersion,
     updateAvailable,
-    canUpdate,
-    error,
-  };
-}
-
-async function getPackageAgentStatus(config: PackageAgentConfig): Promise<AgentStatus> {
-  const packageRoot = await findProjectPackageRoot(config.packageName);
-  const packageJsonPath = packageRoot
-    ? join(packageRoot, "node_modules", ...config.packagePath, "package.json")
-    : undefined;
-  const packageJson = packageJsonPath
-    ? await readJsonFile<{ version?: string }>(packageJsonPath)
-    : null;
-  const currentVersion = packageJson?.version;
-
-  let latestVersion: string | undefined;
-  let error: string | undefined;
-  try {
-    latestVersion = await getLatestPackageVersion(config.packageName);
-  } catch (err) {
-    error = `无法检查 ${config.displayName} 最新版本：${formatError(err)}`;
-  }
-
-  const updateAvailable = !!(
-    currentVersion &&
-    latestVersion &&
-    compareVersions(currentVersion, latestVersion) < 0
-  );
-
-  return {
-    installed: !!currentVersion,
-    currentVersion,
-    latestVersion,
-    updateAvailable,
-    canUpdate: !!packageRoot && !app.isPackaged,
+    canUpdate: await commandExists("npm"),
     error,
   };
 }
 
 async function getAgentStatus(agentId: string): Promise<AgentStatus> {
-  const packageConfig = PACKAGE_AGENTS[agentId];
-  if (packageConfig) return getPackageAgentStatus(packageConfig);
-
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return {
@@ -344,34 +259,6 @@ async function getAgentStatus(agentId: string): Promise<AgentStatus> {
 }
 
 async function updateAgent(agentId: string): Promise<{ success: boolean; status?: AgentStatus; error?: string }> {
-  const packageConfig = PACKAGE_AGENTS[agentId];
-  if (packageConfig) {
-    if (updateInProgress.has(agentId)) {
-      return { success: false, error: `${packageConfig.displayName} 正在更新中` };
-    }
-
-    const packageRoot = await findProjectPackageRoot(packageConfig.packageName);
-    if (!packageRoot) {
-      return { success: false, error: `未找到包含 ${packageConfig.packageName} 的 package.json` };
-    }
-    if (app.isPackaged) {
-      return { success: false, error: `打包版暂不支持自动更新 ${packageConfig.displayName}` };
-    }
-
-    updateInProgress.add(agentId);
-    try {
-      await runNpmCommand(["install", `${packageConfig.packageName}@latest`], {
-        cwd: packageRoot,
-        timeout: 180000,
-      });
-      return { success: true, status: await getAgentStatus(agentId) };
-    } catch (err) {
-      return { success: false, error: formatError(err), status: await getAgentStatus(agentId) };
-    } finally {
-      updateInProgress.delete(agentId);
-    }
-  }
-
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return { success: false, error: `不支持的 agent: ${agentId}` };

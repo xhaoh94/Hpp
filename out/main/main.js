@@ -45,7 +45,7 @@ function getCommandNames(command, env = process.env) {
   const lower = command.toLowerCase();
   const hasKnownExtension = getWindowsExecutableExtensions(env).some((ext) => lower.endsWith(ext));
   if (hasKnownExtension) return [command];
-  return [command, ...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`)];
+  return [...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`), command];
 }
 function findCommandOnPath(command, options = {}) {
   const env = options.env || process.env;
@@ -390,7 +390,7 @@ async function getLatestNpmPackageVersion(packageName) {
 }
 const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 const MIN_NODE_VERSION = "22.19.0";
-function runCommand(command, args, options = {}) {
+function runCommand$1(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const resolvedCommand = resolveCommand(command);
     child_process.execFile(
@@ -421,7 +421,7 @@ function nodeCommand() {
   return getNodeExecutable(["PI_NODE_PATH"]);
 }
 function runNpmCommand$1(args, options = {}) {
-  return runCommand("npm", args, options);
+  return runCommand$1("npm", args, options);
 }
 function parseVersion$1(version) {
   return version.replace(/^v/, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
@@ -441,7 +441,7 @@ function formatError$1(error) {
   const detail = (err.stderr || err.stdout || err.message || String(error)).trim();
   return detail.split(/\r?\n/).filter(Boolean).slice(-3).join("\n");
 }
-async function readJsonFile$1(filePath) {
+async function readJsonFile(filePath) {
   try {
     return JSON.parse(await promises.readFile(filePath, "utf8"));
   } catch {
@@ -456,7 +456,7 @@ async function findPackageRoot() {
   for (const candidate of candidates) {
     const packageJsonPath = path.join(candidate, "package.json");
     if (!fs.existsSync(packageJsonPath)) continue;
-    const packageJson = await readJsonFile$1(packageJsonPath);
+    const packageJson = await readJsonFile(packageJsonPath);
     if (packageJson?.name === "hpp" || packageJson?.dependencies?.[PI_SDK_PACKAGE] || packageJson?.devDependencies?.[PI_SDK_PACKAGE]) {
       return candidate;
     }
@@ -464,7 +464,7 @@ async function findPackageRoot() {
   return void 0;
 }
 async function getInstalledVersion(packageRoot) {
-  const packageJson = await readJsonFile$1(
+  const packageJson = await readJsonFile(
     path.join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json")
   );
   return packageJson?.version;
@@ -474,7 +474,7 @@ async function getLatestVersion() {
 }
 async function getNodeStatus() {
   try {
-    const { stdout } = await runCommand(nodeCommand(), ["-v"], { timeout: 5e3 });
+    const { stdout } = await runCommand$1(nodeCommand(), ["-v"], { timeout: 5e3 });
     const nodeVersion = stdout.trim().replace(/^v/, "");
     return {
       nodeVersion,
@@ -536,6 +536,11 @@ function registerPiSDKHandlers() {
   });
 }
 const CLI_AGENTS = {
+  codex: {
+    command: "codex",
+    packageName: "@openai/codex",
+    displayName: "Codex CLI"
+  },
   opencode: {
     command: "opencode",
     packageName: "opencode-ai",
@@ -545,13 +550,6 @@ const CLI_AGENTS = {
     command: "droid",
     packageName: "droid",
     displayName: "Factory Droid"
-  }
-};
-const PACKAGE_AGENTS = {
-  codex: {
-    packageName: "@openai/codex",
-    displayName: "Codex CLI",
-    packagePath: ["@openai", "codex"]
   }
 };
 const DEFAULT_THINKING_LEVEL = "medium";
@@ -587,13 +585,35 @@ async function getDefaultThinkingLevel(agentId) {
   if (agentId === "codex") return getCodexDefaultThinkingLevel();
   return DEFAULT_THINKING_LEVEL;
 }
-function runShellCommand(command, args, options = {}) {
-  const parts = [command, ...args].map((a) => {
-    if (/[\s"]/.test(a)) {
-      return JSON.stringify(a);
-    }
-    return a;
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const resolvedCommand = resolveCommand(command);
+    child_process.execFile(
+      resolvedCommand,
+      args,
+      {
+        cwd: options.cwd,
+        env: getCommandEnv(),
+        shell: isWindowsShellShim(resolvedCommand),
+        encoding: "utf8",
+        timeout: options.timeout ?? 15e3,
+        maxBuffer: 1024 * 1024 * 4
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const commandError = error;
+          commandError.stdout = stdout;
+          commandError.stderr = stderr;
+          reject(commandError);
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
   });
+}
+function runShellCommand(command, args, options = {}) {
+  const parts = [command, ...args].map((arg) => /[\s"]/.test(arg) ? JSON.stringify(arg) : arg);
   const fullCommand = parts.join(" ");
   return new Promise((resolve, reject) => {
     child_process.exec(
@@ -642,34 +662,12 @@ function formatError(error) {
 function extractVersion(output) {
   return output.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
 }
-async function readJsonFile(filePath) {
-  try {
-    return JSON.parse(await promises.readFile(filePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-async function findProjectPackageRoot(packageName) {
-  const candidates = Array.from(/* @__PURE__ */ new Set([
-    process.cwd(),
-    electron.app.getAppPath()
-  ]));
-  for (const candidate of candidates) {
-    const packageJsonPath = path.join(candidate, "package.json");
-    if (!fs.existsSync(packageJsonPath)) continue;
-    const packageJson = await readJsonFile(packageJsonPath);
-    if (packageJson?.dependencies?.[packageName] || packageJson?.devDependencies?.[packageName]) {
-      return candidate;
-    }
-  }
-  return void 0;
-}
 async function commandExists(command) {
   return commandExists$1(command, { excludeNodeModules: true });
 }
 async function getCommandVersion(command) {
   try {
-    const { stdout, stderr } = await runShellCommand(command, ["--version"], { timeout: 5e3 });
+    const { stdout, stderr } = await runCommand(command, ["--version"], { timeout: 5e3 });
     return extractVersion(`${stdout}
 ${stderr}`);
   } catch {
@@ -685,7 +683,7 @@ async function getCliAgentStatus(config) {
     return {
       installed: false,
       updateAvailable: false,
-      canUpdate: false
+      canUpdate: await commandExists("npm")
     };
   }
   const currentVersion = await getCommandVersion(config.command);
@@ -696,42 +694,17 @@ async function getCliAgentStatus(config) {
   } catch (err) {
     error = `无法检查 ${config.displayName} 最新版本：${formatError(err)}`;
   }
-  const canUpdate = await commandExists("npm");
   const updateAvailable = !!(currentVersion && latestVersion && compareVersions(currentVersion, latestVersion) < 0);
   return {
     installed: true,
     currentVersion,
     latestVersion,
     updateAvailable,
-    canUpdate,
-    error
-  };
-}
-async function getPackageAgentStatus(config) {
-  const packageRoot = await findProjectPackageRoot(config.packageName);
-  const packageJsonPath = packageRoot ? path.join(packageRoot, "node_modules", ...config.packagePath, "package.json") : void 0;
-  const packageJson = packageJsonPath ? await readJsonFile(packageJsonPath) : null;
-  const currentVersion = packageJson?.version;
-  let latestVersion;
-  let error;
-  try {
-    latestVersion = await getLatestPackageVersion(config.packageName);
-  } catch (err) {
-    error = `无法检查 ${config.displayName} 最新版本：${formatError(err)}`;
-  }
-  const updateAvailable = !!(currentVersion && latestVersion && compareVersions(currentVersion, latestVersion) < 0);
-  return {
-    installed: !!currentVersion,
-    currentVersion,
-    latestVersion,
-    updateAvailable,
-    canUpdate: !!packageRoot && !electron.app.isPackaged,
+    canUpdate: await commandExists("npm"),
     error
   };
 }
 async function getAgentStatus(agentId) {
-  const packageConfig = PACKAGE_AGENTS[agentId];
-  if (packageConfig) return getPackageAgentStatus(packageConfig);
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return {
@@ -744,31 +717,6 @@ async function getAgentStatus(agentId) {
   return getCliAgentStatus(config);
 }
 async function updateAgent(agentId) {
-  const packageConfig = PACKAGE_AGENTS[agentId];
-  if (packageConfig) {
-    if (updateInProgress.has(agentId)) {
-      return { success: false, error: `${packageConfig.displayName} 正在更新中` };
-    }
-    const packageRoot = await findProjectPackageRoot(packageConfig.packageName);
-    if (!packageRoot) {
-      return { success: false, error: `未找到包含 ${packageConfig.packageName} 的 package.json` };
-    }
-    if (electron.app.isPackaged) {
-      return { success: false, error: `打包版暂不支持自动更新 ${packageConfig.displayName}` };
-    }
-    updateInProgress.add(agentId);
-    try {
-      await runNpmCommand(["install", `${packageConfig.packageName}@latest`], {
-        cwd: packageRoot,
-        timeout: 18e4
-      });
-      return { success: true, status: await getAgentStatus(agentId) };
-    } catch (err) {
-      return { success: false, error: formatError(err), status: await getAgentStatus(agentId) };
-    } finally {
-      updateInProgress.delete(agentId);
-    }
-  }
   const config = CLI_AGENTS[agentId];
   if (!config) {
     return { success: false, error: `不支持的 agent: ${agentId}` };

@@ -9,7 +9,7 @@ export const AGENT_PLAN_MODE_SUPPORT: Record<string, AgentPlanModeSupport> = {
 
 // All available agents in the application
 export const AVAILABLE_AGENTS = [
-  { id: "codex", name: "Codex", desc: "OpenAI Codex CLI 编程助手", runtime: "sdk" },
+  { id: "codex", name: "Codex", desc: "OpenAI Codex CLI 编程助手", runtime: "cli", command: "codex" },
   { id: "pi", name: "Pi Agent", desc: "AI 编程助手", runtime: "sdk" },
   { id: "opencode", name: "OpenCode", desc: "开源 AI 编程助手", runtime: "cli", command: "opencode" },
   { id: "droid", name: "Factory Droid", desc: "Factory AI 编程助手", runtime: "cli", command: "droid" },
@@ -34,7 +34,7 @@ export function getAgentPlanModeTooltip(id: string): string {
 
 export function getInstallHint(command: string): string {
   switch (command) {
-    case "codex": return "在通用设置中更新 Codex CLI，或运行 npm install @openai/codex@latest";
+    case "codex": return "npm install -g @openai/codex";
     case "pi": return "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest";
     case "opencode": return "npm install -g opencode-ai";
     case "droid": return "npm install -g droid";
@@ -44,7 +44,7 @@ export function getInstallHint(command: string): string {
 
 export function getAgentUpdateCommand(agentId: string): string | null {
   switch (agentId) {
-    case "codex": return "npm install @openai/codex@latest";
+    case "codex": return "npm install -g @openai/codex@latest";
     case "pi": return "npm install @earendil-works/pi-coding-agent@latest";
     case "opencode": return "npm install -g opencode-ai@latest";
     case "droid": return "npm install -g droid@latest";

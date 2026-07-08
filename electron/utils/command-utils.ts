@@ -26,7 +26,7 @@ function getCommandNames(command: string, env: NodeJS.ProcessEnv = process.env):
   const lower = command.toLowerCase();
   const hasKnownExtension = getWindowsExecutableExtensions(env).some((ext) => lower.endsWith(ext));
   if (hasKnownExtension) return [command];
-  return [command, ...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`)];
+  return [...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`), command];
 }
 
 export function findCommandOnPath(
