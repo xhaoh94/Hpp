@@ -7,7 +7,7 @@ import {
   type SessionForkOrigin,
   type SessionReference,
 } from "@/stores/project-store";
-import { useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
+import { isAgentStartupFailureMessage, useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 
 interface PersistedData {
   projects: Project[];
@@ -185,9 +185,17 @@ const parsePersistedMessages = (value: unknown): PersistedMessages | null => {
     if (!Array.isArray(messages)) continue;
     sessionMessages[sessionId] = messages
       .map(parseChatMessage)
-      .filter((message): message is ChatMessage => !!message);
+      .filter((message): message is ChatMessage => !!message && !isAgentStartupFailureMessage(message));
   }
   return { sessionMessages };
+};
+
+const stripTransientMessages = (sessionMessages: Record<string, ChatMessage[]>) => {
+  const result: Record<string, ChatMessage[]> = {};
+  for (const [sessionId, messages] of Object.entries(sessionMessages)) {
+    result[sessionId] = messages.filter((message) => !isAgentStartupFailureMessage(message));
+  }
+  return result;
 };
 
 const parseModelInfo = (value: unknown): ModelInfo | null => {
@@ -463,6 +471,9 @@ export function useDataPersistence() {
           activeSession.agentId, activeProject.path, activeSession.id, activeSession.sessionFilePath
         ).then((result) => {
           const projectState = useProjectStore.getState();
+          if (result.success) {
+            useChatStore.getState().clearAgentStartupErrors(activeSessionId!);
+          }
           if (result.sessionFilePath) {
             projectState.setSessionFilePath(activeProject!.id, activeSessionId!, result.sessionFilePath);
           }
@@ -513,7 +524,7 @@ export function useDataPersistence() {
     const unsubscribe = useChatStore.subscribe((state) => {
       if (state.sessionMessages === lastSessionMessages) return;
       lastSessionMessages = state.sessionMessages;
-      const data = { sessionMessages: state.sessionMessages };
+      const data = { sessionMessages: stripTransientMessages(state.sessionMessages) };
       if (hasStreamingMessages(state.sessionMessages)) {
         scheduleStreamingMessagesSave(data);
         return;

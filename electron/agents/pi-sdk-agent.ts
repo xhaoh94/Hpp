@@ -1,11 +1,9 @@
-import { BrowserWindow, app } from "electron";
+import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
-import { existsSync } from "fs";
-import { join } from "path";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
-import { getCommandEnv, getNodeExecutable } from "../utils/command-utils";
+import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
 
 interface AgentModel {
   id: string;
@@ -41,13 +39,10 @@ interface AgentForkResult {
 }
 
 const getWorkerPath = () => {
-  const candidates = [
-    join(__dirname, "pi-sdk-worker.mjs"),
-    join(app.getAppPath(), "electron", "agents", "pi-sdk-worker.mjs"),
-    join(process.cwd(), "electron", "agents", "pi-sdk-worker.mjs"),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) || candidates[candidates.length - 1];
+  return getBundledWorkerPath("pi-sdk-worker.mjs", __dirname);
 };
+
+const PI_WORKER_INIT_TIMEOUT_MS = 120_000;
 
 export class PiSDKAgent {
   private process: ChildProcess | null = null;
@@ -68,6 +63,8 @@ export class PiSDKAgent {
   private activePromptIds = new Set<string>();
   private turnActive = false;
   private turnToken = 0;
+  private initPromise: Promise<void> | null = null;
+  private initKey: string | null = null;
 
   constructor(private readonly hppSessionId = "default") {
     this.eventBuffer = new AgentEventBuffer(hppSessionId);
@@ -83,24 +80,35 @@ export class PiSDKAgent {
   }
 
   async init(projectPath: string, existingSessionFilePath?: string): Promise<void> {
+    const requestedSessionFilePath = existingSessionFilePath || null;
+    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}`;
+    if (this.initPromise && this.initKey === nextInitKey) {
+      return this.initPromise;
+    }
+
     if (this.process && this.projectPath === projectPath && this._sessionFilePath === (existingSessionFilePath || this._sessionFilePath)) {
       return;
     }
 
+    this.initKey = nextInitKey;
     this.dispose();
+    this.initKey = nextInitKey;
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
 
-    const child = spawn(getNodeExecutable(["PI_NODE_PATH"]), [getWorkerPath()], {
+    const worker = getWorkerInvocation(getWorkerPath(), ["PI_NODE_PATH"], { packagedRuntime: "node" });
+    const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      env: getCommandEnv(),
+      env: worker.env,
     });
     this.process = child;
 
     const decoder = new StringDecoder("utf8");
     let buffer = "";
+    let stderrText = "";
+    const getWorkerErrorDetail = () => stderrText.trim().slice(-2000);
     child.stdout?.on("data", (chunk: Buffer) => {
       buffer += decoder.write(chunk);
       while (true) {
@@ -119,7 +127,9 @@ export class PiSDKAgent {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      console.log("[pi-sdk-worker]", chunk.toString().trim());
+      const text = chunk.toString();
+      stderrText = `${stderrText}${text}`.slice(-4000);
+      console.log("[pi-sdk-worker]", text.trim());
     });
 
     child.on("error", (error) => {
@@ -135,18 +145,28 @@ export class PiSDKAgent {
       this.pendingResponses.clear();
     });
 
-    child.on("exit", () => {
+    child.on("exit", (code, signal) => {
       if (this.process === child) this.process = null;
+      const exitReason = signal || (code ?? "unknown");
+      const detail = getWorkerErrorDetail();
+      const error = [
+        `Pi SDK worker exited before completing the request (${exitReason})`,
+        detail,
+      ].filter(Boolean).join("\n");
+      for (const handler of this.pendingResponses.values()) handler({ type: "error", error });
+      this.pendingResponses.clear();
+      this.activePromptIds.clear();
+      this.pendingUIRequestIds.clear();
       if (!this.isAborting) {
         this.emitEvent({ type: "agent_disconnected" });
       }
     });
 
-    await new Promise<void>((resolve, reject) => {
+    const initPromise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingResponses.delete(initId);
         reject(new Error("Pi SDK worker init timed out"));
-      }, 12000);
+      }, PI_WORKER_INIT_TIMEOUT_MS);
       const initId = this.sendWorkerCommand({
         type: "init",
         projectPath,
@@ -162,6 +182,15 @@ export class PiSDKAgent {
         }
       });
     });
+    this.initPromise = initPromise;
+    try {
+      await initPromise;
+    } finally {
+      if (this.initPromise === initPromise) {
+        this.initPromise = null;
+        this.initKey = null;
+      }
+    }
   }
 
   async sendMessage(message: string, images?: Array<{ type: string; data: string; mimeType: string }>, options?: AgentSendOptions): Promise<void> {
@@ -350,6 +379,8 @@ export class PiSDKAgent {
   }
 
   dispose(): void {
+    this.initPromise = null;
+    this.initKey = null;
     this.clearTurnFallback();
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();

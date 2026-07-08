@@ -63,7 +63,7 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   isStreaming?: boolean;
-  systemType?: "context_compaction";
+  systemType?: "context_compaction" | "agent_startup_error";
   eventId?: string;
   images?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
@@ -159,6 +159,7 @@ interface ChatState {
   toggleFavorite: (model: ModelInfo) => void;
   setActiveAgent: (id: string) => void;
   clearMessages: () => void;
+  clearAgentStartupErrors: (sessionId?: string | null) => void;
   setHighlightedFile: (path: string | null) => void;
   setDraftText: (sessionId: string, text: string) => void;
   addPendingImage: (image: PendingImage, sessionId?: string | null) => void;
@@ -260,6 +261,19 @@ export const createEmptyChatDraft = (): ChatDraft => ({
 });
 
 export const EMPTY_CHAT_DRAFT = createEmptyChatDraft();
+
+export const isAgentStartupFailureMessage = (message: ChatMessage) => {
+  if (message.role !== "system") return false;
+  if (message.systemType === "agent_startup_error") return true;
+  const content = message.content || "";
+  if (!content.startsWith("Agent ")) return false;
+  return (
+    content.includes("worker init timed out") ||
+    content.includes("worker exited before completing the request") ||
+    content.includes("Codex worker") ||
+    content.includes("Pi SDK worker")
+  );
+};
 
 const updateSessionDraft = (
   state: ChatState,
@@ -561,6 +575,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setActiveAgent: (id) => set({ activeAgentId: id }),
   clearMessages: () => set({ messages: [] }),
+  clearAgentStartupErrors: (sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => messages.filter((message) => !isAgentStartupFailureMessage(message)))),
   setHighlightedFile: (path) => set({ highlightedFile: path }),
   setDraftText: (sessionId, text) =>
     set((s) => updateSessionDraft(s, sessionId, (draft) => (

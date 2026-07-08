@@ -57,6 +57,7 @@
     "files": [
       "out/**/*"
     ],
+    "asar": false,
     "win": {
       "target": "nsis",
       "icon": "public/icon.png"

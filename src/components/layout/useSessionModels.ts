@@ -127,6 +127,9 @@ export function useSessionModels({
       session.id,
       session.sessionFilePath
     ).then(async (result) => {
+      if (result.success) {
+        useChatStore.getState().clearAgentStartupErrors(session.id);
+      }
       if (result.sessionFilePath) {
         useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
       }

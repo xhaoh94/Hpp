@@ -29,6 +29,7 @@ export function ProjectCard({ project }: Props) {
   const {
     clearMessages,
     addMessage,
+    clearAgentStartupErrors,
     sessionMessages,
     loadSessionMessages,
     switchSession,
@@ -167,7 +168,10 @@ export function ProjectCard({ project }: Props) {
           role: "system",
           content: `Agent 启动失败: ${result.error}`,
           timestamp: Date.now(),
+          systemType: "agent_startup_error",
         }, sessionId);
+      } else {
+        clearAgentStartupErrors(sessionId);
       }
     });
   };
@@ -196,6 +200,9 @@ export function ProjectCard({ project }: Props) {
     ).then(async (result) => {
       if (result.sessionFilePath) {
         useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
+      }
+      if (result.success) {
+        clearAgentStartupErrors(session.id);
       }
       if (useProjectStore.getState().activeSessionId === session.id) {
         applySessionModels(session.id, result.models);
