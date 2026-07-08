@@ -8,7 +8,6 @@
     "build": "electron-vite build",
     "dist": "npm run build && electron-builder",
     "dist:publish": "npm run build && electron-builder --publish always",
-    "release": "node scripts/release.mjs",
     "preview": "electron-vite preview"
   },
   "keywords": [],
