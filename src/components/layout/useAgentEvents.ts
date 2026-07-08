@@ -97,6 +97,17 @@ export function useAgentEvents({
       return runtime;
     };
 
+    const hasLastAssistantProcessEntry = (sessionId: string, entryId: string) => {
+      const state = useChatStore.getState();
+      const messages = state.sessionMessages[sessionId] || (state.activeSessionId === sessionId ? state.messages : []);
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.role !== "assistant") continue;
+        return !!message.process?.entries.some((entry) => entry.id === entryId);
+      }
+      return false;
+    };
+
     const flushRuntimeRender = (sessionId: string) => {
       const runtime = getRuntime(sessionId);
       if (runtime.streamRenderFlushTimer) {
@@ -128,6 +139,20 @@ export function useAgentEvents({
     const appendProcessEntry = (sessionId: string, entry: Omit<AgentProcessEntry, "id" | "timestamp"> & { id?: string; timestamp?: number }) => {
       const runtime = getRuntime(sessionId);
       if (!runtime.processActive) return;
+      if (entry.id && hasLastAssistantProcessEntry(sessionId, entry.id)) {
+        useChatStore.getState().updateLastAssistantProcessEntry(entry.id, {
+          timestamp: entry.timestamp || Date.now(),
+          type: entry.type,
+          title: entry.title,
+          detail: entry.detail,
+          files: entry.files,
+          toolKind: entry.toolKind,
+          command: entry.command,
+          state: entry.state,
+          expanded: entry.expanded,
+        }, sessionId);
+        return;
+      }
       useChatStore.getState().appendLastAssistantProcessEntry({
         id: entry.id || createProcessEntryId(),
         timestamp: entry.timestamp || Date.now(),
@@ -485,6 +510,27 @@ export function useAgentEvents({
       }
     };
 
+    const notifyAgentTaskCompleted = (sessionId: string, timedOut: boolean) => {
+      const projectState = useProjectStore.getState();
+      const project = projectState.projects.find((candidate) =>
+        candidate.sessions.some((session) => session.id === sessionId)
+      );
+      const session = project?.sessions.find((candidate) => candidate.id === sessionId);
+      const agentName = getAgentName(session?.agentId || latestOptionsRef.current.activeAgentId);
+      const title = timedOut ? `${agentName} 任务已停止` : `${agentName} 任务已完成`;
+      const context = [
+        project?.name,
+        session?.title,
+      ].filter(Boolean).join(" · ");
+
+      void window.electronAPI.showNotification({
+        title,
+        body: context || "点击查看 Hpp",
+      }).catch((error) => {
+        console.error("[notification] show failed:", error);
+      });
+    };
+
     const completeAssistantStream = (
       currentSessionId: string,
       content?: string,
@@ -524,6 +570,7 @@ export function useAgentEvents({
           currentSessionId === activeId ? "idle" : timedOut ? "error" : "completed"
         );
       }
+      notifyAgentTaskCompleted(currentSessionId, timedOut);
     };
 
     const failAssistantStream = (currentSessionId: string, title: string, detail?: string) => {
@@ -755,6 +802,7 @@ export function useAgentEvents({
             questionEntryId = createProcessEntryId();
             setPendingUIResponse(getPendingUIFromEvent(event, currentSessionId, questionEntryId));
           }
+          const processEntryId = questionEntryId || (typeof event.id === "string" ? event.id : undefined);
           const processFiles = Array.isArray(event.files) ? getToolProcessFiles(event) : undefined;
           const changedProcessFiles = (processFiles || []).filter((file) =>
             file.action === "edited" ||
@@ -781,7 +829,7 @@ export function useAgentEvents({
           }
 
           appendProcessEntry(currentSessionId, {
-            id: questionEntryId,
+            id: processEntryId,
             type: eventType,
             title: processedTitle,
             detail: eventType === "question" ? undefined : eventDetail,

@@ -5,6 +5,7 @@ import { readFileSync } from "fs";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import { getOpenCodeConfigPath } from "./agent-config";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
+import { getCommandEnv, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
 
 interface AgentModel {
   id: string;
@@ -172,15 +173,15 @@ export class OpenCodeAgent {
     this.sessionId = null;
     this.emitEvent({ type: "agent_init", agentId: "opencode" });
 
-    this.process = spawn("opencode", ["serve", "--port", String(this.port), "--hostname", this.host], {
+    const opencodeCommand = resolveCommand("opencode");
+    this.process = spawn(opencodeCommand, ["serve", "--port", String(this.port), "--hostname", this.host], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
-      env: {
-        ...process.env,
+      shell: isWindowsShellShim(opencodeCommand),
+      env: getCommandEnv({
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(process.env.OPENCODE_CONFIG_CONTENT),
-      },
+      }),
     });
 
     this.process.stderr?.on("data", (chunk: Buffer) => {

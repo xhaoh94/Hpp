@@ -24,6 +24,181 @@
   letter-spacing: 0.3px;
 }
 
+.titlebar-title-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.titlebar-update-wrap {
+  -webkit-app-region: no-drag;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.titlebar-update-btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  min-width: 22px;
+  max-width: 62px;
+  padding: 0 6px;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  border-radius: 5px;
+  background: rgba(96, 165, 250, 0.12);
+  color: #8ec5ff;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.titlebar-update-btn:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.55);
+  background: rgba(96, 165, 250, 0.2);
+  color: #d6ebff;
+}
+
+.titlebar-update-btn.active {
+  border-color: rgba(96, 165, 250, 0.65);
+  background: rgba(96, 165, 250, 0.24);
+  color: #e6f3ff;
+}
+
+.titlebar-update-btn:disabled {
+  cursor: default;
+  opacity: 0.9;
+}
+
+.titlebar-update-btn.downloading svg {
+  animation: titlebar-update-spin 0.9s linear infinite;
+}
+
+.titlebar-update-progress {
+  font-variant-numeric: tabular-nums;
+}
+
+.titlebar-update-popover {
+  -webkit-app-region: no-drag;
+  position: absolute;
+  top: 26px;
+  left: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 238px;
+  padding: 12px;
+  border: 1px solid #333b46;
+  border-radius: 8px;
+  background: #202327;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
+  color: #d7dde5;
+  cursor: default;
+}
+
+.titlebar-update-popover::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 11px;
+  width: 10px;
+  height: 10px;
+  border-left: 1px solid #333b46;
+  border-top: 1px solid #333b46;
+  background: #202327;
+  transform: rotate(45deg);
+}
+
+.titlebar-update-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.titlebar-update-popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f0f4f8;
+}
+
+.titlebar-update-popover-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #8c96a3;
+  cursor: pointer;
+}
+
+.titlebar-update-popover-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f2f5f8;
+}
+
+.titlebar-update-popover-body {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b9c2cc;
+}
+
+.titlebar-update-popover-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.titlebar-update-popover-actions button {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #3a414a;
+  border-radius: 6px;
+  background: #282c31;
+  color: #cfd6de;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.titlebar-update-popover-actions button:hover:not(:disabled) {
+  border-color: #4b5561;
+  background: #30353b;
+  color: #f0f4f8;
+}
+
+.titlebar-update-popover-actions button.primary {
+  border-color: rgba(96, 165, 250, 0.46);
+  background: rgba(96, 165, 250, 0.18);
+  color: #9fd0ff;
+}
+
+.titlebar-update-popover-actions button.primary:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.66);
+  background: rgba(96, 165, 250, 0.26);
+  color: #e6f3ff;
+}
+
+.titlebar-update-popover-actions button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+@keyframes titlebar-update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .titlebar-controls {
   display: flex;
   height: 100%;

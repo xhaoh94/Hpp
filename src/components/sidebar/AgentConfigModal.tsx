@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Copy, Eye, EyeOff, Pencil, Plus, RefreshCw, Save, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig } from "@/types";
 import { AVAILABLE_AGENTS, getAgentName } from "@/lib/agents";
+import { useChatStore } from "@/stores/chat-store";
 import "./Settings.css";
 
 type AgentConfigModalProps = {
@@ -83,6 +84,8 @@ function getAgentHint(agentId: string) {
 
 export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpdated }: AgentConfigModalProps) {
   const [agentId, setAgentId] = useState(initialAgentId);
+  const activeAgentId = useChatStore((state) => state.activeAgentId);
+  const currentModelProvider = useChatStore((state) => state.currentModel?.provider);
   const configurable = CONFIGURABLE_AGENTS.has(agentId);
   const usesActivation = agentId === "codex";
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
@@ -100,6 +103,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
     setAgentId(initialAgentId);
@@ -109,6 +113,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     () => config.providers.find((provider) => provider.providerId === selectedProviderId) || null,
     [config.providers, selectedProviderId]
   );
+
+  const getPreferredProviderId = useCallback((state: AgentConfigState) => {
+    const currentProviderId = agentId === activeAgentId ? currentModelProvider : "";
+    if (currentProviderId && state.providers.some((provider) => provider.providerId === currentProviderId)) {
+      return currentProviderId;
+    }
+    if (usesActivation && state.activeProviderId) return state.activeProviderId;
+    return state.providers[0]?.providerId || "";
+  }, [activeAgentId, agentId, currentModelProvider, usesActivation]);
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -124,10 +137,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         return;
       }
       setConfig(result.config);
-      const nextSelected = usesActivation
-        ? result.config.activeProviderId || result.config.providers[0]?.providerId || ""
-        : result.config.providers[0]?.providerId || "";
-      setSelectedProviderId(nextSelected);
+      setSelectedProviderId(getPreferredProviderId(result.config));
       setDraft(null);
       setEditorBaseline(null);
       setEditorOriginalProviderId("");
@@ -137,7 +147,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setLoading(false);
     }
-  }, [agentId, usesActivation]);
+  }, [agentId, getPreferredProviderId]);
 
   useEffect(() => {
     if (!configurable) {
@@ -150,6 +160,16 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   useEffect(() => {
     setApiKeyCopied(false);
   }, [selectedSavedProvider]);
+
+  useEffect(() => {
+    if (loading || !selectedProviderId) return;
+    const item = providerItemRefs.current[selectedProviderId];
+    if (!item) return;
+    const frame = requestAnimationFrame(() => {
+      item.scrollIntoView({ block: "center", behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loading, selectedProviderId, config.providers]);
 
   useEffect(() => {
     return () => {
@@ -444,6 +464,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     return (
                       <div
                         key={provider.providerId}
+                        ref={(element) => {
+                          providerItemRefs.current[provider.providerId] = element;
+                        }}
                         className={`agent-config-provider-item ${selected ? "selected" : ""} ${active ? "active" : ""}`}
                         onClick={() => handleSelectProvider(provider)}
                       >

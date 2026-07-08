@@ -8,6 +8,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Platform info
   platform: process.platform,
+  getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
+  getAppUpdateStatus: () => ipcRenderer.invoke("app:update:getStatus"),
+  checkAppUpdate: () => ipcRenderer.invoke("app:update:check"),
+  downloadAppUpdate: () => ipcRenderer.invoke("app:update:download"),
+  installAppUpdate: () => ipcRenderer.invoke("app:update:install"),
+  getCloseToTray: () => ipcRenderer.invoke("app:getCloseToTray"),
+  setCloseToTray: (enabled: boolean) => ipcRenderer.invoke("app:setCloseToTray", enabled),
+  showNotification: (options: { title?: string; body?: string }) =>
+    ipcRenderer.invoke("app:showNotification", options),
 
   // File system
   readDirectory: (dirPath: string) =>
@@ -78,5 +87,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_event: unknown, data: unknown) => callback(data);
     ipcRenderer.on("agent:event", handler);
     return () => ipcRenderer.removeListener("agent:event", handler);
+  },
+  onAppUpdateStatus: (callback: (status: unknown) => void) => {
+    const handler = (_event: unknown, data: unknown) => callback(data);
+    ipcRenderer.on("app:update-status", handler);
+    return () => ipcRenderer.removeListener("app:update-status", handler);
   },
 });

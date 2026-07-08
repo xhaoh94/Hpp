@@ -73,6 +73,39 @@ export interface AgentReloadConfigResult {
   reloadedSessionIds?: string[];
 }
 
+export type AppUpdateState =
+  | "idle"
+  | "checking"
+  | "available"
+  | "not-available"
+  | "downloading"
+  | "downloaded"
+  | "error";
+
+export interface AppUpdateStatus {
+  state: AppUpdateState;
+  currentVersion: string;
+  version?: string;
+  releaseDate?: string;
+  releaseName?: string;
+  releaseNotes?: string;
+  percent?: number;
+  bytesPerSecond?: number;
+  transferred?: number;
+  total?: number;
+  error?: string;
+  feedUrl?: string;
+  canCheck: boolean;
+  canDownload: boolean;
+  canInstall: boolean;
+}
+
+export interface AppUpdateResult {
+  success: boolean;
+  error?: string;
+  status?: AppUpdateStatus;
+}
+
 export interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
@@ -144,6 +177,14 @@ export interface ElectronAPI {
   maximize: () => void;
   close: () => void;
   platform: string;
+  getAppVersion: () => Promise<string>;
+  getAppUpdateStatus: () => Promise<AppUpdateStatus>;
+  checkAppUpdate: () => Promise<AppUpdateResult>;
+  downloadAppUpdate: () => Promise<AppUpdateResult>;
+  installAppUpdate: () => Promise<AppUpdateResult>;
+  getCloseToTray: () => Promise<boolean>;
+  setCloseToTray: (enabled: boolean) => Promise<{ success: boolean }>;
+  showNotification: (options: { title?: string; body?: string }) => Promise<{ success: boolean; error?: string }>;
 
   // File system
   readDirectory: (dirPath: string) => Promise<FileEntry[]>;
@@ -184,12 +225,13 @@ export interface ElectronAPI {
   agentSendGuidance: (message: string, images?: Array<{ type: string; data: string; mimeType: string }>, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
-  agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean }>;
+  agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;
   agentSetThinkingLevel: (level: string, sessionId?: string) => Promise<{ success: boolean }>;
   agentSendUIResponse: (response: AgentUIResponse) => Promise<{ success: boolean }>;
 
   // Agent events
   onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;
+  onAppUpdateStatus: (callback: (status: AppUpdateStatus) => void) => () => void;
 }
 
 declare global {

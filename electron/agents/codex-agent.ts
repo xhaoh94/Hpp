@@ -4,6 +4,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
+import { getCommandEnv, getNodeExecutable } from "../utils/command-utils";
 
 interface AgentModel {
   id: string;
@@ -47,12 +48,6 @@ const getWorkerPath = () => {
   return candidates.find((candidate) => existsSync(candidate)) || candidates[candidates.length - 1];
 };
 
-const getNodeExecutable = () => {
-  if (process.env.CODEX_NODE_PATH) return process.env.CODEX_NODE_PATH;
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? "node.exe" : "node";
-};
-
 export class CodexAgent {
   private process: ChildProcess | null = null;
   private window: BrowserWindow | null = null;
@@ -88,10 +83,10 @@ export class CodexAgent {
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "codex" });
 
-    const child = spawn(getNodeExecutable(), [getWorkerPath()], {
+    const child = spawn(getNodeExecutable(["CODEX_NODE_PATH", "PI_NODE_PATH"]), [getWorkerPath()], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: getCommandEnv(),
     });
     this.process = child;
 

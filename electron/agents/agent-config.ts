@@ -702,10 +702,11 @@ async function writePiNativeConfigProviders(state: AgentConfigState): Promise<Fi
   const filePath = getPiModelsPath();
   const snapshot = await snapshotFile(filePath);
   const config = await readJsonObject(filePath);
+  const existingProviders = isRecord(config.providers) ? config.providers : {};
   const providers: JsonRecord = {};
 
   for (const provider of state.providers) {
-    const existingProvider = isRecord(providers[provider.providerId]) ? providers[provider.providerId] : {};
+    const existingProvider = isRecord(existingProviders[provider.providerId]) ? existingProviders[provider.providerId] : {};
     providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
   }
 

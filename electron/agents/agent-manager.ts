@@ -95,7 +95,7 @@ function readLocalModelsConfig(): LocalModelsConfig {
     if (_localModelsConfig && mtime <= _localModelsConfigMtime) {
       return _localModelsConfig;
     }
-    const content = readFileSync(configPath, "utf-8");
+    const content = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
     _localModelsConfig = JSON.parse(content) as LocalModelsConfig;
     _localModelsConfigMtime = mtime;
   } catch {
@@ -146,6 +146,7 @@ async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined,
   const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
   if (configuredModels.length === 0) return models;
   if (agentId === "codex") return configuredModels;
+  if (agentId === "pi") return models;
 
   const merged = new Map<string, AgentModel>();
   for (const model of models) {
@@ -627,10 +628,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string, sessionId?: string) => {
-    const agent = agentManager.getAgentForSession(sessionId);
-    if (!agent) return { success: false };
-    await agent.setModel(provider, modelId);
-    return { success: true };
+    try {
+      const agent = agentManager.getAgentForSession(sessionId);
+      if (!agent) return { success: false, error: "No active agent" };
+      await agent.setModel(provider, modelId);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || String(err) };
+    }
   });
 
   ipcMain.handle("agent:setThinkingLevel", async (_event, level: string, sessionId?: string) => {

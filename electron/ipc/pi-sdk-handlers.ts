@@ -3,6 +3,8 @@ import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
+import { getCommandEnv, getNodeExecutable, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
+import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 
 const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 const MIN_NODE_VERSION = "22.19.0";
@@ -35,11 +37,14 @@ function runCommand(
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
+    const resolvedCommand = resolveCommand(command);
     execFile(
-      command,
+      resolvedCommand,
       args,
       {
         cwd: options.cwd,
+        env: getCommandEnv(),
+        shell: isWindowsShellShim(resolvedCommand),
         encoding: "utf8",
         timeout: options.timeout ?? 15000,
         maxBuffer: 1024 * 1024 * 4,
@@ -59,17 +64,13 @@ function runCommand(
 }
 
 function nodeCommand(): string {
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? "node.exe" : "node";
+  return getNodeExecutable(["PI_NODE_PATH"]);
 }
 
 function runNpmCommand(
   args: string[],
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
-  if (process.platform === "win32") {
-    return runCommand("cmd.exe", ["/d", "/s", "/c", "npm", ...args], options);
-  }
   return runCommand("npm", args, options);
 }
 
@@ -141,19 +142,8 @@ async function getInstalledVersion(packageRoot: string): Promise<string | undefi
   return packageJson?.version;
 }
 
-async function getLatestVersion(packageRoot?: string): Promise<string | undefined> {
-  const { stdout } = await runNpmCommand(
-    ["view", PI_SDK_PACKAGE, "version", "--json"],
-    { cwd: packageRoot, timeout: 15000 }
-  );
-  const raw = stdout.trim();
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : undefined;
-  } catch {
-    return raw.replace(/^"|"$/g, "");
-  }
+async function getLatestVersion(): Promise<string | undefined> {
+  return getLatestNpmPackageVersion(PI_SDK_PACKAGE);
 }
 
 async function getNodeStatus(): Promise<Pick<PiSDKStatus, "nodeVersion" | "nodeOk">> {
@@ -177,7 +167,7 @@ async function getPiSDKStatus(): Promise<PiSDKStatus> {
   let error: string | undefined;
 
   try {
-    latestVersion = await getLatestVersion(packageRoot);
+    latestVersion = await getLatestVersion();
   } catch (err) {
     error = `无法检查最新版本：${formatError(err)}`;
   }

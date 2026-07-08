@@ -3,6 +3,7 @@ import { readdir, readFile, access, stat } from "fs/promises";
 import { basename, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
+import { commandExists } from "../utils/command-utils";
 
 const SEARCH_RESULT_LIMIT = 50;
 const SEARCH_EXCLUDED_DIRS = new Set([
@@ -239,14 +240,7 @@ export function registerFileHandlers() {
   ipcMain.handle("fs:isCommandAvailable", (_event, command: string) => {
     if (typeof command !== "string" || !/^[\w@./:-]+$/.test(command)) return false;
     try {
-      const executable = process.platform === "win32" ? "where" : "which";
-      const args = process.platform === "win32" ? [command] : ["-a", command];
-      const result = spawnSync(executable, args, { encoding: "utf-8", shell: false });
-      if (result.status !== 0 || result.error) return false;
-      const output = result.stdout.trim();
-      if (!output) return false;
-      const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-      return lines.some((p) => !p.includes("node_modules"));
+      return commandExists(command, { excludeNodeModules: true });
     } catch {
       return false;
     }

@@ -5,6 +5,7 @@ import { join } from "path";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
+import { getCommandEnv, getNodeExecutable } from "../utils/command-utils";
 
 interface AgentModel {
   id: string;
@@ -46,11 +47,6 @@ const getWorkerPath = () => {
     join(process.cwd(), "electron", "agents", "pi-sdk-worker.mjs"),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || candidates[candidates.length - 1];
-};
-
-const getNodeExecutable = () => {
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? "node.exe" : "node";
 };
 
 export class PiSDKAgent {
@@ -96,10 +92,10 @@ export class PiSDKAgent {
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
 
-    const child = spawn(getNodeExecutable(), [getWorkerPath()], {
+    const child = spawn(getNodeExecutable(["PI_NODE_PATH"]), [getWorkerPath()], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: getCommandEnv(),
     });
     this.process = child;
 
@@ -308,8 +304,22 @@ export class PiSDKAgent {
   }
 
   async setModel(provider: string, modelId: string): Promise<void> {
-    this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
-      if (data.type === "model_changed") this.emitEvent({ type: "model_changed", model: data.model });
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    let requestId = "";
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        reject(new Error("Pi SDK set model timed out"));
+      }, 8000);
+      requestId = this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "model_changed") {
+          this.emitEvent({ type: "model_changed", model: data.model });
+          resolve();
+          return;
+        }
+        reject(new Error(data.error || "Pi SDK set model failed"));
+      });
     });
   }
 

@@ -1474,7 +1474,31 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       activeSessionIdAtSend === targetSessionId ? useChatStore.getState().currentModel : null
     );
     if (modelToSync) {
-      await window.electronAPI.agentSetModel(modelToSync.provider, modelToSync.id, targetSessionId);
+      const modelResult = await window.electronAPI.agentSetModel(modelToSync.provider, modelToSync.id, targetSessionId);
+      if (!modelResult.success) {
+        const runtime = sessionRuntimeRef.current[targetSessionId];
+        if (runtime?.streamWatchdog) {
+          clearTimeout(runtime.streamWatchdog);
+          runtime.streamWatchdog = null;
+        }
+        useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
+        if (runtime) {
+          resetSessionRuntimeAfterTurn(runtime);
+        }
+        setStreaming(false);
+        useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
+        if (options?.onSendFailure) {
+          options.onSendFailure(modelResult.error || "Model switch failed");
+          return;
+        }
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "system",
+          content: `Model switch failed: ${modelResult.error || "Unknown error"}`,
+          timestamp: Date.now(),
+        }, targetSessionId);
+        return;
+      }
     }
 
     const result = await window.electronAPI.agentSendMessage(
@@ -1724,12 +1748,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, [setPendingUIResponseState, setStreaming]);
 
   const handleSelectModel = async (model: ModelInfo) => {
-    setCurrentModel(model);
+    const previousModel = useChatStore.getState().currentModel;
     setModelOpen(false);
-    // Save model selection for this session
     const sessionId = useProjectStore.getState().activeSessionId;
+    const result = await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
+    if (!result.success) {
+      if (previousModel) setCurrentModel(previousModel);
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: `Model switch failed: ${result.error || "Unknown error"}`,
+        timestamp: Date.now(),
+      }, sessionId || undefined);
+      return;
+    }
+
+    setCurrentModel(model);
+    // Save model selection for this session
     if (sessionId) saveSessionModel(sessionId, model);
-    await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
   };
 
   const handleModelConfigModelsUpdated = useCallback((agentId: string, models?: ModelInfo[]) => {

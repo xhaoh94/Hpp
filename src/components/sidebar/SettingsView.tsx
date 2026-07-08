@@ -107,6 +107,8 @@ export function SettingsView() {
   const [tempImagePath, setTempImagePath] = useState("");
   const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const [closeToTray, setCloseToTray] = useState(true);
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
@@ -125,9 +127,26 @@ export function SettingsView() {
           setTempImagePath(data.general.tempImagePath || "");
           setImageRetentionHours(data.general.imageRetentionHours || 12);
           setPlanModeEnabled(!!data.general.planModeEnabled);
+          setCloseToTray(typeof data.general.closeToTray === "boolean" ? data.general.closeToTray : true);
         }
       }
     });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    window.electronAPI.getAppVersion()
+      .then((version) => {
+        if (!cancelled) setAppVersion(version);
+      })
+      .catch(() => {
+        if (!cancelled) setAppVersion("0.0.1");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -145,12 +164,12 @@ export function SettingsView() {
   const saveSettings = useCallback(async (
     nextShortcuts = shortcuts,
     nextFilters = filters,
-    nextGeneral?: { tempImagePath: string; imageRetentionHours: number; planModeEnabled: boolean },
+    nextGeneral?: { tempImagePath: string; imageRetentionHours: number; planModeEnabled: boolean; closeToTray: boolean },
   ) => {
     const data = await window.electronAPI.loadData("settings");
     const currentSettings = asRecord(data);
     const currentGeneral = asRecord(currentSettings.general);
-    const generalValues = nextGeneral ?? { tempImagePath, imageRetentionHours, planModeEnabled };
+    const generalValues = nextGeneral ?? { tempImagePath, imageRetentionHours, planModeEnabled, closeToTray };
     const nextSettings = {
       ...currentSettings,
       shortcuts: nextShortcuts,
@@ -162,7 +181,7 @@ export function SettingsView() {
     };
 
     await window.electronAPI.saveData("settings", nextSettings);
-  }, [shortcuts, filters, tempImagePath, imageRetentionHours, planModeEnabled]);
+  }, [shortcuts, filters, tempImagePath, imageRetentionHours, planModeEnabled, closeToTray]);
 
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
@@ -175,10 +194,22 @@ export function SettingsView() {
   };
 
   const saveGeneral = async () => {
-    await saveSettings(shortcuts, filters, { tempImagePath, imageRetentionHours, planModeEnabled });
+    await saveSettings(shortcuts, filters, { tempImagePath, imageRetentionHours, planModeEnabled, closeToTray });
+    await window.electronAPI.setCloseToTray(closeToTray);
     window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
       detail: { planModeEnabled },
     }));
+  };
+
+  const updateCloseToTray = (enabled: boolean) => {
+    setCloseToTray(enabled);
+    void saveSettings(shortcuts, filters, {
+      tempImagePath,
+      imageRetentionHours,
+      planModeEnabled,
+      closeToTray: enabled,
+    });
+    void window.electronAPI.setCloseToTray(enabled);
   };
 
   const openAgentConfig = () => {
@@ -237,7 +268,10 @@ export function SettingsView() {
 
   return (
     <div className="settings">
-      <div className="settings-header">设置</div>
+      <div className="settings-header">
+        <span>设置</span>
+        <span className="settings-header-version">Hpp v{appVersion || "0.0.1"}</span>
+      </div>
 
       <div className="settings-content">
         <div className="settings-section">
@@ -452,6 +486,22 @@ export function SettingsView() {
               <button onClick={() => setShowGeneralModal(false)} className="settings-modal-close">×</button>
             </div>
             <div className="settings-modal-content">
+              <div className="settings-section">
+                <h3>窗口设置</h3>
+                <div className="filter-group">
+                  <label className="settings-toggle-row">
+                    <span>
+                      <span className="settings-toggle-title">关闭时最小化到托盘</span>
+                      <span className="settings-toggle-desc">开启后点击关闭按钮会隐藏窗口，可从系统托盘重新打开。</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={closeToTray}
+                      onChange={(event) => updateCloseToTray(event.target.checked)}
+                    />
+                  </label>
+                </div>
+              </div>
               <div className="settings-section">
                 <h3>图片设置</h3>
                 <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>

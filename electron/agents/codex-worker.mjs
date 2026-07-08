@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
 
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
@@ -110,6 +110,29 @@ const stringifyValue = (value) => {
   }
 };
 
+const CODEX_RECONNECT_ENTRY_ID = "codex-reconnect-status";
+
+const getCodexReconnectTitle = (params) => {
+  const message = String(params?.message || "").trim();
+  const match = message.match(/reconnecting\s*\.{3}\s*(\d+)\s*\/\s*(\d+)/i);
+  if (match) return `Reconnecting... ${match[1]}/${match[2]}`;
+  return message || "Reconnecting...";
+};
+
+const isRetryingCodexError = (params) => {
+  if (!isRecord(params)) return false;
+  if (params.willRetry === true) return true;
+  if (params.willRetry === false) return false;
+  return /^reconnecting\s*\.{3}/i.test(String(params.message || ""));
+};
+
+const getCodexFinalErrorDetail = (params) => {
+  if (!isRecord(params)) return stringifyValue(params);
+  const detail = stringifyValue(params);
+  if (detail) return detail;
+  return String(params.message || params.additionalDetails || "Unknown error");
+};
+
 const truncate = (value, maxLength = 1200) => {
   const text = String(value || "");
   if (text.length <= maxLength) return text;
@@ -194,8 +217,8 @@ const prependPathDirs = (env, pathDirs) => {
       if (envKey.toLowerCase() === "path" && envKey !== key) delete env[envKey];
     }
   }
-  const existing = String(env[key] || "").split(process.platform === "win32" ? ";" : ":").filter((item) => item && !pathDirs.includes(item));
-  env[key] = [...pathDirs, ...existing].join(process.platform === "win32" ? ";" : ":");
+  const existing = String(env[key] || "").split(delimiter).filter((item) => item && !pathDirs.includes(item));
+  env[key] = [...pathDirs, ...existing].join(delimiter);
 };
 
 const startAppServer = async () => {
@@ -1227,11 +1250,21 @@ const handleServerNotification = (method, params) => {
       break;
     case "error":
       if (!promptRunning || abortRequested) return;
+      if (isRetryingCodexError(params)) {
+        send({
+          type: "process_event",
+          id: CODEX_RECONNECT_ENTRY_ID,
+          entryType: "status",
+          title: getCodexReconnectTitle(params),
+          state: "running",
+        });
+        break;
+      }
       send({
         type: "process_event",
         entryType: "error",
         title: "Codex error",
-        detail: params.message || stringifyValue(params),
+        detail: getCodexFinalErrorDetail(params),
         state: "error",
       });
       break;

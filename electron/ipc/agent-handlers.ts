@@ -4,6 +4,8 @@ import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import { commandExists as commandExistsOnPath, getCommandEnv, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
+import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 
 export interface AgentStatus {
   installed: boolean;
@@ -103,11 +105,14 @@ function runCommand(
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
+    const resolvedCommand = resolveCommand(command);
     execFile(
-      command,
+      resolvedCommand,
       args,
       {
         cwd: options.cwd,
+        env: getCommandEnv(),
+        shell: isWindowsShellShim(resolvedCommand),
         encoding: "utf8",
         timeout: options.timeout ?? 15000,
         maxBuffer: 1024 * 1024 * 4,
@@ -147,6 +152,7 @@ function runShellCommand(
       fullCommand,
       {
         cwd: options.cwd,
+        env: getCommandEnv(),
         encoding: "utf8",
         timeout: options.timeout ?? 15000,
         maxBuffer: 1024 * 1024 * 4,
@@ -201,13 +207,6 @@ function extractVersion(output: string): string | undefined {
   return output.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
 }
 
-function splitCommandPaths(output: string): string[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
   try {
     return JSON.parse(await readFile(filePath, "utf8")) as T;
@@ -240,14 +239,7 @@ async function findProjectPackageRoot(packageName: string): Promise<string | und
 }
 
 async function commandExists(command: string): Promise<boolean> {
-  try {
-    const lookupCommand = process.platform === "win32" ? "where.exe" : "which";
-    const lookupArgs = process.platform === "win32" ? [command] : ["-a", command];
-    const { stdout } = await runCommand(lookupCommand, lookupArgs, { timeout: 5000 });
-    return splitCommandPaths(stdout).some((path) => !path.includes("node_modules"));
-  } catch {
-    return false;
-  }
+  return commandExistsOnPath(command, { excludeNodeModules: true });
 }
 
 async function getCommandVersion(command: string): Promise<string | undefined> {
@@ -260,18 +252,7 @@ async function getCommandVersion(command: string): Promise<string | undefined> {
 }
 
 async function getLatestPackageVersion(packageName: string): Promise<string | undefined> {
-  const { stdout } = await runNpmCommand(["view", packageName, "version", "--json"], {
-    timeout: 15000,
-  });
-  const raw = stdout.trim();
-  if (!raw) return undefined;
-
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : undefined;
-  } catch {
-    return raw.replace(/^"|"$/g, "");
-  }
+  return getLatestNpmPackageVersion(packageName);
 }
 
 async function getCliAgentStatus(config: CliAgentConfig): Promise<AgentStatus> {
