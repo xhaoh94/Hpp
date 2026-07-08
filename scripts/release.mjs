@@ -60,9 +60,9 @@ async function writeJson(filePath, data) {
 }
 
 function run(command, commandArgs, extraEnv = {}) {
-  const executable = resolveCliCommand(command);
+  const { executable, args } = resolveCommandInvocation(command, commandArgs);
   console.log(`[release] $ ${[command, ...commandArgs].join(" ")}`);
-  const result = spawnSync(executable, commandArgs, {
+  const result = spawnSync(executable, args, {
     cwd: rootDir,
     stdio: "inherit",
     env: {
@@ -71,17 +71,24 @@ function run(command, commandArgs, extraEnv = {}) {
     },
   });
 
+  if (result.error) {
+    console.error(`[release] Failed to start ${command}: ${result.error.message}`);
+    process.exit(1);
+  }
   if (result.status !== 0) {
     process.exit(result.status || 1);
   }
 }
 
 function capture(command, commandArgs) {
-  const executable = resolveCliCommand(command);
-  const result = spawnSync(executable, commandArgs, {
+  const { executable, args } = resolveCommandInvocation(command, commandArgs);
+  const result = spawnSync(executable, args, {
     cwd: rootDir,
     encoding: "utf8",
   });
+  if (result.error) {
+    throw result.error;
+  }
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || "").trim();
     throw new Error(detail || `${command} ${commandArgs.join(" ")} failed`);
@@ -90,19 +97,48 @@ function capture(command, commandArgs) {
 }
 
 function captureOptional(command, commandArgs) {
-  const executable = resolveCliCommand(command);
-  const result = spawnSync(executable, commandArgs, {
+  const { executable, args } = resolveCommandInvocation(command, commandArgs);
+  const result = spawnSync(executable, args, {
     cwd: rootDir,
     encoding: "utf8",
   });
+  if (result.error) return "";
   if (result.status !== 0) return "";
   return result.stdout.trim();
 }
 
-function resolveCliCommand(command) {
-  if (process.platform !== "win32") return command;
-  if (command === "npm" || command === "npx") return `${command}.cmd`;
-  return command;
+function resolveCommandInvocation(command, commandArgs) {
+  if (command === "npm") {
+    const npmCli = findNpmCli();
+    if (npmCli) return { executable: process.execPath, args: [npmCli, ...commandArgs] };
+  }
+
+  if (command === "electron-builder") {
+    const electronBuilderCli = findFirstExisting([
+      path.join(rootDir, "node_modules", "electron-builder", "cli.js"),
+      path.join(rootDir, "node_modules", "electron-builder", "out", "cli", "cli.js"),
+    ]);
+    if (electronBuilderCli) return { executable: process.execPath, args: [electronBuilderCli, ...commandArgs] };
+  }
+
+  return { executable: command, args: commandArgs };
+}
+
+function findNpmCli() {
+  return findFirstExisting([
+    process.env.npm_execpath,
+    path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(path.dirname(path.dirname(process.execPath)), "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ]);
+}
+
+function findFirstExisting(candidates) {
+  return candidates.filter(Boolean).find((candidate) => existsSync(candidate));
+}
+
+function stageReleaseChanges() {
+  run("git", ["add", "-A", "--", "."]);
+  run("git", ["restore", "--staged", "--", "out"]);
 }
 
 function getGithubToken() {
@@ -262,7 +298,7 @@ async function main() {
   let sha = capture("git", ["rev-parse", "HEAD"]);
   if (!dryRun) {
     if (!noCommit) {
-      run("git", ["add", "-A"]);
+      stageReleaseChanges();
       const staged = capture("git", ["diff", "--cached", "--name-only"]);
       if (staged) {
         run("git", ["commit", "-m", `chore: release ${tagName}`]);
@@ -281,7 +317,7 @@ async function main() {
     }
     await ensureGithubTag({ owner, repo, token, tag: tagName, sha });
   }
-  run("npx", ["electron-builder", "--publish", dryRun ? "never" : "always"], releaseEnv);
+  run("electron-builder", ["--publish", dryRun ? "never" : "always"], releaseEnv);
 
   console.log(`[release] Done: ${dryRun ? "built" : "published"} ${tagName}`);
 }

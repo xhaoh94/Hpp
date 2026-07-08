@@ -35,14 +35,14 @@ npm run release -- 0.0.2
 1. 更新 `package.json` 和 `package-lock.json` 的版本号。
 2. 清空旧的 `release/` 打包目录。
 3. 执行 `npm run build`。
-4. 构建通过后执行 `git add -A`。
+4. 构建通过后暂存源码改动，并确保 `out/` 等生成产物不进入 release commit。
 5. 创建 release commit，提交信息为 `chore: release v0.0.2`。
 6. push 当前分支到 `origin`。
 7. 在 GitHub 创建 tag，例如 `v0.0.2`。
 8. 执行 `electron-builder --publish always`。
 9. 上传安装包、blockmap 和 `latest.yml` 到 GitHub Release。
 
-也就是说，当前工作区里未提交的源码改动会默认一起进入 release commit。
+也就是说，当前工作区里未提交的源码改动会默认一起进入 release commit，但构建产物不会进入 release commit。
 
 ## 版本号规则
 
