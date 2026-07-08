@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "questionnaire"];
@@ -430,6 +431,18 @@ const disposeSession = () => {
   session = null;
 };
 
+const stripUtf8Bom = (filePath) => {
+  if (!existsSync(filePath)) return;
+  try {
+    const content = readFileSync(filePath, "utf8");
+    if (content.charCodeAt(0) === 0xfeff) {
+      writeFileSync(filePath, content.slice(1), "utf8");
+    }
+  } catch {
+    // Pi will surface the underlying config read error if the file is still invalid.
+  }
+};
+
 const setPermissionMode = (permissionMode) => {
   if (!session?.setActiveToolsByName) return;
   const tools = permissionMode === "plan"
@@ -444,6 +457,10 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
   sdk = await import("@earendil-works/pi-coding-agent");
   const eventBus = sdk.createEventBus();
   const agentDir = sdk.getAgentDir();
+  stripUtf8Bom(join(agentDir, "models.json"));
+  stripUtf8Bom(join(agentDir, "auth.json"));
+  const authStorage = sdk.AuthStorage.create(join(agentDir, "auth.json"));
+  const modelRegistry = sdk.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
   const settingsManager = sdk.SettingsManager.create(cwd, agentDir);
   const resourceLoader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, eventBus });
   await resourceLoader.reload();
@@ -453,6 +470,8 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
   const result = await sdk.createAgentSession({
     cwd,
     agentDir,
+    authStorage,
+    modelRegistry,
     settingsManager,
     resourceLoader,
     sessionManager,
@@ -594,8 +613,20 @@ const handleCommand = async (command) => {
         send({ type: "models", id: command.id, models: getModels() });
         break;
       case "setModel": {
+        if (!session) throw new Error("Pi SDK session is not initialized");
         const model = session?.modelRegistry.find(command.provider, command.modelId);
-        if (model) await session?.setModel(model);
+        if (!model) {
+          const loadError = session.modelRegistry.getError?.();
+          throw new Error(
+            loadError
+              ? `Pi model config failed to load: ${loadError}`
+              : `Pi model is not available: ${command.provider}/${command.modelId}`
+          );
+        }
+        if (!session.modelRegistry.hasConfiguredAuth(model)) {
+          throw new Error(`No API key found for model: ${command.provider}/${command.modelId}`);
+        }
+        await session.setModel(model);
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
       }

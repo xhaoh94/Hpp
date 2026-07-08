@@ -7,6 +7,14 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   close: () => electron.ipcRenderer.send("window:close"),
   // Platform info
   platform: process.platform,
+  getAppVersion: () => electron.ipcRenderer.invoke("app:getVersion"),
+  getAppUpdateStatus: () => electron.ipcRenderer.invoke("app:update:getStatus"),
+  checkAppUpdate: () => electron.ipcRenderer.invoke("app:update:check"),
+  downloadAppUpdate: () => electron.ipcRenderer.invoke("app:update:download"),
+  installAppUpdate: () => electron.ipcRenderer.invoke("app:update:install"),
+  getCloseToTray: () => electron.ipcRenderer.invoke("app:getCloseToTray"),
+  setCloseToTray: (enabled) => electron.ipcRenderer.invoke("app:setCloseToTray", enabled),
+  showNotification: (options) => electron.ipcRenderer.invoke("app:showNotification", options),
   // File system
   readDirectory: (dirPath) => electron.ipcRenderer.invoke("fs:readDirectory", dirPath),
   readFile: (filePath) => electron.ipcRenderer.invoke("fs:readFile", filePath),
@@ -51,5 +59,10 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_event, data) => callback(data);
     electron.ipcRenderer.on("agent:event", handler);
     return () => electron.ipcRenderer.removeListener("agent:event", handler);
+  },
+  onAppUpdateStatus: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("app:update-status", handler);
+    return () => electron.ipcRenderer.removeListener("app:update-status", handler);
   }
 });

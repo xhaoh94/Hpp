@@ -1,11 +1,13 @@
 "use strict";
 const electron = require("electron");
+const promises = require("fs/promises");
 const path = require("path");
 const utils = require("@electron-toolkit/utils");
-const promises = require("fs/promises");
+const electronUpdater = require("electron-updater");
 const os = require("os");
 const child_process = require("child_process");
 const fs = require("fs");
+const https = require("https");
 const http = require("http");
 const string_decoder = require("string_decoder");
 function _interopNamespaceDefault(e) {
@@ -25,6 +27,73 @@ function _interopNamespaceDefault(e) {
   return Object.freeze(n);
 }
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
+function getPathEnvKey(env = process.env) {
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+}
+function getPathEnvValue(env = process.env) {
+  return env[getPathEnvKey(env)] || "";
+}
+function commandHasPath(command) {
+  return command.includes("/") || command.includes("\\") || path.isAbsolute(command);
+}
+function getWindowsExecutableExtensions(env = process.env) {
+  const configured = env.PATHEXT || ".EXE;.CMD;.BAT;.COM";
+  return configured.split(";").map((ext) => ext.trim().toLowerCase()).filter(Boolean);
+}
+function getCommandNames(command, env = process.env) {
+  if (process.platform !== "win32") return [command];
+  const lower = command.toLowerCase();
+  const hasKnownExtension = getWindowsExecutableExtensions(env).some((ext) => lower.endsWith(ext));
+  if (hasKnownExtension) return [command];
+  return [command, ...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`)];
+}
+function findCommandOnPath(command, options = {}) {
+  const env = options.env || process.env;
+  if (!command.trim()) return void 0;
+  if (commandHasPath(command)) {
+    const normalized = path.normalize(command);
+    return fs.existsSync(normalized) ? normalized : void 0;
+  }
+  const dirs = getPathEnvValue(env).split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    for (const name of getCommandNames(command, env)) {
+      const candidate = path.join(dir, name);
+      if (!fs.existsSync(candidate)) continue;
+      if (options.excludeNodeModules && candidate.includes(`${path.sep}node_modules${path.sep}`)) continue;
+      return candidate;
+    }
+  }
+  return void 0;
+}
+function resolveCommand(command, env = process.env) {
+  return findCommandOnPath(command, { env }) || command;
+}
+function commandExists$1(command, options = {}) {
+  return !!findCommandOnPath(command, {
+    env: process.env,
+    excludeNodeModules: options.excludeNodeModules
+  });
+}
+function getCommandEnv(extra) {
+  const env = { ...process.env, ...extra };
+  const pathKey = getPathEnvKey(env);
+  env[pathKey] = env[pathKey] || "";
+  return env;
+}
+function getNodeExecutable(envKeys = []) {
+  for (const key of envKeys) {
+    const value = process.env[key];
+    if (value && fs.existsSync(value)) return value;
+  }
+  return findCommandOnPath("node") || "node";
+}
+function isWindowsShellShim(filePath) {
+  return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(filePath);
+}
+function getNpmPackageBinTarget(shimPath, packageName, binPath) {
+  const target = path.join(path.dirname(shimPath), "node_modules", packageName, binPath);
+  return fs.existsSync(target) ? target : void 0;
+}
 const SEARCH_RESULT_LIMIT = 50;
 const SEARCH_EXCLUDED_DIRS = /* @__PURE__ */ new Set([
   "node_modules",
@@ -215,14 +284,7 @@ function registerFileHandlers() {
   electron.ipcMain.handle("fs:isCommandAvailable", (_event, command) => {
     if (typeof command !== "string" || !/^[\w@./:-]+$/.test(command)) return false;
     try {
-      const executable = process.platform === "win32" ? "where" : "which";
-      const args = process.platform === "win32" ? [command] : ["-a", command];
-      const result = child_process.spawnSync(executable, args, { encoding: "utf-8", shell: false });
-      if (result.status !== 0 || result.error) return false;
-      const output = result.stdout.trim();
-      if (!output) return false;
-      const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-      return lines.some((p) => !p.includes("node_modules"));
+      return commandExists$1(command, { excludeNodeModules: true });
     } catch {
       return false;
     }
@@ -262,15 +324,82 @@ function registerStoreHandlers() {
     }
   );
 }
+function getRegistryBaseUrls() {
+  const configured = process.env.npm_config_registry || process.env.NPM_CONFIG_REGISTRY;
+  return Array.from(new Set([
+    configured,
+    "https://registry.npmjs.org/",
+    "https://registry.npmmirror.com/"
+  ].filter(Boolean).map((registry) => registry.endsWith("/") ? registry : `${registry}/`)));
+}
+function getNpmRegistryPackageUrls(packageName) {
+  const packagePath = `${encodeURIComponent(packageName)}/latest`;
+  return getRegistryBaseUrls().map((registry) => new URL(packagePath, registry).toString());
+}
+function requestLatestPackageVersion(url, timeout = 15e3) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "Hpp"
+        }
+      },
+      (response) => {
+        if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          const redirectUrl = new URL(response.headers.location, url).toString();
+          response.resume();
+          requestLatestPackageVersion(redirectUrl, timeout).then(resolve, reject);
+          return;
+        }
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`npm registry returned HTTP ${response.statusCode || "unknown"}`));
+          return;
+        }
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            const parsed = JSON.parse(body);
+            resolve(typeof parsed.version === "string" ? parsed.version : void 0);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+    request.setTimeout(timeout, () => request.destroy(new Error("npm registry request timed out")));
+    request.on("error", reject);
+  });
+}
+async function getLatestNpmPackageVersion(packageName) {
+  let lastError;
+  for (const url of getNpmRegistryPackageUrls(packageName)) {
+    try {
+      return await requestLatestPackageVersion(url);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
 const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 const MIN_NODE_VERSION = "22.19.0";
-function runCommand$1(command, args, options = {}) {
+function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
+    const resolvedCommand = resolveCommand(command);
     child_process.execFile(
-      command,
+      resolvedCommand,
       args,
       {
         cwd: options.cwd,
+        env: getCommandEnv(),
+        shell: isWindowsShellShim(resolvedCommand),
         encoding: "utf8",
         timeout: options.timeout ?? 15e3,
         maxBuffer: 1024 * 1024 * 4
@@ -289,14 +418,10 @@ function runCommand$1(command, args, options = {}) {
   });
 }
 function nodeCommand() {
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? "node.exe" : "node";
+  return getNodeExecutable(["PI_NODE_PATH"]);
 }
 function runNpmCommand$1(args, options = {}) {
-  if (process.platform === "win32") {
-    return runCommand$1("cmd.exe", ["/d", "/s", "/c", "npm", ...args], options);
-  }
-  return runCommand$1("npm", args, options);
+  return runCommand("npm", args, options);
 }
 function parseVersion$1(version) {
   return version.replace(/^v/, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
@@ -344,23 +469,12 @@ async function getInstalledVersion(packageRoot) {
   );
   return packageJson?.version;
 }
-async function getLatestVersion(packageRoot) {
-  const { stdout } = await runNpmCommand$1(
-    ["view", PI_SDK_PACKAGE, "version", "--json"],
-    { cwd: packageRoot, timeout: 15e3 }
-  );
-  const raw = stdout.trim();
-  if (!raw) return void 0;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : void 0;
-  } catch {
-    return raw.replace(/^"|"$/g, "");
-  }
+async function getLatestVersion() {
+  return getLatestNpmPackageVersion(PI_SDK_PACKAGE);
 }
 async function getNodeStatus() {
   try {
-    const { stdout } = await runCommand$1(nodeCommand(), ["-v"], { timeout: 5e3 });
+    const { stdout } = await runCommand(nodeCommand(), ["-v"], { timeout: 5e3 });
     const nodeVersion = stdout.trim().replace(/^v/, "");
     return {
       nodeVersion,
@@ -377,7 +491,7 @@ async function getPiSDKStatus() {
   let latestVersion;
   let error;
   try {
-    latestVersion = await getLatestVersion(packageRoot);
+    latestVersion = await getLatestVersion();
   } catch (err) {
     error = `无法检查最新版本：${formatError$1(err)}`;
   }
@@ -473,30 +587,6 @@ async function getDefaultThinkingLevel(agentId) {
   if (agentId === "codex") return getCodexDefaultThinkingLevel();
   return DEFAULT_THINKING_LEVEL;
 }
-function runCommand(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    child_process.execFile(
-      command,
-      args,
-      {
-        cwd: options.cwd,
-        encoding: "utf8",
-        timeout: options.timeout ?? 15e3,
-        maxBuffer: 1024 * 1024 * 4
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const commandError = error;
-          commandError.stdout = stdout;
-          commandError.stderr = stderr;
-          reject(commandError);
-          return;
-        }
-        resolve({ stdout, stderr });
-      }
-    );
-  });
-}
 function runShellCommand(command, args, options = {}) {
   const parts = [command, ...args].map((a) => {
     if (/[\s"]/.test(a)) {
@@ -510,6 +600,7 @@ function runShellCommand(command, args, options = {}) {
       fullCommand,
       {
         cwd: options.cwd,
+        env: getCommandEnv(),
         encoding: "utf8",
         timeout: options.timeout ?? 15e3,
         maxBuffer: 1024 * 1024 * 4
@@ -551,9 +642,6 @@ function formatError(error) {
 function extractVersion(output) {
   return output.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
 }
-function splitCommandPaths(output) {
-  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-}
 async function readJsonFile(filePath) {
   try {
     return JSON.parse(await promises.readFile(filePath, "utf8"));
@@ -577,14 +665,7 @@ async function findProjectPackageRoot(packageName) {
   return void 0;
 }
 async function commandExists(command) {
-  try {
-    const lookupCommand = process.platform === "win32" ? "where.exe" : "which";
-    const lookupArgs = process.platform === "win32" ? [command] : ["-a", command];
-    const { stdout } = await runCommand(lookupCommand, lookupArgs, { timeout: 5e3 });
-    return splitCommandPaths(stdout).some((path2) => !path2.includes("node_modules"));
-  } catch {
-    return false;
-  }
+  return commandExists$1(command, { excludeNodeModules: true });
 }
 async function getCommandVersion(command) {
   try {
@@ -596,17 +677,7 @@ ${stderr}`);
   }
 }
 async function getLatestPackageVersion(packageName) {
-  const { stdout } = await runNpmCommand(["view", packageName, "version", "--json"], {
-    timeout: 15e3
-  });
-  const raw = stdout.trim();
-  if (!raw) return void 0;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : void 0;
-  } catch {
-    return raw.replace(/^"|"$/g, "");
-  }
+  return getLatestNpmPackageVersion(packageName);
 }
 async function getCliAgentStatus(config) {
   const installed = await commandExists(config.command);
@@ -1324,9 +1395,10 @@ async function writePiNativeConfigProviders(state) {
   const filePath = getPiModelsPath();
   const snapshot = await snapshotFile(filePath);
   const config = await readJsonObject(filePath);
+  const existingProviders = isRecord(config.providers) ? config.providers : {};
   const providers = {};
   for (const provider of state.providers) {
-    const existingProvider = isRecord(providers[provider.providerId]) ? providers[provider.providerId] : {};
+    const existingProvider = isRecord(existingProviders[provider.providerId]) ? existingProviders[provider.providerId] : {};
     providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
   }
   await writeJsonObject(filePath, { ...config, providers });
@@ -2002,15 +2074,15 @@ class OpenCodeAgent {
     this.port = 1e4 + Math.floor(Math.random() * 55e3);
     this.sessionId = null;
     this.emitEvent({ type: "agent_init", agentId: "opencode" });
-    this.process = child_process.spawn("opencode", ["serve", "--port", String(this.port), "--hostname", this.host], {
+    const opencodeCommand = resolveCommand("opencode");
+    this.process = child_process.spawn(opencodeCommand, ["serve", "--port", String(this.port), "--hostname", this.host], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
-      env: {
-        ...process.env,
+      shell: isWindowsShellShim(opencodeCommand),
+      env: getCommandEnv({
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(process.env.OPENCODE_CONFIG_CONTENT)
-      }
+      })
     });
     this.process.stderr?.on("data", (chunk) => {
       console.log("[opencode]", chunk.toString().trim());
@@ -2566,49 +2638,19 @@ class OpenCodeAgent {
     this.eventBuffer.send(data);
   }
 }
-function getPathEnvValue() {
-  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") || "PATH";
-  return process.env[pathKey] || "";
-}
-function findOnPath(fileNames) {
-  for (const dir of getPathEnvValue().split(path.delimiter)) {
-    if (!dir) continue;
-    for (const fileName of fileNames) {
-      const candidate = path.join(dir, fileName);
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return void 0;
-}
-function getNodeExecutable$2() {
-  if (process.env.DROID_NODE_PATH) return process.env.DROID_NODE_PATH;
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? findOnPath(["node.exe"]) || "node.exe" : "node";
-}
-function getNpmDroidShimTarget(shimPath) {
-  const target = path.join(path.dirname(shimPath), "node_modules", "droid", "bin", "droid");
-  return fs.existsSync(target) ? target : void 0;
-}
-function isWindowsShellShim(filePath) {
-  return /\.(?:cmd|bat)$/i.test(filePath);
-}
 function getDroidExecutable(args) {
   if (process.env.DROID_PATH && fs.existsSync(process.env.DROID_PATH)) {
-    if (process.platform === "win32" && isWindowsShellShim(process.env.DROID_PATH)) {
+    if (isWindowsShellShim(process.env.DROID_PATH)) {
       return { command: process.env.DROID_PATH, args, shell: true };
     }
     return { command: process.env.DROID_PATH, args };
   }
-  if (process.platform !== "win32") {
-    return { command: "droid", args };
-  }
-  const exe = findOnPath(["droid.exe"]);
-  if (exe) return { command: exe, args };
-  const npmShim = findOnPath(["droid.cmd", "droid.bat"]);
-  const shimTarget = npmShim ? getNpmDroidShimTarget(npmShim) : void 0;
-  if (shimTarget) return { command: getNodeExecutable$2(), args: [shimTarget, ...args] };
-  if (npmShim) return { command: npmShim, args, shell: true };
-  return { command: "droid.exe", args };
+  const executable = findCommandOnPath("droid");
+  if (!executable) return { command: "droid", args };
+  if (!isWindowsShellShim(executable)) return { command: executable, args };
+  const shimTarget = getNpmPackageBinTarget(executable, "droid", path.join("bin", "droid"));
+  if (shimTarget) return { command: getNodeExecutable(["DROID_NODE_PATH", "PI_NODE_PATH"]), args: [shimTarget, ...args] };
+  return { command: executable, args, shell: true };
 }
 class DroidAgent {
   process = null;
@@ -2662,7 +2704,7 @@ class DroidAgent {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       shell: executable.shell || false,
-      env: { ...process.env }
+      env: getCommandEnv()
     });
     const decoder = new string_decoder.StringDecoder("utf8");
     let buffer = "";
@@ -3071,10 +3113,6 @@ const getWorkerPath$1 = () => {
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[candidates.length - 1];
 };
-const getNodeExecutable$1 = () => {
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? "node.exe" : "node";
-};
 class PiSDKAgent {
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
@@ -3113,10 +3151,10 @@ class PiSDKAgent {
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
-    const child = child_process.spawn(getNodeExecutable$1(), [getWorkerPath$1()], {
+    const child = child_process.spawn(getNodeExecutable(["PI_NODE_PATH"]), [getWorkerPath$1()], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env: getCommandEnv()
     });
     this.process = child;
     const decoder = new string_decoder.StringDecoder("utf8");
@@ -3302,8 +3340,22 @@ class PiSDKAgent {
     });
   }
   async setModel(provider, modelId) {
-    this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
-      if (data.type === "model_changed") this.emitEvent({ type: "model_changed", model: data.model });
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    let requestId = "";
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        reject(new Error("Pi SDK set model timed out"));
+      }, 8e3);
+      requestId = this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
+        clearTimeout(timeout);
+        if (data.type === "model_changed") {
+          this.emitEvent({ type: "model_changed", model: data.model });
+          resolve();
+          return;
+        }
+        reject(new Error(data.error || "Pi SDK set model failed"));
+      });
     });
   }
   async setThinkingLevel(level) {
@@ -3605,11 +3657,6 @@ const getWorkerPath = () => {
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[candidates.length - 1];
 };
-const getNodeExecutable = () => {
-  if (process.env.CODEX_NODE_PATH) return process.env.CODEX_NODE_PATH;
-  if (process.env.PI_NODE_PATH) return process.env.PI_NODE_PATH;
-  return process.platform === "win32" ? "node.exe" : "node";
-};
 class CodexAgent {
   constructor(hppSessionId = "default") {
     this.hppSessionId = hppSessionId;
@@ -3640,10 +3687,10 @@ class CodexAgent {
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "codex" });
-    const child = child_process.spawn(getNodeExecutable(), [getWorkerPath()], {
+    const child = child_process.spawn(getNodeExecutable(["CODEX_NODE_PATH", "PI_NODE_PATH"]), [getWorkerPath()], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env: getCommandEnv()
     });
     this.process = child;
     const decoder = new string_decoder.StringDecoder("utf8");
@@ -3969,7 +4016,7 @@ function readLocalModelsConfig() {
     if (_localModelsConfig && mtime <= _localModelsConfigMtime) {
       return _localModelsConfig;
     }
-    const content = fs.readFileSync(configPath, "utf-8");
+    const content = fs.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
     _localModelsConfig = JSON.parse(content);
     _localModelsConfigMtime = mtime;
   } catch {
@@ -4006,6 +4053,7 @@ async function mergeModelsWithConfiguredAgentModels(agentId, models) {
   const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
   if (configuredModels.length === 0) return models;
   if (agentId === "codex") return configuredModels;
+  if (agentId === "pi") return models;
   const merged = /* @__PURE__ */ new Map();
   for (const model of models) {
     merged.set(`${model.provider}:${model.id}`, model);
@@ -4404,10 +4452,14 @@ function registerAgentHandlers(getWindow) {
     return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
   });
   electron.ipcMain.handle("agent:setModel", async (_event, provider, modelId, sessionId) => {
-    const agent = agentManager.getAgentForSession(sessionId);
-    if (!agent) return { success: false };
-    await agent.setModel(provider, modelId);
-    return { success: true };
+    try {
+      const agent = agentManager.getAgentForSession(sessionId);
+      if (!agent) return { success: false, error: "No active agent" };
+      await agent.setModel(provider, modelId);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message || String(err) };
+    }
   });
   electron.ipcMain.handle("agent:setThinkingLevel", async (_event, level, sessionId) => {
     const agent = agentManager.getAgentForSession(sessionId);
@@ -4425,10 +4477,212 @@ if (process.platform === "linux") {
   electron.app.commandLine.appendSwitch("wayland-text-input-version", "3");
 }
 electron.app.setName("hpp");
+if (process.platform === "win32") {
+  electron.app.setAppUserModelId("com.hpp.app");
+}
+const DEFAULT_CLOSE_TO_TRAY = true;
 let mainWindow = null;
+let tray = null;
+let closeToTray = DEFAULT_CLOSE_TO_TRAY;
+let isQuitting = false;
+let updaterInitialized = false;
+let updateStatus = {
+  state: "idle",
+  currentVersion: electron.app.getVersion(),
+  canCheck: false,
+  canDownload: false,
+  canInstall: false
+};
+const singleInstanceLock = electron.app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  electron.app.quit();
+}
+function focusMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+function getIconPath() {
+  return utils.is.dev ? path.join(process.cwd(), "public/icon.png") : path.join(__dirname, "../renderer/icon.png");
+}
+async function loadCloseToTraySetting() {
+  try {
+    const settingsPath = path.join(electron.app.getPath("userData"), "hpp-data", "settings.json");
+    const content = await promises.readFile(settingsPath, "utf-8");
+    const settings = JSON.parse(content);
+    closeToTray = typeof settings.general?.closeToTray === "boolean" ? settings.general.closeToTray : DEFAULT_CLOSE_TO_TRAY;
+  } catch {
+    closeToTray = DEFAULT_CLOSE_TO_TRAY;
+  }
+}
+function createTray() {
+  if (tray) return;
+  const trayIcon = electron.nativeImage.createFromPath(getIconPath());
+  tray = new electron.Tray(trayIcon.isEmpty() ? getIconPath() : trayIcon.resize({ width: 16, height: 16 }));
+  tray.setToolTip("Hpp");
+  tray.setContextMenu(electron.Menu.buildFromTemplate([
+    { label: "显示 Hpp", click: focusMainWindow },
+    { type: "separator" },
+    {
+      label: "退出",
+      click: () => {
+        isQuitting = true;
+        electron.app.quit();
+      }
+    }
+  ]));
+  tray.on("click", focusMainWindow);
+}
+function getUpdateFeedLabel() {
+  const explicitUrl = process.env.HPP_UPDATE_URL?.trim();
+  if (explicitUrl) return explicitUrl;
+  return "github:xhaoh94/Hpp";
+}
+function updateStatusPatch(patch) {
+  updateStatus = {
+    ...updateStatus,
+    currentVersion: electron.app.getVersion(),
+    feedUrl: getUpdateFeedLabel(),
+    canCheck: electron.app.isPackaged,
+    canDownload: patch.state === "available" || patch.state === void 0 && updateStatus.state === "available",
+    canInstall: patch.state === "downloaded" || patch.state === void 0 && updateStatus.state === "downloaded",
+    ...patch
+  };
+  mainWindow?.webContents.send("app:update-status", updateStatus);
+}
+function getReleaseNotes(info) {
+  const notes = info.releaseNotes;
+  if (typeof notes === "string") return notes;
+  if (Array.isArray(notes)) {
+    return notes.map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object" && "note" in item) return String(item.note || "");
+      return "";
+    }).filter(Boolean).join("\n");
+  }
+  return void 0;
+}
+function updateStatusFromInfo(state, info, extra) {
+  updateStatusPatch({
+    state,
+    version: info?.version || updateStatus.version,
+    releaseDate: info?.releaseDate || updateStatus.releaseDate,
+    releaseName: info?.releaseName || updateStatus.releaseName,
+    releaseNotes: info ? getReleaseNotes(info) : updateStatus.releaseNotes,
+    error: void 0,
+    ...extra
+  });
+}
+function notifyUpdate(title, body) {
+  if (!electron.Notification.isSupported()) return;
+  const notification = new electron.Notification({ title, body, icon: getIconPath() });
+  notification.on("click", focusMainWindow);
+  notification.show();
+}
+function initAutoUpdater() {
+  if (updaterInitialized) return;
+  updaterInitialized = true;
+  electronUpdater.autoUpdater.autoDownload = false;
+  electronUpdater.autoUpdater.autoInstallOnAppQuit = true;
+  const explicitUrl = process.env.HPP_UPDATE_URL?.trim();
+  if (explicitUrl) {
+    electronUpdater.autoUpdater.setFeedURL({ provider: "generic", url: explicitUrl });
+  }
+  electronUpdater.autoUpdater.on("checking-for-update", () => {
+    updateStatusPatch({
+      state: "checking",
+      error: void 0,
+      percent: void 0,
+      bytesPerSecond: void 0,
+      transferred: void 0,
+      total: void 0
+    });
+  });
+  electronUpdater.autoUpdater.on("update-available", (info) => {
+    updateStatusFromInfo("available", info);
+    notifyUpdate("Hpp 有新版本", `v${info.version} 可下载`);
+  });
+  electronUpdater.autoUpdater.on("update-not-available", (info) => {
+    updateStatusFromInfo("not-available", info, {
+      version: electron.app.getVersion()
+    });
+  });
+  electronUpdater.autoUpdater.on("download-progress", (progress) => {
+    updateStatusPatch({
+      state: "downloading",
+      percent: progress.percent,
+      bytesPerSecond: progress.bytesPerSecond,
+      transferred: progress.transferred,
+      total: progress.total,
+      error: void 0
+    });
+  });
+  electronUpdater.autoUpdater.on("update-downloaded", (info) => {
+    updateStatusFromInfo("downloaded", info, {
+      percent: 100
+    });
+    notifyUpdate("Hpp 更新已下载", "重启应用即可安装新版本");
+  });
+  electronUpdater.autoUpdater.on("error", (error) => {
+    updateStatusPatch({
+      state: "error",
+      error: error?.message || String(error)
+    });
+  });
+  updateStatusPatch({
+    state: "idle",
+    error: void 0
+  });
+}
+async function checkForAppUpdates() {
+  if (!electron.app.isPackaged) {
+    updateStatusPatch({
+      state: "idle",
+      error: "自动更新仅在打包后的应用中可用。",
+      canCheck: false
+    });
+    return { success: false, error: updateStatus.error, status: updateStatus };
+  }
+  try {
+    initAutoUpdater();
+    updateStatusPatch({ state: "checking", error: void 0 });
+    await electronUpdater.autoUpdater.checkForUpdates();
+    return { success: true, status: updateStatus };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    updateStatusPatch({ state: "error", error: message });
+    return { success: false, error: message, status: updateStatus };
+  }
+}
+async function downloadAppUpdate() {
+  if (!electron.app.isPackaged) {
+    return { success: false, error: "自动更新仅在打包后的应用中可用。", status: updateStatus };
+  }
+  if (updateStatus.state !== "available") {
+    return { success: false, error: "当前没有可下载的更新。", status: updateStatus };
+  }
+  try {
+    initAutoUpdater();
+    await electronUpdater.autoUpdater.downloadUpdate();
+    return { success: true, status: updateStatus };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    updateStatusPatch({ state: "error", error: message });
+    return { success: false, error: message, status: updateStatus };
+  }
+}
+function installAppUpdate() {
+  if (updateStatus.state !== "downloaded") {
+    return { success: false, error: "更新尚未下载完成。", status: updateStatus };
+  }
+  isQuitting = true;
+  setImmediate(() => electronUpdater.autoUpdater.quitAndInstall(false, true));
+  return { success: true, status: updateStatus };
+}
 function createWindow() {
   electron.Menu.setApplicationMenu(null);
-  const iconPath = path.join(__dirname, "../renderer/icon.png");
+  const iconPath = getIconPath();
   mainWindow = new electron.BrowserWindow({
     width: 1400,
     height: 900,
@@ -4445,22 +4699,51 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
+  mainWindow.on("close", (event) => {
+    if (isQuitting || !closeToTray) return;
+    event.preventDefault();
+    mainWindow?.hide();
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
   if (utils.is.dev && process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
     mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
 }
-electron.app.whenReady().then(() => {
-  createWindow();
-  registerFileHandlers();
-  registerStoreHandlers();
-  registerPiSDKHandlers();
-  registerAgentStatusHandlers();
-  registerAgentHandlers(() => mainWindow);
-  electron.app.on("activate", () => {
-    if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();
+if (singleInstanceLock) {
+  electron.app.whenReady().then(async () => {
+    await loadCloseToTraySetting();
+    createWindow();
+    createTray();
+    registerFileHandlers();
+    registerStoreHandlers();
+    registerPiSDKHandlers();
+    registerAgentStatusHandlers();
+    registerAgentHandlers(() => mainWindow);
+    updateStatusPatch({
+      state: "idle",
+      canCheck: electron.app.isPackaged,
+      error: electron.app.isPackaged ? void 0 : "自动更新仅在打包后的应用中可用。"
+    });
+    if (electron.app.isPackaged) {
+      initAutoUpdater();
+      setTimeout(() => {
+        void checkForAppUpdates();
+      }, 3e3);
+    }
+    electron.app.on("activate", () => {
+      if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
+  electron.app.on("second-instance", () => {
+    focusMainWindow();
+  });
+}
+electron.app.on("before-quit", () => {
+  isQuitting = true;
 });
 electron.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") electron.app.quit();
@@ -4474,6 +4757,29 @@ electron.ipcMain.on("window:maximize", () => {
   }
 });
 electron.ipcMain.on("window:close", () => mainWindow?.close());
+electron.ipcMain.handle("app:getVersion", () => electron.app.getVersion());
+electron.ipcMain.handle("app:update:getStatus", () => updateStatus);
+electron.ipcMain.handle("app:update:check", () => checkForAppUpdates());
+electron.ipcMain.handle("app:update:download", () => downloadAppUpdate());
+electron.ipcMain.handle("app:update:install", () => installAppUpdate());
+electron.ipcMain.handle("app:getCloseToTray", () => closeToTray);
+electron.ipcMain.handle("app:setCloseToTray", (_event, enabled) => {
+  closeToTray = enabled;
+  return { success: true };
+});
+electron.ipcMain.handle("app:showNotification", (_event, options) => {
+  if (!electron.Notification.isSupported()) {
+    return { success: false, error: "System notifications are not supported on this platform." };
+  }
+  const notification = new electron.Notification({
+    title: options.title || "Hpp",
+    body: options.body || "",
+    icon: getIconPath()
+  });
+  notification.on("click", focusMainWindow);
+  notification.show();
+  return { success: true };
+});
 electron.ipcMain.handle("clipboard:writeImage", async (_event, imageDataUrl) => {
   if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/")) {
     return { success: false, error: "Invalid image data" };
