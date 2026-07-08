@@ -54,17 +54,15 @@ const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
   return `${entries.length} 条事件`;
 };
 
-const getStepProgressIndex = (steps: AgentProcessStep[], ended: boolean) => {
-  if (steps.length === 0) return 0;
-  const runningIndex = steps.findIndex((step) => step.status === "running");
-  if (runningIndex >= 0) return runningIndex + 1;
+const getStepProgressText = (steps: AgentProcessStep[]) => {
+  const total = steps.length;
+  if (total === 0) return "";
 
   const terminalIndex = steps.findIndex((step) => step.status === "failed" || step.status === "cancelled");
-  if (terminalIndex >= 0) return terminalIndex + 1;
+  if (terminalIndex >= 0) return `第 ${terminalIndex + 1} / ${total} 步`;
 
-  const completed = steps.filter((step) => step.status === "completed").length;
-  if (completed > 0) return Math.min(steps.length, completed);
-  return ended ? steps.length : 1;
+  const completed = Math.min(total, steps.filter((step) => step.status === "completed").length);
+  return `已完成 ${completed} / ${total}`;
 };
 
 const isTerminalStepStatus = (status?: AgentProcessStep["status"]) =>
@@ -72,6 +70,9 @@ const isTerminalStepStatus = (status?: AgentProcessStep["status"]) =>
 
 const getStepById = (steps: AgentProcessStep[], id: string) =>
   steps.find((step) => step.id === id);
+
+const isActiveStepStatus = (status?: AgentProcessStep["status"]) =>
+  !!status && status !== "pending";
 
 const normalizeInferredStepsForDisplay = (
   process: AgentProcess,
@@ -84,29 +85,36 @@ const normalizeInferredStepsForDisplay = (
   const operate = getStepById(steps, "inferred-operate");
   const modify = getStepById(steps, "inferred-modify");
   const verify = getStepById(steps, "inferred-verify");
+  const hasLaterActiveStep = [operate, modify, verify].some((step) => isActiveStepStatus(step?.status));
+  const hasModifyActiveStep = isActiveStepStatus(modify?.status);
+  const hasVerifyActiveStep = isActiveStepStatus(verify?.status);
 
   const analyzeStatus: AgentProcessStep["status"] =
     isTerminalStepStatus(analyze?.status)
       ? analyze!.status
-      : operate || modify || verify
+      : hasLaterActiveStep
         ? "completed"
         : analyze?.status || "pending";
 
-  const operateStatus: AgentProcessStep["status"] =
-    isTerminalStepStatus(operate?.status)
-      ? operate!.status
-      : isTerminalStepStatus(modify?.status)
-        ? modify!.status
-        : verify || modify?.status === "completed"
-          ? "completed"
-          : modify?.status === "running" || operate?.status === "running"
-            ? "running"
-            : operate?.status === "completed"
-              ? "completed"
-              : "pending";
+  let operateStatus: AgentProcessStep["status"] = "pending";
+  if (isTerminalStepStatus(operate?.status)) {
+    operateStatus = operate!.status;
+  } else if (isTerminalStepStatus(modify?.status)) {
+    operateStatus = modify!.status;
+  } else if (hasVerifyActiveStep || verify?.status === "completed" || modify?.status === "completed") {
+    operateStatus = "completed";
+  } else if (hasModifyActiveStep || operate?.status === "running") {
+    operateStatus = "running";
+  } else if (operate?.status === "completed") {
+    operateStatus = "completed";
+  }
 
   const verifyStatus: AgentProcessStep["status"] =
-    verify?.status || (process.endedAt && !isTerminalStepStatus(operateStatus) ? "completed" : "pending");
+    verify?.status && verify.status !== "pending"
+      ? verify.status
+      : process.endedAt && !isTerminalStepStatus(operateStatus)
+        ? "completed"
+        : "pending";
 
   return [
     { id: "inferred-analyze", title: "分析请求", status: analyzeStatus },
@@ -139,9 +147,7 @@ function ProcessProgressSummary({
     return <span className="chat-process-summary">{fallback}</span>;
   }
 
-  const stepText = steps.length > 0
-    ? `第 ${getStepProgressIndex(steps, !!process.endedAt)} / ${steps.length} 步`
-    : "";
+  const stepText = getStepProgressText(steps);
 
   return (
     <span
