@@ -767,11 +767,14 @@
   display: flex;
   gap: 2px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s;
 }
 
-.chat-msg:hover .chat-msg-actions {
+.chat-msg:hover .chat-msg-actions,
+.chat-msg-actions:focus-within {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .chat-copy-btn {
@@ -895,6 +898,15 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  max-width: 100%;
+}
+
+.chat-msg.user .chat-images {
+  justify-content: flex-end;
+}
+
+.chat-msg.assistant .chat-images {
+  justify-content: flex-start;
 }
 
 .chat-bubble-row {
@@ -902,6 +914,17 @@
   align-items: flex-end;
   gap: 6px;
   max-width: 100%;
+}
+
+.chat-msg.user .chat-bubble-row {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.chat-msg.user .chat-msg-actions {
+  align-self: flex-end;
+  padding-right: 2px;
 }
 
 .chat-bubble-stack {

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { GitBranch } from "lucide-react";
 import type { ProjectSession } from "@/stores/project-store";
 import type { ChatMessage } from "@/stores/chat-store";
+import { getAgentName } from "@/lib/agents";
 import "./SessionHistory.css";
 
 interface Props {
@@ -73,7 +74,12 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
               {sessions.map((session) => (
                 <div key={session.id} className="session-item">
                   <div className="session-item-header">
-                    <span className="session-time">{formatTime(session.createdAt)}</span>
+                    <div className="session-item-meta">
+                      <span className="session-time">{formatTime(session.createdAt)}</span>
+                      <span className="session-agent-badge" title={getAgentName(session.agentId)}>
+                        {getAgentName(session.agentId)}
+                      </span>
+                    </div>
                     <div className="session-actions">
                       <button
                         onClick={() => onResume(session)}
