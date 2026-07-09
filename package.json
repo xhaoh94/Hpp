@@ -7,7 +7,7 @@
     "dev": "electron-vite dev",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "electron-vite build",
+    "build": "electron-vite build && node scripts/package-agent-plugins.cjs",
     "dist": "npm run build && electron-builder",
     "dist:publish": "npm run build && electron-builder --publish always",
     "preview": "electron-vite preview"
@@ -17,6 +17,7 @@
   "license": "ISC",
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.1",
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -31,6 +32,7 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@electron-toolkit/utils": "^4.0.0",
+    "adm-zip": "^0.5.18",
     "electron-updater": "^6.8.9",
     "electron-vite": "^5.0.0",
     "lucide-react": "^1.21.0",

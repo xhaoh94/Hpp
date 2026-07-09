@@ -1,6 +1,6 @@
 import { getAgentName } from "@/lib/agents";
 import { useProjectStore } from "@/stores/project-store";
-import type { AgentProcessFile } from "@/stores/chat-store";
+import { useChatStore, type AgentProcessFile } from "@/stores/chat-store";
 import type { AgentEvent } from "@/types";
 import {
   createProcessEntryId,
@@ -75,7 +75,8 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     event.type !== "stream_end" &&
     event.type !== "agent_end" &&
     event.type !== "agent_disconnected" &&
-    event.type !== "context_compaction"
+    event.type !== "context_compaction" &&
+    event.type !== "turn_metadata"
   ) {
     completeIdleNotice(currentSessionId);
     refreshStreamWatchdog(currentSessionId);
@@ -133,6 +134,19 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       break;
     case "context_compaction":
       appendContextCompactionDivider(currentSessionId, typeof event.id === "string" ? event.id : undefined);
+      break;
+    case "turn_metadata":
+      {
+        const nativeTurnId = typeof event.nativeTurnId === "string"
+          ? event.nativeTurnId
+          : typeof event.turnId === "string"
+            ? event.turnId
+            : "";
+        const clientUserMessageId = typeof event.clientUserMessageId === "string" ? event.clientUserMessageId : "";
+        if (nativeTurnId && clientUserMessageId) {
+          useChatStore.getState().setNativeTurnIdForTurn(clientUserMessageId, nativeTurnId, currentSessionId);
+        }
+      }
       break;
     case "plan_update":
       {

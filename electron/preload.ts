@@ -48,6 +48,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentUpdate: (agentId: string) => ipcRenderer.invoke("agent:update", agentId),
   agentGetDefaultThinkingLevel: (agentId: string) =>
     ipcRenderer.invoke("agent:getDefaultThinkingLevel", agentId),
+  agentList: () => ipcRenderer.invoke("agent:list"),
+  agentPluginChoosePath: (kind?: "zip" | "directory") => ipcRenderer.invoke("agentPlugin:choosePath", kind),
+  agentPluginInstallFromPath: (pluginPath: string) =>
+    ipcRenderer.invoke("agentPlugin:installFromPath", pluginPath),
+  agentPluginListOfficial: () => ipcRenderer.invoke("agentPlugin:listOfficial"),
+  agentPluginInstallOfficial: (agentId: string) =>
+    ipcRenderer.invoke("agentPlugin:installOfficial", agentId),
+  agentPluginRemove: (agentId: string) =>
+    ipcRenderer.invoke("agentPlugin:remove", agentId),
+  agentPluginReload: () => ipcRenderer.invoke("agentPlugin:reload"),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),

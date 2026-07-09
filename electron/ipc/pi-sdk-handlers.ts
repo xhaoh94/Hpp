@@ -159,7 +159,7 @@ async function getNodeStatus(): Promise<Pick<PiSDKStatus, "nodeVersion" | "nodeO
   }
 }
 
-async function getPiSDKStatus(): Promise<PiSDKStatus> {
+export async function getPiSDKStatus(): Promise<PiSDKStatus> {
   const packageRoot = await findPackageRoot();
   const currentVersion = packageRoot ? await getInstalledVersion(packageRoot) : undefined;
   const nodeStatus = await getNodeStatus();
@@ -192,34 +192,36 @@ async function getPiSDKStatus(): Promise<PiSDKStatus> {
 
 let updateInProgress = false;
 
+export async function updatePiSDK(): Promise<{ success: boolean; error?: string; status?: PiSDKStatus }> {
+  if (updateInProgress) {
+    return { success: false, error: "Pi SDK 正在更新中" };
+  }
+
+  const packageRoot = await findPackageRoot();
+  if (!packageRoot) {
+    return { success: false, error: "未找到 Hpp 的 package.json" };
+  }
+
+  if (app.isPackaged) {
+    return { success: false, error: "打包版暂不支持自动更新 Pi SDK" };
+  }
+
+  updateInProgress = true;
+  try {
+    await runNpmCommand(
+      ["install", `${PI_SDK_PACKAGE}@latest`],
+      { cwd: packageRoot, timeout: 180000 }
+    );
+    return { success: true, status: await getPiSDKStatus() };
+  } catch (err) {
+    return { success: false, error: formatError(err), status: await getPiSDKStatus() };
+  } finally {
+    updateInProgress = false;
+  }
+}
+
 export function registerPiSDKHandlers() {
   ipcMain.handle("pi-sdk:getStatus", async () => getPiSDKStatus());
 
-  ipcMain.handle("pi-sdk:update", async () => {
-    if (updateInProgress) {
-      return { success: false, error: "Pi SDK 正在更新中" };
-    }
-
-    const packageRoot = await findPackageRoot();
-    if (!packageRoot) {
-      return { success: false, error: "未找到 Hpp 的 package.json" };
-    }
-
-    if (app.isPackaged) {
-      return { success: false, error: "打包版暂不支持自动更新 Pi SDK" };
-    }
-
-    updateInProgress = true;
-    try {
-      await runNpmCommand(
-        ["install", `${PI_SDK_PACKAGE}@latest`],
-        { cwd: packageRoot, timeout: 180000 }
-      );
-      return { success: true, status: await getPiSDKStatus() };
-    } catch (err) {
-      return { success: false, error: formatError(err), status: await getPiSDKStatus() };
-    } finally {
-      updateInProgress = false;
-    }
-  });
+  ipcMain.handle("pi-sdk:update", async () => updatePiSDK());
 }

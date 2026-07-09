@@ -3,6 +3,7 @@ import { existsSync } from "fs";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { homedir } from "os";
+import { getAgentPluginRegistry } from "./agent-plugin-registry";
 
 export interface AgentCustomModelConfig {
   id: string;
@@ -47,7 +48,7 @@ export interface FileSnapshot {
 
 type JsonRecord = Record<string, unknown>;
 
-const SUPPORTED_CONFIG_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
+const NATIVE_CONFIG_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
 const SETTINGS_KEY = "agentConfigs";
 const CODEX_FALLBACK_MODEL_ID = "gpt-5.5";
 
@@ -230,8 +231,18 @@ async function writeAgentConfigState(agentId: string, state: AgentConfigState) {
   await writeSettings(settings);
 }
 
-function ensureSupportedAgent(agentId: string) {
-  if (!SUPPORTED_CONFIG_AGENTS.has(agentId)) {
+async function isSupportedConfigAgent(agentId: string) {
+  if (NATIVE_CONFIG_AGENTS.has(agentId)) return true;
+  return getAgentPluginRegistry().isConfigurable(agentId);
+}
+
+async function usesSingleActiveProvider(agentId: string) {
+  const capabilities = await getAgentPluginRegistry().getCapabilities(agentId);
+  return capabilities.providerActivation === "single-active";
+}
+
+async function ensureSupportedAgent(agentId: string) {
+  if (!(await isSupportedConfigAgent(agentId))) {
     throw new Error("当前 Agent 暂不支持自定义渠道配置。");
   }
 }
@@ -566,7 +577,7 @@ async function readNativeAgentConfigState(agentId: string): Promise<AgentConfigS
   if (agentId === "pi") return readPiNativeConfigState();
   if (agentId === "droid") return readDroidNativeConfigState();
   if (agentId === "opencode") return readOpenCodeNativeConfigState();
-  return { providers: [] };
+  return readSavedAgentConfigState(agentId);
 }
 
 async function readCurrentAgentConfigState(agentId: string): Promise<AgentConfigState> {
@@ -575,9 +586,14 @@ async function readCurrentAgentConfigState(agentId: string): Promise<AgentConfig
     : readNativeAgentConfigState(agentId);
 }
 
+export async function getAgentConfigStateForBackend(agentId: string): Promise<AgentConfigState> {
+  if (!(await isSupportedConfigAgent(agentId))) return { providers: [] };
+  return readCurrentAgentConfigState(agentId);
+}
+
 export async function listAgentConfig(agentId: string): Promise<AgentConfigResult> {
   try {
-    if (!SUPPORTED_CONFIG_AGENTS.has(agentId)) {
+    if (!(await isSupportedConfigAgent(agentId))) {
       return { success: true, config: { providers: [] } };
     }
     return { success: true, config: await readCurrentAgentConfigState(agentId) };
@@ -588,7 +604,8 @@ export async function listAgentConfig(agentId: string): Promise<AgentConfigResul
 
 export async function saveAgentProviderConfig(agentId: string, providerValue: unknown): Promise<AgentConfigResult> {
   try {
-    ensureSupportedAgent(agentId);
+    await ensureSupportedAgent(agentId);
+    const singleActiveProvider = await usesSingleActiveProvider(agentId);
     const normalizedProvider = normalizeProvider(providerValue);
     if (!normalizedProvider) throw new Error("渠道配置无效。");
     const provider = agentId === "codex"
@@ -613,7 +630,7 @@ export async function saveAgentProviderConfig(agentId: string, providerValue: un
       providers,
     };
 
-    if (agentId === "codex") {
+    if (singleActiveProvider) {
       await writeAgentConfigState(agentId, nextState);
     } else {
       await writeNativeAgentConfig(agentId, nextState);
@@ -627,19 +644,18 @@ export async function saveAgentProviderConfig(agentId: string, providerValue: un
 
 export async function deleteAgentProviderConfig(agentId: string, providerId: string): Promise<AgentConfigResult> {
   try {
-    ensureSupportedAgent(agentId);
-    const state = agentId === "codex"
-      ? await readSavedCodexConfigState()
-      : await readNativeAgentConfigState(agentId);
-    if (agentId === "codex" && state.activeProviderId === providerId) {
-      throw new Error("当前启用的 Codex 渠道不能直接删除，请先启用其它渠道。");
+    await ensureSupportedAgent(agentId);
+    const singleActiveProvider = await usesSingleActiveProvider(agentId);
+    const state = await readCurrentAgentConfigState(agentId);
+    if (singleActiveProvider && state.activeProviderId === providerId) {
+      throw new Error("当前启用的渠道不能直接删除，请先启用其它渠道。");
     }
     const nextProviders = state.providers.filter((provider) => provider.providerId !== providerId);
     const nextState = {
       activeProviderId: state.activeProviderId === providerId ? undefined : state.activeProviderId,
       providers: nextProviders,
     };
-    if (agentId === "codex") {
+    if (singleActiveProvider) {
       await writeAgentConfigState(agentId, nextState);
     } else {
       await writeNativeAgentConfig(agentId, nextState);
@@ -652,7 +668,8 @@ export async function deleteAgentProviderConfig(agentId: string, providerId: str
 
 export async function reorderAgentProviderConfigs(agentId: string, providerOrderValue: unknown): Promise<AgentConfigResult> {
   try {
-    ensureSupportedAgent(agentId);
+    await ensureSupportedAgent(agentId);
+    const singleActiveProvider = await usesSingleActiveProvider(agentId);
     if (!Array.isArray(providerOrderValue)) throw new Error("渠道顺序无效。");
     const providerOrder = providerOrderValue.map((item) => String(item || "").trim());
     if (providerOrder.some((providerId) => !providerId)) throw new Error("渠道顺序包含空 ID。");
@@ -675,7 +692,7 @@ export async function reorderAgentProviderConfigs(agentId: string, providerOrder
       providers: providerOrder.map((providerId) => providerById.get(providerId)!),
     };
 
-    if (agentId === "codex") {
+    if (singleActiveProvider) {
       await writeAgentConfigState(agentId, nextState);
     } else {
       await writeNativeAgentConfig(agentId, nextState);
@@ -688,16 +705,52 @@ export async function reorderAgentProviderConfigs(agentId: string, providerOrder
 }
 
 export async function setActiveAgentProviderConfig(agentId: string, providerId: string): Promise<AgentConfigState> {
-  if (agentId !== "codex") {
-    throw new Error("只有 Codex 需要启用渠道。");
+  await ensureSupportedAgent(agentId);
+  if (!(await usesSingleActiveProvider(agentId))) {
+    throw new Error("当前 Agent 不支持启用单一渠道。");
   }
-  const state = await readSavedCodexConfigState();
+  const state = await readCurrentAgentConfigState(agentId);
   if (!state.providers.some((provider) => provider.providerId === providerId)) {
     throw new Error("未找到要启用的渠道。");
   }
   const nextState = { ...state, activeProviderId: providerId };
   await writeAgentConfigState(agentId, nextState);
   return nextState;
+}
+
+export async function activateAgentProviderConfig(
+  agentId: string,
+  providerId: string
+): Promise<{ state: AgentConfigState; provider: AgentProviderConfig; snapshots: FileSnapshot[] }> {
+  await ensureSupportedAgent(agentId);
+  if (!(await usesSingleActiveProvider(agentId))) {
+    throw new Error("当前 Agent 不支持启用单一渠道。");
+  }
+
+  const state = await readCurrentAgentConfigState(agentId);
+  const provider = state.providers.find((item) => item.providerId === providerId);
+  if (!provider) throw new Error("未找到要启用的渠道。");
+  validateProviderConfig(provider);
+
+  const result = await getAgentPluginRegistry().activateProvider(
+    agentId,
+    { providerId, provider, state },
+    {
+      writeCodexNativeProviderConfig: async ({ state: nextState, provider: nextProvider }) => {
+        if (agentId !== "codex") {
+          throw new Error("Codex native provider helper is only available to the Codex plugin.");
+        }
+        return {
+          snapshots: await writeCodexNativeConfig(
+            nextState as AgentConfigState,
+            nextProvider as AgentProviderConfig
+          ),
+        };
+      },
+    }
+  );
+  const snapshots = Array.isArray(result.snapshots) ? result.snapshots as FileSnapshot[] : [];
+  return { state, provider, snapshots };
 }
 
 async function snapshotFile(filePath: string): Promise<FileSnapshot> {
@@ -990,25 +1043,14 @@ export async function writeNativeAgentProviderConfig(
   agentId: string,
   providerId: string
 ): Promise<{ state: AgentConfigState; provider: AgentProviderConfig; snapshots: FileSnapshot[] }> {
-  ensureSupportedAgent(agentId);
-  if (agentId !== "codex") {
-    throw new Error("只有 Codex 需要启用指定渠道。");
-  }
-  const state = await readSavedCodexConfigState();
-  const provider = state.providers.find((item) => item.providerId === providerId);
-  if (!provider) throw new Error("未找到要启用的渠道。");
-  validateProviderConfig(provider);
-
-  const snapshots = await writeCodexNativeConfig(state, provider);
-
-  return { state, provider, snapshots };
+  return activateAgentProviderConfig(agentId, providerId);
 }
 
 export async function writeNativeAgentConfig(
   agentId: string,
   stateOverride?: AgentConfigState
 ): Promise<{ state: AgentConfigState; snapshots: FileSnapshot[] }> {
-  ensureSupportedAgent(agentId);
+  await ensureSupportedAgent(agentId);
   if (agentId === "codex") {
     throw new Error("Codex 需要启用指定渠道后才能写入当前渠道。");
   }
@@ -1023,7 +1065,13 @@ export async function writeNativeAgentConfig(
       ? await writePiNativeConfigProviders(state)
       : agentId === "droid"
         ? await writeDroidNativeConfigProviders(state)
-        : await writeOpenCodeNativeConfigProviders(state);
+        : agentId === "opencode"
+          ? await writeOpenCodeNativeConfigProviders(state)
+          : [];
+
+  if (!NATIVE_CONFIG_AGENTS.has(agentId)) {
+    await writeAgentConfigState(agentId, state);
+  }
 
   return { state, snapshots };
 }
@@ -1035,7 +1083,7 @@ export async function getConfiguredAgentModels(agentId: string): Promise<Array<{
   reasoning: boolean;
   supportsImages?: boolean;
 }>> {
-  if (!SUPPORTED_CONFIG_AGENTS.has(agentId)) return [];
+  if (!(await isSupportedConfigAgent(agentId))) return [];
   const state = agentId === "codex"
     ? await readSavedCodexConfigState()
     : await readNativeAgentConfigState(agentId);

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Bot, Settings } from "lucide-react";
 import { AgentSettingsView } from "./AgentSettingsView";
 import { AgentConfigModal } from "./AgentConfigModal";
-import { AVAILABLE_AGENTS } from "@/lib/agents";
+import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import "./Settings.css";
@@ -157,6 +157,12 @@ export function SettingsView() {
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
+  const agents = useAgentCatalogStore((state) => state.agents);
+  const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
+
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
 
   // Load saved settings on mount
   useEffect(() => {
@@ -254,11 +260,11 @@ export function SettingsView() {
   };
 
   const openAgentConfig = () => {
-    setConfigAgentId(getActiveSessionAgentId() || "codex");
+    setConfigAgentId(getActiveSessionAgentId() || agents[0]?.id || null);
   };
 
   const configAgent = configAgentId
-    ? AVAILABLE_AGENTS.find((agent) => agent.id === configAgentId) || null
+    ? agents.find((agent) => agent.id === configAgentId) || null
     : null;
 
   // Keyboard recording handler

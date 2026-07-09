@@ -4,6 +4,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, isAbsolute, join, relative } from "node:path";
+import {
+  getRollbackTurnCountForIndex,
+  getRollbackTurnCountForTarget,
+  normalizeCodexTurns,
+} from "./codex-fork-utils.mjs";
 
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
@@ -362,21 +367,77 @@ const requestThreadRollback = async (targetThreadId, numTurns) => {
   return getThreadIdFromResult(result) || targetThreadId;
 };
 
+const requestThreadTurns = async (sourceThreadId) => {
+  const attempts = [
+    ["thread/read", { threadId: sourceThreadId, includeTurns: true }],
+    ["thread/turns/list", {
+      threadId: sourceThreadId,
+      cursor: null,
+      limit: 1000,
+      sortDirection: "asc",
+      itemsView: "full",
+    }],
+    ["thread/turns/list", {
+      threadId: sourceThreadId,
+      cursor: null,
+      limit: 1000,
+      sortDirection: "asc",
+    }],
+  ];
+  let lastError = null;
+  for (const [method, params] of attempts) {
+    try {
+      const result = await rpcRequest(method, params, 30000);
+      const turns = normalizeCodexTurns(result);
+      if (turns.length > 0) return turns;
+      lastError = new Error(`${method} did not return turns`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Codex app-server did not return thread turns");
+};
+
+const getLegacyRollbackTurnCount = (command) =>
+  Math.max(0, Number(command.rollbackUserMessageCount || 0));
+
+const resolveRollbackTurnCount = async (command, sourceThreadId) => {
+  const legacyRollbackTurnCount = getLegacyRollbackTurnCount(command);
+  if (!Number.isInteger(legacyRollbackTurnCount)) {
+    throw new Error("source Codex rollback turn count is invalid");
+  }
+
+  const targetTurnId = String(command.targetTurnId || "").trim();
+  try {
+    const turns = await requestThreadTurns(sourceThreadId);
+    if (targetTurnId) {
+      const rollbackTurnCount = getRollbackTurnCountForTarget(turns, targetTurnId);
+      if (rollbackTurnCount !== null) return rollbackTurnCount;
+    }
+
+    const sourceTurnIndex = Number(command.sourceUserMessageIndex);
+    const rollbackTurnCount = getRollbackTurnCountForIndex(turns, sourceTurnIndex);
+    if (rollbackTurnCount !== null) return rollbackTurnCount;
+  } catch {
+    // Older app-server versions may not expose turn listing. Keep the legacy
+    // count path as a fallback so fork remains available.
+  }
+
+  return legacyRollbackTurnCount;
+};
+
 const forkCodexSession = async (command) => {
   await startAppServer();
   const sourceThreadId = command.sourceSessionFilePath || threadId;
   if (!sourceThreadId) {
     return { supported: true, success: false, reason: "source Codex thread is not initialized" };
   }
-  const rollbackTurnCount = Math.max(0, Number(command.rollbackUserMessageCount || 0));
-  if (!Number.isInteger(rollbackTurnCount)) {
-    return { supported: true, success: false, reason: "source Codex rollback turn count is invalid" };
-  }
 
   const originalThreadId = threadId;
   const originalActiveThreadId = activeThreadId;
   forkRequestActive = true;
   try {
+    const rollbackTurnCount = await resolveRollbackTurnCount(command, sourceThreadId);
     const forkedThreadId = await requestThreadFork(sourceThreadId);
     const sessionFilePath = await requestThreadRollback(forkedThreadId, rollbackTurnCount);
     return {
@@ -573,6 +634,18 @@ const buildThreadParams = () => {
   return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
 };
 
+const getRequestModelId = () =>
+  currentModelId && currentModelId !== DEFAULT_MODEL_ID ? currentModelId : undefined;
+
+const buildTurnCollaborationMode = () => ({
+  mode: activePlanModeEnabled ? "plan" : "default",
+  settings: {
+    model: getRequestModelId() || "",
+    reasoning_effort: normalizeReasoningEffort(thinkingLevel) || null,
+    developer_instructions: null,
+  },
+});
+
 const ensureThread = async () => {
   await startAppServer();
   if (threadId) {
@@ -599,6 +672,18 @@ const startStream = () => {
   streamStarted = true;
   send({ type: "agent_start" });
   send({ type: "stream_start", role: "assistant" });
+};
+
+const sendTurnMetadata = (turnId) => {
+  const nativeTurnId = String(turnId || "").trim();
+  if (!nativeTurnId) return;
+  send({
+    type: "turn_metadata",
+    nativeTurnId,
+    turnId: nativeTurnId,
+    clientUserMessageId: activePromptId || undefined,
+    threadId: activeThreadId || threadId || undefined,
+  });
 };
 
 const resetTurnState = () => {
@@ -1127,8 +1212,9 @@ const handleItem = (item, phase) => {
 
 const handleTurnStarted = (params) => {
   if (shouldIgnoreTurnNotification(params)) return;
-  activeTurnId = params.turn?.id || activeTurnId;
+  activeTurnId = params.turn?.id || params.turnId || activeTurnId;
   activeThreadId = params.threadId || activeThreadId;
+  sendTurnMetadata(activeTurnId);
   if (abortRequested) {
     void interruptTurn(activeTurnId);
     return;
@@ -1147,6 +1233,7 @@ const handleTurnCompleted = (params) => {
   if (shouldIgnoreTurnNotification(params)) return;
   if (!promptRunning || abortRequested) return;
   const turn = params.turn || {};
+  sendTurnMetadata(turn.id || params.turnId || activeTurnId);
   if (Array.isArray(turn.items)) {
     for (const item of turn.items) handleItem(item, "completed");
   }
@@ -1313,8 +1400,9 @@ const runPrompt = async (command) => {
         : activePermissionMode === "full-access"
           ? { type: "dangerFullAccess" }
           : undefined,
-      model: currentModelId && currentModelId !== DEFAULT_MODEL_ID ? currentModelId : undefined,
+      model: getRequestModelId(),
       effort: normalizeReasoningEffort(thinkingLevel),
+      collaborationMode: buildTurnCollaborationMode(),
     });
     if (abortRequested) {
       const startedTurnId = result?.turn?.id || result?.turnId || activeTurnId;
@@ -1326,6 +1414,7 @@ const runPrompt = async (command) => {
     }
     if (!promptRunning || activePromptId !== command.id) return;
     activeTurnId = result?.turn?.id || result?.turnId || activeTurnId;
+    sendTurnMetadata(activeTurnId);
   } catch (error) {
     if (!aborting && !abortRequested && promptRunning && activePromptId === command.id) {
       send({
@@ -1368,11 +1457,13 @@ const runGuidance = async (command) => {
       clientUserMessageId: command.id,
       input: buildInput(command.message, imagePayload.entries),
       expectedTurnId: turnId,
+      collaborationMode: buildTurnCollaborationMode(),
     }, 25000);
     registerActiveImageCleanup(imagePayload.cleanup);
     cleanupRegistered = true;
     if (!promptRunning || abortRequested) return;
     activeTurnId = result?.turnId || activeTurnId;
+    sendTurnMetadata(activeTurnId);
     send({ type: "guidance_done", id: command.id });
   } finally {
     if (!cleanupRegistered) await imagePayload.cleanup();

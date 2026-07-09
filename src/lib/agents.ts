@@ -1,61 +1,134 @@
-export type AgentPlanModeSupport = "native" | "prompt";
+import type { AgentDescriptor, AgentPlanModeSupport } from "@/types";
 
-export const AGENT_PLAN_MODE_SUPPORT: Record<string, AgentPlanModeSupport> = {
-  codex: "native",
-  pi: "prompt",
-  opencode: "native",
-  droid: "native",
-};
+const nativeCaps = (planMode: AgentPlanModeSupport, guidance = false, fork = false) => ({
+  planMode,
+  guidance,
+  fork,
+  configuration: "openai-compatible" as const,
+  providerActivation: "none" as const,
+});
 
-// All available agents in the application
-export const AVAILABLE_AGENTS = [
-  { id: "codex", name: "Codex", desc: "OpenAI Codex CLI 编程助手", runtime: "cli", command: "codex" },
-  { id: "pi", name: "Pi Agent", desc: "AI 编程助手", runtime: "sdk" },
-  { id: "opencode", name: "OpenCode", desc: "开源 AI 编程助手", runtime: "cli", command: "opencode" },
-  { id: "droid", name: "Factory Droid", desc: "Factory AI 编程助手", runtime: "cli", command: "droid" },
+export const FALLBACK_AGENTS: AgentDescriptor[] = [
+  {
+    id: "codex",
+    name: "Codex",
+    desc: "OpenAI Codex CLI 编程助手",
+    description: "OpenAI Codex CLI 编程助手",
+    version: "seeded",
+    runtime: "cli",
+    command: "codex",
+    packageName: "@openai/codex",
+    capabilities: { ...nativeCaps("native", true, true), providerActivation: "single-active" },
+    source: "plugin",
+    removable: true,
+    installHint: "npm install -g @openai/codex",
+    updateCommand: "npm install -g @openai/codex@latest",
+    shortName: "CX",
+  },
+  {
+    id: "pi",
+    name: "Pi Agent",
+    desc: "AI 编程助手",
+    description: "AI 编程助手",
+    version: "seeded",
+    runtime: "sdk",
+    packageName: "@earendil-works/pi-coding-agent",
+    capabilities: nativeCaps("prompt", true, true),
+    source: "plugin",
+    removable: true,
+    installHint: "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest",
+    updateCommand: "npm install @earendil-works/pi-coding-agent@latest",
+    shortName: "PI",
+  },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    desc: "开源 AI 编程助手",
+    description: "开源 AI 编程助手",
+    version: "seeded",
+    runtime: "cli",
+    command: "opencode",
+    packageName: "opencode-ai",
+    capabilities: nativeCaps("native"),
+    source: "plugin",
+    removable: true,
+    installHint: "npm install -g opencode-ai",
+    updateCommand: "npm install -g opencode-ai@latest",
+    shortName: "OC",
+  },
+  {
+    id: "droid",
+    name: "Factory Droid",
+    desc: "Factory AI 编程助手",
+    description: "Factory AI 编程助手",
+    version: "seeded",
+    runtime: "cli",
+    command: "droid",
+    packageName: "droid",
+    capabilities: nativeCaps("native"),
+    source: "plugin",
+    removable: true,
+    installHint: "npm install -g droid",
+    updateCommand: "npm install -g droid@latest",
+    shortName: "FD",
+  },
 ];
 
+let agentCatalog: AgentDescriptor[] = [];
+
+export function setAgentCatalog(agents: AgentDescriptor[]) {
+  agentCatalog = agents;
+}
+
+export function getAvailableAgents(): AgentDescriptor[] {
+  return agentCatalog;
+}
+
+export function getAgentById(id: string): AgentDescriptor | undefined {
+  return agentCatalog.find((agent) => agent.id === id) || FALLBACK_AGENTS.find((agent) => agent.id === id);
+}
+
 export function getAgentName(id: string): string {
-  return AVAILABLE_AGENTS.find((a) => a.id === id)?.name || id;
+  return getAgentById(id)?.name || id;
 }
 
 export function supportsNativePlanMode(id: string): boolean {
-  return AGENT_PLAN_MODE_SUPPORT[id] === "native";
+  return getAgentById(id)?.capabilities.planMode === "native";
 }
 
 export function supportsGuidance(id: string): boolean {
-  return id === "pi" || id === "codex";
+  return getAgentById(id)?.capabilities.guidance === true;
+}
+
+export function requiresProviderActivation(id: string): boolean {
+  return getAgentById(id)?.capabilities.providerActivation === "single-active";
 }
 
 export function getAgentPlanModeTooltip(id: string): string {
   if (supportsNativePlanMode(id)) return "支持原生 Plan 模式";
-  return "当前 Agent 不支持原生 Plan 模式，将通过提示词要求先计划并等待确认";
+  return "当前 Agent 不支持原生 Plan 模式，将通过提示词要求先规划并等待确认";
 }
 
-export function getInstallHint(command: string): string {
-  switch (command) {
+export function getInstallHint(agentOrCommand: AgentDescriptor | string): string {
+  if (typeof agentOrCommand !== "string") {
+    return agentOrCommand.installHint || (agentOrCommand.command ? `请安装 ${agentOrCommand.command}` : "请检查插件安装状态");
+  }
+
+  switch (agentOrCommand) {
     case "codex": return "npm install -g @openai/codex";
     case "pi": return "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest";
     case "opencode": return "npm install -g opencode-ai";
     case "droid": return "npm install -g droid";
-    default: return `请安装 ${command}`;
+    default: return `请安装 ${agentOrCommand}`;
   }
 }
 
 export function getAgentUpdateCommand(agentId: string): string | null {
-  switch (agentId) {
-    case "codex": return "npm install -g @openai/codex@latest";
-    case "pi": return "npm install @earendil-works/pi-coding-agent@latest";
-    case "opencode": return "npm install -g opencode-ai@latest";
-    case "droid": return "npm install -g droid@latest";
-    default: return null;
-  }
+  return getAgentById(agentId)?.updateCommand || null;
 }
 
-export const DEFAULT_AGENT_ORDER = AVAILABLE_AGENTS.map((agent) => agent.id);
-
-export function normalizeAgentOrder(order?: string[]): string[] {
-  const knownIds = new Set(DEFAULT_AGENT_ORDER);
+export function normalizeAgentOrder(order?: string[], agents: AgentDescriptor[] = agentCatalog): string[] {
+  const knownIds = new Set(agents.map((agent) => agent.id));
   const normalized = (Array.isArray(order) ? order : [])
     .filter((id) => knownIds.has(id));
   const seen = new Set<string>();
@@ -66,12 +139,12 @@ export function normalizeAgentOrder(order?: string[]): string[] {
   });
   return [
     ...unique,
-    ...DEFAULT_AGENT_ORDER.filter((id) => !seen.has(id)),
+    ...agents.map((agent) => agent.id).filter((id) => !seen.has(id)),
   ];
 }
 
 export function orderAgents<T extends { id: string }>(agents: T[], order?: string[]): T[] {
-  const normalizedOrder = normalizeAgentOrder(order);
+  const normalizedOrder = normalizeAgentOrder(order, agents as unknown as AgentDescriptor[]);
   const indexById = new Map(normalizedOrder.map((id, index) => [id, index]));
   return [...agents].sort((a, b) => {
     const left = indexById.get(a.id) ?? Number.MAX_SAFE_INTEGER;

@@ -9,7 +9,7 @@ const copyAgentWorkerPlugin = () => ({
   writeBundle() {
     const targetDir = resolve(__dirname, "out/main");
     mkdirSync(targetDir, { recursive: true });
-    for (const worker of ["pi-sdk-worker.mjs", "codex-worker.mjs"]) {
+    for (const worker of ["pi-sdk-worker.mjs", "codex-worker.mjs", "codex-fork-utils.mjs"]) {
       copyFileSync(
         resolve(__dirname, "electron/agents", worker),
         resolve(targetDir, worker)

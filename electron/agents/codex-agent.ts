@@ -2,6 +2,7 @@ import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
+import { normalizeQuestionProcessEvent } from "./process-events";
 import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
 import { isRecord } from "../../src/types/ipc";
@@ -26,6 +27,7 @@ interface AgentForkTarget {
   sourceSessionFilePath?: string;
   sourceUserMessageIndex: number;
   rollbackUserMessageCount?: number;
+  targetTurnId?: string;
   sourceMessageContent?: string;
   throughMessageId?: string;
 }
@@ -66,6 +68,17 @@ const normalizeModels = (value: unknown): AgentModel[] => {
       supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
     }];
   });
+};
+
+const isQuestionProcessEvent = (record: UnknownRecord): boolean => {
+  const kind = String(record.entryType || record.kind || record.mode || record.toolKind || "");
+  return kind === "question";
+};
+
+const normalizeCodexQuestionEvent = (record: UnknownRecord): UnknownRecord => {
+  const prompt = record.prompt || record.question || record.message;
+  const title = prompt ? undefined : record.title;
+  return normalizeQuestionProcessEvent({ ...record, title }) as UnknownRecord;
 };
 
 const getWorkerPath = () => {
@@ -405,6 +418,19 @@ export class CodexAgent {
         this._sessionFilePath = optionalString(record.sessionFilePath) || optionalString(record.threadId) || this._sessionFilePath;
         this.emitEvent({ type: "session_file_path", sessionFilePath: this._sessionFilePath, threadId: record.threadId });
         break;
+      case "turn_metadata": {
+        const nativeTurnId = optionalString(record.nativeTurnId) || optionalString(record.turnId);
+        if (nativeTurnId) {
+          this.emitEvent({
+            type: "turn_metadata",
+            nativeTurnId,
+            turnId: nativeTurnId,
+            clientUserMessageId: optionalString(record.clientUserMessageId),
+            threadId: optionalString(record.threadId),
+          });
+        }
+        break;
+      }
       case "agent_start":
         this.emitEvent({ type: "agent_start" });
         break;
@@ -428,11 +454,13 @@ export class CodexAgent {
         break;
       case "tool_start":
       case "tool_end":
-      case "process_event":
       case "plan_update":
       case "context_compaction":
       case "diff_update":
         this.emitEvent(record);
+        break;
+      case "process_event":
+        this.emitEvent(isQuestionProcessEvent(record) ? normalizeCodexQuestionEvent(record) : record);
         break;
       case "agent_end":
         this.activePromptIds.clear();

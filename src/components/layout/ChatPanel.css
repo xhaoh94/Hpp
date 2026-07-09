@@ -861,6 +861,8 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .chat-bubble.user {
@@ -2377,6 +2379,21 @@ body.chat-questionnaire-resizing {
   font-family: inherit;
   min-height: 24px;
   max-height: 150px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+body.layout-sidebar-resizing .chat-textarea,
+body.chat-questionnaire-resizing .chat-textarea {
+  cursor: text !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+body.layout-sidebar-resizing .chat-bubble,
+body.chat-questionnaire-resizing .chat-bubble {
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 
 .chat-textarea::placeholder {

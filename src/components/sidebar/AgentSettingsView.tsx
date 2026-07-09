@@ -1,27 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
-import { GripVertical, Settings } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Download, FileArchive, FolderOpen, GripVertical, PackagePlus, RefreshCw, Settings, X } from "lucide-react";
 import {
-  AVAILABLE_AGENTS,
   getAgentPlanModeTooltip,
   normalizeAgentOrder,
   orderAgents,
   supportsNativePlanMode,
 } from "@/lib/agents";
+import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
-import type { AgentPackageStatus, PiSDKStatus } from "@/types";
+import type { AgentDescriptor, AgentPackageStatus, AgentPluginInstallResult, OfficialAgentPluginDescriptor } from "@/types";
 import { AgentConfigModal } from "./AgentConfigModal";
 import "./Settings.css";
 
-const DEFAULT_ENABLED_AGENTS = ["codex", "pi"];
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+const VERSION_CACHE_MS = 60_000;
 
-// === Module-level version check cache (persists across mounts) ===
-let cachedPiSDKStatus: PiSDKStatus | null = null;
 let cachedAgentStatuses: Record<string, AgentPackageStatus> = {};
-let lastPiSDKCheck = 0;
 let lastAgentChecks: Record<string, number> = {};
-const VERSION_CACHE_MS = 60_000; // 1 minute
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -45,7 +41,19 @@ function getActiveSessionAgentId() {
   return activeSession?.agentId || useChatStore.getState().activeAgentId;
 }
 
-function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; name: string; provider: string; reasoning: boolean; supportsImages?: boolean }>) {
+function filterKnownAgentIds(ids: string[], agents: AgentDescriptor[]) {
+  const knownIds = new Set(agents.map((agent) => agent.id));
+  return ids.filter((id) => knownIds.has(id));
+}
+
+function defaultEnabledAgents(agents: AgentDescriptor[]) {
+  return agents.map((agent) => agent.id);
+}
+
+function syncActiveAgentModels(
+  agentId: string,
+  models?: Array<{ id: string; name: string; provider: string; reasoning: boolean; supportsImages?: boolean }>
+) {
   if (!models || models.length === 0) return;
   if (getActiveSessionAgentId() !== agentId) return;
 
@@ -55,11 +63,26 @@ function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; nam
   const matchingCurrentModel = currentModel ? models.find((model) =>
     model.id === currentModel.id && model.provider === currentModel.provider
   ) : undefined;
-  if (matchingCurrentModel) {
-    chatStore.setCurrentModel(matchingCurrentModel);
-  } else {
-    chatStore.setCurrentModel(models[0]);
+  chatStore.setCurrentModel(matchingCurrentModel || models[0]);
+}
+
+function parseVersion(version: string): number[] {
+  return version
+    .replace(/^v/, "")
+    .split("-")[0]
+    .split(".")
+    .map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff !== 0) return diff;
   }
+  return 0;
 }
 
 interface AgentSettingsViewProps {
@@ -67,60 +90,69 @@ interface AgentSettingsViewProps {
 }
 
 export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) {
-  const [enabledAgents, setEnabledAgents] = useState<string[]>(DEFAULT_ENABLED_AGENTS);
-  const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
+  const [enabledAgents, setEnabledAgents] = useState<string[]>([]);
+  const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [draggingAgentId, setDraggingAgentId] = useState<string | null>(null);
   const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
-  const [piSDKStatus, setPiSDKStatus] = useState<PiSDKStatus | null>(null);
-  const [piSDKChecking, setPiSDKChecking] = useState(false);
-  const [piSDKUpdating, setPiSDKUpdating] = useState(false);
-  const [piSDKUpdateError, setPiSDKUpdateError] = useState<string | null>(null);
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentPackageStatus>>({});
   const [agentChecking, setAgentChecking] = useState<Record<string, boolean>>({});
   const [agentUpdating, setAgentUpdating] = useState<Record<string, boolean>>({});
   const [agentUpdateErrors, setAgentUpdateErrors] = useState<Record<string, string>>({});
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
+  const [pluginPath, setPluginPath] = useState("");
+  const [pluginStatus, setPluginStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [installingPlugin, setInstallingPlugin] = useState(false);
+  const [installingOfficialAgentId, setInstallingOfficialAgentId] = useState("");
+  const [removingAgentId, setRemovingAgentId] = useState("");
+  const [showLocalPluginModal, setShowLocalPluginModal] = useState(false);
+  const [showOfficialPluginModal, setShowOfficialPluginModal] = useState(false);
 
-  const refreshPiSDKStatus = useCallback(async () => {
-    setPiSDKChecking(true);
-    try {
-      const status = await window.electronAPI.piSDKGetStatus();
-      cachedPiSDKStatus = status;
-      lastPiSDKCheck = Date.now();
-      setPiSDKStatus(status);
-      setPiSDKUpdateError(null);
-    } catch (error) {
-      cachedPiSDKStatus = null;
-      setPiSDKStatus({
-        installed: false,
-        updateAvailable: false,
-        canUpdate: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPiSDKChecking(false);
-    }
-  }, []);
+  const agents = useAgentCatalogStore((state) => state.agents);
+  const officialPlugins = useAgentCatalogStore((state) => state.officialPlugins);
+  const officialLoading = useAgentCatalogStore((state) => state.officialLoading);
+  const officialError = useAgentCatalogStore((state) => state.officialError);
+  const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
+  const reloadAgents = useAgentCatalogStore((state) => state.reloadAgents);
+  const installPluginFromPath = useAgentCatalogStore((state) => state.installPluginFromPath);
+  const loadOfficialPlugins = useAgentCatalogStore((state) => state.loadOfficialPlugins);
+  const installOfficialPlugin = useAgentCatalogStore((state) => state.installOfficialPlugin);
+  const removePlugin = useAgentCatalogStore((state) => state.removePlugin);
 
-  const handlePiSDKUpdate = useCallback(async () => {
-    setPiSDKUpdating(true);
-    setPiSDKUpdateError(null);
-    try {
-      const result = await window.electronAPI.piSDKUpdate();
-      if (result.status) {
-        cachedPiSDKStatus = result.status;
-        lastPiSDKCheck = Date.now();
-        setPiSDKStatus(result.status);
-      }
-      if (!result.success) {
-        setPiSDKUpdateError(result.error || "Pi SDK 更新失败");
-      }
-    } catch (error) {
-      setPiSDKUpdateError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPiSDKUpdating(false);
-    }
-  }, []);
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
+
+  useEffect(() => {
+    void loadOfficialPlugins();
+  }, [loadOfficialPlugins]);
+
+  const saveAgentSettings = useCallback(async (
+    nextEnabledAgents = enabledAgents,
+    nextAgentOrder = agentOrder,
+    agentList = agents,
+  ) => {
+    const settings = await loadSettings();
+    const general = asRecord(settings.general);
+    const normalizedEnabled = filterKnownAgentIds(nextEnabledAgents, agentList);
+    const normalizedOrder = normalizeAgentOrder(nextAgentOrder, agentList);
+    const nextSettings = {
+      ...settings,
+      general: {
+        ...general,
+        enabledAgents: normalizedEnabled,
+        agentOrder: normalizedOrder,
+      },
+    };
+
+    await window.electronAPI.saveData("settings", nextSettings);
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
+      detail: {
+        enabledAgents: normalizedEnabled,
+        agentOrder: normalizedOrder,
+        planModeEnabled: typeof general.planModeEnabled === "boolean" ? general.planModeEnabled : undefined,
+      },
+    }));
+  }, [agentOrder, agents, enabledAgents]);
 
   const refreshAgentStatus = useCallback(async (agentId: string) => {
     setAgentChecking((prev) => ({ ...prev, [agentId]: true }));
@@ -152,10 +184,9 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     try {
       const result = await window.electronAPI.agentUpdate(agentId);
       if (result.status) {
-        const status = result.status;
-        cachedAgentStatuses[agentId] = status;
+        cachedAgentStatuses[agentId] = result.status;
         lastAgentChecks[agentId] = Date.now();
-        setAgentStatuses((prev) => ({ ...prev, [agentId]: status }));
+        setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status! }));
       }
       if (!result.success) {
         setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "更新失败" }));
@@ -167,35 +198,9 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     }
   }, []);
 
-  const saveAgentSettings = useCallback(async (
-    nextEnabledAgents = enabledAgents,
-    nextAgentOrder = agentOrder,
-  ) => {
-    const settings = await loadSettings();
-    const general = asRecord(settings.general);
-    const normalizedOrder = normalizeAgentOrder(nextAgentOrder);
-    const nextSettings = {
-      ...settings,
-      general: {
-        ...general,
-        enabledAgents: nextEnabledAgents,
-        agentOrder: normalizedOrder,
-      },
-    };
-
-    await window.electronAPI.saveData("settings", nextSettings);
-    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
-      detail: {
-        enabledAgents: nextEnabledAgents,
-        agentOrder: normalizedOrder,
-        planModeEnabled: typeof general.planModeEnabled === "boolean" ? general.planModeEnabled : undefined,
-      },
-    }));
-  }, [enabledAgents, agentOrder]);
-
   const moveAgent = useCallback((sourceId: string, targetId: string) => {
     if (sourceId === targetId) return;
-    const currentOrder = normalizeAgentOrder(agentOrder);
+    const currentOrder = normalizeAgentOrder(agentOrder, agents);
     const fromIndex = currentOrder.indexOf(sourceId);
     const toIndex = currentOrder.indexOf(targetId);
     if (fromIndex < 0 || toIndex < 0) return;
@@ -204,7 +209,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     nextOrder.splice(toIndex, 0, moved);
     setAgentOrder(nextOrder);
     void saveAgentSettings(enabledAgents, nextOrder);
-  }, [agentOrder, enabledAgents, saveAgentSettings]);
+  }, [agentOrder, agents, enabledAgents, saveAgentSettings]);
 
   useEffect(() => {
     let cancelled = false;
@@ -212,217 +217,354 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     loadSettings().then((settings) => {
       if (cancelled) return;
       const general = asRecord(settings.general);
-      setEnabledAgents(getStringArray(general.enabledAgents) ?? DEFAULT_ENABLED_AGENTS);
-      setAgentOrder(normalizeAgentOrder(getStringArray(general.agentOrder)));
+      const savedEnabled = getStringArray(general.enabledAgents);
+      const savedOrder = getStringArray(general.agentOrder);
+      setEnabledAgents(savedEnabled ? filterKnownAgentIds(savedEnabled, agents) : defaultEnabledAgents(agents));
+      setAgentOrder(normalizeAgentOrder(savedOrder, agents));
     });
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agents]);
 
   useEffect(() => {
     const handleAgentSettingsUpdated = (event: Event) => {
       const detail = (event as CustomEvent<{ enabledAgents?: string[]; agentOrder?: string[] }>).detail;
-      if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(detail.enabledAgents);
-      if (detail?.agentOrder) setAgentOrder(normalizeAgentOrder(detail.agentOrder));
+      if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(filterKnownAgentIds(detail.enabledAgents, agents));
+      if (detail?.agentOrder) setAgentOrder(normalizeAgentOrder(detail.agentOrder, agents));
     };
     window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
     return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
-  }, []);
+  }, [agents]);
 
-  // Check agent package status (with 1-minute cache)
   useEffect(() => {
     const now = Date.now();
-
-    if (now - lastPiSDKCheck > VERSION_CACHE_MS) {
-      void refreshPiSDKStatus();
-    } else if (cachedPiSDKStatus) {
-      setPiSDKStatus(cachedPiSDKStatus);
-    }
-
-    for (const agent of AVAILABLE_AGENTS) {
-      if (agent.id === "pi") continue;
+    for (const agent of agents) {
       if (now - (lastAgentChecks[agent.id] || 0) > VERSION_CACHE_MS) {
         void refreshAgentStatus(agent.id);
       } else if (cachedAgentStatuses[agent.id]) {
         setAgentStatuses((prev) => ({ ...prev, [agent.id]: cachedAgentStatuses[agent.id]! }));
       }
     }
-  }, [refreshPiSDKStatus, refreshAgentStatus]);
+  }, [agents, refreshAgentStatus]);
 
   const openAgentConfig = useCallback(() => {
-    setConfigAgentId(getActiveSessionAgentId() || "codex");
-  }, []);
+    const activeAgentId = getActiveSessionAgentId();
+    setConfigAgentId(activeAgentId || agents[0]?.id || null);
+  }, [agents]);
 
   const configAgent = configAgentId
-    ? AVAILABLE_AGENTS.find((agent) => agent.id === configAgentId) || null
+    ? agents.find((agent) => agent.id === configAgentId) || null
     : null;
+
+  const handleChoosePluginPath = useCallback(async (kind: "zip" | "directory") => {
+    const result = await window.electronAPI.agentPluginChoosePath(kind);
+    if (!result.canceled && result.path) setPluginPath(result.path);
+  }, []);
+
+  const applyInstalledPluginResult = useCallback(async (result: AgentPluginInstallResult) => {
+    if (!result.agent) return;
+    const nextAgents = result.agents || agents;
+    const nextEnabledAgents = enabledAgents.includes(result.agent.id)
+      ? enabledAgents
+      : [...enabledAgents, result.agent.id];
+    const nextAgentOrder = normalizeAgentOrder([...agentOrder, result.agent.id], nextAgents);
+    setEnabledAgents(filterKnownAgentIds(nextEnabledAgents, nextAgents));
+    setAgentOrder(nextAgentOrder);
+    delete cachedAgentStatuses[result.agent.id];
+    delete lastAgentChecks[result.agent.id];
+    await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
+  }, [agentOrder, agents, enabledAgents, saveAgentSettings]);
+
+  const handleInstallPlugin = useCallback(async () => {
+    const nextPath = pluginPath.trim();
+    if (!nextPath) {
+      setPluginStatus({ type: "error", text: "请选择插件目录或 ZIP 文件" });
+      return;
+    }
+    const trusted = window.confirm("本地 Agent 插件会在主进程中执行 JavaScript。请只安装你信任的插件。是否继续安装？");
+    if (!trusted) return;
+
+    setInstallingPlugin(true);
+    setPluginStatus(null);
+    try {
+      const result = await installPluginFromPath(nextPath);
+      if (!result.success) {
+        setPluginStatus({ type: "error", text: result.error || "插件安装失败" });
+        return;
+      }
+      await applyInstalledPluginResult(result);
+      setPluginPath("");
+      setShowLocalPluginModal(false);
+      setPluginStatus({
+        type: "success",
+        text: `${result.agent?.name || "插件"} ${result.replaced ? "已更新" : "已安装"}`,
+      });
+    } catch (error) {
+      setPluginStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setInstallingPlugin(false);
+    }
+  }, [applyInstalledPluginResult, installPluginFromPath, pluginPath]);
+
+  const handleInstallOfficialPlugin = useCallback(async (plugin: OfficialAgentPluginDescriptor) => {
+    const trusted = window.confirm("官方 Agent 插件会在主进程中执行 JavaScript。请确认信任 xhaoh94/Hpp Release 后继续安装。");
+    if (!trusted) return;
+
+    setInstallingOfficialAgentId(plugin.id);
+    setPluginStatus(null);
+    try {
+      const result = await installOfficialPlugin(plugin.id);
+      if (!result.success) {
+        setPluginStatus({ type: "error", text: result.error || "官方插件安装失败" });
+        return;
+      }
+      await applyInstalledPluginResult(result);
+      setShowOfficialPluginModal(false);
+      setPluginStatus({
+        type: "success",
+        text: `${result.agent?.name || plugin.name} ${result.replaced ? "已更新" : "已安装"}`,
+      });
+    } catch (error) {
+      setPluginStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setInstallingOfficialAgentId("");
+    }
+  }, [applyInstalledPluginResult, installOfficialPlugin]);
+
+  const handleReloadPlugins = useCallback(async () => {
+    setPluginStatus(null);
+    const resultAgents = await reloadAgents();
+    setPluginStatus({ type: "success", text: `已加载 ${resultAgents.length} 个 Agent` });
+  }, [reloadAgents]);
+
+  const handleReloadOfficialPlugins = useCallback(async () => {
+    setPluginStatus(null);
+    await loadOfficialPlugins(true);
+  }, [loadOfficialPlugins]);
+
+  const handleRemovePlugin = useCallback(async (agentId: string) => {
+    setRemovingAgentId(agentId);
+    setPluginStatus(null);
+    try {
+      const result = await removePlugin(agentId);
+      if (!result.success) {
+        setPluginStatus({ type: "error", text: result.error || "插件卸载失败" });
+        return;
+      }
+      delete cachedAgentStatuses[agentId];
+      delete lastAgentChecks[agentId];
+      const nextAgents = result.agents || agents.filter((agent) => agent.id !== agentId);
+      const nextEnabledAgents = enabledAgents.filter((id) => id !== agentId);
+      const nextAgentOrder = agentOrder.filter((id) => id !== agentId);
+      setEnabledAgents(nextEnabledAgents);
+      setAgentOrder(nextAgentOrder);
+      setAgentStatuses((prev) => {
+        const next = { ...prev };
+        delete next[agentId];
+        return next;
+      });
+      await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
+      setPluginStatus({ type: "success", text: "插件已卸载" });
+    } catch (error) {
+      setPluginStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setRemovingAgentId("");
+    }
+  }, [agentOrder, agents, enabledAgents, removePlugin, saveAgentSettings]);
+
+  const orderedAgents = useMemo(() => orderAgents(agents, agentOrder), [agentOrder, agents]);
+  const installedAgentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
 
   const content = (
     <>
-        <div className="settings-section">
-          {!embedded && (
-            <div className="agent-settings-section-header">
-              <h3>Agent 设置</h3>
-              <button
-                type="button"
-                className="btn-icon agent-settings-config-icon"
-                onClick={openAgentConfig}
-                title="配置 Agent 渠道和模型"
-                aria-label="配置 Agent 渠道和模型"
+      <div className="settings-section">
+        {!embedded && (
+          <div className="agent-settings-section-header">
+            <h3>Agent 设置</h3>
+            <button
+              type="button"
+              className="btn-icon agent-settings-config-icon"
+              onClick={openAgentConfig}
+              disabled={agents.length === 0}
+              title="配置 Agent 渠道和模型"
+              aria-label="配置 Agent 渠道和模型"
+            >
+              <Settings size={15} />
+            </button>
+          </div>
+        )}
+        <p className="section-desc">
+          选择启用的 Agent，未启用的不会显示在项目卡片上。拖动左侧手柄可以调整显示顺序。
+        </p>
+
+        <div className="agent-plugin-entry-actions">
+          <button
+            type="button"
+            className="filter-add-btn agent-plugin-entry-btn"
+            onClick={() => {
+              setPluginStatus(null);
+              setShowLocalPluginModal(true);
+            }}
+          >
+            <PackagePlus size={14} />
+            本地安装
+          </button>
+          <button
+            type="button"
+            className="btn-action agent-plugin-entry-btn"
+            onClick={() => {
+              setPluginStatus(null);
+              setShowOfficialPluginModal(true);
+              void loadOfficialPlugins();
+            }}
+          >
+            <Download size={14} />
+            官方插件
+          </button>
+        </div>
+        {pluginStatus && (
+          <div className={`status-message ${pluginStatus.type}`}>
+            {pluginStatus.text}
+          </div>
+        )}
+
+        <div className="filter-group">
+          {orderedAgents.map((agent) => {
+            const hasNativePlanMode = supportsNativePlanMode(agent.id);
+            const agentStatus = agentStatuses[agent.id];
+            const isInstalled = agentStatus?.installed === true;
+            const isChecking = agentChecking[agent.id] === true || !agentStatus;
+            const isUnavailable = !isInstalled && !isChecking;
+            const versionLabel = agentStatus?.currentVersion
+              ? `v${agentStatus.currentVersion}`
+              : isChecking
+                ? "检查中..."
+                : isInstalled
+                  ? "版本未知"
+                  : "未安装";
+
+            return (
+              <div
+                key={agent.id}
+                className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? "agent-settings-row-drop-target" : ""}`}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  if (draggingAgentId && draggingAgentId !== agent.id) setDragOverAgentId(agent.id);
+                }}
+                onDragLeave={() => setDragOverAgentId((current) => current === agent.id ? null : current)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (draggingAgentId) moveAgent(draggingAgentId, agent.id);
+                  setDraggingAgentId(null);
+                  setDragOverAgentId(null);
+                }}
               >
-                <Settings size={15} />
-              </button>
-            </div>
-          )}
-          <p className="section-desc">
-            选择启用的 Agent，未启用的不会显示在项目卡片上。拖动左侧手柄可以调整显示顺序。
-          </p>
-
-          <div className="filter-group">
-            {orderAgents(AVAILABLE_AGENTS, agentOrder).map((agent) => {
-              const isPiSDKAgent = agent.id === "pi";
-              const hasNativePlanMode = supportsNativePlanMode(agent.id);
-              const agentStatus = agentStatuses[agent.id];
-              const isInstalled = isPiSDKAgent
-                ? piSDKStatus?.installed === true
-                : agentStatus?.installed === true;
-              const isChecking = isPiSDKAgent
-                ? (piSDKChecking || !piSDKStatus)
-                : agentChecking[agent.id];
-              const isUnavailable = !isInstalled && !isChecking;
-              const versionLabel = isPiSDKAgent
-                ? piSDKStatus?.currentVersion
-                  ? `v${piSDKStatus.currentVersion}`
-                  : isChecking
-                    ? "检查中..."
-                    : isInstalled
-                      ? "版本未知"
-                      : "未安装"
-                : agentStatus?.currentVersion
-                  ? `v${agentStatus.currentVersion}`
-                  : isChecking
-                    ? "检查中..."
-                    : isInstalled
-                      ? "版本未知"
-                      : "未安装";
-
-              return (
-                <div
-                  key={agent.id}
-                  className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? "agent-settings-row-drop-target" : ""}`}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    if (draggingAgentId && draggingAgentId !== agent.id) setDragOverAgentId(agent.id);
+                <button
+                  type="button"
+                  className="agent-settings-drag-handle"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", agent.id);
+                    setDraggingAgentId(agent.id);
                   }}
-                  onDragLeave={() => setDragOverAgentId((current) => current === agent.id ? null : current)}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (draggingAgentId) moveAgent(draggingAgentId, agent.id);
+                  onDragEnd={() => {
                     setDraggingAgentId(null);
                     setDragOverAgentId(null);
                   }}
+                  title="拖动排序"
                 >
-                  <button
-                    type="button"
-                    className="agent-settings-drag-handle"
-                    draggable
-                    onDragStart={(event) => {
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", agent.id);
-                      setDraggingAgentId(agent.id);
-                    }}
-                    onDragEnd={() => {
-                      setDraggingAgentId(null);
-                      setDragOverAgentId(null);
-                    }}
-                    title="拖动排序"
-                  >
-                    <GripVertical size={14} />
-                  </button>
+                  <GripVertical size={14} />
+                </button>
 
-                  <label className="agent-settings-main">
-                    <input
-                      type="checkbox"
-                      checked={enabledAgents.includes(agent.id)}
-                      disabled={!isInstalled || isChecking}
-                      onChange={(event) => {
-                        const nextEnabledAgents = event.target.checked
-                          ? enabledAgents.includes(agent.id)
-                            ? enabledAgents
-                            : [...enabledAgents, agent.id]
-                          : enabledAgents.filter((id) => id !== agent.id);
-                        setEnabledAgents(nextEnabledAgents);
-                        void saveAgentSettings(nextEnabledAgents, agentOrder);
-                      }}
-                      className="agent-settings-checkbox"
-                    />
-                    <span className="agent-settings-copy">
-                      <span className="agent-settings-title-line">
-                        <span className="agent-settings-name">{agent.name}</span>
-                        <span className={`agent-settings-badge ${(isPiSDKAgent ? piSDKStatus?.updateAvailable : agentStatus?.updateAvailable) ? "agent-settings-badge-warning" : ""}`}>
-                          {versionLabel}
-                        </span>
-                        {isUnavailable && versionLabel !== "未安装" && (
-                          <span className="agent-settings-badge agent-settings-badge-warning">
-                            未安装
-                          </span>
-                        )}
-                        {(isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion) && (
-                          <span className="agent-settings-meta">
-                            最新 v{isPiSDKAgent ? piSDKStatus?.latestVersion : agentStatus?.latestVersion}
-                          </span>
-                        )}
-                        <span
-                          className={`agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`}
-                          title={getAgentPlanModeTooltip(agent.id)}
-                        >
-                          Plan
-                        </span>
+                <label className="agent-settings-main">
+                  <input
+                    type="checkbox"
+                    checked={enabledAgents.includes(agent.id)}
+                    disabled={!isInstalled || isChecking}
+                    onChange={(event) => {
+                      const nextEnabledAgents = event.target.checked
+                        ? enabledAgents.includes(agent.id)
+                          ? enabledAgents
+                          : [...enabledAgents, agent.id]
+                        : enabledAgents.filter((id) => id !== agent.id);
+                      setEnabledAgents(nextEnabledAgents);
+                      void saveAgentSettings(nextEnabledAgents, agentOrder);
+                    }}
+                    className="agent-settings-checkbox"
+                  />
+                  <span className="agent-settings-copy">
+                    <span className="agent-settings-title-line">
+                      <span className="agent-settings-name">{agent.name}</span>
+                      <span className={`agent-settings-badge ${agentStatus?.updateAvailable ? "agent-settings-badge-warning" : ""}`}>
+                        {versionLabel}
                       </span>
-                      {isPiSDKAgent && piSDKStatus?.nodeVersion && piSDKStatus.nodeOk === false && (
-                        <span className="agent-settings-error">
-                          Node v{piSDKStatus.nodeVersion} 过低，需要 22.19.0 或更高版本
+                      {isUnavailable && versionLabel !== "未安装" && (
+                        <span className="agent-settings-badge agent-settings-badge-warning">
+                          未安装
                         </span>
                       )}
-                      {(isPiSDKAgent ? (piSDKStatus?.error || piSDKUpdateError) : (agentStatus?.error || agentUpdateErrors[agent.id])) && (
-                        <span className="agent-settings-error">
-                          {isPiSDKAgent ? (piSDKUpdateError || piSDKStatus?.error) : (agentUpdateErrors[agent.id] || agentStatus?.error)}
+                      {agentStatus?.latestVersion && (
+                        <span className="agent-settings-meta">
+                          最新 v{agentStatus.latestVersion}
                         </span>
                       )}
-                    </span>
-                  </label>
-
-                  <div className="agent-settings-actions">
-                    {((isPiSDKAgent && piSDKStatus?.updateAvailable) || (!isPiSDKAgent && agentStatus?.updateAvailable)) && (
-                      <button
-                        className="filter-add-btn agent-settings-update-btn"
-                        onClick={() => isPiSDKAgent ? void handlePiSDKUpdate() : void handleAgentUpdate(agent.id)}
-                        disabled={(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) || !(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate)}
-                        title={(isPiSDKAgent ? piSDKStatus?.canUpdate : agentStatus?.canUpdate) ? "更新" : "当前环境不支持自动更新"}
+                      <span
+                        className={`agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`}
+                        title={getAgentPlanModeTooltip(agent.id)}
                       >
-                        {(isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id]) ? "更新中..." : "更新"}
-                      </button>
+                        Plan
+                      </span>
+                    </span>
+                    {(agentStatus?.error || agentUpdateErrors[agent.id]) && (
+                      <span className="agent-settings-error">
+                        {agentUpdateErrors[agent.id] || agentStatus?.error}
+                      </span>
                     )}
+                  </span>
+                </label>
+
+                <div className="agent-settings-actions">
+                  {agentStatus?.updateAvailable && (
+                    <button
+                      className="filter-add-btn agent-settings-update-btn"
+                      onClick={() => void handleAgentUpdate(agent.id)}
+                      disabled={agentUpdating[agent.id] || !agentStatus.canUpdate}
+                      title={agentStatus.canUpdate ? "更新" : "当前环境不支持自动更新"}
+                    >
+                      {agentUpdating[agent.id] ? "更新中..." : "更新"}
+                    </button>
+                  )}
+                  {agent.removable && (
                     <button
                       className="btn-action agent-settings-refresh-btn"
-                      onClick={() => isPiSDKAgent ? void refreshPiSDKStatus() : void refreshAgentStatus(agent.id)}
-                      disabled={isChecking || (isPiSDKAgent ? piSDKUpdating : agentUpdating[agent.id])}
-                      title="重新检查版本"
+                      onClick={() => void handleRemovePlugin(agent.id)}
+                      disabled={removingAgentId === agent.id}
+                      title="卸载插件"
                     >
-                      {isChecking ? "检查中..." : "刷新"}
+                      {removingAgentId === agent.id ? "卸载中..." : "卸载"}
                     </button>
-                  </div>
+                  )}
+                  <button
+                    className="btn-action agent-settings-refresh-btn"
+                    onClick={() => void refreshAgentStatus(agent.id)}
+                    disabled={isChecking || agentUpdating[agent.id]}
+                    title="重新检查版本"
+                  >
+                    {isChecking ? "检查中..." : "刷新"}
+                  </button>
                 </div>
-              );
-            })}
+              </div>
+            );
+          })}
 
-            {AVAILABLE_AGENTS.length === 0 && (
-              <p style={{ fontSize: 12, color: "var(--text-secondary)" }}>暂无可用 Agent</p>
-            )}
-          </div>
+          {agents.length === 0 && (
+            <p className="agent-settings-empty">未安装 Agent 插件。请选择插件 ZIP 或插件目录安装。</p>
+          )}
         </div>
+      </div>
     </>
   );
 
@@ -436,6 +578,162 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
           onClose={() => setConfigAgentId(null)}
           onModelsUpdated={syncActiveAgentModels}
         />
+      )}
+      {showLocalPluginModal && (
+        <div className="settings-modal-overlay" onClick={() => setShowLocalPluginModal(false)}>
+          <div className="settings-modal agent-plugin-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-modal-header">
+              <h3>本地安装</h3>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={() => setShowLocalPluginModal(false)}
+                aria-label="关闭"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="settings-modal-content">
+              <div className="agent-plugin-toolbar agent-plugin-toolbar-modal">
+                <input
+                  value={pluginPath}
+                  onChange={(event) => setPluginPath(event.target.value)}
+                  className="input-field agent-plugin-path"
+                  placeholder="Agent 插件目录或 ZIP 文件"
+                />
+                <button
+                  type="button"
+                  className="btn-action"
+                  onClick={() => void handleChoosePluginPath("zip")}
+                  title="选择 Agent 插件 ZIP"
+                >
+                  <FileArchive size={14} />
+                  选择 ZIP
+                </button>
+                <button
+                  type="button"
+                  className="btn-action"
+                  onClick={() => void handleChoosePluginPath("directory")}
+                  title="选择解压后的 Agent 插件目录"
+                >
+                  <FolderOpen size={14} />
+                  文件夹
+                </button>
+                <button
+                  type="button"
+                  className="filter-add-btn"
+                  onClick={() => void handleInstallPlugin()}
+                  disabled={installingPlugin}
+                >
+                  <PackagePlus size={14} />
+                  {installingPlugin ? "安装中..." : "安装"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-action"
+                  onClick={() => void handleReloadPlugins()}
+                  title="重新扫描已安装插件"
+                >
+                  <RefreshCw size={14} />
+                  刷新
+                </button>
+              </div>
+              {pluginStatus && (
+                <div className={`status-message ${pluginStatus.type}`}>
+                  {pluginStatus.text}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {showOfficialPluginModal && (
+        <div className="settings-modal-overlay" onClick={() => setShowOfficialPluginModal(false)}>
+          <div className="settings-modal agent-plugin-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-modal-header">
+              <div className="settings-modal-title-actions">
+                <h3>官方插件</h3>
+                <button
+                  type="button"
+                  className="btn-icon settings-modal-header-icon"
+                  onClick={() => void handleReloadOfficialPlugins()}
+                  disabled={officialLoading}
+                  title="刷新官方插件"
+                  aria-label="刷新官方插件"
+                >
+                  <RefreshCw size={15} />
+                </button>
+              </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={() => setShowOfficialPluginModal(false)}
+                aria-label="关闭"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="settings-modal-content">
+              {officialError && (
+                <div className="status-message error">
+                  {officialError}
+                </div>
+              )}
+              {pluginStatus && (
+                <div className={`status-message ${pluginStatus.type}`}>
+                  {pluginStatus.text}
+                </div>
+              )}
+              <div className="agent-official-list">
+                {officialPlugins.map((plugin) => {
+                  const installedAgent = installedAgentById.get(plugin.id);
+                  const installed = !!installedAgent;
+                  const updateAvailable = installed && compareVersions(plugin.version, installedAgent.version) > 0;
+                  const installing = installingOfficialAgentId === plugin.id;
+                  const buttonText = installing
+                    ? "安装中..."
+                    : !installed
+                      ? "安装"
+                      : updateAvailable
+                        ? "更新"
+                        : "已安装";
+
+                  return (
+                    <div key={plugin.id} className="agent-official-row">
+                      <div className="agent-official-main">
+                        <div className="agent-settings-title-line">
+                          <span className="agent-settings-name">{plugin.name}</span>
+                          <span className="agent-settings-badge">v{plugin.version}</span>
+                          <span className={`agent-settings-badge ${updateAvailable || !installed ? "agent-settings-badge-warning" : ""}`}>
+                            {!installed ? "未安装" : updateAvailable ? "可更新" : "已安装"}
+                          </span>
+                        </div>
+                        {plugin.description && (
+                          <div className="agent-settings-meta">{plugin.description}</div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className={installed && !updateAvailable ? "btn-action agent-settings-refresh-btn" : "filter-add-btn agent-settings-update-btn"}
+                        onClick={() => void handleInstallOfficialPlugin(plugin)}
+                        disabled={officialLoading || installing || (installed && !updateAvailable)}
+                      >
+                        {buttonText}
+                      </button>
+                    </div>
+                  );
+                })}
+
+                {officialLoading && officialPlugins.length === 0 && (
+                  <p className="agent-settings-empty">加载中...</p>
+                )}
+                {!officialLoading && !officialError && officialPlugins.length === 0 && (
+                  <p className="agent-settings-empty">暂无官方插件。</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

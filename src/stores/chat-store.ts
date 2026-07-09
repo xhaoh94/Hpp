@@ -70,6 +70,7 @@ export interface ChatMessage {
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   diffs?: FileDiff[];
   process?: AgentProcess;
+  nativeTurnId?: string;
 }
 
 export interface PendingFile {
@@ -142,6 +143,7 @@ interface ChatState {
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
+  setNativeTurnIdForTurn: (clientMessageId: string, nativeTurnId: string, sessionId?: string | null) => void;
   appendLastAssistantDiffs: (diffs: FileDiff[], sessionId?: string | null) => void;
   appendContextCompactionDivider: (eventId?: string, sessionId?: string | null) => void;
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
@@ -253,6 +255,40 @@ const updateSessionMessages = (
     : { sessionMessages: nextSessionMessages };
 };
 
+const setNativeTurnIdForMessages = (
+  messages: ChatMessage[],
+  clientMessageId: string,
+  nativeTurnId: string
+) => {
+  const normalizedClientMessageId = clientMessageId.trim();
+  const normalizedNativeTurnId = nativeTurnId.trim();
+  if (!normalizedClientMessageId || !normalizedNativeTurnId) return messages;
+
+  const userIndex = messages.findIndex((message) => message.id === normalizedClientMessageId);
+  if (userIndex < 0) return messages;
+
+  let changed = false;
+  const nextMessages = [...messages];
+  const assign = (index: number) => {
+    const message = nextMessages[index];
+    if (!message || message.nativeTurnId === normalizedNativeTurnId) return;
+    nextMessages[index] = { ...message, nativeTurnId: normalizedNativeTurnId };
+    changed = true;
+  };
+
+  assign(userIndex);
+  for (let index = userIndex + 1; index < nextMessages.length; index += 1) {
+    const message = nextMessages[index];
+    if (message.role === "user") break;
+    if (message.role === "assistant") {
+      assign(index);
+      break;
+    }
+  }
+
+  return changed ? nextMessages : messages;
+};
+
 export const createEmptyChatDraft = (): ChatDraft => ({
   text: "",
   pendingImages: [],
@@ -321,6 +357,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return msgs;
       });
     }),
+
+  setNativeTurnIdForTurn: (clientMessageId, nativeTurnId, sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) =>
+      setNativeTurnIdForMessages(messages, clientMessageId, nativeTurnId)
+    )),
 
   appendLastAssistantDiffs: (diffs, sessionId) =>
     set((s) => {

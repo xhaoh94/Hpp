@@ -1,8 +1,9 @@
 import { useMemo, useState, useEffect } from "react";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
-import { useChatStore, type ModelInfo } from "@/stores/chat-store";
+import { useChatStore } from "@/stores/chat-store";
+import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
-import { AVAILABLE_AGENTS, getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
+import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from "@/hooks/useDataPersistence";
 import { GitBranch } from "lucide-react";
 
@@ -27,6 +28,8 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const getSessionAgentBadgeLabel = (agentId: string) => agentId.trim() || "agent";
+
 function BrailleSpinner() {
   const [index, setIndex] = useState(0);
   useEffect(() => {
@@ -41,7 +44,7 @@ interface Props {
 }
 
 export function ProjectCard({ project }: Props) {
-  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized, isSessionInitialized, setSessionFilePath } = useProjectStore();
+  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized } = useProjectStore();
   const {
     clearMessages,
     addMessage,
@@ -54,13 +57,17 @@ export function ProjectCard({ project }: Props) {
     deleteSessionsMessages,
   } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
-  const [enabledAgents, setEnabledAgents] = useState<string[]>(["codex", "pi"]);
-  const [agentOrder, setAgentOrder] = useState<string[]>(normalizeAgentOrder());
+  const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
-  const [showAddAgent, setShowAddAgent] = useState(false);
   const [loading, setLoading] = useState(true);
+  const agents = useAgentCatalogStore((state) => state.agents);
+  const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
 
-  // Load enabled agents & check installation status, then show buttons
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
+
+  // Load display order and package status; plugin catalog controls which buttons are shown.
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
@@ -70,22 +77,17 @@ export function ProjectCard({ project }: Props) {
       if (cancelled) return;
       const settings = asRecord(data);
       const general = asRecord(settings.general);
-      const enabled = getStringArray(general.enabledAgents) || ["codex", "pi"];
-      setEnabledAgents(enabled);
-      setAgentOrder(normalizeAgentOrder(getStringArray(general.agentOrder)));
+      setAgentOrder(normalizeAgentOrder(getStringArray(general.agentOrder), agents));
+      setLoading(false);
+
       // Check all agents in parallel
-      const checks = AVAILABLE_AGENTS.map(async (agent) => {
-        if (agent.runtime === "sdk") {
-          const status = agent.id === "pi"
-            ? await window.electronAPI.piSDKGetStatus()
-            : await window.electronAPI.agentGetStatus(agent.id);
+      const checks = agents.map(async (agent) => {
+        try {
+          const status = await window.electronAPI.agentGetStatus(agent.id);
           return { id: agent.id, installed: status.installed };
-        }
-        if (agent.runtime !== "cli" || !agent.command) {
+        } catch {
           return { id: agent.id, installed: false };
         }
-        const ok = await window.electronAPI.isCommandAvailable(agent.command);
-        return { id: agent.id, installed: ok };
       });
       const results = await Promise.all(checks);
       if (cancelled) return;
@@ -94,41 +96,37 @@ export function ProjectCard({ project }: Props) {
         installed[r.id] = r.installed;
       }
       setInstalledAgents(installed);
-      setLoading(false);
     };
     run();
     return () => { cancelled = true; };
-  }, []);
+  }, [agents]);
 
   useEffect(() => {
     const handleAgentSettingsUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ enabledAgents?: string[]; agentOrder?: string[] }>).detail;
-      if (Array.isArray(detail?.enabledAgents)) setEnabledAgents(detail.enabledAgents);
-      if (Array.isArray(detail?.agentOrder)) setAgentOrder(normalizeAgentOrder(detail.agentOrder));
+      const detail = (event as CustomEvent<{ agentOrder?: string[] }>).detail;
+      if (Array.isArray(detail?.agentOrder)) setAgentOrder(normalizeAgentOrder(detail.agentOrder, agents));
     };
     window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
     return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
-  }, []);
-
-  // Close add agent popup on outside click
-  useEffect(() => {
-    if (!showAddAgent) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(".project-terminal-btn-add") && !target.closest(".agent-add-popup")) {
-        setShowAddAgent(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [showAddAgent]);
+  }, [agents]);
 
   const handleStartAgent = async (agentId: string) => {
     // Check if agent is installed before starting
-    if (installedAgents[agentId] !== true) {
-      const agent = AVAILABLE_AGENTS.find((a) => a.id === agentId);
+    let packageInstalled = installedAgents[agentId];
+    if (packageInstalled !== true) {
+      try {
+        const status = await window.electronAPI.agentGetStatus(agentId);
+        packageInstalled = status.installed;
+        setInstalledAgents((prev) => ({ ...prev, [agentId]: status.installed }));
+      } catch {
+        packageInstalled = false;
+      }
+    }
+
+    if (packageInstalled !== true) {
+      const agent = agents.find((a) => a.id === agentId);
       const name = agent?.name || agentId;
-      const cmd = agent?.runtime === "sdk" ? agent.id : agent?.command || agentId;
+      const cmd = agent?.command || agentId;
       alert(`${name} 未安装，请先安装：\n\n${getInstallHint(cmd)}`);
       return;
     }
@@ -206,7 +204,6 @@ export function ProjectCard({ project }: Props) {
   };
 
   const handleSelectSession = async (session: ProjectSession) => {
-    setShowAddAgent(false);
     setShowHistory(false);
 
     // Save current session's messages before switching
@@ -322,17 +319,10 @@ export function ProjectCard({ project }: Props) {
   };
 
   const orderedAgents = useMemo(
-    () => orderAgents(AVAILABLE_AGENTS, agentOrder),
-    [agentOrder]
+    () => orderAgents(agents, agentOrder),
+    [agents, agentOrder]
   );
-  const uncheckedAgents = useMemo(
-    () => orderedAgents.filter((a) => !enabledAgents.includes(a.id) && installedAgents[a.id] === true),
-    [enabledAgents, installedAgents, orderedAgents]
-  );
-  const enabledInstalledAgents = useMemo(
-    () => orderedAgents.filter((agent) => enabledAgents.includes(agent.id) && installedAgents[agent.id] === true),
-    [enabledAgents, installedAgents, orderedAgents]
-  );
+  const cardAgents = orderedAgents;
   const openSessions = useMemo(
     () => project.sessions.filter((session) => !session.closed),
     [project.sessions]
@@ -379,47 +369,21 @@ export function ProjectCard({ project }: Props) {
               </div>
             ) : (
               <>
-                {enabledInstalledAgents.map((a) => (
+                {cardAgents.map((a) => (
                   <div
                     key={a.id}
                     className="project-terminal-btn"
                     onClick={() => handleStartAgent(a.id)}
+                    title={`启动 ${a.name}`}
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                       <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
                       <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                       <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                     </svg>
-                    <span>{a.id === "codex" ? "CX" : a.id === "pi" ? "PI" : a.id === "opencode" ? "OC" : a.id === "droid" ? "FD" : a.id}</span>
+                    <span>{a.id}</span>
                   </div>
                 ))}
-                {/* Add agent button - only show when there are unchecked agents */}
-                {uncheckedAgents.length > 0 && (
-                  <div className="relative">
-                    <div
-                      className="project-terminal-btn project-terminal-btn-add"
-                      onClick={() => setShowAddAgent(!showAddAgent)}
-                      title="新建 Agent 会话"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                        <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-                      </svg>
-                    </div>
-                    {showAddAgent && (
-                      <div className="agent-add-popup">
-                        {uncheckedAgents.map((agent) => (
-                          <div
-                            key={agent.id}
-                            className="agent-add-item"
-                            onClick={() => { handleStartAgent(agent.id); setShowAddAgent(false); }}
-                          >
-                            <span className="agent-add-name">{agent.name}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
               </>
             )}
           </div>
@@ -431,21 +395,20 @@ export function ProjectCard({ project }: Props) {
         <div className="project-terminal-children">
           {openSessions.map((session) => {
             const status = agentStatuses[session.id];
+            const agentBadgeLabel = getSessionAgentBadgeLabel(session.agentId);
             return (
               <div
                 key={session.id}
                 className={`project-terminal-child ${session.id === activeSessionId ? "active" : ""}`}
                 onClick={() => handleSelectSession(session)}
               >
-                {status === "running" ? (
-                  <BrailleSpinner />
-                ) : (
-                  <svg className="terminal-child-icon" width="14" height="14" viewBox="0 0 24 24" fill="none">
-                    <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  </svg>
-                )}
+                {status === "running" && <BrailleSpinner />}
+                <span
+                  className="terminal-child-agent-badge"
+                  title={getAgentName(session.agentId)}
+                >
+                  {agentBadgeLabel}
+                </span>
                 <span className="terminal-child-title">
                   {(() => {
                     const msgs = sessionMessages[session.id];

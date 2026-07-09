@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "pi",
+  "name": "Pi Agent",
+  "version": "1.0.0",
+  "description": "Pi SDK programming agent",
+  "entry": "agent.mjs",
+  "runtime": "sdk",
+  "packageName": "@earendil-works/pi-coding-agent",
+  "capabilities": {
+    "planMode": "prompt",
+    "guidance": true,
+    "fork": true,
+    "configuration": "openai-compatible"
+  }
+}

@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { AVAILABLE_AGENTS } from "@/lib/agents";
 
 export interface ProjectSession {
   id: string;
@@ -57,7 +56,7 @@ interface ProjectState {
   activeSessionId: string | null;
   agentStatuses: Record<string, AgentStatus>; // sessionId -> status
   initializedSessionIds: Set<string>; // session IDs with agent backend created
-  addProject: (name: string, path: string) => void;
+  addProject: (name: string, path: string, agentIds?: string[]) => void;
   removeProject: (id: string) => void;
   setActiveProject: (id: string | null) => void;
   addSession: (projectId: string, session: ProjectSession) => void;
@@ -81,7 +80,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   agentStatuses: {},
   initializedSessionIds: new Set<string>(),
 
-  addProject: (name, path) =>
+  addProject: (name, path, agentIds = []) =>
     set((s) => {
       const newId = crypto.randomUUID();
       return {
@@ -92,7 +91,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             name,
             path,
             createdAt: new Date().toISOString(),
-            agents: AVAILABLE_AGENTS.map((a) => a.id),
+            agents: agentIds,
             sessions: [],
           },
         ],

@@ -30,7 +30,7 @@ import {
 } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
+import { getAgentById, getAgentName, getAgentPlanModeTooltip, requiresProviderActivation, supportsGuidance } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import {
   buildSessionReferencesContext,
@@ -69,8 +69,6 @@ import {
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
-const CONFIGURED_PROVIDER_ORDER_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
-
 type AgentImagePayload = { type: string; data: string; mimeType: string };
 type MessageImagePayload = { id: string; src: string; name: string };
 type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: string };
@@ -109,6 +107,19 @@ const getCompatibleForkSessionTitle = (message: ChatMessage) => {
   return title.startsWith("分叉 - ")
     ? title.replace(/^分叉 - /, "兼容分叉 - ")
     : `兼容分叉 - ${title}`;
+};
+
+const getForkTargetTurnId = (message: ChatMessage, sourceMessages: ChatMessage[]) => {
+  if (message.nativeTurnId) return message.nativeTurnId;
+  if (message.role !== "assistant") return undefined;
+
+  for (let index = sourceMessages.length - 2; index >= 0; index -= 1) {
+    const candidate = sourceMessages[index];
+    if (candidate.role === "assistant") break;
+    if (candidate.role === "user" && candidate.nativeTurnId) return candidate.nativeTurnId;
+  }
+
+  return undefined;
 };
 
 const buildPathAttachmentBlock = (attachments: PendingPathAttachment[]) => {
@@ -956,7 +967,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   );
 
   const refreshModelProviderOrder = useCallback(async (agentId: string) => {
-    if (!CONFIGURED_PROVIDER_ORDER_AGENTS.has(agentId)) {
+    if (getAgentById(agentId)?.capabilities.configuration !== "openai-compatible") {
       setModelProviderOrder([]);
       return;
     }
@@ -1380,7 +1391,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     sessionId: string,
     sourceUserMessageIndex: number,
     rollbackUserMessageCount: number,
-    sourceMessage: ChatMessage
+    sourceMessage: ChatMessage,
+    targetTurnId?: string
   ) => {
     try {
       return await window.electronAPI.agentForkSession(sourceSession.id, {
@@ -1388,6 +1400,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         sourceSessionFilePath: sourceSession.sessionFilePath,
         sourceUserMessageIndex,
         rollbackUserMessageCount,
+        targetTurnId,
         sourceMessageContent: sourceMessage.content,
         throughMessageId: sourceMessage.id,
       });
@@ -1463,6 +1476,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const sourceUserMessageIndex = sourceUserMessageCount - 1;
     const totalUserMessageCount = currentMessages.filter((message) => message.role === "user").length;
     const rollbackUserMessageCount = Math.max(0, totalUserMessageCount - sourceUserMessageCount);
+    const targetTurnId = getForkTargetTurnId(msg, sourceMessages);
     const now = new Date().toISOString();
     const forkedFrom = {
       sourceSessionId: activeSession.id,
@@ -1470,6 +1484,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       throughMessageId: msg.id,
       createdAt: now,
     };
+    const forkContext = createSessionForkContext(activeSession, sourceMessages, msg.id);
 
     const createForkSession = (session: ProjectSession, visibleMessages: ChatMessage[]) => {
       loadSessionMessages(activeSession.id, currentMessages);
@@ -1489,7 +1504,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         createdAt: now,
         lastActiveAt: now,
         forkedFrom,
-        forkContext: createSessionForkContext(activeSession, sourceMessages, msg.id),
+        forkContext,
       };
       const visibleMessages: ChatMessage[] = warning
         ? [
@@ -1517,7 +1532,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             sessionId,
             sourceUserMessageIndex,
             rollbackUserMessageCount,
-            msg
+            msg,
+            targetTurnId
           );
           if (nativeFork.success && nativeFork.sessionFilePath) {
             const session: ProjectSession = {
@@ -1529,6 +1545,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               lastActiveAt: now,
               sessionFilePath: nativeFork.sessionFilePath,
               forkedFrom,
+              forkContext,
             };
             createForkSession(session, forkMessages);
             return;
@@ -1554,7 +1571,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           sessionId,
           sourceUserMessageIndex,
           rollbackUserMessageCount,
-          msg
+          msg,
+          targetTurnId
         ).then((nativeFork) => {
           if (!nativeFork.success || !nativeFork.sessionFilePath) return;
           void applyNativeForkToSession(sessionId, activeSession.agentId, nativeFork.sessionFilePath);
@@ -2051,20 +2069,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setModelOpen(false);
     const sessionId = useProjectStore.getState().activeSessionId;
     const agentId = activeSession?.agentId || activeAgentId;
-    const switchingCodexProvider =
-      agentId === "codex" &&
+    const switchingProvider =
+      requiresProviderActivation(agentId) &&
       !!previousModel &&
       previousModel.provider !== model.provider;
 
-    if (switchingCodexProvider) {
+    if (switchingProvider) {
       if (currentSessionRunning) {
-        window.alert("切换 Codex 渠道需要等当前 Agent 运行结束后再操作。");
+        window.alert("切换 Agent 渠道需要等当前 Agent 运行结束后再操作。");
         return;
       }
 
-      const activateResult = await window.electronAPI.agentConfigActivate("codex", model.provider);
+      const activateResult = await window.electronAPI.agentConfigActivate(agentId, model.provider);
       if (!activateResult.success) {
-        window.alert(activateResult.error || "切换 Codex 渠道失败，请稍后重试。");
+        window.alert(activateResult.error || "切换 Agent 渠道失败，请稍后重试。");
         return;
       }
       if (activateResult.models && activateResult.models.length > 0) {

@@ -27,6 +27,7 @@ interface AgentForkTarget {
   sourceSessionFilePath?: string;
   sourceUserMessageIndex: number;
   rollbackUserMessageCount?: number;
+  targetTurnId?: string;
   sourceMessageContent?: string;
   throughMessageId?: string;
 }

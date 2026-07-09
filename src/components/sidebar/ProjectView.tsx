@@ -1,15 +1,22 @@
 import { useState, useEffect } from "react";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
+import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
 
 export function ProjectView() {
   const { projects, addProject } = useProjectStore();
+  const agents = useAgentCatalogStore((state) => state.agents);
+  const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
   const { showAddProject, clearAddProject } = useAppStore();
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
+
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
 
   useEffect(() => {
     if (showAddProject) {
@@ -20,7 +27,7 @@ export function ProjectView() {
 
   const handleAdd = () => {
     if (!name.trim() || !path.trim()) return;
-    addProject(name.trim(), path.trim());
+    addProject(name.trim(), path.trim(), agents.map((agent) => agent.id));
     setName("");
     setPath("");
     setShowAdd(false);

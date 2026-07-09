@@ -3,16 +3,33 @@ import type {
   AgentImagePayload,
   AgentSendOptions,
   AgentUIResponse,
+  AgentDescriptor,
+  AgentPackageStatus,
+  AgentPluginInstallResult,
+  AgentPluginManifest,
+  OfficialAgentPluginCatalogResult,
+  OfficialAgentPluginDescriptor,
   AppUpdateResult,
   AppUpdateStatus,
 } from "./ipc";
 
 export type {
   AgentEvent,
+  AgentCapabilities,
+  AgentConfigurationSupport,
+  AgentDescriptor,
   AgentImagePayload,
   AgentImagePayloadItem,
+  AgentPackageStatus,
+  AgentPlanModeSupport,
+  AgentProviderActivationSupport,
+  AgentPluginInstallResult,
+  AgentPluginManifest,
+  AgentSource,
   AgentSendOptions,
   AgentUIResponse,
+  OfficialAgentPluginCatalogResult,
+  OfficialAgentPluginDescriptor,
   AppUpdateResult,
   AppUpdateState,
   AppUpdateStatus,
@@ -73,6 +90,7 @@ export interface AgentForkTarget {
   sourceSessionFilePath?: string;
   sourceUserMessageIndex: number;
   rollbackUserMessageCount?: number;
+  targetTurnId?: string;
   sourceMessageContent?: string;
   throughMessageId?: string;
 }
@@ -91,18 +109,6 @@ export interface AgentReloadConfigResult {
   error?: string;
   models?: AgentModel[];
   reloadedSessionIds?: string[];
-}
-
-export interface AgentPackageStatus {
-  installed: boolean;
-  currentVersion?: string;
-  latestVersion?: string;
-  updateAvailable: boolean;
-  canUpdate: boolean;
-  packageRoot?: string;
-  nodeVersion?: string;
-  nodeOk?: boolean;
-  error?: string;
 }
 
 export type PiSDKStatus = AgentPackageStatus;
@@ -136,9 +142,16 @@ export interface ElectronAPI {
   isCommandAvailable: (command: string) => Promise<boolean>;
   piSDKGetStatus: () => Promise<PiSDKStatus>;
   piSDKUpdate: () => Promise<{ success: boolean; error?: string; status?: PiSDKStatus }>;
+  agentList: () => Promise<AgentDescriptor[]>;
   agentGetStatus: (agentId: string) => Promise<AgentPackageStatus>;
   agentUpdate: (agentId: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
   agentGetDefaultThinkingLevel: (agentId: string) => Promise<string>;
+  agentPluginChoosePath: (kind?: "zip" | "directory") => Promise<{ canceled: boolean; path: string }>;
+  agentPluginInstallFromPath: (pluginPath: string) => Promise<AgentPluginInstallResult>;
+  agentPluginListOfficial: () => Promise<OfficialAgentPluginCatalogResult>;
+  agentPluginInstallOfficial: (agentId: string) => Promise<AgentPluginInstallResult>;
+  agentPluginRemove: (agentId: string) => Promise<AgentPluginInstallResult>;
+  agentPluginReload: () => Promise<AgentPluginInstallResult>;
 
   // Data persistence
   loadData: (key: string) => Promise<unknown>;

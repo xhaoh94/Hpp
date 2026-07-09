@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "droid",
+  "name": "Factory Droid",
+  "version": "1.0.0",
+  "description": "Factory Droid CLI programming agent",
+  "entry": "agent.mjs",
+  "runtime": "cli",
+  "command": "droid",
+  "packageName": "droid",
+  "capabilities": {
+    "planMode": "native",
+    "guidance": false,
+    "fork": false,
+    "configuration": "openai-compatible"
+  }
+}

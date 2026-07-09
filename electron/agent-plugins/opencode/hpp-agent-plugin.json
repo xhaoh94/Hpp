@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "opencode",
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "description": "OpenCode CLI programming agent",
+  "entry": "agent.mjs",
+  "runtime": "cli",
+  "command": "opencode",
+  "packageName": "opencode-ai",
+  "capabilities": {
+    "planMode": "native",
+    "guidance": false,
+    "fork": false,
+    "configuration": "openai-compatible"
+  }
+}

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { CheckCircle2, Copy, Eye, EyeOff, GripVertical, Pencil, Plus, RefreshCw, Save, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig } from "@/types";
-import { AVAILABLE_AGENTS, getAgentName } from "@/lib/agents";
+import { getAgentName } from "@/lib/agents";
+import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import "./Settings.css";
 
@@ -11,9 +12,6 @@ type AgentConfigModalProps = {
   onClose: () => void;
   onModelsUpdated: (agentId: string, models?: AgentModel[]) => void;
 };
-
-const CONFIGURABLE_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
-const CONFIGURABLE_AGENT_LIST = AVAILABLE_AGENTS.filter((agent) => CONFIGURABLE_AGENTS.has(agent.id));
 
 const emptyModel = (): AgentCustomModelConfig => ({
   id: "",
@@ -84,10 +82,17 @@ function getAgentHint(agentId: string) {
 
 export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpdated }: AgentConfigModalProps) {
   const [agentId, setAgentId] = useState(initialAgentId);
+  const agents = useAgentCatalogStore((state) => state.agents);
+  const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
   const activeAgentId = useChatStore((state) => state.activeAgentId);
   const currentModelProvider = useChatStore((state) => state.currentModel?.provider);
-  const configurable = CONFIGURABLE_AGENTS.has(agentId);
-  const usesActivation = agentId === "codex";
+  const configurableAgentList = useMemo(
+    () => agents.filter((agent) => agent.capabilities.configuration === "openai-compatible"),
+    [agents]
+  );
+  const activeAgent = configurableAgentList.find((agent) => agent.id === agentId);
+  const configurable = !!activeAgent;
+  const usesActivation = activeAgent?.capabilities.providerActivation === "single-active";
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
@@ -107,6 +112,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
 
   useEffect(() => {
     setAgentId(initialAgentId);
@@ -505,7 +514,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
             </div>
             <div className="agent-config-subtitle">{getConfigPathLabel(agentId)}</div>
             <div className="agent-config-tabs" role="tablist" aria-label="Agent 配置切换">
-              {CONFIGURABLE_AGENT_LIST.map((agent) => {
+              {configurableAgentList.map((agent) => {
                 const active = agent.id === agentId;
                 return (
                   <button
