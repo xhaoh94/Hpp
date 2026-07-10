@@ -1,5 +1,6 @@
 import { existsSync } from "fs";
-import { delimiter, dirname, isAbsolute, join, normalize, sep } from "path";
+import { delimiter, dirname, isAbsolute, join, normalize, posix, sep, win32 } from "path";
+import { homedir } from "os";
 
 export function getPathEnvKey(env: NodeJS.ProcessEnv = process.env): string {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
@@ -7,6 +8,29 @@ export function getPathEnvKey(env: NodeJS.ProcessEnv = process.env): string {
 
 export function getPathEnvValue(env: NodeJS.ProcessEnv = process.env): string {
   return env[getPathEnvKey(env)] || "";
+}
+
+export function getCommonCommandDirs(
+  platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir()
+): string[] {
+  if (platform === "win32") {
+    return [
+      env.APPDATA ? win32.join(env.APPDATA, "npm") : "",
+      env.ProgramFiles ? win32.join(env.ProgramFiles, "nodejs") : "",
+      env.LOCALAPPDATA ? win32.join(env.LOCALAPPDATA, "Programs", "nodejs") : "",
+    ].filter(Boolean);
+  }
+
+  const homeDirs = [
+    posix.join(home, ".local", "bin"),
+    posix.join(home, ".volta", "bin"),
+    posix.join(home, ".fnm", "aliases", "default", "bin"),
+  ];
+  return platform === "darwin"
+    ? [...homeDirs, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    : [...homeDirs, "/usr/local/bin", "/usr/bin", "/bin", "/snap/bin"];
 }
 
 function commandHasPath(command: string): boolean {
@@ -87,7 +111,7 @@ export function resolveCommand(command: string, env: NodeJS.ProcessEnv = process
 
 export function commandExists(command: string, options: { excludeNodeModules?: boolean } = {}): boolean {
   return !!findCommandOnPath(command, {
-    env: process.env,
+    env: getCommandEnv(),
     excludeNodeModules: options.excludeNodeModules,
   });
 }
@@ -95,7 +119,11 @@ export function commandExists(command: string, options: { excludeNodeModules?: b
 export function getCommandEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
   const pathKey = getPathEnvKey(env);
-  env[pathKey] = env[pathKey] || "";
+  const pathDirs = (env[pathKey] || "").split(delimiter).filter(Boolean);
+  for (const dir of getCommonCommandDirs(process.platform, env)) {
+    if (!pathDirs.includes(dir)) pathDirs.push(dir);
+  }
+  env[pathKey] = pathDirs.join(delimiter);
   return env;
 }
 
@@ -104,11 +132,31 @@ export function getNodeExecutable(envKeys: string[] = []): string {
     const value = process.env[key];
     if (value && existsSync(value)) return value;
   }
-  return findCommandOnPath("node") || "node";
+  return findCommandOnPath("node", { env: getCommandEnv() }) || "node";
 }
 
 export function isWindowsShellShim(filePath: string): boolean {
   return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(filePath);
+}
+
+function quoteWindowsCommandArg(value: string): string {
+  if (!value || /[\s"&|<>^()]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+export function getExecFileInvocation(command: string, args: string[], env: NodeJS.ProcessEnv = process.env) {
+  const resolvedCommand = resolveCommand(command, env);
+  if (!isWindowsShellShim(resolvedCommand)) {
+    return { command: resolvedCommand, args };
+  }
+
+  const commandLine = [quoteWindowsCommandArg(resolvedCommand), ...args.map(quoteWindowsCommandArg)].join(" ");
+  return {
+    command: env.ComSpec || process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", `chcp 65001>nul & call ${commandLine}`],
+  };
 }
 
 export function getNpmPackageBinTarget(shimPath: string, packageName: string, binPath: string): string | undefined {

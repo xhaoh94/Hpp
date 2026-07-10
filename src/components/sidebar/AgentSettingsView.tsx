@@ -575,7 +575,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 <div className="agent-settings-actions">
                   {agentStatus && (isInstallAction || agentStatus.updateAvailable) && (
                     <button
-                      className="filter-add-btn agent-settings-update-btn"
+                      className={`filter-add-btn agent-settings-update-btn ${isInstallAction ? "agent-settings-install-btn" : ""}`}
                       onClick={() => void handleAgentUpdate(agent.id)}
                       disabled={agentUpdating[agent.id] || !agentStatus.canUpdate}
                       title={agentStatus.canUpdate

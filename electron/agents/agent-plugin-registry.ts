@@ -1,5 +1,5 @@
 import { app, BrowserWindow } from "electron";
-import { exec, execFile } from "child_process";
+import { execFile } from "child_process";
 import { existsSync, statSync } from "fs";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
@@ -15,8 +15,7 @@ import {
   commandExists as commandExistsOnPath,
   findCommandsOnPath,
   getCommandEnv,
-  isWindowsShellShim,
-  resolveCommand,
+  getExecFileInvocation,
 } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 import type {
@@ -313,46 +312,14 @@ function runCommand(
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
   return new Promise((resolvePromise, reject) => {
-    const resolvedCommand = resolveCommand(command);
+    const env = getCommandEnv();
+    const invocation = getExecFileInvocation(command, args, env);
     execFile(
-      resolvedCommand,
-      args,
+      invocation.command,
+      invocation.args,
       {
         cwd: options.cwd,
-        env: getCommandEnv(),
-        shell: isWindowsShellShim(resolvedCommand),
-        encoding: "utf8",
-        timeout: options.timeout ?? 15000,
-        maxBuffer: 1024 * 1024 * 4,
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const commandError = error as CommandError;
-          commandError.stdout = stdout;
-          commandError.stderr = stderr;
-          reject(commandError);
-          return;
-        }
-        resolvePromise({ stdout, stderr });
-      }
-    );
-  });
-}
-
-function runShellCommand(
-  command: string,
-  args: string[],
-  options: { cwd?: string; timeout?: number } = {}
-): Promise<CommandResult> {
-  const parts = [command, ...args].map((arg) => (/[\s"]/.test(arg) ? JSON.stringify(arg) : arg));
-  const fullCommand = parts.join(" ");
-
-  return new Promise((resolvePromise, reject) => {
-    exec(
-      fullCommand,
-      {
-        cwd: options.cwd,
-        env: getCommandEnv(),
+        env,
         encoding: "utf8",
         timeout: options.timeout ?? 15000,
         maxBuffer: 1024 * 1024 * 4,
@@ -372,7 +339,7 @@ function runShellCommand(
 }
 
 function runNpmCommand(args: string[], options: { cwd?: string; timeout?: number } = {}): Promise<CommandResult> {
-  return runShellCommand("npm", args, options);
+  return runCommand("npm", args, options);
 }
 
 function parseVersion(version: string): number[] {

@@ -3,7 +3,7 @@ import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
-import { commandExists, getCommandEnv, getNodeExecutable, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
+import { commandExists, getCommandEnv, getExecFileInvocation, getNodeExecutable } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 import { getPiSDKPackageJsonPath, getPiSDKUserRuntimeRoot, PI_SDK_PACKAGE } from "../utils/pi-sdk-runtime";
 
@@ -37,14 +37,14 @@ function runCommand(
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    const resolvedCommand = resolveCommand(command);
+    const env = getCommandEnv();
+    const invocation = getExecFileInvocation(command, args, env);
     execFile(
-      resolvedCommand,
-      args,
+      invocation.command,
+      invocation.args,
       {
         cwd: options.cwd,
-        env: getCommandEnv(),
-        shell: isWindowsShellShim(resolvedCommand),
+        env,
         encoding: "utf8",
         timeout: options.timeout ?? 15000,
         maxBuffer: 1024 * 1024 * 4,

@@ -681,6 +681,7 @@ const getTodoStatusText = (status: AgentProcessStep["status"]) => {
 function TodoSummaryPill({ process }: { process: AgentProcess }) {
   const steps = process.planSteps || [];
   if (!hasNativeTodoSteps(process)) return null;
+  const completedCount = getCompletedTodoCount(steps);
 
   const changeSummary = process.changeSummary;
   const changeText = changeSummary && changeSummary.filesChanged > 0
@@ -690,13 +691,13 @@ function TodoSummaryPill({ process }: { process: AgentProcess }) {
   return (
     <div className="chat-todo-summary">
       <span className="chat-todo-summary-dot" />
-      <span className="chat-todo-summary-text">Todo {getCompletedTodoCount(steps)} / {steps.length}</span>
+      <span className="chat-todo-summary-text">进度 {completedCount}/{steps.length}</span>
       {changeText && <span className="chat-todo-summary-change">· {changeText}</span>}
       <div className="chat-todo-summary-popover">
         {steps.map((step) => (
           <div className="chat-todo-summary-row" key={step.id}>
             <span className={`chat-todo-summary-status ${step.status}`} />
-            <span className="chat-todo-summary-title">{step.title}</span>
+            <span className="chat-todo-summary-title" title={step.title}>{step.title}</span>
             <span className="chat-todo-summary-label">{getTodoStatusText(step.status)}</span>
           </div>
         ))}

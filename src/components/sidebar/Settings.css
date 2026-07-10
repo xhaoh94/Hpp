@@ -686,6 +686,17 @@
   white-space: nowrap;
 }
 
+.agent-settings-install-btn:not(:disabled) {
+  background: #1687ff;
+  box-shadow: 0 0 0 2px rgba(22, 135, 255, 0.28), 0 0 16px rgba(22, 135, 255, 0.35);
+  font-weight: 700;
+}
+
+.agent-settings-install-btn:not(:disabled):hover {
+  background: #3297ff;
+  box-shadow: 0 0 0 2px rgba(50, 151, 255, 0.38), 0 0 20px rgba(50, 151, 255, 0.45);
+}
+
 .agent-plugin-entry-actions {
   display: flex;
   flex-wrap: wrap;
