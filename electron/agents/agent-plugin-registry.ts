@@ -16,6 +16,7 @@ import {
   findCommandsOnPath,
   getCommandEnv,
   getExecFileInvocation,
+  getNpmInvocation,
 } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 import type {
@@ -339,7 +340,10 @@ function runCommand(
 }
 
 function runNpmCommand(args: string[], options: { cwd?: string; timeout?: number } = {}): Promise<CommandResult> {
-  return runCommand("npm", args, options);
+  const env = getCommandEnv();
+  const invocation = getNpmInvocation(args, env);
+  if (!invocation) return Promise.reject(new Error("未找到可用的 npm CLI，请重新安装 Node.js"));
+  return runCommand(invocation.command, invocation.args, options);
 }
 
 function parseVersion(version: string): number[] {

@@ -1,11 +1,10 @@
 import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
-import { existsSync } from "fs";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "./agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
 import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
-import { getPiSDKPackageJsonPath, getPiSDKUserRuntimeRoot } from "../utils/pi-sdk-runtime";
+import { getPiSDKUserRuntimeRoot } from "../utils/pi-sdk-runtime";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
 import { isRecord } from "../../src/types/ipc";
 
@@ -133,9 +132,7 @@ export class PiSDKAgent {
 
     const worker = getWorkerInvocation(getWorkerPath(), ["PI_NODE_PATH"], { packagedRuntime: "node" });
     const userRuntimeRoot = getPiSDKUserRuntimeRoot();
-    const workerEnv = existsSync(getPiSDKPackageJsonPath(userRuntimeRoot))
-      ? { ...worker.env, PI_SDK_PACKAGE_ROOT: userRuntimeRoot }
-      : worker.env;
+    const workerEnv = { ...worker.env, PI_SDK_PACKAGE_ROOT: userRuntimeRoot };
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],

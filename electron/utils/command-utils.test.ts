@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getCommonCommandDirs, getExecFileInvocation } from "./command-utils";
+import { execFileSync } from "child_process";
+import { getCommonCommandDirs, getExecFileInvocation, getNpmInvocation } from "./command-utils";
 
 describe("getExecFileInvocation", () => {
   it("quotes Windows command shims located under Program Files", () => {
@@ -32,5 +33,13 @@ describe("getExecFileInvocation", () => {
       "/usr/bin",
       "/home/tester/.local/bin",
     ]));
+  });
+
+  it("runs npm through Node without invoking a shell shim", () => {
+    const invocation = getNpmInvocation(["--version"], process.env);
+    expect(invocation).not.toBeNull();
+    expect(invocation?.command.toLowerCase()).not.toMatch(/\.(?:cmd|bat)$/);
+    const output = execFileSync(invocation!.command, invocation!.args, { encoding: "utf8" }).trim();
+    expect(output).toMatch(/^\d+\.\d+\.\d+/);
   });
 });

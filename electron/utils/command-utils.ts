@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { delimiter, dirname, isAbsolute, join, normalize, posix, sep, win32 } from "path";
 import { homedir } from "os";
 
@@ -157,6 +157,28 @@ export function getExecFileInvocation(command: string, args: string[], env: Node
     command: env.ComSpec || process.env.ComSpec || "cmd.exe",
     args: ["/d", "/s", "/c", `chcp 65001>nul & call ${commandLine}`],
   };
+}
+
+export function getNpmInvocation(args: string[], env: NodeJS.ProcessEnv = process.env) {
+  const npmCommand = findCommandOnPath("npm", { env });
+  if (!npmCommand) return null;
+
+  if (process.platform === "win32") {
+    const npmCli = join(dirname(npmCommand), "node_modules", "npm", "bin", "npm-cli.js");
+    const bundledNode = join(dirname(npmCommand), "node.exe");
+    if (!existsSync(npmCli)) return null;
+    return {
+      command: existsSync(bundledNode) ? bundledNode : getNodeExecutable(),
+      args: [npmCli, ...args],
+    };
+  }
+
+  try {
+    const npmCli = realpathSync(npmCommand);
+    return { command: getNodeExecutable(), args: [npmCli, ...args] };
+  } catch {
+    return null;
+  }
 }
 
 export function getNpmPackageBinTarget(shimPath: string, packageName: string, binPath: string): string | undefined {

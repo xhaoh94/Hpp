@@ -559,8 +559,13 @@
   flex-shrink: 0;
 }
 
-.agent-settings-row-disabled {
+.agent-settings-row-disabled .agent-settings-drag-handle,
+.agent-settings-row-disabled .agent-settings-main {
   opacity: 0.55;
+}
+
+.agent-settings-row-disabled .agent-settings-actions {
+  opacity: 1;
 }
 
 .agent-settings-row-dragging {
@@ -684,17 +689,6 @@
   padding: 4px 10px;
   font-size: 11px;
   white-space: nowrap;
-}
-
-.agent-settings-install-btn:not(:disabled) {
-  background: #1687ff;
-  box-shadow: 0 0 0 2px rgba(22, 135, 255, 0.28), 0 0 16px rgba(22, 135, 255, 0.35);
-  font-weight: 700;
-}
-
-.agent-settings-install-btn:not(:disabled):hover {
-  background: #3297ff;
-  box-shadow: 0 0 0 2px rgba(50, 151, 255, 0.38), 0 0 20px rgba(50, 151, 255, 0.45);
 }
 
 .agent-plugin-entry-actions {

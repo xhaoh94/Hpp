@@ -455,12 +455,14 @@ const setPermissionMode = (permissionMode) => {
 
 const loadPiSDK = async () => {
   const packageRoot = String(process.env.PI_SDK_PACKAGE_ROOT || "").trim();
-  if (packageRoot) {
-    const require = createRequire(import.meta.url);
+  if (!packageRoot) throw new Error("Pi SDK 未安装，请先在 Hpp Agent 设置中安装 Pi");
+  const require = createRequire(import.meta.url);
+  try {
     const entryPath = require.resolve("@earendil-works/pi-coding-agent", { paths: [packageRoot] });
     return import(pathToFileURL(entryPath).href);
+  } catch {
+    throw new Error("Pi SDK 未安装或安装不完整，请在 Hpp Agent 设置中重新安装 Pi");
   }
-  return import("@earendil-works/pi-coding-agent");
 };
 
 const init = async ({ projectPath: cwd, sessionFilePath }) => {

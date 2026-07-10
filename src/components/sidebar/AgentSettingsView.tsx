@@ -575,7 +575,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 <div className="agent-settings-actions">
                   {agentStatus && (isInstallAction || agentStatus.updateAvailable) && (
                     <button
-                      className={`filter-add-btn agent-settings-update-btn ${isInstallAction ? "agent-settings-install-btn" : ""}`}
+                      className="filter-add-btn agent-settings-update-btn"
                       onClick={() => void handleAgentUpdate(agent.id)}
                       disabled={agentUpdating[agent.id] || !agentStatus.canUpdate}
                       title={agentStatus.canUpdate
@@ -587,7 +587,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                         : isInstallAction ? "安装" : "更新"}
                     </button>
                   )}
-                  {agent.removable && (
+                  {isInstalled && agent.removable && (
                     <button
                       className="btn-action agent-settings-refresh-btn"
                       onClick={() => openRemovePluginConfirm(agent.id)}
@@ -597,6 +597,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                       {removingAgentId === agent.id ? "卸载中..." : "卸载"}
                     </button>
                   )}
+                  {isInstalled && (
                   <button
                     className="btn-action agent-settings-refresh-btn"
                     onClick={() => void refreshAgentStatus(agent.id)}
@@ -605,6 +606,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                   >
                     {isChecking ? "检查中..." : "刷新"}
                   </button>
+                  )}
                 </div>
               </div>
             );

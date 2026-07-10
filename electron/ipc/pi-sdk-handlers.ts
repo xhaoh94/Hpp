@@ -1,9 +1,8 @@
-import { app, ipcMain } from "electron";
+import { ipcMain } from "electron";
 import { execFile } from "child_process";
-import { existsSync } from "fs";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
-import { commandExists, getCommandEnv, getExecFileInvocation, getNodeExecutable } from "../utils/command-utils";
+import { commandExists, getCommandEnv, getExecFileInvocation, getNodeExecutable, getNpmInvocation } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 import { getPiSDKPackageJsonPath, getPiSDKUserRuntimeRoot, PI_SDK_PACKAGE } from "../utils/pi-sdk-runtime";
 
@@ -71,7 +70,10 @@ function runNpmCommand(
   args: string[],
   options: { cwd?: string; timeout?: number } = {}
 ): Promise<CommandResult> {
-  return runCommand("npm", args, options);
+  const env = getCommandEnv();
+  const invocation = getNpmInvocation(args, env);
+  if (!invocation) return Promise.reject(new Error("未找到可用的 npm CLI，请重新安装 Node.js"));
+  return runCommand(invocation.command, invocation.args, options);
 }
 
 function parseVersion(version: string): number[] {
@@ -107,34 +109,6 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
-async function findBundledPackageRoot(): Promise<string | undefined> {
-  const candidates = Array.from(new Set([
-    process.cwd(),
-    app.getAppPath(),
-  ]));
-
-  for (const candidate of candidates) {
-    const packageJsonPath = join(candidate, "package.json");
-    if (!existsSync(packageJsonPath)) continue;
-
-    const packageJson = await readJsonFile<{
-      name?: string;
-      dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-    }>(packageJsonPath);
-
-    if (
-      packageJson?.name === "hpp" ||
-      packageJson?.dependencies?.[PI_SDK_PACKAGE] ||
-      packageJson?.devDependencies?.[PI_SDK_PACKAGE]
-    ) {
-      return candidate;
-    }
-  }
-
-  return undefined;
-}
-
 async function getInstalledVersion(packageRoot: string): Promise<string | undefined> {
   const packageJson = await readJsonFile<{ version?: string }>(
     getPiSDKPackageJsonPath(packageRoot)
@@ -145,7 +119,7 @@ async function getInstalledVersion(packageRoot: string): Promise<string | undefi
 async function getActivePackageRoot(): Promise<string | undefined> {
   const userRuntimeRoot = getPiSDKUserRuntimeRoot();
   if (await getInstalledVersion(userRuntimeRoot)) return userRuntimeRoot;
-  return app.isPackaged ? undefined : findBundledPackageRoot();
+  return undefined;
 }
 
 async function getLatestVersion(): Promise<string | undefined> {
@@ -208,18 +182,15 @@ export async function updatePiSDK(): Promise<{ success: boolean; error?: string;
     return { success: false, error: "Pi SDK 正在更新中" };
   }
 
-  const packageRoot = app.isPackaged ? getPiSDKUserRuntimeRoot() : await findBundledPackageRoot();
-  if (!packageRoot) return { success: false, error: "未找到 Pi SDK 安装目录" };
+  const packageRoot = getPiSDKUserRuntimeRoot();
 
   updateInProgress = true;
   try {
-    if (app.isPackaged) {
-      await mkdir(packageRoot, { recursive: true });
-      await writeFile(join(packageRoot, "package.json"), `${JSON.stringify({
-        name: "hpp-pi-sdk-runtime",
-        private: true,
-      }, null, 2)}\n`, "utf8");
-    }
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), `${JSON.stringify({
+      name: "hpp-pi-sdk-runtime",
+      private: true,
+    }, null, 2)}\n`, "utf8");
     await runNpmCommand(
       ["install", `${PI_SDK_PACKAGE}@latest`, "--save-exact", "--omit=dev"],
       { cwd: packageRoot, timeout: 180000 }
