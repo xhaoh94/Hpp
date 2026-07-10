@@ -618,7 +618,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
   });
 
-  ipcMain.handle("agentPlugin:remove", async (_event, agentId: string) => {
+  ipcMain.handle("agentPlugin:remove", async (_event, agentId: string, removeRuntime = false) => {
     if (agentManager.hasAgentSessions(agentId)) {
       return {
         success: false,
@@ -626,7 +626,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         agents: await agentRegistry.listAgents(),
       };
     }
-    return agentRegistry.removePlugin(agentId);
+    return agentRegistry.removePlugin(agentId, removeRuntime);
   });
 
   ipcMain.handle("agentPlugin:reload", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "hpp",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
@@ -17,6 +17,7 @@
   "license": "ISC",
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.1",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.17",
@@ -30,7 +31,6 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.3",
     "@electron-toolkit/utils": "^4.0.0",
     "adm-zip": "^0.5.18",
     "electron-updater": "^6.8.9",

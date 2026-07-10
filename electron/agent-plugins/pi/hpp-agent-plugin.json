@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "pi",
-  "name": "Pi Agent",
+  "name": "Pi",
   "version": "1.0.0",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",

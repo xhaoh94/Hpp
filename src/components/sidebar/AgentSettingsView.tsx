@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileArchive, FolderOpen, GripVertical, PackagePlus, RefreshCw, Settings, X } from "lucide-react";
 import {
   getAgentPlanModeTooltip,
@@ -102,10 +102,14 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const [pluginPath, setPluginPath] = useState("");
   const [pluginStatus, setPluginStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [installingPlugin, setInstallingPlugin] = useState(false);
-  const [installingOfficialAgentId, setInstallingOfficialAgentId] = useState("");
+  const [installingOfficialAgentIds, setInstallingOfficialAgentIds] = useState<Record<string, boolean>>({});
   const [removingAgentId, setRemovingAgentId] = useState("");
+  const [removeConfirmAgentId, setRemoveConfirmAgentId] = useState<string | null>(null);
+  const [removeLocalRuntime, setRemoveLocalRuntime] = useState(false);
   const [showLocalPluginModal, setShowLocalPluginModal] = useState(false);
   const [showOfficialPluginModal, setShowOfficialPluginModal] = useState(false);
+  const officialInstallQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const installResultQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const agents = useAgentCatalogStore((state) => state.agents);
   const officialPlugins = useAgentCatalogStore((state) => state.officialPlugins);
@@ -263,18 +267,29 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     if (!result.canceled && result.path) setPluginPath(result.path);
   }, []);
 
-  const applyInstalledPluginResult = useCallback(async (result: AgentPluginInstallResult) => {
-    if (!result.agent) return;
-    const nextAgents = result.agents || agents;
-    const nextEnabledAgents = enabledAgents.includes(result.agent.id)
-      ? enabledAgents
-      : [...enabledAgents, result.agent.id];
-    const nextAgentOrder = normalizeAgentOrder([...agentOrder, result.agent.id], nextAgents);
-    setEnabledAgents(filterKnownAgentIds(nextEnabledAgents, nextAgents));
-    setAgentOrder(nextAgentOrder);
-    delete cachedAgentStatuses[result.agent.id];
-    delete lastAgentChecks[result.agent.id];
-    await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
+  const applyInstalledPluginResult = useCallback((result: AgentPluginInstallResult) => {
+    const installedAgent = result.agent;
+    if (!installedAgent) return Promise.resolve();
+
+    const applyResult = installResultQueueRef.current.then(async () => {
+      const nextAgents = result.agents || agents;
+      const settings = await loadSettings();
+      const general = asRecord(settings.general);
+      const currentEnabledAgents = getStringArray(general.enabledAgents) ?? enabledAgents;
+      const currentAgentOrder = getStringArray(general.agentOrder) ?? agentOrder;
+      const nextEnabledAgents = currentEnabledAgents.includes(installedAgent.id)
+        ? currentEnabledAgents
+        : [...currentEnabledAgents, installedAgent.id];
+      const nextAgentOrder = normalizeAgentOrder([...currentAgentOrder, installedAgent.id], nextAgents);
+      setEnabledAgents(filterKnownAgentIds(nextEnabledAgents, nextAgents));
+      setAgentOrder(nextAgentOrder);
+      delete cachedAgentStatuses[installedAgent.id];
+      delete lastAgentChecks[installedAgent.id];
+      await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
+    });
+
+    installResultQueueRef.current = applyResult.catch(() => undefined);
+    return applyResult;
   }, [agentOrder, agents, enabledAgents, saveAgentSettings]);
 
   const handleInstallPlugin = useCallback(async () => {
@@ -312,24 +327,36 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     const trusted = window.confirm("官方 Agent 插件会在主进程中执行 JavaScript。请确认信任 xhaoh94/Hpp Release 后继续安装。");
     if (!trusted) return;
 
-    setInstallingOfficialAgentId(plugin.id);
+    setInstallingOfficialAgentIds((prev) => ({ ...prev, [plugin.id]: true }));
     setPluginStatus(null);
-    try {
-      const result = await installOfficialPlugin(plugin.id);
-      if (!result.success) {
-        setPluginStatus({ type: "error", text: result.error || "官方插件安装失败" });
-        return;
+
+    const installTask = officialInstallQueueRef.current.then(async () => {
+      try {
+        const result = await installOfficialPlugin(plugin.id);
+        if (!result.success) {
+          setPluginStatus({ type: "error", text: result.error || "官方插件安装失败" });
+          return;
+        }
+        await applyInstalledPluginResult(result);
+        setShowOfficialPluginModal(false);
+        setPluginStatus({
+          type: "success",
+          text: `${result.agent?.name || plugin.name} ${result.replaced ? "已更新" : "已安装"}`,
+        });
+      } catch (error) {
+        setPluginStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
       }
-      await applyInstalledPluginResult(result);
-      setShowOfficialPluginModal(false);
-      setPluginStatus({
-        type: "success",
-        text: `${result.agent?.name || plugin.name} ${result.replaced ? "已更新" : "已安装"}`,
-      });
-    } catch (error) {
-      setPluginStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    });
+
+    officialInstallQueueRef.current = installTask.catch(() => undefined);
+    try {
+      await installTask;
     } finally {
-      setInstallingOfficialAgentId("");
+      setInstallingOfficialAgentIds((prev) => {
+        const next = { ...prev };
+        delete next[plugin.id];
+        return next;
+      });
     }
   }, [applyInstalledPluginResult, installOfficialPlugin]);
 
@@ -344,11 +371,24 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     await loadOfficialPlugins(true);
   }, [loadOfficialPlugins]);
 
-  const handleRemovePlugin = useCallback(async (agentId: string) => {
+  const openRemovePluginConfirm = useCallback((agentId: string) => {
+    setRemoveLocalRuntime(false);
+    setRemoveConfirmAgentId(agentId);
+  }, []);
+
+  const closeRemovePluginConfirm = useCallback(() => {
+    if (removingAgentId) return;
+    setRemoveConfirmAgentId(null);
+    setRemoveLocalRuntime(false);
+  }, [removingAgentId]);
+
+  const handleRemovePlugin = useCallback(async () => {
+    const agentId = removeConfirmAgentId;
+    if (!agentId) return;
     setRemovingAgentId(agentId);
     setPluginStatus(null);
     try {
-      const result = await removePlugin(agentId);
+      const result = await removePlugin(agentId, removeLocalRuntime);
       if (!result.success) {
         setPluginStatus({ type: "error", text: result.error || "插件卸载失败" });
         return;
@@ -366,13 +406,18 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
         return next;
       });
       await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
-      setPluginStatus({ type: "success", text: "插件已卸载" });
+      setPluginStatus({
+        type: "success",
+        text: removeLocalRuntime ? "插件和本地 Agent 已卸载" : "插件已卸载",
+      });
+      setRemoveConfirmAgentId(null);
+      setRemoveLocalRuntime(false);
     } catch (error) {
       setPluginStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       setRemovingAgentId("");
     }
-  }, [agentOrder, agents, enabledAgents, removePlugin, saveAgentSettings]);
+  }, [agentOrder, agents, enabledAgents, removeConfirmAgentId, removeLocalRuntime, removePlugin, saveAgentSettings]);
 
   const orderedAgents = useMemo(() => orderAgents(agents, agentOrder), [agentOrder, agents]);
   const installedAgentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
@@ -437,6 +482,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
             const isInstalled = agentStatus?.installed === true;
             const isChecking = agentChecking[agent.id] === true || !agentStatus;
             const isUnavailable = !isInstalled && !isChecking;
+            const isInstallAction = agentStatus?.installed === false;
             const versionLabel = agentStatus?.currentVersion
               ? `v${agentStatus.currentVersion}`
               : isChecking
@@ -527,20 +573,24 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 </label>
 
                 <div className="agent-settings-actions">
-                  {agentStatus?.updateAvailable && (
+                  {agentStatus && (isInstallAction || agentStatus.updateAvailable) && (
                     <button
                       className="filter-add-btn agent-settings-update-btn"
                       onClick={() => void handleAgentUpdate(agent.id)}
                       disabled={agentUpdating[agent.id] || !agentStatus.canUpdate}
-                      title={agentStatus.canUpdate ? "更新" : "当前环境不支持自动更新"}
+                      title={agentStatus.canUpdate
+                        ? isInstallAction ? "安装" : "更新"
+                        : agentStatus.error || "请先安装 Node.js 和 npm"}
                     >
-                      {agentUpdating[agent.id] ? "更新中..." : "更新"}
+                      {agentUpdating[agent.id]
+                        ? isInstallAction ? "安装中..." : "更新中..."
+                        : isInstallAction ? "安装" : "更新"}
                     </button>
                   )}
                   {agent.removable && (
                     <button
                       className="btn-action agent-settings-refresh-btn"
-                      onClick={() => void handleRemovePlugin(agent.id)}
+                      onClick={() => openRemovePluginConfirm(agent.id)}
                       disabled={removingAgentId === agent.id}
                       title="卸载插件"
                     >
@@ -689,7 +739,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                   const installedAgent = installedAgentById.get(plugin.id);
                   const installed = !!installedAgent;
                   const updateAvailable = installed && compareVersions(plugin.version, installedAgent.version) > 0;
-                  const installing = installingOfficialAgentId === plugin.id;
+                  const installing = installingOfficialAgentIds[plugin.id] === true;
                   const buttonText = installing
                     ? "安装中..."
                     : !installed
@@ -730,6 +780,49 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 {!officialLoading && !officialError && officialPlugins.length === 0 && (
                   <p className="agent-settings-empty">暂无官方插件。</p>
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {removeConfirmAgentId && (
+        <div className="settings-modal-overlay" onClick={closeRemovePluginConfirm}>
+          <div className="settings-modal agent-remove-confirm-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-modal-header">
+              <h3>卸载 Agent 插件</h3>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={closeRemovePluginConfirm}
+                disabled={!!removingAgentId}
+                aria-label="关闭"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="settings-modal-content agent-remove-confirm-content">
+              <p>
+                确定要卸载 {agents.find((agent) => agent.id === removeConfirmAgentId)?.name || removeConfirmAgentId} 插件吗？
+              </p>
+              <label className="settings-toggle-row agent-remove-runtime-toggle">
+                <span>
+                  <span className="settings-toggle-title">同时卸载本地安装的 Agent</span>
+                  <span className="settings-toggle-desc">关闭时只删除 Hpp 插件，保留本地运行时。</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={removeLocalRuntime}
+                  onChange={(event) => setRemoveLocalRuntime(event.target.checked)}
+                  disabled={!!removingAgentId}
+                />
+              </label>
+              <div className="agent-remove-confirm-actions">
+                <button type="button" className="btn-action" onClick={closeRemovePluginConfirm} disabled={!!removingAgentId}>
+                  取消
+                </button>
+                <button type="button" className="filter-add-btn" onClick={() => void handleRemovePlugin()} disabled={!!removingAgentId}>
+                  {removingAgentId ? "卸载中..." : "确认卸载"}
+                </button>
               </div>
             </div>
           </div>

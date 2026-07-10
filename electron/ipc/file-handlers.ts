@@ -1,11 +1,12 @@
 import { ipcMain, dialog, BrowserWindow } from "electron";
 import { readdir, readFile, access, stat } from "fs/promises";
-import { basename, join } from "path";
+import { basename, extname, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
 import { commandExists } from "../utils/command-utils";
 
 const SEARCH_RESULT_LIMIT = 50;
+const MAX_IMAGE_PREVIEW_BYTES = 25 * 1024 * 1024;
 const SEARCH_EXCLUDED_DIRS = new Set([
   "node_modules",
   ".git",
@@ -20,6 +21,18 @@ const SEARCH_EXCLUDED_DIRS = new Set([
   "target",
   "vendor",
 ]);
+
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".gif": "image/gif",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+};
 
 interface FileEntry {
   name: string;
@@ -45,6 +58,10 @@ const getPathAttachmentInfo = async (targetPath: string): Promise<PathAttachment
     kind: info.isDirectory() ? "folder" : "file",
   };
 };
+
+function getImageMimeType(filePath: string) {
+  return IMAGE_MIME_TYPES[extname(filePath).toLowerCase()] || "";
+}
 
 export function registerFileHandlers() {
   ipcMain.handle("fs:readDirectory", async (_event, dirPath: string) => {
@@ -90,6 +107,27 @@ export function registerFileHandlers() {
     try {
       const content = await readFile(filePath, "utf-8");
       return { success: true, content };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("fs:readFileDataUrl", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || !filePath.trim()) {
+      return { success: false, error: "Invalid file path" };
+    }
+    const mimeType = getImageMimeType(filePath);
+    if (!mimeType) {
+      return { success: false, error: "Unsupported image file type" };
+    }
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) return { success: false, error: "Path is not a file" };
+      if (info.size > MAX_IMAGE_PREVIEW_BYTES) {
+        return { success: false, error: "Image is too large to preview (maximum 25 MiB)" };
+      }
+      const content = await readFile(filePath);
+      return { success: true, dataUrl: `data:${mimeType};base64,${content.toString("base64")}` };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }

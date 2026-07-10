@@ -131,6 +131,7 @@ export interface ElectronAPI {
   // File system
   readDirectory: (dirPath: string) => Promise<FileEntry[]>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
+  readFileDataUrl: (filePath: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>;
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
@@ -150,7 +151,7 @@ export interface ElectronAPI {
   agentPluginInstallFromPath: (pluginPath: string) => Promise<AgentPluginInstallResult>;
   agentPluginListOfficial: () => Promise<OfficialAgentPluginCatalogResult>;
   agentPluginInstallOfficial: (agentId: string) => Promise<AgentPluginInstallResult>;
-  agentPluginRemove: (agentId: string) => Promise<AgentPluginInstallResult>;
+  agentPluginRemove: (agentId: string, removeRuntime?: boolean) => Promise<AgentPluginInstallResult>;
   agentPluginReload: () => Promise<AgentPluginInstallResult>;
 
   // Data persistence

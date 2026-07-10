@@ -38,6 +38,7 @@ export interface AgentEvent {
   title?: string;
   state?: string;
   status?: string;
+  expanded?: boolean;
   command?: string;
   filePath?: string;
   detail?: unknown;

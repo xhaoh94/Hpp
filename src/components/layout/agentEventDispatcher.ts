@@ -228,6 +228,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         detail: eventType === "question" ? undefined : eventDetail,
         files: processFiles,
         state: eventType === "question" ? eventState || "running" : eventState,
+        expanded: typeof event.expanded === "boolean" ? event.expanded : undefined,
       });
       break;
     case "agent_ready":

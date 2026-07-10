@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, Settings } from "lucide-react";
+import { Bot, RotateCcw, Settings } from "lucide-react";
 import { AgentSettingsView } from "./AgentSettingsView";
 import { AgentConfigModal } from "./AgentConfigModal";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -48,6 +48,8 @@ const DEFAULT_FILTERS: FilterConfig = {
   excludeExtensions: [".pyc", ".class"],
   excludeFiles: [".env"],
 };
+
+const IMAGE_RETENTION_HOURS = 12;
 
 function formatKey(e: KeyboardEvent): string {
   const parts: string[] = [];
@@ -109,12 +111,9 @@ function normalizeFilters(value: unknown): FilterConfig {
 
 function normalizeGeneral(value: unknown): GeneralSettings {
   const general = asRecord(value);
-  const imageRetentionHours = typeof general.imageRetentionHours === "number"
-    ? general.imageRetentionHours
-    : 12;
   return {
     tempImagePath: typeof general.tempImagePath === "string" ? general.tempImagePath : "",
-    imageRetentionHours,
+    imageRetentionHours: IMAGE_RETENTION_HOURS,
     planModeEnabled: general.planModeEnabled === true,
     closeToTray: typeof general.closeToTray === "boolean" ? general.closeToTray : true,
   };
@@ -150,7 +149,6 @@ export function SettingsView() {
   const [showAgentSettingsModal, setShowAgentSettingsModal] = useState(false);
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
   const [tempImagePath, setTempImagePath] = useState("");
-  const [imageRetentionHours, setImageRetentionHours] = useState(12);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const [closeToTray, setCloseToTray] = useState(true);
@@ -171,11 +169,20 @@ export function SettingsView() {
       if (settings.shortcuts) setShortcuts(normalizeShortcuts(settings.shortcuts));
       if (settings.filters) setFilters(normalizeFilters(settings.filters));
       if (settings.general) {
+        const originalGeneral = asRecord(settings.general);
         const general = normalizeGeneral(settings.general);
         setTempImagePath(general.tempImagePath);
-        setImageRetentionHours(general.imageRetentionHours);
         setPlanModeEnabled(general.planModeEnabled);
         setCloseToTray(general.closeToTray);
+        if (originalGeneral.imageRetentionHours !== IMAGE_RETENTION_HOURS) {
+          void window.electronAPI.saveData("settings", {
+            ...settings,
+            general: {
+              ...originalGeneral,
+              imageRetentionHours: IMAGE_RETENTION_HOURS,
+            },
+          });
+        }
       }
     });
   }, []);
@@ -216,7 +223,12 @@ export function SettingsView() {
     const data = await window.electronAPI.loadData("settings");
     const currentSettings = asRecord(data);
     const currentGeneral = asRecord(currentSettings.general);
-    const generalValues = nextGeneral ?? { tempImagePath, imageRetentionHours, planModeEnabled, closeToTray };
+    const generalValues = nextGeneral ?? {
+      tempImagePath,
+      imageRetentionHours: IMAGE_RETENTION_HOURS,
+      planModeEnabled,
+      closeToTray,
+    };
     const nextSettings = {
       ...currentSettings,
       shortcuts: nextShortcuts,
@@ -228,7 +240,7 @@ export function SettingsView() {
     };
 
     await window.electronAPI.saveData("settings", nextSettings);
-  }, [shortcuts, filters, tempImagePath, imageRetentionHours, planModeEnabled, closeToTray]);
+  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray]);
 
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
@@ -240,23 +252,25 @@ export function SettingsView() {
     void saveSettings(shortcuts, f);
   };
 
-  const saveGeneral = async () => {
-    await saveSettings(shortcuts, filters, { tempImagePath, imageRetentionHours, planModeEnabled, closeToTray });
-    await window.electronAPI.setCloseToTray(closeToTray);
-    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
-      detail: { planModeEnabled },
-    }));
-  };
-
   const updateCloseToTray = (enabled: boolean) => {
     setCloseToTray(enabled);
     void saveSettings(shortcuts, filters, {
       tempImagePath,
-      imageRetentionHours,
+      imageRetentionHours: IMAGE_RETENTION_HOURS,
       planModeEnabled,
       closeToTray: enabled,
     });
     void window.electronAPI.setCloseToTray(enabled);
+  };
+
+  const updateTempImagePath = (nextPath: string) => {
+    setTempImagePath(nextPath);
+    void saveSettings(shortcuts, filters, {
+      tempImagePath: nextPath,
+      imageRetentionHours: IMAGE_RETENTION_HOURS,
+      planModeEnabled,
+      closeToTray,
+    });
   };
 
   const openAgentConfig = () => {
@@ -552,7 +566,7 @@ export function SettingsView() {
               <div className="settings-section">
                 <h3>图片设置</h3>
                 <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>
-                  临时图片将在指定时间后自动清理
+                  临时图片将在 12 小时后自动清理
                 </p>
                 <div className="filter-group">
                   <div className="filter-row">
@@ -560,17 +574,29 @@ export function SettingsView() {
                     <div style={{ display: "flex", gap: 6 }}>
                       <input
                         value={tempImagePath}
-                        onChange={(e) => setTempImagePath(e.target.value)}
+                        readOnly
                         placeholder="留空使用默认路径"
                         className="filter-custom-input"
                         style={{ flex: 1 }}
+                        title={tempImagePath || "留空使用默认路径"}
                       />
                       <button
+                        type="button"
+                        className="filter-add-btn"
+                        onClick={() => updateTempImagePath("")}
+                        disabled={!tempImagePath}
+                        title="恢复默认路径"
+                        aria-label="恢复默认路径"
+                      >
+                        <RotateCcw size={14} />
+                      </button>
+                      <button
+                        type="button"
                         className="filter-add-btn"
                         onClick={async () => {
                           const result = await window.electronAPI.openDirectory();
                           if (!result.canceled && result.path) {
-                            setTempImagePath(result.path);
+                            updateTempImagePath(result.path);
                           }
                         }}
                         title="选择文件夹"
@@ -579,29 +605,7 @@ export function SettingsView() {
                       </button>
                     </div>
                   </div>
-                  <div className="filter-row">
-                    <label>图片保留时间（小时）</label>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <input
-                        type="number"
-                        min={1}
-                        max={168}
-                        value={imageRetentionHours}
-                        onChange={(e) => setImageRetentionHours(parseInt(e.target.value) || 12)}
-                        className="filter-custom-input"
-                        style={{ width: 80 }}
-                      />
-                      <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>小时</span>
-                    </div>
-                  </div>
                 </div>
-                <button
-                  className="filter-add-btn"
-                  style={{ marginTop: 12 }}
-                  onClick={() => { saveGeneral(); setShowGeneralModal(false); }}
-                >
-                  保存
-                </button>
               </div>
             </div>
           </div>

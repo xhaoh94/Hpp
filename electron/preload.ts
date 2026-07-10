@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   readDirectory: (dirPath: string) =>
     ipcRenderer.invoke("fs:readDirectory", dirPath),
   readFile: (filePath: string) => ipcRenderer.invoke("fs:readFile", filePath),
+  readFileDataUrl: (filePath: string) => ipcRenderer.invoke("fs:readFileDataUrl", filePath),
   statPath: (filePath: string) => ipcRenderer.invoke("fs:statPath", filePath),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
@@ -55,8 +56,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentPluginListOfficial: () => ipcRenderer.invoke("agentPlugin:listOfficial"),
   agentPluginInstallOfficial: (agentId: string) =>
     ipcRenderer.invoke("agentPlugin:installOfficial", agentId),
-  agentPluginRemove: (agentId: string) =>
-    ipcRenderer.invoke("agentPlugin:remove", agentId),
+  agentPluginRemove: (agentId: string, removeRuntime = false) =>
+    ipcRenderer.invoke("agentPlugin:remove", agentId, removeRuntime),
   agentPluginReload: () => ipcRenderer.invoke("agentPlugin:reload"),
 
   // Data persistence

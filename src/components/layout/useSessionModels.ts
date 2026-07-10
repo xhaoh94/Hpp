@@ -1,26 +1,15 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
-import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from "@/hooks/useDataPersistence";
+import {
+  applySessionModels,
+  getSessionModel,
+  getSessionThinkingOrDefault,
+  saveSessionModel,
+  selectSessionModel,
+} from "@/hooks/useDataPersistence";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
-
-const findMatchingModel = (models: ModelInfo[], model: ModelInfo | null): ModelInfo | undefined =>
-  model
-    ? models.find((item) => item.id === model.id && item.provider === model.provider)
-    : undefined;
-
-const selectSessionModel = (sessionId: string, models: ModelInfo[]): ModelInfo => {
-  const persisted = getSessionModel(sessionId);
-  const persistedMatch = findMatchingModel(models, persisted);
-  if (persistedMatch) return persistedMatch;
-
-  const currentModel = useChatStore.getState().currentModel;
-  const currentMatch = findMatchingModel(models, currentModel);
-  if (currentMatch) return currentMatch;
-
-  return models[0];
-};
 
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -39,6 +28,7 @@ const addAgentStartupError = (sessionId: string, error: unknown) => {
 
 const applyAndSyncSessionModel = async (sessionId: string, model: ModelInfo, setCurrentModel: (model: ModelInfo) => void) => {
   setCurrentModel(model);
+  saveSessionModel(sessionId, model);
   await window.electronAPI.agentSetModel(model.provider, model.id, sessionId);
 };
 
@@ -86,7 +76,8 @@ export function useSessionModels({
 
         if (models && models.length > 0) {
           setAvailableModels(models);
-          await applyAndSyncSessionModel(sessionId, selectSessionModel(sessionId, models), setCurrentModel);
+          const selectedModel = selectSessionModel(sessionId, models);
+          if (selectedModel) await applyAndSyncSessionModel(sessionId, selectedModel, setCurrentModel);
           return;
         }
       } catch {
@@ -132,6 +123,10 @@ export function useSessionModels({
   ]);
 
   const switchToSession = useCallback((project: Project, session: ProjectSession) => {
+    const currentModel = useChatStore.getState().currentModel;
+    if (!getSessionModel(session.id) && currentModel) {
+      saveSessionModel(session.id, currentModel);
+    }
     useProjectStore.getState().setActiveSession(session.id);
     useChatStore.getState().setActiveAgent(session.agentId);
     useChatStore.getState().switchSession(session.id);
@@ -154,8 +149,10 @@ export function useSessionModels({
         applySessionModels(session.id, result.models);
         if (result.models && result.models.length > 0) {
           const selectedModel = selectSessionModel(session.id, result.models);
-          useChatStore.getState().setCurrentModel(selectedModel);
-          await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
+          if (selectedModel) {
+            useChatStore.getState().setCurrentModel(selectedModel);
+            await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
+          }
         }
       }
       useProjectStore.getState().markSessionInitialized(session.id);
@@ -166,8 +163,10 @@ export function useSessionModels({
           if (models && models.length > 0) {
             useChatStore.getState().setAvailableModels(models);
             const selectedModel = selectSessionModel(session.id, models);
-            useChatStore.getState().setCurrentModel(selectedModel);
-            await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
+            if (selectedModel) {
+              useChatStore.getState().setCurrentModel(selectedModel);
+              await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
+            }
           }
         } catch {
           // The active-session model effect will retry and show an empty list if needed.

@@ -4,7 +4,7 @@ import type {
   AgentPluginInstallResult,
   OfficialAgentPluginDescriptor,
 } from "@/types";
-import { setAgentCatalog } from "@/lib/agents";
+import { normalizeAgentDisplayName, setAgentCatalog } from "@/lib/agents";
 
 interface AgentCatalogState {
   agents: AgentDescriptor[];
@@ -20,11 +20,11 @@ interface AgentCatalogState {
   installPluginFromPath: (pluginPath: string) => Promise<AgentPluginInstallResult>;
   loadOfficialPlugins: (force?: boolean) => Promise<OfficialAgentPluginDescriptor[]>;
   installOfficialPlugin: (agentId: string) => Promise<AgentPluginInstallResult>;
-  removePlugin: (agentId: string) => Promise<AgentPluginInstallResult>;
+  removePlugin: (agentId: string, removeRuntime?: boolean) => Promise<AgentPluginInstallResult>;
 }
 
 function applyAgents(agents: AgentDescriptor[]) {
-  const nextAgents = agents;
+  const nextAgents = agents.map(normalizeAgentDisplayName);
   setAgentCatalog(nextAgents);
   return nextAgents;
 }
@@ -92,7 +92,7 @@ export const useAgentCatalogStore = create<AgentCatalogState>((set, get) => ({
     try {
       const result = await window.electronAPI.agentPluginListOfficial();
       set({
-        officialPlugins: result.plugins,
+        officialPlugins: result.plugins.map(normalizeAgentDisplayName),
         officialLoaded: true,
         officialLoading: false,
         officialError: result.success ? null : result.error || "加载官方插件失败",
@@ -113,8 +113,8 @@ export const useAgentCatalogStore = create<AgentCatalogState>((set, get) => ({
     return result;
   },
 
-  removePlugin: async (agentId: string) => {
-    const result = await window.electronAPI.agentPluginRemove(agentId);
+  removePlugin: async (agentId: string, removeRuntime = false) => {
+    const result = await window.electronAPI.agentPluginRemove(agentId, removeRuntime);
     if (result.agents) {
       const agents = applyAgents(result.agents);
       set({ agents, loaded: true, error: result.success ? null : result.error || null });

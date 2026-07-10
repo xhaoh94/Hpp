@@ -878,6 +878,31 @@
   width: 620px;
 }
 
+.settings-modal.agent-remove-confirm-modal {
+  width: 440px;
+}
+
+.agent-remove-confirm-content > p {
+  margin: 0 0 18px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.agent-remove-runtime-toggle {
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.agent-remove-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
 .settings-modal-header {
   display: flex;
   justify-content: space-between;

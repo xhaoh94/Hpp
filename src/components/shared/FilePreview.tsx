@@ -31,12 +31,58 @@ interface FilePreviewProps {
 
 const MAX_RENDER_LINES = 1000;
 const MAX_MARKDOWN_CHARS = 500000;
+const IMAGE_FILE_PATTERN = /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i;
+
+function getPathDirectory(filePath: string) {
+  const index = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+  return index >= 0 ? filePath.slice(0, index) : "";
+}
+
+function decodeHrefPath(href: string) {
+  const pathWithoutHash = href.split("#")[0] || "";
+  const pathWithoutQuery = pathWithoutHash.split("?")[0] || "";
+  try {
+    return decodeURIComponent(pathWithoutQuery);
+  } catch {
+    return pathWithoutQuery;
+  }
+}
+
+function resolveMarkdownLinkPath(baseFilePath: string, href: string) {
+  const targetPath = decodeHrefPath(href).trim();
+  if (!targetPath || targetPath.startsWith("#")) return null;
+  if (targetPath.startsWith("//")) return null;
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(targetPath)) return null;
+  if (targetPath.startsWith("/") || targetPath.startsWith("\\")) return null;
+  if (!/\.mdx?$/i.test(targetPath)) return null;
+
+  const separator = baseFilePath.includes("\\") ? "\\" : "/";
+  const baseDirectory = getPathDirectory(baseFilePath);
+  const rootPrefix = baseDirectory.startsWith("/") ? "/" : "";
+  const baseParts = baseDirectory.split(/[\\/]+/).filter(Boolean);
+  const minParts = /^[a-zA-Z]:$/.test(baseParts[0] || "") ? 1 : 0;
+  const targetParts = targetPath.split(/[\\/]+/);
+  const nextParts = [...baseParts];
+
+  for (const part of targetParts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (nextParts.length > minParts) nextParts.pop();
+      continue;
+    }
+    nextParts.push(part);
+  }
+
+  return `${rootPrefix}${nextParts.join(separator)}`;
+}
 
 export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   const [content, setContent] = useState("");
+  const [imageSrc, setImageSrc] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<boolean | null>(null);
+  const [previewHistory, setPreviewHistory] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -50,34 +96,60 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
+  const activeFilePath = previewHistory[previewHistory.length - 1] || filePath;
+
   const handleClose = useCallback(() => {
     setContextMenu(null);
+    if (previewHistory.length > 0) {
+      setPreviewHistory((current) => current.slice(0, -1));
+      return;
+    }
     onCloseRef.current();
-  }, []);
+  }, [previewHistory.length]);
 
   const isMarkdown = useMemo(() => {
-    if (!filePath) return false;
-    return /\.mdx?$/i.test(filePath);
-  }, [filePath]);
+    if (!activeFilePath) return false;
+    return /\.mdx?$/i.test(activeFilePath);
+  }, [activeFilePath]);
+
+  const isImage = useMemo(() => {
+    if (!activeFilePath) return false;
+    return IMAGE_FILE_PATTERN.test(activeFilePath);
+  }, [activeFilePath]);
 
   useEffect(() => {
     setPreviewMode(isMarkdown ? true : null);
   }, [isMarkdown]);
 
   useEffect(() => {
-    if (!filePath) return;
+    setPreviewHistory([]);
+  }, [filePath]);
+
+  useEffect(() => {
+    if (!activeFilePath) return;
     let cancelled = false;
     const loadContent = async () => {
       setLoading(true);
       setError(null);
       setContent("");
+      setImageSrc("");
       try {
-        const result = await window.electronAPI.readFile(filePath);
-        if (cancelled) return;
-        if (result.success) {
-          setContent(result.content || "");
+        if (isImage) {
+          const result = await window.electronAPI.readFileDataUrl(activeFilePath);
+          if (cancelled) return;
+          if (result.success) {
+            setImageSrc(result.dataUrl || "");
+          } else {
+            setError(result.error || "无法读取文件");
+          }
         } else {
-          setError(result.error || "无法读取文件");
+          const result = await window.electronAPI.readFile(activeFilePath);
+          if (cancelled) return;
+          if (result.success) {
+            setContent(result.content || "");
+          } else {
+            setError(result.error || "无法读取文件");
+          }
         }
       } catch (err: unknown) {
         if (cancelled) return;
@@ -88,10 +160,10 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     };
     loadContent();
     return () => { cancelled = true; };
-  }, [filePath]);
+  }, [activeFilePath, isImage]);
 
   useEffect(() => {
-    if (!filePath) return;
+    if (!activeFilePath) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         handleClose();
@@ -99,7 +171,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [filePath, handleClose]);
+  }, [activeFilePath, handleClose]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -111,7 +183,10 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     return () => document.removeEventListener("mousedown", handleClick, true);
   }, [contextMenu]);
 
-  const fileName = useMemo(() => filePath?.split(/[/\\]/).pop() || filePath || "", [filePath]);
+  const fileName = useMemo(
+    () => activeFilePath?.split(/[/\\]/).pop() || activeFilePath || "",
+    [activeFilePath]
+  );
   const showMarkdownPreview = previewMode === true && isMarkdown;
 
   const contentLines = useMemo(() => content.split("\n"), [content]);
@@ -133,6 +208,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
+      if (isImage) return;
       setContextMenu(null);
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed) return;
@@ -170,22 +246,32 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
         setContextMenu({ x: e.clientX, y: e.clientY, selection: selectedText, startLine, endLine });
       }, 10);
     },
-    []
+    [isImage]
   );
 
   const handleSendToChat = useCallback(() => {
-    if (!contextMenu || !filePath) return;
+    if (!contextMenu || !activeFilePath) return;
     addPendingFile({
       id: crypto.randomUUID(),
       fileName,
-      filePath,
+      filePath: activeFilePath,
       startLine: contextMenu.startLine,
       endLine: contextMenu.endLine,
     });
     setContextMenu(null);
-  }, [contextMenu, filePath, fileName, addPendingFile]);
+  }, [contextMenu, activeFilePath, fileName, addPendingFile]);
 
-  if (!filePath) return null;
+  const handleMarkdownLinkClick = useCallback((href: string, event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!activeFilePath) return false;
+    const targetFilePath = resolveMarkdownLinkPath(activeFilePath, href);
+    if (!targetFilePath) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    setPreviewHistory((current) => [...current, targetFilePath]);
+    return true;
+  }, [activeFilePath]);
+
+  if (!activeFilePath) return null;
 
   return (
     <div className="fp-overlay" onClick={handleClose}>
@@ -221,14 +307,22 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
             <div className="fp-status">加载中...</div>
           ) : error ? (
             <div className="fp-status fp-error">{error}</div>
+          ) : isImage ? (
+            <div className="fp-image-preview">
+              {imageSrc ? (
+                <img src={imageSrc} alt={fileName} className="fp-image" />
+              ) : (
+                <div className="fp-status">无法显示图片</div>
+              )}
+            </div>
           ) : showMarkdownPreview ? (
             <div className="fp-markdown-preview">
-              <ErrorBoundary fallback={<div className="fp-status">Markdown 渲染失败，请切换到源码模式</div>}>
-                <MarkdownRenderer content={markdownContent} />
+              <ErrorBoundary key={activeFilePath} fallback={<div className="fp-status">Markdown 渲染失败，请切换到源码模式</div>}>
+                <MarkdownRenderer content={markdownContent} onLinkClick={handleMarkdownLinkClick} />
               </ErrorBoundary>
             </div>
           ) : (
-            <pre ref={contentRef} className="fp-text" data-file-path={filePath}>
+            <pre ref={contentRef} className="fp-text" data-file-path={activeFilePath}>
               {displayContent.split('\n').map((line, i) => (
                 <div key={i} className="fp-line" data-line={i + 1}>
                   <span className="fp-line-number" data-line={i + 1}>{i + 1}</span>
@@ -239,7 +333,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
           )}
         </div>
         <div className="fp-footer">
-          <span>选择内容后右键可发送到聊天</span>
+          <span>{isImage ? "图片预览" : "选择内容后右键可发送到聊天"}</span>
         </div>
       </div>
 

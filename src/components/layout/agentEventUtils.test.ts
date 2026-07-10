@@ -6,6 +6,7 @@ import {
   getToolSummary,
   getUIResponsePayload,
   mergeRuntimeChangeFile,
+  normalizePlanStepsFromEvent,
   summarizeRuntimeChanges,
 } from "./agentEventUtils";
 
@@ -84,6 +85,27 @@ describe("agentEventUtils", () => {
     runtime.nativePlanSteps = true;
 
     expect(buildInferredPlanSteps(runtime, "analyze")).toBeNull();
+  });
+
+  it("reads detailed Codex plan tasks from the step field", () => {
+    expect(normalizePlanStepsFromEvent({
+      type: "plan_update",
+      steps: [
+        { step: "Locate the Todo data source and renderer", status: "in_progress" },
+        { step: "Fix the plan field mapping and preserve compatibility", status: "pending" },
+      ],
+    } as AgentEvent)).toEqual([
+      {
+        id: "step-0-Locate the Todo data sou",
+        title: "Locate the Todo data source and renderer",
+        status: "running",
+      },
+      {
+        id: "step-1-Fix the plan field mappi",
+        title: "Fix the plan field mapping and preserve compatibility",
+        status: "pending",
+      },
+    ]);
   });
 
   it("normalizes confirm UI responses with localized negative answers", () => {

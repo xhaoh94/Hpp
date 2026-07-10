@@ -10,7 +10,7 @@ import { CodexAgent } from "./codex-agent";
 import { DroidAgent } from "./droid-agent";
 import { OpenCodeAgent } from "./opencode-agent";
 import { PiSDKAgent } from "./pi-sdk-agent";
-import { getPiSDKStatus, updatePiSDK } from "../ipc/pi-sdk-handlers";
+import { getPiSDKStatus, uninstallPiSDK, updatePiSDK } from "../ipc/pi-sdk-handlers";
 import {
   commandExists as commandExistsOnPath,
   findCommandsOnPath,
@@ -441,14 +441,31 @@ async function getInstalledPackageVersion(packageName: string): Promise<string |
   }
 }
 
+async function getNodeRuntimeStatus(): Promise<{ nodeVersion?: string; nodeOk: boolean; error?: string }> {
+  if (!(await commandExists("node"))) {
+    return { nodeOk: false, error: "未检测到 Node.js，请先安装 Node.js 后再安装 Agent" };
+  }
+  const versionResult = await getCommandVersion("node");
+  return {
+    nodeVersion: versionResult.version,
+    nodeOk: !!versionResult.version,
+    error: versionResult.version ? undefined : `无法检测 Node.js 版本：${versionResult.error || "未知错误"}`,
+  };
+}
+
 async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPackageStatus> {
   const command = descriptor.command || descriptor.id;
   const installed = await commandExists(command);
+  const nodeStatus = await getNodeRuntimeStatus();
+  const npmAvailable = await commandExists("npm");
   if (!installed) {
     return {
       installed: false,
       updateAvailable: false,
-      canUpdate: await commandExists("npm"),
+      canUpdate: npmAvailable && nodeStatus.nodeOk,
+      nodeVersion: nodeStatus.nodeVersion,
+      nodeOk: nodeStatus.nodeOk,
+      error: nodeStatus.error || (npmAvailable ? undefined : "未检测到 npm，请重新安装包含 npm 的 Node.js"),
       source: descriptor.source,
       installedPath: descriptor.installedPath,
       removable: descriptor.removable,
@@ -484,7 +501,9 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
     currentVersion,
     latestVersion,
     updateAvailable,
-    canUpdate: !!descriptor.packageName && await commandExists("npm"),
+    canUpdate: !!descriptor.packageName && npmAvailable && nodeStatus.nodeOk,
+    nodeVersion: nodeStatus.nodeVersion,
+    nodeOk: nodeStatus.nodeOk,
     source: descriptor.source,
     installedPath: descriptor.installedPath,
     removable: descriptor.removable,
@@ -495,6 +514,14 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
 async function updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }> {
   if (!descriptor.packageName) {
     return { success: false, error: `${descriptor.name} 不支持自动更新`, status: await getCliAgentStatus(descriptor) };
+  }
+  const nodeStatus = await getNodeRuntimeStatus();
+  if (!nodeStatus.nodeOk) {
+    return {
+      success: false,
+      error: nodeStatus.error || "未检测到可用的 Node.js",
+      status: await getCliAgentStatus(descriptor),
+    };
   }
   if (!(await commandExists("npm"))) {
     return {
@@ -806,12 +833,30 @@ export class AgentPluginRegistry {
     }
   }
 
-  async removePlugin(agentId: string): Promise<AgentPluginInstallResult> {
+  async removePlugin(agentId: string, removeRuntime = false): Promise<AgentPluginInstallResult> {
     try {
       await this.ensureLoaded();
       const record = this.pluginRecords.get(agentId);
       if (!record) {
         return { success: false, error: `未安装 agent 插件：${agentId}`, agents: await this.listAgents() };
+      }
+
+      if (removeRuntime) {
+        if (agentId === "pi") {
+          const result = await uninstallPiSDK();
+          if (!result.success) {
+            return { success: false, error: result.error || "Pi SDK 卸载失败", agents: await this.listAgents() };
+          }
+        } else if (record.descriptor.packageName) {
+          if (!(await commandExists("npm"))) {
+            return { success: false, error: "未找到 npm，无法卸载本地 Agent", agents: await this.listAgents() };
+          }
+          try {
+            await runNpmCommand(["uninstall", "-g", record.descriptor.packageName], { timeout: 180000 });
+          } catch (error) {
+            return { success: false, error: formatError(error), agents: await this.listAgents() };
+          }
+        }
       }
 
       record.module = undefined;

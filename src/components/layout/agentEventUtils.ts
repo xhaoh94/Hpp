@@ -440,6 +440,7 @@ const normalizePlanStepStatus = (value: unknown): AgentProcessStepStatus => {
 
 const getPlanStepTitle = (step: UnknownRecord, index: number) => {
   const title =
+    getStringField(step, "step") ||
     getStringField(step, "title") ||
     getStringField(step, "text") ||
     getStringField(step, "content") ||

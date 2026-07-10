@@ -9,6 +9,11 @@ import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers } from "./agents/agent-manager";
 import type { AppUpdateState, AppUpdateStatus } from "../src/types/ipc";
+import {
+  APP_UPDATE_CHECK_INTERVAL_MS,
+  shouldRunPeriodicAppUpdateCheck,
+  shouldStopAppUpdatePolling,
+} from "./app-update-polling";
 
 // Enable IME support on Linux Wayland
 if (process.platform === "linux") {
@@ -29,6 +34,7 @@ let tray: Tray | null = null;
 let closeToTray = DEFAULT_CLOSE_TO_TRAY;
 let isQuitting = false;
 let updaterInitialized = false;
+let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
 let updateStatus: AppUpdateStatus = {
   state: "idle",
   currentVersion: app.getVersion(),
@@ -106,6 +112,21 @@ function updateStatusPatch(patch: Partial<AppUpdateStatus>) {
     ...patch,
   };
   mainWindow?.webContents.send("app:update-status", updateStatus);
+  if (shouldStopAppUpdatePolling(updateStatus.state)) stopPeriodicUpdateChecks();
+}
+
+function stopPeriodicUpdateChecks() {
+  if (!updateCheckTimer) return;
+  clearInterval(updateCheckTimer);
+  updateCheckTimer = null;
+}
+
+function startPeriodicUpdateChecks() {
+  if (!app.isPackaged || updateCheckTimer || shouldStopAppUpdatePolling(updateStatus.state)) return;
+  updateCheckTimer = setInterval(() => {
+    if (!shouldRunPeriodicAppUpdateCheck(updateStatus.state)) return;
+    void checkForAppUpdates();
+  }, APP_UPDATE_CHECK_INTERVAL_MS);
 }
 
 function getReleaseNotes(info: UpdateInfo) {
@@ -137,7 +158,9 @@ function updateStatusFromInfo(state: AppUpdateState, info?: UpdateInfo, extra?: 
 }
 
 function shouldShowSystemNotification() {
-  return !BrowserWindow.getFocusedWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return true;
+  if (!mainWindow.isVisible() || mainWindow.isMinimized()) return true;
+  return !mainWindow.isFocused() && BrowserWindow.getFocusedWindow() !== mainWindow;
 }
 
 function showSystemNotification(title: string, body: string) {
@@ -332,6 +355,7 @@ if (singleInstanceLock) {
     });
     if (app.isPackaged) {
       initAutoUpdater();
+      startPeriodicUpdateChecks();
       setTimeout(() => {
         void checkForAppUpdates();
       }, 3000);
@@ -349,6 +373,7 @@ if (singleInstanceLock) {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stopPeriodicUpdateChecks();
 });
 
 app.on("window-all-closed", () => {

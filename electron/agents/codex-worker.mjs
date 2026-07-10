@@ -271,7 +271,7 @@ const startAppServer = async () => {
 
     child.stderr?.on("data", (chunk) => {
       const text = chunk.toString().trim();
-      if (text) send({ type: "process_event", entryType: "status", title: "Codex app-server", detail: text, state: "running" });
+      if (text) send({ type: "process_event", entryType: "status", title: "Codex app-server", detail: text, state: "running", expanded: false });
     });
 
     child.on("error", (error) => {
@@ -1271,7 +1271,13 @@ const handleServerNotification = (method, params) => {
           steps: params.plan
             .map((step, index) => ({
               id: String(step.id || step.stepId || `codex-plan-${index}`),
-              title: String(step.text || step.title || step.description || `Step ${index + 1}`),
+              title: String(
+                step.step ||
+                step.text ||
+                step.title ||
+                step.description ||
+                `Task ${index + 1}: description unavailable`
+              ),
               status: step.status || step.state || "pending",
             }))
             .filter((step) => step.title.trim()),

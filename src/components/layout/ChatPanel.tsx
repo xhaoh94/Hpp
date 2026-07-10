@@ -1524,8 +1524,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setForkingMessageId(msg.id);
 
     try {
-      const isCodexFork = activeSession.agentId === "codex";
-      if (isCodexFork) {
+      const supportsSynchronousNativeFork = activeSession.agentId === "codex" || activeSession.agentId === "pi";
+      if (supportsSynchronousNativeFork) {
         if (sourceUserMessageIndex >= 0) {
           const nativeFork = await createNativeFork(
             activeSession,
@@ -1545,7 +1545,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
               lastActiveAt: now,
               sessionFilePath: nativeFork.sessionFilePath,
               forkedFrom,
-              forkContext,
             };
             createForkSession(session, forkMessages);
             return;

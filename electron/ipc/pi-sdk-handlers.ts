@@ -1,12 +1,12 @@
 import { app, ipcMain } from "electron";
 import { execFile } from "child_process";
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
+import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
-import { getCommandEnv, getNodeExecutable, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
+import { commandExists, getCommandEnv, getNodeExecutable, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
+import { getPiSDKPackageJsonPath, getPiSDKUserRuntimeRoot, PI_SDK_PACKAGE } from "../utils/pi-sdk-runtime";
 
-const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 const MIN_NODE_VERSION = "22.19.0";
 
 export interface PiSDKStatus {
@@ -107,7 +107,7 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
-async function findPackageRoot(): Promise<string | undefined> {
+async function findBundledPackageRoot(): Promise<string | undefined> {
   const candidates = Array.from(new Set([
     process.cwd(),
     app.getAppPath(),
@@ -137,9 +137,15 @@ async function findPackageRoot(): Promise<string | undefined> {
 
 async function getInstalledVersion(packageRoot: string): Promise<string | undefined> {
   const packageJson = await readJsonFile<{ version?: string }>(
-    join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json")
+    getPiSDKPackageJsonPath(packageRoot)
   );
   return packageJson?.version;
+}
+
+async function getActivePackageRoot(): Promise<string | undefined> {
+  const userRuntimeRoot = getPiSDKUserRuntimeRoot();
+  if (await getInstalledVersion(userRuntimeRoot)) return userRuntimeRoot;
+  return app.isPackaged ? undefined : findBundledPackageRoot();
 }
 
 async function getLatestVersion(): Promise<string | undefined> {
@@ -160,7 +166,7 @@ async function getNodeStatus(): Promise<Pick<PiSDKStatus, "nodeVersion" | "nodeO
 }
 
 export async function getPiSDKStatus(): Promise<PiSDKStatus> {
-  const packageRoot = await findPackageRoot();
+  const packageRoot = await getActivePackageRoot();
   const currentVersion = packageRoot ? await getInstalledVersion(packageRoot) : undefined;
   const nodeStatus = await getNodeStatus();
   let latestVersion: string | undefined;
@@ -177,16 +183,21 @@ export async function getPiSDKStatus(): Promise<PiSDKStatus> {
     latestVersion &&
     compareVersions(currentVersion, latestVersion) < 0
   );
+  const environmentError = !nodeStatus.nodeOk
+    ? `Pi SDK 需要 Node.js >= ${MIN_NODE_VERSION}${nodeStatus.nodeVersion ? `，当前版本为 ${nodeStatus.nodeVersion}` : ""}`
+    : commandExists("npm")
+      ? undefined
+      : "未检测到 npm，请重新安装包含 npm 的 Node.js";
 
   return {
     installed: !!currentVersion,
     currentVersion,
     latestVersion,
     updateAvailable,
-    canUpdate: !!packageRoot && !app.isPackaged,
+    canUpdate: commandExists("npm") && nodeStatus.nodeOk === true,
     packageRoot,
     ...nodeStatus,
-    error,
+    error: error || environmentError,
   };
 }
 
@@ -197,19 +208,20 @@ export async function updatePiSDK(): Promise<{ success: boolean; error?: string;
     return { success: false, error: "Pi SDK 正在更新中" };
   }
 
-  const packageRoot = await findPackageRoot();
-  if (!packageRoot) {
-    return { success: false, error: "未找到 Hpp 的 package.json" };
-  }
-
-  if (app.isPackaged) {
-    return { success: false, error: "打包版暂不支持自动更新 Pi SDK" };
-  }
+  const packageRoot = app.isPackaged ? getPiSDKUserRuntimeRoot() : await findBundledPackageRoot();
+  if (!packageRoot) return { success: false, error: "未找到 Pi SDK 安装目录" };
 
   updateInProgress = true;
   try {
+    if (app.isPackaged) {
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, "package.json"), `${JSON.stringify({
+        name: "hpp-pi-sdk-runtime",
+        private: true,
+      }, null, 2)}\n`, "utf8");
+    }
     await runNpmCommand(
-      ["install", `${PI_SDK_PACKAGE}@latest`],
+      ["install", `${PI_SDK_PACKAGE}@latest`, "--save-exact", "--omit=dev"],
       { cwd: packageRoot, timeout: 180000 }
     );
     return { success: true, status: await getPiSDKStatus() };
@@ -217,6 +229,16 @@ export async function updatePiSDK(): Promise<{ success: boolean; error?: string;
     return { success: false, error: formatError(err), status: await getPiSDKStatus() };
   } finally {
     updateInProgress = false;
+  }
+}
+
+export async function uninstallPiSDK(): Promise<{ success: boolean; error?: string }> {
+  if (updateInProgress) return { success: false, error: "Pi SDK 正在更新中，暂时无法卸载" };
+  try {
+    await rm(getPiSDKUserRuntimeRoot(), { recursive: true, force: true });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: formatError(error) };
   }
 }
 

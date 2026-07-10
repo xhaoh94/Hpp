@@ -4,7 +4,12 @@ import { useChatStore } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
-import { applySessionModels, getSessionModel, getSessionThinkingOrDefault } from "@/hooks/useDataPersistence";
+import {
+  applySessionModels,
+  getSessionThinkingOrDefault,
+  saveSessionModel,
+  selectSessionModel,
+} from "@/hooks/useDataPersistence";
 import { GitBranch } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
@@ -143,6 +148,8 @@ export function ProjectCard({ project }: Props) {
       createdAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
     };
+    const currentModel = useChatStore.getState().currentModel;
+    if (currentModel) saveSessionModel(sessionId, currentModel);
     addSession(project.id, session);
 
     // Switch chat to the new (empty) session
@@ -167,8 +174,12 @@ export function ProjectCard({ project }: Props) {
         const models = await window.electronAPI.agentGetModels(sessionId);
         if (isStillActiveSession() && models && models.length > 0) {
           useChatStore.getState().setAvailableModels(models);
-          // New session: always use first model for the agent
-          useChatStore.getState().setCurrentModel(models[0]);
+          const selectedModel = selectSessionModel(sessionId, models);
+          if (selectedModel) {
+            useChatStore.getState().setCurrentModel(selectedModel);
+            saveSessionModel(sessionId, selectedModel);
+            await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, sessionId);
+          }
         }
       } catch { /* ignore */ }
       if (isStillActiveSession()) {
@@ -254,12 +265,12 @@ export function ProjectCard({ project }: Props) {
           const models = await window.electronAPI.agentGetModels(session.id);
           if (models && models.length > 0) {
             useChatStore.getState().setAvailableModels(models);
-            // Restore per-session persisted model if available, otherwise use first
-            const persisted = getSessionModel(session.id);
-            const match = persisted
-              ? models.find(m => m.id === persisted.id && m.provider === persisted.provider)
-              : undefined;
-            useChatStore.getState().setCurrentModel(match || models[0]);
+            const selectedModel = selectSessionModel(session.id, models);
+            if (selectedModel) {
+              useChatStore.getState().setCurrentModel(selectedModel);
+              saveSessionModel(session.id, selectedModel);
+              await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
+            }
           }
           const thinkingToSet = await getSessionThinkingOrDefault(session.id, session.agentId);
           if (useProjectStore.getState().activeSessionId === session.id) {

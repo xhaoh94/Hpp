@@ -1,4 +1,4 @@
-import { isValidElement, memo, useCallback, useState, type ReactNode } from "react";
+import { isValidElement, memo, useCallback, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -59,7 +59,12 @@ function getTextContent(children: ReactNode): string {
   return "";
 }
 
-function MarkdownRendererImpl({ content }: { content: string }) {
+interface MarkdownRendererProps {
+  content: string;
+  onLinkClick?: (href: string, event: MouseEvent<HTMLAnchorElement>) => boolean | void;
+}
+
+function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
   return (
     <div className="md-content">
       <ReactMarkdown
@@ -98,11 +103,14 @@ function MarkdownRendererImpl({ content }: { content: string }) {
           a({ href, children, ...props }) {
             return (
               <a
+                {...props}
                 href={href}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="md-link"
-                {...props}
+                onClick={(event) => {
+                  if (href) onLinkClick?.(href, event);
+                }}
               >
                 {children}
               </a>

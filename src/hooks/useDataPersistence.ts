@@ -346,30 +346,31 @@ export async function getSessionThinkingOrDefault(sessionId: string, agentId?: s
   }
 }
 
-export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
-  if (!models || models.length === 0) return;
+export function selectSessionModel(sessionId: string, models: ModelInfo[]): ModelInfo | null {
+  if (models.length === 0) return null;
   const chatState = useChatStore.getState();
-  chatState.setAvailableModels(models);
 
   const persisted = getSessionModel(sessionId);
   const persistedMatch = persisted
     ? models.find(m => m.id === persisted.id && m.provider === persisted.provider)
     : undefined;
-  if (persistedMatch) {
-    chatState.setCurrentModel(persistedMatch);
-    return;
-  }
+  if (persistedMatch) return persistedMatch;
 
   const currentModel = chatState.currentModel;
   const currentMatch = currentModel
     ? models.find(m => m.id === currentModel.id && m.provider === currentModel.provider)
     : undefined;
-  if (currentMatch) {
-    chatState.setCurrentModel(currentMatch);
-    return;
-  }
+  if (currentMatch) return currentMatch;
 
-  chatState.setCurrentModel(models[0]);
+  return models[0];
+}
+
+export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
+  if (!models || models.length === 0) return;
+  const chatState = useChatStore.getState();
+  const selectedModel = selectSessionModel(sessionId, models);
+  chatState.setAvailableModels(models);
+  if (selectedModel) chatState.setCurrentModel(selectedModel);
 }
 
 export function useDataPersistence() {

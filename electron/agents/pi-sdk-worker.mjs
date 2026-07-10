@@ -1,7 +1,9 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "questionnaire"];
@@ -451,10 +453,20 @@ const setPermissionMode = (permissionMode) => {
   session.setActiveToolsByName(tools);
 };
 
+const loadPiSDK = async () => {
+  const packageRoot = String(process.env.PI_SDK_PACKAGE_ROOT || "").trim();
+  if (packageRoot) {
+    const require = createRequire(import.meta.url);
+    const entryPath = require.resolve("@earendil-works/pi-coding-agent", { paths: [packageRoot] });
+    return import(pathToFileURL(entryPath).href);
+  }
+  return import("@earendil-works/pi-coding-agent");
+};
+
 const init = async ({ projectPath: cwd, sessionFilePath }) => {
   disposeSession();
   projectPath = cwd;
-  sdk = await import("@earendil-works/pi-coding-agent");
+  sdk = await loadPiSDK();
   const eventBus = sdk.createEventBus();
   const agentDir = sdk.getAgentDir();
   stripUtf8Bom(join(agentDir, "models.json"));

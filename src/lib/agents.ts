@@ -27,7 +27,7 @@ export const FALLBACK_AGENTS: AgentDescriptor[] = [
   },
   {
     id: "pi",
-    name: "Pi Agent",
+    name: "Pi",
     desc: "AI 编程助手",
     description: "AI 编程助手",
     version: "seeded",
@@ -76,8 +76,14 @@ export const FALLBACK_AGENTS: AgentDescriptor[] = [
 
 let agentCatalog: AgentDescriptor[] = [];
 
+export function normalizeAgentDisplayName<T extends { id: string; name: string }>(agent: T): T {
+  return agent.id === "pi" && agent.name !== "Pi"
+    ? { ...agent, name: "Pi" }
+    : agent;
+}
+
 export function setAgentCatalog(agents: AgentDescriptor[]) {
-  agentCatalog = agents;
+  agentCatalog = agents.map(normalizeAgentDisplayName);
 }
 
 export function getAvailableAgents(): AgentDescriptor[] {

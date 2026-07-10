@@ -43,6 +43,12 @@ export function createAgentEventController({
   setStreamingState,
 }: CreateAgentEventControllerOptions): AgentEventRuntimeController {
   const getActiveAgentId = () => activeAgentIdRef.current;
+  const getSessionAgentName = (sessionId: string) => {
+    const session = useProjectStore.getState().projects
+      .flatMap((project) => project.sessions)
+      .find((candidate) => candidate.id === sessionId);
+    return getAgentName(session?.agentId || getActiveAgentId());
+  };
   const getRuntime = (sessionId: string) => {
     const existing = sessionRuntimeRef.current[sessionId];
     if (existing) return existing;
@@ -188,11 +194,12 @@ export function createAgentEventController({
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
+    const agentName = getSessionAgentName(sessionId);
 
     if (runtime.streamIdleNoticeEntryId) {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
-        title: "Codex 仍在运行，暂时没有新输出",
-        detail: "Codex 任务还没有结束，正在等待后续事件或最终响应。",
+        title: `${agentName} 仍在运行，暂时没有新输出`,
+        detail: `${agentName} 任务还没有结束，正在等待后续事件或最终响应。`,
         state: "running",
         expanded: false,
       }, sessionId);
@@ -202,8 +209,8 @@ export function createAgentEventController({
       appendProcessEntry(sessionId, {
         id: entryId,
         type: "status",
-        title: "Codex 仍在运行，暂时没有新输出",
-        detail: "Codex 任务还没有结束，正在等待后续事件或最终响应。",
+        title: `${agentName} 仍在运行，暂时没有新输出`,
+        detail: `${agentName} 任务还没有结束，正在等待后续事件或最终响应。`,
         state: "running",
         expanded: false,
       });
@@ -217,11 +224,12 @@ export function createAgentEventController({
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
+    const agentName = getSessionAgentName(sessionId);
 
     if (runtime.streamIdleNoticeEntryId) {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
-        title: "Codex 仍在执行上一条请求",
-        detail: "新的发送请求已忽略；当前 Codex 任务还在运行，后续输出会继续追加到这里。",
+        title: `${agentName} 仍在执行上一条请求`,
+        detail: `新的发送请求已忽略；当前 ${agentName} 任务还在运行，后续输出会继续追加到这里。`,
         state: "running",
         expanded: false,
       }, sessionId);
@@ -231,8 +239,8 @@ export function createAgentEventController({
       appendProcessEntry(sessionId, {
         id: entryId,
         type: "status",
-        title: "Codex 仍在执行上一条请求",
-        detail: "新的发送请求已忽略；当前 Codex 任务还在运行，后续输出会继续追加到这里。",
+        title: `${agentName} 仍在执行上一条请求`,
+        detail: `新的发送请求已忽略；当前 ${agentName} 任务还在运行，后续输出会继续追加到这里。`,
         state: "running",
         expanded: false,
       });
@@ -483,12 +491,14 @@ export function createAgentEventController({
   };
 
   const notifyAgentTaskCompleted = (sessionId: string, timedOut: boolean) => {
+    if (document.visibilityState === "visible" && document.hasFocus()) return;
+
     const projectState = useProjectStore.getState();
     const project = projectState.projects.find((candidate) =>
       candidate.sessions.some((session) => session.id === sessionId)
     );
     const session = project?.sessions.find((candidate) => candidate.id === sessionId);
-    const agentName = getAgentName(session?.agentId || getActiveAgentId());
+    const agentName = getSessionAgentName(sessionId);
     const title = timedOut ? `${agentName} 任务已停止` : `${agentName} 任务已完成`;
     const context = [
       project?.name,

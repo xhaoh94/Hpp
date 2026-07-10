@@ -229,4 +229,4 @@ export const getToolActionSummary = (
 };
 
 export const getPlanStepFallbackTitle = (index: number) =>
-  `步骤 ${index + 1}`;
+  `任务 ${index + 1}（未提供具体描述）`;
