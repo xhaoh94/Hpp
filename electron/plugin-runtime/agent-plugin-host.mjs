@@ -7,6 +7,15 @@ let nextId = 0;
 let pluginModule = null;
 let pluginMeta = null;
 
+const writeLog = (...args) => {
+  process.stderr.write(`${args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" ")}\n`);
+};
+
+console.log = writeLog;
+console.info = writeLog;
+console.debug = writeLog;
+console.warn = writeLog;
+
 const loadBuiltinBackend = async (backendName, sessionId, emit) => {
   const backendDir = process.env.HPP_AGENT_BACKEND_DIR;
   if (!backendDir) throw new Error("HPP_AGENT_BACKEND_DIR is not configured.");
