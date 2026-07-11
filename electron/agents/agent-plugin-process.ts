@@ -113,12 +113,11 @@ export class AgentPluginProcess {
       join(app.getAppPath(), "out", "main"),
       join(process.cwd(), "out", "main"),
     ].find((candidate) => existsSync(join(candidate, "plugin-backend-codex.mjs")));
-    if (!backendDir) throw new Error("Agent backend bundles are missing. Run the backend build step.");
     const invocation = getWorkerInvocation(workerPath);
     const child = spawn(invocation.command, invocation.args, {
       env: {
         ...invocation.env,
-        HPP_AGENT_BACKEND_DIR: backendDir,
+        HPP_AGENT_BACKEND_DIR: backendDir || "",
         HPP_AGENT_WORKER_DIR: dirname(workerPath),
         HPP_DATA_DIR: String(this.meta.dataDir || ""),
       },
