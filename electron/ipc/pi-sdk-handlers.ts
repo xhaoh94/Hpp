@@ -1,10 +1,10 @@
 import { ipcMain } from "electron";
 import { execFile } from "child_process";
-import { mkdir, readFile, rm, writeFile } from "fs/promises";
-import { join } from "path";
+import { access, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { join, resolve } from "path";
 import { commandExists, getCommandEnv, getExecFileInvocation, getNodeExecutable, getNpmInvocation } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
-import { getPiSDKPackageJsonPath, getPiSDKUserRuntimeRoot, PI_SDK_PACKAGE } from "../utils/pi-sdk-runtime";
+import { getPiSDKPackageJsonPath, getPiSDKPackageRoot, getPiSDKUserRuntimeRoot, PI_SDK_PACKAGE } from "../utils/pi-sdk-runtime";
 
 const MIN_NODE_VERSION = "22.19.0";
 
@@ -110,10 +110,28 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 }
 
 async function getInstalledVersion(packageRoot: string): Promise<string | undefined> {
-  const packageJson = await readJsonFile<{ version?: string }>(
-    getPiSDKPackageJsonPath(packageRoot)
-  );
-  return packageJson?.version;
+  const packageJson = await readJsonFile<{
+    version?: string;
+    main?: string;
+    exports?: { "."?: { import?: string } | string };
+  }>(getPiSDKPackageJsonPath(packageRoot));
+  if (!packageJson?.version) return undefined;
+
+  const rootExport = packageJson.exports?.["."];
+  const entry = typeof rootExport === "string"
+    ? rootExport
+    : rootExport?.import || packageJson.main;
+  if (!entry) return undefined;
+
+  const packageDir = getPiSDKPackageRoot(packageRoot);
+  const entryPath = resolve(packageDir, entry);
+  if (!entryPath.startsWith(resolve(packageDir))) return undefined;
+  try {
+    await access(entryPath);
+    return packageJson.version;
+  } catch {
+    return undefined;
+  }
 }
 
 async function getActivePackageRoot(): Promise<string | undefined> {

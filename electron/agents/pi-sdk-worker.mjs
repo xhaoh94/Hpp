@@ -1,8 +1,7 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
@@ -456,9 +455,18 @@ const setPermissionMode = (permissionMode) => {
 const loadPiSDK = async () => {
   const packageRoot = String(process.env.PI_SDK_PACKAGE_ROOT || "").trim();
   if (!packageRoot) throw new Error("Pi SDK 未安装，请先在 Hpp Agent 设置中安装 Pi");
-  const require = createRequire(import.meta.url);
+  const packageDir = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent");
   try {
-    const entryPath = require.resolve("@earendil-works/pi-coding-agent", { paths: [packageRoot] });
+    const packageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+    const rootExport = packageJson.exports?.["."];
+    const entry = typeof rootExport === "string"
+      ? rootExport
+      : rootExport?.import || packageJson.main;
+    if (!entry) throw new Error("package.json does not define an ESM entry");
+    const entryPath = resolve(packageDir, entry);
+    if (!entryPath.startsWith(resolve(packageDir)) || !existsSync(entryPath)) {
+      throw new Error(`Pi SDK entry does not exist: ${entryPath}`);
+    }
     return import(pathToFileURL(entryPath).href);
   } catch {
     throw new Error("Pi SDK 未安装或安装不完整，请在 Hpp Agent 设置中重新安装 Pi");

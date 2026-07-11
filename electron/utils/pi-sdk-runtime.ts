@@ -8,3 +8,6 @@ export const getPiSDKUserRuntimeRoot = () =>
 
 export const getPiSDKPackageJsonPath = (packageRoot: string) =>
   join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json");
+
+export const getPiSDKPackageRoot = (packageRoot: string) =>
+  join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent");
