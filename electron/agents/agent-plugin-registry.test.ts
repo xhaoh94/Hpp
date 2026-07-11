@@ -11,6 +11,7 @@ const electronState = vi.hoisted(() => ({
 vi.mock("electron", () => ({
   app: {
     getPath: () => electronState.userDataDir,
+    getAppPath: () => process.cwd(),
     getVersion: () => "0.0.0-test",
     isPackaged: false,
   },
@@ -106,6 +107,43 @@ describe("AgentPluginRegistry", () => {
     await expect(backend.getModels()).resolves.toEqual([
       { id: "model-a", name: "Model A", provider: "test", reasoning: false },
     ]);
+  });
+
+  it("forces plugin events to the backend agent and session", async () => {
+    const source = await createPluginSource(tempRoot, "event-agent");
+    await registry.installFromPath(source);
+    const send = vi.fn();
+    const backend = await registry.createBackend("event-agent", "session-1", {
+      window: { webContents: { send } } as never,
+    });
+
+    await backend.sendMessage("hello");
+
+    expect(send).toHaveBeenCalledWith("agent:event", {
+      type: "stream_delta",
+      delta: "hello",
+      sessionId: "session-1",
+      agentId: "event-agent",
+    });
+  });
+
+  it("rejects malformed plugin events", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "invalid-event-agent",
+      "1.0.0",
+      undefined,
+      backendModule.replace(
+        'context.sendEvent({ type: "stream_delta", delta: message });',
+        'context.sendEvent({ delta: message });',
+      ),
+    );
+    await registry.installFromPath(source);
+    const backend = await registry.createBackend("invalid-event-agent", "session-1", {
+      window: { webContents: { send: vi.fn() } } as never,
+    });
+
+    await expect(backend.sendMessage("hello")).rejects.toThrow("non-empty type");
   });
 
   it("allows installing an official plugin id as a normal plugin", async () => {

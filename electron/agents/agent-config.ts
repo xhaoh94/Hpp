@@ -773,10 +773,6 @@ export async function restoreNativeConfigSnapshots(snapshots: FileSnapshot[]) {
   }
 }
 
-function managedProviderIds(state: AgentConfigState) {
-  return new Set(state.providers.map((provider) => provider.providerId));
-}
-
 function toPiProviderConfig(provider: AgentProviderConfig, existingProvider: JsonRecord = {}) {
   return {
     ...existingProvider,
@@ -790,20 +786,6 @@ function toPiProviderConfig(provider: AgentProviderConfig, existingProvider: Jso
       input: model.imageInput ? ["text", "image"] : ["text"],
     })),
   };
-}
-
-async function writePiNativeConfig(state: AgentConfigState, provider: AgentProviderConfig): Promise<FileSnapshot[]> {
-  const filePath = getPiModelsPath();
-  const snapshot = await snapshotFile(filePath);
-  const config = await readJsonObject(filePath);
-  const providers = isRecord(config.providers) ? { ...config.providers } : {};
-
-  const existingProviderValue = providers[provider.providerId];
-  const existingProvider = isRecord(existingProviderValue) ? existingProviderValue : {};
-  providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
-
-  await writeJsonObject(filePath, { ...config, providers });
-  return [snapshot];
 }
 
 async function writePiNativeConfigProviders(state: AgentConfigState): Promise<FileSnapshot[]> {
@@ -820,36 +802,6 @@ async function writePiNativeConfigProviders(state: AgentConfigState): Promise<Fi
   }
 
   await writeJsonObject(filePath, { ...config, providers });
-  return [snapshot];
-}
-
-async function writeDroidNativeConfig(state: AgentConfigState, provider: AgentProviderConfig): Promise<FileSnapshot[]> {
-  const filePath = getDroidSettingsPath();
-  const snapshot = await snapshotFile(filePath);
-  const config = await readJsonObject(filePath);
-  const managedIds = managedProviderIds(state);
-  const existingModels = Array.isArray(config.customModels) ? config.customModels : [];
-  const customModels = existingModels.filter((model) => {
-    if (!isRecord(model)) return true;
-    return !(model.hppManaged === true && managedIds.has(String(model.hppProviderId || "")));
-  });
-
-  for (const model of provider.models) {
-    customModels.push({
-      hppManaged: true,
-      hppProviderId: provider.providerId,
-      provider: "generic-chat-completion-api",
-      model: model.id,
-      id: `custom:${model.id}`,
-      displayName: model.name || model.id,
-      baseUrl: provider.baseUrl,
-      apiKey: provider.apiKey,
-      reasoning: !!model.reasoning,
-      noImageSupport: !model.imageInput,
-    });
-  }
-
-  await writeJsonObject(filePath, { ...config, customModels });
   return [snapshot];
 }
 
@@ -903,17 +855,6 @@ function toOpenCodeProviderConfig(provider: AgentProviderConfig): JsonRecord {
     },
     models,
   };
-}
-
-async function writeOpenCodeNativeConfig(state: AgentConfigState, provider: AgentProviderConfig): Promise<FileSnapshot[]> {
-  const filePath = getOpenCodeConfigPath();
-  const snapshot = await snapshotFile(filePath);
-  const config = await readJsonObject(filePath);
-  const providers = isRecord(config.provider) ? { ...config.provider } : {};
-  providers[provider.providerId] = toOpenCodeProviderConfig(provider);
-
-  await writeJsonObject(filePath, { ...config, provider: providers });
-  return [snapshot];
 }
 
 async function writeOpenCodeNativeConfigProviders(state: AgentConfigState): Promise<FileSnapshot[]> {

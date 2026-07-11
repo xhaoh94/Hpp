@@ -1,12 +1,11 @@
-import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
-import { AgentEventBuffer } from "./agent-event-buffer";
-import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "./process-events";
-import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
-import { getPiSDKUserRuntimeRoot } from "../utils/pi-sdk-runtime";
-import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
-import { isRecord } from "../../src/types/ipc";
+import { join } from "path";
+import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
+import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "../../plugin-runtime/process-events";
+import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
+import { isRecord } from "../../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -71,15 +70,10 @@ const normalizeModels = (value: unknown): AgentModel[] => {
   });
 };
 
-const getWorkerPath = () => {
-  return getBundledWorkerPath("pi-sdk-worker.mjs", __dirname);
-};
-
 const PI_WORKER_INIT_TIMEOUT_MS = 120_000;
 
 export class PiSDKAgent {
   private process: ChildProcess | null = null;
-  private window: BrowserWindow | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
@@ -99,17 +93,12 @@ export class PiSDKAgent {
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
 
-  constructor(private readonly hppSessionId = "default") {
-    this.eventBuffer = new AgentEventBuffer(hppSessionId);
+  constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
+    this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
   }
 
   get sessionFilePath(): string | null {
     return this._sessionFilePath;
-  }
-
-  setWindow(win: BrowserWindow) {
-    this.window = win;
-    this.eventBuffer.setWindow(win);
   }
 
   async init(projectPath: string, existingSessionFilePath?: string): Promise<void> {
@@ -130,8 +119,8 @@ export class PiSDKAgent {
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
 
-    const worker = getWorkerInvocation(getWorkerPath(), ["PI_NODE_PATH"], { packagedRuntime: "node" });
-    const userRuntimeRoot = getPiSDKUserRuntimeRoot();
+    const worker = getPluginWorkerInvocation("pi-sdk-worker.mjs", ["PI_NODE_PATH"], true);
+    const userRuntimeRoot = join(process.env.HPP_DATA_DIR || process.cwd(), "pi-sdk-runtime");
     const workerEnv = { ...worker.env, PI_SDK_PACKAGE_ROOT: userRuntimeRoot };
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,

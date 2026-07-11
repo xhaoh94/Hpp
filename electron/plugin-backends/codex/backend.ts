@@ -1,11 +1,10 @@
-import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
-import { AgentEventBuffer } from "./agent-event-buffer";
-import { normalizeQuestionProcessEvent } from "./process-events";
-import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
-import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
-import { isRecord } from "../../src/types/ipc";
+import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
+import { normalizeQuestionProcessEvent } from "../../plugin-runtime/process-events";
+import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
+import { isRecord } from "../../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -81,15 +80,10 @@ const normalizeCodexQuestionEvent = (record: UnknownRecord): UnknownRecord => {
   return normalizeQuestionProcessEvent({ ...record, title }) as UnknownRecord;
 };
 
-const getWorkerPath = () => {
-  return getBundledWorkerPath("codex-worker.mjs", __dirname);
-};
-
 const CODEX_WORKER_INIT_TIMEOUT_MS = 120_000;
 
 export class CodexAgent {
   private process: ChildProcess | null = null;
-  private window: BrowserWindow | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
@@ -101,17 +95,12 @@ export class CodexAgent {
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
 
-  constructor(private readonly hppSessionId = "default") {
-    this.eventBuffer = new AgentEventBuffer(hppSessionId);
+  constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
+    this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
   }
 
   get sessionFilePath(): string | null {
     return this._sessionFilePath;
-  }
-
-  setWindow(win: BrowserWindow) {
-    this.window = win;
-    this.eventBuffer.setWindow(win);
   }
 
   async init(projectPath: string, existingSessionFilePath?: string): Promise<void> {
@@ -132,7 +121,7 @@ export class CodexAgent {
     this._sessionFilePath = existingSessionFilePath || null;
     this.emitEvent({ type: "agent_init", agentId: "codex" });
 
-    const worker = getWorkerInvocation(getWorkerPath(), ["CODEX_NODE_PATH", "PI_NODE_PATH"]);
+    const worker = getPluginWorkerInvocation("codex-worker.mjs", ["CODEX_NODE_PATH", "PI_NODE_PATH"]);
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],

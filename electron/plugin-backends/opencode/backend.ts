@@ -1,13 +1,13 @@
-import { BrowserWindow } from "electron";
+import { join } from "path";
+import { homedir } from "os";
 import { spawn, type ChildProcess } from "child_process";
 import * as http from "http";
 import { readFileSync } from "fs";
-import { AgentEventBuffer } from "./agent-event-buffer";
-import { getOpenCodeConfigPath } from "./agent-config";
-import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "./process-events";
-import { getCommandEnv, isWindowsShellShim, resolveCommand } from "../utils/command-utils";
-import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
-import { isRecord } from "../../src/types/ipc";
+import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
+import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "../../plugin-runtime/process-events";
+import { getCommandEnv, isWindowsShellShim, resolveCommand } from "../../utils/command-utils";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
+import { isRecord } from "../../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -106,7 +106,7 @@ function isToolPartComplete(props: unknown) {
 
 function readOpenCodeConfigContent(): string | undefined {
   try {
-    return readFileSync(getOpenCodeConfigPath(), "utf-8");
+    return readFileSync(process.env.OPENCODE_CONFIG || join(homedir(), ".config", "opencode", "opencode.json"), "utf-8");
   } catch {
     return undefined;
   }
@@ -151,8 +151,6 @@ function imageExtension(mimeType: string) {
 // ============================================================
 export class OpenCodeAgent {
   private process: ChildProcess | null = null;
-  private window: BrowserWindow | null = null;
-  private hppSessionId: string;
   private port = 0;
   private host = "127.0.0.1";
   private projectPath = "";
@@ -169,14 +167,8 @@ export class OpenCodeAgent {
   private pendingQuestionToolParts = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
-  constructor(hppSessionId = "default") {
-    this.hppSessionId = hppSessionId;
-    this.eventBuffer = new AgentEventBuffer(hppSessionId);
-  }
-
-  setWindow(win: BrowserWindow) {
-    this.window = win;
-    this.eventBuffer.setWindow(win);
+  constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
+    this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
   }
 
   /** Start opencode serve and wait for it to be ready */
@@ -777,31 +769,6 @@ export class OpenCodeAgent {
           method: "POST",
           headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
           timeout: 30000,
-        },
-        (res) => {
-          let resBody = "";
-          res.on("data", (chunk) => (resBody += chunk));
-          res.on("end", () => {
-            try { resolve(JSON.parse(resBody)); } catch { resolve(resBody); }
-          });
-        }
-      );
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-      req.write(body);
-      req.end();
-    });
-  }
-
-  private httpPatch(path: string, data: unknown): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const body = JSON.stringify(data);
-      const req = http.request(
-        `http://${this.host}:${this.port}${path}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-          timeout: 10000,
         },
         (res) => {
           let resBody = "";

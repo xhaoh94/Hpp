@@ -1,15 +1,11 @@
 import { app, BrowserWindow } from "electron";
 import { execFile } from "child_process";
-import { existsSync, statSync } from "fs";
+import { existsSync } from "fs";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
 import { homedir } from "os";
-import { pathToFileURL } from "url";
 import AdmZip from "adm-zip";
-import { CodexAgent } from "./codex-agent";
-import { DroidAgent } from "./droid-agent";
-import { OpenCodeAgent } from "./opencode-agent";
-import { PiSDKAgent } from "./pi-sdk-agent";
+import { AgentPluginProcess, type PluginHostCapabilities } from "./agent-plugin-process";
 import { getPiSDKStatus, uninstallPiSDK, updatePiSDK } from "../ipc/pi-sdk-handlers";
 import {
   commandExists as commandExistsOnPath,
@@ -80,60 +76,12 @@ export interface AgentBackend {
   readonly sessionFilePath: string | null;
 }
 
-interface PluginAgentBackend {
-  setWindow?(win: BrowserWindow): void;
-  init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
-  isIdle?(): boolean;
-  sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
-  abort(): Promise<void>;
-  getModels(): Promise<AgentModel[]>;
-  setModel(provider: string, modelId: string): Promise<void>;
-  setThinkingLevel(level: string): Promise<void>;
-  sendUIResponse?(response: AgentUIResponse): void;
-  dispose(): void;
-  readonly sessionFilePath?: string | null;
-}
-
-type PluginModule = {
-  createAgentBackend?: (context: PluginAgentContext) => PluginAgentBackend | Promise<PluginAgentBackend>;
-  getStatus?: (context: PluginStatusContext) => Promise<Partial<AgentPackageStatus>> | Partial<AgentPackageStatus>;
-  update?: (context: PluginStatusContext) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
-  getDefaultThinkingLevel?: (context: PluginStatusContext) => Promise<string> | string;
-  configProvider?: {
-    activateProvider?: (
-      context: PluginStatusContext,
-      args: PluginActivateProviderArgs
-    ) => Promise<PluginActivateProviderResult | void> | PluginActivateProviderResult | void;
-  };
-};
-
 interface PluginRecord {
   descriptor: AgentDescriptor;
   pluginDir: string;
   entryPath: string;
-  module?: PluginModule;
-  moduleMtimeMs?: number;
-}
-
-export interface PluginAgentContext {
-  agentId: string;
-  sessionId: string;
-  pluginDir: string;
-  dataDir: string;
-  appVersion: string;
-  host: AgentHostApi;
-  sendEvent: (event: Record<string, unknown>) => void;
-  getConfigState?: () => Promise<unknown>;
-}
-
-export interface PluginStatusContext {
-  agentId: string;
-  pluginDir?: string;
-  dataDir: string;
-  appVersion: string;
-  host: AgentHostApi;
+  process?: AgentPluginProcess;
+  processCapabilities?: PluginHostCapabilities;
 }
 
 interface InstallOptions {
@@ -152,10 +100,6 @@ interface PluginActivateProviderResult {
 }
 
 interface AgentHostApi {
-  createCodexAgentBackend(sessionId: string): AgentBackend;
-  createPiAgentBackend(sessionId: string): AgentBackend;
-  createOpenCodeAgentBackend(sessionId: string): AgentBackend;
-  createDroidAgentBackend(sessionId: string): AgentBackend;
   getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPackageStatus>;
   updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }>;
   getPiSDKStatus(pluginDir?: string): Promise<AgentPackageStatus>;
@@ -176,6 +120,7 @@ type CommandError = Error & {
 
 const MANIFEST_FILE = "hpp-agent-plugin.json";
 const DEFAULT_THINKING_LEVEL = "medium";
+const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const DEFAULT_AGENT_ORDER = ["codex", "pi", "opencode", "droid"];
 
@@ -206,6 +151,22 @@ function getErrorMessage(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizePluginEvent(event: unknown): Record<string, unknown> {
+  if (!isRecord(event) || typeof event.type !== "string" || !event.type.trim()) {
+    throw new Error("Plugin events must include a non-empty type.");
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(event);
+  } catch {
+    throw new Error("Plugin event must be JSON serializable.");
+  }
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PLUGIN_EVENT_BYTES) {
+    throw new Error("Plugin event exceeds the 1 MB size limit.");
+  }
+  return event;
 }
 
 function asString(value: unknown): string {
@@ -591,6 +552,7 @@ export class AgentPluginRegistry {
   }
 
   async reload(): Promise<AgentDescriptor[]> {
+    for (const record of this.pluginRecords.values()) record.process?.dispose();
     this.pluginRecords.clear();
     await mkdir(getPluginInstallDir(), { recursive: true });
 
@@ -661,14 +623,12 @@ export class AgentPluginRegistry {
       throw new Error(`${record.descriptor.name} 不支持启用单一渠道。`);
     }
 
-    const module = await this.loadPluginModule(record);
-    const activateProvider = module.configProvider?.activateProvider;
-    if (typeof activateProvider !== "function") {
+    const pluginProcess = await this.getPluginProcess(record, hostOverrides);
+    if (!record.processCapabilities?.activateProvider) {
       throw new Error(`插件 ${record.descriptor.id} 声明了 single-active provider，但未导出 configProvider.activateProvider。`);
     }
 
-    const result = await activateProvider(this.createStatusContext(record, hostOverrides), args);
-    return result || {};
+    return await pluginProcess.call("activateProvider", args) as PluginActivateProviderResult || {};
   }
 
   async getStatus(agentId: string): Promise<AgentPackageStatus> {
@@ -683,9 +643,9 @@ export class AgentPluginRegistry {
       };
     }
 
-    const module = await this.loadPluginModule(record).catch(() => undefined);
-    if (module?.getStatus) {
-      const status = await module.getStatus(this.createStatusContext(record));
+    const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
+    if (pluginProcess && record.processCapabilities?.getStatus) {
+      const status = await pluginProcess.call("getStatus") as Partial<AgentPackageStatus>;
       return {
         installed: status.installed !== false,
         updateAvailable: status.updateAvailable === true,
@@ -718,8 +678,10 @@ export class AgentPluginRegistry {
     await this.ensureLoaded();
     const record = this.pluginRecords.get(agentId);
     if (!record) return { success: false, error: `未安装 agent 插件：${agentId}` };
-    const module = await this.loadPluginModule(record).catch(() => undefined);
-    if (module?.update) return module.update(this.createStatusContext(record));
+    const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
+    if (pluginProcess && record.processCapabilities?.update) {
+      return pluginProcess.call("update") as Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
+    }
     return {
       success: false,
       error: "外部插件请通过重新安装本地目录或 ZIP 进行更新。",
@@ -731,9 +693,9 @@ export class AgentPluginRegistry {
     await this.ensureLoaded();
     const record = this.pluginRecords.get(agentId);
     if (!record) return DEFAULT_THINKING_LEVEL;
-    const module = await this.loadPluginModule(record).catch(() => undefined);
-    if (module?.getDefaultThinkingLevel) {
-      return normalizeThinkingLevel(await module.getDefaultThinkingLevel(this.createStatusContext(record)))
+    const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
+    if (pluginProcess && record.processCapabilities?.getDefaultThinkingLevel) {
+      return normalizeThinkingLevel(await pluginProcess.call("getDefaultThinkingLevel"))
         || DEFAULT_THINKING_LEVEL;
     }
     return DEFAULT_THINKING_LEVEL;
@@ -751,13 +713,17 @@ export class AgentPluginRegistry {
   }
 
   async installFromPath(pluginPath: string, options: InstallOptions = {}): Promise<AgentPluginInstallResult> {
+    let stagingDir = "";
+    let backupDir = "";
+    let targetDir = "";
     try {
       const sourcePath = resolve(pluginPath);
       const info = await stat(sourcePath);
       const installDir = getPluginInstallDir();
       await mkdir(installDir, { recursive: true });
 
-      const stagingDir = join(installDir, `.install-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const operationId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      stagingDir = join(installDir, `.install-${operationId}`);
       let manifest: AgentPluginManifest;
       let descriptor: AgentDescriptor;
 
@@ -784,13 +750,29 @@ export class AgentPluginRegistry {
         throw new Error("插件安装校验失败：复制后的 manifest ID 不一致。");
       }
 
-      const targetDir = join(installDir, descriptor.id);
+      targetDir = join(installDir, descriptor.id);
       const replaced = this.pluginRecords.has(descriptor.id) || existsSync(targetDir);
-      await rm(targetDir, { recursive: true, force: true });
-      await rename(stagingDir, targetDir);
+      if (existsSync(targetDir)) {
+        backupDir = join(installDir, `.backup-${descriptor.id}-${operationId}`);
+        await rename(targetDir, backupDir);
+      }
+      try {
+        await rename(stagingDir, targetDir);
+        stagingDir = "";
+      } catch (error) {
+        if (backupDir && existsSync(backupDir) && !existsSync(targetDir)) {
+          await rename(backupDir, targetDir).catch(() => undefined);
+          backupDir = "";
+        }
+        throw error;
+      }
 
       const finalRecord = await this.readPluginRecord(targetDir);
       this.pluginRecords.set(finalRecord.descriptor.id, finalRecord);
+      if (backupDir) {
+        await rm(backupDir, { recursive: true, force: true });
+        backupDir = "";
+      }
       this.loaded = true;
       return {
         success: true,
@@ -801,6 +783,14 @@ export class AgentPluginRegistry {
       };
     } catch (error) {
       return { success: false, error: getErrorMessage(error), agents: await this.listAgents().catch(() => []) };
+    } finally {
+      if (stagingDir) await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      if (backupDir && targetDir && !existsSync(targetDir) && existsSync(backupDir)) {
+        await rename(backupDir, targetDir).catch(() => undefined);
+      }
+      if (backupDir && existsSync(backupDir) && existsSync(targetDir)) {
+        await rm(backupDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 
@@ -830,7 +820,9 @@ export class AgentPluginRegistry {
         }
       }
 
-      record.module = undefined;
+      record.process?.dispose();
+      record.process = undefined;
+      record.processCapabilities = undefined;
       await rm(record.pluginDir, { recursive: true, force: true });
       this.pluginRecords.delete(agentId);
       return { success: true, agents: await this.listAgents() };
@@ -891,10 +883,6 @@ export class AgentPluginRegistry {
 
   private createHostApi(overrides: Partial<AgentHostApi> = {}): AgentHostApi {
     return {
-      createCodexAgentBackend: (sessionId) => new CodexAgent(sessionId),
-      createPiAgentBackend: (sessionId) => new PiSDKAgent(sessionId),
-      createOpenCodeAgentBackend: (sessionId) => new OpenCodeAgent(sessionId),
-      createDroidAgentBackend: (sessionId) => new DroidAgent(sessionId),
       getCliAgentStatus,
       updateCliAgent,
       getPiSDKStatus: async (pluginDir?: string) => ({
@@ -909,92 +897,95 @@ export class AgentPluginRegistry {
     };
   }
 
-  private async loadPluginModule(record: PluginRecord): Promise<PluginModule> {
-    const mtimeMs = statSync(record.entryPath).mtimeMs;
-    if (record.module && record.moduleMtimeMs === mtimeMs) return record.module;
-    const moduleUrl = `${pathToFileURL(record.entryPath).href}?mtime=${mtimeMs}`;
-    const module = await import(moduleUrl) as PluginModule;
-    if (typeof module.createAgentBackend !== "function") {
-      throw new Error(`插件 ${record.descriptor.id} 未导出 createAgentBackend(context)。`);
+  private async getPluginProcess(
+    record: PluginRecord,
+    hostOverrides: Partial<AgentHostApi> = {},
+  ): Promise<AgentPluginProcess> {
+    if (!record.process) {
+      const hostApi = this.createHostApi(hostOverrides);
+      record.process = new AgentPluginProcess(
+        record.entryPath,
+        {
+          agentId: record.descriptor.id,
+          pluginDir: record.pluginDir,
+          dataDir: getDataDir(),
+          appVersion: app.getVersion(),
+        },
+        hostApi as unknown as Record<string, (...args: unknown[]) => unknown>,
+      );
+      record.processCapabilities = await record.process.ensureLoaded();
+    } else if (Object.keys(hostOverrides).length > 0) {
+      record.process.updateHostMethods(
+        this.createHostApi(hostOverrides) as unknown as Record<string, (...args: unknown[]) => unknown>,
+      );
     }
-    record.module = module;
-    record.moduleMtimeMs = mtimeMs;
-    return module;
+    return record.process;
   }
 
-  private createStatusContext(record: PluginRecord, hostOverrides: Partial<AgentHostApi> = {}): PluginStatusContext {
-    return {
-      agentId: record.descriptor.id,
-      pluginDir: record.pluginDir,
-      dataDir: getDataDir(),
-      appVersion: app.getVersion(),
-      host: this.createHostApi(hostOverrides),
-    };
-  }
 
   private async createPluginBackend(
     record: PluginRecord,
     sessionId: string,
     options: { window?: BrowserWindow | null; getConfigState?: () => Promise<unknown> }
   ): Promise<AgentBackend> {
-    const module = await this.loadPluginModule(record);
     let currentWindow = options.window || null;
     const sendEvent = (event: Record<string, unknown>) => {
+      const normalizedEvent = normalizePluginEvent(event);
       currentWindow?.webContents.send("agent:event", {
-        ...event,
+        ...normalizedEvent,
         sessionId,
-        agentId: event.agentId || record.descriptor.id,
+        agentId: record.descriptor.id,
       });
     };
-    const backend = await module.createAgentBackend!({
-      agentId: record.descriptor.id,
+    const pluginProcess = await this.getPluginProcess(record);
+    const { backendId, capabilities } = await pluginProcess.createBackend(
       sessionId,
-      pluginDir: record.pluginDir,
-      dataDir: getDataDir(),
-      appVersion: app.getVersion(),
-      host: this.createHostApi(),
-      sendEvent,
-      getConfigState: options.getConfigState,
-    });
-    this.validatePluginBackend(record.descriptor.id, backend);
+      (event) => sendEvent(event as Record<string, unknown>),
+      options.getConfigState,
+    );
+    let sessionFilePath: string | null = null;
+    let idle = true;
 
     const wrapped: AgentBackend = {
       setWindow(win: BrowserWindow) {
         currentWindow = win;
-        backend.setWindow?.(win);
       },
-      init: (projectPath, existingSessionFilePath) => backend.init(projectPath, existingSessionFilePath),
-      isIdle: () => backend.isIdle?.() ?? true,
-      sendMessage: (message, images, sendOptions) => backend.sendMessage(message, images, sendOptions),
-      abort: () => backend.abort(),
-      getModels: () => backend.getModels(),
-      setModel: (provider, modelId) => backend.setModel(provider, modelId),
-      setThinkingLevel: (level) => backend.setThinkingLevel(level),
-      sendUIResponse: (response) => backend.sendUIResponse?.(response),
-      dispose: () => backend.dispose(),
+      async init(projectPath, existingSessionFilePath) {
+        await pluginProcess.backendCall(backendId, "init", [projectPath, existingSessionFilePath]);
+        sessionFilePath = await pluginProcess.backendCall(backendId, "sessionFilePath") as string | null;
+        idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true;
+      },
+      isIdle: () => idle,
+      async sendMessage(message, images, sendOptions) {
+        idle = false;
+        try { await pluginProcess.backendCall(backendId, "sendMessage", [message, images, sendOptions]); }
+        finally { idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true; }
+      },
+      abort: () => pluginProcess.backendCall(backendId, "abort") as Promise<void>,
+      getModels: () => pluginProcess.backendCall(backendId, "getModels") as Promise<AgentModel[]>,
+      setModel: (provider, modelId) => pluginProcess.backendCall(backendId, "setModel", [provider, modelId]) as Promise<void>,
+      setThinkingLevel: (level) => pluginProcess.backendCall(backendId, "setThinkingLevel", [level]) as Promise<void>,
+      sendUIResponse: (response) => { void pluginProcess.backendCall(backendId, "sendUIResponse", [response]); },
+      dispose: () => { void pluginProcess.disposeBackend(backendId); },
       get sessionFilePath() {
-        return typeof backend.sessionFilePath === "string" ? backend.sessionFilePath : null;
+        return sessionFilePath;
       },
     };
 
-    if (typeof backend.sendGuidance === "function") {
-      wrapped.sendGuidance = (message, images, sendOptions) => backend.sendGuidance!(message, images, sendOptions);
+    if (capabilities.sendGuidance) {
+      wrapped.sendGuidance = (message, images, sendOptions) => pluginProcess.backendCall(backendId, "sendGuidance", [message, images, sendOptions]) as Promise<void>;
     }
-    if (typeof backend.forkSession === "function") {
-      wrapped.forkSession = (target) => backend.forkSession!(target);
+    if (capabilities.forkSession) {
+      wrapped.forkSession = async (target) => {
+        const result = await pluginProcess.backendCall(backendId, "forkSession", [target]) as AgentForkResult;
+        sessionFilePath = await pluginProcess.backendCall(backendId, "sessionFilePath") as string | null;
+        return result;
+      };
     }
 
     return wrapped;
   }
 
-  private validatePluginBackend(agentId: string, backend: unknown): asserts backend is PluginAgentBackend {
-    if (!isRecord(backend)) throw new Error(`插件 ${agentId} createAgentBackend 必须返回对象。`);
-    for (const method of ["init", "sendMessage", "abort", "getModels", "setModel", "setThinkingLevel", "dispose"]) {
-      if (typeof backend[method] !== "function") {
-        throw new Error(`插件 ${agentId} backend 缺少 ${method} 方法。`);
-      }
-    }
-  }
 }
 
 const registry = new AgentPluginRegistry();

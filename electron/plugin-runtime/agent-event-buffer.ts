@@ -1,4 +1,3 @@
-import type { BrowserWindow } from "electron";
 import type { AgentEvent } from "../../src/types/ipc";
 import { isAgentEvent } from "../../src/types/ipc";
 
@@ -8,18 +7,15 @@ const STREAM_FLUSH_INTERVAL_MS = 50;
 const MAX_BUFFERED_CHARS = 4000;
 
 export class AgentEventBuffer {
-  private window: BrowserWindow | null = null;
+  private readonly emit?: (event: AgentEvent) => void;
   private readonly hppSessionId: string;
   private queue: Array<{ type: StreamEventType; delta: string }> = [];
   private bufferedChars = 0;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(hppSessionId: string) {
+  constructor(hppSessionId: string, emit?: (event: AgentEvent) => void) {
     this.hppSessionId = hppSessionId;
-  }
-
-  setWindow(win: BrowserWindow) {
-    this.window = win;
+    this.emit = emit;
   }
 
   send(data: unknown) {
@@ -72,7 +68,7 @@ export class AgentEventBuffer {
     if (!isAgentEvent(data)) return;
     const payload =
       { ...data, sessionId: this.hppSessionId };
-    this.window?.webContents.send("agent:event", payload);
+    this.emit?.(payload);
   }
 
   private isStreamDelta(data: unknown): data is { type: StreamEventType; delta?: unknown } {

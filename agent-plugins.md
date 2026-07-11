@@ -192,22 +192,20 @@ type AgentForkTarget = {
 };
 ```
 
-## 使用 Host API 复用官方 Backend
+## 官方 Backend
 
-官方插件就是通过 host helper 包装现有 backend：
+官方插件在独立插件宿主进程中直接创建内置 backend：
 
 ```js
-export function createAgentBackend(context) {
-  return context.host.createCodexAgentBackend(context.sessionId);
+export async function createAgentBackend(context) {
+  return context.createBuiltinBackend("codex");
 }
 ```
 
-可用 host helper 包括：
+`createBuiltinBackend` 仅供 Hpp 官方插件使用。真实 backend 和它启动的 CLI/worker 都运行在对应插件宿主进程中，不进入 Electron 主进程。
 
-- `createCodexAgentBackend(sessionId)`
-- `createPiAgentBackend(sessionId)`
-- `createOpenCodeAgentBackend(sessionId)`
-- `createDroidAgentBackend(sessionId)`
+第三方插件应直接实现并返回自己的 backend。可用 host helper 包括：
+
 - `getCliAgentStatus(descriptor)`
 - `updateCliAgent(descriptor)`
 - `getPiSDKStatus(pluginDir)`
@@ -215,7 +213,7 @@ export function createAgentBackend(context) {
 - `getCodexDefaultThinkingLevel()`
 - `writeCodexNativeProviderConfig(args)`，仅用于 Codex 风格 single-active provider 写入。
 
-第三方插件可以完全自实现 backend，也可以复用这些 host helper。
+插件代码和 backend 必须使用可 JSON 序列化的数据与主进程通信。
 
 ## 配置与 Provider 激活
 

@@ -5,7 +5,7 @@ import {
   getRollbackTurnCountForIndex,
   getRollbackTurnCountForTarget,
   normalizeCodexTurns,
-} from "./codex-fork-utils.mjs";
+} from "./fork-utils.mjs";
 
 describe("codex fork utils", () => {
   it("normalizes turns from known app-server result shapes", () => {

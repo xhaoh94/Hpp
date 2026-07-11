@@ -1,26 +1,25 @@
-import { BrowserWindow } from "electron";
 import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import { AgentEventBuffer } from "./agent-event-buffer";
+import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import {
   findCommandOnPath,
   getCommandEnv,
   getNodeExecutable,
   getNpmPackageBinTarget,
   isWindowsShellShim,
-} from "../utils/command-utils";
+} from "../../utils/command-utils";
 import {
   buildDiffsFromToolEvent,
   isContextCompactionLike,
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
-} from "./process-events";
-import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../src/types/ipc";
-import { isRecord } from "../../src/types/ipc";
+} from "../../plugin-runtime/process-events";
+import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
+import { isRecord } from "../../../src/types/ipc";
 
 interface AgentModel {
   id: string;
@@ -66,8 +65,6 @@ function getDroidExecutable(args: string[]): { command: string; args: string[]; 
 // ============================================================
 export class DroidAgent {
   private process: ChildProcess | null = null;
-  private window: BrowserWindow | null = null;
-  private hppSessionId: string;
   private projectPath = "";
   private sessionId: string | null = null;
   private models: AgentModel[] = [];
@@ -83,14 +80,8 @@ export class DroidAgent {
   private isAborting = false;
   private eventBuffer: AgentEventBuffer;
 
-  constructor(hppSessionId = "default") {
-    this.hppSessionId = hppSessionId;
-    this.eventBuffer = new AgentEventBuffer(hppSessionId);
-  }
-
-  setWindow(win: BrowserWindow) {
-    this.window = win;
-    this.eventBuffer.setWindow(win);
+  constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
+    this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
   }
 
   /** Start droid exec in stream-jsonrpc mode */

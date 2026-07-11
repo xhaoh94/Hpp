@@ -1,5 +1,5 @@
-export function createAgentBackend(context) {
-  return context.host.createPiAgentBackend(context.sessionId);
+export async function createAgentBackend(context) {
+  return context.createBuiltinBackend("pi");
 }
 
 export function getStatus(context) {

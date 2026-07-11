@@ -1,5 +1,5 @@
-export function createAgentBackend(context) {
-  return context.host.createCodexAgentBackend(context.sessionId);
+export async function createAgentBackend(context) {
+  return context.createBuiltinBackend("codex");
 }
 
 export function getStatus(context) {

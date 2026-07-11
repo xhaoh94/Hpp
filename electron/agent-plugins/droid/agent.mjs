@@ -1,5 +1,5 @@
-export function createAgentBackend(context) {
-  return context.host.createDroidAgentBackend(context.sessionId);
+export async function createAgentBackend(context) {
+  return context.createBuiltinBackend("droid");
 }
 
 export function getStatus(context) {

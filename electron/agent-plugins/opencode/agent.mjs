@@ -1,5 +1,5 @@
-export function createAgentBackend(context) {
-  return context.host.createOpenCodeAgentBackend(context.sessionId);
+export async function createAgentBackend(context) {
+  return context.createBuiltinBackend("opencode");
 }
 
 export function getStatus(context) {

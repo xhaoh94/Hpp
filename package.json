@@ -1,13 +1,13 @@
 {
   "name": "hpp",
-  "version": "0.0.7",
+  "version": "0.0.1",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/build-agent-backends.cjs && electron-vite dev",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "electron-vite build && node scripts/package-agent-plugins.cjs",
+    "build": "electron-vite build && node scripts/build-agent-backends.cjs && node scripts/package-agent-plugins.cjs",
     "dist": "npm run build && electron-builder",
     "dist:publish": "npm run build && electron-builder --publish always",
     "preview": "electron-vite preview"
