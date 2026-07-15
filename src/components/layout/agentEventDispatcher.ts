@@ -1,6 +1,6 @@
 import { getAgentName } from "@/lib/agents";
 import { useProjectStore } from "@/stores/project-store";
-import { useChatStore, type AgentProcessFile } from "@/stores/chat-store";
+import { useChatStore, type AgentProcessFile, type ChatMessage } from "@/stores/chat-store";
 import type { AgentEvent } from "@/types";
 import {
   createProcessEntryId,
@@ -9,6 +9,7 @@ import {
   normalizePlanStepsFromEvent,
   normalizeProcessEntryState,
   normalizeProcessEntryType,
+  normalizeToolKind,
   stringifyProcessValue,
   truncateProcessDetail,
 } from "./agentEventUtils";
@@ -32,6 +33,32 @@ import {
 } from "./agentToolHandlers";
 import type { AgentEventRuntimeController } from "./agentEventTypes";
 
+const parseHistorySnapshotMessages = (value: unknown): ChatMessage[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const message = item as Record<string, unknown>;
+    const role = message.role;
+    const timestamp = message.timestamp;
+    if (
+      typeof message.id !== "string" ||
+      (role !== "user" && role !== "assistant" && role !== "system") ||
+      typeof message.content !== "string" ||
+      typeof timestamp !== "number" ||
+      !Number.isFinite(timestamp)
+    ) {
+      return [];
+    }
+    return [{
+      id: message.id,
+      role,
+      content: message.content,
+      timestamp,
+      nativeTurnId: typeof message.nativeTurnId === "string" ? message.nativeTurnId : undefined,
+    }];
+  });
+};
+
 export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRuntimeController) {
   const handlerContext = controller;
   const {
@@ -47,7 +74,6 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     finishThinkingEntry,
     getPendingUIFromEvent,
     getRuntime,
-    isAlreadyRunningError,
     isOpenProjectSession,
     recordProcessFiles,
     refreshStreamWatchdog,
@@ -76,7 +102,8 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     event.type !== "agent_end" &&
     event.type !== "agent_disconnected" &&
     event.type !== "context_compaction" &&
-    event.type !== "turn_metadata"
+    event.type !== "turn_metadata" &&
+    event.type !== "history_snapshot"
   ) {
     completeIdleNotice(currentSessionId);
     refreshStreamWatchdog(currentSessionId);
@@ -103,7 +130,6 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     case "user_ask_question":
     case "ask_user_question":
     case "ask_user":
-    case "droid.ask_user":
       handleDirectQuestionEvent(event, currentSessionId, handlerContext);
       break;
     case "stream_end":
@@ -163,6 +189,12 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       const eventTitle = String(event.title || "Agent 事件");
       const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
       const eventState = normalizeProcessEntryState(event.state);
+      const eventCommand = typeof event.command === "string" ? event.command : undefined;
+      const processToolKind = eventType === "tool"
+        ? (normalizeToolKind(event.toolKind) === "unknown" && eventCommand
+            ? "run_command"
+            : normalizeToolKind(event.toolKind))
+        : undefined;
       if (isPlanLikeProcessEvent(event)) {
         const steps = normalizePlanStepsFromEvent(event);
         if (steps.length > 0) {
@@ -175,7 +207,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       }
       if (
         (eventType === "error" || eventState === "error") &&
-        isAlreadyRunningError(eventTitle, eventDetail) &&
+        event.reason === "already-running" &&
         (runtime.processActive || useProjectStore.getState().agentStatuses[currentSessionId] === "running")
       ) {
         if (!runtime.processActive) ensureAssistantContinuation(currentSessionId);
@@ -227,8 +259,10 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         title: processedTitle,
         detail: eventType === "question" ? undefined : eventDetail,
         files: processFiles,
+        toolKind: processToolKind,
+        command: eventCommand,
         state: eventType === "question" ? eventState || "running" : eventState,
-        expanded: typeof event.expanded === "boolean" ? event.expanded : undefined,
+        expanded: false,
       });
       break;
     case "agent_ready":
@@ -249,6 +283,18 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         );
         if (project) {
           useProjectStore.getState().setSessionFilePath(project.id, currentSessionId, sessionFilePath);
+        }
+      }
+      break;
+    case "history_snapshot":
+      {
+        const chatState = useChatStore.getState();
+        const storedMessages = chatState.sessionMessages[currentSessionId] || [];
+        const visibleMessages = chatState.activeSessionId === currentSessionId ? chatState.messages : [];
+        if (storedMessages.length > 0 || visibleMessages.length > 0) break;
+        const recoveredMessages = parseHistorySnapshotMessages(event.messages);
+        if (recoveredMessages.length > 0) {
+          chatState.loadSessionMessages(currentSessionId, recoveredMessages);
         }
       }
       break;

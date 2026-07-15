@@ -157,37 +157,54 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }),
 
   closeSession: (projectId, sessionId) =>
-    set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              sessions: p.sessions.map((se) =>
-                se.id === sessionId ? { ...se, closed: true } : se
-              ),
-            }
-          : p
-      ),
-      activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
-    })),
+    set((s) => {
+      const now = new Date().toISOString();
+      return {
+        projects: s.projects.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                sessions: p.sessions.map((se) =>
+                  se.id === sessionId ? { ...se, closed: true, lastActiveAt: now } : se
+                ),
+              }
+            : p
+        ),
+        activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
+      };
+    }),
 
   reopenSession: (projectId, sessionId) =>
-    set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              sessions: p.sessions.map((se) =>
-                se.id === sessionId ? { ...se, closed: false } : se
-              ),
-            }
-          : p
-      ),
-    })),
+    set((s) => {
+      const now = new Date().toISOString();
+      return {
+        projects: s.projects.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                sessions: p.sessions.map((se) =>
+                  se.id === sessionId ? { ...se, closed: false, lastActiveAt: now } : se
+                ),
+              }
+            : p
+        ),
+      };
+    }),
 
-  setActiveSession: (sessionId) => set((s) => (
-    s.activeSessionId === sessionId ? {} : { activeSessionId: sessionId }
-  )),
+  setActiveSession: (sessionId) => set((s) => {
+    if (s.activeSessionId === sessionId) return {};
+    if (!sessionId) return { activeSessionId: null };
+    const now = new Date().toISOString();
+    return {
+      activeSessionId: sessionId,
+      projects: s.projects.map((p) => ({
+        ...p,
+        sessions: p.sessions.map((se) =>
+          se.id === sessionId ? { ...se, lastActiveAt: now } : se
+        ),
+      })),
+    };
+  }),
 
   upsertSessionReference: (projectId, sessionId, reference) =>
     set((s) => ({

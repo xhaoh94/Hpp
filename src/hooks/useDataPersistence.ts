@@ -261,8 +261,39 @@ let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
 const saveScheduler = new PersistenceFlushScheduler();
 
+export class PersistenceHydrationGate {
+  private generation = 0;
+  private hydrated = false;
+
+  begin(): number {
+    this.hydrated = false;
+    this.generation += 1;
+    return this.generation;
+  }
+
+  complete(generation: number): boolean {
+    if (generation !== this.generation) return false;
+    this.hydrated = true;
+    return true;
+  }
+
+  isCurrent(generation: number): boolean {
+    return generation === this.generation;
+  }
+
+  canPersist(): boolean {
+    return this.hydrated;
+  }
+}
+
+const persistenceHydration = new PersistenceHydrationGate();
+
 function flushProjectsToDisk() {
   saveScheduler.clear("projects");
+  if (!persistenceHydration.canPersist()) {
+    _pendingProjectsData = null;
+    return;
+  }
   if (!_pendingProjectsData) return;
   const data = _pendingProjectsData;
   _pendingProjectsData = null;
@@ -270,12 +301,17 @@ function flushProjectsToDisk() {
 }
 
 function scheduleProjectsSave(data: PersistedData) {
+  if (!persistenceHydration.canPersist()) return;
   _pendingProjectsData = data;
   saveScheduler.schedule("projects", 500, flushProjectsToDisk);
 }
 
 function flushMessagesToDisk() {
   saveScheduler.clearMany(["messages", "streamingMessages"]);
+  if (!persistenceHydration.canPersist()) {
+    _pendingMessagesData = null;
+    return;
+  }
   if (!_pendingMessagesData) return;
   const data = _pendingMessagesData;
   _pendingMessagesData = null;
@@ -283,11 +319,13 @@ function flushMessagesToDisk() {
 }
 
 function scheduleMessagesSave(data: PersistedMessages) {
+  if (!persistenceHydration.canPersist()) return;
   _pendingMessagesData = data;
   saveScheduler.schedule("messages", 1000, flushMessagesToDisk);
 }
 
 function scheduleStreamingMessagesSave(data: PersistedMessages) {
+  if (!persistenceHydration.canPersist()) return;
   _pendingMessagesData = data;
   saveScheduler.schedule("streamingMessages", 8000, flushMessagesToDisk, { reset: false });
 }
@@ -376,11 +414,22 @@ export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
 export function useDataPersistence() {
   // Load everything on mount in a single coordinated flow
   useEffect(() => {
+    if (persistenceHydration.canPersist()) {
+      flushPendingDataToDisk();
+    }
+    const hydrationGeneration = persistenceHydration.begin();
+    let cancelled = false;
+    _pendingProjectsData = null;
+    _pendingMessagesData = null;
+    saveScheduler.clearMany(["projects", "messages", "streamingMessages"]);
+
     Promise.all([
-      window.electronAPI.loadData("projects"),
-      window.electronAPI.loadData("sessionMessages"),
-      window.electronAPI.loadData("currentModel"),
+      window.electronAPI.loadData("projects").catch(() => null),
+      window.electronAPI.loadData("sessionMessages").catch(() => null),
+      window.electronAPI.loadData("currentModel").catch(() => null),
     ]).then(([projectData, msgData, modelData]) => {
+      if (cancelled || !persistenceHydration.isCurrent(hydrationGeneration)) return;
+
       // 1. Load projects and restore active session
       let activeSessionId: string | null = null;
       let activeAgentId: string | null = null;
@@ -449,6 +498,8 @@ export function useDataPersistence() {
         }
       }
 
+      if (!persistenceHydration.complete(hydrationGeneration)) return;
+
       // 4. Restart agent backend for the active session (async, in background)
       if (activeSessionId && activeProject && activeSession) {
         window.electronAPI.agentCreateSession(
@@ -490,6 +541,10 @@ export function useDataPersistence() {
         });
       }
     });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // NOTE: Model and thinking level saving is done directly in handleSelectModel
@@ -515,6 +570,8 @@ export function useDataPersistence() {
       lastActiveProjectId = state.activeProjectId;
       lastActiveSessionId = state.activeSessionId;
 
+      if (!persistenceHydration.canPersist()) return;
+
       scheduleProjectsSave({
         projects: state.projects,
         activeProjectId: state.activeProjectId,
@@ -530,6 +587,7 @@ export function useDataPersistence() {
     const unsubscribe = useChatStore.subscribe((state) => {
       if (state.sessionMessages === lastSessionMessages) return;
       lastSessionMessages = state.sessionMessages;
+      if (!persistenceHydration.canPersist()) return;
       const data = { sessionMessages: stripTransientMessages(state.sessionMessages) };
       if (hasStreamingMessages(state.sessionMessages)) {
         scheduleStreamingMessagesSave(data);

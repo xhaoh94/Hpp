@@ -7,7 +7,7 @@ import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
-import { registerAgentHandlers } from "./agents/agent-manager";
+import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
 import type { AppUpdateState, AppUpdateStatus } from "../src/types/ipc";
 import {
   APP_UPDATE_CHECK_INTERVAL_MS,
@@ -35,6 +35,7 @@ let closeToTray = DEFAULT_CLOSE_TO_TRAY;
 let isQuitting = false;
 let updaterInitialized = false;
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
+let agentShutdownStarted = false;
 let updateStatus: AppUpdateStatus = {
   state: "idle",
   currentVersion: app.getVersion(),
@@ -371,9 +372,13 @@ if (singleInstanceLock) {
   });
 }
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   isQuitting = true;
   stopPeriodicUpdateChecks();
+  if (agentShutdownStarted) return;
+  agentShutdownStarted = true;
+  event.preventDefault();
+  void shutdownAgentRuntime().finally(() => app.quit());
 });
 
 app.on("window-all-closed", () => {

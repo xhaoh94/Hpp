@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess } from "child_process";
+import { execFile, spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { normalizeQuestionProcessEvent } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import { loadCodexHistorySnapshot } from "./history";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
 
@@ -94,6 +95,7 @@ export class CodexAgent {
   private activePromptIds = new Set<string>();
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
+  private intentionalExits = new WeakSet<ChildProcess>();
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -111,11 +113,12 @@ export class CodexAgent {
     }
 
     if (this.process && this.projectPath === projectPath && this._sessionFilePath === (existingSessionFilePath || this._sessionFilePath)) {
+      await this.emitRecoveredHistory(existingSessionFilePath);
       return;
     }
 
     this.initKey = nextInitKey;
-    this.dispose();
+    await this.dispose();
     this.initKey = nextInitKey;
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
@@ -181,7 +184,7 @@ export class CodexAgent {
       ].filter(Boolean).join("\n");
       for (const handler of this.pendingResponses.values()) handler({ type: "error", error });
       this.pendingResponses.clear();
-      if (!this.isAborting) {
+      if (!this.intentionalExits.has(child) && !this.isAborting) {
         this.emitEvent({ type: "agent_disconnected" });
       }
     });
@@ -202,7 +205,6 @@ export class CodexAgent {
         clearTimeout(timeout);
         if (data.type === "ready") {
           this._sessionFilePath = optionalString(data.sessionFilePath) || existingSessionFilePath || null;
-          this.emitEvent({ type: "agent_ready", agentId: "codex", mock: false });
           resolve();
         } else {
           reject(new Error(optionalString(data.error) || "Codex worker init failed"));
@@ -212,6 +214,8 @@ export class CodexAgent {
     this.initPromise = initPromise;
     try {
       await initPromise;
+      await this.emitRecoveredHistory(existingSessionFilePath);
+      this.emitEvent({ type: "agent_ready", agentId: "codex", mock: false });
     } finally {
       if (this.initPromise === initPromise) {
         this.initPromise = null;
@@ -373,18 +377,25 @@ export class CodexAgent {
     });
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.initPromise = null;
     this.initKey = null;
+    for (const [id, handler] of this.pendingResponses.entries()) {
+      handler({ type: "error", id, error: "Codex backend disposed" });
+    }
     this.pendingResponses.clear();
     this.activePromptIds.clear();
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;
-    if (child) {
-      child.stdin?.write(`${JSON.stringify({ type: "dispose" })}\n`);
-      setTimeout(() => child.kill(), 500);
+    if (!child) return;
+    this.intentionalExits.add(child);
+    if (child.stdin?.writable) {
+      child.stdin.write(`${JSON.stringify({ type: "dispose" })}\n`);
     }
+    if (await this.waitForExit(child, 1500)) return;
+    await this.killProcessTree(child);
+    await this.waitForExit(child, 500);
   }
 
   private handleWorkerMessage(data: unknown) {
@@ -475,6 +486,7 @@ export class CodexAgent {
             title: "Codex 仍在执行上一条请求",
             detail: "新的发送请求已忽略；当前 Codex 任务还在运行，后续输出会继续追加到当前处理中块。",
             state: "running",
+            reason: "already-running",
           });
           break;
         }
@@ -500,6 +512,46 @@ export class CodexAgent {
 
   private createCommandId(): string {
     return `codex-${++this.requestId}`;
+  }
+
+  private waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode !== null && child.exitCode !== undefined) return Promise.resolve(true);
+    if (child.signalCode !== null && child.signalCode !== undefined) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        child.off("exit", onExit);
+        resolve(exited);
+      };
+      const onExit = () => finish(true);
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      child.once("exit", onExit);
+    });
+  }
+
+  private async killProcessTree(child: ChildProcess): Promise<void> {
+    if (process.platform !== "win32" || !child.pid) {
+      child.kill("SIGKILL");
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => resolve());
+    });
+  }
+
+  private async emitRecoveredHistory(sessionFilePath?: string): Promise<void> {
+    if (!sessionFilePath) return;
+    try {
+      const messages = await loadCodexHistorySnapshot(sessionFilePath);
+      if (messages.length > 0) {
+        this.emitEvent({ type: "history_snapshot", messages });
+      }
+    } catch (error: unknown) {
+      console.warn("[codex-history] Failed to recover session history:", error);
+    }
   }
 
   private emitEvent(data: unknown) {

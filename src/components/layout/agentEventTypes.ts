@@ -43,7 +43,6 @@ export type AgentEventHandlerContext = {
   failAssistantStream: (currentSessionId: string, title: string, detail?: string) => void;
   refreshStreamWatchdog: (currentSessionId: string) => void;
   ensureAssistantContinuation: (currentSessionId: string) => SessionRuntime;
-  isAlreadyRunningError: (title: string, detail?: string) => boolean;
 };
 
 export type AgentEventRuntimeController = AgentEventHandlerContext & {

@@ -1,89 +1,9 @@
-import type { AgentDescriptor, AgentPlanModeSupport } from "@/types";
-
-const nativeCaps = (planMode: AgentPlanModeSupport, guidance = false, fork = false) => ({
-  planMode,
-  guidance,
-  fork,
-  configuration: "openai-compatible" as const,
-  providerActivation: "none" as const,
-});
-
-export const FALLBACK_AGENTS: AgentDescriptor[] = [
-  {
-    id: "codex",
-    name: "Codex",
-    desc: "OpenAI Codex CLI 编程助手",
-    description: "OpenAI Codex CLI 编程助手",
-    version: "seeded",
-    runtime: "cli",
-    command: "codex",
-    packageName: "@openai/codex",
-    capabilities: { ...nativeCaps("native", true, true), providerActivation: "single-active" },
-    source: "plugin",
-    removable: true,
-    installHint: "npm install -g @openai/codex",
-    updateCommand: "npm install -g @openai/codex@latest",
-    shortName: "CX",
-  },
-  {
-    id: "pi",
-    name: "Pi",
-    desc: "AI 编程助手",
-    description: "AI 编程助手",
-    version: "seeded",
-    runtime: "sdk",
-    packageName: "@earendil-works/pi-coding-agent",
-    capabilities: nativeCaps("prompt", true, true),
-    source: "plugin",
-    removable: true,
-    installHint: "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest",
-    updateCommand: "npm install @earendil-works/pi-coding-agent@latest",
-    shortName: "PI",
-  },
-  {
-    id: "opencode",
-    name: "OpenCode",
-    desc: "开源 AI 编程助手",
-    description: "开源 AI 编程助手",
-    version: "seeded",
-    runtime: "cli",
-    command: "opencode",
-    packageName: "opencode-ai",
-    capabilities: nativeCaps("native"),
-    source: "plugin",
-    removable: true,
-    installHint: "npm install -g opencode-ai",
-    updateCommand: "npm install -g opencode-ai@latest",
-    shortName: "OC",
-  },
-  {
-    id: "droid",
-    name: "Factory Droid",
-    desc: "Factory AI 编程助手",
-    description: "Factory AI 编程助手",
-    version: "seeded",
-    runtime: "cli",
-    command: "droid",
-    packageName: "droid",
-    capabilities: nativeCaps("native"),
-    source: "plugin",
-    removable: true,
-    installHint: "npm install -g droid",
-    updateCommand: "npm install -g droid@latest",
-    shortName: "FD",
-  },
-];
+import type { AgentDescriptor, AgentProviderConfiguration } from "@/types";
 
 let agentCatalog: AgentDescriptor[] = [];
 
-export function normalizeAgentDisplayName<T extends { id: string; name: string }>(agent: T): T {
-  return agent.id === "pi" && agent.name !== "Pi"
-    ? { ...agent, name: "Pi" }
-    : agent;
-}
-
 export function setAgentCatalog(agents: AgentDescriptor[]) {
-  agentCatalog = agents.map(normalizeAgentDisplayName);
+  agentCatalog = agents;
 }
 
 export function getAvailableAgents(): AgentDescriptor[] {
@@ -91,7 +11,7 @@ export function getAvailableAgents(): AgentDescriptor[] {
 }
 
 export function getAgentById(id: string): AgentDescriptor | undefined {
-  return agentCatalog.find((agent) => agent.id === id) || FALLBACK_AGENTS.find((agent) => agent.id === id);
+  return agentCatalog.find((agent) => agent.id === id);
 }
 
 export function getAgentName(id: string): string {
@@ -104,6 +24,15 @@ export function supportsNativePlanMode(id: string): boolean {
 
 export function supportsGuidance(id: string): boolean {
   return getAgentById(id)?.capabilities.guidance === true;
+}
+
+export function supportsNativeFork(id: string): boolean {
+  return getAgentById(id)?.capabilities.fork === true;
+}
+
+export function getAgentProviderConfiguration(id: string): AgentProviderConfiguration | undefined {
+  const configuration = getAgentById(id)?.capabilities.configuration;
+  return configuration && configuration !== "none" ? configuration : undefined;
 }
 
 export function requiresProviderActivation(id: string): boolean {
@@ -120,13 +49,7 @@ export function getInstallHint(agentOrCommand: AgentDescriptor | string): string
     return agentOrCommand.installHint || (agentOrCommand.command ? `请安装 ${agentOrCommand.command}` : "请检查插件安装状态");
   }
 
-  switch (agentOrCommand) {
-    case "codex": return "npm install -g @openai/codex";
-    case "pi": return "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest";
-    case "opencode": return "npm install -g opencode-ai";
-    case "droid": return "npm install -g droid";
-    default: return `请安装 ${agentOrCommand}`;
-  }
+  return `请安装 ${agentOrCommand}`;
 }
 
 export function getAgentUpdateCommand(agentId: string): string | null {

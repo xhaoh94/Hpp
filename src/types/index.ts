@@ -16,12 +16,15 @@ import type {
 export type {
   AgentEvent,
   AgentCapabilities,
+  AgentBackendModelVisibility,
   AgentConfigurationSupport,
   AgentDescriptor,
   AgentImagePayload,
   AgentImagePayloadItem,
   AgentPackageStatus,
   AgentPlanModeSupport,
+  AgentProviderConfiguration,
+  AgentProviderEndpointOption,
   AgentProviderActivationSupport,
   AgentPluginInstallResult,
   AgentPluginManifest,
@@ -63,13 +66,15 @@ export interface AgentCustomModelConfig {
   imageInput: boolean;
 }
 
+export type AgentProviderEndpoint = string;
+
 export interface AgentProviderConfig {
   providerId: string;
   displayName: string;
   baseUrl: string;
   apiKey: string;
+  endpoint: AgentProviderEndpoint;
   models: AgentCustomModelConfig[];
-  hppManaged?: boolean;
 }
 
 export interface AgentConfigState {
@@ -83,6 +88,24 @@ export interface AgentConfigResult {
   config?: AgentConfigState;
   models?: AgentModel[];
   reloadedSessionIds?: string[];
+}
+
+export interface AgentRemoteModel {
+  id: string;
+  name: string;
+}
+
+export interface AgentConfigFetchModelsResult {
+  success: boolean;
+  error?: string;
+  models: AgentRemoteModel[];
+}
+
+export interface AgentModelVisibilityResult {
+  success: boolean;
+  error?: string;
+  backendModelsVisible?: boolean;
+  models?: AgentModel[];
 }
 
 export interface AgentForkTarget {
@@ -169,6 +192,9 @@ export interface ElectronAPI {
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
+  agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;
+  agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) => Promise<AgentModelVisibilityResult>;
+  agentConfigFetchModels: (baseUrl: string, apiKey: string) => Promise<AgentConfigFetchModelsResult>;
   agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
   agentConfigActivate: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigDelete: (agentId: string, providerId: string) => Promise<AgentConfigResult>;

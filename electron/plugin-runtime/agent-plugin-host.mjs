@@ -1,11 +1,13 @@
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
+import { dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const pending = new Map();
 const backends = new Map();
 let nextId = 0;
 let pluginModule = null;
 let pluginMeta = null;
+let shutdownPromise = null;
 
 const writeLog = (...args) => {
   process.stderr.write(`${args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" ")}\n`);
@@ -17,8 +19,7 @@ console.debug = writeLog;
 console.warn = writeLog;
 
 const loadBuiltinBackend = async (backendName, sessionId, emit) => {
-  const backendDir = process.env.HPP_AGENT_BACKEND_DIR;
-  if (!backendDir) throw new Error("HPP_AGENT_BACKEND_DIR is not configured.");
+  const backendDir = process.env.HPP_AGENT_BACKEND_DIR || dirname(fileURLToPath(import.meta.url));
   const module = await import(pathToFileURL(`${backendDir}/plugin-backend-${backendName}.mjs`).href);
   return module.createBackend(sessionId, emit);
 };
@@ -66,6 +67,17 @@ const createContext = (sessionId, backendId) => ({
 
 const createStatusContext = () => ({ ...pluginMeta, host });
 
+const disposeAllBackends = async () => {
+  const activeBackends = Array.from(backends.values());
+  backends.clear();
+  await Promise.allSettled(activeBackends.map((backend) => backend?.dispose?.()));
+};
+
+const shutdownHost = async () => {
+  if (!shutdownPromise) shutdownPromise = disposeAllBackends();
+  await shutdownPromise;
+};
+
 const methods = {
   async load({ entryPath, meta }) {
     pluginMeta = meta;
@@ -76,13 +88,19 @@ const methods = {
     return {
       getStatus: typeof pluginModule.getStatus === "function",
       update: typeof pluginModule.update === "function",
+      uninstall: typeof pluginModule.uninstall === "function",
       getDefaultThinkingLevel: typeof pluginModule.getDefaultThinkingLevel === "function",
+      readProviderConfig: typeof pluginModule.configProvider?.read === "function",
+      writeProviderConfig: typeof pluginModule.configProvider?.write === "function",
       activateProvider: typeof pluginModule.configProvider?.activateProvider === "function",
     };
   },
   async getStatus() { return pluginModule.getStatus?.(createStatusContext()); },
   async update() { return pluginModule.update?.(createStatusContext()); },
+  async uninstall() { return pluginModule.uninstall?.(createStatusContext()); },
   async getDefaultThinkingLevel() { return pluginModule.getDefaultThinkingLevel?.(createStatusContext()); },
+  async readProviderConfig(args) { return pluginModule.configProvider?.read?.(createStatusContext(), args); },
+  async writeProviderConfig(args) { return pluginModule.configProvider?.write?.(createStatusContext(), args); },
   async activateProvider(args) { return pluginModule.configProvider?.activateProvider?.(createStatusContext(), args); },
   async createBackend({ backendId, sessionId }) {
     const backend = await pluginModule.createAgentBackend(createContext(sessionId, backendId));
@@ -112,9 +130,15 @@ const methods = {
     backends.delete(backendId);
     await backend?.dispose?.();
   },
+  async shutdown() {
+    await shutdownHost();
+    setTimeout(() => process.exit(0), 0);
+    return { success: true };
+  },
 };
 
-createInterface({ input: process.stdin }).on("line", async (line) => {
+const input = createInterface({ input: process.stdin });
+input.on("line", async (line) => {
   let message;
   try { message = JSON.parse(line); } catch { return; }
   if (message.kind === "response") {
@@ -135,4 +159,11 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   }
 });
 
-process.on("disconnect", () => process.exit(0));
+const exitAfterShutdown = () => {
+  void shutdownHost().finally(() => process.exit(0));
+};
+
+input.on("close", exitAfterShutdown);
+process.on("disconnect", exitAfterShutdown);
+process.on("SIGINT", exitAfterShutdown);
+process.on("SIGTERM", exitAfterShutdown);

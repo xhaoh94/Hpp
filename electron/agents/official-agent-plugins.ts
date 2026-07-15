@@ -3,9 +3,11 @@ import { join } from "path";
 import type {
   AgentCapabilities,
   AgentPlanModeSupport,
+  AgentProviderConfiguration,
   OfficialAgentPluginCatalogResult,
   OfficialAgentPluginDescriptor,
 } from "../../src/types/ipc";
+import { isValidVersion, meetsMinimumVersion } from "../../src/lib/version";
 
 export const OFFICIAL_RELEASE_DOWNLOAD_BASE_URL =
   "https://github.com/xhaoh94/Hpp/releases/latest/download";
@@ -70,13 +72,59 @@ function normalizePlanMode(value: unknown): AgentPlanModeSupport {
   return DEFAULT_CAPABILITIES.planMode;
 }
 
+function normalizeProviderConfiguration(value: unknown): AgentProviderConfiguration | "none" {
+  if (!isRecord(value) || value.type !== "provider" || !Array.isArray(value.endpoints)) return "none";
+  const seenEndpoints = new Set<string>();
+  const endpoints = value.endpoints.flatMap((rawEndpoint) => {
+    if (!isRecord(rawEndpoint)) return [];
+    const id = asString(rawEndpoint.id);
+    if (!id || seenEndpoints.has(id)) return [];
+    seenEndpoints.add(id);
+    return [{ id, label: asString(rawEndpoint.label) || id }];
+  });
+  if (endpoints.length === 0) return "none";
+
+  const defaultEndpoint = asString(value.defaultEndpoint);
+  const modelDefaults = isRecord(value.modelDefaults) ? value.modelDefaults : {};
+  const modelListMode = value.modelListMode === "configured" || value.modelListMode === "backend"
+    ? value.modelListMode
+    : "merge";
+  const rawBackendModelVisibility = isRecord(value.backendModelVisibility)
+    ? value.backendModelVisibility
+    : undefined;
+  return {
+    type: "provider",
+    storage: value.storage === "plugin" ? "plugin" : "hpp",
+    endpoints,
+    defaultEndpoint: endpoints.some((endpoint) => endpoint.id === defaultEndpoint)
+      ? defaultEndpoint
+      : endpoints[0].id,
+    pathLabel: asString(value.pathLabel) || undefined,
+    hint: asString(value.hint) || undefined,
+    modelDefaults: {
+      reasoning: modelDefaults.reasoning === true,
+      imageInput: modelDefaults.imageInput === true,
+    },
+    fixedModelCapabilities: value.fixedModelCapabilities === true,
+    modelListMode,
+    backendModelVisibility: modelListMode === "merge" && rawBackendModelVisibility
+      ? {
+          userConfigurable: rawBackendModelVisibility.userConfigurable === true,
+          defaultVisible: rawBackendModelVisibility.defaultVisible !== false,
+          label: asString(rawBackendModelVisibility.label) || "显示 Agent 内置模型",
+          description: asString(rawBackendModelVisibility.description) || undefined,
+        }
+      : undefined,
+  };
+}
+
 function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
   return {
     planMode: normalizePlanMode(input.planMode),
     guidance: input.guidance === true,
     fork: input.fork === true,
-    configuration: input.configuration === "openai-compatible" ? "openai-compatible" : "none",
+    configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
   };
 }
@@ -140,12 +188,19 @@ function ensureOfficialCatalogUrl(rawUrl: string) {
 
 export function validateOfficialPluginCatalog(
   value: unknown,
+  currentHppVersion: string,
   sourceUrl = OFFICIAL_PLUGIN_CATALOG_URL
 ): OfficialAgentPluginDescriptor[] {
   ensureOfficialCatalogUrl(sourceUrl);
   if (!isRecord(value)) throw new Error("官方插件目录必须是 JSON 对象。");
-  if (value.schemaVersion !== 1) throw new Error("官方插件目录 schemaVersion 必须为 1。");
+  if (value.schemaVersion === 1) {
+    throw new Error("GitHub 上还是旧版官方插件列表，请先发布当前版本生成的插件包，然后点击刷新。");
+  }
+  if (value.schemaVersion !== 2) {
+    throw new Error("官方插件列表与当前 Hpp 版本不兼容，请更新 Hpp 后重试。");
+  }
   if (!Array.isArray(value.plugins)) throw new Error("官方插件目录必须包含 plugins 数组。");
+  if (!isValidVersion(currentHppVersion)) throw new Error(`当前 Hpp 版本号无效：${currentHppVersion}`);
 
   const seenIds = new Set<string>();
   return value.plugins.map((rawPlugin, index) => {
@@ -154,6 +209,7 @@ export function validateOfficialPluginCatalog(
     const id = asString(rawPlugin.id);
     const name = asString(rawPlugin.name);
     const version = asString(rawPlugin.version);
+    const minHppVersion = asString(rawPlugin.minHppVersion);
     const zipFile = asString(rawPlugin.zipFile);
     const downloadUrl = asString(rawPlugin.downloadUrl);
     if (!id) throw new Error(`官方插件目录第 ${index} 项缺少 id。`);
@@ -162,8 +218,15 @@ export function validateOfficialPluginCatalog(
     seenIds.add(id);
     if (!name) throw new Error(`官方插件 ${id} 缺少 name。`);
     if (!version) throw new Error(`官方插件 ${id} 缺少 version。`);
+    if (!isValidVersion(version)) throw new Error(`官方插件 ${id} 的 version 无效：${version || "空"}`);
+    if (!minHppVersion) throw new Error(`官方插件 ${id} 缺少 minHppVersion。`);
+    if (!isValidVersion(minHppVersion)) {
+      throw new Error(`官方插件 ${id} 的 minHppVersion 无效：${minHppVersion}`);
+    }
     ensureSafeZipFile(zipFile);
     ensureAllowedOfficialPluginUrl(downloadUrl, zipFile);
+
+    const compatible = meetsMinimumVersion(currentHppVersion, minHppVersion);
 
     const runtime = rawPlugin.runtime === "cli" || rawPlugin.runtime === "sdk"
       ? rawPlugin.runtime
@@ -173,10 +236,19 @@ export function validateOfficialPluginCatalog(
       id,
       name,
       version,
+      minHppVersion,
+      compatible,
+      compatibilityError: compatible
+        ? undefined
+        : `需要 Hpp v${minHppVersion} 或更高版本，当前为 v${currentHppVersion}。`,
       description: asString(rawPlugin.description) || undefined,
       runtime,
       command: asString(rawPlugin.command) || undefined,
       packageName: asString(rawPlugin.packageName) || undefined,
+      order: typeof rawPlugin.order === "number" && Number.isFinite(rawPlugin.order) ? rawPlugin.order : 1000,
+      installHint: asString(rawPlugin.installHint) || undefined,
+      updateCommand: asString(rawPlugin.updateCommand) || undefined,
+      shortName: asString(rawPlugin.shortName) || undefined,
       capabilities: normalizeCapabilities(rawPlugin.capabilities),
       zipFile,
       downloadUrl,
@@ -187,6 +259,7 @@ export function validateOfficialPluginCatalog(
 const defaultFetch: FetchLike = (url, init) => fetch(url, init);
 
 export async function listOfficialAgentPlugins(
+  currentHppVersion: string,
   fetchImpl: FetchLike = defaultFetch,
   sourceUrl = OFFICIAL_PLUGIN_CATALOG_URL
 ): Promise<OfficialAgentPluginCatalogResult> {
@@ -206,7 +279,7 @@ export async function listOfficialAgentPlugins(
     }
     return {
       success: true,
-      plugins: validateOfficialPluginCatalog(json, sourceUrl),
+      plugins: validateOfficialPluginCatalog(json, currentHppVersion, sourceUrl),
       sourceUrl,
       fetchedAt: new Date().toISOString(),
     };
@@ -225,6 +298,9 @@ export async function downloadOfficialPluginZip(
   tempDir: string,
   fetchImpl: FetchLike = defaultFetch
 ): Promise<string> {
+  if (!plugin.compatible) {
+    throw new Error(plugin.compatibilityError || `${plugin.name} 与当前 Hpp 版本不兼容。`);
+  }
   ensureAgentId(plugin.id);
   ensureSafeZipFile(plugin.zipFile);
   ensureAllowedOfficialPluginUrl(plugin.downloadUrl, plugin.zipFile);

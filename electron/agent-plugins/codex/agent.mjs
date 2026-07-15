@@ -1,3 +1,5 @@
+import { activateProvider, getDefaultThinkingLevel as readDefaultThinkingLevel, readProviderConfig } from "./config.mjs";
+
 export async function createAgentBackend(context) {
   return context.createBuiltinBackend("codex");
 }
@@ -26,15 +28,15 @@ export function update(context) {
   });
 }
 
-export function getDefaultThinkingLevel(context) {
-  return context.host.getCodexDefaultThinkingLevel();
+export function getDefaultThinkingLevel() {
+  return readDefaultThinkingLevel();
 }
 
 export const configProvider = {
-  async activateProvider(context, { provider, state }) {
-    if (typeof context.host.writeCodexNativeProviderConfig !== "function") {
-      throw new Error("Host does not support Codex provider activation.");
-    }
-    return context.host.writeCodexNativeProviderConfig({ provider, state });
-  }
+  read() {
+    return readProviderConfig();
+  },
+  activateProvider(_context, { provider }) {
+    return activateProvider(provider);
+  },
 };

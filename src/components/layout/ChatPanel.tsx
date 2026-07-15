@@ -30,7 +30,7 @@ import {
 } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentById, getAgentName, getAgentPlanModeTooltip, requiresProviderActivation, supportsGuidance } from "@/lib/agents";
+import { getAgentName, getAgentPlanModeTooltip, requiresProviderActivation, supportsGuidance, supportsNativeFork } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import {
   buildSessionReferencesContext,
@@ -968,11 +968,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   );
 
   const refreshModelProviderOrder = useCallback(async (agentId: string) => {
-    if (getAgentById(agentId)?.capabilities.configuration !== "openai-compatible") {
-      setModelProviderOrder([]);
-      return;
-    }
-
     try {
       const result = await window.electronAPI.agentConfigList(agentId);
       if (!result.success || !result.config) {
@@ -1004,6 +999,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
+  const [agentReloadConfirmOpen, setAgentReloadConfirmOpen] = useState(false);
+  const [agentReloading, setAgentReloading] = useState(false);
+  const [agentReloadError, setAgentReloadError] = useState("");
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const referenceRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -1525,7 +1523,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setForkingMessageId(msg.id);
 
     try {
-      const supportsSynchronousNativeFork = activeSession.agentId === "codex" || activeSession.agentId === "pi";
+      const supportsSynchronousNativeFork = supportsNativeFork(activeSession.agentId);
       if (supportsSynchronousNativeFork) {
         if (sourceUserMessageIndex >= 0) {
           const nativeFork = await createNativeFork(
@@ -1552,15 +1550,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           }
 
           const detail = nativeFork.error || nativeFork.reason;
+          const agentName = getAgentName(activeSession.agentId);
           createFallbackForkSession(
             detail
-              ? `Codex 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：${detail}`
-              : "Codex 原生分叉失败，当前会话使用隐藏上下文兼容模式。"
+              ? `${agentName} 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：${detail}`
+              : `${agentName} 原生分叉失败，当前会话使用隐藏上下文兼容模式。`
           );
           return;
         }
 
-        createFallbackForkSession("Codex 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：没有可定位的用户消息");
+        createFallbackForkSession(`${getAgentName(activeSession.agentId)} 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：没有可定位的用户消息`);
         return;
       }
 
@@ -1855,14 +1854,6 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     if (abortIfTargetSessionMissing()) return;
     if (!result.success) {
       const runtime = sessionRuntimeRef.current[targetSessionId];
-      if (/Codex is already running/i.test(result.error || "")) {
-        const latestStatus = useProjectStore.getState().agentStatuses[targetSessionId];
-        if (runtime?.processActive || latestStatus === "running") {
-          setStreamingForTargetSession(true);
-          useProjectStore.getState().setAgentStatus(targetSessionId, "running");
-          return;
-        }
-      }
       if (runtime?.streamWatchdog) {
         clearTimeout(runtime.streamWatchdog);
         runtime.streamWatchdog = null;
@@ -2114,17 +2105,24 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
   };
 
-  const handleModelConfigModelsUpdated = useCallback((agentId: string, models?: ModelInfo[]) => {
-    if (!models || models.length === 0) return;
+  const handleModelConfigModelsUpdated = useCallback((agentId: string, models?: ModelInfo[], selectedProviderId?: string) => {
+    if (!models) return;
     if (currentAgentId !== agentId) return;
 
     void refreshModelProviderOrder(agentId);
     const chatState = useChatStore.getState();
     chatState.setAvailableModels(models);
+    if (models.length === 0) {
+      useChatStore.setState({ currentModel: null });
+      return;
+    }
     const current = chatState.currentModel;
-    const nextModel = current
+    const selectedProviderModel = selectedProviderId
+      ? models.find((model) => model.provider === selectedProviderId)
+      : undefined;
+    const nextModel = selectedProviderModel || (current
       ? models.find((model) => model.id === current.id && model.provider === current.provider) || models[0]
-      : models[0];
+      : models[0]);
     chatState.setCurrentModel(nextModel);
 
     const sessionId = useProjectStore.getState().activeSessionId;
@@ -2133,6 +2131,50 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId);
     }
   }, [currentAgentId, refreshModelProviderOrder]);
+
+  const openAgentReloadConfirm = useCallback(() => {
+    setAgentReloadError("");
+    setAgentReloadConfirmOpen(true);
+  }, []);
+
+  const closeAgentReloadConfirm = useCallback(() => {
+    if (agentReloading) return;
+    setAgentReloadConfirmOpen(false);
+    setAgentReloadError("");
+  }, [agentReloading]);
+
+  const handleReloadCurrentAgent = useCallback(async () => {
+    if (agentReloading || currentSessionRunning || !activeSessionId) return;
+    setAgentReloading(true);
+    setAgentReloadError("");
+    try {
+      const result = await window.electronAPI.agentReloadConfig(currentAgentId, activeSessionId);
+      if (!result.success) {
+        setAgentReloadError(result.error || "重载 Agent 失败，请稍后重试。");
+        return;
+      }
+      handleModelConfigModelsUpdated(currentAgentId, result.models);
+      setAgentReloadConfirmOpen(false);
+      showFloatingToastMessage(
+        result.reloadedSessionIds?.includes(activeSessionId)
+          ? `${getAgentName(currentAgentId)} 当前会话已重新打开`
+          : `${getAgentName(currentAgentId)} 当前会话无需重载`
+      );
+    } catch (error) {
+      setAgentReloadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAgentReloading(false);
+    }
+  }, [activeSessionId, agentReloading, currentAgentId, currentSessionRunning, handleModelConfigModelsUpdated]);
+
+  useEffect(() => {
+    if (!agentReloadConfirmOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !agentReloading) closeAgentReloadConfirm();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [agentReloadConfirmOpen, agentReloading, closeAgentReloadConfirm]);
 
   const handleSelectThinking = async (levelId: string) => {
     setThinkingLevel(levelId);
@@ -2221,7 +2263,16 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       <div className="chat-header">
         <div className="chat-agent-dot" />
         <span className="chat-agent-name">{activeProject.name}</span>
-        <span className="chat-agent-tag">{getAgentName(activeAgentId)}</span>
+        <button
+          type="button"
+          className="chat-agent-tag chat-agent-reload-trigger"
+          onClick={openAgentReloadConfirm}
+          title={`重载 ${getAgentName(currentAgentId)}`}
+          aria-label={`重载 ${getAgentName(currentAgentId)}`}
+        >
+          <span>{getAgentName(currentAgentId)}</span>
+          <RefreshCw size={10} strokeWidth={2} />
+        </button>
         <UserMessageHistoryControl
           open={userMsgHistoryOpen}
           anchorRef={userMsgHistoryRef}
@@ -2356,7 +2407,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           }
           getPlanModeTooltip={getAgentPlanModeTooltip}
           onExpandedProviderChange={setExpandedProvider}
-          onModelOpenChange={setModelOpen}
+          onModelOpenChange={(open) => {
+            setModelOpen(open);
+            if (open) void refreshModelProviderOrder(currentAgentId);
+          }}
           onThinkingOpenChange={setThinkingOpen}
           onPlanModeChange={savePlanModeEnabled}
           onOpenModelConfig={() => {
@@ -2423,6 +2477,55 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           onClose={() => setModelConfigAgentId(null)}
           onModelsUpdated={handleModelConfigModelsUpdated}
         />
+      )}
+      {agentReloadConfirmOpen && (
+        <div className="chat-agent-reload-overlay" onMouseDown={closeAgentReloadConfirm}>
+          <div
+            className="chat-agent-reload-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="chat-agent-reload-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="chat-agent-reload-header">
+              <div>
+                <h3 id="chat-agent-reload-title">重载 {getAgentName(currentAgentId)}</h3>
+                <span>{currentAgentId}</span>
+              </div>
+              <button
+                type="button"
+                className="chat-agent-reload-close"
+                onClick={closeAgentReloadConfirm}
+                disabled={agentReloading}
+                title="关闭"
+                aria-label="关闭"
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <div className="chat-agent-reload-content">
+              <p>是否重载当前会话？</p>
+              {currentSessionRunning && (
+                <div className="chat-agent-reload-warning">当前会话正在运行，请等待任务结束后再重载。</div>
+              )}
+              {agentReloadError && <div className="chat-agent-reload-error">{agentReloadError}</div>}
+            </div>
+            <div className="chat-agent-reload-actions">
+              <button type="button" className="btn-action" onClick={closeAgentReloadConfirm} disabled={agentReloading}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="filter-add-btn chat-agent-reload-confirm"
+                onClick={() => void handleReloadCurrentAgent()}
+                disabled={agentReloading || currentSessionRunning}
+              >
+                <RefreshCw size={13} className={agentReloading ? "chat-agent-reload-spin" : undefined} />
+                {agentReloading ? "重载中..." : "确认重载"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       </div>
     </>

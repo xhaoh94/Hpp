@@ -3,9 +3,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { getPiMessageText, resolvePiForkEntryId } from "./pi-fork-utils.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
-const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "questionnaire"];
+const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "ask_user_question", "questionnaire", "question"];
+const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
 
 let sdk = null;
 let session = null;
@@ -13,6 +15,9 @@ let uiBridge = null;
 let unsubscribe = null;
 let projectPath = "";
 let activePromptId = null;
+let activePermissionMode = "full-access";
+let fullAccessToolNames = [];
+let activeCompactionId = null;
 const completedPromptIds = new Set();
 
 const send = (message) => {
@@ -73,27 +78,6 @@ const isContextCompactionLike = (...values) => {
   );
 };
 
-const normalizeForkText = (value) =>
-  String(value || "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const findForkTargetMessage = (messages, command) => {
-  const index = Number.isInteger(command.sourceUserMessageIndex)
-    ? command.sourceUserMessageIndex
-    : Number(command.sourceUserMessageIndex);
-  if (Number.isInteger(index) && index >= 0 && index < messages.length) {
-    return messages[index];
-  }
-
-  const sourceText = normalizeForkText(command.sourceMessageContent);
-  if (!sourceText) return null;
-  return messages.find((message) => {
-    const text = normalizeForkText(message.text);
-    return text === sourceText || text.includes(sourceText) || sourceText.includes(text);
-  }) || null;
-};
-
 const forkSessionAtMessage = async (command) => {
   if (!sdk || !session) {
     return { supported: true, success: false, error: "Pi SDK session is not initialized" };
@@ -104,24 +88,23 @@ const forkSessionAtMessage = async (command) => {
     return { supported: true, success: false, reason: "source session is not persisted" };
   }
 
-  const forkMessages = session.getUserMessagesForForking?.() || [];
-  const targetMessage = findForkTargetMessage(forkMessages, command);
-  if (!targetMessage?.entryId) {
+  const sessionManager = sdk.SessionManager.open(sourcePath, undefined, projectPath);
+  const targetEntryId = resolvePiForkEntryId(sessionManager.getBranch(), command);
+  if (!targetEntryId) {
     return {
       supported: true,
       success: false,
-      reason: "could not map UI message to Pi session tree entry",
+      reason: "could not map the Hpp message to a completed Pi turn",
     };
   }
 
-  const sessionManager = sdk.SessionManager.open(sourcePath, undefined, projectPath);
-  const sessionFilePath = sessionManager.createBranchedSession(targetMessage.entryId);
+  const sessionFilePath = sessionManager.createBranchedSession(targetEntryId);
   if (!sessionFilePath || !existsSync(sessionFilePath)) {
     return {
       supported: true,
       success: false,
-      nativeEntryId: targetMessage.entryId,
-      reason: "forked Pi session file was not created yet",
+      nativeEntryId: targetEntryId,
+      reason: "Pi did not persist the forked session file",
     };
   }
 
@@ -129,7 +112,7 @@ const forkSessionAtMessage = async (command) => {
     supported: true,
     success: true,
     sessionFilePath,
-    nativeEntryId: targetMessage.entryId,
+    nativeEntryId: targetEntryId,
   };
 };
 
@@ -220,6 +203,64 @@ const getErrorFromMessage = (message) => {
   );
 };
 
+const getTimestamp = (entry, message) => {
+  if (typeof message?.timestamp === "number" && Number.isFinite(message.timestamp)) return message.timestamp;
+  const parsed = Date.parse(String(entry?.timestamp || ""));
+  return Number.isFinite(parsed) ? parsed : Date.now();
+};
+
+const buildHistorySnapshot = (sessionManager) => {
+  const history = [];
+  let activeTurnIndexes = [];
+  for (const entry of sessionManager.getBranch()) {
+    if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) continue;
+    const role = entry.message.role;
+    if (role === "user") {
+      const content = getPiMessageText(entry.message).trim();
+      if (!content || typeof entry.id !== "string") continue;
+      history.push({
+        id: `pi-history-${entry.id}`,
+        role: "user",
+        content,
+        timestamp: getTimestamp(entry, entry.message),
+        nativeTurnId: entry.id,
+      });
+      activeTurnIndexes = [history.length - 1];
+      continue;
+    }
+    if (role !== "assistant" || typeof entry.id !== "string") continue;
+    for (const historyIndex of activeTurnIndexes) history[historyIndex].nativeTurnId = entry.id;
+    const content = getTextFromMessage(entry.message).trim();
+    if (!content) continue;
+    history.push({
+      id: `pi-history-${entry.id}`,
+      role: "assistant",
+      content,
+      timestamp: getTimestamp(entry, entry.message),
+      nativeTurnId: entry.id,
+    });
+    activeTurnIndexes.push(history.length - 1);
+  }
+  return history;
+};
+
+const emitLatestAssistantTurnMetadata = (promptId, previousLeafId) => {
+  queueMicrotask(() => {
+    if (!promptId || !session) return;
+    const leafEntry = session.sessionManager.getLeafEntry?.();
+    if (
+      !isRecord(leafEntry) ||
+      leafEntry.id === previousLeafId ||
+      leafEntry.type !== "message" ||
+      !isRecord(leafEntry.message) ||
+      leafEntry.message.role !== "assistant"
+    ) {
+      return;
+    }
+    send({ type: "turn_metadata", nativeTurnId: leafEntry.id, clientUserMessageId: promptId });
+  });
+};
+
 const createDialogPromise = (emit, pending, request, parse, defaultValue, opts = {}) => {
   if (opts.signal?.aborted) return Promise.resolve(defaultValue);
 
@@ -230,25 +271,33 @@ const createDialogPromise = (emit, pending, request, parse, defaultValue, opts =
       opts.signal?.removeEventListener("abort", onAbort);
       pending.delete(request.id);
     };
-    const onAbort = () => {
+    const settle = (value) => {
       cleanup();
+      resolve(value);
+    };
+    const onAbort = () => {
       opts.onDismiss?.(request.id, "abort");
-      resolve(defaultValue);
+      settle(defaultValue);
     };
 
     opts.signal?.addEventListener("abort", onAbort, { once: true });
     if (opts.timeout) {
       timeoutId = setTimeout(() => {
-        cleanup();
         opts.onDismiss?.(request.id, "timeout");
-        resolve(defaultValue);
+        settle(defaultValue);
       }, opts.timeout);
     }
 
     pending.set(request.id, {
-      cleanup,
-      resolve: (response) => resolve(parse(response)),
-      reject,
+      resolve: (response) => settle(parse(response)),
+      reject: (error) => {
+        cleanup();
+        reject(error);
+      },
+      dismiss: (reason) => {
+        opts.onDismiss?.(request.id, reason);
+        settle(defaultValue);
+      },
     });
     emit(request);
   });
@@ -308,8 +357,12 @@ class DesktopUIBridge {
         const id = randomUUID();
         const questions = this.buildAskQuestions();
         const toolName = this.interactArgs?.toolName;
+        const hasAskPayload = normalizeQuestions(this.lastAskPayload?.questions).length > 0;
         this.lastAskPayload = null;
         this.interactArgs = null;
+        if ((!QUESTIONNAIRE_TOOLS.has(toolName) && !hasAskPayload) || questions.length === 0) {
+          throw new Error(`Pi extension custom UI is not supported by Hpp${toolName ? `: ${toolName}` : ""}`);
+        }
         return createDialogPromise(
           (request) => send({ type: "extension_ui_request", request }),
           this.pending,
@@ -365,8 +418,11 @@ class DesktopUIBridge {
   handleResponse(response) {
     const pending = response?.id ? this.pending.get(response.id) : undefined;
     if (!pending) return;
-    pending.cleanup();
     pending.resolve(response);
+  }
+
+  dismissAll(reason = "dismissed") {
+    for (const pending of [...this.pending.values()]) pending.dismiss(reason);
   }
 
   buildAskQuestions() {
@@ -394,10 +450,7 @@ class DesktopUIBridge {
 
   dispose() {
     this.unsubscribeAsk?.();
-    for (const pending of this.pending.values()) {
-      pending.cleanup();
-      pending.reject(new Error("UI bridge disposed"));
-    }
+    for (const pending of [...this.pending.values()]) pending.reject(new Error("UI bridge disposed"));
     this.pending.clear();
   }
 }
@@ -423,6 +476,9 @@ const buildCommandContextActions = (sess) => ({
 
 const disposeSession = () => {
   activePromptId = null;
+  activePermissionMode = "full-access";
+  fullAccessToolNames = [];
+  activeCompactionId = null;
   completedPromptIds.clear();
   unsubscribe?.();
   unsubscribe = null;
@@ -446,10 +502,14 @@ const stripUtf8Bom = (filePath) => {
 
 const setPermissionMode = (permissionMode) => {
   if (!session?.setActiveToolsByName) return;
-  const tools = permissionMode === "plan"
-    ? PLAN_MODE_TOOLS
-    : session.getAllTools?.().map((tool) => tool.name).filter(Boolean) || [];
-  session.setActiveToolsByName(tools);
+  if (permissionMode === activePermissionMode) return;
+  if (permissionMode === "plan") {
+    fullAccessToolNames = session.getActiveToolNames?.() || fullAccessToolNames;
+    session.setActiveToolsByName(PLAN_MODE_TOOLS);
+  } else {
+    session.setActiveToolsByName(fullAccessToolNames);
+  }
+  activePermissionMode = permissionMode;
 };
 
 const loadPiSDK = async () => {
@@ -473,7 +533,7 @@ const loadPiSDK = async () => {
   }
 };
 
-const init = async ({ projectPath: cwd, sessionFilePath }) => {
+const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   disposeSession();
   projectPath = cwd;
   sdk = await loadPiSDK();
@@ -505,11 +565,23 @@ const init = async ({ projectPath: cwd, sessionFilePath }) => {
     mode: "tui",
     commandContextActions: buildCommandContextActions(session),
   });
+  fullAccessToolNames = session.getActiveToolNames?.() || [];
+  activePermissionMode = "full-access";
   unsubscribe = session.subscribe(handleSessionEvent);
-  send({ type: "ready", sessionFilePath: session.sessionFile });
+  send({ type: "history_snapshot", messages: buildHistorySnapshot(session.sessionManager) });
+  send({ type: "ready", id, sessionFilePath: session.sessionFile });
 };
 
 const handleSessionEvent = (event) => {
+  if (event.type === "compaction_start") {
+    activeCompactionId = randomUUID();
+    return;
+  }
+  if (event.type === "compaction_end") {
+    if (!event.aborted) send({ type: "context_compaction", id: activeCompactionId || randomUUID() });
+    activeCompactionId = null;
+    return;
+  }
   if (isContextCompactionLike(event.type, event.name, event.title, event.message)) {
     send({ type: "context_compaction", id: event.id || event.itemId || event.messageId });
     return;
@@ -521,10 +593,9 @@ const handleSessionEvent = (event) => {
       break;
     case "agent_end":
       send({ type: "agent_end" });
-      {
-        const promptId = activePromptId;
-        setTimeout(() => finishPrompt(promptId), 250);
-      }
+      break;
+    case "agent_settled":
+      finishPrompt(activePromptId);
       break;
     case "message_update": {
       const assistantEvent = event.assistantMessageEvent;
@@ -538,6 +609,8 @@ const handleSessionEvent = (event) => {
     case "message_end": {
       const message = event.message;
       if (message?.role === "assistant") {
+        const promptId = activePromptId;
+        const previousLeafId = session?.sessionManager.getLeafId?.();
         send({
           type: "message_end",
           message: {
@@ -548,9 +621,28 @@ const handleSessionEvent = (event) => {
             errorMessage: getErrorFromMessage(message),
           },
         });
+        emitLatestAssistantTurnMetadata(promptId, previousLeafId);
       }
       break;
     }
+    case "auto_retry_start":
+      send({
+        type: "status",
+        id: `pi-retry-${event.attempt}`,
+        status: "retrying",
+        title: `Pi 正在自动重试 (${event.attempt}/${event.maxAttempts})`,
+        detail: event.errorMessage,
+      });
+      break;
+    case "auto_retry_end":
+      send({
+        type: "status",
+        id: `pi-retry-${event.attempt}`,
+        status: event.success ? "completed" : "error",
+        title: event.success ? "Pi 自动重试成功" : "Pi 自动重试失败",
+        detail: event.finalError,
+      });
+      break;
     case "tool_execution_start":
       uiBridge?.cacheInteractArgs(event.toolName, event.args);
       send({
@@ -628,6 +720,7 @@ const handleCommand = async (command) => {
         break;
       }
       case "abort":
+        uiBridge?.dismissAll("abort");
         await session?.abort();
         send({ type: "aborted", id: command.id });
         break;
@@ -681,7 +774,11 @@ rl.on("line", (line) => {
 
 process.on("uncaughtException", (error) => {
   send({ type: "error", error: error?.message || String(error) });
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
 });
 process.on("unhandledRejection", (error) => {
   send({ type: "error", error: error?.message || String(error) });
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
 });

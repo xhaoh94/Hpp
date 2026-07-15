@@ -1,6 +1,7 @@
 import { resolve } from "path";
-import { copyFileSync, mkdirSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { buildSync } from "esbuild";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -12,12 +13,31 @@ const copyAgentWorkerPlugin = () => ({
     const workers = [
       ["electron/plugin-runtime/agent-plugin-host.mjs", "agent-plugin-host.mjs"],
       ["electron/plugin-backends/codex/worker.mjs", "codex-worker.mjs"],
-      ["electron/plugin-backends/codex/fork-utils.mjs", "codex-fork-utils.mjs"],
+      ["electron/plugin-backends/codex/fork-utils.mjs", "fork-utils.mjs"],
+      ["electron/plugin-backends/codex/command-invocation.mjs", "command-invocation.mjs"],
       ["electron/plugin-backends/pi/worker.mjs", "pi-sdk-worker.mjs"],
+      ["electron/plugin-backends/pi/pi-fork-utils.mjs", "pi-fork-utils.mjs"],
     ];
     for (const [source, target] of workers) {
       copyFileSync(resolve(__dirname, source), resolve(targetDir, target));
     }
+    const backendRoot = resolve(__dirname, "electron/plugin-backends");
+    const backendEntryPoints = Object.fromEntries(
+      readdirSync(backendRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && existsSync(resolve(backendRoot, entry.name, "entry.ts")))
+        .map((entry) => [`plugin-backend-${entry.name}`, resolve(backendRoot, entry.name, "entry.ts")]),
+    );
+    buildSync({
+      entryPoints: backendEntryPoints,
+      outdir: targetDir,
+      outExtension: { ".js": ".mjs" },
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      target: "node20",
+      sourcemap: false,
+      external: ["electron"],
+    });
   },
 });
 

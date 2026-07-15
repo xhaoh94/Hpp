@@ -1,6 +1,16 @@
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "child_process";
-import { getCommonCommandDirs, getExecFileInvocation, getNpmInvocation } from "./command-utils";
+import {
+  findCommandOnPath,
+  findCommandsOnPath,
+  getCommonCommandDirs,
+  getExecFileInvocation,
+  getNpmPackageBinTarget,
+  getNpmInvocation,
+} from "./command-utils";
 
 describe("getExecFileInvocation", () => {
   it("quotes Windows command shims located under Program Files", () => {
@@ -41,5 +51,38 @@ describe("getExecFileInvocation", () => {
     expect(invocation?.command.toLowerCase()).not.toMatch(/\.(?:cmd|bat)$/);
     const output = execFileSync(invocation!.command, invocation!.args, { encoding: "utf8" }).trim();
     expect(output).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it("resolves the real executable behind a global npm shim", async () => {
+    const prefixDir = await mkdtemp(join(tmpdir(), "hpp-global-npm-bin-"));
+    try {
+      const shimPath = join(prefixDir, "opencode.cmd");
+      const targetPath = join(prefixDir, "node_modules", "opencode-ai", "bin", "opencode.exe");
+      await mkdir(join(prefixDir, "node_modules", "opencode-ai", "bin"), { recursive: true });
+      await writeFile(shimPath, "@echo off\n", "utf8");
+      await writeFile(targetPath, "", "utf8");
+
+      expect(getNpmPackageBinTarget(
+        shimPath,
+        "opencode-ai",
+        join("bin", "opencode.exe"),
+      )).toBe(targetPath);
+    } finally {
+      await rm(prefixDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("ignores bare npm shell shims on Windows", async () => {
+    const commandDir = await mkdtemp(join(tmpdir(), "hpp-command-path-"));
+    try {
+      await writeFile(join(commandDir, "codex"), "#!/bin/sh\n", "utf8");
+      await writeFile(join(commandDir, "codex.cmd"), "@echo off\n", "utf8");
+      const env = { ...process.env, PATH: commandDir, PATHEXT: ".EXE" };
+
+      expect(findCommandOnPath("codex", { env })).toBe(join(commandDir, "codex.cmd"));
+      expect(findCommandsOnPath("codex", { env })).toEqual([join(commandDir, "codex.cmd")]);
+    } finally {
+      await rm(commandDir, { recursive: true, force: true });
+    }
   });
 });

@@ -268,7 +268,7 @@ function CommandDetail({
   entry: AgentProcessEntry;
   onPreserveScroll?: PreserveScroll;
 }) {
-  const [outputExpanded, setOutputExpanded] = useState(entry.state === "running");
+  const [outputExpanded, setOutputExpanded] = useState(false);
   const userToggledRef = useRef(false);
   const { command, output } = useMemo(
     () => splitCommandDetail(entry.detail, entry.command),
@@ -292,7 +292,7 @@ function CommandDetail({
   };
 
   return (
-    <div className={`chat-command-detail ${outputExpanded || isRunning ? "expanded" : "collapsed"}`}>
+    <div className={`chat-command-detail ${outputExpanded ? "expanded" : "collapsed"}`}>
       <button
         className="chat-command-header"
         onClick={canExpand ? (event) => toggleOutput(event.currentTarget) : undefined}
@@ -305,13 +305,13 @@ function CommandDetail({
           <svg
             className="chat-command-chevron"
             width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
-            style={{ transform: outputExpanded || isRunning ? "rotate(180deg)" : "rotate(0deg)" }}
+            style={{ transform: outputExpanded ? "rotate(180deg)" : "rotate(0deg)" }}
           >
             <path d="M6 9l6 6 6-6" />
           </svg>
         )}
       </button>
-      {outputLines.length > 0 && (outputExpanded || isRunning) && (
+      {outputLines.length > 0 && outputExpanded && (
         <div className="chat-command-output">
           <div className="chat-command-lang">BASH</div>
           <pre>{outputLines.join("\n")}</pre>

@@ -38,11 +38,12 @@ function commandHasPath(command: string): boolean {
 }
 
 function getWindowsExecutableExtensions(env: NodeJS.ProcessEnv = process.env): string[] {
-  const configured = env.PATHEXT || ".EXE;.CMD;.BAT;.COM";
-  return configured
+  const supported = new Set([".com", ".exe", ".cmd", ".bat"]);
+  const configured = (env.PATHEXT || "")
     .split(";")
     .map((ext) => ext.trim().toLowerCase())
-    .filter(Boolean);
+    .filter((ext) => supported.has(ext));
+  return [...new Set([...configured, ".com", ".exe", ".cmd", ".bat"])];
 }
 
 function getCommandNames(command: string, env: NodeJS.ProcessEnv = process.env): string[] {
@@ -50,7 +51,7 @@ function getCommandNames(command: string, env: NodeJS.ProcessEnv = process.env):
   const lower = command.toLowerCase();
   const hasKnownExtension = getWindowsExecutableExtensions(env).some((ext) => lower.endsWith(ext));
   if (hasKnownExtension) return [command];
-  return [...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`), command];
+  return getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`);
 }
 
 export function findCommandOnPath(

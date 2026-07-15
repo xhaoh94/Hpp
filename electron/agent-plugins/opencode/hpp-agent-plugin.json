@@ -1,17 +1,36 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.0.0",
+  "version": "1.3.0",
+  "minHppVersion": "0.0.2",
   "description": "OpenCode CLI programming agent",
   "entry": "agent.mjs",
   "runtime": "cli",
   "command": "opencode",
   "packageName": "opencode-ai",
+  "order": 30,
+  "installHint": "npm install -g opencode-ai",
+  "updateCommand": "npm install -g opencode-ai@latest",
+  "shortName": "OC",
   "capabilities": {
     "planMode": "native",
     "guidance": false,
-    "fork": false,
-    "configuration": "openai-compatible"
+    "fork": true,
+    "configuration": {
+      "type": "provider",
+      "storage": "plugin",
+      "endpoints": [
+        { "id": "chat-completions", "label": "Chat Completions (/chat/completions)" },
+        { "id": "responses", "label": "Responses (/responses)" },
+        { "id": "anthropic-messages", "label": "Anthropic Messages (/v1/messages)" }
+      ],
+      "defaultEndpoint": "chat-completions",
+      "pathLabel": "~/.config/opencode/opencode.json",
+      "hint": "渠道由 OpenCode 插件读写 provider 配置。",
+      "modelDefaults": { "reasoning": false, "imageInput": false },
+      "fixedModelCapabilities": false,
+      "modelListMode": "merge"
+    }
   }
 }

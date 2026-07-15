@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,5 +48,27 @@ describe("store handlers", () => {
     await expect(save({}, "../escaped", { unsafe: true })).resolves.toMatchObject({ success: false });
     await expect(load({}, "../escaped")).resolves.toBeNull();
     await expect(readFile(join(tempRoot, "escaped.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("keeps the previous value as a backup", async () => {
+    const save = electronState.handlers.get("store:save")!;
+
+    await save({}, "sessionMessages", { sessionMessages: { first: [{ content: "kept" }] } });
+    await save({}, "sessionMessages", { sessionMessages: { second: [] } });
+
+    const backup = JSON.parse(await readFile(join(tempRoot, "hpp-data", "sessionMessages.json.bak"), "utf8"));
+    expect(backup).toEqual({ sessionMessages: { first: [{ content: "kept" }] } });
+  });
+
+  it("loads the backup when the primary file is corrupt", async () => {
+    const save = electronState.handlers.get("store:save")!;
+    const load = electronState.handlers.get("store:load")!;
+    const filePath = join(tempRoot, "hpp-data", "projects.json");
+
+    await save({}, "projects", { projects: [{ id: "first" }] });
+    await save({}, "projects", { projects: [{ id: "second" }] });
+    await writeFile(filePath, "{broken", "utf8");
+
+    await expect(load({}, "projects")).resolves.toEqual({ projects: [{ id: "first" }] });
   });
 });

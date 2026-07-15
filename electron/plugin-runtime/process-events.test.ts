@@ -80,6 +80,17 @@ describe("process event normalization", () => {
     });
   });
 
+  it("normalizes Execute-style tools from any agent as commands", () => {
+    expect(normalizeToolEvent("tool_start", {
+      name: "execute-cli",
+      parameters: { command: "git status" },
+    })).toMatchObject({
+      toolKind: "run_command",
+      command: "git status",
+      detail: "$ git status",
+    });
+  });
+
   it("normalizes question process events from nested detail params", () => {
     const questions = [{ id: "choice", question: "Pick one" }];
     const options = [{ label: "A" }, { label: "B" }];

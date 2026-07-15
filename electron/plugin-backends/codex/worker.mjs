@@ -8,15 +8,18 @@ import {
   getRollbackTurnCountForIndex,
   getRollbackTurnCountForTarget,
   normalizeCodexTurns,
-} from "./codex-fork-utils.mjs";
+} from "./fork-utils.mjs";
+import { getCodexCommandInvocation } from "./command-invocation.mjs";
 
 const DEFAULT_MODEL_ID = "default";
 const CODEX_PROVIDER = "codex";
-const CODEX_MODELS = [
-  { id: "gpt-5.5", name: "GPT-5.5", provider: CODEX_PROVIDER, reasoning: true, supportsImages: true },
-  { id: "gpt-5.4", name: "GPT-5.4", provider: CODEX_PROVIDER, reasoning: true, supportsImages: true },
-  { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: CODEX_PROVIDER, reasoning: true, supportsImages: true },
-];
+const DEFAULT_CODEX_MODEL = {
+  id: DEFAULT_MODEL_ID,
+  name: "Codex Default",
+  provider: CODEX_PROVIDER,
+  reasoning: true,
+  supportsImages: true,
+};
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const PLAN_MODE_INSTRUCTIONS = [
   "<plan_mode>",
@@ -84,10 +87,11 @@ let commandOutputByItemId = new Map();
 let reasoningTextByItemId = new Map();
 let agentTextByItemId = new Map();
 let completedItemIds = new Set();
-let emittedContextCompactionIds = new Set();
+let contextCompactionEmitted = false;
 let pendingUIRequest = null;
 let activeImageCleanups = [];
 let forkRequestActive = false;
+let shuttingDown = false;
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -140,7 +144,45 @@ const normalizeReasoningEffort = (level) => {
   return VALID_REASONING_EFFORTS.has(normalized) ? normalized : undefined;
 };
 
-const getModels = () => CODEX_MODELS;
+const normalizeCodexModel = (model) => {
+  if (!isRecord(model) || model.hidden === true) return null;
+  const id = String(model.id || model.model || "").trim();
+  if (!id) return null;
+  const reasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
+    ? model.supportedReasoningEfforts
+    : [];
+  const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : [];
+  return {
+    id,
+    name: String(model.displayName || model.name || id),
+    provider: CODEX_PROVIDER,
+    reasoning: reasoningEfforts.length > 0,
+    supportsImages: inputModalities.includes("image"),
+    isDefault: model.isDefault === true,
+  };
+};
+
+const getModels = async () => {
+  try {
+    await startAppServer();
+    const models = [];
+    let cursor = null;
+    do {
+      const result = await rpcRequest("model/list", { cursor, limit: 100 }, 15000);
+      const page = Array.isArray(result?.data) ? result.data : [];
+      models.push(...page.map(normalizeCodexModel).filter(Boolean));
+      cursor = typeof result?.nextCursor === "string" && result.nextCursor ? result.nextCursor : null;
+    } while (cursor && models.length < 1000);
+    if (models.length > 0) {
+      return models
+        .sort((left, right) => Number(right.isDefault) - Number(left.isDefault))
+        .map(({ isDefault: _isDefault, ...model }) => model);
+    }
+  } catch (error) {
+    process.stderr.write(`[codex-models] ${error?.message || String(error)}\n`);
+  }
+  return [DEFAULT_CODEX_MODEL];
+};
 
 const pathEnvKey = (env, platform = process.platform) => {
   if (platform !== "win32") return "PATH";
@@ -150,11 +192,15 @@ const pathEnvKey = (env, platform = process.platform) => {
 
 const getWindowsCommandNames = (command) => {
   if (process.platform !== "win32") return [command];
-  const configured = process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM";
-  const extensions = configured.split(";").map((ext) => ext.trim()).filter(Boolean);
+  const supported = new Set([".com", ".exe", ".cmd", ".bat"]);
+  const configured = String(process.env.PATHEXT || "")
+    .split(";")
+    .map((ext) => ext.trim().toLowerCase())
+    .filter((ext) => supported.has(ext));
+  const extensions = [...new Set([...configured, ".com", ".exe", ".cmd", ".bat"])];
   const lower = command.toLowerCase();
-  if (extensions.some((ext) => lower.endsWith(ext.toLowerCase()))) return [command];
-  return [...extensions.map((ext) => `${command}${ext}`), command];
+  if (extensions.some((ext) => lower.endsWith(ext))) return [command];
+  return extensions.map((ext) => `${command}${ext}`);
 };
 
 const findCommandsOnPath = (command) => {
@@ -175,13 +221,11 @@ const findCommandsOnPath = (command) => {
   return matches;
 };
 
-const isWindowsShellShim = (filePath) => process.platform === "win32" && /\.(?:cmd|bat)$/i.test(filePath);
-
 const checkCodexExecutable = (candidate) => {
-  const result = spawnSync(candidate, ["--version"], {
+  const invocation = getCodexCommandInvocation(candidate, ["--version"]);
+  const result = spawnSync(invocation.command, invocation.args, {
     env: process.env,
     encoding: "utf8",
-    shell: isWindowsShellShim(candidate),
     timeout: 5000,
   });
   if (!result.error && result.status === 0) return { usable: true };
@@ -211,10 +255,10 @@ const resolveCodexExecutable = () => {
   }
 
   if (process.platform === "win32") {
-    throw new Error("Unable to locate Codex CLI. Install it with `npm install -g @openai/codex`, or set CODEX_PATH to codex.exe.");
+    throw new Error("Unable to locate Codex CLI. Install it from Hpp Agent settings, use `npm install -g @openai/codex`, or set CODEX_PATH to codex.exe.");
   }
 
-  throw new Error("Unable to locate Codex CLI. Install it with `npm install -g @openai/codex`, or set CODEX_PATH to the codex executable.");
+  throw new Error("Unable to locate Codex CLI. Install it from Hpp Agent settings, use `npm install -g @openai/codex`, or set CODEX_PATH to the codex executable.");
 };
 
 const startAppServer = async () => {
@@ -228,11 +272,11 @@ const startAppServer = async () => {
       env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE = "codex_sdk_ts";
     }
 
-    const child = spawn(executablePath, ["app-server", "--stdio"], {
+    const invocation = getCodexCommandInvocation(executablePath, ["app-server", "--stdio"]);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: projectPath || process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
       env,
-      shell: isWindowsShellShim(executablePath),
     });
     appServer = child;
 
@@ -270,8 +314,8 @@ const startAppServer = async () => {
     });
 
     child.stderr?.on("data", (chunk) => {
-      const text = chunk.toString().trim();
-      if (text) send({ type: "process_event", entryType: "status", title: "Codex app-server", detail: text, state: "running", expanded: false });
+      const text = chunk.toString();
+      if (text) process.stderr.write(`[codex-app-server] ${text}`);
     });
 
     child.on("error", (error) => {
@@ -306,6 +350,36 @@ const failPendingRpc = (error) => {
     pending.reject(error);
   }
   pendingRpc.clear();
+};
+
+const waitForProcessExit = (child, timeoutMs) => {
+  if (child.exitCode !== null && child.exitCode !== undefined) return Promise.resolve(true);
+  if (child.signalCode !== null && child.signalCode !== undefined) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+  });
+};
+
+const killProcessTree = (child) => {
+  if (process.platform === "win32" && child.pid) {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return;
+  }
+  child.kill("SIGKILL");
 };
 
 const writeRpc = (message) => {
@@ -694,7 +768,7 @@ const resetTurnState = () => {
   reasoningTextByItemId = new Map();
   agentTextByItemId = new Map();
   completedItemIds = new Set();
-  emittedContextCompactionIds = new Set();
+  contextCompactionEmitted = false;
   interruptedTurnIds = new Set();
 };
 
@@ -743,7 +817,13 @@ const handleServerRequest = (message) => {
       handleApprovalRequest(message, "file", "approved", "denied");
       break;
     case "item/permissions/requestApproval":
-      rpcRespond(message.id, { permissions: {}, scope: "turn" });
+      rpcRespond(message.id, {
+        permissions: activePermissionMode === "full-access" ? message.params?.permissions || {} : {},
+        scope: "turn",
+      });
+      break;
+    case "currentTime/read":
+      rpcRespond(message.id, { currentTimeAt: Math.floor(Date.now() / 1000) });
       break;
     case "account/chatgptAuthTokens/refresh":
     case "attestation/generate":
@@ -1197,13 +1277,58 @@ const handleItem = (item, phase) => {
       });
       break;
     case "contextCompaction":
-      if (!emittedContextCompactionIds.has(item.id)) {
-        emittedContextCompactionIds.add(item.id);
+      if (!contextCompactionEmitted) {
+        contextCompactionEmitted = true;
         send({
           type: "context_compaction",
           id: item.id,
         });
       }
+      break;
+    case "collabAgentToolCall":
+      send({
+        type: phase === "completed" ? "tool_end" : "tool_start",
+        toolName: String(item.tool || "multi_agent"),
+        toolCallId: item.id,
+        toolKind: "unknown",
+        args: { prompt: item.prompt, model: item.model, receiverThreadIds: item.receiverThreadIds },
+        result: phase === "completed" ? { status: item.status, agentsStates: item.agentsStates } : undefined,
+        detail: truncate(item.prompt || item.tool || "Codex multi-agent task"),
+        isError: item.status === "failed",
+      });
+      break;
+    case "subAgentActivity":
+      send({
+        type: "process_event",
+        entryType: "status",
+        title: `Codex sub-agent: ${item.kind || "activity"}`,
+        detail: item.agentPath || item.agentThreadId,
+        state: phase === "completed" ? "completed" : "running",
+      });
+      break;
+    case "imageView":
+      send({
+        type: phase === "completed" ? "tool_end" : "tool_start",
+        toolName: "view_image",
+        toolCallId: item.id,
+        toolKind: "read_file",
+        args: { path: item.path },
+        result: phase === "completed" ? { path: item.path } : undefined,
+        detail: item.path,
+        isError: false,
+      });
+      break;
+    case "imageGeneration":
+      send({
+        type: phase === "completed" ? "tool_end" : "tool_start",
+        toolName: "image_generation",
+        toolCallId: item.id,
+        toolKind: "unknown",
+        args: { revisedPrompt: item.revisedPrompt },
+        result: phase === "completed" ? { result: item.result, savedPath: item.savedPath, status: item.status } : undefined,
+        detail: item.savedPath || item.result,
+        isError: item.status === "failed",
+      });
       break;
   }
 
@@ -1293,6 +1418,7 @@ const handleServerNotification = (method, params) => {
       handleItem(params.item, "completed");
       break;
     case "item/agentMessage/delta":
+    case "item/plan/delta":
       if (!promptRunning || abortRequested) return;
       startStream();
       if (params.itemId) {
@@ -1336,6 +1462,33 @@ const handleServerNotification = (method, params) => {
             status: file.status,
           })),
         });
+      }
+      break;
+    case "thread/compacted": {
+      const compactionId = `${params.threadId || threadId || "thread"}:${params.turnId || "turn"}`;
+      if (!contextCompactionEmitted) {
+        contextCompactionEmitted = true;
+        send({ type: "context_compaction", id: compactionId });
+      }
+      break;
+    }
+    case "warning":
+    case "guardianWarning":
+    case "deprecationNotice":
+    case "configWarning":
+      send({
+        type: "process_event",
+        entryType: "status",
+        title: String(params.message || "Codex warning"),
+        detail: params.details || params.help,
+        state: "completed",
+      });
+      break;
+    case "thread/closed":
+      if (params.threadId && params.threadId === threadId) {
+        threadId = null;
+        activeThreadId = null;
+        send({ type: "agent_disconnected" });
       }
       break;
     case "error":
@@ -1389,10 +1542,10 @@ const runPrompt = async (command) => {
   send({ type: "accepted", id: command.id });
   startStream();
 
-  await cleanupActiveImages();
-  const imagePayload = await materializeImages(command.images);
-  registerActiveImageCleanup(imagePayload.cleanup);
   try {
+    await cleanupActiveImages();
+    const imagePayload = await materializeImages(command.images);
+    registerActiveImageCleanup(imagePayload.cleanup);
     const nextThreadId = await ensureThread();
     if (!promptRunning || activePromptId !== command.id) return;
     const result = await rpcRequest("turn/start", {
@@ -1538,14 +1691,23 @@ const disposeSession = async () => {
     appServerReady = null;
     try {
       child.stdin?.end();
-      setTimeout(() => {
-        try {
-          if (!child.killed) child.kill();
-        } catch {}
-      }, 500);
     } catch {}
+    if (!(await waitForProcessExit(child, 1500))) {
+      try { killProcessTree(child); } catch {}
+      await waitForProcessExit(child, 500);
+    }
   }
   aborting = false;
+};
+
+const shutdownWorker = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    await disposeSession();
+  } finally {
+    process.exit(0);
+  }
 };
 
 const handleCommand = async (command) => {
@@ -1555,7 +1717,7 @@ const handleCommand = async (command) => {
         await init(command);
         break;
       case "prompt":
-        void runPrompt(command);
+        await runPrompt(command);
         break;
       case "guidance":
         await runGuidance(command);
@@ -1569,11 +1731,11 @@ const handleCommand = async (command) => {
         await abortPrompt(command);
         break;
       case "getModels":
-        send({ type: "models", id: command.id, models: getModels() });
+        send({ type: "models", id: command.id, models: await getModels() });
         break;
       case "setModel":
         currentModelId =
-          command.provider === CODEX_PROVIDER && command.modelId !== DEFAULT_MODEL_ID
+          command.modelId !== DEFAULT_MODEL_ID
             ? command.modelId
             : null;
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
@@ -1586,8 +1748,7 @@ const handleCommand = async (command) => {
         runUIResponse(command.response);
         break;
       case "dispose":
-        await disposeSession();
-        process.exit(0);
+        await shutdownWorker();
         break;
     }
   } catch (error) {
@@ -1603,6 +1764,18 @@ rl.on("line", (line) => {
   } catch (error) {
     send({ type: "error", error: error?.message || String(error) });
   }
+});
+
+rl.on("close", () => {
+  void shutdownWorker();
+});
+
+process.on("SIGINT", () => {
+  void shutdownWorker();
+});
+
+process.on("SIGTERM", () => {
+  void shutdownWorker();
 });
 
 process.on("uncaughtException", (error) => {

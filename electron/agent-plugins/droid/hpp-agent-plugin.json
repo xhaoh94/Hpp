@@ -1,17 +1,42 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "id": "droid",
-  "name": "Factory Droid",
-  "version": "1.0.0",
-  "description": "Factory Droid CLI programming agent",
+  "name": "Droid",
+  "version": "1.3.2",
+  "minHppVersion": "0.0.2",
+  "description": "Droid CLI programming agent",
   "entry": "agent.mjs",
   "runtime": "cli",
   "command": "droid",
   "packageName": "droid",
+  "order": 40,
+  "installHint": "npm install -g droid",
+  "updateCommand": "npm install -g droid@latest",
+  "shortName": "FD",
   "capabilities": {
     "planMode": "native",
     "guidance": false,
-    "fork": false,
-    "configuration": "openai-compatible"
+    "fork": true,
+    "configuration": {
+      "type": "provider",
+      "storage": "plugin",
+      "endpoints": [
+        { "id": "chat-completions", "label": "Chat Completions (/chat/completions)" },
+        { "id": "responses", "label": "Responses (/responses)" },
+        { "id": "anthropic-messages", "label": "Anthropic Messages (/v1/messages)" }
+      ],
+      "defaultEndpoint": "chat-completions",
+      "pathLabel": "~/.factory/settings.json",
+      "hint": "渠道由 Droid 插件管理 customModels 中的 Hpp 条目，并保留其它原生配置。",
+      "modelDefaults": { "reasoning": false, "imageInput": false },
+      "fixedModelCapabilities": false,
+      "modelListMode": "merge",
+      "backendModelVisibility": {
+        "userConfigurable": true,
+        "defaultVisible": false,
+        "label": "显示 Droid 官方模型",
+        "description": "关闭后，模型列表只显示渠道配置中的自定义模型。"
+      }
+    }
   }
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
-import { selectSessionModel } from "./useDataPersistence";
+import { PersistenceHydrationGate, selectSessionModel } from "./useDataPersistence";
 
 const models: ModelInfo[] = [
   { id: "default-model", name: "Default", provider: "default-provider", reasoning: true },
@@ -24,5 +24,18 @@ describe("selectSessionModel", () => {
     });
 
     expect(selectSessionModel("new-session-with-missing-model", models)).toEqual(models[0]);
+  });
+});
+
+describe("PersistenceHydrationGate", () => {
+  it("rejects stale StrictMode hydration completions", () => {
+    const gate = new PersistenceHydrationGate();
+    const firstGeneration = gate.begin();
+    const secondGeneration = gate.begin();
+
+    expect(gate.complete(firstGeneration)).toBe(false);
+    expect(gate.canPersist()).toBe(false);
+    expect(gate.complete(secondGeneration)).toBe(true);
+    expect(gate.canPersist()).toBe(true);
   });
 });

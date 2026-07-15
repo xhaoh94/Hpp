@@ -1,16 +1,41 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "id": "pi",
   "name": "Pi",
-  "version": "1.0.0",
+  "version": "1.2.1",
+  "minHppVersion": "0.0.2",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",
   "runtime": "sdk",
   "packageName": "@earendil-works/pi-coding-agent",
+  "order": 20,
+  "installHint": "在通用设置中更新 Pi SDK，或运行 npm install @earendil-works/pi-coding-agent@latest",
+  "updateCommand": "npm install @earendil-works/pi-coding-agent@latest",
+  "shortName": "PI",
   "capabilities": {
     "planMode": "prompt",
     "guidance": true,
     "fork": true,
-    "configuration": "openai-compatible"
+    "configuration": {
+      "type": "provider",
+      "storage": "plugin",
+      "endpoints": [
+        { "id": "chat-completions", "label": "Chat Completions (/chat/completions)" },
+        { "id": "responses", "label": "Responses (/responses)" },
+        { "id": "anthropic-messages", "label": "Anthropic Messages (/messages)" },
+        { "id": "mistral-conversations", "label": "Mistral Conversations" },
+        { "id": "azure-openai-responses", "label": "Azure OpenAI Responses" },
+        { "id": "openai-codex-responses", "label": "OpenAI Codex Responses" },
+        { "id": "bedrock-converse-stream", "label": "Amazon Bedrock Converse" },
+        { "id": "google-generative-ai", "label": "Google Generative AI" },
+        { "id": "google-vertex", "label": "Google Vertex AI" }
+      ],
+      "defaultEndpoint": "chat-completions",
+      "pathLabel": "~/.pi/agent/models.json",
+      "hint": "渠道由 Pi 插件无损读写 models.json，图片能力映射到模型 input。",
+      "modelDefaults": { "reasoning": false, "imageInput": false },
+      "fixedModelCapabilities": false,
+      "modelListMode": "configured"
+    }
   }
 }

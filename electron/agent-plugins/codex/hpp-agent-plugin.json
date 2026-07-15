@@ -1,18 +1,36 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "id": "codex",
   "name": "Codex",
-  "version": "1.0.0",
+  "version": "1.1.1",
+  "minHppVersion": "0.0.2",
   "description": "OpenAI Codex CLI programming agent",
   "entry": "agent.mjs",
   "runtime": "cli",
   "command": "codex",
   "packageName": "@openai/codex",
+  "order": 10,
+  "installHint": "可在 Hpp Agent 设置中全局安装 Codex，或运行 npm install -g @openai/codex",
+  "updateCommand": "npm install -g @openai/codex@latest",
+  "shortName": "CX",
   "capabilities": {
     "planMode": "native",
     "guidance": true,
     "fork": true,
-    "configuration": "openai-compatible",
+    "configuration": {
+      "type": "provider",
+      "storage": "hpp",
+      "endpoints": [
+        { "id": "responses", "label": "Responses (/responses)" },
+        { "id": "chat-completions", "label": "Chat Completions (/chat/completions)" }
+      ],
+      "defaultEndpoint": "responses",
+      "pathLabel": "~/.codex/config.toml",
+      "hint": "启用渠道时写入 Codex 当前 provider、默认模型和认证配置。",
+      "modelDefaults": { "reasoning": true, "imageInput": true },
+      "fixedModelCapabilities": true,
+      "modelListMode": "configured"
+    },
     "providerActivation": "single-active"
   }
 }

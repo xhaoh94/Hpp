@@ -1,10 +1,10 @@
-const { createReadStream, statSync } = require("fs");
+const { createReadStream, readdirSync, statSync } = require("fs");
 const { basename, resolve } = require("path");
 const https = require("https");
 
 const owner = "xhaoh94";
 const repo = "Hpp";
-const version = "0.0.1";
+const version = require("../package.json").version;
 const tag = `v${version}`;
 const token = process.env.GH_TOKEN;
 
@@ -80,13 +80,15 @@ function uploadFile(uploadUrl, filePath, contentType) {
 
 async function main() {
   const releases = await requestJson("GET", `/repos/${owner}/${repo}/releases?per_page=100`);
-  for (const release of releases) {
-    console.log(`Deleting release ${release.tag_name}`);
-    await requestJson("DELETE", `/repos/${owner}/${repo}/releases/${release.id}`);
+  const existingRelease = releases.find((release) => release.tag_name === tag);
+  if (existingRelease) {
+    console.log(`Deleting existing release ${tag}`);
+    await requestJson("DELETE", `/repos/${owner}/${repo}/releases/${existingRelease.id}`);
   }
 
-  const refs = await requestJson("GET", `/repos/${owner}/${repo}/git/matching-refs/tags/`);
+  const refs = await requestJson("GET", `/repos/${owner}/${repo}/git/matching-refs/tags/${encodeURIComponent(tag)}`);
   for (const ref of refs) {
+    if (ref.ref !== `refs/tags/${tag}`) continue;
     const refName = ref.ref.replace(/^refs\//, "");
     console.log(`Deleting tag ${refName}`);
     await requestJson("DELETE", `/repos/${owner}/${repo}/git/refs/${refName}`);
@@ -96,21 +98,24 @@ async function main() {
     tag_name: tag,
     target_commitish: "main",
     name: `Hpp ${tag}`,
-    body: "Hpp 重新整理后的首个发布版本。包含独立 Agent 插件进程、真实 backend 进程隔离、插件目录重构和安全修复。",
+    body: `Hpp ${version}。包含 Agent 插件进程、渠道与模型配置、会话恢复和 fork，以及 Codex、Pi、OpenCode、Droid 适配修复。`,
     draft: false,
     prerelease: false,
     make_latest: "true",
   });
 
+  const pluginAssets = readdirSync(resolve("release/agent-plugins"), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => [
+      `release/agent-plugins/${entry.name}`,
+      entry.name.endsWith(".zip") ? "application/zip" : "application/json",
+  ]);
   const assets = [
-    ["release/hpp-Setup-0.0.1.exe", "application/vnd.microsoft.portable-executable"],
-    ["release/hpp-Setup-0.0.1.exe.blockmap", "application/octet-stream"],
+    [`release/hpp-Setup-${version}.exe`, "application/vnd.microsoft.portable-executable"],
+    [`release/hpp-Setup-${version}.exe.blockmap`, "application/octet-stream"],
     ["release/latest.yml", "text/yaml"],
-    ["release/agent-plugins/agent-plugins.json", "application/json"],
-    ["release/agent-plugins/codex.zip", "application/zip"],
-    ["release/agent-plugins/pi.zip", "application/zip"],
-    ["release/agent-plugins/opencode.zip", "application/zip"],
-    ["release/agent-plugins/droid.zip", "application/zip"],
+    ...pluginAssets,
   ];
 
   for (const [relativePath, contentType] of assets) {

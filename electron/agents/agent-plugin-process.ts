@@ -30,7 +30,10 @@ type HostMethods = Record<string, (...args: unknown[]) => unknown>;
 export interface PluginHostCapabilities {
   getStatus: boolean;
   update: boolean;
+  uninstall: boolean;
   getDefaultThinkingLevel: boolean;
+  readProviderConfig: boolean;
+  writeProviderConfig: boolean;
   activateProvider: boolean;
 }
 
@@ -42,6 +45,9 @@ export class AgentPluginProcess {
   private nextId = 0;
   private nextBackendId = 0;
   private loadPromise: Promise<PluginHostCapabilities> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
+  private stopping = false;
+  private terminalError: Error | null = null;
 
   constructor(
     private readonly entryPath: string,
@@ -49,11 +55,8 @@ export class AgentPluginProcess {
     private hostMethods: HostMethods,
   ) {}
 
-  updateHostMethods(hostMethods: HostMethods): void {
-    this.hostMethods = hostMethods;
-  }
-
   async ensureLoaded(): Promise<PluginHostCapabilities> {
+    if (this.terminalError) throw this.terminalError;
     if (!this.loadPromise) this.loadPromise = this.start();
     return this.loadPromise;
   }
@@ -92,34 +95,70 @@ export class AgentPluginProcess {
   async disposeBackend(backendId: string): Promise<void> {
     this.eventHandlers.delete(backendId);
     this.configHandlers.delete(backendId);
-    await this.call("disposeBackend", { backendId }).catch(() => undefined);
+    if (!this.child?.stdin.writable) return;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        this.request("disposeBackend", { backendId }),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("Plugin backend dispose timed out.")), 5000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   dispose(): void {
+    void this.shutdown();
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     const child = this.child;
-    this.child = null;
     this.loadPromise = null;
-    for (const callback of this.pending.values()) callback.reject(new Error("Plugin host stopped."));
-    this.pending.clear();
     this.eventHandlers.clear();
     this.configHandlers.clear();
-    child?.kill();
+    if (!child) {
+      this.rejectPending(new Error("Plugin host stopped."));
+      return;
+    }
+
+    this.stopping = true;
+    this.shutdownPromise = (async () => {
+      await Promise.race([
+        this.request("shutdown").catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 1000)),
+      ]);
+      if (!(await this.waitForExit(child, 1000))) {
+        await this.killProcessTree(child);
+        await this.waitForExit(child, 500);
+      }
+      if (this.child === child) this.child = null;
+      this.rejectPending(new Error("Plugin host stopped."));
+    })().finally(() => {
+      this.stopping = false;
+      this.shutdownPromise = null;
+    });
+    return this.shutdownPromise;
   }
 
   private async start(): Promise<PluginHostCapabilities> {
     const workerPath = getBundledWorkerPath("agent-plugin-host.mjs", dirname(this.entryPath));
+    const agentId = String(this.meta.agentId || "");
     const backendDir = [
       dirname(workerPath),
       join(app.getAppPath(), "out", "main"),
       join(process.cwd(), "out", "main"),
-    ].find((candidate) => existsSync(join(candidate, "plugin-backend-codex.mjs")));
+    ].find((candidate) => existsSync(join(candidate, `plugin-backend-${agentId}.mjs`)));
     const invocation = getWorkerInvocation(workerPath);
+    const dataDir = String(this.meta.dataDir || "");
     const child = spawn(invocation.command, invocation.args, {
       env: {
         ...invocation.env,
         HPP_AGENT_BACKEND_DIR: backendDir || "",
-        HPP_AGENT_WORKER_DIR: dirname(workerPath),
-        HPP_DATA_DIR: String(this.meta.dataDir || ""),
+        HPP_AGENT_WORKER_DIR: backendDir || dirname(workerPath),
+        HPP_DATA_DIR: dataDir,
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -134,12 +173,19 @@ export class AgentPluginProcess {
       this.child = null;
       this.loadPromise = null;
       const error = new Error(`Plugin host exited (${code ?? signal ?? "unknown"}).`);
-      for (const callback of this.pending.values()) callback.reject(error);
-      this.pending.clear();
+      if (!this.stopping) this.terminalError = error;
+      this.rejectPending(error);
+      if (!this.stopping) {
+        for (const handler of this.eventHandlers.values()) {
+          handler({ type: "agent_disconnected", reason: "plugin-host-exited" });
+        }
+      }
+      this.eventHandlers.clear();
+      this.configHandlers.clear();
     });
     child.on("error", (error) => {
-      for (const callback of this.pending.values()) callback.reject(error);
-      this.pending.clear();
+      if (!this.stopping) this.terminalError = error;
+      this.rejectPending(error);
     });
     return this.request("load", { entryPath: this.entryPath, meta: this.meta }) as Promise<PluginHostCapabilities>;
   }
@@ -194,5 +240,46 @@ export class AgentPluginProcess {
 
   private sendResponse(id: string, result?: unknown, error?: string): void {
     this.child?.stdin.write(`${JSON.stringify({ kind: "response", id, result, error })}\n`);
+  }
+
+  private rejectPending(error: Error): void {
+    for (const callback of this.pending.values()) callback.reject(error);
+    this.pending.clear();
+  }
+
+  private waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode !== null && child.exitCode !== undefined) return Promise.resolve(true);
+    if (child.signalCode !== null && child.signalCode !== undefined) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        child.off("exit", onExit);
+        resolve(exited);
+      };
+      const onExit = () => finish(true);
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      child.once("exit", onExit);
+    });
+  }
+
+  private killProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (process.platform === "win32" && child.pid) {
+      return new Promise((resolve) => {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          windowsHide: true,
+          stdio: "ignore",
+        });
+        killer.on("error", () => {
+          child.kill();
+          resolve();
+        });
+        killer.on("exit", () => resolve());
+      });
+    }
+    child.kill("SIGKILL");
+    return Promise.resolve();
   }
 }

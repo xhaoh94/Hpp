@@ -6,6 +6,7 @@ import {
   orderAgents,
   supportsNativePlanMode,
 } from "@/lib/agents";
+import { compareVersions } from "@/lib/version";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -64,25 +65,6 @@ function syncActiveAgentModels(
     model.id === currentModel.id && model.provider === currentModel.provider
   ) : undefined;
   chatStore.setCurrentModel(matchingCurrentModel || models[0]);
-}
-
-function parseVersion(version: string): number[] {
-  return version
-    .replace(/^v/, "")
-    .split("-")[0]
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
-}
-
-function compareVersions(a: string, b: string): number {
-  const left = parseVersion(a);
-  const right = parseVersion(b);
-  const length = Math.max(left.length, right.length);
-  for (let i = 0; i < length; i += 1) {
-    const diff = (left[i] || 0) - (right[i] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
 }
 
 interface AgentSettingsViewProps {
@@ -201,6 +183,9 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
       setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
     }
   }, []);
+
+  const activeAgentUpdateId = Object.entries(agentUpdating).find(([, updating]) => updating)?.[0] || null;
+  const isAnyAgentUpdating = activeAgentUpdateId !== null;
 
   const moveAgent = useCallback((sourceId: string, targetId: string) => {
     if (sourceId === targetId) return;
@@ -324,7 +309,15 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   }, [applyInstalledPluginResult, installPluginFromPath, pluginPath]);
 
   const handleInstallOfficialPlugin = useCallback(async (plugin: OfficialAgentPluginDescriptor) => {
-    const trusted = window.confirm("官方 Agent 插件会在主进程中执行 JavaScript。请确认信任 xhaoh94/Hpp Release 后继续安装。");
+    if (!plugin.compatible) {
+      setPluginStatus({
+        type: "error",
+        text: plugin.compatibilityError || `${plugin.name} 与当前 Hpp 版本不兼容。`,
+      });
+      return;
+    }
+
+    const trusted = window.confirm("Agent 插件等同运行本机程序。请确认信任 xhaoh94/Hpp Release 后继续安装。");
     if (!trusted) return;
 
     setInstallingOfficialAgentIds((prev) => ({ ...prev, [plugin.id]: true }));
@@ -384,7 +377,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
 
   const handleRemovePlugin = useCallback(async () => {
     const agentId = removeConfirmAgentId;
-    if (!agentId) return;
+    if (!agentId || isAnyAgentUpdating) return;
     setRemovingAgentId(agentId);
     setPluginStatus(null);
     try {
@@ -417,7 +410,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     } finally {
       setRemovingAgentId("");
     }
-  }, [agentOrder, agents, enabledAgents, removeConfirmAgentId, removeLocalRuntime, removePlugin, saveAgentSettings]);
+  }, [agentOrder, agents, enabledAgents, isAnyAgentUpdating, removeConfirmAgentId, removeLocalRuntime, removePlugin, saveAgentSettings]);
 
   const orderedAgents = useMemo(() => orderAgents(agents, agentOrder), [agentOrder, agents]);
   const installedAgentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
@@ -577,8 +570,10 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                     <button
                       className="filter-add-btn agent-settings-update-btn"
                       onClick={() => void handleAgentUpdate(agent.id)}
-                      disabled={agentUpdating[agent.id] || !agentStatus.canUpdate}
-                      title={agentStatus.canUpdate
+                      disabled={isAnyAgentUpdating || !agentStatus.canUpdate}
+                      title={isAnyAgentUpdating && activeAgentUpdateId !== agent.id
+                        ? "请等待其他 Agent 更新完成"
+                        : agentStatus.canUpdate
                         ? isInstallAction ? "安装" : "更新"
                         : agentStatus.error || "请先安装 Node.js 和 npm"}
                     >
@@ -591,7 +586,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                     <button
                       className="btn-action agent-settings-refresh-btn"
                       onClick={() => openRemovePluginConfirm(agent.id)}
-                      disabled={removingAgentId === agent.id}
+                      disabled={!!removingAgentId || isAnyAgentUpdating}
                       title="卸载插件"
                     >
                       {removingAgentId === agent.id ? "卸载中..." : "卸载"}
@@ -601,7 +596,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                   <button
                     className="btn-action agent-settings-refresh-btn"
                     onClick={() => void refreshAgentStatus(agent.id)}
-                    disabled={isChecking || agentUpdating[agent.id]}
+                    disabled={isChecking || isAnyAgentUpdating}
                     title="重新检查版本"
                   >
                     {isChecking ? "检查中..." : "刷新"}
@@ -740,10 +735,14 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 {officialPlugins.map((plugin) => {
                   const installedAgent = installedAgentById.get(plugin.id);
                   const installed = !!installedAgent;
-                  const updateAvailable = installed && compareVersions(plugin.version, installedAgent.version) > 0;
+                  const hasNewerVersion = installed && compareVersions(plugin.version, installedAgent.version) > 0;
+                  const updateAvailable = hasNewerVersion && plugin.compatible;
+                  const blockedByHppVersion = !plugin.compatible;
                   const installing = installingOfficialAgentIds[plugin.id] === true;
                   const buttonText = installing
                     ? "安装中..."
+                    : blockedByHppVersion
+                      ? "需更新 Hpp"
                     : !installed
                       ? "安装"
                       : updateAvailable
@@ -756,19 +755,31 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                         <div className="agent-settings-title-line">
                           <span className="agent-settings-name">{plugin.name}</span>
                           <span className="agent-settings-badge">v{plugin.version}</span>
-                          <span className={`agent-settings-badge ${updateAvailable || !installed ? "agent-settings-badge-warning" : ""}`}>
-                            {!installed ? "未安装" : updateAvailable ? "可更新" : "已安装"}
+                          <span className={`agent-settings-badge ${blockedByHppVersion || updateAvailable || !installed ? "agent-settings-badge-warning" : ""}`}>
+                            {blockedByHppVersion
+                              ? `需要 Hpp v${plugin.minHppVersion}+`
+                              : !installed
+                                ? "未安装"
+                                : updateAvailable
+                                  ? "可更新"
+                                  : "已安装"}
                           </span>
                         </div>
                         {plugin.description && (
                           <div className="agent-settings-meta">{plugin.description}</div>
                         )}
+                        {blockedByHppVersion && plugin.compatibilityError && (
+                          <div className="agent-settings-error">{plugin.compatibilityError}</div>
+                        )}
                       </div>
                       <button
                         type="button"
-                        className={installed && !updateAvailable ? "btn-action agent-settings-refresh-btn" : "filter-add-btn agent-settings-update-btn"}
+                        className={blockedByHppVersion || (installed && !updateAvailable)
+                          ? "btn-action agent-settings-refresh-btn"
+                          : "filter-add-btn agent-settings-update-btn"}
                         onClick={() => void handleInstallOfficialPlugin(plugin)}
-                        disabled={officialLoading || installing || (installed && !updateAvailable)}
+                        disabled={officialLoading || installing || blockedByHppVersion || (installed && !updateAvailable)}
+                        title={blockedByHppVersion ? plugin.compatibilityError : undefined}
                       >
                         {buttonText}
                       </button>
@@ -815,14 +826,14 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                   type="checkbox"
                   checked={removeLocalRuntime}
                   onChange={(event) => setRemoveLocalRuntime(event.target.checked)}
-                  disabled={!!removingAgentId}
+                  disabled={!!removingAgentId || isAnyAgentUpdating}
                 />
               </label>
               <div className="agent-remove-confirm-actions">
                 <button type="button" className="btn-action" onClick={closeRemovePluginConfirm} disabled={!!removingAgentId}>
                   取消
                 </button>
-                <button type="button" className="filter-add-btn" onClick={() => void handleRemovePlugin()} disabled={!!removingAgentId}>
+                <button type="button" className="filter-add-btn" onClick={() => void handleRemovePlugin()} disabled={!!removingAgentId || isAnyAgentUpdating}>
                   {removingAgentId ? "卸载中..." : "确认卸载"}
                 </button>
               </div>

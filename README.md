@@ -1,25 +1,27 @@
 # Hpp
 
-Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理器。它把多个编程 Agent 统一放进同一个桌面应用里，按项目组织会话，支持插件化安装、模型配置、Plan 模式、运行中引导和会话 fork。
+Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理器。它通过 Agent 插件统一管理不同编程 Agent，并按项目组织会话、模型、历史记录、分叉和运行状态。
 
-## 功能概览
+## 功能
 
-- 项目卡片：为每个本地项目管理多个 Agent 会话。
-- 多 Agent 插件：通过安装插件添加 Codex、Pi、OpenCode、Droid 或第三方 Agent。
-- 插件安装：支持本地 ZIP、插件目录，以及官方插件列表一键安装/更新。
-- 会话管理：支持打开、关闭、恢复历史会话，并保留会话消息。
-- 模型与 Provider 配置：支持 OpenAI-compatible provider 表单和 per-agent 模型列表。
-- Agent 能力：插件可声明 Plan、guidance、fork、configuration、providerActivation 等能力。
-- 官方插件包：构建后输出到 `release/agent-plugins`，可直接用于安装测试或发布。
+- 项目与多会话管理，支持历史恢复、会话引用和分叉。
+- Agent 插件安装、更新、排序、卸载和状态检测。
+- CLI Agent 使用系统全局安装；在终端更新后，Hpp 重新检查即可同步版本。
+- 每个 Agent 插件运行在独立插件宿主进程中，同一插件可管理多个会话 backend。
+- 应用退出或插件重载时会等待 backend 清理 worker/CLI 子进程，超时后结束对应进程树。
+- 插件通过 manifest 声明 Plan、guidance、fork、Provider 配置和模型列表策略。
+- Provider 配置支持插件自定义 Endpoint 列表、默认模型能力和原生配置存储方式。
+- 官方插件构建后输出独立 ZIP 和插件目录索引。
+- 插件 manifest 声明最低 Hpp 版本，官方更新、本地 ZIP 和目录安装都会在主进程校验兼容性。
 
-## 快速开始
+## 开发
 
 ```bash
 npm install
 npm run dev
 ```
 
-常用脚本：
+常用命令：
 
 ```bash
 npm test
@@ -27,24 +29,27 @@ npm run build
 npm run dist
 ```
 
-- `npm run dev`：启动 Electron 开发环境。
 - `npm test`：运行 Vitest 测试。
-- `npm run build`：构建主进程、预加载脚本、渲染端，并打包官方 Agent 插件。
-- `npm run dist`：构建并生成安装包。
+- `npm run build`：构建 Electron 主进程、预加载脚本和渲染端，并打包官方 Agent 插件。
+- `npm run dist`：生成桌面安装包。
 
-## Agent 插件使用
+## Agent 插件
 
-Hpp 不再默认内置安装 Agent。Agent 通过插件目录或 ZIP 安装。
+Hpp 不在核心代码中按 Agent ID 判断配置格式或功能行为。插件通过 `hpp-agent-plugin.json` 自描述：
 
-在应用中打开 `Agent 设置`：
+- 展示顺序、安装提示和更新命令。
+- Plan、guidance 和原生 fork 能力。
+- Provider Endpoint 列表和默认 Endpoint。
+- Provider 配置保存在 Hpp 或由插件读写原生文件。
+- 模型列表使用 backend、配置列表或两者合并。
+- 插件可声明是否允许用户隐藏 backend/官方模型，只保留自定义渠道模型。
+- 单渠道激活时由插件写入对应 Agent 的原生配置。
 
-- 点 `本地安装`，选择插件 ZIP 或已解压的插件目录。
-- 点 `官方插件`，从 GitHub Release 的官方插件列表下载并安装。
-- 已安装插件可在 Agent 设置中启用、排序、刷新状态、更新或卸载。
+因此新增 Gemini CLI 等 Agent 时，不需要在 Hpp 中增加 `if (agentId === "gemini")`。插件只需声明能力，并在插件内实现 backend 与可选的 `configProvider`。
 
-如果某个 Agent 仍有打开的会话，Hpp 会阻止更新或卸载该插件。先关闭相关会话后再操作。
+完整开发规范见 [agent-plugins.md](./agent-plugins.md)。
 
-## 官方插件包
+## 官方插件
 
 官方插件源码位于：
 
@@ -52,32 +57,30 @@ Hpp 不再默认内置安装 Agent。Agent 通过插件目录或 ZIP 安装。
 electron/agent-plugins/
 ```
 
-运行构建后会生成：
+构建产物位于：
 
 ```text
-release/agent-plugins/codex.zip
-release/agent-plugins/pi.zip
-release/agent-plugins/opencode.zip
-release/agent-plugins/droid.zip
+release/agent-plugins/<plugin-id>.zip
 release/agent-plugins/agent-plugins.json
 ```
 
-`agent-plugins.json` 是官方插件索引，发布到 GitHub Release 后，Hpp 的官方插件弹窗会从 latest release 下载并展示。
+打包和发布脚本会根据插件目录及 manifest 自动发现插件，不维护固定 Agent ID 名单。
+
+官方插件目录使用独立 schema 版本。发布需要更高 Hpp 的插件时，旧 Hpp 会拒绝新目录；新 Hpp 会显示最低版本要求，并禁止安装或更新不兼容插件。
 
 ## 项目结构
 
 ```text
-src/                     Renderer UI、状态管理和前端类型
-electron/                Electron 主进程、IPC、Agent backend 适配
-electron/agent-plugins/  官方 Agent 插件源码
-scripts/                 构建辅助脚本，例如官方插件打包
-release/                 构建产物和发布产物
+src/                       Renderer UI、状态管理和共享类型
+electron/agents/           通用插件注册、配置编排和会话管理
+electron/agent-plugins/    官方插件 manifest、entry 和原生配置适配器
+electron/plugin-backends/  官方 backend 实现
+electron/plugin-runtime/   插件宿主和 backend 运行时
+scripts/                   构建、打包和发布辅助脚本
 ```
 
-## 插件开发
+## 安全边界
 
-开发第三方 Agent 插件请参考 [agent-plugins.md](./agent-plugins.md)。
+Agent 插件是受信任的本机代码。插件不在 Electron 主进程中执行，而是在独立插件宿主进程中运行，因此插件崩溃不会直接终止主进程。
 
-## 安全说明
-
-首版插件按受信任本地代码处理，插件 entry 会在主进程环境中执行 JavaScript。只安装你信任来源的插件。插件依赖需要随插件目录提供，Hpp 不会自动执行 `npm install`。
+独立进程不是权限沙箱。插件仍拥有完整 Node.js 权限，可以访问用户文件、环境变量、网络和本机命令。安装本地 ZIP 等同于运行本机程序，只应安装可信来源的插件。

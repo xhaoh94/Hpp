@@ -4,7 +4,7 @@ import type {
   AgentPluginInstallResult,
   OfficialAgentPluginDescriptor,
 } from "@/types";
-import { normalizeAgentDisplayName, setAgentCatalog } from "@/lib/agents";
+import { setAgentCatalog } from "@/lib/agents";
 
 interface AgentCatalogState {
   agents: AgentDescriptor[];
@@ -24,9 +24,8 @@ interface AgentCatalogState {
 }
 
 function applyAgents(agents: AgentDescriptor[]) {
-  const nextAgents = agents.map(normalizeAgentDisplayName);
-  setAgentCatalog(nextAgents);
-  return nextAgents;
+  setAgentCatalog(agents);
+  return agents;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -92,7 +91,7 @@ export const useAgentCatalogStore = create<AgentCatalogState>((set, get) => ({
     try {
       const result = await window.electronAPI.agentPluginListOfficial();
       set({
-        officialPlugins: result.plugins.map(normalizeAgentDisplayName),
+        officialPlugins: result.plugins,
         officialLoaded: true,
         officialLoading: false,
         officialError: result.success ? null : result.error || "加载官方插件失败",

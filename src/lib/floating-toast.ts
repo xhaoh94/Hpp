@@ -5,7 +5,7 @@ export function showFloatingToastMessage(text: string) {
 }
 
 export function getModelSwitchToastText(agentId: string, provider: string, modelName: string) {
-  return agentId === "codex"
+  return requiresProviderActivation(agentId)
     ? `已切换至 ${modelName}（${provider} 渠道）`
     : `已切换至 ${modelName}`;
 }
@@ -14,3 +14,4 @@ export function getFloatingToastText(event: Event) {
   const detail = (event as CustomEvent<{ text?: unknown }>).detail;
   return typeof detail?.text === "string" ? detail.text : "";
 }
+import { requiresProviderActivation } from "@/lib/agents";

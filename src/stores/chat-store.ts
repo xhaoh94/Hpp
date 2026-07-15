@@ -300,16 +300,7 @@ export const createEmptyChatDraft = (): ChatDraft => ({
 export const EMPTY_CHAT_DRAFT = createEmptyChatDraft();
 
 export const isAgentStartupFailureMessage = (message: ChatMessage) => {
-  if (message.role !== "system") return false;
-  if (message.systemType === "agent_startup_error") return true;
-  const content = message.content || "";
-  if (!content.startsWith("Agent ")) return false;
-  return (
-    content.includes("worker init timed out") ||
-    content.includes("worker exited before completing the request") ||
-    content.includes("Codex worker") ||
-    content.includes("Pi SDK worker")
-  );
+  return message.role === "system" && message.systemType === "agent_startup_error";
 };
 
 const updateSessionDraft = (
@@ -338,7 +329,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingLevel: "medium",
   availableModels: [],
   favoriteModels: [],
-  activeAgentId: "codex",
+  activeAgentId: "",
   highlightedFile: null,
   sessionDrafts: {},
   messageQueues: {},
@@ -418,7 +409,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const process = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
       const normalizedEntry: AgentProcessEntry = {
         ...entry,
-        expanded: entry.expanded ?? (entry.type === "thinking" ? false : entry.state === "running"),
+        expanded: false,
       };
       msgs[index] = {
         ...msg,

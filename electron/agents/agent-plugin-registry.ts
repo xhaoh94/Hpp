@@ -2,11 +2,9 @@ import { app, BrowserWindow } from "electron";
 import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
-import { homedir } from "os";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
 import AdmZip from "adm-zip";
 import { AgentPluginProcess, type PluginHostCapabilities } from "./agent-plugin-process";
-import { getPiSDKStatus, uninstallPiSDK, updatePiSDK } from "../ipc/pi-sdk-handlers";
 import {
   commandExists as commandExistsOnPath,
   findCommandsOnPath,
@@ -21,10 +19,12 @@ import type {
   AgentImagePayload,
   AgentPackageStatus,
   AgentPlanModeSupport,
+  AgentProviderConfiguration,
   AgentPluginInstallResult,
   AgentPluginManifest,
   AgentUIResponse,
 } from "../../src/types/ipc";
+import { isValidVersion, meetsMinimumVersion } from "../../src/lib/version";
 
 export interface AgentModel {
   id: string;
@@ -72,7 +72,7 @@ export interface AgentBackend {
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
   sendUIResponse(response: AgentUIResponse): void;
-  dispose(): void;
+  dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;
 }
 
@@ -83,6 +83,11 @@ interface PluginRecord {
   process?: AgentPluginProcess;
   processCapabilities?: PluginHostCapabilities;
 }
+
+type RawAgentPluginManifest = Omit<AgentPluginManifest, "schemaVersion" | "minHppVersion"> & {
+  schemaVersion: number;
+  minHppVersion?: string;
+};
 
 interface InstallOptions {
   canReplace?: (agentId: string) => boolean | Promise<boolean>;
@@ -102,10 +107,6 @@ interface PluginActivateProviderResult {
 interface AgentHostApi {
   getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPackageStatus>;
   updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }>;
-  getPiSDKStatus(pluginDir?: string): Promise<AgentPackageStatus>;
-  updatePiSDK(): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
-  getCodexDefaultThinkingLevel(): Promise<string>;
-  writeCodexNativeProviderConfig?(args: { state: unknown; provider: unknown }): Promise<PluginActivateProviderResult>;
 }
 
 interface CommandResult {
@@ -116,14 +117,16 @@ interface CommandResult {
 type CommandError = Error & {
   stdout?: string;
   stderr?: string;
+  code?: string | number;
+  signal?: string;
+  killed?: boolean;
+  timeoutMs?: number;
 };
 
 const MANIFEST_FILE = "hpp-agent-plugin.json";
 const DEFAULT_THINKING_LEVEL = "medium";
 const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
-const DEFAULT_AGENT_ORDER = ["codex", "pi", "opencode", "droid"];
-
 const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
   guidance: false,
@@ -179,17 +182,77 @@ function normalizePlanMode(value: unknown): AgentPlanModeSupport {
   return DEFAULT_PLUGIN_CAPABILITIES.planMode;
 }
 
+function normalizeProviderConfiguration(value: unknown): AgentProviderConfiguration | "none" {
+  if (!isRecord(value) || value.type !== "provider" || !Array.isArray(value.endpoints)) return "none";
+  const seenEndpoints = new Set<string>();
+  const endpoints = value.endpoints.flatMap((rawEndpoint) => {
+    if (!isRecord(rawEndpoint)) return [];
+    const id = asString(rawEndpoint.id);
+    if (!id || seenEndpoints.has(id)) return [];
+    seenEndpoints.add(id);
+    return [{ id, label: asString(rawEndpoint.label) || id }];
+  });
+  if (endpoints.length === 0) return "none";
+
+  const defaultEndpoint = asString(value.defaultEndpoint);
+  const modelDefaults = isRecord(value.modelDefaults) ? value.modelDefaults : {};
+  const modelListMode = value.modelListMode === "configured" || value.modelListMode === "backend"
+    ? value.modelListMode
+    : "merge";
+  const rawBackendModelVisibility = isRecord(value.backendModelVisibility)
+    ? value.backendModelVisibility
+    : undefined;
+  const backendModelVisibility = modelListMode === "merge" && rawBackendModelVisibility
+    ? {
+        userConfigurable: rawBackendModelVisibility.userConfigurable === true,
+        defaultVisible: rawBackendModelVisibility.defaultVisible !== false,
+        label: asString(rawBackendModelVisibility.label) || "显示 Agent 内置模型",
+        description: asString(rawBackendModelVisibility.description) || undefined,
+      }
+    : undefined;
+  return {
+    type: "provider",
+    storage: value.storage === "plugin" ? "plugin" : "hpp",
+    endpoints,
+    defaultEndpoint: endpoints.some((endpoint) => endpoint.id === defaultEndpoint)
+      ? defaultEndpoint
+      : endpoints[0].id,
+    pathLabel: asString(value.pathLabel) || undefined,
+    hint: asString(value.hint) || undefined,
+    modelDefaults: {
+      reasoning: modelDefaults.reasoning === true,
+      imageInput: modelDefaults.imageInput === true,
+    },
+    fixedModelCapabilities: value.fixedModelCapabilities === true,
+    modelListMode,
+    backendModelVisibility,
+  };
+}
+
 function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
-  const configuration = input.configuration === "openai-compatible"
-    ? "openai-compatible"
-    : "none";
   return {
     planMode: normalizePlanMode(input.planMode),
     guidance: input.guidance === true,
     fork: input.fork === true,
-    configuration,
+    configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
+  };
+}
+
+function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
+  return {
+    ...capabilities,
+    configuration: capabilities.configuration === "none"
+      ? "none"
+      : {
+          ...capabilities.configuration,
+          endpoints: capabilities.configuration.endpoints.map((endpoint) => ({ ...endpoint })),
+          modelDefaults: { ...capabilities.configuration.modelDefaults },
+          backendModelVisibility: capabilities.configuration.backendModelVisibility
+            ? { ...capabilities.configuration.backendModelVisibility }
+            : undefined,
+        },
   };
 }
 
@@ -227,27 +290,44 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 }
 
 function descriptorFromManifest(
-  manifest: AgentPluginManifest,
+  manifest: RawAgentPluginManifest,
   source: AgentDescriptor["source"],
-  installedPath?: string
+  installedPath?: string,
+  allowLegacySchema = false
 ): AgentDescriptor {
-  if (manifest.schemaVersion !== 1) throw new Error("插件 schemaVersion 必须为 1。");
+  const legacySchema = manifest.schemaVersion === 2;
+  if (manifest.schemaVersion !== 3 && !(allowLegacySchema && legacySchema)) {
+    throw new Error("插件 schemaVersion 必须为 3。");
+  }
   const id = asString(manifest.id);
   const name = asString(manifest.name);
   const version = asString(manifest.version);
+  const minHppVersion = asString(manifest.minHppVersion) || (legacySchema ? "0.0.0-0" : "");
   const entry = asString(manifest.entry);
   if (!id) throw new Error("插件缺少 id。");
   if (!name) throw new Error(`插件 ${id} 缺少 name。`);
   if (!version) throw new Error(`插件 ${id} 缺少 version。`);
+  if (!isValidVersion(version)) throw new Error(`插件 ${id} 的 version 无效：${version || "空"}。`);
+  if (!minHppVersion) throw new Error(`插件 ${id} 缺少 minHppVersion。`);
+  if (!isValidVersion(minHppVersion)) {
+    throw new Error(`插件 ${id} 的 minHppVersion 无效：${minHppVersion}。`);
+  }
   if (!entry) throw new Error(`插件 ${id} 缺少 entry。`);
   ensureAgentId(id);
   ensureRelativePath(entry, "entry");
+
+  const currentHppVersion = app.getVersion();
+  if (!isValidVersion(currentHppVersion)) throw new Error(`当前 Hpp 版本号无效：${currentHppVersion}。`);
+  if (!meetsMinimumVersion(currentHppVersion, minHppVersion)) {
+    throw new Error(`插件 ${name} 需要 Hpp v${minHppVersion} 或更高版本，当前为 v${currentHppVersion}。`);
+  }
 
   const description = asString(manifest.description);
   const runtime = manifest.runtime === "cli" || manifest.runtime === "sdk" ? manifest.runtime : "plugin";
   const command = asString(manifest.command) || undefined;
   const packageName = asString(manifest.packageName) || undefined;
   const capabilities = normalizeCapabilities(manifest.capabilities);
+  const order = typeof manifest.order === "number" && Number.isFinite(manifest.order) ? manifest.order : 1000;
 
   return {
     id,
@@ -255,16 +335,18 @@ function descriptorFromManifest(
     desc: description,
     description,
     version,
+    minHppVersion,
     runtime,
     command,
     packageName,
+    order,
     capabilities,
     source,
     removable: source === "plugin",
     installedPath,
-    installHint: command ? `请安装或配置 ${command}` : source === "plugin" ? "请检查插件安装目录" : undefined,
-    updateCommand: packageName ? `npm install -g ${packageName}@latest` : undefined,
-    shortName: id.slice(0, 2).toUpperCase(),
+    installHint: asString(manifest.installHint) || (command ? `请安装或配置 ${command}` : source === "plugin" ? "请检查插件安装目录" : undefined),
+    updateCommand: asString(manifest.updateCommand) || (packageName ? `npm install -g ${packageName}@latest` : undefined),
+    shortName: asString(manifest.shortName) || id.slice(0, 2).toUpperCase(),
   };
 }
 
@@ -291,6 +373,7 @@ function runCommand(
           const commandError = error as CommandError;
           commandError.stdout = stdout;
           commandError.stderr = stderr;
+          commandError.timeoutMs = options.timeout ?? 15000;
           reject(commandError);
           return;
         }
@@ -305,6 +388,56 @@ function runNpmCommand(args: string[], options: { cwd?: string; timeout?: number
   const invocation = getNpmInvocation(args, env);
   if (!invocation) return Promise.reject(new Error("未找到可用的 npm CLI，请重新安装 Node.js"));
   return runCommand(invocation.command, invocation.args, options);
+}
+
+async function terminateOrphanedWindowsCliProcesses(command: string): Promise<number> {
+  if (process.platform !== "win32") return 0;
+  const commandName = basename(command).replace(/\.(?:cmd|bat|com|exe)$/i, "");
+  if (!/^[a-zA-Z0-9._-]+$/.test(commandName)) return 0;
+  const powershell = join(
+    process.env.SystemRoot || "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  if (!existsSync(powershell)) return 0;
+
+  const script = [
+    "& {",
+    "param([string]$TargetName)",
+    "$all = @(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "$byId = @{}",
+    "foreach ($item in $all) { $byId[[string]$item.ProcessId] = $item }",
+    "$stale = @($all | Where-Object {",
+    "  if ($_.Name -ine $TargetName) { return $false }",
+    "  $parent = $byId[[string]$_.ParentProcessId]",
+    "  return $null -eq $parent -or $parent.CreationDate -gt $_.CreationDate",
+    "})",
+    "foreach ($item in $stale) { Stop-Process -Id $item.ProcessId -Force -ErrorAction SilentlyContinue }",
+    "foreach ($item in $stale) { Wait-Process -Id $item.ProcessId -Timeout 5 -ErrorAction SilentlyContinue }",
+    "[pscustomobject]@{ count = $stale.Count; ids = @($stale.ProcessId) } | ConvertTo-Json -Compress",
+    "}",
+  ].join("\n");
+
+  try {
+    const result = await runCommand(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script, `${commandName}.exe`],
+      { timeout: 15000 },
+    );
+    const output = result.stdout.trim();
+    if (!output) return 0;
+    const parsed = JSON.parse(output) as { count?: unknown; ids?: unknown };
+    const count = typeof parsed.count === "number" ? parsed.count : 0;
+    if (count > 0) {
+      console.info(`[agent-runtime] Removed ${count} orphaned ${commandName} process(es).`);
+    }
+    return count;
+  } catch (error) {
+    console.warn(`[agent-runtime] Failed to inspect orphaned ${commandName} processes:`, formatError(error));
+    return 0;
+  }
 }
 
 function parseVersion(version: string): number[] {
@@ -328,8 +461,17 @@ function compareVersions(a: string, b: string): number {
 
 function formatError(error: unknown): string {
   const err = error as CommandError;
-  const detail = (err.stderr || err.stdout || err.message || String(error)).trim();
-  return detail.split(/\r?\n/).filter(Boolean).slice(-3).join("\n");
+  if (err.killed) {
+    return `更新命令执行超过 ${Math.ceil((err.timeoutMs || 0) / 1000)} 秒，已终止。`;
+  }
+  const output = (err.stderr || err.stdout || "").trim();
+  if (output) {
+    const lines = output.split(/\r?\n/).filter(Boolean);
+    if (lines.length <= 8) return lines.join("\n");
+    return [...lines.slice(0, 6), "...", ...lines.slice(-2)].join("\n");
+  }
+  const code = err.code !== undefined ? `（错误码 ${String(err.code)}）` : "";
+  return `${err.message || String(error)}${code}`.trim();
 }
 
 function extractVersion(output: string): string | undefined {
@@ -358,19 +500,6 @@ async function getCommandVersion(command: string): Promise<{ version?: string; e
   }
 
   return { error: lastError };
-}
-
-async function getInstalledPackageVersion(packageName: string): Promise<string | undefined> {
-  try {
-    const { stdout } = await runNpmCommand(["root", "-g"], { timeout: 10000 });
-    const packageRoot = stdout.trim();
-    if (!packageRoot) return undefined;
-    const packageJson = await readFile(join(packageRoot, ...packageName.split("/"), "package.json"), "utf8");
-    const parsed = JSON.parse(packageJson) as { version?: unknown };
-    return typeof parsed.version === "string" ? parsed.version : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function getNodeRuntimeStatus(): Promise<{ nodeVersion?: string; nodeOk: boolean; error?: string }> {
@@ -405,31 +534,31 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
   }
 
   const versionResult = await getCommandVersion(command);
-  const packageVersion = !versionResult.version && descriptor.packageName
-    ? await getInstalledPackageVersion(descriptor.packageName)
-    : undefined;
-  const currentVersion = versionResult.version || packageVersion;
+  const executableReady = !!versionResult.version;
+  const currentVersion = versionResult.version;
   let latestVersion: string | undefined;
-  let error = packageVersion && versionResult.error
-    ? `${descriptor.name} 命令无法执行或无法返回版本：${versionResult.error}`
+  let error = !executableReady
+    ? `${descriptor.name} 命令无法执行，请点击安装进行修复。${versionResult.error ? `\n${versionResult.error}` : ""}`
     : undefined;
 
   if (descriptor.packageName) {
     try {
       latestVersion = await getLatestNpmPackageVersion(descriptor.packageName);
     } catch (err) {
-      error = `无法检查 ${descriptor.name} 最新版本：${formatError(err)}`;
+      const latestVersionError = `无法检查 ${descriptor.name} 最新版本：${formatError(err)}`;
+      error = error ? `${error}\n${latestVersionError}` : latestVersionError;
     }
   }
 
   const updateAvailable = !!(
+    executableReady &&
     currentVersion &&
     latestVersion &&
     compareVersions(currentVersion, latestVersion) < 0
   );
 
   return {
-    installed: true,
+    installed: executableReady,
     currentVersion,
     latestVersion,
     updateAvailable,
@@ -464,6 +593,17 @@ async function updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: b
   }
 
   try {
+    const currentStatus = await getCliAgentStatus(descriptor);
+    if (
+      currentStatus.installed &&
+      currentStatus.currentVersion &&
+      currentStatus.latestVersion &&
+      compareVersions(currentStatus.currentVersion, currentStatus.latestVersion) >= 0
+    ) {
+      return { success: true, status: currentStatus };
+    }
+
+    await terminateOrphanedWindowsCliProcesses(descriptor.command || descriptor.id);
     await runNpmCommand(["install", "-g", `${descriptor.packageName}@latest`], { timeout: 180000 });
     return { success: true, status: await getCliAgentStatus(descriptor) };
   } catch (err) {
@@ -475,31 +615,6 @@ function normalizeThinkingLevel(value: unknown): string | undefined {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "none") return "off";
   return VALID_THINKING_LEVELS.has(normalized) ? normalized : undefined;
-}
-
-function extractTopLevelConfigValue(content: string, key: string): string | undefined {
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    if (line.startsWith("[")) break;
-
-    const match = line.match(new RegExp(`^${key}\\s*=\\s*(?:"([^"]+)"|'([^']+)'|([^\\s#]+))`));
-    if (match) return match[1] || match[2] || match[3];
-  }
-  return undefined;
-}
-
-function getCodexConfigPath(): string {
-  return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
-}
-
-async function getCodexDefaultThinkingLevel(): Promise<string> {
-  try {
-    const content = await readFile(getCodexConfigPath(), "utf8");
-    return normalizeThinkingLevel(extractTopLevelConfigValue(content, "model_reasoning_effort")) || DEFAULT_THINKING_LEVEL;
-  } catch {
-    return DEFAULT_THINKING_LEVEL;
-  }
 }
 
 function getZipSafeName(entryName: string) {
@@ -514,7 +629,7 @@ function getZipSafeName(entryName: string) {
   return normalized.endsWith("/") ? `${parts.join("/")}/` : parts.join("/");
 }
 
-function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; manifest: AgentPluginManifest } {
+function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; manifest: RawAgentPluginManifest } {
   const entries = zip.getEntries().filter((entry) => !entry.isDirectory);
   const safeNames = entries.map((entry) => getZipSafeName(entry.entryName));
   const rootIndex = safeNames.findIndex((name) => name === MANIFEST_FILE);
@@ -522,7 +637,7 @@ function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; mani
     return {
       entryName: entries[rootIndex].entryName,
       prefix: "",
-      manifest: JSON.parse(entries[rootIndex].getData().toString("utf8")) as AgentPluginManifest,
+      manifest: JSON.parse(entries[rootIndex].getData().toString("utf8")) as RawAgentPluginManifest,
     };
   }
 
@@ -534,7 +649,7 @@ function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; mani
       return {
         entryName: entries[nestedIndex].entryName,
         prefix,
-        manifest: JSON.parse(entries[nestedIndex].getData().toString("utf8")) as AgentPluginManifest,
+        manifest: JSON.parse(entries[nestedIndex].getData().toString("utf8")) as RawAgentPluginManifest,
       };
     }
   }
@@ -552,7 +667,7 @@ export class AgentPluginRegistry {
   }
 
   async reload(): Promise<AgentDescriptor[]> {
-    for (const record of this.pluginRecords.values()) record.process?.dispose();
+    await this.shutdown();
     this.pluginRecords.clear();
     await mkdir(getPluginInstallDir(), { recursive: true });
 
@@ -584,21 +699,15 @@ export class AgentPluginRegistry {
     const plugins = Array.from(this.pluginRecords.values())
       .map((record) => record.descriptor)
       .sort((left, right) => {
-        const leftIndex = DEFAULT_AGENT_ORDER.indexOf(left.id);
-        const rightIndex = DEFAULT_AGENT_ORDER.indexOf(right.id);
-        if (leftIndex !== -1 || rightIndex !== -1) {
-          return (leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex)
-            - (rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex);
-        }
-        return left.name.localeCompare(right.name);
+        return left.order - right.order || left.name.localeCompare(right.name);
       });
-    return plugins.map((agent) => ({ ...agent, capabilities: { ...agent.capabilities } }));
+    return plugins.map((agent) => ({ ...agent, capabilities: cloneCapabilities(agent.capabilities) }));
   }
 
   async getDescriptor(agentId: string): Promise<AgentDescriptor | undefined> {
     await this.ensureLoaded();
     const plugin = this.pluginRecords.get(agentId)?.descriptor;
-    return plugin ? { ...plugin, capabilities: { ...plugin.capabilities } } : undefined;
+    return plugin ? { ...plugin, capabilities: cloneCapabilities(plugin.capabilities) } : undefined;
   }
 
   async getCapabilities(agentId: string): Promise<AgentCapabilities> {
@@ -608,13 +717,32 @@ export class AgentPluginRegistry {
 
   async isConfigurable(agentId: string): Promise<boolean> {
     const capabilities = await this.getCapabilities(agentId);
-    return capabilities.configuration === "openai-compatible";
+    return capabilities.configuration !== "none";
+  }
+
+  async readProviderConfig(agentId: string): Promise<unknown | undefined> {
+    await this.ensureLoaded();
+    const record = this.pluginRecords.get(agentId);
+    if (!record) throw new Error(`未安装 agent 插件：${agentId}`);
+    const pluginProcess = await this.getPluginProcess(record);
+    if (!record.processCapabilities?.readProviderConfig) return undefined;
+    return pluginProcess.call("readProviderConfig");
+  }
+
+  async writeProviderConfig(agentId: string, state: unknown): Promise<PluginActivateProviderResult> {
+    await this.ensureLoaded();
+    const record = this.pluginRecords.get(agentId);
+    if (!record) throw new Error(`未安装 agent 插件：${agentId}`);
+    const pluginProcess = await this.getPluginProcess(record);
+    if (!record.processCapabilities?.writeProviderConfig) {
+      throw new Error(`插件 ${record.descriptor.id} 声明了插件配置存储，但未导出 configProvider.write。`);
+    }
+    return await pluginProcess.call("writeProviderConfig", { state }) as PluginActivateProviderResult || {};
   }
 
   async activateProvider(
     agentId: string,
-    args: PluginActivateProviderArgs,
-    hostOverrides: Partial<AgentHostApi> = {}
+    args: PluginActivateProviderArgs
   ): Promise<PluginActivateProviderResult> {
     await this.ensureLoaded();
     const record = this.pluginRecords.get(agentId);
@@ -623,7 +751,7 @@ export class AgentPluginRegistry {
       throw new Error(`${record.descriptor.name} 不支持启用单一渠道。`);
     }
 
-    const pluginProcess = await this.getPluginProcess(record, hostOverrides);
+    const pluginProcess = await this.getPluginProcess(record);
     if (!record.processCapabilities?.activateProvider) {
       throw new Error(`插件 ${record.descriptor.id} 声明了 single-active provider，但未导出 configProvider.activateProvider。`);
     }
@@ -724,7 +852,7 @@ export class AgentPluginRegistry {
 
       const operationId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       stagingDir = join(installDir, `.install-${operationId}`);
-      let manifest: AgentPluginManifest;
+      let manifest: RawAgentPluginManifest;
       let descriptor: AgentDescriptor;
 
       if (info.isDirectory()) {
@@ -745,7 +873,7 @@ export class AgentPluginRegistry {
         throw new Error("请选择插件目录或 .zip 文件。");
       }
 
-      const installedRecord = await this.readPluginRecord(stagingDir);
+        const installedRecord = await this.readPluginRecord(stagingDir, false);
       if (installedRecord.descriptor.id !== descriptor.id) {
         throw new Error("插件安装校验失败：复制后的 manifest ID 不一致。");
       }
@@ -767,7 +895,7 @@ export class AgentPluginRegistry {
         throw error;
       }
 
-      const finalRecord = await this.readPluginRecord(targetDir);
+      const finalRecord = await this.readPluginRecord(targetDir, false);
       this.pluginRecords.set(finalRecord.descriptor.id, finalRecord);
       if (backupDir) {
         await rm(backupDir, { recursive: true, force: true });
@@ -803,10 +931,11 @@ export class AgentPluginRegistry {
       }
 
       if (removeRuntime) {
-        if (agentId === "pi") {
-          const result = await uninstallPiSDK();
-          if (!result.success) {
-            return { success: false, error: result.error || "Pi SDK 卸载失败", agents: await this.listAgents() };
+        const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
+        if (pluginProcess && record.processCapabilities?.uninstall) {
+          const result = await pluginProcess.call("uninstall") as { success?: boolean; error?: string } | undefined;
+          if (result?.success !== true) {
+            return { success: false, error: result?.error || `${record.descriptor.name} 运行时卸载失败`, agents: await this.listAgents() };
           }
         } else if (record.descriptor.packageName) {
           if (!(await commandExists("npm"))) {
@@ -820,7 +949,7 @@ export class AgentPluginRegistry {
         }
       }
 
-      record.process?.dispose();
+      await record.process?.shutdown();
       record.process = undefined;
       record.processCapabilities = undefined;
       await rm(record.pluginDir, { recursive: true, force: true });
@@ -829,6 +958,15 @@ export class AgentPluginRegistry {
     } catch (error) {
       return { success: false, error: getErrorMessage(error), agents: await this.listAgents().catch(() => []) };
     }
+  }
+
+  async shutdown(): Promise<void> {
+    const records = Array.from(this.pluginRecords.values());
+    await Promise.allSettled(records.map(async (record) => {
+      await record.process?.shutdown();
+      record.process = undefined;
+      record.processCapabilities = undefined;
+    }));
   }
 
   private async assertCanInstallDescriptor(descriptor: AgentDescriptor, options: InstallOptions) {
@@ -844,16 +982,16 @@ export class AgentPluginRegistry {
     }
   }
 
-  private async readManifestFromDirectory(pluginDir: string): Promise<AgentPluginManifest> {
+  private async readManifestFromDirectory(pluginDir: string): Promise<RawAgentPluginManifest> {
     const manifestPath = join(pluginDir, MANIFEST_FILE);
-    const manifest = await readJsonFile<AgentPluginManifest>(manifestPath);
+    const manifest = await readJsonFile<RawAgentPluginManifest>(manifestPath);
     if (!manifest) throw new Error(`插件缺少有效的 ${MANIFEST_FILE}。`);
     return manifest;
   }
 
-  private async readPluginRecord(pluginDir: string): Promise<PluginRecord> {
+  private async readPluginRecord(pluginDir: string, allowLegacySchema = true): Promise<PluginRecord> {
     const manifest = await this.readManifestFromDirectory(pluginDir);
-    const descriptor = descriptorFromManifest(manifest, "plugin", pluginDir);
+    const descriptor = descriptorFromManifest(manifest, "plugin", pluginDir, allowLegacySchema);
     const entry = ensureRelativePath(manifest.entry, "entry");
     const entryPath = resolve(pluginDir, entry.split("/").join(sep));
     assertInside(pluginDir, entryPath);
@@ -881,28 +1019,16 @@ export class AgentPluginRegistry {
     }
   }
 
-  private createHostApi(overrides: Partial<AgentHostApi> = {}): AgentHostApi {
+  private createHostApi(): AgentHostApi {
     return {
       getCliAgentStatus,
       updateCliAgent,
-      getPiSDKStatus: async (pluginDir?: string) => ({
-        ...await getPiSDKStatus(),
-        source: "plugin",
-        installedPath: pluginDir,
-        removable: true,
-      }),
-      updatePiSDK,
-      getCodexDefaultThinkingLevel,
-      ...overrides,
     };
   }
 
-  private async getPluginProcess(
-    record: PluginRecord,
-    hostOverrides: Partial<AgentHostApi> = {},
-  ): Promise<AgentPluginProcess> {
+  private async getPluginProcess(record: PluginRecord): Promise<AgentPluginProcess> {
     if (!record.process) {
-      const hostApi = this.createHostApi(hostOverrides);
+      const hostApi = this.createHostApi();
       record.process = new AgentPluginProcess(
         record.entryPath,
         {
@@ -914,10 +1040,6 @@ export class AgentPluginRegistry {
         hostApi as unknown as Record<string, (...args: unknown[]) => unknown>,
       );
       record.processCapabilities = await record.process.ensureLoaded();
-    } else if (Object.keys(hostOverrides).length > 0) {
-      record.process.updateHostMethods(
-        this.createHostApi(hostOverrides) as unknown as Record<string, (...args: unknown[]) => unknown>,
-      );
     }
     return record.process;
   }
@@ -929,8 +1051,18 @@ export class AgentPluginRegistry {
     options: { window?: BrowserWindow | null; getConfigState?: () => Promise<unknown> }
   ): Promise<AgentBackend> {
     let currentWindow = options.window || null;
+    let idle = true;
     const sendEvent = (event: Record<string, unknown>) => {
       const normalizedEvent = normalizePluginEvent(event);
+      if (normalizedEvent.type === "message_start" || normalizedEvent.type === "stream_start") {
+        idle = false;
+      } else if (
+        normalizedEvent.type === "stream_end" ||
+        normalizedEvent.type === "aborted" ||
+        normalizedEvent.type === "agent_disconnected"
+      ) {
+        idle = true;
+      }
       currentWindow?.webContents.send("agent:event", {
         ...normalizedEvent,
         sessionId,
@@ -944,7 +1076,6 @@ export class AgentPluginRegistry {
       options.getConfigState,
     );
     let sessionFilePath: string | null = null;
-    let idle = true;
 
     const wrapped: AgentBackend = {
       setWindow(win: BrowserWindow) {
@@ -961,12 +1092,22 @@ export class AgentPluginRegistry {
         try { await pluginProcess.backendCall(backendId, "sendMessage", [message, images, sendOptions]); }
         finally { idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true; }
       },
-      abort: () => pluginProcess.backendCall(backendId, "abort") as Promise<void>,
+      async abort() {
+        try {
+          await pluginProcess.backendCall(backendId, "abort");
+        } finally {
+          idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true;
+        }
+      },
       getModels: () => pluginProcess.backendCall(backendId, "getModels") as Promise<AgentModel[]>,
       setModel: (provider, modelId) => pluginProcess.backendCall(backendId, "setModel", [provider, modelId]) as Promise<void>,
       setThinkingLevel: (level) => pluginProcess.backendCall(backendId, "setThinkingLevel", [level]) as Promise<void>,
-      sendUIResponse: (response) => { void pluginProcess.backendCall(backendId, "sendUIResponse", [response]); },
-      dispose: () => { void pluginProcess.disposeBackend(backendId); },
+      sendUIResponse: (response) => {
+        void pluginProcess.backendCall(backendId, "sendUIResponse", [response]).catch((error) => {
+          console.error(`[agent-plugin:${record.descriptor.id}] Failed to send UI response:`, error);
+        });
+      },
+      dispose: () => pluginProcess.disposeBackend(backendId),
       get sessionFilePath() {
         return sessionFilePath;
       },

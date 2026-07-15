@@ -8,8 +8,10 @@ type PackagedWorkerRuntime = "electron" | "node";
 export function getBundledWorkerPath(workerFileName: string, currentDir: string): string {
   const candidates = [
     join(currentDir, workerFileName),
+    join(process.cwd(), "electron", "plugin-runtime", workerFileName),
     join(process.cwd(), "electron", "agents", workerFileName),
     join(app.getAppPath(), "out", "main", workerFileName),
+    join(app.getAppPath(), "electron", "plugin-runtime", workerFileName),
     join(app.getAppPath(), "electron", "agents", workerFileName),
     join(process.cwd(), "out", "main", workerFileName),
   ];

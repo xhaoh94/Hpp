@@ -1,11 +1,16 @@
 import { join } from "path";
 import { homedir } from "os";
-import { spawn, type ChildProcess } from "child_process";
+import { execFile, spawn, type ChildProcess } from "child_process";
 import * as http from "http";
 import { readFileSync } from "fs";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "../../plugin-runtime/process-events";
-import { getCommandEnv, isWindowsShellShim, resolveCommand } from "../../utils/command-utils";
+import {
+  getCommandEnv,
+  getNpmPackageBinTarget,
+  isWindowsShellShim,
+  resolveCommand,
+} from "../../utils/command-utils";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
 
@@ -19,8 +24,38 @@ interface AgentModel {
 
 interface AgentSendOptions {
   planModeEnabled?: boolean;
+  clientMessageId?: string;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
+}
+
+interface AgentForkTarget {
+  newSessionId: string;
+  sourceSessionFilePath?: string;
+  sourceUserMessageIndex: number;
+  rollbackUserMessageCount?: number;
+  targetTurnId?: string;
+  sourceMessageContent?: string;
+  throughMessageId?: string;
+}
+
+interface AgentForkResult {
+  supported: boolean;
+  success: boolean;
+  sessionFilePath?: string;
+  nativeEntryId?: string;
+  error?: string;
+  reason?: string;
+}
+
+function resolveOpenCodeCommand(): string {
+  const command = resolveCommand("opencode");
+  if (!isWindowsShellShim(command)) return command;
+  return getNpmPackageBinTarget(command, "opencode-ai", join("bin", "opencode.exe")) || command;
+}
+
+interface PendingOpenCodeUIRequest {
+  kind: "question" | "permission";
 }
 
 type OpenCodePromptPart =
@@ -31,6 +66,7 @@ interface OpenCodePromptBody {
   parts: OpenCodePromptPart[];
   agent?: "plan" | "build";
   model?: { providerID: string; modelID: string };
+  variant?: string;
 }
 
 const asRecord = (value: unknown): UnknownRecord =>
@@ -50,12 +86,13 @@ function formatProcessDetail(value: unknown): string | undefined {
 function summarizeToolPart(props: unknown) {
   const propsRecord = asRecord(props);
   const part = asRecord(propsRecord.part || propsRecord);
+  const state = asRecord(part.state);
   const toolName =
     part.tool || part.toolName || part.name || part.type || propsRecord.tool || propsRecord.toolName || "tool";
   const toolCallId = part.id || part.callID || part.callId || propsRecord.partID || propsRecord.partId || propsRecord.id || toolName;
-  const args = part.input || part.args || propsRecord.input || propsRecord.args;
-  const output = part.output || part.result || propsRecord.output || propsRecord.result;
-  const error = part.error || propsRecord.error;
+  const args = part.input || part.args || state.input || state.args || propsRecord.input || propsRecord.args;
+  const output = part.output || part.result || state.output || state.result || propsRecord.output || propsRecord.result;
+  const error = part.error || state.error || propsRecord.error;
 
   return {
     toolName,
@@ -72,7 +109,7 @@ function normalizeEventName(value: unknown) {
 }
 
 function isAskUserName(value: unknown) {
-  return ["ask_user", "ask_user_question", "user_ask_question", "droid.ask_user"].includes(normalizeEventName(value));
+  return ["ask_user", "ask_user_question", "user_ask_question"].includes(normalizeEventName(value));
 }
 
 function isToolLikePart(props: unknown) {
@@ -133,9 +170,39 @@ function buildOpenCodeConfigContent(existing?: string): string {
 function modelSupportsImages(modelInfo: unknown): boolean {
   const info = asRecord(modelInfo);
   if (info.attachment === true || info.supportsImages === true || info.imageInput === true) return true;
+  const capabilities = asRecord(info.capabilities);
+  if (capabilities.attachment === true || asRecord(capabilities.input).image === true) return true;
   const modalities = asRecord(info.modalities);
   const input = info.input || modalities.input;
   return Array.isArray(input) && input.includes("image");
+}
+
+function modelSupportsReasoning(modelInfo: unknown): boolean {
+  const info = asRecord(modelInfo);
+  return info.reasoning === true || asRecord(info.capabilities).reasoning === true;
+}
+
+function getModelVariants(modelInfo: unknown): string[] {
+  const variants = asRecord(asRecord(modelInfo).variants);
+  return Object.entries(variants).flatMap(([variantId, value]) => {
+    return asRecord(value).disabled === true ? [] : [variantId];
+  });
+}
+
+function selectThinkingVariant(level: string, variants: string[]): string | undefined {
+  const normalized = level.trim().toLowerCase();
+  if (!normalized || variants.length === 0) return undefined;
+  const candidates: Record<string, string[]> = {
+    off: ["off", "none", "minimal"],
+    none: ["none", "off", "minimal"],
+    minimal: ["minimal", "low"],
+    low: ["low", "minimal"],
+    medium: ["medium", "default"],
+    high: ["high"],
+    xhigh: ["xhigh", "max", "high"],
+    max: ["max", "xhigh", "high"],
+  };
+  return (candidates[normalized] || [normalized]).find((candidate) => variants.includes(candidate));
 }
 
 function imageExtension(mimeType: string) {
@@ -146,11 +213,44 @@ function imageExtension(mimeType: string) {
   return "png";
 }
 
+function parseHttpBody(body: string): unknown {
+  if (!body) return "";
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
+
+function createHttpError(method: string, path: string, statusCode: number, body: string) {
+  const detail = body.trim().slice(0, 500);
+  return new Error(`OpenCode ${method} ${path} failed (${statusCode})${detail ? `: ${detail}` : ""}`);
+}
+
+function getUIAnswerValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  const answer = asRecord(value);
+  const selected = Array.isArray(answer.selected) ? answer.selected : Array.isArray(answer.values) ? answer.values : null;
+  if (selected) return selected.map(String).filter(Boolean);
+  const scalar = answer.value ?? answer.answer ?? answer.label;
+  return scalar === undefined || scalar === null || scalar === "" ? [] : [String(scalar)];
+}
+
+function getPermissionReply(response: AgentUIResponse): "once" | "always" | "reject" {
+  if (response.cancelled === true) return "reject";
+  const firstAnswer = Array.isArray(response.answers) ? getUIAnswerValues(response.answers[0])[0] : undefined;
+  const value = String(firstAnswer || response.value || response.text || "once").toLowerCase();
+  if (value === "always") return "always";
+  if (["reject", "deny", "cancel", "cancelled"].includes(value)) return "reject";
+  return "once";
+}
+
 // ============================================================
 // OpenCode Agent - communicates with opencode serve via HTTP/SSE
 // ============================================================
 export class OpenCodeAgent {
   private process: ChildProcess | null = null;
+  private processError: Error | null = null;
   private port = 0;
   private host = "127.0.0.1";
   private projectPath = "";
@@ -158,6 +258,8 @@ export class OpenCodeAgent {
   private models: AgentModel[] = [];
   private currentModelId: string | null = null;
   private currentProviderId: string | null = null;
+  private currentThinkingLevel = "medium";
+  private modelVariants = new Map<string, string[]>();
   private eventSource: ReturnType<typeof http.get> | null = null;
   private sseBuffer = "";
   private streamedContent = false;
@@ -165,6 +267,11 @@ export class OpenCodeAgent {
   private runningToolParts = new Set<string>();
   private completedToolParts = new Set<string>();
   private pendingQuestionToolParts = new Set<string>();
+  private partTypes = new Map<string, string>();
+  private turnActive = false;
+  private activeClientMessageId: string | null = null;
+  private activeAssistantMessageId: string | null = null;
+  private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
@@ -180,12 +287,14 @@ export class OpenCodeAgent {
     }
 
     this.projectPath = projectPath;
-    this.killProcess();
+    this.stopSSEListener();
+    await this.killProcess();
+    this.processError = null;
     this.port = 10000 + Math.floor(Math.random() * 55000);
     this.sessionId = null;
     this.emitEvent({ type: "agent_init", agentId: "opencode" });
 
-    const opencodeCommand = resolveCommand("opencode");
+    const opencodeCommand = resolveOpenCodeCommand();
     this.process = spawn(opencodeCommand, ["serve", "--port", String(this.port), "--hostname", this.host], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
@@ -196,16 +305,29 @@ export class OpenCodeAgent {
       }),
     });
 
-    this.process.stderr?.on("data", (chunk: Buffer) => {
+    const childProcess = this.process!;
+    childProcess.stdout?.on("data", () => undefined);
+    childProcess.stderr?.on("data", (chunk: Buffer) => {
       console.log("[opencode]", chunk.toString().trim());
     });
 
-    this.process.on("exit", () => {
+    childProcess.on("error", (error) => {
+      if (this.process !== childProcess) return;
+      this.processError = error;
       this.process = null;
-      this.emitEvent({ type: "agent_disconnected" });
+      if (this.turnActive) this.failActiveTurn("OpenCode process failed", error.message);
+      else this.emitEvent({ type: "agent_disconnected", detail: error.message });
     });
 
-    await this.waitForReady();
+    childProcess.on("exit", (code, signal) => {
+      if (this.process !== childProcess) return;
+      this.process = null;
+      const detail = `OpenCode exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+      if (this.turnActive) this.failActiveTurn("OpenCode disconnected", detail);
+      else this.emitEvent({ type: "agent_disconnected", detail });
+    });
+
+    await this.waitForReady(childProcess);
 
     // If an existing session ID was provided, verify it exists on the server.
     // Otherwise create one now so the renderer can persist the real OpenCode
@@ -238,9 +360,12 @@ export class OpenCodeAgent {
     }
   }
 
-  private async waitForReady(): Promise<void> {
+  private async waitForReady(childProcess: ChildProcess): Promise<void> {
     const maxAttempts = 60;
     for (let i = 0; i < maxAttempts; i++) {
+      if (this.process !== childProcess) {
+        throw this.processError || new Error("OpenCode exited before becoming ready");
+      }
       try {
         const result = await this.httpGet("/global/health");
         if (asRecord(result).healthy) {
@@ -252,7 +377,8 @@ export class OpenCodeAgent {
       }
       await new Promise((r) => setTimeout(r, 500));
     }
-    this.emitEvent({ type: "agent_ready", agentId: "opencode", mock: true });
+    await this.killProcess();
+    throw new Error("OpenCode server did not become ready within 30 seconds");
   }
 
   /** Create a new opencode session, or reuse existing if session ID is already set */
@@ -287,9 +413,10 @@ export class OpenCodeAgent {
     }
 
     this.emitEvent({ type: "stream_start", role: "assistant" });
-    this.startSSEListener();
 
     try {
+      await this.startSSEListener();
+      if (!this.eventSource) throw new Error("OpenCode event stream closed before the prompt was sent");
       const parts: OpenCodePromptPart[] = [{ type: "text", text: message }];
       if (images?.length) {
         images.forEach((image, index) => {
@@ -303,6 +430,9 @@ export class OpenCodeAgent {
         });
       }
       const body: OpenCodePromptBody = { parts };
+      this.activeClientMessageId = options?.clientMessageId?.trim() || null;
+      this.activeAssistantMessageId = null;
+      this.turnActive = true;
       if (options?.planModeEnabled || options?.permissionMode === "plan") {
         body.agent = "plan";
       } else {
@@ -310,6 +440,9 @@ export class OpenCodeAgent {
       }
       if (this.currentModelId && this.currentProviderId) {
         body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };
+        const variants = this.modelVariants.get(`${this.currentProviderId}:${this.currentModelId}`) || [];
+        const variant = selectThinkingVariant(this.currentThinkingLevel, variants);
+        if (variant) body.variant = variant;
       }
       await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
     } catch (e) {
@@ -317,12 +450,16 @@ export class OpenCodeAgent {
       this.emitEvent({ type: "stream_delta", delta: `\n\n发送失败: ${e}` });
       this.emitEvent({ type: "stream_end" });
       this.emitEvent({ type: "agent_end" });
+      this.turnActive = false;
       this.stopSSEListener();
+      this.pendingUIRequests.clear();
+      this.clearActiveTurn();
     }
   }
 
   isIdle(): boolean {
     return (
+      !this.turnActive &&
       !this.eventSource &&
       !this.idleTimer &&
       this.runningToolParts.size === 0 &&
@@ -331,29 +468,62 @@ export class OpenCodeAgent {
   }
 
   /** Listen to SSE events for streaming responses */
-  private startSSEListener() {
+  private startSSEListener(): Promise<void> {
     this.stopSSEListener();
+    this.clearActiveTurn();
     this.sseBuffer = "";
     this.streamedContent = false;
     this.runningToolParts.clear();
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
+    this.partTypes.clear();
 
-    const req = http.get(
-      `http://${this.host}:${this.port}/event`,
-      (res) => {
-        res.setEncoding("utf-8");
-        res.on("data", (chunk: string) => {
-          this.sseBuffer += chunk;
-          this.processSSEBuffer();
-        });
-        res.on("end", () => this.stopSSEListener());
-        res.on("error", () => this.stopSSEListener());
-      }
-    );
+    return new Promise((resolve, reject) => {
+      let connected = false;
+      const req = http.get(
+        `http://${this.host}:${this.port}/event`,
+        { timeout: 10000 },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            this.eventSource = null;
+            req.destroy();
+            reject(new Error(`OpenCode event stream failed (${res.statusCode || 0})`));
+            return;
+          }
+          connected = true;
+          req.setTimeout(0);
+          res.setEncoding("utf-8");
+          res.on("data", (chunk: string) => {
+            this.sseBuffer += chunk;
+            this.processSSEBuffer();
+          });
+          res.on("end", () => this.handleSSEDisconnect(req, "OpenCode event stream ended"));
+          res.on("aborted", () => this.handleSSEDisconnect(req, "OpenCode event stream was aborted"));
+          res.on("close", () => this.handleSSEDisconnect(req, "OpenCode event stream closed"));
+          res.on("error", (error) => this.handleSSEDisconnect(req, error.message));
+          resolve();
+        }
+      );
 
-    req.on("error", () => this.stopSSEListener());
-    this.eventSource = req;
+      req.on("error", (error) => {
+        if (this.eventSource === req) this.eventSource = null;
+        if (!connected) reject(error);
+        else this.handleSSEDisconnect(req, error.message);
+      });
+      req.on("timeout", () => {
+        if (this.eventSource === req) this.eventSource = null;
+        req.destroy();
+        if (!connected) reject(new Error("OpenCode event stream timed out"));
+      });
+      this.eventSource = req;
+    });
+  }
+
+  private handleSSEDisconnect(request: ReturnType<typeof http.get>, detail: string) {
+    if (this.eventSource !== request) return;
+    this.eventSource = null;
+    if (this.turnActive) this.failActiveTurn("OpenCode event stream disconnected", detail);
   }
 
   private processSSEBuffer() {
@@ -363,8 +533,8 @@ export class OpenCodeAgent {
     for (const line of lines) {
       // OpenCode SSE format: each line is "data: {json}"
       // Event type is inside the JSON "type" field
-      if (line.startsWith("data: ")) {
-        const jsonStr = line.slice(6).trim();
+      if (line.startsWith("data:")) {
+        const jsonStr = line.slice(5).trim();
         if (!jsonStr) continue;
         let parsed: unknown;
         try { parsed = JSON.parse(jsonStr); } catch { continue; }
@@ -379,6 +549,9 @@ export class OpenCodeAgent {
     const dataRecord = asRecord(data);
     const props = asRecord(dataRecord.properties || dataRecord);
     const part = asRecord(props.part || props);
+    const info = asRecord(props.info);
+    const eventSessionId = String(props.sessionID || part.sessionID || info.sessionID || "");
+    if (this.sessionId && eventSessionId && eventSessionId !== this.sessionId) return;
     if (
       isContextCompactionLike(
         eventType,
@@ -398,8 +571,65 @@ export class OpenCodeAgent {
     }
 
     switch (eventType) {
+      case "question.asked":
+      case "question.v2.asked":
+        if (typeof props.id === "string") {
+          this.cancelIdleTimer();
+          this.pendingUIRequests.set(props.id, { kind: "question" });
+          this.emitEvent(normalizeQuestionProcessEvent({
+            type: eventType,
+            requestId: props.id,
+            method: "opencode.question",
+            questions: props.questions,
+            detail: props,
+          }));
+        }
+        break;
+      case "permission.asked":
+      case "permission.v2.asked":
+        if (typeof props.id === "string") {
+          this.cancelIdleTimer();
+          const action = String(props.action || props.permission || "requested action");
+          const resources = Array.isArray(props.resources)
+            ? props.resources.map(String)
+            : Array.isArray(props.patterns)
+              ? props.patterns.map(String)
+              : [];
+          this.pendingUIRequests.set(props.id, { kind: "permission" });
+          this.emitEvent(normalizeQuestionProcessEvent({
+            type: eventType,
+            requestId: props.id,
+            method: "opencode.permission",
+            questions: [{
+              header: "Permission",
+              question: resources.length > 0 ? `${action}: ${resources.join(", ")}` : action,
+              options: [
+                { label: "Allow once", value: "once" },
+                { label: "Always allow", value: "always" },
+                { label: "Reject", value: "reject" },
+              ],
+            }],
+            detail: props,
+          }));
+        }
+        break;
+      case "question.replied":
+      case "question.rejected":
+      case "question.v2.replied":
+      case "question.v2.rejected":
+      case "permission.replied":
+      case "permission.v2.replied":
+        {
+          const requestId = typeof props.id === "string" ? props.id : typeof props.requestID === "string" ? props.requestID : "";
+          if (requestId) this.pendingUIRequests.delete(requestId);
+        }
+        break;
+      case "message.updated":
+        if (info.role === "assistant") this.recordAssistantMessageId(info.id);
+        break;
       case "message.part.added":
       case "message.part.updated": {
+        this.rememberPartType(part);
         if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
@@ -435,13 +665,16 @@ export class OpenCodeAgent {
             this.runningToolParts.delete(tool.toolCallId);
             this.completedToolParts.add(tool.toolCallId);
           }
+        } else if (props.delta) {
+          this.emitPartDelta(part.type, props.delta);
         }
         break;
       }
       case "message.part.done":
       case "message.part.removed": {
-        const partType = part.type || props.type;
-        if (partType === "thinking") {
+        const partId = String(part.id || props.partID || props.partId || "");
+        const partType = part.type || props.type || this.partTypes.get(partId);
+        if (this.isReasoningPartType(partType)) {
           this.emitEvent({ type: "thinking_end" });
         } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
@@ -461,39 +694,26 @@ export class OpenCodeAgent {
           this.runningToolParts.delete(tool.toolCallId);
           this.completedToolParts.add(tool.toolCallId);
         }
+        if (partId) this.partTypes.delete(partId);
         break;
       }
       case "message.part.delta": {
         // Cancel pending idle handling - main agent may still be processing
         this.cancelIdleTimer();
-        if (props.field === "text" && props.delta) {
-          this.streamedContent = true;
-          this.emitEvent({ type: "stream_delta", delta: String(props.delta) });
-        } else if (props.field === "thinking" && props.delta) {
-          this.streamedContent = true;
-          this.emitEvent({ type: "thinking_delta", delta: String(props.delta) });
-        }
+        const partId = String(props.partID || props.partId || part.id || "");
+        const partType = props.field === "thinking"
+          ? "thinking"
+          : part.type || this.partTypes.get(partId);
+        this.emitPartDelta(partType, props.delta);
         break;
       }
       case "session.status": {
         const status = asRecord(props.status);
         const statusType = status.type || props.status;
         if (statusType === "busy") {
-          this.emitEvent({
-            type: "process_event",
-            entryType: "status",
-            title: "OpenCode 正在处理",
-            state: "running",
-          });
           // Session is busy - cancel pending idle timer (sub-agent done but main agent continues)
           this.cancelIdleTimer();
         } else if (statusType === "idle") {
-          this.emitEvent({
-            type: "process_event",
-            entryType: "status",
-            title: "OpenCode 处理完成",
-            state: "completed",
-          });
           // Session is truly idle - schedule stream end with a small delay
           // to catch trailing message.part.delta events
           this.scheduleIdleEnd();
@@ -516,9 +736,12 @@ export class OpenCodeAgent {
           state: "error",
         });
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${message || "未知错误"}` });
+        this.turnActive = false;
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
         this.stopSSEListener();
+        this.pendingUIRequests.clear();
+        this.clearActiveTurn();
         break;
       }
       case "session.diff": {
@@ -529,12 +752,6 @@ export class OpenCodeAgent {
         break;
       }
       case "session.idle": {
-        this.emitEvent({
-          type: "process_event",
-          entryType: "status",
-          title: "OpenCode 空闲",
-          state: "completed",
-        });
         // Don't end immediately - sub-agent may have finished but main agent continues
         // Schedule a delayed end; if session.status becomes "busy" again, the timer is cancelled
         this.scheduleIdleEnd();
@@ -552,12 +769,16 @@ export class OpenCodeAgent {
 
   private scheduleIdleEnd() {
     this.cancelIdleTimer();
+    if (this.pendingUIRequests.size > 0) return;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       if (this.streamedContent) {
+        this.turnActive = false;
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
         this.stopSSEListener();
+        this.pendingUIRequests.clear();
+        this.clearActiveTurn();
       } else {
         // Fallback: fetch final message via REST (for older opencode versions)
         this.fetchAssistantMessage();
@@ -568,9 +789,12 @@ export class OpenCodeAgent {
   /** Fetch the latest assistant message content via REST after session.idle */
   private async fetchAssistantMessage() {
     if (!this.sessionId) {
+      this.turnActive = false;
       this.emitEvent({ type: "stream_end" });
       this.emitEvent({ type: "agent_end" });
       this.stopSSEListener();
+      this.pendingUIRequests.clear();
+      this.clearActiveTurn();
       return;
     }
 
@@ -582,6 +806,7 @@ export class OpenCodeAgent {
           .reverse()
           .map((message) => asRecord(message))
           .find((message) => asRecord(message.info).role === "assistant");
+        this.recordAssistantMessageId(asRecord(assistantMsg?.info).id);
         const assistantParts = Array.isArray(assistantMsg?.parts) ? assistantMsg.parts : [];
         if (assistantParts.length > 0) {
           for (const rawPart of assistantParts) {
@@ -610,31 +835,84 @@ export class OpenCodeAgent {
       this.emitEvent({ type: "stream_delta", delta: `\n\n获取响应失败: ${e}` });
     }
 
+    this.turnActive = false;
     this.emitEvent({ type: "stream_end" });
     this.emitEvent({ type: "agent_end" });
     this.stopSSEListener();
+    this.pendingUIRequests.clear();
+    this.clearActiveTurn();
   }
 
   private stopSSEListener() {
     this.cancelIdleTimer();
-    if (this.eventSource) {
-      this.eventSource.destroy();
-      this.eventSource = null;
-    }
+    const request = this.eventSource;
+    this.eventSource = null;
+    request?.destroy();
   }
 
   /** Abort the current response */
   async abort() {
+    let errorMessage = "";
     if (this.sessionId) {
       try {
         await this.httpPost(`/session/${this.sessionId}/abort`, {});
-      } catch {
-        // ignore
+      } catch (error) {
+        errorMessage = error instanceof Error ? error.message : String(error);
       }
     }
+    this.turnActive = false;
     this.stopSSEListener();
     this.runningToolParts.clear();
     this.pendingQuestionToolParts.clear();
+    this.partTypes.clear();
+    this.pendingUIRequests.clear();
+    this.clearActiveTurn();
+    this.emitEvent({ type: "aborted", detail: errorMessage || undefined });
+  }
+
+  async forkSession(target: AgentForkTarget): Promise<AgentForkResult> {
+    const sourceSessionId = target.sourceSessionFilePath || this.sessionId;
+    if (!sourceSessionId) {
+      return {
+        supported: true,
+        success: false,
+        reason: "OpenCode source session is unavailable",
+      };
+    }
+
+    if (!target.targetTurnId && (target.rollbackUserMessageCount || 0) > 0) {
+      return {
+        supported: true,
+        success: false,
+        reason: "OpenCode native message id is unavailable for this historical turn",
+      };
+    }
+
+    try {
+      const body = target.targetTurnId ? { messageID: target.targetTurnId } : {};
+      const result = asRecord(await this.httpPost(`/session/${sourceSessionId}/fork`, body));
+      const forkedSessionId = typeof result.id === "string" ? result.id : "";
+      if (!forkedSessionId) {
+        return {
+          supported: true,
+          success: false,
+          reason: "OpenCode did not return a forked session id",
+        };
+      }
+
+      return {
+        supported: true,
+        success: true,
+        sessionFilePath: forkedSessionId,
+        nativeEntryId: target.targetTurnId,
+      };
+    } catch (error) {
+      return {
+        supported: true,
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /** Get available models from providers */
@@ -642,6 +920,7 @@ export class OpenCodeAgent {
     console.log("[opencode] getModels called, cached:", this.models.length, "port:", this.port);
     if (this.models.length > 0) return this.models;
 
+    this.modelVariants.clear();
     try {
       const result = asRecord(await this.httpGet("/config/providers"));
       if (Array.isArray(result.providers)) {
@@ -656,11 +935,13 @@ export class OpenCodeAgent {
               const model = asRecord(rawModel);
               const modelId = model.id || model.name;
               if (modelId === undefined || modelId === null) continue;
+              const normalizedModelId = String(modelId);
+              this.modelVariants.set(`${providerId}:${normalizedModelId}`, getModelVariants(model));
               models.push({
-                id: String(modelId),
+                id: normalizedModelId,
                 name: String(model.name || model.id || modelId),
                 provider: providerId,
-                reasoning: typeof model.reasoning === "boolean" ? model.reasoning : false,
+                reasoning: modelSupportsReasoning(model),
                 supportsImages: modelSupportsImages(model),
               });
             }
@@ -668,11 +949,12 @@ export class OpenCodeAgent {
             // models may be a record: { modelId: modelInfo }
             for (const [modelId, modelInfo] of Object.entries(provider.models)) {
               const model = asRecord(modelInfo);
+              this.modelVariants.set(`${providerId}:${modelId}`, getModelVariants(modelInfo));
               models.push({
                 id: modelId,
                 name: typeof model.name === "string" ? model.name : modelId,
                 provider: providerId,
-                reasoning: typeof model.reasoning === "boolean" ? model.reasoning : false,
+                reasoning: modelSupportsReasoning(modelInfo),
                 supportsImages: modelSupportsImages(modelInfo),
               });
             }
@@ -708,36 +990,59 @@ export class OpenCodeAgent {
     this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
   }
 
-  /** Set thinking level - opencode does not have a direct equivalent */
-  async setThinkingLevel(_level: string) {
-    this.emitEvent({ type: "thinking_level_changed", level: _level });
+  /** Set the OpenCode model variant used by subsequent prompts. */
+  async setThinkingLevel(level: string) {
+    this.currentThinkingLevel = level;
+    this.emitEvent({ type: "thinking_level_changed", level });
   }
 
-  sendUIResponse(_response: AgentUIResponse) {
-    // OpenCode ask-user style events are surfaced in the process trace; the
-    // current HTTP/SSE bridge does not expose a matching UI response endpoint.
+  sendUIResponse(response: AgentUIResponse) {
+    void this.respondToUIRequest(response).catch((error) => {
+      this.emitEvent({
+        type: "process_event",
+        entryType: "error",
+        title: "OpenCode response failed",
+        detail: error instanceof Error ? error.message : String(error),
+        state: "error",
+      });
+    });
   }
 
   /** For OpenCode, the session ID serves as the session file path equivalent */
   get sessionFilePath(): string | null { return this.sessionId; }
 
   /** Dispose and clean up */
-  dispose() {
+  async dispose() {
     this.cancelIdleTimer();
     this.stopSSEListener();
     this.eventBuffer.flush();
-    this.killProcess();
+    await this.killProcess();
   }
 
-  private killProcess() {
-    if (this.process) {
-      this.process.stdin?.end();
-      this.process.kill();
-      this.process = null;
-    }
+  private async killProcess() {
+    const childProcess = this.process;
+    this.process = null;
+    childProcess?.stdin?.end();
+    this.turnActive = false;
     this.sessionId = null;
     this.runningToolParts.clear();
     this.pendingQuestionToolParts.clear();
+    this.partTypes.clear();
+    this.pendingUIRequests.clear();
+    this.models = [];
+    this.modelVariants.clear();
+    this.clearActiveTurn();
+    if (childProcess) await this.killProcessTree(childProcess);
+  }
+
+  private async killProcessTree(childProcess: ChildProcess) {
+    if (process.platform !== "win32" || !childProcess.pid) {
+      childProcess.kill("SIGKILL");
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      execFile("taskkill", ["/pid", String(childProcess.pid), "/t", "/f"], { windowsHide: true }, () => resolve());
+    });
   }
 
   // ---- HTTP helpers ----
@@ -751,7 +1056,12 @@ export class OpenCodeAgent {
           let body = "";
           res.on("data", (chunk) => (body += chunk));
           res.on("end", () => {
-            try { resolve(JSON.parse(body)); } catch { resolve(body); }
+            const statusCode = res.statusCode || 0;
+            if (statusCode < 200 || statusCode >= 300) {
+              reject(createHttpError("GET", path, statusCode, body));
+              return;
+            }
+            resolve(parseHttpBody(body));
           });
         }
       );
@@ -774,7 +1084,12 @@ export class OpenCodeAgent {
           let resBody = "";
           res.on("data", (chunk) => (resBody += chunk));
           res.on("end", () => {
-            try { resolve(JSON.parse(resBody)); } catch { resolve(resBody); }
+            const statusCode = res.statusCode || 0;
+            if (statusCode < 200 || statusCode >= 300) {
+              reject(createHttpError("POST", path, statusCode, resBody));
+              return;
+            }
+            resolve(parseHttpBody(resBody));
           });
         }
       );
@@ -787,5 +1102,90 @@ export class OpenCodeAgent {
 
   private emitEvent(data: unknown) {
     this.eventBuffer.send(data);
+  }
+
+  private failActiveTurn(title: string, detail: string) {
+    const shouldFinish = this.turnActive || !!this.eventSource;
+    this.turnActive = false;
+    this.emitEvent({
+      type: "process_event",
+      entryType: "error",
+      title,
+      detail,
+      state: "error",
+    });
+    if (shouldFinish) {
+      this.emitEvent({ type: "stream_end" });
+      this.emitEvent({ type: "agent_end" });
+    }
+    this.stopSSEListener();
+    this.pendingUIRequests.clear();
+    this.clearActiveTurn();
+  }
+
+  private async respondToUIRequest(response: AgentUIResponse) {
+    const requestId = typeof response.id === "string"
+      ? response.id
+      : typeof response.requestId === "string"
+        ? response.requestId
+        : "";
+    if (!requestId) throw new Error("OpenCode UI response is missing request id");
+    const pending = this.pendingUIRequests.get(requestId);
+    const method = typeof response.method === "string" ? response.method : "";
+    const kind = pending?.kind || (method.includes("permission") ? "permission" : method.includes("question") ? "question" : undefined);
+    if (!kind) throw new Error(`Unknown OpenCode UI request: ${requestId}`);
+
+    if (kind === "permission") {
+      await this.httpPost(`/permission/${encodeURIComponent(requestId)}/reply`, {
+        reply: getPermissionReply(response),
+      });
+    } else if (response.cancelled === true) {
+      await this.httpPost(`/question/${encodeURIComponent(requestId)}/reject`, {});
+    } else {
+      const rawAnswers = Array.isArray(response.answers) ? response.answers : [];
+      const answers = rawAnswers.length > 0
+        ? rawAnswers.map(getUIAnswerValues)
+        : [[String(response.text || response.value || "")].filter(Boolean)];
+      await this.httpPost(`/question/${encodeURIComponent(requestId)}/reply`, { answers });
+    }
+    this.pendingUIRequests.delete(requestId);
+  }
+
+  private recordAssistantMessageId(value: unknown) {
+    if (!this.activeClientMessageId || typeof value !== "string" || !value.startsWith("msg")) return;
+    if (value === this.activeAssistantMessageId) return;
+    this.activeAssistantMessageId = value;
+    this.emitEvent({
+      type: "turn_metadata",
+      nativeTurnId: value,
+      clientUserMessageId: this.activeClientMessageId,
+    });
+  }
+
+  private rememberPartType(part: UnknownRecord) {
+    const partId = typeof part.id === "string" ? part.id : "";
+    const partType = typeof part.type === "string" ? part.type : "";
+    if (partId && partType) this.partTypes.set(partId, partType);
+  }
+
+  private isReasoningPartType(value: unknown) {
+    const normalized = normalizeEventName(value);
+    return normalized === "reasoning" || normalized === "thinking";
+  }
+
+  private emitPartDelta(partType: unknown, delta: unknown) {
+    if (delta === undefined || delta === null || delta === "") return;
+    this.streamedContent = true;
+    if (this.isReasoningPartType(partType)) {
+      this.emitEvent({ type: "thinking_delta", delta: String(delta) });
+      return;
+    }
+    this.emitEvent({ type: "stream_delta", delta: String(delta) });
+  }
+
+  private clearActiveTurn() {
+    this.activeClientMessageId = null;
+    this.activeAssistantMessageId = null;
+    this.partTypes.clear();
   }
 }

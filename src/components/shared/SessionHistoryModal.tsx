@@ -75,7 +75,7 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
                 <div key={session.id} className="session-item">
                   <div className="session-item-header">
                     <div className="session-item-meta">
-                      <span className="session-time">{formatTime(session.createdAt)}</span>
+                      <span className="session-time">{formatTime(session.lastActiveAt || session.createdAt)}</span>
                       <span className="session-agent-badge" title={getAgentName(session.agentId)}>
                         {getAgentName(session.agentId)}
                       </span>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { CheckCircle2, Copy, Eye, EyeOff, GripVertical, Pencil, Plus, RefreshCw, Save, Trash2, Undo2, X, Zap } from "lucide-react";
-import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig } from "@/types";
+import { CheckCircle2, Copy, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
+import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
@@ -10,23 +10,27 @@ type AgentConfigModalProps = {
   agentId: string;
   agentName: string;
   onClose: () => void;
-  onModelsUpdated: (agentId: string, models?: AgentModel[]) => void;
+  onModelsUpdated: (agentId: string, models?: AgentModel[], selectedProviderId?: string) => void;
 };
 
-const emptyModel = (): AgentCustomModelConfig => ({
+const emptyModel = (configuration?: AgentProviderConfiguration): AgentCustomModelConfig => ({
   id: "",
   name: "",
-  reasoning: false,
-  imageInput: false,
+  reasoning: configuration?.modelDefaults.reasoning === true,
+  imageInput: configuration?.modelDefaults.imageInput === true,
 });
 
-const createProvider = (index: number): AgentProviderConfig => ({
+const createProvider = (index: number, configuration: AgentProviderConfiguration): AgentProviderConfig => ({
   providerId: `custom-${index}`,
   displayName: `Custom ${index}`,
   baseUrl: "",
   apiKey: "",
-  models: [emptyModel()],
+  endpoint: configuration.defaultEndpoint,
+  models: [emptyModel(configuration)],
 });
+
+const getEndpointLabel = (configuration: AgentProviderConfiguration, endpoint: AgentProviderEndpoint) =>
+  configuration.endpoints.find((option) => option.id === endpoint)?.label || endpoint;
 
 function cloneProvider(provider: AgentProviderConfig): AgentProviderConfig {
   return {
@@ -50,34 +54,14 @@ function createCopiedProvider(provider: AgentProviderConfig, existingIds: Set<st
   };
 }
 
-function getConfigPathLabel(agentId: string) {
-  switch (agentId) {
-    case "pi":
-      return "~/.pi/agent/models.json";
-    case "droid":
-      return "~/.factory/settings.json";
-    case "opencode":
-      return "~/.config/opencode/opencode.json";
-    case "codex":
-      return "~/.codex/config.toml";
-    default:
-      return "agent local config";
+export function resolvePreferredProviderId(state: AgentConfigState, currentProviderId = ""): string {
+  if (currentProviderId && state.providers.some((provider) => provider.providerId === currentProviderId)) {
+    return currentProviderId;
   }
-}
-
-function getAgentHint(agentId: string) {
-  switch (agentId) {
-    case "pi":
-      return "读取并写入 ~/.pi/agent/models.json，模型图片能力会写入 input。";
-    case "droid":
-      return "读取并写入 ~/.factory/settings.json 的 customModels，图片能力会映射到 noImageSupport。";
-    case "opencode":
-      return "读取并写入 OpenCode provider 配置，HPP 不额外保存渠道副本。";
-    case "codex":
-      return "启用渠道会替换 ~/.codex/config.toml 当前 provider 的 base_url、默认 model 和 auth.json 的 sk-key。";
-    default:
-      return "";
+  if (state.activeProviderId && state.providers.some((provider) => provider.providerId === state.activeProviderId)) {
+    return state.activeProviderId;
   }
+  return state.providers[0]?.providerId || "";
 }
 
 export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpdated }: AgentConfigModalProps) {
@@ -87,12 +71,17 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const activeAgentId = useChatStore((state) => state.activeAgentId);
   const currentModelProvider = useChatStore((state) => state.currentModel?.provider);
   const configurableAgentList = useMemo(
-    () => agents.filter((agent) => agent.capabilities.configuration === "openai-compatible"),
+    () => agents.filter((agent) => agent.capabilities.configuration !== "none"),
     [agents]
   );
   const activeAgent = configurableAgentList.find((agent) => agent.id === agentId);
-  const configurable = !!activeAgent;
+  const providerConfiguration = activeAgent?.capabilities.configuration !== "none"
+    ? activeAgent?.capabilities.configuration
+    : undefined;
+  const configurable = !!providerConfiguration;
   const usesActivation = activeAgent?.capabilities.providerActivation === "single-active";
+  const endpointOptions = providerConfiguration?.endpoints || [];
+  const backendModelVisibility = providerConfiguration?.backendModelVisibility;
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
@@ -103,14 +92,25 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [saving, setSaving] = useState(false);
   const [activatingProviderId, setActivatingProviderId] = useState<string>("");
   const [deletingProviderId, setDeletingProviderId] = useState<string>("");
+  const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<AgentProviderConfig | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const [reloading, setReloading] = useState(false);
+  const [backendModelsVisible, setBackendModelsVisible] = useState(true);
+  const [savingModelVisibility, setSavingModelVisibility] = useState(false);
   const [reorderingProviderId, setReorderingProviderId] = useState<string>("");
   const [dragProviderId, setDragProviderId] = useState<string>("");
   const [dragOverProviderId, setDragOverProviderId] = useState<string>("");
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelFetchError, setModelFetchError] = useState("");
+  const [remoteModels, setRemoteModels] = useState<AgentRemoteModel[]>([]);
+  const [selectedRemoteModelIds, setSelectedRemoteModelIds] = useState<Set<string>>(new Set());
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelFetchRequest = useRef(0);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
@@ -127,25 +127,23 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   );
 
   const getPreferredProviderId = useCallback((state: AgentConfigState) => {
-    if (usesActivation) return state.providers[0]?.providerId || "";
-
     const currentProviderId = agentId === activeAgentId ? currentModelProvider : "";
-    if (currentProviderId && state.providers.some((provider) => provider.providerId === currentProviderId)) {
-      return currentProviderId;
-    }
-    return state.providers[0]?.providerId || "";
-  }, [activeAgentId, agentId, currentModelProvider, usesActivation]);
+    return resolvePreferredProviderId(state, currentProviderId);
+  }, [activeAgentId, agentId, currentModelProvider]);
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
     setStatus(null);
     setActivatingProviderId("");
     setDeletingProviderId("");
+    setDeleteConfirmProvider(null);
+    setDeleteError("");
     setReorderingProviderId("");
     setDragProviderId("");
     setDragOverProviderId("");
     setApiKeyVisible(false);
     setApiKeyCopied(false);
+    setBackendModelsVisible(backendModelVisibility?.defaultVisible ?? true);
     try {
       const result = await window.electronAPI.agentConfigList(agentId);
       if (!result.success || !result.config) {
@@ -158,12 +156,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setEditorBaseline(null);
       setEditorOriginalProviderId("");
       setEditorOpen(false);
+      if (backendModelVisibility?.userConfigurable) {
+        const visibilityResult = await window.electronAPI.agentConfigGetModelVisibility(agentId);
+        if (visibilityResult.success && typeof visibilityResult.backendModelsVisible === "boolean") {
+          setBackendModelsVisible(visibilityResult.backendModelsVisible);
+        } else if (!visibilityResult.success) {
+          setStatus({ type: "error", text: visibilityResult.error || "读取模型显示设置失败" });
+        }
+      }
     } catch (error) {
       setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       setLoading(false);
     }
-  }, [agentId, getPreferredProviderId]);
+  }, [agentId, backendModelVisibility, getPreferredProviderId]);
 
   useEffect(() => {
     if (!configurable) {
@@ -193,6 +199,38 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     };
   }, []);
 
+  useEffect(() => {
+    if (editorOpen) return;
+    modelFetchRequest.current += 1;
+    setFetchingModels(false);
+    setModelFetchError("");
+    setRemoteModels([]);
+    setSelectedRemoteModelIds(new Set());
+    setModelSearch("");
+    setModelPickerOpen(false);
+  }, [editorOpen]);
+
+  const configuredModelIds = useMemo(
+    () => new Set((draft?.models || []).map((model) => model.id.trim()).filter(Boolean)),
+    [draft?.models]
+  );
+  const filteredRemoteModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    if (!query) return remoteModels;
+    return remoteModels.filter((model) =>
+      model.id.toLowerCase().includes(query) || model.name.toLowerCase().includes(query)
+    );
+  }, [modelSearch, remoteModels]);
+  const selectableFilteredModelIds = useMemo(
+    () => filteredRemoteModels
+      .filter((model) => !configuredModelIds.has(model.id))
+      .map((model) => model.id),
+    [configuredModelIds, filteredRemoteModels]
+  );
+  const allFilteredModelsSelected = selectableFilteredModelIds.length > 0 && selectableFilteredModelIds.every(
+    (modelId) => selectedRemoteModelIds.has(modelId)
+  );
+
   const handleReload = useCallback(async () => {
     setReloading(true);
     setStatus(null);
@@ -215,21 +253,44 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     }
   }, [agentId, onModelsUpdated]);
 
+  const handleBackendModelsVisibleChange = useCallback(async (visible: boolean) => {
+    const previousVisible = backendModelsVisible;
+    setBackendModelsVisible(visible);
+    setSavingModelVisibility(true);
+    setStatus(null);
+    try {
+      const result = await window.electronAPI.agentConfigSetBackendModelsVisible(agentId, visible);
+      if (!result.success) {
+        setBackendModelsVisible(previousVisible);
+        setStatus({ type: "error", text: result.error || "保存模型显示设置失败" });
+        return;
+      }
+      if (result.models) onModelsUpdated(agentId, result.models);
+      setStatus({
+        type: "success",
+        text: visible ? "已显示 Agent 内置模型" : "已仅显示自定义渠道模型",
+      });
+    } catch (error) {
+      setBackendModelsVisible(previousVisible);
+      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSavingModelVisibility(false);
+    }
+  }, [agentId, backendModelsVisible, onModelsUpdated]);
+
   const handleAddProvider = useCallback(() => {
+    if (!providerConfiguration) return;
     const existingIds = new Set(config.providers.map((provider) => provider.providerId));
     let index = config.providers.length + 1;
     while (existingIds.has(`custom-${index}`)) index += 1;
-    const provider = createProvider(index);
-    if (agentId === "codex") {
-      provider.models = [{ ...provider.models[0], reasoning: true, imageInput: true }];
-    }
+    const provider = createProvider(index, providerConfiguration);
     if (!usesActivation) setSelectedProviderId(provider.providerId);
     setDraft(provider);
     setEditorBaseline(cloneProvider(provider));
     setEditorOriginalProviderId("");
     setEditorOpen(true);
     setStatus(null);
-  }, [agentId, config.providers, usesActivation]);
+  }, [config.providers, providerConfiguration, usesActivation]);
 
   const handleSelectProvider = useCallback((provider: AgentProviderConfig) => {
     setSelectedProviderId(provider.providerId);
@@ -281,8 +342,82 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, []);
 
   const addModel = useCallback(() => {
-    setDraft((current) => current ? { ...current, models: [...current.models, emptyModel()] } : current);
-  }, []);
+    setDraft((current) => current ? { ...current, models: [...current.models, emptyModel(providerConfiguration)] } : current);
+  }, [providerConfiguration]);
+
+  const handleFetchModels = useCallback(async () => {
+    if (!draft) return;
+    if (!draft.baseUrl.trim()) {
+      setModelFetchError("请先填写渠道 URL。");
+      return;
+    }
+
+    const requestId = ++modelFetchRequest.current;
+    setFetchingModels(true);
+    setModelFetchError("");
+    try {
+      const result = await window.electronAPI.agentConfigFetchModels(draft.baseUrl, draft.apiKey);
+      if (modelFetchRequest.current !== requestId) return;
+      if (!result.success || result.models.length === 0) {
+        setModelFetchError(result.error || "没有获取到可用模型。");
+        return;
+      }
+      setRemoteModels(result.models);
+      setSelectedRemoteModelIds(new Set());
+      setModelSearch("");
+      setModelPickerOpen(true);
+    } catch (error) {
+      if (modelFetchRequest.current !== requestId) return;
+      setModelFetchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (modelFetchRequest.current === requestId) setFetchingModels(false);
+    }
+  }, [draft]);
+
+  const toggleRemoteModel = useCallback((modelId: string) => {
+    if (configuredModelIds.has(modelId)) return;
+    setSelectedRemoteModelIds((current) => {
+      const next = new Set(current);
+      if (next.has(modelId)) next.delete(modelId);
+      else next.add(modelId);
+      return next;
+    });
+  }, [configuredModelIds]);
+
+  const toggleAllFilteredModels = useCallback(() => {
+    setSelectedRemoteModelIds((current) => {
+      const next = new Set(current);
+      if (allFilteredModelsSelected) {
+        for (const modelId of selectableFilteredModelIds) next.delete(modelId);
+      } else {
+        for (const modelId of selectableFilteredModelIds) next.add(modelId);
+      }
+      return next;
+    });
+  }, [allFilteredModelsSelected, selectableFilteredModelIds]);
+
+  const addSelectedRemoteModels = useCallback(() => {
+    if (!draft) return;
+    const selectedModels = remoteModels.filter((model) => selectedRemoteModelIds.has(model.id));
+    if (selectedModels.length === 0) return;
+    const existingIds = new Set(draft.models.map((model) => model.id.trim()).filter(Boolean));
+    const additions = selectedModels.flatMap((model) => {
+      if (existingIds.has(model.id)) return [];
+      existingIds.add(model.id);
+      return [{
+        id: model.id,
+        name: model.name || model.id,
+        reasoning: providerConfiguration?.modelDefaults.reasoning === true,
+        imageInput: providerConfiguration?.modelDefaults.imageInput === true,
+      }];
+    });
+    if (additions.length === 0) return;
+    const retainedModels = draft.models.filter((model) => model.id.trim() || model.name.trim());
+    setDraft({ ...draft, models: [...retainedModels, ...additions] });
+    setModelPickerOpen(false);
+    setModelFetchError("");
+    setStatus({ type: "success", text: `已添加 ${additions.length} 个模型到渠道草稿` });
+  }, [draft, providerConfiguration, remoteModels, selectedRemoteModelIds]);
 
   const removeModel = useCallback((index: number) => {
     setDraft((current) => {
@@ -306,8 +441,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           ...model,
           id: model.id.trim(),
           name: (model.name || model.id).trim(),
-          reasoning: agentId === "codex" ? true : model.reasoning,
-          imageInput: agentId === "codex" ? true : model.imageInput,
+          reasoning: providerConfiguration?.fixedModelCapabilities
+            ? providerConfiguration.modelDefaults.reasoning
+            : model.reasoning,
+          imageInput: providerConfiguration?.fixedModelCapabilities
+            ? providerConfiguration.modelDefaults.imageInput
+            : model.imageInput,
         })),
       };
       const payload = editorOriginalProviderId
@@ -332,7 +471,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setEditorBaseline(null);
       setEditorOriginalProviderId("");
       setEditorOpen(false);
-      if (result.models && result.models.length > 0) {
+      if (result.models) {
         onModelsUpdated(agentId, result.models);
       }
       const count = result.reloadedSessionIds?.length || 0;
@@ -351,7 +490,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setSaving(false);
     }
-  }, [agentId, draft, editorOriginalProviderId, onModelsUpdated, selectedProviderId, usesActivation]);
+  }, [agentId, draft, editorOriginalProviderId, onModelsUpdated, providerConfiguration, selectedProviderId, usesActivation]);
 
   const handleActivate = useCallback(async (providerId: string) => {
     setActivatingProviderId(providerId);
@@ -366,7 +505,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setSelectedProviderId(providerId);
       const provider = result.config.providers.find((item) => item.providerId === providerId);
       setDraft(provider ? cloneProvider(provider) : null);
-      onModelsUpdated(agentId, result.models);
+      onModelsUpdated(agentId, result.models, providerId);
       const count = result.reloadedSessionIds?.length || 0;
       setStatus({
         type: "success",
@@ -380,36 +519,50 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, [agentId, onModelsUpdated]);
 
   const handleDelete = useCallback(async (providerId: string) => {
+    const deletedIndex = config.providers.findIndex((provider) => provider.providerId === providerId);
     setDeletingProviderId(providerId);
+    setDeleteError("");
     setStatus(null);
     try {
       const result = await window.electronAPI.agentConfigDelete(agentId, providerId);
       if (!result.success || !result.config) {
-        setStatus({ type: "error", text: result.error || "删除渠道失败" });
+        setDeleteError(result.error || "删除渠道失败");
         return;
       }
       setConfig(result.config);
-      const nextSelected = result.config.providers[0]?.providerId || "";
+      const nextSelectedIndex = Math.min(
+        Math.max(deletedIndex, 0),
+        Math.max(result.config.providers.length - 1, 0)
+      );
+      const nextSelected = result.config.providers[nextSelectedIndex]?.providerId || "";
       setSelectedProviderId(nextSelected);
       setDraft(null);
       setEditorBaseline(null);
       setEditorOriginalProviderId("");
       setEditorOpen(false);
-      if (result.models && result.models.length > 0) {
+      setDeleteConfirmProvider(null);
+      setDeleteError("");
+      if (result.models) {
         onModelsUpdated(agentId, result.models);
       }
       setStatus({
         type: "success",
         text: usesActivation
-          ? "渠道草稿已删除，本地 Codex 当前配置未被清理"
+          ? "渠道草稿已删除，当前启用的原生配置未被修改"
           : result.error || "渠道已从本地配置删除",
       });
     } catch (error) {
-      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {
       setDeletingProviderId("");
     }
-  }, [agentId, onModelsUpdated, usesActivation]);
+  }, [agentId, config.providers, onModelsUpdated, usesActivation]);
+
+  const closeDeleteConfirm = useCallback(() => {
+    if (deletingProviderId) return;
+    setDeleteConfirmProvider(null);
+    setDeleteError("");
+  }, [deletingProviderId]);
 
   const handleProviderDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
     if (config.providers.length < 2 || reorderingProviderId) {
@@ -512,7 +665,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
             <div className="agent-config-title-row">
               <h3>{getAgentName(agentId)} 配置</h3>
             </div>
-            <div className="agent-config-subtitle">{getConfigPathLabel(agentId)}</div>
+            <div className="agent-config-subtitle">{providerConfiguration?.pathLabel || "Agent provider config"}</div>
             <div className="agent-config-tabs" role="tablist" aria-label="Agent 配置切换">
               {configurableAgentList.map((agent) => {
                 const active = agent.id === agentId;
@@ -538,11 +691,27 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
         <div className="settings-modal-content agent-config-content">
           <div className="agent-config-toolbar">
-            <span>{getAgentHint(agentId)}</span>
-            <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
-              <RefreshCw size={13} />
-              {reloading ? "重载中..." : "重新载入当前配置"}
-            </button>
+            <span>{providerConfiguration?.hint || ""}</span>
+            <div className="agent-config-toolbar-actions">
+              {backendModelVisibility?.userConfigurable && (
+                <label
+                  className="agent-config-model-visibility"
+                  title={backendModelVisibility.description}
+                >
+                  <span>{backendModelVisibility.label}</span>
+                  <input
+                    type="checkbox"
+                    checked={backendModelsVisible}
+                    disabled={loading || savingModelVisibility}
+                    onChange={(event) => void handleBackendModelsVisibleChange(event.target.checked)}
+                  />
+                </label>
+              )}
+              <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
+                <RefreshCw size={13} />
+                {reloading ? "重载中..." : "重新载入当前配置"}
+              </button>
+            </div>
           </div>
 
           {!configurable ? (
@@ -653,7 +822,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         <button
                           type="button"
                           className="btn-action"
-                          onClick={() => void handleDelete(selectedSavedProvider.providerId)}
+                          onClick={() => {
+                            setDeleteError("");
+                            setDeleteConfirmProvider(cloneProvider(selectedSavedProvider));
+                          }}
                           disabled={!!deletingProviderId || !!reorderingProviderId || (usesActivation && selectedSavedProvider.providerId === config.activeProviderId)}
                           title={usesActivation && selectedSavedProvider.providerId === config.activeProviderId ? "请先启用其它渠道再删除当前渠道" : undefined}
                         >
@@ -675,6 +847,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                       <div className="agent-config-summary-row wide">
                         <span>渠道 URL</span>
                         <strong>{selectedSavedProvider.baseUrl || "未配置"}</strong>
+                      </div>
+                      <div className="agent-config-summary-row">
+                        <span>Endpoint</span>
+                        <strong>{providerConfiguration ? getEndpointLabel(providerConfiguration, selectedSavedProvider.endpoint) : selectedSavedProvider.endpoint}</strong>
                       </div>
                       <div className="agent-config-summary-row">
                         <span>模型数量</span>
@@ -792,6 +968,18 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   />
                 </label>
                 <label>
+                  <span>Endpoint</span>
+                  <select
+                    value={draft.endpoint}
+                    onChange={(event) => updateDraft({ endpoint: event.target.value as AgentProviderEndpoint })}
+                    className="input-field"
+                  >
+                    {endpointOptions.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="agent-config-field-wide">
                   <span>sk-key</span>
                   <div className="agent-config-secret-input">
                     <input
@@ -829,11 +1017,23 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
               <div className="agent-config-models-header">
                 <div className="agent-config-section-title">模型</div>
-                <button type="button" className="btn-action agent-config-mini-btn" onClick={addModel}>
-                  <Plus size={13} />
-                  添加模型
-                </button>
+                <div className="agent-config-model-actions">
+                  <button
+                    type="button"
+                    className="btn-action agent-config-mini-btn"
+                    onClick={() => void handleFetchModels()}
+                    disabled={fetchingModels || !draft.baseUrl.trim()}
+                  >
+                    {fetchingModels ? <Loader2 size={13} className="agent-config-spin" /> : <RefreshCw size={13} />}
+                    {fetchingModels ? "获取中..." : "获取模型"}
+                  </button>
+                  <button type="button" className="btn-action agent-config-mini-btn" onClick={addModel}>
+                    <Plus size={13} />
+                    添加模型
+                  </button>
+                </div>
               </div>
+              {modelFetchError && <div className="status-message error agent-config-fetch-error">{modelFetchError}</div>}
               <div className="agent-config-model-list">
                 {draft.models.map((model, index) => (
                   <div key={index} className="agent-config-model-row">
@@ -854,6 +1054,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         type="checkbox"
                         checked={model.reasoning}
                         onChange={(event) => updateModel(index, { reasoning: event.target.checked })}
+                        disabled={providerConfiguration?.fixedModelCapabilities}
                       />
                       Reasoning
                     </label>
@@ -862,6 +1063,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         type="checkbox"
                         checked={model.imageInput}
                         onChange={(event) => updateModel(index, { imageInput: event.target.checked })}
+                        disabled={providerConfiguration?.fixedModelCapabilities}
                       />
                       图片
                     </label>
@@ -876,6 +1078,130 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     </button>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {modelPickerOpen && draft && (
+        <div
+          className="settings-modal-overlay agent-model-picker-overlay"
+          onMouseDown={(event) => {
+            event.stopPropagation();
+            setModelPickerOpen(false);
+          }}
+        >
+          <div className="settings-modal agent-model-picker-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="settings-modal-header">
+              <div>
+                <h3>选择模型</h3>
+                <div className="agent-config-subtitle">{draft.displayName || draft.providerId} · {remoteModels.length} 个模型</div>
+              </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={() => setModelPickerOpen(false)}
+                aria-label="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="settings-modal-content agent-model-picker-content">
+              <div className="agent-model-picker-search">
+                <Search size={14} />
+                <input
+                  value={modelSearch}
+                  onChange={(event) => setModelSearch(event.target.value)}
+                  className="input-field"
+                  placeholder="搜索模型 ID 或名称"
+                  autoFocus
+                />
+              </div>
+              <div className="agent-model-picker-toolbar">
+                <span>已选择 {selectedRemoteModelIds.size} 个</span>
+                <button
+                  type="button"
+                  className="btn-action agent-config-mini-btn"
+                  onClick={toggleAllFilteredModels}
+                  disabled={selectableFilteredModelIds.length === 0}
+                >
+                  {allFilteredModelsSelected ? "清空结果" : "全选结果"}
+                </button>
+              </div>
+              <div className="agent-model-picker-list">
+                {filteredRemoteModels.length === 0 ? (
+                  <div className="agent-config-empty">没有匹配的模型</div>
+                ) : filteredRemoteModels.map((model) => {
+                  const configured = configuredModelIds.has(model.id);
+                  return (
+                    <label key={model.id} className={`agent-model-picker-row ${configured ? "configured" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={configured || selectedRemoteModelIds.has(model.id)}
+                        onChange={() => toggleRemoteModel(model.id)}
+                        disabled={configured}
+                      />
+                      <span className="agent-model-picker-name">{model.name}</span>
+                      <code>{model.id}</code>
+                      {configured && <span className="agent-model-picker-badge">已添加</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="agent-model-picker-footer">
+              <button type="button" className="btn-action" onClick={() => setModelPickerOpen(false)}>取消</button>
+              <button
+                type="button"
+                className="filter-add-btn"
+                onClick={addSelectedRemoteModels}
+                disabled={selectedRemoteModelIds.size === 0}
+              >
+                <Plus size={13} />
+                添加已选（{selectedRemoteModelIds.size}）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteConfirmProvider && (
+        <div className="settings-modal-overlay agent-provider-delete-overlay" onMouseDown={closeDeleteConfirm}>
+          <div className="settings-modal agent-remove-confirm-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="settings-modal-header">
+              <div>
+                <h3>删除渠道</h3>
+                <div className="agent-config-subtitle">{deleteConfirmProvider.providerId}</div>
+              </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={closeDeleteConfirm}
+                disabled={!!deletingProviderId}
+                aria-label="关闭"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="settings-modal-content agent-remove-confirm-content">
+              <p>确定删除渠道“{deleteConfirmProvider.displayName || deleteConfirmProvider.providerId}”吗？</p>
+              <div className="agent-provider-delete-target">
+                <span>渠道 ID</span>
+                <code>{deleteConfirmProvider.providerId}</code>
+              </div>
+              {deleteError && <div className="status-message error agent-provider-delete-error">{deleteError}</div>}
+              <div className="agent-remove-confirm-actions">
+                <button type="button" className="btn-action" onClick={closeDeleteConfirm} disabled={!!deletingProviderId}>
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="filter-add-btn"
+                  onClick={() => void handleDelete(deleteConfirmProvider.providerId)}
+                  disabled={!!deletingProviderId}
+                >
+                  <Trash2 size={13} />
+                  {deletingProviderId ? "删除中..." : "确认删除"}
+                </button>
               </div>
             </div>
           </div>

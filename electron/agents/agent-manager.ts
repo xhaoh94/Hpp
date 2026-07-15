@@ -1,8 +1,6 @@
 import { ipcMain, BrowserWindow, dialog, app } from "electron";
-import { readFileSync, existsSync, statSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
-import { homedir } from "os";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
 import {
   downloadOfficialPluginZip,
@@ -17,13 +15,19 @@ import {
   activateAgentProviderConfig,
   deleteAgentProviderConfig,
   getAgentConfigStateForBackend,
+  getAgentModelVisibility,
   getConfiguredAgentModels,
   listAgentConfig,
   reorderAgentProviderConfigs,
   restoreNativeConfigSnapshots,
   saveAgentProviderConfig,
+  setAgentBackendModelsVisible,
   setActiveAgentProviderConfig,
+  shouldShowAgentBackendModels,
 } from "./agent-config";
+import { fetchProviderModels } from "./agent-model-fetch";
+import { combineAgentModels } from "./agent-model-list";
+import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
 
 interface AgentModel {
   id: string;
@@ -46,7 +50,7 @@ interface AgentBackend {
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
   sendUIResponse(response: AgentUIResponse): void;
-  dispose(): void;
+  dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;
 }
 
@@ -85,106 +89,18 @@ interface AgentReloadConfigResult {
 const AGENT_SESSION_INIT_TIMEOUT_MS = 90_000;
 const agentRegistry = getAgentPluginRegistry();
 
-// ============================================================
-// Local models.json config support
-// ============================================================
-
-interface ProviderModelConfig {
-  id: string;
-  name?: string;
-  reasoning?: boolean;
-  input?: string[];
-}
-
-interface ProviderConfig {
-  models?: ProviderModelConfig[];
-}
-
-interface LocalModelsConfig {
-  providers?: Record<string, ProviderConfig>;
-}
-
-let _localModelsConfig: LocalModelsConfig | null = null;
-let _localModelsConfigMtime = 0;
-
-/** Read ~/.pi/agent/models.json, cached with mtime check */
-function readLocalModelsConfig(): LocalModelsConfig {
-  const configPath = join(homedir(), ".pi", "agent", "models.json");
-  try {
-    const stat = existsSync(configPath) ? statSync(configPath) : null;
-    const mtime = stat ? stat.mtimeMs : 0;
-    if (_localModelsConfig && mtime <= _localModelsConfigMtime) {
-      return _localModelsConfig;
-    }
-    const content = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
-    _localModelsConfig = JSON.parse(content) as LocalModelsConfig;
-    _localModelsConfigMtime = mtime;
-  } catch {
-    _localModelsConfig = {};
-    _localModelsConfigMtime = Date.now();
-  }
-  return _localModelsConfig!;
-}
-
-/**
- * Filter fetched models against the local models.json config.
- * If the provider (vendor) is defined in models.json.providers,
- * only return the models whose IDs are listed in that provider's models array.
- * If the provider is NOT configured, return all models for that provider unchanged.
- */
-function filterModelsByLocalConfig(models: AgentModel[]): AgentModel[] {
-  const config = readLocalModelsConfig();
-  if (!config?.providers) return models;
-
-  const result: AgentModel[] = [];
-  for (const model of models) {
-    const providerConfig = config.providers[model.provider];
-    const configuredModels = Array.isArray(providerConfig?.models)
-      ? providerConfig.models.filter((configuredModel) => typeof configuredModel?.id === "string")
-      : undefined;
-    if (!configuredModels) {
-      // Provider not configured — keep all models
-      result.push(model);
-    } else {
-      // Provider is configured — only include models whose id matches
-      const configuredIds = new Set(configuredModels.map((configuredModel) => configuredModel.id));
-      if (configuredIds.has(model.id)) {
-        // Use the config's model info as-is (id, name, reasoning) to respect custom overrides
-        const configuredModel = configuredModels.find((candidate) => candidate.id === model.id);
-        result.push({
-          ...model,
-          name: typeof configuredModel?.name === "string" ? configuredModel.name : model.name,
-          reasoning: typeof configuredModel?.reasoning === "boolean" ? configuredModel.reasoning : model.reasoning,
-          supportsImages: Array.isArray(configuredModel?.input)
-            ? configuredModel.input.includes("image")
-            : model.supportsImages,
-        });
-      }
-    }
-  }
-  return result;
-}
-
 async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
   if (!agentId) return models;
+  const capabilities = await agentRegistry.getCapabilities(agentId);
+  if (capabilities.configuration === "none") return models;
   const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
-  if (agentId === "codex") return configuredModels;
-  if (configuredModels.length === 0) return models;
-  if (agentId === "pi") return models;
-
-  const merged = new Map<string, AgentModel>();
-  for (const model of models) {
-    merged.set(`${model.provider}:${model.id}`, model);
-  }
-  for (const model of configuredModels) {
-    merged.set(`${model.provider}:${model.id}`, model);
-  }
-  return Array.from(merged.values());
-}
-
-function resetLocalModelsConfigCache() {
-  _localModelsConfig = null;
-  _localModelsConfigMtime = 0;
+  const backendModelsVisible = await shouldShowAgentBackendModels(agentId);
+  return combineAgentModels(
+    models,
+    configuredModels,
+    capabilities.configuration.modelListMode,
+    backendModelsVisible,
+  );
 }
 
 async function supportsNativePlanMode(agentId?: string): Promise<boolean> {
@@ -237,13 +153,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 // ============================================================
-// Agent Manager - supports Pi SDK, OpenCode, and Droid per session
+// Agent Manager - manages plugin backends per session.
 // ============================================================
-class AgentManager {
+export class AgentManager {
   private sessionAgents = new Map<string, AgentBackend>();
-  private sessionAgentTypes = new Map<string, string>(); // sessionId -> agentId ("pi" | "opencode")
+  private sessionAgentTypes = new Map<string, string>();
   private sessionFilePaths = new Map<string, string>();
   private sessionProjectPaths = new Map<string, string>();
+  private runtimeUpdatingAgentIds = new Set<string>();
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
 
@@ -273,6 +190,9 @@ class AgentManager {
     sessionId: string, agentId: string, projectPath: string,
     existingSessionFilePath?: string
   ): Promise<void> {
+    if (this.runtimeUpdatingAgentIds.has(agentId)) {
+      throw new Error(`${agentId} CLI 正在更新，请等待更新完成。`);
+    }
     console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
     let agent = this.sessionAgents.get(sessionId);
     if (!agent) {
@@ -322,9 +242,11 @@ class AgentManager {
 
   getActiveAgent(): AgentBackend | null {
     if (!this.activeSessionId) return null;
-    return this.sessionAgents.get(this.activeSessionId) || null;
+    return this.getAgentBySessionId(this.activeSessionId);
   }
   getAgentBySessionId(sessionId: string): AgentBackend | null {
+    const agentId = this.sessionAgentTypes.get(sessionId);
+    if (agentId && this.runtimeUpdatingAgentIds.has(agentId)) return null;
     return this.sessionAgents.get(sessionId) || null;
   }
 
@@ -369,8 +291,16 @@ class AgentManager {
     if (!agent) return [];
     const models = await agent.getModels();
     const agentType = this.sessionAgentTypes.get(sessionId);
-    const filteredModels = agentType === "pi" ? filterModelsByLocalConfig(models) : models;
-    return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
+    return mergeModelsWithConfiguredAgentModels(agentType, models);
+  }
+
+  async getModelsByAgentId(agentId: string): Promise<AgentModel[]> {
+    const preferredSessionId = this.activeSessionId && this.sessionAgentTypes.get(this.activeSessionId) === agentId
+      ? this.activeSessionId
+      : Array.from(this.sessionAgentTypes.entries()).find(([, type]) => type === agentId)?.[0];
+    return preferredSessionId
+      ? this.getModelsBySessionId(preferredSessionId)
+      : mergeModelsWithConfiguredAgentModels(agentId, []);
   }
 
   sendUIResponse(response: AgentUIResponse) {
@@ -456,8 +386,6 @@ class AgentManager {
       };
     });
 
-    resetLocalModelsConfigCache();
-
     const initializedTargets: Array<{
       target: (typeof targets)[number];
       nextAgent: AgentBackend;
@@ -514,31 +442,174 @@ class AgentManager {
     return false;
   }
 
-  removeSession(sessionId: string) {
+  isAgentRuntimeUpdating(agentId?: string): boolean {
+    return !!agentId && this.runtimeUpdatingAgentIds.has(agentId);
+  }
+
+  async suspendAgentSessionsForRuntimeUpdate(agentId: string): Promise<{
+    success: boolean;
+    sessionCount: number;
+    error?: string;
+  }> {
+    if (this.runtimeUpdatingAgentIds.has(agentId)) {
+      return { success: false, sessionCount: 0, error: "该 Agent CLI 已在更新中。" };
+    }
+
+    const targets = Array.from(this.sessionAgents.entries())
+      .filter(([sessionId]) => this.sessionAgentTypes.get(sessionId) === agentId);
+    const busySession = targets.find(([, agent]) => !agent.isIdle());
+    if (busySession) {
+      return {
+        success: false,
+        sessionCount: targets.length,
+        error: "该 Agent 仍有会话正在运行，请等待任务结束后再更新。",
+      };
+    }
+    this.runtimeUpdatingAgentIds.add(agentId);
+    if (targets.length === 0) {
+      return { success: true, sessionCount: 0 };
+    }
+    const results = await Promise.allSettled(
+      targets.map(([, agent]) => Promise.resolve(agent.dispose()))
+    );
+    const failure = results.find((result) => result.status === "rejected");
+    if (!failure || failure.status !== "rejected") {
+      return { success: true, sessionCount: targets.length };
+    }
+
+    let recoveryError = "";
+    try {
+      const recovery = await this.resumeAgentSessionsAfterRuntimeUpdate(agentId);
+      if (!recovery.success) recoveryError = recovery.error || "会话恢复失败";
+    } catch (error) {
+      recoveryError = getErrorMessage(error);
+    }
+    const detail = getErrorMessage(failure.reason);
+    return {
+      success: false,
+      sessionCount: targets.length,
+      error: recoveryError
+        ? `无法暂停 Agent 空闲会话：${detail}；恢复会话失败：${recoveryError}`
+        : `无法暂停 Agent 空闲会话：${detail}`,
+    };
+  }
+
+  async resumeAgentSessionsAfterRuntimeUpdate(agentId: string): Promise<AgentReloadConfigResult> {
+    if (!this.runtimeUpdatingAgentIds.has(agentId)) {
+      return { success: true, reloadedSessionIds: [] };
+    }
+    try {
+      return await this.reloadConfig(agentId);
+    } finally {
+      this.runtimeUpdatingAgentIds.delete(agentId);
+    }
+  }
+
+  async removeSession(sessionId: string) {
     const agent = this.sessionAgents.get(sessionId);
-    if (agent) { agent.dispose(); this.sessionAgents.delete(sessionId); }
+    if (agent) {
+      this.sessionAgents.delete(sessionId);
+      await Promise.resolve(agent.dispose());
+    }
     this.sessionAgentTypes.delete(sessionId);
     this.sessionFilePaths.delete(sessionId);
     this.sessionProjectPaths.delete(sessionId);
     if (this.activeSessionId === sessionId) this.activeSessionId = null;
   }
+
+  async shutdown(): Promise<void> {
+    const agents = Array.from(this.sessionAgents.values());
+    this.sessionAgents.clear();
+    this.sessionAgentTypes.clear();
+    this.sessionFilePaths.clear();
+    this.sessionProjectPaths.clear();
+    this.activeSessionId = null;
+    await Promise.allSettled(agents.map((agent) => Promise.resolve(agent.dispose())));
+  }
 }
 
 const agentManager = new AgentManager();
+
+async function activateProviderAndReload(agentId: string, providerId: string) {
+  const idleCheck = agentManager.canReloadConfig(agentId);
+  if (!idleCheck.success) return idleCheck;
+
+  let snapshots: Awaited<ReturnType<typeof activateAgentProviderConfig>>["snapshots"] = [];
+  try {
+    const activation = await activateAgentProviderConfig(agentId, providerId);
+    snapshots = activation.snapshots;
+    const reloadResult = await agentManager.reloadConfig(agentId);
+    if (!reloadResult.success) {
+      await restoreNativeConfigSnapshots(snapshots);
+      return reloadResult;
+    }
+
+    const config = await setActiveAgentProviderConfig(agentId, providerId);
+    const models = await mergeModelsWithConfiguredAgentModels(agentId, reloadResult.models || []);
+    return { ...reloadResult, models, config };
+  } catch (error: unknown) {
+    if (snapshots.length > 0) {
+      await restoreNativeConfigSnapshots(snapshots).catch(() => undefined);
+    }
+    return { success: false, error: getErrorMessage(error), reloadedSessionIds: [] };
+  }
+}
+
+export async function shutdownAgentRuntime(): Promise<void> {
+  await agentManager.shutdown();
+  await agentRegistry.shutdown();
+}
 
 // ============================================================
 // IPC handlers
 // ============================================================
 export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agent:update", async (_event, agentId: string) => {
-    if (agentManager.hasAgentSessions(agentId)) {
-      return {
-        success: false,
-        error: "该 Agent 仍有已打开会话，请先关闭相关会话后再更新。",
-        status: await agentRegistry.getStatus(agentId),
-      };
-    }
-    return agentRegistry.updateAgent(agentId);
+    return agentRuntimeOperationQueue.run(agentId, "update", async () => {
+      const suspension = await agentManager.suspendAgentSessionsForRuntimeUpdate(agentId);
+      if (!suspension.success) {
+        return {
+          success: false,
+          error: suspension.error,
+          status: await agentRegistry.getStatus(agentId),
+        };
+      }
+
+      let updateResult: Awaited<ReturnType<typeof agentRegistry.updateAgent>> | undefined;
+      let updateError = "";
+      try {
+        updateResult = await agentRegistry.updateAgent(agentId);
+      } catch (error) {
+        updateError = getErrorMessage(error);
+      }
+
+      let resumeError = "";
+      try {
+        const resumeResult = await agentManager.resumeAgentSessionsAfterRuntimeUpdate(agentId);
+        if (!resumeResult.success) resumeError = resumeResult.error || "会话恢复失败";
+      } catch (error) {
+        resumeError = getErrorMessage(error);
+      }
+
+      if (resumeError) {
+        const prefix = updateResult?.success
+          ? "CLI 已更新，但空闲会话自动恢复失败"
+          : updateError || updateResult?.error || "CLI 更新失败";
+        return {
+          success: false,
+          error: `${prefix}：${resumeError}。请重载会话或重启 Hpp。`,
+          status: updateResult?.status || await agentRegistry.getStatus(agentId),
+        };
+      }
+      if (updateError) {
+        return {
+          success: false,
+          error: updateError,
+          status: await agentRegistry.getStatus(agentId),
+        };
+      }
+      return updateResult!;
+    });
   });
 
   ipcMain.handle("agentPlugin:choosePath", async (event, kind?: "zip" | "directory") => {
@@ -565,11 +636,11 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agentPlugin:listOfficial", async () => {
-    return listOfficialAgentPlugins();
+    return listOfficialAgentPlugins(app.getVersion());
   });
 
   ipcMain.handle("agentPlugin:installOfficial", async (_event, agentId: string) => {
-    const catalog = await listOfficialAgentPlugins();
+    const catalog = await listOfficialAgentPlugins(app.getVersion());
     if (!catalog.success) {
       return {
         success: false,
@@ -583,6 +654,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return {
         success: false,
         error: `官方插件列表中不存在 ${agentId}。`,
+        agents: await agentRegistry.listAgents(),
+      };
+    }
+
+    if (!plugin.compatible) {
+      return {
+        success: false,
+        error: plugin.compatibilityError || `${plugin.name} 与当前 Hpp 版本不兼容。`,
         agents: await agentRegistry.listAgents(),
       };
     }
@@ -619,14 +698,16 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agentPlugin:remove", async (_event, agentId: string, removeRuntime = false) => {
-    if (agentManager.hasAgentSessions(agentId)) {
-      return {
-        success: false,
-        error: "该 Agent 仍有已打开会话，请先关闭相关会话后再卸载插件。",
-        agents: await agentRegistry.listAgents(),
-      };
-    }
-    return agentRegistry.removePlugin(agentId, removeRuntime);
+    return agentRuntimeOperationQueue.run(agentId, "uninstall", async () => {
+      if (agentManager.hasAgentSessions(agentId)) {
+        return {
+          success: false,
+          error: "该 Agent 仍有已打开会话，请先关闭相关会话后再卸载插件。",
+          agents: await agentRegistry.listAgents(),
+        };
+      }
+      return agentRegistry.removePlugin(agentId, removeRuntime);
+    });
   });
 
   ipcMain.handle("agentPlugin:reload", async () => {
@@ -656,18 +737,31 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agent:removeSession", async (_event, sessionId: string) => {
-    agentManager.removeSession(sessionId);
-    return { success: true };
+    const agentId = agentManager.getSessionAgentType(sessionId);
+    if (!agentId) {
+      await agentManager.removeSession(sessionId);
+      return { success: true };
+    }
+    return agentRuntimeOperationQueue.run(agentId, "session-dispose", async () => {
+      await agentManager.removeSession(sessionId);
+      return { success: true };
+    });
   });
 
   ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
-    const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
-    if (!agent) return { success: false, error: "No active agent" };
     try {
       const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
+      if (agentManager.isAgentRuntimeUpdating(agentType)) {
+        return { success: false, error: "该 Agent CLI 正在更新，请等待更新完成。" };
+      }
+      const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
+      if (!agent) return { success: false, error: "No active agent" };
       const planModeEnabled = !!options?.planModeEnabled;
       const permissionMode: AgentSendOptions["permissionMode"] = planModeEnabled ? "plan" : "full-access";
       const nativePlanMode = await supportsNativePlanMode(agentType);
+      if (agentManager.isAgentRuntimeUpdating(agentType)) {
+        return { success: false, error: "该 Agent CLI 正在更新，请等待更新完成。" };
+      }
       const effectiveMessage = planModeEnabled && !nativePlanMode
         ? withPromptPlanMode(message)
         : message;
@@ -703,6 +797,28 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return listAgentConfig(agentId);
   });
 
+  ipcMain.handle("agentConfig:getModelVisibility", async (_event, agentId: string) => {
+    return getAgentModelVisibility(agentId);
+  });
+
+  ipcMain.handle("agentConfig:setBackendModelsVisible", async (_event, agentId: string, visible: boolean) => {
+    const result = await setAgentBackendModelsVisible(agentId, visible);
+    if (!result.success) return result;
+    return {
+      ...result,
+      models: await agentManager.getModelsByAgentId(agentId),
+    };
+  });
+
+  ipcMain.handle("agentConfig:fetchModels", async (_event, baseUrl: string, apiKey: string) => {
+    try {
+      const models = await fetchProviderModels(baseUrl, apiKey);
+      return { success: true, models };
+    } catch (error: unknown) {
+      return { success: false, error: getErrorMessage(error), models: [] };
+    }
+  });
+
   ipcMain.handle("agentConfig:save", async (_event, agentId: string, config: unknown) => {
     const saveResult = await saveAgentProviderConfig(agentId, config);
     if (!saveResult.success || !saveResult.config) {
@@ -725,7 +841,6 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
 
     try {
-      resetLocalModelsConfigCache();
       const reloadResult = await agentManager.reloadConfig(agentId);
       return { ...reloadResult, config: saveResult.config };
     } catch (err: unknown) {
@@ -755,11 +870,25 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
 
     try {
-      resetLocalModelsConfigCache();
       const reloadResult = await agentManager.reloadConfig(agentId);
+      if (!reloadResult.success) {
+        const models = await mergeModelsWithConfiguredAgentModels(agentId, []);
+        return {
+          ...deleteResult,
+          models,
+          error: `渠道已从本地配置删除；${reloadResult.error || "Agent 重载失败。"}`,
+          reloadedSessionIds: [],
+        };
+      }
       return { ...reloadResult, config: deleteResult.config };
     } catch (err: unknown) {
-      return { success: false, error: getErrorMessage(err), config: deleteResult.config, reloadedSessionIds: [] };
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []).catch(() => []);
+      return {
+        ...deleteResult,
+        models,
+        error: `渠道已从本地配置删除；Agent 重载失败：${getErrorMessage(err)}`,
+        reloadedSessionIds: [],
+      };
     }
   });
 
@@ -785,7 +914,6 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
 
     try {
-      resetLocalModelsConfigCache();
       const reloadResult = await agentManager.reloadConfig(agentId);
       return { ...reloadResult, config: reorderResult.config };
     } catch (err: unknown) {
@@ -794,32 +922,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agentConfig:activate", async (_event, agentId: string, providerId: string) => {
-    const idleCheck = agentManager.canReloadConfig(agentId);
-    if (!idleCheck.success) return idleCheck;
-
-    let snapshots: Awaited<ReturnType<typeof activateAgentProviderConfig>>["snapshots"] = [];
-    try {
-      const activation = await activateAgentProviderConfig(agentId, providerId);
-      snapshots = activation.snapshots;
-      resetLocalModelsConfigCache();
-
-      const reloadResult = await agentManager.reloadConfig(agentId);
-      if (!reloadResult.success) {
-        await restoreNativeConfigSnapshots(snapshots);
-        resetLocalModelsConfigCache();
-        return reloadResult;
-      }
-
-      const config = await setActiveAgentProviderConfig(agentId, providerId);
-      const models = await mergeModelsWithConfiguredAgentModels(agentId, reloadResult.models || []);
-      return { ...reloadResult, models, config };
-    } catch (err: unknown) {
-      if (snapshots.length > 0) {
-        await restoreNativeConfigSnapshots(snapshots).catch(() => undefined);
-        resetLocalModelsConfigCache();
-      }
-      return { success: false, error: getErrorMessage(err), reloadedSessionIds: [] };
-    }
+    return activateProviderAndReload(agentId, providerId);
   });
 
   ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
@@ -846,18 +949,35 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     if (!agent) return [];
     const models = await agent.getModels();
     const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
-    const filteredModels = agentType === "pi" ? filterModelsByLocalConfig(models) : models;
-    return mergeModelsWithConfiguredAgentModels(agentType, filteredModels);
+    return mergeModelsWithConfiguredAgentModels(agentType, models);
   });
 
   ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string, sessionId?: string) => {
     try {
+      const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
+      if (agentType) {
+        const capabilities = await agentRegistry.getCapabilities(agentType);
+        if (capabilities.configuration !== "none" && capabilities.configuration.modelListMode === "configured") {
+          const configuredModels = await getConfiguredAgentModels(agentType);
+          if (
+            configuredModels.length > 0 &&
+            !configuredModels.some((model) => model.provider === provider && model.id === modelId)
+          ) {
+            return { success: false, error: "所选模型不属于已配置渠道，请刷新模型列表后重试。" };
+          }
+
+          if (capabilities.providerActivation === "single-active" && configuredModels.length > 0) {
+            const configState = await getAgentConfigStateForBackend(agentType);
+            if (configState.activeProviderId !== provider) {
+              const activationResult = await activateProviderAndReload(agentType, provider);
+              if (!activationResult.success) return activationResult;
+            }
+          }
+        }
+      }
       const agent = agentManager.getAgentForSession(sessionId);
       if (!agent) return { success: false, error: "No active agent" };
-      const agentType = sessionId
-        ? agentManager.getSessionAgentType(sessionId)
-        : agentManager.getActiveAgentType();
-      await agent.setModel(agentType === "codex" ? "codex" : provider, modelId);
+      await agent.setModel(provider, modelId);
       return { success: true };
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err) };

@@ -408,15 +408,14 @@
 }
 
 .project-terminals {
+  position: relative;
   display: flex;
   flex-wrap: nowrap;
+  align-items: center;
   gap: 4px;
   margin-top: 6px;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-bottom: 2px;
-  scrollbar-width: thin;
+  overflow: visible;
 }
 
 .project-terminals-loading {
@@ -435,15 +434,20 @@
   gap: 4px;
   min-height: 24px;
   padding: 2px 8px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   background-color: var(--bg-tertiary);
   border-radius: 4px;
+  color: var(--text-primary);
+  font: inherit;
   cursor: pointer;
   transition: all 0.15s;
-  max-width: none;
+  max-width: 96px;
 }
 
 .project-terminal-btn:hover {
   background-color: var(--accent-color);
+  border-color: rgba(255, 255, 255, 0.32);
   color: var(--bg-primary);
 }
 
@@ -452,9 +456,69 @@
 }
 
 .project-terminal-btn span {
+  min-width: 0;
+  overflow: hidden;
   font-size: 10px;
-  white-space: nowrap;
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-agent-picker {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.project-agent-more-btn {
+  width: 24px;
+  padding: 2px;
+  justify-content: center;
+}
+
+.project-agent-menu {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  width: 168px;
+  max-height: 220px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+.project-agent-menu-item {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-agent-menu-item:hover,
+.project-agent-menu-item:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+}
+
+.project-agent-menu-item span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .braille-spinner {

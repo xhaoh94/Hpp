@@ -5,6 +5,7 @@ import { join, resolve } from "path";
 import { commandExists, getCommandEnv, getExecFileInvocation, getNodeExecutable, getNpmInvocation } from "../utils/command-utils";
 import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 import { getPiSDKPackageJsonPath, getPiSDKPackageRoot, getPiSDKUserRuntimeRoot, PI_SDK_PACKAGE } from "../utils/pi-sdk-runtime";
+import { agentRuntimeOperationQueue } from "../agents/agent-runtime-operation-queue";
 
 const MIN_NODE_VERSION = "22.19.0";
 
@@ -234,5 +235,7 @@ export async function uninstallPiSDK(): Promise<{ success: boolean; error?: stri
 export function registerPiSDKHandlers() {
   ipcMain.handle("pi-sdk:getStatus", async () => getPiSDKStatus());
 
-  ipcMain.handle("pi-sdk:update", async () => updatePiSDK());
+  ipcMain.handle("pi-sdk:update", async () => (
+    agentRuntimeOperationQueue.run("pi", "update", updatePiSDK)
+  ));
 }

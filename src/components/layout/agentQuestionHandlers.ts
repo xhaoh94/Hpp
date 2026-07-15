@@ -10,8 +10,7 @@ import type { AgentEventHandlerContext } from "./agentEventTypes";
 export const isDirectQuestionEvent = (event: AgentEvent) =>
   event.type === "user_ask_question" ||
   event.type === "ask_user_question" ||
-  event.type === "ask_user" ||
-  event.type === "droid.ask_user";
+  event.type === "ask_user";
 
 export function handleDirectQuestionEvent(
   event: AgentEvent,

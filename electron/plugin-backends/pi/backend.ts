@@ -81,6 +81,7 @@ export class PiSDKAgent {
   private requestId = 0;
   private models: AgentModel[] = [];
   private pendingAssistantText = "";
+  private pendingAssistantError = "";
   private streamedText = false;
   private streamedTextBuffer = "";
   private emittedAssistantTextSnapshot = "";
@@ -92,6 +93,7 @@ export class PiSDKAgent {
   private turnToken = 0;
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
+  private isReady = false;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -108,15 +110,22 @@ export class PiSDKAgent {
       return this.initPromise;
     }
 
-    if (this.process && this.projectPath === projectPath && this._sessionFilePath === (existingSessionFilePath || this._sessionFilePath)) {
+    if (
+      this.process &&
+      this.isReady &&
+      this.projectPath === projectPath &&
+      (!requestedSessionFilePath || this._sessionFilePath === requestedSessionFilePath)
+    ) {
       return;
     }
 
     this.initKey = nextInitKey;
-    this.dispose();
+    await this.dispose();
     this.initKey = nextInitKey;
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
+    this.models = [];
+    this.isReady = false;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
 
     const worker = getPluginWorkerInvocation("pi-sdk-worker.mjs", ["PI_NODE_PATH"], true);
@@ -157,58 +166,59 @@ export class PiSDKAgent {
     });
 
     child.on("error", (error) => {
-      this.emitEvent({
-        type: "process_event",
-        entryType: "error",
-        kind: "error",
-        title: "Pi 启动失败",
-        detail: `${error.message}\n请确认系统 PATH 中的 node 版本 >= 22，或设置 PI_NODE_PATH 指向 Node 22。`,
-        state: "error",
-      });
-      for (const handler of this.pendingResponses.values()) handler({ type: "error", error: error.message });
-      this.pendingResponses.clear();
+      this.handleWorkerTermination(
+        child,
+        "Pi 启动失败",
+        `${error.message}\n请确认系统 PATH 中的 node 版本 >= 22.19.0，或设置 PI_NODE_PATH 指向兼容版本。`,
+      );
     });
 
     child.on("exit", (code, signal) => {
-      if (this.process === child) this.process = null;
       const exitReason = signal || (code ?? "unknown");
       const detail = getWorkerErrorDetail();
-      const error = [
+      this.handleWorkerTermination(child, "Pi SDK worker 已退出", [
         `Pi SDK worker exited before completing the request (${exitReason})`,
         detail,
-      ].filter(Boolean).join("\n");
-      for (const handler of this.pendingResponses.values()) handler({ type: "error", error });
-      this.pendingResponses.clear();
-      this.activePromptIds.clear();
-      this.pendingUIRequestIds.clear();
-      if (!this.isAborting) {
-        this.emitEvent({ type: "agent_disconnected" });
-      }
+      ].filter(Boolean).join("\n"));
     });
 
     const initPromise = new Promise<void>((resolve, reject) => {
+      let initId = "";
       const timeout = setTimeout(() => {
-        this.pendingResponses.delete(initId);
+        if (initId) this.pendingResponses.delete(initId);
         reject(new Error("Pi SDK worker init timed out"));
       }, PI_WORKER_INIT_TIMEOUT_MS);
-      const initId = this.sendWorkerCommand({
-        type: "init",
-        projectPath,
-        sessionFilePath: existingSessionFilePath,
-      }, (data) => {
+      try {
+        initId = this.sendWorkerCommand({
+          type: "init",
+          projectPath,
+          sessionFilePath: existingSessionFilePath,
+        }, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "ready") {
+            this._sessionFilePath = optionalString(data.sessionFilePath) || existingSessionFilePath || null;
+            this.isReady = true;
+            this.emitEvent({ type: "agent_ready", agentId: "pi", mock: false });
+            resolve();
+          } else {
+            reject(new Error(optionalString(data.error) || "Pi SDK worker init failed"));
+          }
+        });
+      } catch (error) {
         clearTimeout(timeout);
-        if (data.type === "ready") {
-          this._sessionFilePath = optionalString(data.sessionFilePath) || existingSessionFilePath || null;
-          this.emitEvent({ type: "agent_ready", agentId: "pi", mock: false });
-          resolve();
-        } else {
-          reject(new Error(optionalString(data.error) || "Pi SDK worker init failed"));
-        }
-      });
+        reject(error);
+      }
     });
     this.initPromise = initPromise;
     try {
       await initPromise;
+    } catch (error) {
+      if (this.process === child) {
+        this.process = null;
+        this.isReady = false;
+        child.kill();
+      }
+      throw error;
     } finally {
       if (this.initPromise === initPromise) {
         this.initPromise = null;
@@ -263,19 +273,24 @@ export class PiSDKAgent {
         this.pendingResponses.delete(guidanceId);
         reject(new Error("Pi SDK guidance timed out"));
       }, 12000);
-      this.sendWorkerCommand({
-        id: guidanceId,
-        type: "guidance",
-        message,
-        images,
-      }, (data) => {
+      try {
+        this.sendWorkerCommand({
+          id: guidanceId,
+          type: "guidance",
+          message,
+          images,
+        }, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "accepted" || data.type === "guidance_done") {
+            resolve();
+          } else {
+            reject(new Error(optionalString(data.error) || "Pi SDK guidance failed"));
+          }
+        });
+      } catch (error) {
         clearTimeout(timeout);
-        if (data.type === "accepted" || data.type === "guidance_done") {
-          resolve();
-        } else {
-          reject(new Error(optionalString(data.error) || "Pi SDK guidance failed"));
-        }
-      });
+        reject(error);
+      }
     });
     this.emitEvent({
       type: "process_event",
@@ -297,22 +312,27 @@ export class PiSDKAgent {
         this.pendingResponses.delete(requestId);
         resolve({ supported: true, success: false, error: "Pi SDK fork timed out" });
       }, 12000);
-      this.sendWorkerCommand({
-        id: requestId,
-        type: "forkSession",
-        ...target,
-        sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || undefined,
-      }, (data) => {
-        clearTimeout(timeout);
-        resolve({
-          supported: data.supported !== false,
-          success: !!data.success,
-          sessionFilePath: optionalString(data.sessionFilePath),
-          nativeEntryId: optionalString(data.nativeEntryId),
-          error: optionalString(data.error),
-          reason: optionalString(data.reason),
+      try {
+        this.sendWorkerCommand({
+          id: requestId,
+          type: "forkSession",
+          ...target,
+          sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || undefined,
+        }, (data) => {
+          clearTimeout(timeout);
+          resolve({
+            supported: data.supported !== false,
+            success: !!data.success,
+            sessionFilePath: optionalString(data.sessionFilePath),
+            nativeEntryId: optionalString(data.nativeEntryId),
+            error: optionalString(data.error),
+            reason: optionalString(data.reason),
+          });
         });
-      });
+      } catch (error) {
+        clearTimeout(timeout);
+        resolve({ supported: true, success: false, error: error instanceof Error ? error.message : String(error) });
+      }
     });
   }
 
@@ -334,11 +354,20 @@ export class PiSDKAgent {
       return;
     }
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 5000);
-      this.sendWorkerCommand({ type: "abort" }, () => {
+      let requestId = "";
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        resolve();
+      }, 5000);
+      try {
+        requestId = this.sendWorkerCommand({ type: "abort" }, () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      } catch {
         clearTimeout(timeout);
         resolve();
-      });
+      }
     });
     this.finishAbortState();
   }
@@ -347,12 +376,21 @@ export class PiSDKAgent {
     if (this.models.length > 0) return this.models;
     if (!this.process) return [];
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve([]), 4000);
-      this.sendWorkerCommand({ type: "getModels" }, (data) => {
+      let requestId = "";
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        resolve([]);
+      }, 4000);
+      try {
+        requestId = this.sendWorkerCommand({ type: "getModels" }, (data) => {
+          clearTimeout(timeout);
+          this.models = normalizeModels(data.models);
+          resolve(this.models);
+        });
+      } catch {
         clearTimeout(timeout);
-        this.models = normalizeModels(data.models);
-        resolve(this.models);
-      });
+        resolve([]);
+      }
     });
   }
 
@@ -364,21 +402,45 @@ export class PiSDKAgent {
         if (requestId) this.pendingResponses.delete(requestId);
         reject(new Error("Pi SDK set model timed out"));
       }, 8000);
-      requestId = this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
+      try {
+        requestId = this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "model_changed") {
+            this.emitEvent({ type: "model_changed", model: data.model });
+            resolve();
+            return;
+          }
+          reject(new Error(optionalString(data.error) || "Pi SDK set model failed"));
+        });
+      } catch (error) {
         clearTimeout(timeout);
-        if (data.type === "model_changed") {
-          this.emitEvent({ type: "model_changed", model: data.model });
-          resolve();
-          return;
-        }
-        reject(new Error(optionalString(data.error) || "Pi SDK set model failed"));
-      });
+        reject(error);
+      }
     });
   }
 
   async setThinkingLevel(level: string): Promise<void> {
-    this.sendWorkerCommand({ type: "setThinkingLevel", level }, (data) => {
-      if (data.type === "thinking_level_changed") this.emitEvent({ type: "thinking_level_changed", level: data.level });
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    let requestId = "";
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        reject(new Error("Pi SDK set thinking level timed out"));
+      }, 8000);
+      try {
+        requestId = this.sendWorkerCommand({ type: "setThinkingLevel", level }, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "thinking_level_changed") {
+            this.emitEvent({ type: "thinking_level_changed", level: data.level });
+            resolve();
+            return;
+          }
+          reject(new Error(optionalString(data.error) || "Pi SDK set thinking level failed"));
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
     });
   }
 
@@ -402,7 +464,7 @@ export class PiSDKAgent {
     });
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.initPromise = null;
     this.initKey = null;
     this.clearTurnFallback();
@@ -411,13 +473,34 @@ export class PiSDKAgent {
     this.activePromptIds.clear();
     this.turnActive = false;
     this.isAborting = false;
+    this.isReady = false;
+    this.models = [];
+    this.pendingAssistantError = "";
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;
-    if (child) {
-      child.stdin?.write(`${JSON.stringify({ type: "dispose" })}\n`);
-      setTimeout(() => child.kill(), 500);
-    }
+    if (!child) return;
+    child.stdin?.write(`${JSON.stringify({ type: "dispose" })}\n`);
+    if (await this.waitForExit(child, 1500)) return;
+    child.kill("SIGKILL");
+    await this.waitForExit(child, 500);
+  }
+
+  private waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode != null || child.signalCode != null) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        child.off("exit", onExit);
+        resolve(exited);
+      };
+      const onExit = () => finish(true);
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      child.once("exit", onExit);
+    });
   }
 
   private handleWorkerMessage(data: unknown) {
@@ -435,9 +518,26 @@ export class PiSDKAgent {
       case "context_compaction":
         this.emitEvent({ type: "context_compaction", id: record.id });
         break;
-      case "ready":
-        for (const handler of this.pendingResponses.values()) handler(record);
-        this.pendingResponses.clear();
+      case "history_snapshot":
+        this.emitEvent({ type: "history_snapshot", messages: record.messages });
+        break;
+      case "turn_metadata":
+        this.emitEvent({
+          type: "turn_metadata",
+          nativeTurnId: record.nativeTurnId,
+          clientUserMessageId: record.clientUserMessageId,
+        });
+        break;
+      case "status":
+        this.emitEvent({
+          type: "process_event",
+          id: record.id,
+          entryType: record.status === "error" ? "error" : "status",
+          kind: record.status === "error" ? "error" : "status",
+          title: optionalString(record.title) || "Pi 状态更新",
+          detail: record.detail,
+          state: record.status === "error" ? "error" : record.status === "completed" ? "completed" : "running",
+        });
         break;
       case "agent_start":
         this.beginTurn();
@@ -469,24 +569,15 @@ export class PiSDKAgent {
           const stopReason = String(message.stopReason || "");
           const errorMessage = String(message.errorMessage || "").trim();
           if (stopReason === "error" || errorMessage) {
+            this.pendingAssistantError = errorMessage || `Assistant stopped with reason: ${stopReason || "error"}`;
             this.pendingAssistantText = "";
             this.streamedText = false;
             this.streamedTextBuffer = "";
             this.emittedAssistantTextSnapshot = "";
-            this.pendingUIRequestIds.clear();
-            this.activePromptIds.clear();
             this.clearTurnFallback();
-            this.emitEvent({
-              type: "process_event",
-              entryType: "error",
-              kind: "error",
-              title: "模型请求失败",
-              detail: errorMessage || `Assistant stopped with reason: ${stopReason || "error"}`,
-              state: "error",
-            });
-            this.completeTurn(true);
             break;
           }
+          this.pendingAssistantError = "";
           if (typeof message.text === "string" && message.text) {
             this.pendingAssistantText = message.text;
             this.emitPendingAssistantText();
@@ -533,6 +624,16 @@ export class PiSDKAgent {
         if (messageId && !this.activePromptIds.delete(messageId)) break;
         if (!messageId) this.activePromptIds.clear();
         this.pendingUIRequestIds.clear();
+        if (this.pendingAssistantError) {
+          this.emitEvent({
+            type: "process_event",
+            entryType: "error",
+            kind: "error",
+            title: "模型请求失败",
+            detail: this.pendingAssistantError,
+            state: "error",
+          });
+        }
         this.completeTurn(true);
         break;
       case "agent_end":
@@ -561,7 +662,17 @@ export class PiSDKAgent {
   private handleUIRequest(request: unknown) {
     const requestRecord = asRecord(request);
     const method = optionalString(requestRecord.method) || "";
-    if (!method || method === "notify") return;
+    if (!method) return;
+    if (method === "notify") {
+      this.emitEvent({
+        type: "process_event",
+        entryType: "status",
+        kind: "status",
+        title: optionalString(requestRecord.message) || "Pi 通知",
+        state: "completed",
+      });
+      return;
+    }
     const requestId = requestRecord.id !== undefined && requestRecord.id !== null ? String(requestRecord.id) : "";
     if (!requestId) return;
     const kind = optionalString(requestRecord.kind) || "";
@@ -588,8 +699,15 @@ export class PiSDKAgent {
   private sendWorkerCommand(command: WorkerCommand, onResponse?: (data: UnknownRecord) => void): string {
     const id = command.id || this.createCommandId();
     const fullCommand = { ...command, id };
+    const child = this.process;
+    if (!child?.stdin?.writable) throw new Error("Pi SDK worker is not writable");
     if (onResponse) this.pendingResponses.set(id, onResponse);
-    this.process?.stdin?.write(`${JSON.stringify(fullCommand)}\n`);
+    try {
+      child.stdin.write(`${JSON.stringify(fullCommand)}\n`);
+    } catch (error) {
+      this.pendingResponses.delete(id);
+      throw error;
+    }
     return id;
   }
 
@@ -624,6 +742,7 @@ export class PiSDKAgent {
     this.streamedTextBuffer = "";
     this.emittedAssistantTextSnapshot = "";
     this.pendingAssistantText = "";
+    this.pendingAssistantError = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
   }
 
@@ -641,6 +760,7 @@ export class PiSDKAgent {
     this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
     this.emitEvent({ type: "agent_end" });
     this.pendingAssistantText = "";
+    this.pendingAssistantError = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
     this.emittedAssistantTextSnapshot = "";
@@ -667,6 +787,7 @@ export class PiSDKAgent {
     this.clearTurnFallback();
     this.eventBuffer.flush();
     this.pendingAssistantText = "";
+    this.pendingAssistantError = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
     this.emittedAssistantTextSnapshot = "";
@@ -679,6 +800,7 @@ export class PiSDKAgent {
   private finishAbortState() {
     this.isAborting = false;
     this.pendingAssistantText = "";
+    this.pendingAssistantError = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
     this.emittedAssistantTextSnapshot = "";
@@ -688,6 +810,33 @@ export class PiSDKAgent {
     this.turnToken += 1;
     this.eventBuffer.clear();
     this.clearTurnFallback();
+  }
+
+  private handleWorkerTermination(child: ChildProcess, title: string, detail: string) {
+    if (this.process !== child) return;
+    this.process = null;
+    this.isReady = false;
+    const error = detail || title;
+    const handlers = [...this.pendingResponses.values()];
+    this.pendingResponses.clear();
+    for (const handler of handlers) handler({ type: "error", error });
+    this.pendingUIRequestIds.clear();
+    this.activePromptIds.clear();
+    if (this.turnActive) {
+      this.pendingAssistantError = error;
+      this.emitEvent({
+        type: "process_event",
+        entryType: "error",
+        kind: "error",
+        title,
+        detail: error,
+        state: "error",
+      });
+      this.completeTurn(true);
+    } else if (!this.isAborting) {
+      this.emitEvent({ type: "agent_disconnected", detail: error });
+    }
+    this.finishAbortState();
   }
 
   private emitEvent(data: unknown) {

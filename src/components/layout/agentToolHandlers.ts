@@ -59,7 +59,6 @@ export function handleToolStartEvent(
       command: typeof event.command === "string" ? event.command : undefined,
       state: "running",
       type: entryType,
-      expanded: true,
     }, currentSessionId);
   } else {
     const entryId = createProcessEntryId();
@@ -73,7 +72,7 @@ export function handleToolStartEvent(
       toolKind,
       command: typeof event.command === "string" ? event.command : undefined,
       state: "running",
-      expanded: true,
+      expanded: false,
     });
   }
 }
@@ -150,7 +149,7 @@ export function handleToolEndEvent(
     command: typeof event.command === "string" ? event.command : undefined,
     state: event.isError ? "error" : "completed",
     type: entryType,
-    expanded: !!event.isError,
+    expanded: false,
   } satisfies Partial<Omit<AgentProcessEntry, "id">>;
 
   if (entryId) {

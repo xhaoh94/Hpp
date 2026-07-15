@@ -1,4 +1,5 @@
-import { useMemo, useState, useEffect } from "react";
+import { useCallback, useMemo, useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -10,7 +11,7 @@ import {
   saveSessionModel,
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
-import { GitBranch } from "lucide-react";
+import { GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -34,6 +35,11 @@ function getErrorMessage(error: unknown): string {
 }
 
 const getSessionAgentBadgeLabel = (agentId: string) => agentId.trim() || "agent";
+
+const getSessionSortTime = (session: ProjectSession) => {
+  const timestamp = Date.parse(session.lastActiveAt || session.createdAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
 
 function BrailleSpinner() {
   const [index, setIndex] = useState(0);
@@ -65,6 +71,11 @@ export function ProjectCard({ project }: Props) {
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [agentMenuPosition, setAgentMenuPosition] = useState<{ left: number; top: number } | null>(null);
+  const agentPickerRef = useRef<HTMLDivElement>(null);
+  const agentMoreButtonRef = useRef<HTMLButtonElement>(null);
+  const agentMenuRef = useRef<HTMLDivElement>(null);
   const agents = useAgentCatalogStore((state) => state.agents);
   const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
 
@@ -115,6 +126,46 @@ export function ProjectCard({ project }: Props) {
     return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
   }, [agents]);
 
+  const updateAgentMenuPosition = useCallback(() => {
+    const button = agentMoreButtonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    setAgentMenuPosition({
+      left: rect.left,
+      top: rect.bottom + 5,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!showAgentPicker) {
+      setAgentMenuPosition(null);
+      return;
+    }
+    updateAgentMenuPosition();
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        !agentPickerRef.current?.contains(target) &&
+        !agentMenuRef.current?.contains(target)
+      ) {
+        setShowAgentPicker(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowAgentPicker(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", updateAgentMenuPosition);
+    window.addEventListener("scroll", updateAgentMenuPosition, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", updateAgentMenuPosition);
+      window.removeEventListener("scroll", updateAgentMenuPosition, true);
+    };
+  }, [showAgentPicker, updateAgentMenuPosition]);
+
   const handleStartAgent = async (agentId: string) => {
     // Check if agent is installed before starting
     let packageInstalled = installedAgents[agentId];
@@ -132,7 +183,7 @@ export function ProjectCard({ project }: Props) {
       const agent = agents.find((a) => a.id === agentId);
       const name = agent?.name || agentId;
       const cmd = agent?.command || agentId;
-      alert(`${name} 未安装，请先安装：\n\n${getInstallHint(cmd)}`);
+      alert(`${name} 未安装，请先安装：\n\n${getInstallHint(agent || cmd)}`);
       return;
     }
 
@@ -333,13 +384,16 @@ export function ProjectCard({ project }: Props) {
     () => orderAgents(agents, agentOrder),
     [agents, agentOrder]
   );
-  const cardAgents = orderedAgents;
+  const cardAgents = orderedAgents.slice(0, 2);
+  const overflowAgents = orderedAgents.slice(2);
   const openSessions = useMemo(
     () => project.sessions.filter((session) => !session.closed),
     [project.sessions]
   );
   const closedSessions = useMemo(
-    () => project.sessions.filter((session) => session.closed),
+    () => project.sessions
+      .filter((session) => session.closed)
+      .sort((a, b) => getSessionSortTime(b) - getSessionSortTime(a)),
     [project.sessions]
   );
 
@@ -381,20 +435,69 @@ export function ProjectCard({ project }: Props) {
             ) : (
               <>
                 {cardAgents.map((a) => (
-                  <div
+                  <button
+                    type="button"
                     key={a.id}
                     className="project-terminal-btn"
-                    onClick={() => handleStartAgent(a.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleStartAgent(a.id);
+                    }}
                     title={`启动 ${a.name}`}
                   >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                      <rect x="2" y="3" width="20" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                      <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                      <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                    </svg>
-                    <span>{a.id}</span>
-                  </div>
+                    <span>{a.name}</span>
+                  </button>
                 ))}
+                {overflowAgents.length > 0 && (
+                  <div className="project-agent-picker" ref={agentPickerRef}>
+                    <button
+                      type="button"
+                      ref={agentMoreButtonRef}
+                      className="project-terminal-btn project-agent-more-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (showAgentPicker) {
+                          setShowAgentPicker(false);
+                        } else {
+                          updateAgentMenuPosition();
+                          setShowAgentPicker(true);
+                        }
+                      }}
+                      title="选择其他 Agent"
+                      aria-label="选择其他 Agent"
+                      aria-haspopup="menu"
+                      aria-expanded={showAgentPicker}
+                    >
+                      <Terminal size={13} strokeWidth={1.8} />
+                    </button>
+                    {showAgentPicker && agentMenuPosition && createPortal(
+                      <div
+                        className="project-agent-menu"
+                        ref={agentMenuRef}
+                        role="menu"
+                        style={{ left: agentMenuPosition.left, top: agentMenuPosition.top }}
+                      >
+                        {overflowAgents.map((agent) => (
+                          <button
+                            type="button"
+                            key={agent.id}
+                            className="project-agent-menu-item"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setShowAgentPicker(false);
+                              void handleStartAgent(agent.id);
+                            }}
+                            title={`启动 ${agent.name}`}
+                            role="menuitem"
+                          >
+                            <span>{agent.name}</span>
+                          </button>
+                        ))}
+                      </div>,
+                      document.body
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>

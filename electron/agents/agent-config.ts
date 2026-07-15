@@ -1,8 +1,7 @@
 import { app } from "electron";
-import { existsSync } from "fs";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
-import { homedir } from "os";
+import type { AgentProviderConfiguration } from "../../src/types/ipc";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
 
 export interface AgentCustomModelConfig {
@@ -12,13 +11,15 @@ export interface AgentCustomModelConfig {
   imageInput: boolean;
 }
 
+export type AgentProviderEndpoint = string;
+
 export interface AgentProviderConfig {
   providerId: string;
   displayName: string;
   baseUrl: string;
   apiKey: string;
+  endpoint: AgentProviderEndpoint;
   models: AgentCustomModelConfig[];
-  hppManaged?: boolean;
 }
 
 export interface AgentConfigState {
@@ -40,6 +41,12 @@ export interface AgentConfigResult {
   reloadedSessionIds?: string[];
 }
 
+export interface AgentModelVisibilityResult {
+  success: boolean;
+  error?: string;
+  backendModelsVisible?: boolean;
+}
+
 export interface FileSnapshot {
   filePath: string;
   existed: boolean;
@@ -48,9 +55,8 @@ export interface FileSnapshot {
 
 type JsonRecord = Record<string, unknown>;
 
-const NATIVE_CONFIG_AGENTS = new Set(["codex", "pi", "droid", "opencode"]);
 const SETTINGS_KEY = "agentConfigs";
-const CODEX_FALLBACK_MODEL_ID = "gpt-5.5";
+const MODEL_PREFERENCES_KEY = "agentModelPreferences";
 
 function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -68,76 +74,58 @@ function getSettingsPath() {
   return join(getDataDir(), "settings.json");
 }
 
-async function readTextFile(filePath: string): Promise<string> {
-  try {
-    return await readFile(filePath, "utf-8");
-  } catch {
-    return "";
-  }
-}
-
 async function readJsonObject(filePath: string): Promise<JsonRecord> {
   try {
-    const content = (await readFile(filePath, "utf-8")).replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse((await readFile(filePath, "utf8")).replace(/^\uFEFF/, ""));
     return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
   }
 }
 
-async function writeJsonObject(filePath: string, value: JsonRecord) {
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
-}
-
-async function readSettings(): Promise<JsonRecord> {
-  return readJsonObject(getSettingsPath());
-}
-
 async function writeSettings(settings: JsonRecord) {
   await mkdir(getDataDir(), { recursive: true });
-  await writeFile(getSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+  await writeFile(getSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 
 function normalizeModel(value: unknown): AgentCustomModelConfig | null {
   if (!isRecord(value)) return null;
-  const id = String(value.id || "").trim();
+  const id = asString(value.id);
   if (!id) return null;
-  const name = String(value.name || id).trim() || id;
   return {
     id,
-    name,
+    name: asString(value.name) || id,
     reasoning: value.reasoning === true,
     imageInput: value.imageInput === true,
   };
 }
 
-function normalizeProvider(value: unknown): AgentProviderConfig | null {
+function normalizeProvider(value: unknown, configuration: AgentProviderConfiguration): AgentProviderConfig | null {
   if (!isRecord(value)) return null;
-  const providerId = String(value.providerId || "").trim();
+  const providerId = asString(value.providerId);
   if (!providerId) return null;
-  const displayName = String(value.displayName || providerId).trim() || providerId;
-  const baseUrl = String(value.baseUrl || "").trim();
-  const apiKey = String(value.apiKey || "").trim();
+  const endpoint = asString(value.endpoint);
   const models = Array.isArray(value.models)
     ? value.models.map(normalizeModel).filter((model): model is AgentCustomModelConfig => !!model)
     : [];
-  return { providerId, displayName, baseUrl, apiKey, models, hppManaged: value.hppManaged === true };
+  return {
+    providerId,
+    displayName: asString(value.displayName) || providerId,
+    baseUrl: asString(value.baseUrl),
+    apiKey: asString(value.apiKey),
+    endpoint: endpoint || configuration.defaultEndpoint,
+    models,
+  };
 }
 
-function getOriginalProviderId(value: unknown): string | undefined {
-  if (!isRecord(value)) return undefined;
-  const originalProviderId = String(value.originalProviderId || "").trim();
-  return originalProviderId || undefined;
-}
-
-function normalizeState(value: unknown): AgentConfigState {
+function normalizeState(value: unknown, configuration: AgentProviderConfiguration): AgentConfigState {
   const record = isRecord(value) ? value : {};
   const providers = Array.isArray(record.providers)
-    ? record.providers.map(normalizeProvider).filter((provider): provider is AgentProviderConfig => !!provider)
+    ? record.providers
+        .map((provider) => normalizeProvider(provider, configuration))
+        .filter((provider): provider is AgentProviderConfig => !!provider)
     : [];
-  const activeProviderId = typeof record.activeProviderId === "string" ? record.activeProviderId : undefined;
+  const activeProviderId = asString(record.activeProviderId);
   return {
     activeProviderId: activeProviderId && providers.some((provider) => provider.providerId === activeProviderId)
       ? activeProviderId
@@ -146,94 +134,16 @@ function normalizeState(value: unknown): AgentConfigState {
   };
 }
 
-async function readSavedAgentConfigState(agentId: string): Promise<AgentConfigState> {
-  const settings = await readSettings();
-  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-  return normalizeState(allConfigs[agentId]);
+function getOriginalProviderId(value: unknown): string | undefined {
+  return isRecord(value) ? asString(value.originalProviderId) || undefined : undefined;
 }
 
-async function readSavedAgentConfigEntry(agentId: string): Promise<{ exists: boolean; state: AgentConfigState }> {
-  const settings = await readSettings();
-  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-  return {
-    exists: Object.prototype.hasOwnProperty.call(allConfigs, agentId),
-    state: normalizeState(allConfigs[agentId]),
-  };
-}
-
-function isSameCodexNativeProvider(provider: AgentProviderConfig, nativeProvider: AgentProviderConfig) {
-  return provider.providerId === nativeProvider.providerId
-    && provider.displayName === nativeProvider.displayName
-    && provider.baseUrl === nativeProvider.baseUrl;
-}
-
-function isLegacyCodexNativeProvider(
-  provider: AgentProviderConfig,
-  nativeProviders: AgentProviderConfig[],
-  savedActiveProviderId?: string
-) {
-  if (provider.hppManaged === true) return false;
-  if (
-    provider.providerId === "custom"
-    && provider.displayName === "custom"
-    && provider.providerId !== savedActiveProviderId
-  ) {
-    return true;
+async function getProviderConfiguration(agentId: string): Promise<AgentProviderConfiguration> {
+  const capabilities = await getAgentPluginRegistry().getCapabilities(agentId);
+  if (!capabilities.configuration || capabilities.configuration === "none") {
+    throw new Error("当前 Agent 不支持渠道配置。");
   }
-
-  const nativeProvider = nativeProviders.find((item) => item.providerId === provider.providerId);
-  return !!nativeProvider
-    && provider.providerId !== savedActiveProviderId
-    && isSameCodexNativeProvider(provider, nativeProvider);
-}
-
-async function readSavedCodexConfigState(): Promise<AgentConfigState> {
-  const savedEntry = await readSavedAgentConfigEntry("codex");
-  if (!savedEntry.exists) {
-    const native = await readCodexNativeConfigState();
-    const nativeProvider = native.providers.find((provider) => provider.providerId === native.activeProviderId)
-      || native.providers[0];
-    const nextState = nativeProvider
-      ? {
-          activeProviderId: nativeProvider.providerId,
-          providers: [{ ...nativeProvider, hppManaged: true }],
-        }
-      : { providers: [] };
-    await writeAgentConfigState("codex", nextState);
-    return nextState;
-  }
-
-  const saved = savedEntry.state;
-  if (saved.providers.every((provider) => provider.hppManaged === true)) return saved;
-
-  const native = await readCodexNativeConfigState();
-  const providers = saved.providers
-    .filter((provider) => !isLegacyCodexNativeProvider(provider, native.providers, saved.activeProviderId))
-    .map((provider) => ({ ...provider, hppManaged: true }));
-  const nextState = {
-    activeProviderId: saved.activeProviderId && providers.some((provider) => provider.providerId === saved.activeProviderId)
-      ? saved.activeProviderId
-      : undefined,
-    providers,
-  };
-
-  await writeAgentConfigState("codex", nextState);
-  return nextState;
-}
-
-async function writeAgentConfigState(agentId: string, state: AgentConfigState) {
-  const settings = await readSettings();
-  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-  settings[SETTINGS_KEY] = {
-    ...allConfigs,
-    [agentId]: state,
-  };
-  await writeSettings(settings);
-}
-
-async function isSupportedConfigAgent(agentId: string) {
-  if (NATIVE_CONFIG_AGENTS.has(agentId)) return true;
-  return getAgentPluginRegistry().isConfigurable(agentId);
+  return capabilities.configuration;
 }
 
 async function usesSingleActiveProvider(agentId: string) {
@@ -241,17 +151,130 @@ async function usesSingleActiveProvider(agentId: string) {
   return capabilities.providerActivation === "single-active";
 }
 
-async function ensureSupportedAgent(agentId: string) {
-  if (!(await isSupportedConfigAgent(agentId))) {
-    throw new Error("当前 Agent 暂不支持自定义渠道配置。");
+async function readBackendModelsVisible(
+  agentId: string,
+  configuration: AgentProviderConfiguration,
+): Promise<boolean> {
+  const declaration = configuration.backendModelVisibility;
+  if (!declaration) return true;
+  const settings = await readJsonObject(getSettingsPath());
+  const allPreferences = isRecord(settings[MODEL_PREFERENCES_KEY]) ? settings[MODEL_PREFERENCES_KEY] : {};
+  const preferences = isRecord(allPreferences[agentId]) ? allPreferences[agentId] : {};
+  return typeof preferences.backendModelsVisible === "boolean"
+    ? preferences.backendModelsVisible
+    : declaration.defaultVisible;
+}
+
+export async function shouldShowAgentBackendModels(agentId: string): Promise<boolean> {
+  try {
+    const configuration = await getProviderConfiguration(agentId);
+    return readBackendModelsVisible(agentId, configuration);
+  } catch {
+    return true;
   }
 }
 
-function validateProviderConfig(provider: AgentProviderConfig) {
+export async function getAgentModelVisibility(agentId: string): Promise<AgentModelVisibilityResult> {
+  try {
+    const configuration = await getProviderConfiguration(agentId);
+    if (!configuration.backendModelVisibility) {
+      throw new Error("当前 Agent 未提供模型来源显示选项。");
+    }
+    return {
+      success: true,
+      backendModelsVisible: await readBackendModelsVisible(agentId, configuration),
+    };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function setAgentBackendModelsVisible(
+  agentId: string,
+  visible: boolean,
+): Promise<AgentModelVisibilityResult> {
+  try {
+    const configuration = await getProviderConfiguration(agentId);
+    const declaration = configuration.backendModelVisibility;
+    if (!declaration?.userConfigurable) {
+      throw new Error("当前 Agent 不允许修改模型来源显示选项。");
+    }
+    const settings = await readJsonObject(getSettingsPath());
+    const allPreferences = isRecord(settings[MODEL_PREFERENCES_KEY]) ? settings[MODEL_PREFERENCES_KEY] : {};
+    const currentPreferences = isRecord(allPreferences[agentId]) ? allPreferences[agentId] : {};
+    settings[MODEL_PREFERENCES_KEY] = {
+      ...allPreferences,
+      [agentId]: { ...currentPreferences, backendModelsVisible: visible },
+    };
+    await writeSettings(settings);
+    return { success: true, backendModelsVisible: visible };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function readSavedAgentConfigEntry(
+  agentId: string,
+  configuration: AgentProviderConfiguration,
+): Promise<{ exists: boolean; state: AgentConfigState }> {
+  const settings = await readJsonObject(getSettingsPath());
+  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
+  return {
+    exists: Object.prototype.hasOwnProperty.call(allConfigs, agentId),
+    state: normalizeState(allConfigs[agentId], configuration),
+  };
+}
+
+async function writeAgentConfigState(agentId: string, state: AgentConfigState) {
+  const settings = await readJsonObject(getSettingsPath());
+  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
+  settings[SETTINGS_KEY] = { ...allConfigs, [agentId]: state };
+  await writeSettings(settings);
+}
+
+async function readCurrentAgentConfigState(
+  agentId: string,
+  configuration?: AgentProviderConfiguration,
+): Promise<AgentConfigState> {
+  const resolvedConfiguration = configuration || await getProviderConfiguration(agentId);
+  if (resolvedConfiguration.storage === "hpp") {
+    const saved = await readSavedAgentConfigEntry(agentId, resolvedConfiguration);
+    if (saved.exists) return saved.state;
+    const discovered = await getAgentPluginRegistry().readProviderConfig(agentId);
+    const state = normalizeState(discovered, resolvedConfiguration);
+    if (discovered !== undefined && (state.activeProviderId || state.providers.length > 0)) {
+      await writeAgentConfigState(agentId, state);
+    }
+    return state;
+  }
+
+  const nativeState = await getAgentPluginRegistry().readProviderConfig(agentId);
+  if (nativeState === undefined) {
+    throw new Error(`插件 ${agentId} 声明了插件配置存储，但未导出 configProvider.read。`);
+  }
+  return normalizeState(nativeState, resolvedConfiguration);
+}
+
+async function persistAgentConfigState(
+  agentId: string,
+  state: AgentConfigState,
+  configuration: AgentProviderConfiguration,
+) {
+  if (configuration.storage === "hpp") {
+    await writeAgentConfigState(agentId, state);
+    return;
+  }
+  await getAgentPluginRegistry().writeProviderConfig(agentId, state);
+}
+
+function validateProviderConfig(provider: AgentProviderConfig, configuration: AgentProviderConfiguration) {
   if (!/^[a-zA-Z0-9._:-]+$/.test(provider.providerId)) {
     throw new Error("渠道 ID 只能包含字母、数字、点、下划线、冒号和短横线。");
   }
   if (!provider.baseUrl) throw new Error("请填写渠道 URL。");
+  if (!configuration.endpoints.some((endpoint) => endpoint.id === provider.endpoint)) {
+    throw new Error(`当前插件不支持 Endpoint：${provider.endpoint || "空"}`);
+  }
   if (!provider.apiKey) throw new Error("请填写 sk-key。");
   if (provider.models.length === 0) throw new Error("至少需要添加一个模型。");
   for (const model of provider.models) {
@@ -259,344 +282,33 @@ function validateProviderConfig(provider: AgentProviderConfig) {
   }
 }
 
-function uniqueById<T extends { id: string }>(items: T[]): T[] {
-  const seen = new Set<string>();
-  const result: T[] = [];
-  for (const item of items) {
-    if (seen.has(item.id)) continue;
-    seen.add(item.id);
-    result.push(item);
-  }
-  return result;
-}
-
-function mergeModels(saved: AgentCustomModelConfig[], native: AgentCustomModelConfig[]) {
-  return uniqueById([
-    ...saved.map((model) => ({ ...model })),
-    ...native.map((model) => ({ ...model })),
-  ]);
-}
-
-function sanitizeProviderId(value: string, fallback: string) {
-  const normalized = value
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/[^a-zA-Z0-9._:-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return normalized || fallback;
-}
-
-function uniqueProviderId(baseId: string, usedIds: Set<string>) {
-  let providerId = sanitizeProviderId(baseId, "custom");
-  let index = 2;
-  while (usedIds.has(providerId)) {
-    providerId = `${sanitizeProviderId(baseId, "custom")}-${index}`;
-    index += 1;
-  }
-  usedIds.add(providerId);
-  return providerId;
-}
-
-function providerIdFromUrl(baseUrl: string, fallback: string, usedIds: Set<string>) {
-  try {
-    const url = new URL(baseUrl);
-    return uniqueProviderId(url.hostname.replace(/^api\./i, ""), usedIds);
-  } catch {
-    return uniqueProviderId(fallback, usedIds);
-  }
-}
-
-function modelSupportsImages(value: JsonRecord) {
-  if (value.imageInput === true || value.supportsImages === true || value.attachment === true) return true;
-  if (Array.isArray(value.input) && value.input.includes("image")) return true;
-  const modalities = isRecord(value.modalities) ? value.modalities : {};
-  return Array.isArray(modalities.input) && modalities.input.includes("image");
-}
-
-function normalizeNativeModel(value: unknown, fallbackId?: string): AgentCustomModelConfig | null {
-  if (!isRecord(value)) {
-    const id = String(fallbackId || value || "").trim();
-    return id ? { id, name: id, reasoning: false, imageInput: false } : null;
-  }
-  const id = asString(value.id) || asString(value.model) || asString(value.name) || fallbackId || "";
-  if (!id) return null;
-  return {
-    id,
-    name: asString(value.name) || asString(value.displayName) || id,
-    reasoning: value.reasoning === true,
-    imageInput: modelSupportsImages(value),
-  };
-}
-
-function getPiModelsPath() {
-  return join(homedir(), ".pi", "agent", "models.json");
-}
-
-function getDroidSettingsPath() {
-  return join(homedir(), ".factory", "settings.json");
-}
-
-export function getOpenCodeConfigPath() {
-  return process.env.OPENCODE_CONFIG || join(homedir(), ".config", "opencode", "opencode.json");
-}
-
-function getCodexHomeDir() {
-  return process.env.CODEX_HOME || join(homedir(), ".codex");
-}
-
-function getCodexConfigPath() {
-  return join(getCodexHomeDir(), "config.toml");
-}
-
-function getCodexAuthPath() {
-  return join(getCodexHomeDir(), "auth.json");
-}
-
-async function readPiNativeConfigState(): Promise<AgentConfigState> {
-  const config = await readJsonObject(getPiModelsPath());
-  const providersRecord = isRecord(config.providers) ? config.providers : {};
-  const providers: AgentProviderConfig[] = [];
-
-  for (const [providerId, value] of Object.entries(providersRecord)) {
-    if (!isRecord(value)) continue;
-    const models = Array.isArray(value.models)
-      ? value.models.map((model) => normalizeNativeModel(model)).filter((model): model is AgentCustomModelConfig => !!model)
-      : [];
-    providers.push({
-      providerId,
-      displayName: asString(value.name) || providerId,
-      baseUrl: asString(value.baseUrl) || asString(value.baseURL) || asString(value.url),
-      apiKey: asString(value.apiKey) || asString(value.api_key),
-      models,
-    });
-  }
-
-  return {
-    activeProviderId: asString(config.activeProviderId) || asString(config.activeProvider),
-    providers,
-  };
-}
-
-async function readDroidNativeConfigState(): Promise<AgentConfigState> {
-  const config = await readJsonObject(getDroidSettingsPath());
-  const customModels = Array.isArray(config.customModels) ? config.customModels : [];
-  const groups = new Map<string, AgentProviderConfig>();
-  const keyToProviderId = new Map<string, string>();
-  const usedIds = new Set<string>();
-
-  for (const model of customModels) {
-    if (!isRecord(model)) continue;
-    const baseUrl = asString(model.baseUrl) || asString(model.baseURL);
-    const apiKey = asString(model.apiKey);
-    const providerName = asString(model.hppProviderId) || asString(model.provider) || "custom";
-    const groupKey = asString(model.hppProviderId) || `${providerName}|${baseUrl}|${apiKey}`;
-    let providerId = keyToProviderId.get(groupKey);
-    if (!providerId) {
-      providerId = asString(model.hppProviderId) || providerIdFromUrl(baseUrl, providerName, usedIds);
-      keyToProviderId.set(groupKey, providerId);
-      groups.set(providerId, {
-        providerId,
-        displayName: asString(model.hppProviderId) || providerName || providerId,
-        baseUrl,
-        apiKey,
-        models: [],
-      });
-    }
-    const group = groups.get(providerId);
-    if (!group) continue;
-    const modelId = asString(model.model) || asString(model.id) || asString(model.displayName);
-    if (!modelId) continue;
-    group.models.push({
-      id: modelId,
-      name: asString(model.displayName) || modelId,
-      reasoning: model.reasoning === true,
-      imageInput: model.noImageSupport !== true,
-    });
-  }
-
-  const activeModel = asString(isRecord(config.sessionDefaultSettings) ? config.sessionDefaultSettings.model : undefined)
-    .replace(/^custom:/, "");
-  const providers = Array.from(groups.values()).map((provider) => ({
-    ...provider,
-    models: uniqueById(provider.models),
-  }));
-  const activeProvider = activeModel
-    ? providers.find((provider) => provider.models.some((model) => model.id === activeModel))?.providerId
-    : undefined;
-
-  return { activeProviderId: activeProvider, providers };
-}
-
-function parseOpenCodeModels(rawModels: unknown): AgentCustomModelConfig[] {
-  if (Array.isArray(rawModels)) {
-    return rawModels
-      .map((model) => normalizeNativeModel(model))
-      .filter((model): model is AgentCustomModelConfig => !!model);
-  }
-  if (!isRecord(rawModels)) return [];
-  return Object.entries(rawModels)
-    .map(([modelId, value]) => normalizeNativeModel(value, modelId))
-    .filter((model): model is AgentCustomModelConfig => !!model);
-}
-
-async function readOpenCodeNativeConfigState(): Promise<AgentConfigState> {
-  const config = await readJsonObject(getOpenCodeConfigPath());
-  const providersRecord = isRecord(config.provider) ? config.provider : {};
-  const providers: AgentProviderConfig[] = [];
-
-  for (const [providerId, value] of Object.entries(providersRecord)) {
-    if (!isRecord(value)) continue;
-    const options = isRecord(value.options) ? value.options : {};
-    providers.push({
-      providerId,
-      displayName: asString(value.name) || providerId,
-      baseUrl: asString(options.baseURL) || asString(options.baseUrl) || asString(value.baseURL) || asString(value.baseUrl),
-      apiKey: asString(options.apiKey) || asString(value.apiKey),
-      models: parseOpenCodeModels(value.models),
-    });
-  }
-
-  const configuredModel = asString(config.model);
-  const activeProviderId = configuredModel.includes("/")
-    ? configuredModel.split("/")[0]
-    : asString(config.providerID) || asString(config.providerId);
-
-  return { activeProviderId, providers };
-}
-
-function unquoteTomlValue(rawValue: string) {
-  const value = rawValue.trim();
-  if (!value) return "";
-  if (value.startsWith("\"")) {
-    const match = value.match(/^"((?:\\.|[^"\\])*)"/);
-    if (!match) return "";
-    try {
-      return JSON.parse(`"${match[1]}"`);
-    } catch {
-      return match[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
-    }
-  }
-  if (value.startsWith("'")) {
-    const match = value.match(/^'([^']*)'/);
-    return match ? match[1] : "";
-  }
-  return value.split(/\s+#/)[0].trim();
-}
-
-function parseTomlKeyValue(line: string): { key: string; value: string } | null {
-  const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+?)\s*$/);
-  if (!match) return null;
-  return { key: match[1], value: unquoteTomlValue(match[2]) };
-}
-
-function unescapeTomlKey(rawKey: string) {
-  const key = rawKey.trim();
-  if (key.startsWith("\"") && key.endsWith("\"")) {
-    try {
-      return JSON.parse(key);
-    } catch {
-      return key.slice(1, -1);
-    }
-  }
-  if (key.startsWith("'") && key.endsWith("'")) return key.slice(1, -1);
-  return key;
-}
-
-function parseCodexProviderSection(line: string) {
-  const match = line.match(/^\s*\[\s*model_providers\.(.+?)\s*\]\s*$/);
-  return match ? unescapeTomlKey(match[1]) : null;
-}
-
-async function readCodexNativeConfigState(): Promise<AgentConfigState> {
-  const content = await readTextFile(getCodexConfigPath());
-  const auth = await readJsonObject(getCodexAuthPath());
-  const providers = new Map<string, AgentProviderConfig>();
-  let activeProviderId = "";
-  let activeModelId = "";
-  let currentProviderId: string | null = null;
-
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const providerSection = parseCodexProviderSection(line);
-    if (providerSection) {
-      currentProviderId = providerSection;
-      providers.set(providerSection, {
-        providerId: providerSection,
-        displayName: providerSection,
-        baseUrl: "",
-        apiKey: asString(auth.OPENAI_API_KEY),
-        models: [],
-      });
-      continue;
-    }
-    if (line.startsWith("[")) {
-      currentProviderId = null;
-      continue;
-    }
-
-    const pair = parseTomlKeyValue(rawLine);
-    if (!pair) continue;
-    if (!currentProviderId) {
-      if (pair.key === "model_provider") activeProviderId = pair.value;
-      if (pair.key === "model") activeModelId = pair.value;
-      continue;
-    }
-
-    const provider = providers.get(currentProviderId);
-    if (!provider) continue;
-    if (pair.key === "name") provider.displayName = pair.value || currentProviderId;
-    if (pair.key === "base_url") provider.baseUrl = pair.value;
-  }
-
-  if (activeProviderId && !providers.has(activeProviderId)) {
-    providers.set(activeProviderId, {
-      providerId: activeProviderId,
-      displayName: activeProviderId,
-      baseUrl: "",
-      apiKey: asString(auth.OPENAI_API_KEY),
-      models: [],
-    });
-  }
-
-  const modelId = activeModelId || CODEX_FALLBACK_MODEL_ID;
-  const modelDefaults: AgentCustomModelConfig[] = [
-    { id: modelId, name: modelId, reasoning: true, imageInput: true },
-  ];
-
-  for (const provider of providers.values()) {
-    provider.apiKey = asString(auth.OPENAI_API_KEY);
-    provider.models = provider.models.length > 0 ? mergeModels(modelDefaults, provider.models) : modelDefaults;
-  }
-
-  return { activeProviderId, providers: Array.from(providers.values()) };
-}
-
-async function readNativeAgentConfigState(agentId: string): Promise<AgentConfigState> {
-  if (agentId === "codex") return readCodexNativeConfigState();
-  if (agentId === "pi") return readPiNativeConfigState();
-  if (agentId === "droid") return readDroidNativeConfigState();
-  if (agentId === "opencode") return readOpenCodeNativeConfigState();
-  return readSavedAgentConfigState(agentId);
-}
-
-async function readCurrentAgentConfigState(agentId: string): Promise<AgentConfigState> {
-  return agentId === "codex"
-    ? readSavedCodexConfigState()
-    : readNativeAgentConfigState(agentId);
+function normalizeSnapshots(value: unknown): FileSnapshot[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const filePath = asString(item.filePath);
+    if (!filePath) return [];
+    return [{
+      filePath,
+      existed: item.existed === true,
+      content: typeof item.content === "string" ? item.content : "",
+    }];
+  });
 }
 
 export async function getAgentConfigStateForBackend(agentId: string): Promise<AgentConfigState> {
-  if (!(await isSupportedConfigAgent(agentId))) return { providers: [] };
-  return readCurrentAgentConfigState(agentId);
+  try {
+    const configuration = await getProviderConfiguration(agentId);
+    return readCurrentAgentConfigState(agentId, configuration);
+  } catch {
+    return { providers: [] };
+  }
 }
 
 export async function listAgentConfig(agentId: string): Promise<AgentConfigResult> {
   try {
-    if (!(await isSupportedConfigAgent(agentId))) {
-      return { success: true, config: { providers: [] } };
-    }
-    return { success: true, config: await readCurrentAgentConfigState(agentId) };
+    const configuration = await getProviderConfiguration(agentId);
+    return { success: true, config: await readCurrentAgentConfigState(agentId, configuration) };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -604,38 +316,24 @@ export async function listAgentConfig(agentId: string): Promise<AgentConfigResul
 
 export async function saveAgentProviderConfig(agentId: string, providerValue: unknown): Promise<AgentConfigResult> {
   try {
-    await ensureSupportedAgent(agentId);
-    const singleActiveProvider = await usesSingleActiveProvider(agentId);
-    const normalizedProvider = normalizeProvider(providerValue);
-    if (!normalizedProvider) throw new Error("渠道配置无效。");
-    const provider = agentId === "codex"
-      ? { ...normalizedProvider, hppManaged: true }
-      : normalizedProvider;
-    validateProviderConfig(provider);
+    const configuration = await getProviderConfiguration(agentId);
+    const provider = normalizeProvider(providerValue, configuration);
+    if (!provider) throw new Error("渠道配置无效。");
+    validateProviderConfig(provider, configuration);
     const originalProviderId = getOriginalProviderId(providerValue);
-
-    const state = await readCurrentAgentConfigState(agentId);
+    const state = await readCurrentAgentConfigState(agentId, configuration);
     const replaceProviderId = originalProviderId || provider.providerId;
     const existingIndex = state.providers.findIndex((item) => item.providerId === replaceProviderId);
     const providers = state.providers.filter((item) =>
       item.providerId !== provider.providerId && item.providerId !== originalProviderId
     );
-    if (existingIndex >= 0) {
-      providers.splice(Math.min(existingIndex, providers.length), 0, provider);
-    } else {
-      providers.push(provider);
-    }
+    if (existingIndex >= 0) providers.splice(Math.min(existingIndex, providers.length), 0, provider);
+    else providers.push(provider);
     const nextState = {
       activeProviderId: state.activeProviderId === originalProviderId ? provider.providerId : state.activeProviderId,
       providers,
     };
-
-    if (singleActiveProvider) {
-      await writeAgentConfigState(agentId, nextState);
-    } else {
-      await writeNativeAgentConfig(agentId, nextState);
-    }
-
+    await persistAgentConfigState(agentId, nextState, configuration);
     return { success: true, config: nextState };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -644,22 +342,21 @@ export async function saveAgentProviderConfig(agentId: string, providerValue: un
 
 export async function deleteAgentProviderConfig(agentId: string, providerId: string): Promise<AgentConfigResult> {
   try {
-    await ensureSupportedAgent(agentId);
-    const singleActiveProvider = await usesSingleActiveProvider(agentId);
-    const state = await readCurrentAgentConfigState(agentId);
-    if (singleActiveProvider && state.activeProviderId === providerId) {
+    const configuration = await getProviderConfiguration(agentId);
+    const state = await readCurrentAgentConfigState(agentId, configuration);
+    const targetProviderId = asString(providerId);
+    if (!targetProviderId) throw new Error("渠道 ID 无效。");
+    if (!state.providers.some((provider) => provider.providerId === targetProviderId)) {
+      throw new Error(`未找到渠道：${targetProviderId}`);
+    }
+    if (await usesSingleActiveProvider(agentId) && state.activeProviderId === targetProviderId) {
       throw new Error("当前启用的渠道不能直接删除，请先启用其它渠道。");
     }
-    const nextProviders = state.providers.filter((provider) => provider.providerId !== providerId);
     const nextState = {
-      activeProviderId: state.activeProviderId === providerId ? undefined : state.activeProviderId,
-      providers: nextProviders,
+      activeProviderId: state.activeProviderId === targetProviderId ? undefined : state.activeProviderId,
+      providers: state.providers.filter((provider) => provider.providerId !== targetProviderId),
     };
-    if (singleActiveProvider) {
-      await writeAgentConfigState(agentId, nextState);
-    } else {
-      await writeNativeAgentConfig(agentId, nextState);
-    }
+    await persistAgentConfigState(agentId, nextState, configuration);
     return { success: true, config: nextState };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -668,17 +365,12 @@ export async function deleteAgentProviderConfig(agentId: string, providerId: str
 
 export async function reorderAgentProviderConfigs(agentId: string, providerOrderValue: unknown): Promise<AgentConfigResult> {
   try {
-    await ensureSupportedAgent(agentId);
-    const singleActiveProvider = await usesSingleActiveProvider(agentId);
+    const configuration = await getProviderConfiguration(agentId);
     if (!Array.isArray(providerOrderValue)) throw new Error("渠道顺序无效。");
-    const providerOrder = providerOrderValue.map((item) => String(item || "").trim());
+    const providerOrder = providerOrderValue.map(asString);
     if (providerOrder.some((providerId) => !providerId)) throw new Error("渠道顺序包含空 ID。");
-
-    const state = await readCurrentAgentConfigState(agentId);
-    if (providerOrder.length !== state.providers.length) {
-      throw new Error("渠道顺序必须包含全部渠道。");
-    }
-
+    const state = await readCurrentAgentConfigState(agentId, configuration);
+    if (providerOrder.length !== state.providers.length) throw new Error("渠道顺序必须包含全部渠道。");
     const providerById = new Map(state.providers.map((provider) => [provider.providerId, provider]));
     const seen = new Set<string>();
     for (const providerId of providerOrder) {
@@ -686,18 +378,11 @@ export async function reorderAgentProviderConfigs(agentId: string, providerOrder
       if (!providerById.has(providerId)) throw new Error(`未找到渠道：${providerId}`);
       seen.add(providerId);
     }
-
     const nextState = {
       activeProviderId: state.activeProviderId,
       providers: providerOrder.map((providerId) => providerById.get(providerId)!),
     };
-
-    if (singleActiveProvider) {
-      await writeAgentConfigState(agentId, nextState);
-    } else {
-      await writeNativeAgentConfig(agentId, nextState);
-    }
-
+    await persistAgentConfigState(agentId, nextState, configuration);
     return { success: true, config: nextState };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -705,338 +390,66 @@ export async function reorderAgentProviderConfigs(agentId: string, providerOrder
 }
 
 export async function setActiveAgentProviderConfig(agentId: string, providerId: string): Promise<AgentConfigState> {
-  await ensureSupportedAgent(agentId);
-  if (!(await usesSingleActiveProvider(agentId))) {
-    throw new Error("当前 Agent 不支持启用单一渠道。");
-  }
-  const state = await readCurrentAgentConfigState(agentId);
+  if (!(await usesSingleActiveProvider(agentId))) throw new Error("当前 Agent 不支持启用单个渠道。");
+  const configuration = await getProviderConfiguration(agentId);
+  const state = await readCurrentAgentConfigState(agentId, configuration);
   if (!state.providers.some((provider) => provider.providerId === providerId)) {
     throw new Error("未找到要启用的渠道。");
   }
   const nextState = { ...state, activeProviderId: providerId };
-  await writeAgentConfigState(agentId, nextState);
+  await persistAgentConfigState(agentId, nextState, configuration);
   return nextState;
 }
 
 export async function activateAgentProviderConfig(
   agentId: string,
-  providerId: string
+  providerId: string,
 ): Promise<{ state: AgentConfigState; provider: AgentProviderConfig; snapshots: FileSnapshot[] }> {
-  await ensureSupportedAgent(agentId);
-  if (!(await usesSingleActiveProvider(agentId))) {
-    throw new Error("当前 Agent 不支持启用单一渠道。");
-  }
-
-  const state = await readCurrentAgentConfigState(agentId);
+  if (!(await usesSingleActiveProvider(agentId))) throw new Error("当前 Agent 不支持启用单个渠道。");
+  const configuration = await getProviderConfiguration(agentId);
+  const state = await readCurrentAgentConfigState(agentId, configuration);
   const provider = state.providers.find((item) => item.providerId === providerId);
   if (!provider) throw new Error("未找到要启用的渠道。");
-  validateProviderConfig(provider);
-
-  const result = await getAgentPluginRegistry().activateProvider(
-    agentId,
-    { providerId, provider, state },
-    {
-      writeCodexNativeProviderConfig: async ({ state: nextState, provider: nextProvider }) => {
-        if (agentId !== "codex") {
-          throw new Error("Codex native provider helper is only available to the Codex plugin.");
-        }
-        return {
-          snapshots: await writeCodexNativeConfig(
-            nextState as AgentConfigState,
-            nextProvider as AgentProviderConfig
-          ),
-        };
-      },
-    }
-  );
-  const snapshots = Array.isArray(result.snapshots) ? result.snapshots as FileSnapshot[] : [];
-  return { state, provider, snapshots };
-}
-
-async function snapshotFile(filePath: string): Promise<FileSnapshot> {
-  if (!existsSync(filePath)) return { filePath, existed: false, content: "" };
-  return { filePath, existed: true, content: await readFile(filePath, "utf-8") };
+  validateProviderConfig(provider, configuration);
+  const result = await getAgentPluginRegistry().activateProvider(agentId, { providerId, provider, state });
+  return { state, provider, snapshots: normalizeSnapshots(result.snapshots) };
 }
 
 export async function restoreNativeConfigSnapshot(snapshot: FileSnapshot) {
   if (snapshot.existed) {
     await mkdir(dirname(snapshot.filePath), { recursive: true });
-    await writeFile(snapshot.filePath, snapshot.content, "utf-8");
+    await writeFile(snapshot.filePath, snapshot.content, "utf8");
   } else {
     await rm(snapshot.filePath, { force: true });
   }
 }
 
 export async function restoreNativeConfigSnapshots(snapshots: FileSnapshot[]) {
-  for (const snapshot of snapshots) {
-    await restoreNativeConfigSnapshot(snapshot);
-  }
+  for (const snapshot of snapshots) await restoreNativeConfigSnapshot(snapshot);
 }
 
-function toPiProviderConfig(provider: AgentProviderConfig, existingProvider: JsonRecord = {}) {
-  return {
-    ...existingProvider,
-    baseUrl: provider.baseUrl,
-    api: existingProvider.api || "openai-completions",
-    apiKey: provider.apiKey,
-    models: provider.models.map((model) => ({
-      id: model.id,
-      name: model.name || model.id,
-      reasoning: !!model.reasoning,
-      input: model.imageInput ? ["text", "image"] : ["text"],
-    })),
-  };
-}
-
-async function writePiNativeConfigProviders(state: AgentConfigState): Promise<FileSnapshot[]> {
-  const filePath = getPiModelsPath();
-  const snapshot = await snapshotFile(filePath);
-  const config = await readJsonObject(filePath);
-  const existingProviders = isRecord(config.providers) ? config.providers : {};
-  const providers: JsonRecord = {};
-
-  for (const provider of state.providers) {
-    const existingProviderValue = existingProviders[provider.providerId];
-    const existingProvider = isRecord(existingProviderValue) ? existingProviderValue : {};
-    providers[provider.providerId] = toPiProviderConfig(provider, existingProvider);
-  }
-
-  await writeJsonObject(filePath, { ...config, providers });
-  return [snapshot];
-}
-
-async function writeDroidNativeConfigProviders(state: AgentConfigState): Promise<FileSnapshot[]> {
-  const filePath = getDroidSettingsPath();
-  const snapshot = await snapshotFile(filePath);
-  const config = await readJsonObject(filePath);
-  const customModels: JsonRecord[] = [];
-
-  for (const provider of state.providers) {
-    for (const model of provider.models) {
-      customModels.push({
-        hppManaged: true,
-        hppProviderId: provider.providerId,
-        provider: "generic-chat-completion-api",
-        model: model.id,
-        id: `custom:${model.id}`,
-        displayName: model.name || model.id,
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        reasoning: !!model.reasoning,
-        noImageSupport: !model.imageInput,
-      });
-    }
-  }
-
-  await writeJsonObject(filePath, { ...config, customModels });
-  return [snapshot];
-}
-
-function toOpenCodeProviderConfig(provider: AgentProviderConfig): JsonRecord {
-  const models: JsonRecord = {};
-  for (const model of provider.models) {
-    models[model.id] = {
-      name: model.name || model.id,
-      reasoning: !!model.reasoning,
-      attachment: !!model.imageInput,
-      modalities: {
-        input: model.imageInput ? ["text", "image"] : ["text"],
-        output: ["text"],
-      },
-    };
-  }
-
-  return {
-    npm: "@ai-sdk/openai-compatible",
-    name: provider.displayName || provider.providerId,
-    options: {
-      baseURL: provider.baseUrl,
-      apiKey: provider.apiKey,
-    },
-    models,
-  };
-}
-
-async function writeOpenCodeNativeConfigProviders(state: AgentConfigState): Promise<FileSnapshot[]> {
-  const filePath = getOpenCodeConfigPath();
-  const snapshot = await snapshotFile(filePath);
-  const config = await readJsonObject(filePath);
-  const providers: JsonRecord = {};
-
-  for (const provider of state.providers) {
-    providers[provider.providerId] = toOpenCodeProviderConfig(provider);
-  }
-
-  await writeJsonObject(filePath, { ...config, provider: providers });
-  return [snapshot];
-}
-
-function escapeTomlString(value: string) {
-  return JSON.stringify(value);
-}
-
-function tomlKey(key: string) {
-  return /^[A-Za-z0-9_-]+$/.test(key) ? key : escapeTomlString(key);
-}
-
-function setTopLevelTomlValue(content: string, key: string, value: string) {
-  const lines = content ? content.split(/\r?\n/) : [];
-  const firstSectionIndex = lines.findIndex((line) => /^\s*\[/.test(line));
-  const scanEnd = firstSectionIndex === -1 ? lines.length : firstSectionIndex;
-  const nextLine = `${key} = ${escapeTomlString(value)}`;
-
-  for (let index = 0; index < scanEnd; index += 1) {
-    if (new RegExp(`^\\s*${key}\\s*=`).test(lines[index])) {
-      lines[index] = nextLine;
-      return lines.join("\n");
-    }
-  }
-
-  const insertIndex = firstSectionIndex === -1 ? lines.length : firstSectionIndex;
-  lines.splice(insertIndex, 0, nextLine);
-  return lines.join("\n");
-}
-
-function getTopLevelTomlValue(content: string, key: string) {
-  const lines = content ? content.split(/\r?\n/) : [];
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (line.startsWith("[")) return "";
-    if (!line || line.startsWith("#")) continue;
-    const pair = parseTomlKeyValue(rawLine);
-    if (pair?.key === key) return pair.value;
-  }
-  return "";
-}
-
-function providerSectionHeader(providerId: string) {
-  return `[model_providers.${tomlKey(providerId)}]`;
-}
-
-function getFirstCodexProviderSectionId(content: string) {
-  for (const rawLine of content.split(/\r?\n/)) {
-    const providerId = parseCodexProviderSection(rawLine);
-    if (providerId) return providerId;
-  }
-  return "";
-}
-
-function upsertCodexProviderBaseUrl(content: string, providerId: string, baseUrl: string) {
-  const lines = content ? content.split(/\r?\n/) : [];
-  const nextLine = `base_url = ${escapeTomlString(baseUrl)}`;
-
-  let start = -1;
-  for (let index = 0; index < lines.length; index += 1) {
-    if (parseCodexProviderSection(lines[index]) === providerId) {
-      start = index;
-      break;
-    }
-  }
-
-  if (start === -1) {
-    const suffix = lines.length > 0 && lines[lines.length - 1].trim() ? [""] : [];
-    return [...lines, ...suffix, providerSectionHeader(providerId), nextLine, ""].join("\n");
-  }
-
-  let end = start + 1;
-  while (end < lines.length && !/^\s*\[/.test(lines[end])) end += 1;
-
-  for (let index = start + 1; index < end; index += 1) {
-    const pair = parseTomlKeyValue(lines[index]);
-    if (pair?.key === "base_url") {
-      lines[index] = nextLine;
-      return lines.join("\n");
-    }
-  }
-
-  let insertIndex = end;
-  while (insertIndex > start + 1 && !lines[insertIndex - 1].trim()) insertIndex -= 1;
-  lines.splice(insertIndex, 0, nextLine);
-  return lines.join("\n");
-}
-
-async function writeCodexNativeConfig(_state: AgentConfigState, provider: AgentProviderConfig): Promise<FileSnapshot[]> {
-  const configPath = getCodexConfigPath();
-  const authPath = getCodexAuthPath();
-  const snapshots = await Promise.all([snapshotFile(configPath), snapshotFile(authPath)]);
-  let configContent = await readTextFile(configPath);
-  const activeNativeProviderId = getTopLevelTomlValue(configContent, "model_provider");
-  const firstNativeProviderId = getFirstCodexProviderSectionId(configContent);
-  const targetProviderId = activeNativeProviderId || firstNativeProviderId || "openai";
-  const selectedModel = provider.models[0]?.id || CODEX_FALLBACK_MODEL_ID;
-
-  if (!activeNativeProviderId && !firstNativeProviderId) {
-    configContent = setTopLevelTomlValue(configContent, "model_provider", targetProviderId);
-  }
-  configContent = setTopLevelTomlValue(configContent, "model", selectedModel);
-  configContent = upsertCodexProviderBaseUrl(configContent, targetProviderId, provider.baseUrl);
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, configContent.endsWith("\n") ? configContent : `${configContent}\n`, "utf-8");
-
-  const auth = await readJsonObject(authPath);
-  auth.OPENAI_API_KEY = provider.apiKey;
-  await writeJsonObject(authPath, auth);
-
-  return snapshots;
-}
-
-export async function writeNativeAgentProviderConfig(
+export async function getConfiguredAgentModels(
   agentId: string,
-  providerId: string
-): Promise<{ state: AgentConfigState; provider: AgentProviderConfig; snapshots: FileSnapshot[] }> {
-  return activateAgentProviderConfig(agentId, providerId);
-}
-
-export async function writeNativeAgentConfig(
-  agentId: string,
-  stateOverride?: AgentConfigState
-): Promise<{ state: AgentConfigState; snapshots: FileSnapshot[] }> {
-  await ensureSupportedAgent(agentId);
-  if (agentId === "codex") {
-    throw new Error("Codex 需要启用指定渠道后才能写入当前渠道。");
-  }
-
-  const state = stateOverride || await readNativeAgentConfigState(agentId);
-  for (const provider of state.providers) {
-    validateProviderConfig(provider);
-  }
-
-  const snapshots =
-    agentId === "pi"
-      ? await writePiNativeConfigProviders(state)
-      : agentId === "droid"
-        ? await writeDroidNativeConfigProviders(state)
-        : agentId === "opencode"
-          ? await writeOpenCodeNativeConfigProviders(state)
-          : [];
-
-  if (!NATIVE_CONFIG_AGENTS.has(agentId)) {
-    await writeAgentConfigState(agentId, state);
-  }
-
-  return { state, snapshots };
-}
-
-export async function getConfiguredAgentModels(agentId: string): Promise<Array<{
+  options: { activeOnly?: boolean } = {},
+): Promise<Array<{
   id: string;
   name: string;
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
 }>> {
-  if (!(await isSupportedConfigAgent(agentId))) return [];
-  const state = agentId === "codex"
-    ? await readSavedCodexConfigState()
-    : await readNativeAgentConfigState(agentId);
-  const providers = state.providers;
-
-  return providers.flatMap((provider) => {
-    return provider.models.map((model) => ({
-      id: model.id,
-      name: model.name || model.id,
-      provider: provider.providerId,
-      reasoning: !!model.reasoning,
-      supportsImages: !!model.imageInput,
-    }));
-  });
+  const registry = getAgentPluginRegistry();
+  const capabilities = await registry.getCapabilities(agentId);
+  const configuration = await getProviderConfiguration(agentId);
+  const state = await readCurrentAgentConfigState(agentId, configuration);
+  const providers = options.activeOnly && capabilities.providerActivation === "single-active"
+    ? state.providers.filter((provider) => provider.providerId === state.activeProviderId)
+    : state.providers;
+  return providers.flatMap((provider) => provider.models.map((model) => ({
+    id: model.id,
+    name: model.name || model.id,
+    provider: provider.providerId,
+    reasoning: model.reasoning === true,
+    supportsImages: model.imageInput === true,
+  })));
 }

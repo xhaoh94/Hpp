@@ -1,3 +1,5 @@
+import { readProviderConfig, writeProviderConfig } from "./config.mjs";
+
 export async function createAgentBackend(context) {
   return context.createBuiltinBackend("opencode");
 }
@@ -29,3 +31,12 @@ export function update(context) {
 export function getDefaultThinkingLevel() {
   return "medium";
 }
+
+export const configProvider = {
+  read() {
+    return readProviderConfig();
+  },
+  write(_context, { state }) {
+    return writeProviderConfig(state);
+  },
+};

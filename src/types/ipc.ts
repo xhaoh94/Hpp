@@ -71,9 +71,38 @@ export const isAgentEvent = (value: unknown): value is AgentEvent =>
 export type AgentUIResponse = UnknownRecord;
 
 export type AgentPlanModeSupport = "native" | "prompt" | "none";
-export type AgentConfigurationSupport = "openai-compatible" | "none" | false;
 export type AgentProviderActivationSupport = "single-active" | "none";
 export type AgentSource = "plugin";
+
+export interface AgentProviderEndpointOption {
+  id: string;
+  label: string;
+}
+
+export interface AgentBackendModelVisibility {
+  userConfigurable: boolean;
+  defaultVisible: boolean;
+  label: string;
+  description?: string;
+}
+
+export interface AgentProviderConfiguration {
+  type: "provider";
+  storage: "hpp" | "plugin";
+  endpoints: AgentProviderEndpointOption[];
+  defaultEndpoint: string;
+  pathLabel?: string;
+  hint?: string;
+  modelDefaults: {
+    reasoning: boolean;
+    imageInput: boolean;
+  };
+  fixedModelCapabilities: boolean;
+  modelListMode: "configured" | "backend" | "merge";
+  backendModelVisibility?: AgentBackendModelVisibility;
+}
+
+export type AgentConfigurationSupport = AgentProviderConfiguration | "none";
 
 export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
@@ -84,15 +113,20 @@ export interface AgentCapabilities {
 }
 
 export interface AgentPluginManifest {
-  schemaVersion: 1;
+  schemaVersion: 3;
   id: string;
   name: string;
   version: string;
+  minHppVersion: string;
   description?: string;
   entry: string;
   runtime?: "cli" | "sdk" | "plugin";
   command?: string;
   packageName?: string;
+  order?: number;
+  installHint?: string;
+  updateCommand?: string;
+  shortName?: string;
   capabilities?: Partial<AgentCapabilities>;
 }
 
@@ -102,9 +136,11 @@ export interface AgentDescriptor {
   desc?: string;
   description?: string;
   version: string;
+  minHppVersion: string;
   runtime: "cli" | "sdk" | "plugin";
   command?: string;
   packageName?: string;
+  order: number;
   capabilities: AgentCapabilities;
   source: AgentSource;
   removable: boolean;
@@ -127,10 +163,17 @@ export interface OfficialAgentPluginDescriptor {
   id: string;
   name: string;
   version: string;
+  minHppVersion: string;
+  compatible: boolean;
+  compatibilityError?: string;
   description?: string;
   runtime: "cli" | "sdk" | "plugin";
   command?: string;
   packageName?: string;
+  order: number;
+  installHint?: string;
+  updateCommand?: string;
+  shortName?: string;
   capabilities: AgentCapabilities;
   zipFile: string;
   downloadUrl: string;

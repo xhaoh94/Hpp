@@ -251,9 +251,6 @@ export function createAgentEventController({
     refreshStreamWatchdog(sessionId);
   };
 
-  const isAlreadyRunningError = (title: string, detail?: string) =>
-    /Codex is already running/i.test(`${title}\n${detail || ""}`);
-
   const finishManualAbort = (sessionId: string) => {
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
@@ -302,7 +299,7 @@ export function createAgentEventController({
       title: "检测到重复思考，已自动中断",
       detail: `最近思考内容连续重复 ${repeatCount} 次:\n${pattern}`,
       state: "interrupted",
-      expanded: true,
+      expanded: false,
     }, sessionId);
     useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
 
@@ -537,7 +534,7 @@ export function createAgentEventController({
         title: "未收到响应结束事件",
         detail: "Agent 长时间没有返回新的输出，已停止等待。",
         state: "error",
-        expanded: true,
+        expanded: false,
       }, currentSessionId);
     }
     finishThinkingEntry(currentSessionId);
@@ -570,7 +567,7 @@ export function createAgentEventController({
       title,
       detail,
       state: "error",
-      expanded: true,
+      expanded: false,
     }, currentSessionId);
     useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
 
@@ -659,7 +656,6 @@ export function createAgentEventController({
     failAssistantStream,
     refreshStreamWatchdog,
     ensureAssistantContinuation,
-    isAlreadyRunningError,
     getActiveAgentId,
     isOpenProjectSession,
     discardRuntime,
