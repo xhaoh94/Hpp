@@ -256,6 +256,12 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
 // In-memory cache for per-session models and thinking levels, synced to disk.
 let _sessionModelsCache: Record<string, ModelInfo> = {};
 let _sessionThinkingCache: Record<string, string> = {};
+export const SESSION_CONFIG_UPDATED_EVENT = "session-config-updated";
+
+const notifySessionConfigUpdated = (sessionId: string) => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(SESSION_CONFIG_UPDATED_EVENT, { detail: { sessionId } }));
+};
 let _cacheDirty = false;
 let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
@@ -354,6 +360,7 @@ export function saveSessionModel(sessionId: string, model: ModelInfo) {
   _sessionModelsCache[sessionId] = model;
   _cacheDirty = true;
   saveScheduler.schedule("models", 500, flushModelsToDisk);
+  notifySessionConfigUpdated(sessionId);
 }
 
 /** Get persisted model for a session (synchronous, from cache) */
@@ -366,6 +373,7 @@ export function saveSessionThinking(sessionId: string, level: string) {
   _sessionThinkingCache[sessionId] = level;
   _cacheDirty = true;
   saveScheduler.schedule("models", 500, flushModelsToDisk);
+  notifySessionConfigUpdated(sessionId);
 }
 
 /** Get persisted thinking level for a session (synchronous, from cache) */

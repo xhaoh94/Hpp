@@ -16,6 +16,7 @@
   "include": [
     "electron/**/*.ts",
     "electron-vite.config.ts",
-    "src/types/ipc.ts"
+    "src/types/ipc.ts",
+    "shared/**/*.ts"
   ]
 }

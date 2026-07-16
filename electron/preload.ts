@@ -7,6 +7,13 @@ import type {
   AppUpdateStatus,
 } from "../src/types/ipc";
 import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
+import type {
+  RemoteAccessStatus,
+  RemotePairingOffer,
+  RemoteRendererCommand,
+  RemoteRendererCommandResult,
+  RemoteRendererPublish,
+} from "../shared/remote-protocol";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   // Window controls
@@ -64,6 +71,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),
   saveData: (key: string, data: unknown) =>
     ipcRenderer.invoke("store:save", key, data),
+
+  // Remote access
+  remoteGetAccessStatus: (): Promise<RemoteAccessStatus> =>
+    ipcRenderer.invoke("remote:getStatus"),
+  remoteConfigureAccess: (patch: Partial<Pick<RemoteAccessStatus, "enabled" | "bindAddress" | "advertiseAddress" | "port">>): Promise<RemoteAccessStatus> =>
+    ipcRenderer.invoke("remote:configure", patch),
+  remoteBeginPairing: (): Promise<RemotePairingOffer> =>
+    ipcRenderer.invoke("remote:beginPairing"),
+  remoteRevokeDevice: (deviceId: string): Promise<RemoteAccessStatus> =>
+    ipcRenderer.invoke("remote:revokeDevice", deviceId),
+  remotePublish: (update: RemoteRendererPublish) =>
+    ipcRenderer.send("remote:publish", update),
+  remoteCommandResult: (result: RemoteRendererCommandResult) =>
+    ipcRenderer.send("remote:commandResult", result),
+  onRemoteCommand: (callback: (command: RemoteRendererCommand) => void) => {
+    const handler = (_event: unknown, command: RemoteRendererCommand) => callback(command);
+    ipcRenderer.on("remote:command", handler);
+    return () => ipcRenderer.removeListener("remote:command", handler);
+  },
 
   // Clipboard
   writeImageToClipboard: (imageDataUrl: string) =>

@@ -24,6 +24,7 @@ import {
 } from "./lib/floating-toast";
 import { requiresProviderActivation } from "./lib/agents";
 import TitleBar from "./components/layout/TitleBar";
+import { CheckCircle2 } from "lucide-react";
 
 const isSameModel = (left: ModelInfo | null | undefined, right: ModelInfo | null | undefined) =>
   !!left && !!right && left.id === right.id && left.provider === right.provider;
@@ -110,7 +111,7 @@ export default function App() {
     floatingToastTimerRef.current = setTimeout(() => {
       setFloatingToast(null);
       floatingToastTimerRef.current = null;
-    }, 2200);
+    }, 2600);
   }, []);
 
   useEffect(() => {
@@ -182,8 +183,8 @@ export default function App() {
         return;
       }
 
-      setCurrentModel(nextModel);
       if (sessionId) saveSessionModel(sessionId, nextModel);
+      setCurrentModel(nextModel);
       showFloatingToastMessage(getModelSwitchToastText(agentId, nextModel.provider, nextModel.name || nextModel.id));
     } catch (error) {
       console.error("[model] shortcut switch failed:", error);
@@ -417,7 +418,8 @@ export default function App() {
           role="status"
           aria-live="polite"
         >
-          {floatingToast.text}
+          <CheckCircle2 size={17} strokeWidth={2.2} />
+          <span>{floatingToast.text}</span>
         </div>
       )}
     </div>

@@ -17,5 +17,5 @@
     },
     "outDir": "./dist/web"
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "shared/**/*.ts"]
 }

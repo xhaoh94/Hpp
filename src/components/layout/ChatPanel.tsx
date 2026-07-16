@@ -40,7 +40,9 @@ import {
 import {
   cloneMessagesForFork,
   createSessionForkContext,
+  getCompatibleForkSessionTitle,
   getForkSessionTitle,
+  getForkTargetTurnId,
 } from "@/lib/session-forks";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
 import { getSessionModel, saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
@@ -56,6 +58,7 @@ import { useChatScroll } from "./useChatScroll";
 import { useAgentEvents } from "./useAgentEvents";
 import { isSupportedImageAttachment, usePendingImages } from "./usePendingImages";
 import { usePendingUIResponse, usePendingUIResponseActions } from "./usePendingUIResponse";
+import { useRemoteBridge } from "@/hooks/useRemoteBridge";
 import { useQuestionnaireResize } from "./useQuestionnaireResize";
 import { useSessionModels } from "./useSessionModels";
 import {
@@ -101,26 +104,6 @@ const escapeXmlAttribute = (value: string) =>
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-
-const getCompatibleForkSessionTitle = (message: ChatMessage) => {
-  const title = getForkSessionTitle(message);
-  return title.startsWith("分叉 - ")
-    ? title.replace(/^分叉 - /, "兼容分叉 - ")
-    : `兼容分叉 - ${title}`;
-};
-
-const getForkTargetTurnId = (message: ChatMessage, sourceMessages: ChatMessage[]) => {
-  if (message.nativeTurnId) return message.nativeTurnId;
-  if (message.role !== "assistant") return undefined;
-
-  for (let index = sourceMessages.length - 2; index >= 0; index -= 1) {
-    const candidate = sourceMessages[index];
-    if (candidate.role === "assistant") break;
-    if (candidate.role === "user" && candidate.nativeTurnId) return candidate.nativeTurnId;
-  }
-
-  return undefined;
-};
 
 const buildPathAttachmentBlock = (attachments: PendingPathAttachment[]) => {
   if (attachments.length === 0) return "";
@@ -1646,6 +1629,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setStreaming,
   });
 
+  useRemoteBridge({
+    pendingInteraction: pendingUIResponse,
+    setPendingInteraction: setPendingUIResponseState,
+  });
+
   const {
     handleSendUIResponse,
     handleSubmitQuestionnaire,
@@ -2093,9 +2081,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       return;
     }
 
-    setCurrentModel(model);
-    // Save model selection for this session
     if (sessionId) saveSessionModel(sessionId, model);
+    setCurrentModel(model);
     const modelChanged =
       !previousModel ||
       previousModel.id !== model.id ||
@@ -2123,13 +2110,12 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     const nextModel = selectedProviderModel || (current
       ? models.find((model) => model.id === current.id && model.provider === current.provider) || models[0]
       : models[0]);
-    chatState.setCurrentModel(nextModel);
-
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) {
       saveSessionModel(sessionId, nextModel);
       void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId);
     }
+    chatState.setCurrentModel(nextModel);
   }, [currentAgentId, refreshModelProviderOrder]);
 
   const openAgentReloadConfirm = useCallback(() => {
@@ -2177,11 +2163,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, [agentReloadConfirmOpen, agentReloading, closeAgentReloadConfirm]);
 
   const handleSelectThinking = async (levelId: string) => {
-    setThinkingLevel(levelId);
-    setThinkingOpen(false);
-    // Save thinking level for this session
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) saveSessionThinking(sessionId, levelId);
+    setThinkingLevel(levelId);
+    setThinkingOpen(false);
     await window.electronAPI.agentSetThinkingLevel(levelId, sessionId || undefined);
   };
 

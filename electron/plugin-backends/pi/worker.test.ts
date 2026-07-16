@@ -204,4 +204,42 @@ describe("Pi SDK worker protocol", () => {
     await expect(worker.waitFor((message) => message.type === "aborted" && message.id === "abort-1"))
       .resolves.toMatchObject({ type: "aborted", id: "abort-1" });
   });
+
+  it("returns only the questionnaire options selected by the remote client", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "prompt-1", type: "prompt", message: "ask", permissionMode: "full-access" });
+    const request = await worker.waitFor((message) => message.type === "extension_ui_request");
+    const requestId = String((request.request as { id?: unknown }).id || "");
+
+    worker.send({
+      id: "ui-response-1",
+      type: "uiResponse",
+      response: {
+        id: requestId,
+        cancelled: false,
+        result: {
+          cancelled: false,
+          answers: [{
+            id: "agents",
+            questionIndex: 0,
+            question: "常用 Agent",
+            kind: "multi",
+            answer: null,
+            selected: ["Pi"],
+            selectedOptions: [{ label: "Pi", value: "pi" }],
+            values: ["pi"],
+          }],
+        },
+      },
+    });
+
+    const completed = await worker.waitFor((message) => message.type === "tool_execution_end");
+    expect(completed.result).toMatchObject({
+      cancelled: false,
+      answers: [{ selected: ["Pi"], values: ["pi"] }],
+    });
+  });
 });

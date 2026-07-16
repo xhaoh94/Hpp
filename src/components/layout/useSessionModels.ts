@@ -27,8 +27,8 @@ const addAgentStartupError = (sessionId: string, error: unknown) => {
 };
 
 const applyAndSyncSessionModel = async (sessionId: string, model: ModelInfo, setCurrentModel: (model: ModelInfo) => void) => {
-  setCurrentModel(model);
   saveSessionModel(sessionId, model);
+  setCurrentModel(model);
   await window.electronAPI.agentSetModel(model.provider, model.id, sessionId);
 };
 

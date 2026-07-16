@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, RotateCcw, Settings } from "lucide-react";
+import { Bot, RotateCcw, Settings, Smartphone } from "lucide-react";
 import { AgentSettingsView } from "./AgentSettingsView";
 import { AgentConfigModal } from "./AgentConfigModal";
+import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -147,6 +148,7 @@ export function SettingsView() {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [showGeneralModal, setShowGeneralModal] = useState(false);
   const [showAgentSettingsModal, setShowAgentSettingsModal] = useState(false);
+  const [showRemoteAccessModal, setShowRemoteAccessModal] = useState(false);
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
   const [tempImagePath, setTempImagePath] = useState("");
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
@@ -346,6 +348,13 @@ export function SettingsView() {
               Agent 设置
             </button>
             <button
+              onClick={() => setShowRemoteAccessModal(true)}
+              className="btn-quick-setting"
+            >
+              <Smartphone size={16} strokeWidth={1.8} />
+              远程访问
+            </button>
+            <button
               onClick={() => { setShowShortcutModal(true); setRecordingKey(null); }}
               className="btn-quick-setting"
             >
@@ -530,6 +539,9 @@ export function SettingsView() {
             </div>
           </div>
         </div>
+      )}
+      {showRemoteAccessModal && (
+        <RemoteAccessSettings onClose={() => setShowRemoteAccessModal(false)} />
       )}
       {configAgent && (
         <AgentConfigModal

@@ -98,7 +98,16 @@ async function main() {
     tag_name: tag,
     target_commitish: "main",
     name: `Hpp ${tag}`,
-    body: `Hpp ${version}。包含 Agent 插件进程、渠道与模型配置、会话恢复和 fork，以及 Codex、Pi、OpenCode、Droid 适配修复。`,
+    body: [
+      `Hpp ${version}`,
+      "",
+      "- 新增 Android 与 Web 远程客户端，可浏览项目、会话、流式消息、工具过程和 diff。",
+      "- 支持远程新建、关闭、恢复、重载和分叉会话，以及队列、问卷、审批和中止。",
+      "- 支持模型、思考等级与 Plan 模式双向同步。",
+      "- 新增局域网/Tailscale 配对、设备令牌管理、会话草稿和移动端图片发送。",
+      "- Windows 桌面安装包支持 GitHub 自动更新。",
+      "- 正式发布使用持久签名的 Android APK，为后续覆盖更新建立签名链。",
+    ].join("\n"),
     draft: false,
     prerelease: false,
     make_latest: "true",
@@ -115,6 +124,8 @@ async function main() {
     [`release/hpp-Setup-${version}.exe`, "application/vnd.microsoft.portable-executable"],
     [`release/hpp-Setup-${version}.exe.blockmap`, "application/octet-stream"],
     ["release/latest.yml", "text/yaml"],
+    ["release/Hpp-Android.apk", "application/vnd.android.package-archive"],
+    ["release/android-latest.json", "application/json"],
     ...pluginAssets,
   ];
 

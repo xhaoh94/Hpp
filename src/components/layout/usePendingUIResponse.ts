@@ -93,11 +93,21 @@ export function usePendingUIResponseActions({
     failed = false
   ) => {
     finishPendingQuestionEntry(targetSessionId, pendingResponse, failed);
-    useChatStore.getState().finishLastAssistantProcess(
-      Date.now(),
-      failed ? "interrupted" : "completed",
-      targetSessionId
-    );
+    const chatStore = useChatStore.getState();
+    if (pendingResponse?.entryId) {
+      chatStore.finishAssistantProcessContainingEntry(
+        pendingResponse.entryId,
+        Date.now(),
+        failed ? "interrupted" : "completed",
+        targetSessionId,
+      );
+    } else {
+      chatStore.finishLastAssistantProcess(
+        Date.now(),
+        failed ? "interrupted" : "completed",
+        targetSessionId,
+      );
+    }
     resetRuntimeAfterUIResponse(targetSessionId);
   }, [finishPendingQuestionEntry, resetRuntimeAfterUIResponse]);
 

@@ -59,7 +59,7 @@ interface ProjectState {
   addProject: (name: string, path: string, agentIds?: string[]) => void;
   removeProject: (id: string) => void;
   setActiveProject: (id: string | null) => void;
-  addSession: (projectId: string, session: ProjectSession) => void;
+  addSession: (projectId: string, session: ProjectSession, activate?: boolean) => void;
   removeSession: (projectId: string, sessionId: string) => void;
   closeSession: (projectId: string, sessionId: string) => void;
   reopenSession: (projectId: string, sessionId: string) => void;
@@ -122,12 +122,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setActiveProject: (id) => set({ activeProjectId: id }),
 
-  addSession: (projectId, session) =>
+  addSession: (projectId, session, activate = true) =>
     set((s) => ({
       projects: s.projects.map((p) =>
         p.id === projectId ? { ...p, sessions: [...p.sessions, session] } : p
       ),
-      activeSessionId: session.id,
+      activeSessionId: activate ? session.id : s.activeSessionId,
     })),
 
   removeSession: (projectId, sessionId) =>
@@ -159,6 +159,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   closeSession: (projectId, sessionId) =>
     set((s) => {
       const now = new Date().toISOString();
+      const nextAgentStatuses = { ...s.agentStatuses };
+      delete nextAgentStatuses[sessionId];
+      const nextInitializedSessionIds = new Set(s.initializedSessionIds);
+      nextInitializedSessionIds.delete(sessionId);
       return {
         projects: s.projects.map((p) =>
           p.id === projectId
@@ -171,6 +175,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             : p
         ),
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
+        agentStatuses: nextAgentStatuses,
+        initializedSessionIds: nextInitializedSessionIds,
       };
     }),
 

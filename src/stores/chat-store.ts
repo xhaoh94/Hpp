@@ -152,6 +152,7 @@ interface ChatState {
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
   updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
+  finishAssistantProcessContainingEntry: (entryId: string, endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;
   toggleAssistantProcessEntry: (messageId: string, entryId: string) => void;
@@ -254,6 +255,39 @@ const updateSessionMessages = (
     ? { messages: nextMessages, sessionMessages: nextSessionMessages }
     : { sessionMessages: nextSessionMessages };
 };
+
+const findAssistantProcessEntryIndex = (messages: ChatMessage[], entryId: string) => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "assistant" && messages[index].process?.entries.some((entry) => entry.id === entryId)) {
+      return index;
+    }
+  }
+  return -1;
+};
+
+const finishAssistantProcessMessage = (
+  message: ChatMessage,
+  endedAt: number | undefined,
+  finalState: "completed" | "interrupted",
+): ChatMessage => ({
+  ...message,
+  isStreaming: false,
+  process: message.process
+    ? {
+        ...message.process,
+        endedAt: message.process.endedAt || endedAt || Date.now(),
+        entries: message.process.entries.map((entry) =>
+          entry.state === "running"
+            ? {
+                ...entry,
+                state: finalState,
+                expanded: entry.type === "thinking" ? entry.expanded : false,
+              }
+            : entry
+        ),
+      }
+    : message.process,
+});
 
 const setNativeTurnIdForMessages = (
   messages: ChatMessage[],
@@ -426,7 +460,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
       const msgs = [...messages];
-      const index = findLastAssistantIndex(msgs);
+      const index = findAssistantProcessEntryIndex(msgs, entryId);
       if (index < 0) return msgs;
 
       const msg = msgs[index];
@@ -495,30 +529,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const msgs = [...messages];
       const index = findLastAssistantIndex(msgs);
       if (index >= 0) {
-        const msg = msgs[index];
-        msgs[index] = {
-          ...msg,
-          isStreaming: false,
-          process: msg.process
-            ? {
-                ...msg.process,
-                endedAt: msg.process.endedAt || endedAt || Date.now(),
-                entries: msg.process.entries.map((entry) =>
-                  entry.state === "running"
-                    ? {
-                        ...entry,
-                        state: finalState,
-                        expanded: entry.type === "thinking" ? entry.expanded : false,
-                      }
-                    : entry
-                ),
-              }
-            : msg.process,
-        };
+        msgs[index] = finishAssistantProcessMessage(msgs[index], endedAt, finalState);
       }
       return msgs;
       });
     }),
+
+  finishAssistantProcessContainingEntry: (entryId, endedAt, finalState = "completed", sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      const msgs = [...messages];
+      const index = findAssistantProcessEntryIndex(msgs, entryId);
+      if (index >= 0) msgs[index] = finishAssistantProcessMessage(msgs[index], endedAt, finalState);
+      return msgs;
+    })),
 
   collapseLastAssistantProcess: (sessionId) =>
     set((s) => {

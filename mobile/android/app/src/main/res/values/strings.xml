@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Hpp</string>
+    <string name="title_activity_main">Hpp</string>
+    <string name="package_name">com.hpp.mobile</string>
+    <string name="custom_url_scheme">com.hpp.mobile</string>
+</resources>

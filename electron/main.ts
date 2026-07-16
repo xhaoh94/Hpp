@@ -8,6 +8,7 @@ import { registerStoreHandlers } from "./ipc/store-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
+import { remoteAccessServer } from "./remote/remote-server";
 import type { AppUpdateState, AppUpdateStatus } from "../src/types/ipc";
 import {
   APP_UPDATE_CHECK_INTERVAL_MS,
@@ -340,6 +341,7 @@ function createWindow() {
 if (singleInstanceLock) {
   app.whenReady().then(async () => {
     await loadCloseToTraySetting();
+    await remoteAccessServer.initialize(() => mainWindow);
     createWindow();
     createTray();
 
@@ -378,7 +380,10 @@ app.on("before-quit", (event) => {
   if (agentShutdownStarted) return;
   agentShutdownStarted = true;
   event.preventDefault();
-  void shutdownAgentRuntime().finally(() => app.quit());
+  void Promise.allSettled([
+    shutdownAgentRuntime(),
+    remoteAccessServer.shutdown(),
+  ]).finally(() => app.quit());
 });
 
 app.on("window-all-closed", () => {

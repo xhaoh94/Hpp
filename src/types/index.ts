@@ -12,6 +12,32 @@ import type {
   AppUpdateResult,
   AppUpdateStatus,
 } from "./ipc";
+import type {
+  RemoteAccessStatus,
+  RemotePairingOffer,
+  RemoteRendererCommand,
+  RemoteRendererCommandResult,
+  RemoteRendererPublish,
+} from "../../shared/remote-protocol";
+
+export type {
+  RemoteAccessStatus,
+  RemoteAgent,
+  RemoteCatalogSnapshot,
+  RemoteChatMessage,
+  RemoteDeviceInfo,
+  RemoteInteraction,
+  RemotePairingOffer,
+  RemoteProject,
+  RemoteQueuedMessage,
+  RemoteRendererCommand,
+  RemoteRendererCommandResult,
+  RemoteRendererPublish,
+  RemoteServerEnvelope,
+  RemoteSession,
+  RemoteSessionConfig,
+  RemoteSessionCreateResult,
+} from "../../shared/remote-protocol";
 
 export type {
   AgentEvent,
@@ -180,6 +206,13 @@ export interface ElectronAPI {
   // Data persistence
   loadData: (key: string) => Promise<unknown>;
   saveData: (key: string, data: unknown) => Promise<{ success: boolean; error?: string }>;
+  remoteGetAccessStatus: () => Promise<RemoteAccessStatus>;
+  remoteConfigureAccess: (patch: Partial<Pick<RemoteAccessStatus, "enabled" | "bindAddress" | "advertiseAddress" | "port">>) => Promise<RemoteAccessStatus>;
+  remoteBeginPairing: () => Promise<RemotePairingOffer>;
+  remoteRevokeDevice: (deviceId: string) => Promise<RemoteAccessStatus>;
+  remotePublish: (update: RemoteRendererPublish) => void;
+  remoteCommandResult: (result: RemoteRendererCommandResult) => void;
+  onRemoteCommand: (callback: (command: RemoteRendererCommand) => void) => () => void;
 
   // Clipboard
   writeImageToClipboard: (imageDataUrl: string) => Promise<{ success: boolean; error?: string }>;

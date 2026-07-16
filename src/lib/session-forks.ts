@@ -70,6 +70,25 @@ export const getForkSessionTitle = (message: ChatMessage) => {
   return `分叉 - ${truncate(text || "无文本发言", MAX_TITLE_CHARS)}`;
 };
 
+export const getCompatibleForkSessionTitle = (message: ChatMessage) => {
+  const title = getForkSessionTitle(message);
+  return title.startsWith("分叉 - ")
+    ? title.replace(/^分叉 - /, "兼容分叉 - ")
+    : `兼容分叉 - ${title}`;
+};
+
+export const getForkTargetTurnId = (message: ChatMessage, sourceMessages: ChatMessage[]) => {
+  if (message.nativeTurnId) return message.nativeTurnId;
+  if (message.role !== "assistant") return undefined;
+
+  for (let index = sourceMessages.length - 2; index >= 0; index -= 1) {
+    const candidate = sourceMessages[index];
+    if (candidate.role === "assistant") break;
+    if (candidate.role === "user" && candidate.nativeTurnId) return candidate.nativeTurnId;
+  }
+  return undefined;
+};
+
 const describeMessage = (message: ChatMessage, index: number) => {
   const attrs = [
     `index="${index + 1}"`,

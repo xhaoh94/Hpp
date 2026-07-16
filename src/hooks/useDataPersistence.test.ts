@@ -1,41 +1,45 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { useChatStore, type ModelInfo } from "@/stores/chat-store";
-import { PersistenceHydrationGate, selectSessionModel } from "./useDataPersistence";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  saveSessionModel,
+  saveSessionThinking,
+  SESSION_CONFIG_UPDATED_EVENT,
+} from "./useDataPersistence";
 
-const models: ModelInfo[] = [
-  { id: "default-model", name: "Default", provider: "default-provider", reasoning: true },
-  { id: "current-model", name: "Current", provider: "current-provider", reasoning: true },
-];
+describe("session config change notifications", () => {
+  const dispatchEvent = vi.fn();
+  const saveData = vi.fn();
 
-describe("selectSessionModel", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dispatchEvent.mockReset();
+    saveData.mockReset();
+    vi.stubGlobal("window", { dispatchEvent, electronAPI: { saveData } });
+  });
+
   afterEach(() => {
-    useChatStore.setState({ currentModel: null });
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
-  it("inherits the currently selected provider and model for a new session", () => {
-    useChatStore.setState({ currentModel: models[1] });
-
-    expect(selectSessionModel("new-session-without-persisted-model", models)).toEqual(models[1]);
-  });
-
-  it("falls back to the first available model when the current model is unavailable", () => {
-    useChatStore.setState({
-      currentModel: { id: "missing", name: "Missing", provider: "missing-provider", reasoning: true },
+  it("notifies the remote bridge after saving a session model", () => {
+    saveSessionModel("session-model", {
+      id: "gpt-5",
+      name: "GPT-5",
+      provider: "openai",
+      reasoning: true,
     });
 
-    expect(selectSessionModel("new-session-with-missing-model", models)).toEqual(models[0]);
+    const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent<{ sessionId: string }>;
+    expect(event.type).toBe(SESSION_CONFIG_UPDATED_EVENT);
+    expect(event.detail).toEqual({ sessionId: "session-model" });
   });
-});
 
-describe("PersistenceHydrationGate", () => {
-  it("rejects stale StrictMode hydration completions", () => {
-    const gate = new PersistenceHydrationGate();
-    const firstGeneration = gate.begin();
-    const secondGeneration = gate.begin();
+  it("notifies the remote bridge after saving a thinking level", () => {
+    saveSessionThinking("session-thinking", "high");
 
-    expect(gate.complete(firstGeneration)).toBe(false);
-    expect(gate.canPersist()).toBe(false);
-    expect(gate.complete(secondGeneration)).toBe(true);
-    expect(gate.canPersist()).toBe(true);
+    const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent<{ sessionId: string }>;
+    expect(event.type).toBe(SESSION_CONFIG_UPDATED_EVENT);
+    expect(event.detail).toEqual({ sessionId: "session-thinking" });
   });
 });
