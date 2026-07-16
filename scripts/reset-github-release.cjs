@@ -106,6 +106,7 @@ async function main() {
       "- 优化 Windows 标题栏的最小化、最大化/还原和关闭按钮。",
       "- 修复 Pi 插件在 Windows 下触发的 Node.js DEP0190 警告。",
       "- 修复 Hpp 退出时插件状态查询误报 Plugin host exited (0) 的问题。",
+      "- 修复应用内安装更新时旧进程尚未退出，导致安装器提示 Hpp 无法关闭的问题。",
       "- 开发版使用独立 App ID，避免任务栏错误复用已安装版本的图标缓存。",
     ].join("\n"),
     draft: false,

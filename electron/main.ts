@@ -15,6 +15,7 @@ import {
   shouldRunPeriodicAppUpdateCheck,
   shouldStopAppUpdatePolling,
 } from "./app-update-polling";
+import { AppShutdownCoordinator } from "./app-shutdown";
 
 // Enable IME support on Linux Wayland
 if (process.platform === "linux") {
@@ -39,7 +40,6 @@ let windowTheme: WindowTheme = "dark";
 let isQuitting = false;
 let updaterInitialized = false;
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
-let agentShutdownStarted = false;
 let updateStatus: AppUpdateStatus = {
   state: "idle",
   currentVersion: app.getVersion(),
@@ -131,6 +131,14 @@ function stopPeriodicUpdateChecks() {
   clearInterval(updateCheckTimer);
   updateCheckTimer = null;
 }
+
+const shutdownCoordinator = new AppShutdownCoordinator(async () => {
+  stopPeriodicUpdateChecks();
+  await Promise.allSettled([
+    shutdownAgentRuntime(),
+    remoteAccessServer.shutdown(),
+  ]);
+});
 
 function startPeriodicUpdateChecks() {
   if (!app.isPackaged || updateCheckTimer || shouldStopAppUpdatePolling(updateStatus.state)) return;
@@ -302,7 +310,9 @@ function installAppUpdate() {
     return { success: false, error: "更新尚未下载完成。", status: updateStatus };
   }
   isQuitting = true;
-  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  void shutdownCoordinator.prepareAndAllowQuit().then(() => {
+    autoUpdater.quitAndInstall(false, true);
+  });
   return { success: true, status: updateStatus };
 }
 
@@ -385,14 +395,9 @@ if (singleInstanceLock) {
 
 app.on("before-quit", (event) => {
   isQuitting = true;
-  stopPeriodicUpdateChecks();
-  if (agentShutdownStarted) return;
-  agentShutdownStarted = true;
+  if (!shutdownCoordinator.shouldInterceptQuit()) return;
   event.preventDefault();
-  void Promise.allSettled([
-    shutdownAgentRuntime(),
-    remoteAccessServer.shutdown(),
-  ]).finally(() => app.quit());
+  void shutdownCoordinator.prepareAndAllowQuit().then(() => app.quit());
 });
 
 app.on("window-all-closed", () => {
