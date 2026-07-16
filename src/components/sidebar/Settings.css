@@ -406,6 +406,125 @@
   flex-shrink: 0;
 }
 
+.settings-theme-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-theme-option {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-theme-preview {
+  --theme-preview-bg: #f3f4f6;
+  --theme-preview-panel: #fff;
+  --theme-preview-rail: #c4c7cc;
+  --theme-preview-line: #d7dade;
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 1.42;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--theme-preview-bg);
+  box-shadow: 0 1px 2px var(--surface-muted);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.settings-theme-preview.dark {
+  --theme-preview-bg: #505154;
+  --theme-preview-panel: #242528;
+  --theme-preview-rail: #a2a4a8;
+  --theme-preview-line: #6f7176;
+}
+
+.settings-theme-preview.system {
+  --theme-preview-bg: linear-gradient(90deg, #f3f4f6 0 50%, #505154 50% 100%);
+  --theme-preview-panel: linear-gradient(90deg, #fff 0 50%, #242528 50% 100%);
+  --theme-preview-rail: linear-gradient(90deg, #c4c7cc 0 50%, #a2a4a8 50% 100%);
+  --theme-preview-line: linear-gradient(90deg, #d7dade 0 50%, #6f7176 50% 100%);
+}
+
+.settings-theme-preview-rail {
+  position: absolute;
+  top: 18%;
+  left: 27%;
+  width: 46%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--theme-preview-rail);
+}
+
+.settings-theme-preview-panel {
+  position: absolute;
+  inset: 35% 7% -8%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12% 8%;
+  border-radius: 6px 6px 0 0;
+  background: var(--theme-preview-panel);
+  box-shadow: 0 0 0 1px var(--surface-muted);
+}
+
+.settings-theme-preview-line {
+  display: block;
+  width: 56%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--theme-preview-line);
+}
+
+.settings-theme-preview-line.wide {
+  width: 84%;
+}
+
+.settings-theme-preview-line.short {
+  width: 38%;
+}
+
+.settings-theme-option:hover .settings-theme-preview {
+  border-color: color-mix(in srgb, var(--accent-color) 55%, var(--border-color));
+  transform: translateY(-1px);
+}
+
+.settings-theme-option.selected .settings-theme-preview {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 18%, transparent);
+}
+
+.settings-theme-option:focus-visible {
+  outline: none;
+}
+
+.settings-theme-option:focus-visible .settings-theme-preview {
+  outline: 2px solid color-mix(in srgb, var(--accent-color) 42%, transparent);
+  outline-offset: 2px;
+}
+
+.settings-theme-option-label {
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.settings-theme-option.selected .settings-theme-option-label {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .settings-toggle-title {
   display: block;
   color: var(--text-primary);
@@ -856,7 +975,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--overlay-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -872,7 +991,7 @@
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 20px var(--shadow-color);
 }
 
 .settings-modal-agent {
@@ -1985,7 +2104,7 @@
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 12px 30px var(--shadow-color);
 }
 .remote-address-picker-menu > button {
   display: grid;
@@ -2087,6 +2206,40 @@
 .remote-copy-button.copied {
   background-color: #15803d;
   box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+}
+
+:root[data-theme="light"] .settings-modal-overlay,
+:root[data-theme="light"] .agent-provider-editor-overlay,
+:root[data-theme="light"] .agent-model-picker-overlay,
+:root[data-theme="light"] .agent-provider-delete-overlay {
+  background: var(--overlay-backdrop);
+}
+
+:root[data-theme="light"] .agent-config-provider-item.selected {
+  border-color: #b9c0c9;
+  box-shadow: 0 0 0 1px var(--surface-muted);
+}
+
+:root[data-theme="light"] .agent-config-provider-item.active,
+:root[data-theme="light"] .agent-config-provider-item.selected.active {
+  background: rgba(9, 105, 218, 0.08);
+  box-shadow: 0 0 0 1px rgba(9, 105, 218, 0.16);
+}
+
+:root[data-theme="light"] .remote-address-picker-menu > button.selected {
+  color: var(--accent-color);
+}
+
+:root[data-theme="light"] .remote-access-error,
+:root[data-theme="light"] .status-message.error,
+:root[data-theme="light"] .agent-settings-error {
+  color: var(--danger-color);
+}
+
+:root[data-theme="light"] .status-message.success,
+:root[data-theme="light"] .agent-settings-success,
+:root[data-theme="light"] .agent-config-secret-btn.copied {
+  color: var(--success-color);
 }
 
 .remote-device-section {

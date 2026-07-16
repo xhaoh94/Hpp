@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Hpp H Bridge icon concept</title>
+  <desc id="desc">A bold H formed by two blue panes connected with a green bridge on a dark rounded square.</desc>
+  <rect x="72" y="72" width="880" height="880" rx="224" fill="#202124"/>
+  <rect x="82" y="82" width="860" height="860" rx="214" fill="none" stroke="#3C4047" stroke-width="20"/>
+
+  <rect x="260" y="248" width="132" height="528" rx="66" fill="#4A9EFF"/>
+  <rect x="632" y="248" width="132" height="528" rx="66" fill="#4A9EFF"/>
+  <rect x="366" y="446" width="292" height="132" rx="66" fill="#34C78F"/>
+
+  <circle cx="326" cy="314" r="17" fill="#A8D2FF"/>
+  <circle cx="698" cy="710" r="17" fill="#A8D2FF"/>
+</svg>

@@ -6,6 +6,7 @@ import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
+import { applyAppTheme, normalizeAppTheme, type AppTheme } from "@/lib/theme";
 import "./Settings.css";
 
 interface ShortcutConfig {
@@ -27,6 +28,7 @@ interface GeneralSettings {
   imageRetentionHours: number;
   planModeEnabled: boolean;
   closeToTray: boolean;
+  theme: AppTheme;
 }
 
 const SHORTCUT_LABELS: Record<string, string> = {
@@ -51,6 +53,11 @@ const DEFAULT_FILTERS: FilterConfig = {
 };
 
 const IMAGE_RETENTION_HOURS = 12;
+const THEME_OPTIONS: Array<{ value: AppTheme; label: string }> = [
+  { value: "system", label: "系统" },
+  { value: "light", label: "浅色" },
+  { value: "dark", label: "深色" },
+];
 
 function formatKey(e: KeyboardEvent): string {
   const parts: string[] = [];
@@ -117,6 +124,7 @@ function normalizeGeneral(value: unknown): GeneralSettings {
     imageRetentionHours: IMAGE_RETENTION_HOURS,
     planModeEnabled: general.planModeEnabled === true,
     closeToTray: typeof general.closeToTray === "boolean" ? general.closeToTray : true,
+    theme: normalizeAppTheme(general.theme),
   };
 }
 
@@ -154,6 +162,7 @@ export function SettingsView() {
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const [closeToTray, setCloseToTray] = useState(true);
+  const [theme, setTheme] = useState<AppTheme>("dark");
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
@@ -176,6 +185,8 @@ export function SettingsView() {
         setTempImagePath(general.tempImagePath);
         setPlanModeEnabled(general.planModeEnabled);
         setCloseToTray(general.closeToTray);
+        setTheme(general.theme);
+        applyAppTheme(general.theme);
         if (originalGeneral.imageRetentionHours !== IMAGE_RETENTION_HOURS) {
           void window.electronAPI.saveData("settings", {
             ...settings,
@@ -230,6 +241,7 @@ export function SettingsView() {
       imageRetentionHours: IMAGE_RETENTION_HOURS,
       planModeEnabled,
       closeToTray,
+      theme,
     };
     const nextSettings = {
       ...currentSettings,
@@ -242,7 +254,7 @@ export function SettingsView() {
     };
 
     await window.electronAPI.saveData("settings", nextSettings);
-  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray]);
+  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray, theme]);
 
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
@@ -261,8 +273,22 @@ export function SettingsView() {
       imageRetentionHours: IMAGE_RETENTION_HOURS,
       planModeEnabled,
       closeToTray: enabled,
+      theme,
     });
     void window.electronAPI.setCloseToTray(enabled);
+  };
+
+  const updateTheme = (nextTheme: AppTheme) => {
+    setTheme(nextTheme);
+    applyAppTheme(nextTheme);
+    void window.electronAPI.setAppTheme(nextTheme);
+    void saveSettings(shortcuts, filters, {
+      tempImagePath,
+      imageRetentionHours: IMAGE_RETENTION_HOURS,
+      planModeEnabled,
+      closeToTray,
+      theme: nextTheme,
+    });
   };
 
   const updateTempImagePath = (nextPath: string) => {
@@ -272,6 +298,7 @@ export function SettingsView() {
       imageRetentionHours: IMAGE_RETENTION_HOURS,
       planModeEnabled,
       closeToTray,
+      theme,
     });
   };
 
@@ -559,6 +586,31 @@ export function SettingsView() {
               <button onClick={() => setShowGeneralModal(false)} className="settings-modal-close">×</button>
             </div>
             <div className="settings-modal-content">
+              <div className="settings-section">
+                <h3>主题</h3>
+                <div className="settings-theme-options" role="radiogroup" aria-label="主题">
+                  {THEME_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={theme === option.value}
+                      className={`settings-theme-option ${theme === option.value ? "selected" : ""}`}
+                      onClick={() => updateTheme(option.value)}
+                    >
+                      <span className={`settings-theme-preview ${option.value}`} aria-hidden="true">
+                        <span className="settings-theme-preview-rail" />
+                        <span className="settings-theme-preview-panel">
+                          <span className="settings-theme-preview-line wide" />
+                          <span className="settings-theme-preview-line" />
+                          <span className="settings-theme-preview-line short" />
+                        </span>
+                      </span>
+                      <span className="settings-theme-option-label">{option.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="settings-section">
                 <h3>窗口设置</h3>
                 <div className="filter-group">

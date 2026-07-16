@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">Hpp H plus plus icon concepts</title>
+  <desc id="desc">Four dark app icon concepts combining the letter H with two plus symbols.</desc>
+  <rect width="1200" height="340" fill="#151719"/>
+
+  <!-- A: literal H++ with compact spacing -->
+  <g transform="translate(30 30)">
+    <rect width="240" height="240" rx="58" fill="#202124" stroke="#3C4047" stroke-width="4"/>
+    <rect x="42" y="62" width="30" height="116" rx="15" fill="#4A9EFF"/>
+    <rect x="112" y="62" width="30" height="116" rx="15" fill="#4A9EFF"/>
+    <rect x="67" y="105" width="50" height="30" rx="15" fill="#4A9EFF"/>
+    <rect x="154" y="107" width="34" height="14" rx="7" fill="#34C78F"/>
+    <rect x="164" y="97" width="14" height="34" rx="7" fill="#34C78F"/>
+    <rect x="195" y="107" width="34" height="14" rx="7" fill="#34C78F"/>
+    <rect x="205" y="97" width="14" height="34" rx="7" fill="#34C78F"/>
+  </g>
+
+  <!-- B: twin plus controls embedded in the right H pillar -->
+  <g transform="translate(330 30)">
+    <rect width="240" height="240" rx="58" fill="#202124" stroke="#3C4047" stroke-width="4"/>
+    <rect x="56" y="52" width="34" height="136" rx="17" fill="#4A9EFF"/>
+    <rect x="150" y="52" width="34" height="136" rx="17" fill="#4A9EFF"/>
+    <rect x="84" y="103" width="72" height="34" rx="17" fill="#4A9EFF"/>
+    <rect x="137" y="75" width="60" height="16" rx="8" fill="#34C78F"/>
+    <rect x="159" y="53" width="16" height="60" rx="8" fill="#34C78F"/>
+    <rect x="137" y="149" width="60" height="16" rx="8" fill="#34C78F"/>
+    <rect x="159" y="127" width="16" height="60" rx="8" fill="#34C78F"/>
+  </g>
+
+  <!-- C: two plus nodes join the H bridge -->
+  <g transform="translate(630 30)">
+    <rect width="240" height="240" rx="58" fill="#202124" stroke="#3C4047" stroke-width="4"/>
+    <rect x="55" y="52" width="34" height="136" rx="17" fill="#4A9EFF"/>
+    <rect x="151" y="52" width="34" height="136" rx="17" fill="#4A9EFF"/>
+    <rect x="72" y="104" width="96" height="32" rx="16" fill="#34C78F"/>
+    <rect x="43" y="112" width="58" height="16" rx="8" fill="#34C78F"/>
+    <rect x="64" y="91" width="16" height="58" rx="8" fill="#34C78F"/>
+    <rect x="139" y="112" width="58" height="16" rx="8" fill="#34C78F"/>
+    <rect x="160" y="91" width="16" height="58" rx="8" fill="#34C78F"/>
+  </g>
+
+  <!-- D: one shared bridge makes two pluses and an H simultaneously -->
+  <g transform="translate(930 30)">
+    <rect width="240" height="240" rx="58" fill="#202124" stroke="#3C4047" stroke-width="4"/>
+    <rect x="58" y="48" width="36" height="144" rx="18" fill="#4A9EFF"/>
+    <rect x="146" y="48" width="36" height="144" rx="18" fill="#4A9EFF"/>
+    <rect x="36" y="102" width="168" height="36" rx="18" fill="#34C78F"/>
+    <circle cx="76" cy="120" r="10" fill="#B8F3DD"/>
+    <circle cx="164" cy="120" r="10" fill="#B8F3DD"/>
+  </g>
+
+  <g fill="#969696" font-family="Inter, Segoe UI, sans-serif" font-size="18" font-weight="600" text-anchor="middle">
+    <text x="150" y="310">A</text>
+    <text x="450" y="310">B</text>
+    <text x="750" y="310">C</text>
+    <text x="1050" y="310">D</text>
+  </g>
+</svg>

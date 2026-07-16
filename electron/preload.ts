@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   installAppUpdate: () => ipcRenderer.invoke("app:update:install"),
   getCloseToTray: () => ipcRenderer.invoke("app:getCloseToTray"),
   setCloseToTray: (enabled: boolean) => ipcRenderer.invoke("app:setCloseToTray", enabled),
+  setAppTheme: (theme: "system" | "light" | "dark") => ipcRenderer.invoke("app:setTheme", theme),
   showNotification: (options: { title?: string; body?: string }) =>
     ipcRenderer.invoke("app:showNotification", options),
 

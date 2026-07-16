@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
-import { Download, LoaderCircle, RotateCcw, X } from 'lucide-react'
+import { Copy, Download, LoaderCircle, Minus, RotateCcw, Square, X } from 'lucide-react'
 import type { AppUpdateStatus } from '@/types'
 import './TitleBar.css'
 
@@ -181,9 +181,7 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
           title="最小化"
           aria-label="最小化窗口"
         >
-          <svg width="12" height="12" viewBox="0 0 12 12">
-            <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />
-          </svg>
+          <Minus size={15} strokeWidth={1.5} />
         </button>
         <button
           className="titlebar-btn titlebar-btn-maximize"
@@ -192,14 +190,9 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
           aria-label={maximized ? '还原窗口' : '最大化窗口'}
         >
           {maximized ? (
-            <svg width="12" height="12" viewBox="0 0 12 12">
-              <rect x="3" y="3" width="6" height="6" fill="none" stroke="currentColor" strokeWidth="1" />
-              <rect x="1" y="5" width="6" height="6" fill="none" stroke="currentColor" strokeWidth="1" />
-            </svg>
+            <Copy size={13} strokeWidth={1.5} />
           ) : (
-            <svg width="12" height="12" viewBox="0 0 12 12">
-              <rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" />
-            </svg>
+            <Square size={12} strokeWidth={1.5} />
           )}
         </button>
         <button
@@ -208,10 +201,7 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
           title="关闭"
           aria-label="关闭窗口"
         >
-          <svg width="12" height="12" viewBox="0 0 12 12">
-            <line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" />
-            <line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.2" />
-          </svg>
+          <X size={15} strokeWidth={1.5} />
         </button>
       </div>
     </div>

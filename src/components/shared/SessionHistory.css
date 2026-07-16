@@ -314,3 +314,62 @@
 .session-btn.cancel:hover {
   background: #555;
 }
+
+:root[data-theme="light"] .session-modal-overlay,
+:root[data-theme="light"] .session-confirm-overlay {
+  background: var(--overlay-backdrop);
+}
+
+:root[data-theme="light"] .session-modal {
+  background: var(--bg-secondary);
+  border-color: var(--border-color);
+  box-shadow: 0 8px 32px var(--shadow-color);
+}
+
+:root[data-theme="light"] .session-modal-header,
+:root[data-theme="light"] .session-modal-tabs {
+  border-color: var(--border-color);
+}
+
+:root[data-theme="light"] .session-modal-title,
+:root[data-theme="light"] .session-modal-close:hover,
+:root[data-theme="light"] .session-tab:hover,
+:root[data-theme="light"] .session-tab.active,
+:root[data-theme="light"] .session-confirm-title {
+  color: var(--text-primary);
+}
+
+:root[data-theme="light"] .session-modal-close,
+:root[data-theme="light"] .session-tab,
+:root[data-theme="light"] .session-empty,
+:root[data-theme="light"] .session-time,
+:root[data-theme="light"] .session-preview,
+:root[data-theme="light"] .session-confirm-desc {
+  color: var(--text-secondary);
+}
+
+:root[data-theme="light"] .session-tab-count,
+:root[data-theme="light"] .session-btn.delete,
+:root[data-theme="light"] .session-btn.cancel {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+:root[data-theme="light"] .session-loading-item {
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-hover) 50%, var(--bg-tertiary) 75%);
+}
+
+:root[data-theme="light"] .session-item {
+  border-color: var(--border-color);
+}
+
+:root[data-theme="light"] .session-item:hover,
+:root[data-theme="light"] .session-btn.cancel:hover {
+  background: var(--bg-hover);
+}
+
+:root[data-theme="light"] .session-confirm {
+  background: var(--bg-secondary);
+  border-color: var(--border-color);
+  box-shadow: 0 4px 16px var(--shadow-color);
+}

@@ -660,6 +660,9 @@ function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; mani
 export class AgentPluginRegistry {
   private pluginRecords = new Map<string, PluginRecord>();
   private loaded = false;
+  private stopping = false;
+  private permanentShutdown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   async ensureLoaded() {
     if (this.loaded) return;
@@ -760,7 +763,9 @@ export class AgentPluginRegistry {
   }
 
   async getStatus(agentId: string): Promise<AgentPackageStatus> {
+    if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
     await this.ensureLoaded();
+    if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
     const record = this.pluginRecords.get(agentId);
     if (!record) {
       return {
@@ -772,8 +777,15 @@ export class AgentPluginRegistry {
     }
 
     const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
+    if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
     if (pluginProcess && record.processCapabilities?.getStatus) {
-      const status = await pluginProcess.call("getStatus") as Partial<AgentPackageStatus>;
+      let status: Partial<AgentPackageStatus>;
+      try {
+        status = await pluginProcess.call("getStatus") as Partial<AgentPackageStatus>;
+      } catch (error) {
+        if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
+        throw error;
+      }
       return {
         installed: status.installed !== false,
         updateAvailable: status.updateAvailable === true,
@@ -960,13 +972,41 @@ export class AgentPluginRegistry {
     }
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(permanent = false): Promise<void> {
+    if (permanent) this.permanentShutdown = true;
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.stopping = true;
     const records = Array.from(this.pluginRecords.values());
-    await Promise.allSettled(records.map(async (record) => {
+    this.shutdownPromise = Promise.allSettled(records.map(async (record) => {
       await record.process?.shutdown();
       record.process = undefined;
       record.processCapabilities = undefined;
-    }));
+    })).then(() => undefined).finally(() => {
+      if (!this.permanentShutdown) this.stopping = false;
+      this.shutdownPromise = null;
+    });
+    return this.shutdownPromise;
+  }
+
+  private getStoppedStatus(agentId: string): AgentPackageStatus {
+    const record = this.pluginRecords.get(agentId);
+    if (!record) {
+      return {
+        installed: false,
+        updateAvailable: false,
+        canUpdate: false,
+        error: `未安装 agent 插件：${agentId}`,
+      };
+    }
+    return {
+      installed: true,
+      currentVersion: record.descriptor.version,
+      updateAvailable: false,
+      canUpdate: false,
+      source: "plugin",
+      installedPath: record.pluginDir,
+      removable: true,
+    };
   }
 
   private async assertCanInstallDescriptor(descriptor: AgentDescriptor, options: InstallOptions) {
@@ -1027,6 +1067,7 @@ export class AgentPluginRegistry {
   }
 
   private async getPluginProcess(record: PluginRecord): Promise<AgentPluginProcess> {
+    if (this.stopping || this.permanentShutdown) throw new Error("Plugin registry is stopping.");
     if (!record.process) {
       const hostApi = this.createHostApi();
       record.process = new AgentPluginProcess(

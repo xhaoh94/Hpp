@@ -314,6 +314,40 @@ export function createAgentBackend(context) {
     expect(existsSync(join(installedDir, "disposed.marker"))).toBe(true);
   });
 
+  it("resolves status requests that are pending during final shutdown", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "status-shutdown-agent",
+      "1.0.0",
+      undefined,
+      `
+import { writeFile } from "node:fs/promises";
+${backendModule}
+export async function getStatus(context) {
+  await writeFile(context.pluginDir + "/status-started.marker", "started", "utf8");
+  await new Promise(() => {});
+}
+`,
+    );
+    await registry.installFromPath(source);
+    const installedDir = join(electronState.userDataDir, "hpp-data", "agent-plugins", "status-shutdown-agent");
+
+    const pendingStatus = registry.getStatus("status-shutdown-agent");
+    await vi.waitFor(() => expect(existsSync(join(installedDir, "status-started.marker"))).toBe(true));
+    await registry.shutdown(true);
+
+    await expect(pendingStatus).resolves.toMatchObject({
+      installed: true,
+      currentVersion: "1.0.0",
+      updateAvailable: false,
+    });
+    await expect(registry.getStatus("status-shutdown-agent")).resolves.toMatchObject({
+      installed: true,
+      currentVersion: "1.0.0",
+      updateAvailable: false,
+    });
+  });
+
   it("notifies sessions when the plugin host crashes", async () => {
     const source = await createPluginSource(
       tempRoot,

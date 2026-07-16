@@ -175,6 +175,7 @@ export interface ElectronAPI {
   installAppUpdate: () => Promise<AppUpdateResult>;
   getCloseToTray: () => Promise<boolean>;
   setCloseToTray: (enabled: boolean) => Promise<{ success: boolean }>;
+  setAppTheme: (theme: "system" | "light" | "dark") => Promise<{ success: boolean }>;
   showNotification: (options: { title?: string; body?: string }) => Promise<{ success: boolean; error?: string }>;
 
   // File system

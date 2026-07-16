@@ -1,10 +1,60 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, win32 } from "node:path";
 import { spawn } from "node:child_process";
 
 const PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const MIN_NODE_VERSION = "22.19.0";
 let updateInProgress = false;
+
+const getPathValue = (env) => {
+  const key = Object.keys(env).find((name) => name.toLowerCase() === "path") || "PATH";
+  return env[key] || "";
+};
+
+const findWindowsCommands = (command, env) => {
+  if (isAbsolute(command) || command.includes("/") || command.includes("\\")) {
+    return existsSync(command) ? [command] : [];
+  }
+  const extensions = [...new Set([
+    ...(env.PATHEXT || "").split(";").map((value) => value.trim().toLowerCase()).filter(Boolean),
+    ".exe",
+    ".cmd",
+    ".bat",
+  ])];
+  const results = [];
+  const seen = new Set();
+  for (const directory of getPathValue(env).split(delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = win32.join(directory, `${command}${extension}`);
+      const key = candidate.toLowerCase();
+      if (seen.has(key) || !existsSync(candidate)) continue;
+      seen.add(key);
+      results.push(candidate);
+    }
+  }
+  return results;
+};
+
+export const resolveRuntimeCommand = (command, args, env = process.env, platform = process.platform) => {
+  if (platform !== "win32") return { command, args };
+  const candidates = findWindowsCommands(command, env);
+  if (command.toLowerCase() === "npm") {
+    for (const npmCommand of candidates) {
+      const npmCli = join(dirname(npmCommand), "node_modules", "npm", "bin", "npm-cli.js");
+      if (!existsSync(npmCli)) continue;
+      const siblingNode = join(dirname(npmCommand), "node.exe");
+      const nodeCommand = existsSync(siblingNode)
+        ? siblingNode
+        : findWindowsCommands("node", env).find((candidate) => candidate.toLowerCase().endsWith(".exe"));
+      if (nodeCommand) return { command: nodeCommand, args: [npmCli, ...args] };
+    }
+    throw new Error("npm is not available as a direct Node.js invocation.");
+  }
+  const executable = candidates.find((candidate) => candidate.toLowerCase().endsWith(".exe"));
+  if (!executable) throw new Error(`${command} executable was not found.`);
+  return { command: executable, args };
+};
 
 const getRuntimeRoot = (context) => join(context.dataDir, "pi-sdk-runtime");
 const getPackagePath = (context) => join(
@@ -16,10 +66,16 @@ const getPackagePath = (context) => join(
 );
 
 const run = (command, args, options = {}) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, {
+  let invocation;
+  try {
+    invocation = resolveRuntimeCommand(command, args);
+  } catch (error) {
+    reject(error);
+    return;
+  }
+  const child = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,
     windowsHide: true,
-    shell: process.platform === "win32",
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";

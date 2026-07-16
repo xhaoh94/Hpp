@@ -56,6 +56,7 @@ export class AgentPluginProcess {
   ) {}
 
   async ensureLoaded(): Promise<PluginHostCapabilities> {
+    if (this.stopping || this.shutdownPromise) throw new Error("Plugin host stopped.");
     if (this.terminalError) throw this.terminalError;
     if (!this.loadPromise) this.loadPromise = this.start();
     return this.loadPromise;
@@ -172,7 +173,9 @@ export class AgentPluginProcess {
       if (this.child !== child) return;
       this.child = null;
       this.loadPromise = null;
-      const error = new Error(`Plugin host exited (${code ?? signal ?? "unknown"}).`);
+      const error = this.stopping
+        ? new Error("Plugin host stopped.")
+        : new Error(`Plugin host exited (${code ?? signal ?? "unknown"}).`);
       if (!this.stopping) this.terminalError = error;
       this.rejectPending(error);
       if (!this.stopping) {

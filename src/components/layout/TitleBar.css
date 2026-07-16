@@ -2,8 +2,8 @@
   display: flex;
   align-items: center;
   height: 32px;
-  background: #1e1e1e;
-  border-bottom: 1px solid #333;
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--border-color);
   user-select: none;
   flex-shrink: 0;
 }
@@ -20,7 +20,7 @@
 
 .titlebar-title {
   font-size: 12px;
-  color: #999;
+  color: var(--text-secondary);
   letter-spacing: 0.3px;
 }
 
@@ -93,11 +93,11 @@
   gap: 10px;
   width: 238px;
   padding: 12px;
-  border: 1px solid #333b46;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: #202327;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
-  color: #d7dde5;
+  background: var(--bg-secondary);
+  box-shadow: 0 14px 38px var(--shadow-color);
+  color: var(--text-primary);
   cursor: default;
 }
 
@@ -108,9 +108,9 @@
   left: 11px;
   width: 10px;
   height: 10px;
-  border-left: 1px solid #333b46;
-  border-top: 1px solid #333b46;
-  background: #202327;
+  border-left: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
   transform: rotate(45deg);
 }
 
@@ -124,7 +124,7 @@
 .titlebar-update-popover-title {
   font-size: 12px;
   font-weight: 600;
-  color: #f0f4f8;
+  color: var(--text-primary);
 }
 
 .titlebar-update-popover-close {
@@ -137,19 +137,19 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #8c96a3;
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
 .titlebar-update-popover-close:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #f2f5f8;
+  background: var(--surface-muted);
+  color: var(--text-primary);
 }
 
 .titlebar-update-popover-body {
   font-size: 12px;
   line-height: 1.5;
-  color: #b9c2cc;
+  color: var(--text-secondary);
 }
 
 .titlebar-update-popover-actions {
@@ -162,18 +162,18 @@
 .titlebar-update-popover-actions button {
   height: 26px;
   padding: 0 10px;
-  border: 1px solid #3a414a;
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #282c31;
-  color: #cfd6de;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
   font-size: 12px;
   cursor: pointer;
 }
 
 .titlebar-update-popover-actions button:hover:not(:disabled) {
-  border-color: #4b5561;
-  background: #30353b;
-  color: #f0f4f8;
+  border-color: color-mix(in srgb, var(--border-color) 55%, var(--text-secondary));
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .titlebar-update-popover-actions button.primary {
@@ -210,25 +210,55 @@
   align-items: center;
   justify-content: center;
   width: 46px;
+  min-width: 46px;
   height: 100%;
+  padding: 0;
   background: transparent;
   border: none;
-  color: #999;
+  color: color-mix(in srgb, var(--text-primary) 88%, transparent);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
   outline: none;
 }
 
 .titlebar-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  background: var(--surface-strong);
+  color: var(--text-primary);
+}
+
+.titlebar-btn:active {
+  background: color-mix(in srgb, var(--surface-strong) 72%, var(--text-primary));
 }
 
 .titlebar-btn-close:hover {
-  background: #e81123;
+  background: #c42b1c;
+  color: #fff;
+}
+
+.titlebar-btn-close:active {
+  background: #a52317;
   color: #fff;
 }
 
 .titlebar-btn svg {
   display: block;
+  flex: 0 0 auto;
+}
+
+:root[data-theme="light"] .titlebar-update-btn {
+  border-color: rgba(9, 105, 218, 0.28);
+  background: rgba(9, 105, 218, 0.08);
+  color: #0969da;
+}
+
+:root[data-theme="light"] .titlebar-update-btn:hover:not(:disabled),
+:root[data-theme="light"] .titlebar-update-btn.active {
+  border-color: rgba(9, 105, 218, 0.46);
+  background: rgba(9, 105, 218, 0.14);
+  color: #0550ae;
+}
+
+:root[data-theme="light"] .titlebar-update-popover-actions button.primary,
+:root[data-theme="light"] .titlebar-update-popover-actions button.primary:hover:not(:disabled) {
+  color: #0969da;
 }

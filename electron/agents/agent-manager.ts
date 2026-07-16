@@ -557,7 +557,7 @@ async function activateProviderAndReload(agentId: string, providerId: string) {
 
 export async function shutdownAgentRuntime(): Promise<void> {
   await agentManager.shutdown();
-  await agentRegistry.shutdown();
+  await agentRegistry.shutdown(true);
 }
 
 // ============================================================

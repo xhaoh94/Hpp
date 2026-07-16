@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, Notification, Tray } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, Tray } from "electron";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
@@ -25,7 +25,7 @@ if (process.platform === "linux") {
 // Set app name
 app.setName("hpp");
 if (process.platform === "win32") {
-  app.setAppUserModelId("com.hpp.app");
+  app.setAppUserModelId(is.dev ? "com.hpp.app.dev" : "com.hpp.app");
 }
 
 const DEFAULT_CLOSE_TO_TRAY = true;
@@ -33,6 +33,9 @@ const DEFAULT_CLOSE_TO_TRAY = true;
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let closeToTray = DEFAULT_CLOSE_TO_TRAY;
+type WindowTheme = "system" | "light" | "dark";
+
+let windowTheme: WindowTheme = "dark";
 let isQuitting = false;
 let updaterInitialized = false;
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -67,12 +70,18 @@ async function loadCloseToTraySetting() {
   try {
     const settingsPath = join(app.getPath("userData"), "hpp-data", "settings.json");
     const content = await readFile(settingsPath, "utf-8");
-    const settings = JSON.parse(content) as { general?: { closeToTray?: unknown } };
+    const settings = JSON.parse(content) as { general?: { closeToTray?: unknown; theme?: unknown } };
     closeToTray = typeof settings.general?.closeToTray === "boolean"
       ? settings.general.closeToTray
       : DEFAULT_CLOSE_TO_TRAY;
+    windowTheme = settings.general?.theme === "system" || settings.general?.theme === "light"
+      ? settings.general.theme
+      : "dark";
+    nativeTheme.themeSource = windowTheme;
   } catch {
     closeToTray = DEFAULT_CLOSE_TO_TRAY;
+    windowTheme = "dark";
+    nativeTheme.themeSource = windowTheme;
   }
 }
 
@@ -309,7 +318,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: "#1e1e1e",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#f7f7f8",
     title: "Hpp",
     icon: iconPath,
     frame: false,
@@ -409,6 +418,12 @@ ipcMain.handle("app:update:install", () => installAppUpdate());
 ipcMain.handle("app:getCloseToTray", () => closeToTray);
 ipcMain.handle("app:setCloseToTray", (_event, enabled: boolean) => {
   closeToTray = enabled;
+  return { success: true };
+});
+ipcMain.handle("app:setTheme", (_event, theme: unknown) => {
+  windowTheme = theme === "system" || theme === "light" ? theme : "dark";
+  nativeTheme.themeSource = windowTheme;
+  mainWindow?.setBackgroundColor(nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#f7f7f8");
   return { success: true };
 });
 ipcMain.handle("app:showNotification", (_event, options: { title?: string; body?: string }) => {

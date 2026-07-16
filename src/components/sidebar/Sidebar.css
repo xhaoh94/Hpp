@@ -489,7 +489,7 @@
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 8px 24px var(--shadow-color);
 }
 
 .project-agent-menu-item {
@@ -586,4 +586,17 @@
   position: absolute;
   top: 8px;
   right: 40px;
+}
+
+:root[data-theme="light"] .terminal-child-agent-badge,
+:root[data-theme="light"] .project-terminal-btn {
+  border-color: var(--border-color);
+}
+
+:root[data-theme="light"] .terminal-child-close:hover {
+  background-color: var(--surface-muted);
+}
+
+:root[data-theme="light"] .project-terminal-child.active .terminal-child-close:hover {
+  background-color: var(--surface-inset);
 }
