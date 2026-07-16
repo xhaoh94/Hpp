@@ -26,7 +26,13 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@aparajita/capacitor-secure-storage": "^8.0.0",
+    "@capacitor-mlkit/barcode-scanning": "^8.1.0",
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/app": "^8.0.1",
+    "@capacitor/camera": "^8.2.1",
     "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
     "@tailwindcss/vite": "^4.3.1",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^26.0.0",
@@ -43,12 +49,6 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@aparajita/capacitor-secure-storage": "^8.0.0",
-    "@capacitor-mlkit/barcode-scanning": "^8.1.0",
-    "@capacitor/android": "^8.4.2",
-    "@capacitor/app": "^8.0.1",
-    "@capacitor/camera": "^8.2.1",
-    "@capacitor/core": "^8.4.2",
     "@electron-toolkit/utils": "^4.0.0",
     "adm-zip": "^0.5.18",
     "electron-updater": "^6.8.9",
@@ -96,7 +96,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     }
   },
   "allowScripts": {
