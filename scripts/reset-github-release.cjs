@@ -79,6 +79,27 @@ function uploadFile(uploadUrl, filePath, contentType) {
 }
 
 async function main() {
+  const pluginAssets = readdirSync(resolve("release/agent-plugins"), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => [
+      `release/agent-plugins/${entry.name}`,
+      entry.name.endsWith(".zip") ? "application/zip" : "application/json",
+  ]);
+  const assets = [
+    [`release/hpp-Setup-${version}.exe`, "application/vnd.microsoft.portable-executable"],
+    [`release/hpp-Setup-${version}.exe.blockmap`, "application/octet-stream"],
+    ["release/latest.yml", "text/yaml"],
+    ["release/Hpp-Android.apk", "application/vnd.android.package-archive"],
+    ["release/android-latest.json", "application/json"],
+    ...pluginAssets,
+  ];
+  const preparedAssets = assets.map(([relativePath, contentType]) => {
+    const filePath = resolve(relativePath);
+    return { filePath, contentType, size: statSync(filePath).size };
+  });
+  console.log(`Validated ${preparedAssets.length} local release assets`);
+
   const releases = await requestJson("GET", `/repos/${owner}/${repo}/releases?per_page=100`);
   const existingRelease = releases.find((release) => release.tag_name === tag);
   if (existingRelease) {
@@ -116,25 +137,8 @@ async function main() {
     make_latest: "true",
   });
 
-  const pluginAssets = readdirSync(resolve("release/agent-plugins"), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => [
-      `release/agent-plugins/${entry.name}`,
-      entry.name.endsWith(".zip") ? "application/zip" : "application/json",
-  ]);
-  const assets = [
-    [`release/hpp-Setup-${version}.exe`, "application/vnd.microsoft.portable-executable"],
-    [`release/hpp-Setup-${version}.exe.blockmap`, "application/octet-stream"],
-    ["release/latest.yml", "text/yaml"],
-    ["release/Hpp-Android.apk", "application/vnd.android.package-archive"],
-    ["release/android-latest.json", "application/json"],
-    ...pluginAssets,
-  ];
-
-  for (const [relativePath, contentType] of assets) {
-    const filePath = resolve(relativePath);
-    console.log(`Streaming ${basename(filePath)} (${statSync(filePath).size} bytes)`);
+  for (const { filePath, contentType, size } of preparedAssets) {
+    console.log(`Streaming ${basename(filePath)} (${size} bytes)`);
     await uploadFile(release.upload_url, filePath, contentType);
   }
 
