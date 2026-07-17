@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { App as CapacitorApp } from "@capacitor/app";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { BarcodeFormat, BarcodeScanner } from "@capacitor-mlkit/barcode-scanning";
 import {
   ArrowLeft,
@@ -102,6 +102,15 @@ import {
 } from "./storage";
 import { copyText, createClientId } from "./web-platform";
 import { getComposerAction } from "./composer";
+import { HppUpdater } from "./android-updater";
+import {
+  ANDROID_UPDATE_METADATA_URL,
+  getAndroidUpdateErrorMessage,
+  isAndroidUpdateAvailable,
+  parseAndroidUpdateMetadata,
+  type AndroidUpdateMetadata,
+} from "./updater";
+import mobilePackage from "../package.json";
 
 type SessionPage = {
   sessionId: string;
@@ -114,6 +123,15 @@ type SessionPage = {
 };
 
 type PairingMode = "closed" | "manual";
+type AndroidUpdateStage =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "permission"
+  | "installing"
+  | "up-to-date"
+  | "error";
 
 const IS_NATIVE_APP = Capacitor.isNativePlatform();
 const DEMO_SESSION_ID = "demo-session";
@@ -713,8 +731,113 @@ function Questionnaire({
   );
 }
 
+function AndroidUpdateDialog({
+  open,
+  currentVersion,
+  metadata,
+  stage,
+  progress,
+  error,
+  onClose,
+  onPrimary,
+}: {
+  open: boolean;
+  currentVersion: string;
+  metadata: AndroidUpdateMetadata | null;
+  stage: AndroidUpdateStage;
+  progress: number;
+  error: string;
+  onClose: () => void;
+  onPrimary: () => void;
+}) {
+  if (!open) return null;
+  const busy = stage === "checking" || stage === "downloading";
+  const title = stage === "up-to-date"
+    ? "已是最新版本"
+    : stage === "error" && !metadata
+      ? "检查更新失败"
+      : metadata
+        ? `发现 Hpp ${metadata.version}`
+        : "检查 Android 更新";
+  const primaryLabel = stage === "checking"
+    ? "正在检查"
+    : stage === "downloading"
+      ? progress >= 0 ? `下载中 ${progress}%` : "正在下载"
+      : stage === "permission"
+        ? "允许安装更新"
+        : stage === "installing"
+          ? "重新打开安装器"
+          : stage === "up-to-date"
+            ? "重新检查"
+            : stage === "error" && !metadata
+              ? "重试"
+              : stage === "error"
+                ? "重新下载"
+                : "下载并安装";
+
+  return (
+    <div
+      className="sheet-backdrop android-update-backdrop"
+      role="presentation"
+      onClick={() => { if (!busy) onClose(); }}
+    >
+      <section
+        className="android-update-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="android-update-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="android-update-header">
+          <span className="android-update-icon"><Smartphone size={19} /></span>
+          <div>
+            <h2 id="android-update-title">{title}</h2>
+            <p>当前版本 v{currentVersion}</p>
+          </div>
+          <button type="button" className="icon-button" disabled={busy} onClick={onClose} title="关闭"><X size={18} /></button>
+        </header>
+        <div className="android-update-body">
+          {metadata && stage !== "up-to-date" && (
+            <div className="android-update-version">
+              <span>可用版本</span>
+              <strong>v{metadata.version}</strong>
+            </div>
+          )}
+          {stage === "checking" && <p className="android-update-status"><LoaderCircle className="spin" size={16} />正在获取最新版本信息</p>}
+          {stage === "downloading" && (
+            <div className="android-update-progress">
+              <div><span>正在下载安装包</span><strong>{progress >= 0 ? `${progress}%` : "下载中"}</strong></div>
+              <span className={progress < 0 ? "indeterminate" : ""}>
+                <i style={progress >= 0 ? { width: `${progress}%` } : undefined} />
+              </span>
+            </div>
+          )}
+          {stage === "permission" && (
+            <p className="android-update-notice">Android 需要先允许 Hpp 安装未知应用。授权后返回 Hpp，会自动继续打开系统安装器。</p>
+          )}
+          {stage === "installing" && (
+            <p className="android-update-notice">系统安装界面已打开，请确认安装。若没有显示，可以重新打开安装器。</p>
+          )}
+          {stage === "up-to-date" && <p className="android-update-notice">当前安装的 Hpp 已经是最新版本。</p>}
+          {error && <p className="android-update-error" role="alert">{error}</p>}
+          {metadata && stage !== "up-to-date" && (
+            <p className="android-update-security">安装包下载完成后会校验 SHA-256，再交给 Android 系统安装器。</p>
+          )}
+        </div>
+        <footer className="android-update-actions">
+          <button type="button" className="secondary-command" disabled={busy} onClick={onClose}>稍后</button>
+          <button type="button" className="primary-command" disabled={busy} onClick={onPrimary}>
+            {busy && <LoaderCircle className="spin" size={16} />}{primaryLabel}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
-  const demoMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("demo");
+  const demoVariant = import.meta.env.DEV ? new URLSearchParams(window.location.search).get("demo") : null;
+  const demoMode = demoVariant !== null;
   const [hosts, setHosts] = useState<PairedHost[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
   const [hostAvailability, setHostAvailability] = useState<Record<string, HostAvailability>>({});
@@ -755,6 +878,12 @@ export default function App() {
   const [showReturnToBottom, setShowReturnToBottom] = useState(false);
   const [error, setError] = useState("");
   const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);
+  const [appVersion, setAppVersion] = useState(mobilePackage.version);
+  const [updateMetadata, setUpdateMetadata] = useState<AndroidUpdateMetadata | null>(null);
+  const [updateStage, setUpdateStage] = useState<AndroidUpdateStage>("idle");
+  const [updateProgress, setUpdateProgress] = useState(-1);
+  const [updateError, setUpdateError] = useState("");
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const clientRef = useRef<RemoteClient | null>(null);
   const selectedSessionRef = useRef<string | null>(null);
   const projectsRef = useRef<RemoteProject[]>([]);
@@ -774,6 +903,10 @@ export default function App() {
   const loadedDraftKeyRef = useRef<string | null>(null);
   const draftValueRef = useRef({ text: "", referenceSessionIds: [] as string[] });
   const autoConnectAttemptedRef = useRef(false);
+  const updateMetadataRef = useRef<AndroidUpdateMetadata | null>(null);
+  const updateCheckInFlightRef = useRef(false);
+  const dismissedUpdateVersionRef = useRef<number | null>(null);
+  const awaitingInstallPermissionRef = useRef(false);
   const incomingWebPairingRef = useRef(
     !IS_NATIVE_APP ? new URLSearchParams(window.location.search).get("pair") : null,
   );
@@ -796,8 +929,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const demo = import.meta.env.DEV ? new URLSearchParams(window.location.search).get("demo") : null;
-    if (demo) {
+    if (demoVariant) {
+      if (demoVariant === "hosts" || demoVariant === "update") {
+        setHostsLoaded(true);
+        setHosts([DEMO_HOST]);
+        setHostAvailability({ [DEMO_HOST.id]: "online" });
+        if (demoVariant === "update") {
+          const previewMetadata: AndroidUpdateMetadata = {
+            version: "0.1.3",
+            versionCode: 103,
+            url: "https://github.com/xhaoh94/Hpp/releases/latest/download/Hpp-Android.apk",
+            sha256: "a".repeat(64),
+            publishedAt: new Date().toISOString(),
+          };
+          updateMetadataRef.current = previewMetadata;
+          setUpdateMetadata(previewMetadata);
+          setUpdateStage("available");
+          setUpdateDialogOpen(true);
+        }
+        return;
+      }
       setHostsLoaded(true);
       setActiveHost(DEMO_HOST);
       setConnectionState("connected");
@@ -843,7 +994,7 @@ export default function App() {
         "demo-session-2": DEMO_CONFIG,
         "demo-session-3": DEMO_CONFIG,
       });
-      if (demo === "question") {
+      if (demoVariant === "question") {
         setInteractions({
           [DEMO_SESSION_ID]: {
             sessionId: DEMO_SESSION_ID,
@@ -857,7 +1008,7 @@ export default function App() {
             }],
           },
         });
-      } else if (demo === "create") {
+      } else if (demoVariant === "create") {
         setDrawerOpen(true);
         setCreateProject(DEMO_PROJECTS[0]);
         setCreateAgentId(DEMO_AGENTS[0].id);
@@ -873,7 +1024,7 @@ export default function App() {
       setError(err instanceof Error ? err.message : String(err));
       setHostsLoaded(true);
     });
-  }, []);
+  }, [demoVariant]);
 
   useEffect(() => {
     const textarea = composerRef.current;
@@ -893,6 +1044,163 @@ export default function App() {
 
   useEffect(() => () => {
     if (floatingToastTimerRef.current) clearTimeout(floatingToastTimerRef.current);
+  }, []);
+
+  const checkAndroidUpdate = useCallback(async (manual: boolean) => {
+    if (!IS_NATIVE_APP) return;
+    if (updateCheckInFlightRef.current) {
+      if (manual) setUpdateDialogOpen(true);
+      return;
+    }
+    updateCheckInFlightRef.current = true;
+    setUpdateStage("checking");
+    setUpdateError("");
+    if (manual) setUpdateDialogOpen(true);
+    try {
+      const info = await CapacitorApp.getInfo();
+      setAppVersion(info.version || mobilePackage.version);
+      const separator = ANDROID_UPDATE_METADATA_URL.includes("?") ? "&" : "?";
+      const response = await CapacitorHttp.get({
+        url: `${ANDROID_UPDATE_METADATA_URL}${separator}t=${Date.now()}`,
+        headers: {
+          Accept: "application/json",
+          "Cache-Control": "no-cache",
+        },
+        connectTimeout: 12_000,
+        readTimeout: 12_000,
+      });
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`UPDATE_CHECK_HTTP_${response.status}`);
+      }
+      const metadata = parseAndroidUpdateMetadata(response.data);
+      if (isAndroidUpdateAvailable(info.build, metadata)) {
+        updateMetadataRef.current = metadata;
+        setUpdateMetadata(metadata);
+        setUpdateStage("available");
+        if (manual || dismissedUpdateVersionRef.current !== metadata.versionCode) {
+          setUpdateDialogOpen(true);
+        }
+      } else {
+        updateMetadataRef.current = null;
+        setUpdateMetadata(null);
+        setUpdateStage(manual ? "up-to-date" : "idle");
+      }
+    } catch (updateFailure) {
+      const message = getAndroidUpdateErrorMessage(updateFailure);
+      if (manual) {
+        updateMetadataRef.current = null;
+        setUpdateMetadata(null);
+        setUpdateError(message);
+        setUpdateStage("error");
+        setUpdateDialogOpen(true);
+      } else {
+        setUpdateStage("idle");
+        console.warn("[android-updater] automatic check failed", updateFailure);
+      }
+    } finally {
+      updateCheckInFlightRef.current = false;
+    }
+  }, []);
+
+  const continueDownloadedInstall = useCallback(async () => {
+    const metadata = updateMetadataRef.current;
+    if (!metadata) return;
+    setUpdateError("");
+    setUpdateStage("installing");
+    setUpdateDialogOpen(true);
+    try {
+      const result = await HppUpdater.installDownloaded({ sha256: metadata.sha256 });
+      if (result.status === "permission-required") {
+        setUpdateStage("permission");
+        setUpdateError("尚未允许 Hpp 安装未知应用，请授权后重试");
+        return;
+      }
+      dismissedUpdateVersionRef.current = metadata.versionCode;
+      setUpdateStage("installing");
+    } catch (installFailure) {
+      setUpdateError(getAndroidUpdateErrorMessage(installFailure));
+      setUpdateStage("error");
+    }
+  }, []);
+
+  const requestInstallPermission = useCallback(async () => {
+    if (!updateMetadataRef.current) return;
+    setUpdateError("");
+    try {
+      awaitingInstallPermissionRef.current = true;
+      const result = await HppUpdater.requestInstallPermission();
+      if (!result.opened) {
+        awaitingInstallPermissionRef.current = false;
+        await continueDownloadedInstall();
+      }
+    } catch (permissionFailure) {
+      awaitingInstallPermissionRef.current = false;
+      setUpdateError(getAndroidUpdateErrorMessage(permissionFailure));
+      setUpdateStage("permission");
+    }
+  }, [continueDownloadedInstall]);
+
+  const downloadAndroidUpdate = useCallback(async () => {
+    const metadata = updateMetadataRef.current;
+    if (!metadata) {
+      await checkAndroidUpdate(true);
+      return;
+    }
+    setUpdateProgress(0);
+    setUpdateError("");
+    setUpdateStage("downloading");
+    setUpdateDialogOpen(true);
+    try {
+      const result = await HppUpdater.downloadAndInstall({
+        url: metadata.url,
+        sha256: metadata.sha256,
+      });
+      if (result.status === "permission-required") {
+        setUpdateStage("permission");
+        return;
+      }
+      dismissedUpdateVersionRef.current = metadata.versionCode;
+      setUpdateStage("installing");
+    } catch (downloadFailure) {
+      setUpdateError(getAndroidUpdateErrorMessage(downloadFailure));
+      setUpdateStage("error");
+    }
+  }, [checkAndroidUpdate]);
+
+  const closeUpdateDialog = useCallback(() => {
+    const metadata = updateMetadataRef.current;
+    if (metadata) dismissedUpdateVersionRef.current = metadata.versionCode;
+    setUpdateDialogOpen(false);
+  }, []);
+
+  const handleUpdatePrimary = useCallback(() => {
+    if (updateStage === "permission") {
+      void requestInstallPermission();
+      return;
+    }
+    if (updateStage === "installing") {
+      void continueDownloadedInstall();
+      return;
+    }
+    if (updateStage === "up-to-date" || (updateStage === "error" && !updateMetadataRef.current)) {
+      void checkAndroidUpdate(true);
+      return;
+    }
+    void downloadAndroidUpdate();
+  }, [checkAndroidUpdate, continueDownloadedInstall, downloadAndroidUpdate, requestInstallPermission, updateStage]);
+
+  useEffect(() => {
+    if (demoMode || !IS_NATIVE_APP) return;
+    void checkAndroidUpdate(false);
+  }, [checkAndroidUpdate, demoMode]);
+
+  useEffect(() => {
+    if (!IS_NATIVE_APP) return;
+    let listener: { remove: () => Promise<void> } | undefined;
+    void HppUpdater.addListener("downloadProgress", ({ progress }) => {
+      setUpdateProgress(progress);
+    }).then((handle) => { listener = handle; });
+    return () => { void listener?.remove(); };
   }, []);
 
   const updateHosts = useCallback(async (next: PairedHost[]) => {
@@ -1061,11 +1369,20 @@ export default function App() {
   useEffect(() => {
     let listener: { remove: () => Promise<void> } | undefined;
     void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
-      if (isActive) void clientRef.current?.connect();
-      else flushCurrentDraft();
+      if (isActive) {
+        void clientRef.current?.connect();
+        if (awaitingInstallPermissionRef.current) {
+          awaitingInstallPermissionRef.current = false;
+          void continueDownloadedInstall();
+        } else {
+          void checkAndroidUpdate(false);
+        }
+      } else {
+        flushCurrentDraft();
+      }
     }).then((handle) => { listener = handle; });
     return () => { void listener?.remove(); };
-  }, [flushCurrentDraft]);
+  }, [checkAndroidUpdate, continueDownloadedInstall, flushCurrentDraft]);
 
   useEffect(() => () => clientRef.current?.disconnect(), []);
 
@@ -1783,6 +2100,19 @@ export default function App() {
     if (activeHost?.id === host.id) connectHost(nextHost);
   };
 
+  const updateDialog = (
+    <AndroidUpdateDialog
+      open={updateDialogOpen}
+      currentVersion={appVersion}
+      metadata={updateMetadata}
+      stage={updateStage}
+      progress={updateProgress}
+      error={updateError}
+      onClose={closeUpdateDialog}
+      onPrimary={handleUpdatePrimary}
+    />
+  );
+
   if (!hostsLoaded) {
     return <div className="boot-screen"><LoaderCircle className="spin" size={28} /><span>正在打开 Hpp</span></div>;
   }
@@ -1877,6 +2207,23 @@ export default function App() {
             <button type="button" className="primary-command" onClick={() => setPairingMode("manual")}><Link2 size={18} /> 输入配对链接</button>
           )}
         </div>
+        <footer className="connections-footer">
+          {IS_NATIVE_APP ? (
+            <button
+              type="button"
+              className="app-version-button"
+              disabled={updateStage === "checking"}
+              onClick={() => void checkAndroidUpdate(true)}
+              title="检查 Android 更新"
+            >
+              <RefreshCw className={updateStage === "checking" ? "spin" : undefined} size={12} />
+              <span>Hpp v{appVersion}</span>
+              {updateMetadata && updateStage !== "up-to-date" && <small>有更新</small>}
+            </button>
+          ) : (
+            <span className="app-version-label">Hpp v{appVersion}</span>
+          )}
+        </footer>
         {pairingMode === "manual" && (
           <div className="sheet-backdrop" onClick={() => setPairingMode("closed")}>
             <section className="bottom-sheet" onClick={(event) => event.stopPropagation()}>
@@ -1889,6 +2236,7 @@ export default function App() {
             </section>
           </div>
         )}
+        {updateDialog}
       </main>
     );
   }
@@ -1928,6 +2276,8 @@ export default function App() {
           </span>
         </div>
       </header>
+
+      {updateDialog}
 
       {reloadConfirmOpen && selected && (
         <div className="sheet-backdrop session-reload-backdrop" onClick={() => { if (!reloadingSession) setReloadConfirmOpen(false); }}>

@@ -78,6 +78,14 @@ npm run mobile:release
 
 The release APK and update metadata are written to `release/v<version>/Hpp-Android.apk` and `release/v<version>/android-latest.json`. On the first release build, Hpp creates a persistent signing key under `%USERPROFILE%\.hpp\android-signing`. Back up that directory securely: every future Android update must be signed with the same key.
 
+## Android updates
+
+The Android app checks `android-latest.json` from the latest GitHub Release when it starts and whenever it returns to the foreground. It compares Android `versionCode`, not the display version string. When a newer build is available, Hpp downloads the APK, verifies its SHA-256 digest, and then opens the Android system installer. The version shown at the bottom of the desktop-host list can be tapped to check manually.
+
+Android may ask for permission to install unknown apps the first time. Grant the permission for Hpp and return to the app; installation will continue with the already verified APK. All update releases must use the same signing key and a higher `versionCode`.
+
+Builds released before the updater was included cannot discover the updater by themselves. Install the first updater-enabled APK manually once; later versions can use the in-app update flow.
+
 `mobile:sync` rebuilds the Web application and copies it into the native Android project. Run it after changing files under `mobile/src`.
 
 ## Security and storage
