@@ -1,4 +1,11 @@
 import { useState } from "react";
+import {
+  buildQuestionnaireAnswers,
+  getQuestionnaireAnswerLabel,
+  isQuestionnaireComplete,
+  type QuestionnaireOption,
+  type QuestionnaireQuestion,
+} from "@shared/questionnaire";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -13,21 +20,8 @@ const getStringField = (value: UnknownRecord, key: string): string | undefined =
   return typeof found === "string" ? found : undefined;
 };
 
-export type AskQuestionOption = {
-  label: string;
-  value?: string;
-  description?: string;
-  preview?: string;
-  hasPreview?: boolean;
-};
-
-export type AskQuestionPayload = {
-  id?: string;
-  question: string;
-  header?: string;
-  multiSelect?: boolean;
-  options?: AskQuestionOption[];
-};
+export type AskQuestionOption = QuestionnaireOption;
+export type AskQuestionPayload = QuestionnaireQuestion;
 
 const getNestedQuestionValue = (value: unknown, path: string[]): unknown => {
   let current: unknown = value;
@@ -195,13 +189,7 @@ export const normalizeAskQuestionsFromCandidates = (...values: unknown[]): AskQu
   return [];
 };
 
-export const getQuestionnaireAnswerLabel = (answer: unknown) => {
-  const raw = asRecord(answer);
-  if (typeof raw.label === "string") return raw.label;
-  if (typeof raw.answer === "string") return raw.answer;
-  if (Array.isArray(raw.selected)) return raw.selected.map(String).join(", ");
-  return "";
-};
+export { getQuestionnaireAnswerLabel };
 
 export function QuestionnairePanel({
   questions,
@@ -216,58 +204,13 @@ export function QuestionnairePanel({
   const [multiChoice, setMultiChoice] = useState<Record<number, string[]>>({});
   const [customText, setCustomText] = useState<Record<number, string>>({});
 
-  const buildAnswers = () => questions.map((question, questionIndex) => {
-    const custom = customText[questionIndex]?.trim();
-    if (custom) {
-      return {
-        id: question.id || `question-${questionIndex + 1}`,
-        questionIndex,
-        question: question.question,
-        kind: "custom",
-        answer: custom,
-        value: custom,
-        label: custom,
-        wasCustom: true,
-      };
-    }
-    if (question.multiSelect) {
-      const selectedLabels = multiChoice[questionIndex] || [];
-      const selectedOptions = (question.options || []).filter((option) => selectedLabels.includes(option.label));
-      return {
-        id: question.id || `question-${questionIndex + 1}`,
-        questionIndex,
-        question: question.question,
-        kind: "multi",
-        answer: null,
-        selected: selectedLabels,
-        selectedOptions,
-        values: selectedOptions.map((option) => option.value ?? option.label),
-      };
-    }
-    const selectedLabel = singleChoice[questionIndex] || null;
-    const selectedOption = selectedLabel
-      ? question.options?.find((option) => option.label === selectedLabel)
-      : undefined;
-    return {
-      id: question.id || `question-${questionIndex + 1}`,
-      questionIndex,
-      question: question.question,
-      kind: "option",
-      answer: selectedOption?.value ?? selectedLabel,
-      value: selectedOption?.value ?? selectedLabel,
-      label: selectedLabel,
-      wasCustom: false,
-      index: selectedOption ? (question.options || []).findIndex((option) => option.label === selectedOption.label) + 1 : undefined,
-      selectedOption,
-    };
-  });
-
-  const hasAnswer = questions.every((question, questionIndex) => {
-    if (customText[questionIndex]?.trim()) return true;
-    if (question.multiSelect) return (multiChoice[questionIndex] || []).length > 0;
-    if (!question.options || question.options.length === 0) return false;
-    return !!singleChoice[questionIndex];
-  });
+  const selections = Object.fromEntries(questions.map((question, questionIndex) => [
+    questionIndex,
+    question.multiSelect
+      ? multiChoice[questionIndex] || []
+      : singleChoice[questionIndex] ? [singleChoice[questionIndex]] : [],
+  ]));
+  const hasAnswer = isQuestionnaireComplete(questions, selections, customText);
 
   return (
     <div className="chat-questionnaire">
@@ -329,7 +272,7 @@ export function QuestionnairePanel({
         ))}
       </div>
       <div className="chat-questionnaire-actions">
-        <button type="button" onClick={() => onSubmit(buildAnswers())} disabled={!hasAnswer}>
+        <button type="button" onClick={() => onSubmit(buildQuestionnaireAnswers(questions, selections, customText))} disabled={!hasAnswer}>
           提交回答
         </button>
       </div>

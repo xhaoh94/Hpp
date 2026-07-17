@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef } from "react";
 import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import {
-  applySessionModels,
   getSessionModel,
   getSessionThinkingOrDefault,
   saveSessionModel,
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
+import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
 
@@ -24,12 +24,6 @@ const addAgentStartupError = (sessionId: string, error: unknown) => {
     timestamp: Date.now(),
     systemType: "agent_startup_error",
   }, sessionId);
-};
-
-const applyAndSyncSessionModel = async (sessionId: string, model: ModelInfo, setCurrentModel: (model: ModelInfo) => void) => {
-  saveSessionModel(sessionId, model);
-  setCurrentModel(model);
-  await window.electronAPI.agentSetModel(model.provider, model.id, sessionId);
 };
 
 type UseSessionModelsOptions = {
@@ -68,7 +62,7 @@ export function useSessionModels({
       if (!stillCurrent) return;
 
       try {
-        const models = await window.electronAPI.agentGetModels(sessionId);
+        const models = await SessionCommandCoordinator.getAvailableModels(sessionId);
         const stillCurrentAfterFetch =
           modelFetchRunIdRef.current === fetchRunId &&
           useProjectStore.getState().activeSessionId === sessionId;
@@ -77,7 +71,7 @@ export function useSessionModels({
         if (models && models.length > 0) {
           setAvailableModels(models);
           const selectedModel = selectSessionModel(sessionId, models);
-          if (selectedModel) await applyAndSyncSessionModel(sessionId, selectedModel, setCurrentModel);
+          if (selectedModel) await SessionCommandCoordinator.setModel(sessionId, selectedModel, { models });
           return;
         }
       } catch {
@@ -96,8 +90,15 @@ export function useSessionModels({
   useEffect(() => {
     const fetchRunId = ++modelFetchRunIdRef.current;
 
-    if (!activeSessionId || !activeSessionAgentId || !activeSessionInitialized) {
+    if (!activeSessionId || !activeSessionAgentId) {
       clearModels();
+      return;
+    }
+
+    if (!activeSessionInitialized) {
+      void SessionCommandCoordinator.initializeSession(activeSessionId, {
+        recordFailure: true,
+      });
       return;
     }
 
@@ -110,8 +111,7 @@ export function useSessionModels({
       ) {
         return;
       }
-      setThinkingLevel(thinkingToSet);
-      void window.electronAPI.agentSetThinkingLevel(thinkingToSet, activeSessionId);
+      void SessionCommandCoordinator.setThinking(activeSessionId, thinkingToSet).catch(() => undefined);
     });
   }, [
     activeSessionId,
@@ -131,51 +131,10 @@ export function useSessionModels({
     useChatStore.getState().setActiveAgent(session.agentId);
     useChatStore.getState().switchSession(session.id);
 
-    void window.electronAPI.agentCreateSession(
-      session.agentId,
-      project.path,
-      session.id,
-      session.sessionFilePath
-    ).then(async (result) => {
-      if (result.success) {
-        useChatStore.getState().clearAgentStartupErrors(session.id);
-      } else {
-        addAgentStartupError(session.id, result.error || "Agent 会话初始化失败");
-      }
-      if (result.sessionFilePath) {
-        useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
-      }
-      if (useProjectStore.getState().activeSessionId === session.id) {
-        applySessionModels(session.id, result.models);
-        if (result.models && result.models.length > 0) {
-          const selectedModel = selectSessionModel(session.id, result.models);
-          if (selectedModel) {
-            useChatStore.getState().setCurrentModel(selectedModel);
-            await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
-          }
-        }
-      }
-      useProjectStore.getState().markSessionInitialized(session.id);
-      if (useProjectStore.getState().activeSessionId === session.id) {
-        await window.electronAPI.agentSwitchSession(session.id);
-        try {
-          const models = await window.electronAPI.agentGetModels(session.id);
-          if (models && models.length > 0) {
-            useChatStore.getState().setAvailableModels(models);
-            const selectedModel = selectSessionModel(session.id, models);
-            if (selectedModel) {
-              useChatStore.getState().setCurrentModel(selectedModel);
-              await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
-            }
-          }
-        } catch {
-          // The active-session model effect will retry and show an empty list if needed.
-        }
-      }
-    }).catch((error: unknown) => {
-      useProjectStore.getState().markSessionInitialized(session.id);
-      addAgentStartupError(session.id, error);
-    });
+    void SessionCommandCoordinator.initializeSession(session.id, {
+      activate: true,
+      recordFailure: true,
+    }).catch((error: unknown) => addAgentStartupError(session.id, error));
   }, []);
 
   return { switchToSession };

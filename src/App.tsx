@@ -11,10 +11,10 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { ContentArea } from "./components/layout/ContentArea";
 import { ChatPanel } from "./components/layout/ChatPanel";
 import { FileSearch } from "./components/shared/FileSearch";
-import { saveSessionModel, useDataPersistence } from "./hooks/useDataPersistence";
+import { useDataPersistence } from "./hooks/useDataPersistence";
 import { DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useAppStore } from "./stores/app-store";
 import { useAgentCatalogStore } from "./stores/agent-catalog-store";
-import { useChatStore, type ModelInfo } from "./stores/chat-store";
+import { useChatStore } from "./stores/chat-store";
 import { useProjectStore } from "./stores/project-store";
 import {
   getFloatingToastText,
@@ -22,12 +22,10 @@ import {
   HPP_FLOATING_TOAST_EVENT,
   showFloatingToastMessage,
 } from "./lib/floating-toast";
-import { requiresProviderActivation } from "./lib/agents";
 import TitleBar from "./components/layout/TitleBar";
 import { CheckCircle2 } from "lucide-react";
-
-const isSameModel = (left: ModelInfo | null | undefined, right: ModelInfo | null | undefined) =>
-  !!left && !!right && left.id === right.id && left.provider === right.provider;
+import { isSameModel } from "@shared/models";
+import { SessionCommandCoordinator } from "./lib/session-command-coordinator";
 
 const ACTIVITY_BAR_WIDTH = 48;
 const SIDEBAR_COLLAPSE_THRESHOLD = 160;
@@ -125,14 +123,7 @@ export default function App() {
   }, [showFloatingToast]);
 
   const cycleModel = useCallback(async (direction: "prev" | "next") => {
-    const {
-      activeAgentId,
-      favoriteModels,
-      availableModels,
-      currentModel,
-      setAvailableModels,
-      setCurrentModel,
-    } = useChatStore.getState();
+    const { favoriteModels, availableModels, currentModel } = useChatStore.getState();
     const availableFavoriteModels = favoriteModels.filter((favorite) =>
       availableModels.some((model) => isSameModel(model, favorite))
     );
@@ -149,43 +140,12 @@ export default function App() {
 
     const projectState = useProjectStore.getState();
     const sessionId = projectState.activeSessionId;
-    const activeProject = projectState.projects.find((project) => project.id === projectState.activeProjectId);
-    const activeSession = activeProject?.sessions.find((session) => session.id === sessionId);
-    const agentId = activeSession?.agentId || activeAgentId;
-    const switchingProvider =
-      requiresProviderActivation(agentId) &&
-      !!currentModel &&
-      currentModel.provider !== nextModel.provider;
-
+    if (!sessionId) return;
+    const activeSession = projectState.projects.flatMap((project) => project.sessions)
+      .find((session) => session.id === sessionId);
     try {
-      if (switchingProvider) {
-        const currentSessionRunning = sessionId
-          ? projectState.agentStatuses[sessionId] === "running"
-          : useChatStore.getState().isStreaming;
-        if (currentSessionRunning) {
-          window.alert("切换 Agent 渠道需要等当前 Agent 运行结束后再操作。");
-          return;
-        }
-
-        const activateResult = await window.electronAPI.agentConfigActivate(agentId, nextModel.provider);
-        if (!activateResult.success) {
-          window.alert(activateResult.error || "切换 Agent 渠道失败，请稍后重试。");
-          return;
-        }
-        if (activateResult.models && activateResult.models.length > 0) {
-          setAvailableModels(activateResult.models);
-        }
-      }
-
-      const result = await window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId || undefined);
-      if (!result.success) {
-        console.error("[model] shortcut switch failed:", result.error || "Unknown error");
-        return;
-      }
-
-      if (sessionId) saveSessionModel(sessionId, nextModel);
-      setCurrentModel(nextModel);
-      showFloatingToastMessage(getModelSwitchToastText(agentId, nextModel.provider, nextModel.name || nextModel.id));
+      await SessionCommandCoordinator.setModel(sessionId, nextModel, { models: availableModels });
+      showFloatingToastMessage(getModelSwitchToastText(activeSession?.agentId || "agent", nextModel.provider, nextModel.name || nextModel.id));
     } catch (error) {
       console.error("[model] shortcut switch failed:", error);
     }

@@ -1,57 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, FileDiff as FileDiffIcon, Loader2, Undo2, X } from "lucide-react";
-import type { FileDiff } from "@/stores/chat-store";
+import { buildDiffSummary, type DiffFileSummary, type DiffLike } from "@shared/diff-summary";
 
 type DiffBlockProps = {
-  diffs: FileDiff[];
+  diffs: DiffLike[];
   projectPath?: string;
 };
 
-type DiffFileAccumulator = {
-  file: string;
-  patchAdditions: number;
-  patchDeletions: number;
-  metaAdditions: number;
-  metaDeletions: number;
-  patches: string[];
-  seenChanges: Set<string>;
-};
-
-type DiffFileSummary = {
-  file: string;
-  additions: number;
-  deletions: number;
-  patches: string[];
-};
-
 const DEFAULT_VISIBLE_FILES = 3;
-
-const isReversiblePatch = (patch: string) => {
-  const trimmed = patch.trim();
-  if (!trimmed) return false;
-  return /^diff --git\s+/m.test(trimmed) || (/^---\s+/m.test(trimmed) && /^\+\+\+\s+/m.test(trimmed));
-};
-
-const normalizeFilePath = (file: string) => file.replace(/\\/g, "/");
-
-const countPatchChanges = (patch: string) => ({
-  additions: (patch.match(/^\+[^+]/gm) || []).length,
-  deletions: (patch.match(/^-[^-]/gm) || []).length,
-});
-
-const toProjectRelativePath = (file: string, projectPath?: string) => {
-  const normalizedFile = normalizeFilePath(file);
-  const normalizedProject = projectPath ? normalizeFilePath(projectPath).replace(/\/+$/, "") : "";
-  if (!normalizedProject) return normalizedFile;
-
-  const fileKey = normalizedFile.toLowerCase();
-  const projectKey = normalizedProject.toLowerCase();
-  if (fileKey === projectKey) return normalizedFile.split("/").pop() || normalizedFile;
-  if (fileKey.startsWith(`${projectKey}/`)) {
-    return normalizedFile.slice(normalizedProject.length + 1);
-  }
-  return normalizedFile;
-};
 
 const renderDiffLines = (file: string, patches: string[]) =>
   patches.join("\n").split("\n").map((line, index) => {
@@ -69,59 +25,6 @@ const renderDiffLines = (file: string, patches: string[]) =>
       </span>
     );
   });
-
-const buildDiffSummary = (diffs: FileDiff[], projectPath?: string) => {
-  const byFile = new Map<string, DiffFileAccumulator>();
-
-  diffs.forEach((diff) => {
-    const file = toProjectRelativePath(diff.file || "未命名文件", projectPath);
-    const patch = typeof diff.patch === "string" ? diff.patch : "";
-    const trimmedPatch = patch.trim();
-    const countedPatch = trimmedPatch ? countPatchChanges(patch) : { additions: 0, deletions: 0 };
-    const changeKey = trimmedPatch
-      ? `patch:${patch}`
-      : `meta:${diff.status || "modified"}:${diff.additions || 0}:${diff.deletions || 0}`;
-    const existing = byFile.get(file) || {
-      file,
-      patchAdditions: 0,
-      patchDeletions: 0,
-      metaAdditions: 0,
-      metaDeletions: 0,
-      patches: [],
-      seenChanges: new Set<string>(),
-    };
-
-    if (!existing.seenChanges.has(changeKey)) {
-      existing.seenChanges.add(changeKey);
-      if (trimmedPatch) {
-        existing.patchAdditions += Math.max(0, diff.additions || countedPatch.additions || 0);
-        existing.patchDeletions += Math.max(0, diff.deletions || countedPatch.deletions || 0);
-        existing.patches.push(patch);
-      } else {
-        existing.metaAdditions = Math.max(existing.metaAdditions, Math.max(0, diff.additions || 0));
-        existing.metaDeletions = Math.max(existing.metaDeletions, Math.max(0, diff.deletions || 0));
-      }
-    }
-
-    byFile.set(file, existing);
-  });
-
-  const files = Array.from(byFile.values())
-    .map(({ seenChanges, patchAdditions, patchDeletions, metaAdditions, metaDeletions, ...file }) => ({
-      ...file,
-      additions: file.patches.length > 0 ? patchAdditions : metaAdditions,
-      deletions: file.patches.length > 0 ? patchDeletions : metaDeletions,
-    }))
-    .sort((a, b) => a.file.localeCompare(b.file));
-
-  return {
-    files,
-    totalAdditions: files.reduce((sum, file) => sum + file.additions, 0),
-    totalDeletions: files.reduce((sum, file) => sum + file.deletions, 0),
-    patchCount: files.reduce((sum, file) => sum + file.patches.length, 0),
-    reversiblePatches: files.flatMap((file) => file.patches).filter(isReversiblePatch),
-  };
-};
 
 export function DiffBlock({ diffs, projectPath }: DiffBlockProps) {
   const [expanded, setExpanded] = useState(false);

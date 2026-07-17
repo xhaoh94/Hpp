@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import type {
   AgentProcess,
   AgentProcessEntry,
@@ -22,6 +21,12 @@ import {
   createProcessEntryMerger,
   getProcessFileName,
 } from "./processEntryMerge";
+import {
+  groupProcessEntries,
+  getVisibleProcessEntries,
+  isProcessInterrupted,
+  splitCommandDetail,
+} from "@shared/process-view";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
 
@@ -182,19 +187,6 @@ function ProcessEntryFiles({
   );
 }
 
-const splitCommandDetail = (detail?: string, command?: string) => {
-  if (!detail) return { command: command || "", output: "" };
-  const lines = detail.split("\n");
-  const firstLine = lines[0] || "";
-  if (firstLine.startsWith("$ ")) {
-    return {
-      command: command || firstLine.slice(2).trim(),
-      output: lines.slice(1).join("\n").trim(),
-    };
-  }
-  return { command: command || "", output: detail.trim() };
-};
-
 const tryParseJson = (value: string): unknown | null => {
   const text = value.trim();
   if (!text || (!text.startsWith("{") && !text.startsWith("["))) return null;
@@ -271,7 +263,7 @@ function CommandDetail({
   const [outputExpanded, setOutputExpanded] = useState(false);
   const userToggledRef = useRef(false);
   const { command, output } = useMemo(
-    () => splitCommandDetail(entry.detail, entry.command),
+    () => splitCommandDetail(entry),
     [entry.detail, entry.command]
   );
   const outputLines = useMemo(() => output ? output.split("\n") : [], [output]);
@@ -445,42 +437,22 @@ function ProcessEntries({
   onOpenFile: (filePath: string) => void;
   onPreserveScroll: PreserveScroll;
 }) {
-  const rows: ReactNode[] = [];
-  let commandEntries: AgentProcessEntry[] = [];
-
-  const flushCommands = () => {
-    if (commandEntries.length === 0) return;
-    rows.push(
-      <CommandGroup
-        key={`commands-${commandEntries[0].id}`}
-        entries={commandEntries}
-        onPreserveScroll={onPreserveScroll}
-      />
-    );
-    commandEntries = [];
-  };
-
-  entries.forEach((entry) => {
-    if (entry.toolKind === "run_command") {
-      commandEntries.push(entry);
-      return;
-    }
-
-    flushCommands();
-    rows.push(
-      <ProcessEntryRow
-        key={entry.id}
-        messageId={messageId}
-        entry={entry}
-        onToggleEntry={onToggleEntry}
-        onOpenFile={onOpenFile}
-        onPreserveScroll={onPreserveScroll}
-      />
-    );
-  });
-
-  flushCommands();
-  return <>{rows}</>;
+  return <>{groupProcessEntries(entries).map((group) => group.kind === "commands" ? (
+    <CommandGroup
+      key={`commands-${group.entries[0].id}`}
+      entries={group.entries}
+      onPreserveScroll={onPreserveScroll}
+    />
+  ) : (
+    <ProcessEntryRow
+      key={group.entry.id}
+      messageId={messageId}
+      entry={group.entry}
+      onToggleEntry={onToggleEntry}
+      onOpenFile={onOpenFile}
+      onPreserveScroll={onPreserveScroll}
+    />
+  ))}</>;
 }
 
 function useProcessTicker(enabled: boolean) {
@@ -515,17 +487,21 @@ export function ProcessBlock({
   const elapsed = formatProcessDuration(durationEnd - process.startedAt);
   const expanded = !!process.expanded;
   const interrupted = useMemo(
-    () => process.entries.some((entry) => entry.state === "interrupted"),
+    () => isProcessInterrupted(process.entries),
+    [process.entries]
+  );
+  const visibleEntries = useMemo(
+    () => getVisibleProcessEntries(process.entries),
     [process.entries]
   );
   const summary = useMemo(
-    () => summarizeProcessEntries(process.entries),
-    [process.entries]
+    () => summarizeProcessEntries(visibleEntries),
+    [visibleEntries]
   );
   const mergeProcessEntriesRef = useRef(createProcessEntryMerger());
   const mergedEntries = useMemo(
-    () => expanded ? mergeProcessEntriesRef.current(process.entries) : [],
-    [expanded, process.entries]
+    () => expanded ? mergeProcessEntriesRef.current(visibleEntries) : [],
+    [expanded, visibleEntries]
   );
 
   return (
@@ -542,7 +518,7 @@ export function ProcessBlock({
       </button>
       {expanded && (
         <div className="chat-process-content">
-          {process.entries.length === 0 ? (
+          {visibleEntries.length === 0 ? (
             <div className="chat-process-empty">{uiText.process.emptyEvents}</div>
           ) : (
             <ProcessEntries

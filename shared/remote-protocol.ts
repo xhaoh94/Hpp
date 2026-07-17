@@ -1,4 +1,8 @@
 import { z } from "zod";
+import type { DiffLike } from "./diff-summary";
+import type { SharedModel } from "./models";
+import type { ProcessEntryView } from "./process-view";
+import type { QuestionnaireQuestion } from "./questionnaire";
 
 export const REMOTE_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_REMOTE_PORT = 47831;
@@ -199,13 +203,7 @@ export function parseRemoteRequest(value: unknown): RemoteRequestEnvelope {
   return { ...envelope, payload };
 }
 
-export interface RemoteModel {
-  id: string;
-  name: string;
-  provider: string;
-  reasoning: boolean;
-  supportsImages?: boolean;
-}
+export interface RemoteModel extends SharedModel {}
 
 export interface RemoteSessionConfig {
   model: RemoteModel | null;
@@ -242,7 +240,7 @@ export interface RemoteProject {
   sessions: RemoteSession[];
 }
 
-export interface RemoteProcessEntry {
+export interface RemoteProcessEntry extends ProcessEntryView {
   id: string;
   type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question";
   title: string;
@@ -263,7 +261,7 @@ export interface RemoteChatMessage {
   systemType?: string;
   images?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
-  diffs?: Array<{ file: string; patch: string; additions: number; deletions: number; status?: string }>;
+  diffs?: DiffLike[];
   process?: {
     startedAt: number;
     endedAt?: number;
@@ -287,13 +285,7 @@ export interface RemoteInteraction {
   sessionId: string;
   requestId?: string;
   method?: string;
-  questions: Array<{
-    id?: string;
-    question: string;
-    header?: string;
-    multiSelect?: boolean;
-    options?: Array<{ label: string; value?: string; description?: string }>;
-  }>;
+  questions: QuestionnaireQuestion[];
 }
 
 export interface RemoteCatalogSnapshot {

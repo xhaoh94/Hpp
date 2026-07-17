@@ -15,11 +15,9 @@ import { useShallow } from "zustand/react/shallow";
 import { Copy, CornerDownRight, GitBranch, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   useChatStore,
-  type AgentProcessFile,
   type AgentProcess,
   type AgentProcessStep,
   type ChatDraft,
-  type FileDiff,
   type ChatMessage,
   type ModelInfo,
   type QueuedMessage,
@@ -30,22 +28,16 @@ import {
 } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentName, getAgentPlanModeTooltip, requiresProviderActivation, supportsGuidance, supportsNativeFork } from "@/lib/agents";
+import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import {
   buildSessionReferencesContext,
   createSessionReferenceSnapshot,
   getSessionReferenceTitle,
 } from "@/lib/session-references";
-import {
-  cloneMessagesForFork,
-  createSessionForkContext,
-  getCompatibleForkSessionTitle,
-  getForkSessionTitle,
-  getForkTargetTurnId,
-} from "@/lib/session-forks";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
-import { getSessionModel, saveSessionModel, saveSessionThinking } from "@/hooks/useDataPersistence";
+import { getSessionModel } from "@/hooks/useDataPersistence";
+import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
@@ -67,6 +59,9 @@ import {
   resetSessionRuntimeAfterTurn,
   type SessionRuntime,
 } from "./agentEventUtils";
+import { THINKING_LEVELS, getOrderedModelProviders, includeCurrentModel } from "@shared/models";
+import { collectProcessDiffs } from "@shared/diff-summary";
+import { areAssistantMessageActionsVisible, formatHistoryMessageTime } from "@shared/message-display";
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
@@ -88,7 +83,12 @@ const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
 type SendPayloadNow = (
   targetSessionId: string,
   payload: MessagePayload,
-  options?: { onSendFailure?: (error: string) => void; planModeEnabled?: boolean }
+  options?: {
+    onSendFailure?: (error: string) => void;
+    planModeEnabled?: boolean;
+    queueIfRunning?: boolean;
+    clientMessageId?: string;
+  }
 ) => Promise<void>;
 
 type MessageQueueDispatcherProps = {
@@ -310,17 +310,6 @@ type UserMessageHistoryControlProps = {
   onScrollToMessage: (messageId: string) => void;
 };
 
-const formatHistoryMessageTime = (timestamp: number) => {
-  const date = new Date(timestamp);
-  const now = new Date();
-  const isToday = date.toDateString() === now.toDateString();
-  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-  if (isToday) return time;
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${month}/${day} ${time}`;
-};
-
 const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
   open,
   anchorRef,
@@ -441,56 +430,6 @@ type ChatMessageItemProps = {
   forkingMessageId: string | null;
 };
 
-const PROCESS_DIFF_ACTIONS = new Set<AgentProcessFile["action"]>(["edited", "modified", "written"]);
-
-const collectProcessDiffs = (process?: AgentProcess): FileDiff[] => {
-  if (!process?.entries?.length) return [];
-  const byFile = new Map<string, FileDiff & { seenKeys: Set<string> }>();
-  const patchDiffs: FileDiff[] = [];
-  const seenPatchKeys = new Set<string>();
-
-  process.entries.forEach((entry) => {
-    entry.files?.forEach((file, index) => {
-      const patch = typeof file.patch === "string" ? file.patch : "";
-      if (!file.file || (!PROCESS_DIFF_ACTIONS.has(file.action) && !patch.trim())) return;
-      const key = String(file.changeKey || `${entry.id}:${file.file}:${index}`);
-      if (patch.trim()) {
-        if (seenPatchKeys.has(key)) return;
-        seenPatchKeys.add(key);
-        patchDiffs.push({
-          file: file.file,
-          patch,
-          additions: Math.max(0, file.additions || 0),
-          deletions: Math.max(0, file.deletions || 0),
-          status: file.status || "modified",
-        });
-        return;
-      }
-
-      const existing = byFile.get(file.file) || {
-        file: file.file,
-        patch: "",
-        additions: 0,
-        deletions: 0,
-        status: file.status || "modified",
-        seenKeys: new Set<string>(),
-      };
-      if (existing.seenKeys.has(key)) return;
-
-      existing.seenKeys.add(key);
-      existing.additions += Math.max(0, file.additions || 0);
-      existing.deletions += Math.max(0, file.deletions || 0);
-      existing.status = file.status || existing.status;
-      byFile.set(file.file, existing);
-    });
-  });
-
-  return [
-    ...patchDiffs,
-    ...Array.from(byFile.values()).map(({ seenKeys, ...diff }) => diff),
-  ];
-};
-
 const ChatMessageItem = memo(function ChatMessageItem({
   msg,
   projectPath,
@@ -528,7 +467,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences)
       : hasContent || hasImages || hasDiffs || hasSessionReferences;
-  const showAssistantActions = msg.role === "assistant" && hasVisibleBubble && !processRunning;
+  const showAssistantActions = hasVisibleBubble && areAssistantMessageActionsVisible(msg);
   const isForkingThisMessage = forkingMessageId === msg.id;
   const renderSessionReferences = () => (
     hasSessionReferences && msg.sessionReferences ? (
@@ -858,11 +797,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     upsertSessionReference: upsertDraftSessionReference,
     removeSessionReference: removeDraftSessionReference,
     clearSessionDraft,
-    enqueueMessage,
     removeQueuedMessage,
-    markQueuedMessageSending,
-    markQueuedMessageFailed,
-    loadSessionMessages,
     toggleAssistantProcess,
     toggleAssistantProcessEntry,
   } = useChatStore(useShallow((state) => ({
@@ -881,11 +816,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     upsertSessionReference: state.upsertSessionReference,
     removeSessionReference: state.removeSessionReference,
     clearSessionDraft: state.clearSessionDraft,
-    enqueueMessage: state.enqueueMessage,
     removeQueuedMessage: state.removeQueuedMessage,
-    markQueuedMessageSending: state.markQueuedMessageSending,
-    markQueuedMessageFailed: state.markQueuedMessageFailed,
-    loadSessionMessages: state.loadSessionMessages,
     toggleAssistantProcess: state.toggleAssistantProcess,
     toggleAssistantProcessEntry: state.toggleAssistantProcessEntry,
   })));
@@ -900,10 +831,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeSessionId ? state.initializedSessionIds.has(activeSessionId) : false
   );
   const {
-    addSession,
     removeSessionReference: removePersistedSessionReference,
   } = useProjectStore(useShallow((state) => ({
-    addSession: state.addSession,
     removeSessionReference: state.removeSessionReference,
   })));
   const triggerAddProject = useAppStore((state) => state.triggerAddProject);
@@ -932,20 +861,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   );
   const [modelProviderOrder, setModelProviderOrder] = useState<string[]>([]);
   const modelProviders = useMemo(
-    () => {
-      const providers = [...new Set(availableModels.map((model) => model.provider))];
-      if (modelProviderOrder.length === 0) return providers;
-
-      const originalIndex = new Map(providers.map((provider, index) => [provider, index]));
-      const orderedIndex = new Map(modelProviderOrder.map((provider, index) => [provider, index]));
-      return providers.slice().sort((left, right) => {
-        const leftIndex = orderedIndex.get(left) ?? Number.MAX_SAFE_INTEGER;
-        const rightIndex = orderedIndex.get(right) ?? Number.MAX_SAFE_INTEGER;
-        if (leftIndex !== rightIndex) return leftIndex - rightIndex;
-        return (originalIndex.get(left) ?? 0) - (originalIndex.get(right) ?? 0);
-      });
-    },
-    [availableModels, modelProviderOrder]
+    () => getOrderedModelProviders(includeCurrentModel(availableModels, currentModel), modelProviderOrder),
+    [availableModels, currentModel, modelProviderOrder]
   );
 
   const refreshModelProviderOrder = useCallback(async (agentId: string) => {
@@ -1366,198 +1283,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setThinkingLevel,
   });
 
-  const createNativeFork = useCallback(async (
-    sourceSession: ProjectSession,
-    sessionId: string,
-    sourceUserMessageIndex: number,
-    rollbackUserMessageCount: number,
-    sourceMessage: ChatMessage,
-    targetTurnId?: string
-  ) => {
-    try {
-      return await window.electronAPI.agentForkSession(sourceSession.id, {
-        newSessionId: sessionId,
-        sourceSessionFilePath: sourceSession.sessionFilePath,
-        sourceUserMessageIndex,
-        rollbackUserMessageCount,
-        targetTurnId,
-        sourceMessageContent: sourceMessage.content,
-        throughMessageId: sourceMessage.id,
-      });
-    } catch (error) {
-      return {
-        supported: true,
-        success: false,
-        sessionFilePath: undefined,
-        error: error instanceof Error ? error.message : String(error),
-        reason: undefined,
-      };
-    }
-  }, []);
-
-  const applyNativeForkToSession = useCallback(async (
-    sessionId: string,
-    agentId: string,
-    sessionFilePath: string
-  ) => {
-    const project = useProjectStore.getState().projects.find((item) =>
-      item.sessions.some((session) => session.id === sessionId)
-    );
-    if (!project) return;
-
-    const projectState = useProjectStore.getState();
-    if (projectState.agentStatuses[sessionId] === "running") return;
-    projectState.setSessionFilePath(project.id, sessionId, sessionFilePath);
-    projectState.setSessionForkContext(project.id, sessionId, undefined);
-
-    await window.electronAPI.agentRemoveSession(sessionId);
-    try {
-      const result = await window.electronAPI.agentCreateSession(agentId, project.path, sessionId, sessionFilePath);
-      if (result.sessionFilePath) {
-        useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
-      }
-      if (!result.success) {
-        const chatStore = useChatStore.getState();
-        chatStore.clearAgentStartupErrors(sessionId);
-        chatStore.addMessage({
-          id: crypto.randomUUID(),
-          role: "system",
-          content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
-          timestamp: Date.now(),
-          systemType: "agent_startup_error",
-        }, sessionId);
-      }
-    } catch (error) {
-      const chatStore = useChatStore.getState();
-      chatStore.clearAgentStartupErrors(sessionId);
-      chatStore.addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `Agent 启动失败: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: Date.now(),
-        systemType: "agent_startup_error",
-      }, sessionId);
-    } finally {
-      useProjectStore.getState().markSessionInitialized(sessionId);
-    }
-  }, []);
-
   const handleForkFromMessage = useCallback(async (msg: ChatMessage) => {
     if (!activeProject || !activeSession || forkingMessageIdRef.current) return;
-
-    const currentMessages = useChatStore.getState().messages;
-    const messageIndex = currentMessages.findIndex((message) => message.id === msg.id);
-    if (messageIndex < 0) return;
-
-    const sourceMessages = currentMessages.slice(0, messageIndex + 1);
-    const forkMessages = cloneMessagesForFork(sourceMessages);
-    const sessionId = crypto.randomUUID();
-    const sourceUserMessageCount = sourceMessages.filter((message) => message.role === "user").length;
-    const sourceUserMessageIndex = sourceUserMessageCount - 1;
-    const totalUserMessageCount = currentMessages.filter((message) => message.role === "user").length;
-    const rollbackUserMessageCount = Math.max(0, totalUserMessageCount - sourceUserMessageCount);
-    const targetTurnId = getForkTargetTurnId(msg, sourceMessages);
-    const now = new Date().toISOString();
-    const forkedFrom = {
-      sourceSessionId: activeSession.id,
-      sourceTitle: activeSession.title,
-      throughMessageId: msg.id,
-      createdAt: now,
-    };
-    const forkContext = createSessionForkContext(activeSession, sourceMessages, msg.id);
-
-    const createForkSession = (session: ProjectSession, visibleMessages: ChatMessage[]) => {
-      loadSessionMessages(activeSession.id, currentMessages);
-      loadSessionMessages(sessionId, visibleMessages);
-      addSession(activeProject.id, session);
-      switchToSession(activeProject, session);
-      setUserMsgHistoryOpen(false);
-      window.setTimeout(() => scrollToBottomNow(), 0);
-    };
-
-    const createFallbackForkSession = (warning?: string) => {
-      const session: ProjectSession = {
-        id: sessionId,
-        agentId: activeSession.agentId,
-        agentSessionId: sessionId,
-        title: warning ? getCompatibleForkSessionTitle(msg) : getForkSessionTitle(msg),
-        createdAt: now,
-        lastActiveAt: now,
-        forkedFrom,
-        forkContext,
-      };
-      const visibleMessages: ChatMessage[] = warning
-        ? [
-            ...forkMessages,
-            {
-              id: crypto.randomUUID(),
-              role: "system",
-              content: warning,
-              timestamp: Date.now(),
-            },
-          ]
-        : forkMessages;
-      createForkSession(session, visibleMessages);
-    };
-
     forkingMessageIdRef.current = msg.id;
     setForkingMessageId(msg.id);
-
     try {
-      const supportsSynchronousNativeFork = supportsNativeFork(activeSession.agentId);
-      if (supportsSynchronousNativeFork) {
-        if (sourceUserMessageIndex >= 0) {
-          const nativeFork = await createNativeFork(
-            activeSession,
-            sessionId,
-            sourceUserMessageIndex,
-            rollbackUserMessageCount,
-            msg,
-            targetTurnId
-          );
-          if (nativeFork.success && nativeFork.sessionFilePath) {
-            const session: ProjectSession = {
-              id: sessionId,
-              agentId: activeSession.agentId,
-              agentSessionId: sessionId,
-              title: getForkSessionTitle(msg),
-              createdAt: now,
-              lastActiveAt: now,
-              sessionFilePath: nativeFork.sessionFilePath,
-              forkedFrom,
-            };
-            createForkSession(session, forkMessages);
-            return;
-          }
-
-          const detail = nativeFork.error || nativeFork.reason;
-          const agentName = getAgentName(activeSession.agentId);
-          createFallbackForkSession(
-            detail
-              ? `${agentName} 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：${detail}`
-              : `${agentName} 原生分叉失败，当前会话使用隐藏上下文兼容模式。`
-          );
-          return;
-        }
-
-        createFallbackForkSession(`${getAgentName(activeSession.agentId)} 原生分叉失败，当前会话使用隐藏上下文兼容模式。\n原因：没有可定位的用户消息`);
-        return;
-      }
-
-      createFallbackForkSession();
-      if (sourceUserMessageIndex >= 0) {
-        void createNativeFork(
-          activeSession,
-          sessionId,
-          sourceUserMessageIndex,
-          rollbackUserMessageCount,
-          msg,
-          targetTurnId
-        ).then((nativeFork) => {
-          if (!nativeFork.success || !nativeFork.sessionFilePath) return;
-          void applyNativeForkToSession(sessionId, activeSession.agentId, nativeFork.sessionFilePath);
-        });
-      }
+      await SessionCommandCoordinator.forkSession({
+        sourceSessionId: activeSession.id,
+        throughMessageId: msg.id,
+        activate: true,
+      });
+      setUserMsgHistoryOpen(false);
+      window.setTimeout(() => scrollToBottomNow(), 0);
     } finally {
       forkingMessageIdRef.current = null;
       setForkingMessageId(null);
@@ -1565,21 +1302,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, [
     activeProject,
     activeSession,
-    addSession,
-    applyNativeForkToSession,
-    createNativeFork,
-    loadSessionMessages,
     scrollToBottomNow,
-    switchToSession,
   ]);
-
-  const clearForkContextForSession = useCallback((sessionId: string) => {
-    const project = useProjectStore.getState().projects.find((item) =>
-      item.sessions.some((session) => session.id === sessionId)
-    );
-    if (!project) return;
-    useProjectStore.getState().setSessionForkContext(project.id, sessionId, undefined);
-  }, []);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -1738,135 +1462,61 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const sendPayloadNow = useCallback(async (
     targetSessionId: string,
     payload: MessagePayload,
-    options?: { onSendFailure?: (error: string) => void; planModeEnabled?: boolean }
+    options?: {
+      onSendFailure?: (error: string) => void;
+      planModeEnabled?: boolean;
+      queueIfRunning?: boolean;
+      clientMessageId?: string;
+    }
   ) => {
-    const setStreamingForTargetSession = (streaming: boolean) => {
-      if (useProjectStore.getState().activeSessionId === targetSessionId) {
-        setStreaming(streaming);
-      }
-    };
-    const targetSessionExists = () =>
-      useProjectStore.getState().projects.some((project) =>
-        project.sessions.some((session) => session.id === targetSessionId)
-      );
-    const cleanupAbandonedTargetSession = () => {
-      const runtime = sessionRuntimeRef.current[targetSessionId];
+    const cleanupRuntime = (sessionId: string) => {
+      const runtime = sessionRuntimeRef.current[sessionId];
       if (runtime?.streamWatchdog) {
         clearTimeout(runtime.streamWatchdog);
         runtime.streamWatchdog = null;
       }
-      if (runtime) {
-        resetSessionRuntimeAfterTurn(runtime);
+      if (runtime) resetSessionRuntimeAfterTurn(runtime);
+      if (!useProjectStore.getState().projects.some((project) =>
+        project.sessions.some((session) => session.id === sessionId))) {
+        delete sessionRuntimeRef.current[sessionId];
       }
-      delete sessionRuntimeRef.current[targetSessionId];
-      setStreamingForTargetSession(false);
     };
-    const abortIfTargetSessionMissing = () => {
-      if (targetSessionExists()) return false;
-      cleanupAbandonedTargetSession();
-      return true;
-    };
-
-    // Force synchronous render so "working..." appears before IPC call
-    enableAutoFollow(); // New outgoing messages should keep the latest turn visible.
-    const userMessageId = crypto.randomUUID();
-    flushSync(() => {
-      addMessage({
-        id: userMessageId,
-        role: "user",
-        content: payload.displayContent,
-        timestamp: Date.now(),
-        images: payload.messageImages,
-        sessionReferences: payload.sessionReferences,
-      }, targetSessionId);
-      setStreamingForTargetSession(true);
-      useProjectStore.getState().setAgentStatus(targetSessionId, "running");
-      const runtime = sessionRuntimeRef.current[targetSessionId];
-      if (runtime) {
-        if (runtime.streamWatchdog) {
-          clearTimeout(runtime.streamWatchdog);
-          runtime.streamWatchdog = null;
-        }
-        runtime.streamBuffer = "";
-        runtime.thinkingBuffer = "";
-        runtime.thinkingEntryId = null;
-        runtime.streamIdleNoticeEntryId = null;
-        runtime.autoAbortReason = null;
-      }
+    const result = await SessionCommandCoordinator.sendMessage({
+      sessionId: targetSessionId,
+      clientMessageId: options?.clientMessageId || crypto.randomUUID(),
+      queueIfRunning: options?.queueIfRunning === true,
+      message: {
+        ...payload,
+        planModeEnabled: !!options?.planModeEnabled,
+      },
+      hooks: {
+        isProcessActive: (sessionId) => sessionRuntimeRef.current[sessionId]?.processActive === true,
+        commit: (action) => flushSync(action),
+        onSendStarted: (sessionId) => {
+          const runtime = sessionRuntimeRef.current[sessionId];
+          if (!runtime) return;
+          if (runtime.streamWatchdog) {
+            clearTimeout(runtime.streamWatchdog);
+            runtime.streamWatchdog = null;
+          }
+          runtime.streamBuffer = "";
+          runtime.thinkingBuffer = "";
+          runtime.thinkingEntryId = null;
+          runtime.streamIdleNoticeEntryId = null;
+          runtime.autoAbortReason = null;
+        },
+        onOptimisticMessage: () => {
+          enableAutoFollow();
+          scrollToBottomNow();
+        },
+        onSendFailureCleanup: cleanupRuntime,
+      },
     });
-
-    // Scroll to bottom immediately after sending (user wants to see their message)
-    scrollToBottomNow();
-
-    const activeSessionIdAtSend = useProjectStore.getState().activeSessionId;
-    const modelToSync = getSessionModel(targetSessionId) || (
-      activeSessionIdAtSend === targetSessionId ? useChatStore.getState().currentModel : null
-    );
-    if (modelToSync) {
-      const modelResult = await window.electronAPI.agentSetModel(modelToSync.provider, modelToSync.id, targetSessionId);
-      if (abortIfTargetSessionMissing()) return;
-      if (!modelResult.success) {
-        const runtime = sessionRuntimeRef.current[targetSessionId];
-        if (runtime?.streamWatchdog) {
-          clearTimeout(runtime.streamWatchdog);
-          runtime.streamWatchdog = null;
-        }
-        useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
-        if (runtime) {
-          resetSessionRuntimeAfterTurn(runtime);
-        }
-        setStreamingForTargetSession(false);
-        useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
-        if (options?.onSendFailure) {
-          options.onSendFailure(modelResult.error || "Model switch failed");
-          return;
-        }
-        addMessage({
-          id: crypto.randomUUID(),
-          role: "system",
-          content: `Model switch failed: ${modelResult.error || "Unknown error"}`,
-          timestamp: Date.now(),
-        }, targetSessionId);
-        return;
-      }
-    }
-
-    if (abortIfTargetSessionMissing()) return;
-    const result = await window.electronAPI.agentSendMessage(
-      payload.sendContent,
-      payload.agentImages,
-      targetSessionId,
-      { planModeEnabled: !!options?.planModeEnabled, clientMessageId: userMessageId }
-    );
-    if (abortIfTargetSessionMissing()) return;
-    if (!result.success) {
-      const runtime = sessionRuntimeRef.current[targetSessionId];
-      if (runtime?.streamWatchdog) {
-        clearTimeout(runtime.streamWatchdog);
-        runtime.streamWatchdog = null;
-      }
-      useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", targetSessionId);
-      if (runtime) {
-        resetSessionRuntimeAfterTurn(runtime);
-      }
-      setStreamingForTargetSession(false);
-      useProjectStore.getState().setAgentStatus(targetSessionId, "idle");
-      if (options?.onSendFailure) {
-        options.onSendFailure(result.error || "Send failed");
-        return;
-      }
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `发送失败: ${result.error || "请先在项目中启动 Agent"}`,
-        timestamp: Date.now(),
-      }, targetSessionId);
-    }
+    if (result.error && options?.onSendFailure) options.onSendFailure(result.error);
   }, [
-    addMessage,
     enableAutoFollow,
     scrollToBottomNow,
-    setStreaming,
+    sessionRuntimeRef,
   ]);
 
   const handleSend = useCallback(async () => {
@@ -1903,42 +1553,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
 
     const payload = await buildMessagePayload(text, pendingFiles, pendingImages, pendingPathAttachments);
-    const { forkContextUsed, ...queuedPayload } = payload;
-    const existingRuntime = sessionRuntimeRef.current[targetSessionId];
-    const running = existingRuntime?.processActive || useProjectStore.getState().agentStatuses[targetSessionId] === "running";
-
-    if (running) {
-      enqueueMessage({
-        id: crypto.randomUUID(),
-        sessionId: targetSessionId,
-        ...queuedPayload,
-        planModeEnabled,
-        createdAt: Date.now(),
-        status: "queued",
-      });
-      if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
-      clearSessionDraft(targetSessionId);
-      clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
-      if (forkContextUsed) clearForkContextForSession(targetSessionId);
-      setStreaming(true);
-      useProjectStore.getState().setAgentStatus(targetSessionId, "running");
-      return;
-    }
-
     if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
     clearSessionDraft(targetSessionId);
     clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
-    if (forkContextUsed) clearForkContextForSession(targetSessionId);
-    await sendPayloadNow(targetSessionId, payload, { planModeEnabled });
+    await sendPayloadNow(targetSessionId, payload, {
+      planModeEnabled,
+      queueIfRunning: true,
+    });
   }, [
     activeQuestionnaire,
     activeSessionReferences.length,
     addMessage,
     buildMessagePayload,
-    clearForkContextForSession,
     clearLegacySessionReferences,
     clearSessionDraft,
-    enqueueMessage,
     handleSendUIResponse,
     isAwaitingUIResponse,
     pendingFiles,
@@ -1947,32 +1575,13 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     planModeEnabled,
     sendPayloadNow,
     setComposerInput,
-    setStreaming,
   ]);
 
   const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
     if (!activeSessionSupportsGuidance) return;
-    const runtime = sessionRuntimeRef.current[item.sessionId];
-    const running = runtime?.processActive || useProjectStore.getState().agentStatuses[item.sessionId] === "running";
-    if (!running) return;
-
-    markQueuedMessageSending(item.sessionId, item.id);
-    const result = await window.electronAPI.agentSendGuidance(
-      item.sendContent,
-      item.agentImages,
-      item.sessionId,
-      { planModeEnabled: !!item.planModeEnabled }
-    );
-    if (result.success) {
-      removeQueuedMessage(item.sessionId, item.id);
-      return;
-    }
-    markQueuedMessageFailed(item.sessionId, item.id, result.error || "Guidance failed");
+    await SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id).catch(() => undefined);
   }, [
     activeSessionSupportsGuidance,
-    markQueuedMessageFailed,
-    markQueuedMessageSending,
-    removeQueuedMessage,
   ]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -2004,7 +1613,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const handleAbort = useCallback(() => {
     const currentSessionId = useProjectStore.getState().activeSessionId;
     if (!currentSessionId) return;
-    void requestManualAbort(currentSessionId).catch(() => undefined);
+    void SessionCommandCoordinator.abortSession(currentSessionId, {
+      abortSession: requestManualAbort,
+    }).catch(() => undefined);
   }, [requestManualAbort]);
 
   const handleSelectModel = async (model: ModelInfo) => {
@@ -2012,41 +1623,25 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setModelOpen(false);
     const sessionId = useProjectStore.getState().activeSessionId;
     const agentId = activeSession?.agentId || activeAgentId;
-    const switchingProvider =
-      requiresProviderActivation(agentId) &&
-      !!previousModel &&
-      previousModel.provider !== model.provider;
-
-    if (switchingProvider) {
-      if (currentSessionRunning) {
-        window.alert("切换 Agent 渠道需要等当前 Agent 运行结束后再操作。");
+    if (!sessionId) return;
+    try {
+      await SessionCommandCoordinator.setModel(sessionId, model, {
+        models: availableModels,
+        isProcessActive: (targetSessionId) => sessionRuntimeRef.current[targetSessionId]?.processActive === true,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "SESSION_BUSY") {
+        window.alert("切换 Agent 渠道或模型需要等当前 Agent 运行结束后再操作。");
         return;
       }
-
-      const activateResult = await window.electronAPI.agentConfigActivate(agentId, model.provider);
-      if (!activateResult.success) {
-        window.alert(activateResult.error || "切换 Agent 渠道失败，请稍后重试。");
-        return;
-      }
-      if (activateResult.models && activateResult.models.length > 0) {
-        setAvailableModels(activateResult.models);
-      }
-    }
-
-    const result = await window.electronAPI.agentSetModel(model.provider, model.id, sessionId || undefined);
-    if (!result.success) {
-      if (previousModel) setCurrentModel(previousModel);
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
-        content: `Model switch failed: ${result.error || "Unknown error"}`,
+        content: `Model switch failed: ${error instanceof Error ? error.message : String(error)}`,
         timestamp: Date.now(),
-      }, sessionId || undefined);
+      }, sessionId);
       return;
     }
-
-    if (sessionId) saveSessionModel(sessionId, model);
-    setCurrentModel(model);
     const modelChanged =
       !previousModel ||
       previousModel.id !== model.id ||
@@ -2076,10 +1671,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       : models[0]);
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) {
-      saveSessionModel(sessionId, nextModel);
-      void window.electronAPI.agentSetModel(nextModel.provider, nextModel.id, sessionId);
+      void SessionCommandCoordinator.setModel(sessionId, nextModel, { models }).catch(() => undefined);
     }
-    chatState.setCurrentModel(nextModel);
+    if (!sessionId) chatState.setCurrentModel(nextModel);
   }, [currentAgentId, refreshModelProviderOrder]);
 
   const openAgentReloadConfirm = useCallback(() => {
@@ -2098,12 +1692,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setAgentReloading(true);
     setAgentReloadError("");
     try {
-      const result = await window.electronAPI.agentReloadConfig(currentAgentId, activeSessionId);
-      if (!result.success) {
-        setAgentReloadError(result.error || "重载 Agent 失败，请稍后重试。");
-        return;
-      }
-      handleModelConfigModelsUpdated(currentAgentId, result.models);
+      const result = await SessionCommandCoordinator.reloadSession(activeSessionId);
+      void refreshModelProviderOrder(currentAgentId);
       setAgentReloadConfirmOpen(false);
       showFloatingToastMessage(
         result.reloadedSessionIds?.includes(activeSessionId)
@@ -2115,7 +1705,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     } finally {
       setAgentReloading(false);
     }
-  }, [activeSessionId, agentReloading, currentAgentId, currentSessionRunning, handleModelConfigModelsUpdated]);
+  }, [activeSessionId, agentReloading, currentAgentId, currentSessionRunning, refreshModelProviderOrder]);
 
   useEffect(() => {
     if (!agentReloadConfirmOpen) return;
@@ -2128,20 +1718,20 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
   const handleSelectThinking = async (levelId: string) => {
     const sessionId = useProjectStore.getState().activeSessionId;
-    if (sessionId) saveSessionThinking(sessionId, levelId);
-    setThinkingLevel(levelId);
     setThinkingOpen(false);
-    await window.electronAPI.agentSetThinkingLevel(levelId, sessionId || undefined);
+    if (!sessionId) return;
+    try {
+      await SessionCommandCoordinator.setThinking(sessionId, levelId, {
+        isProcessActive: (targetSessionId) => sessionRuntimeRef.current[targetSessionId]?.processActive === true,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "SESSION_BUSY") {
+        window.alert("调整思考级别需要等当前 Agent 运行结束后再操作。");
+      }
+    }
   };
 
-  const thinkingLevels = [
-    { id: "off", label: "关闭" },
-    { id: "minimal", label: "最低" },
-    { id: "low", label: "低" },
-    { id: "medium", label: "中" },
-    { id: "high", label: "高" },
-    { id: "xhigh", label: "极高" },
-  ];
+  const thinkingLevels = THINKING_LEVELS;
   const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel) || thinkingLevels[3];
 
   // No project open - show placeholder
@@ -2282,7 +1872,9 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           canGuide={activeSessionSupportsGuidance}
           currentSessionRunning={currentSessionRunning}
           onGuide={handleGuideQueuedMessage}
-          onRemove={(itemId) => activeSessionId && removeQueuedMessage(activeSessionId, itemId)}
+          onRemove={(itemId) => {
+            if (activeSessionId) SessionCommandCoordinator.removeQueuedMessage(activeSessionId, itemId);
+          }}
         />
 
         <ChatComposer

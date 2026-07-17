@@ -5,12 +5,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
-import {
-  applySessionModels,
-  getSessionThinkingOrDefault,
-  saveSessionModel,
-  selectSessionModel,
-} from "@/hooks/useDataPersistence";
+import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
@@ -55,15 +50,9 @@ interface Props {
 }
 
 export function ProjectCard({ project }: Props) {
-  const { removeProject, addSession, removeSession, closeSession, reopenSession, setActiveProject, activeProjectId, activeSessionId, setActiveSession, agentStatuses, setAgentStatus, markSessionInitialized } = useProjectStore();
+  const { removeProject, removeSession, activeProjectId, activeSessionId, agentStatuses } = useProjectStore();
   const {
-    clearMessages,
-    addMessage,
-    clearAgentStartupErrors,
     sessionMessages,
-    loadSessionMessages,
-    switchSession,
-    setActiveAgent,
     deleteSessionMessages,
     deleteSessionsMessages,
   } = useChatStore();
@@ -187,197 +176,50 @@ export function ProjectCard({ project }: Props) {
       return;
     }
 
-    setActiveProject(project.id);
-
-    // Create session object immediately so UI is responsive
-    const sessionId = crypto.randomUUID();
-    const session = {
-      id: sessionId,
-      agentId,
-      agentSessionId: sessionId,
-      title: `新会话 - ${new Date().toLocaleString("zh-CN")}`,
-      createdAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString(),
-    };
-    const currentModel = useChatStore.getState().currentModel;
-    if (currentModel) saveSessionModel(sessionId, currentModel);
-    addSession(project.id, session);
-
-    // Switch chat to the new (empty) session
-    setActiveAgent(agentId);
-    switchSession(sessionId);
-
-    // Start agent in background (non-blocking)
-    window.electronAPI.agentCreateSession(agentId, project.path, sessionId).then(async (result) => {
-      markSessionInitialized(sessionId);
-      // Save sessionFilePath back to store so it can be resumed later.
-      if (result.sessionFilePath) {
-        useProjectStore.getState().setSessionFilePath(project.id, sessionId, result.sessionFilePath);
-      }
-
-      const isStillActiveSession = () => useProjectStore.getState().activeSessionId === sessionId;
-      if (isStillActiveSession()) {
-        applySessionModels(sessionId, result.models);
-      }
-
-      // Re-fetch models now that agent backend is ready
-      try {
-        const models = await window.electronAPI.agentGetModels(sessionId);
-        if (isStillActiveSession() && models && models.length > 0) {
-          useChatStore.getState().setAvailableModels(models);
-          const selectedModel = selectSessionModel(sessionId, models);
-          if (selectedModel) {
-            useChatStore.getState().setCurrentModel(selectedModel);
-            saveSessionModel(sessionId, selectedModel);
-            await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, sessionId);
-          }
-        }
-      } catch { /* ignore */ }
-      if (isStillActiveSession()) {
-        const thinkingToSet = await getSessionThinkingOrDefault(sessionId, agentId);
-        if (isStillActiveSession()) {
-          useChatStore.getState().setThinkingLevel(thinkingToSet);
-          window.electronAPI.agentSetThinkingLevel(thinkingToSet, sessionId);
-        }
-      }
-      if (!result.success) {
-        clearAgentStartupErrors(sessionId);
-        addMessage({
-          id: crypto.randomUUID(),
-          role: "system",
-          content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
-          timestamp: Date.now(),
-          systemType: "agent_startup_error",
-        }, sessionId);
-      } else {
-        clearAgentStartupErrors(sessionId);
-      }
-    }).catch((error: unknown) => {
-      markSessionInitialized(sessionId);
-      clearAgentStartupErrors(sessionId);
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `Agent 启动失败: ${getErrorMessage(error)}`,
-        timestamp: Date.now(),
-        systemType: "agent_startup_error",
-      }, sessionId);
-    });
+    try {
+      await SessionCommandCoordinator.createSession({
+        projectId: project.id,
+        agentId,
+        activate: true,
+        verifyInstalled: false,
+      });
+    } catch (error) {
+      alert(getErrorMessage(error));
+    }
   };
 
   const handleSelectSession = async (session: ProjectSession) => {
     setShowHistory(false);
-
-    // Save current session's messages before switching
-    const prevSessionId = activeSessionId;
-    if (prevSessionId) {
-      const currentMessages = useChatStore.getState().messages;
-      loadSessionMessages(prevSessionId, currentMessages);
-    }
-
-    // Switch UI immediately for responsiveness
-    setActiveSession(session.id);
-    setActiveProject(project.id);
-    setActiveAgent(session.agentId);
-    switchSession(session.id);
-    // Dismiss completed status so the green dot disappears permanently
-    if (agentStatuses[session.id] === "completed") {
-      setAgentStatus(session.id, "idle");
-    }
-
-    // Create and switch agent session in background (non-blocking)
-    window.electronAPI.agentCreateSession(
-      session.agentId, project.path, session.id, session.sessionFilePath
-    ).then(async (result) => {
-      if (result.sessionFilePath) {
-        useProjectStore.getState().setSessionFilePath(project.id, session.id, result.sessionFilePath);
-      }
-      if (result.success) {
-        clearAgentStartupErrors(session.id);
-      }
-      if (useProjectStore.getState().activeSessionId === session.id) {
-        applySessionModels(session.id, result.models);
-      }
-      markSessionInitialized(session.id);
-      if (!result.success) {
-        clearAgentStartupErrors(session.id);
-        addMessage({
-          id: crypto.randomUUID(),
-          role: "system",
-          content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
-          timestamp: Date.now(),
-          systemType: "agent_startup_error",
-        }, session.id);
-      }
-      // Only update if this session is still the active one
-      if (useProjectStore.getState().activeSessionId === session.id) {
-        await window.electronAPI.agentSwitchSession(session.id);
-        try {
-          const models = await window.electronAPI.agentGetModels(session.id);
-          if (models && models.length > 0) {
-            useChatStore.getState().setAvailableModels(models);
-            const selectedModel = selectSessionModel(session.id, models);
-            if (selectedModel) {
-              useChatStore.getState().setCurrentModel(selectedModel);
-              saveSessionModel(session.id, selectedModel);
-              await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, session.id);
-            }
-          }
-          const thinkingToSet = await getSessionThinkingOrDefault(session.id, session.agentId);
-          if (useProjectStore.getState().activeSessionId === session.id) {
-            useChatStore.getState().setThinkingLevel(thinkingToSet);
-            window.electronAPI.agentSetThinkingLevel(thinkingToSet, session.id);
-          }
-        } catch { /* ignore */ }
-      }
-    }).catch((error: unknown) => {
-      markSessionInitialized(session.id);
-      clearAgentStartupErrors(session.id);
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `Agent 启动失败: ${getErrorMessage(error)}`,
-        timestamp: Date.now(),
-        systemType: "agent_startup_error",
-      }, session.id);
+    await SessionCommandCoordinator.initializeSession(session.id, {
+      activate: true,
+      recordFailure: true,
     });
   };
 
   const handleCloseSession = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
-    closeSession(project.id, sessionId);
-    // Tell the main process to dispose this session's agent
-    window.electronAPI.agentRemoveSession(sessionId);
-    // Clear messages if closing active session
-    if (sessionId === activeSessionId) {
-      clearMessages();
-      setActiveSession(null);
-    }
-  };
-
-  const disposeAgentSessions = (sessionIds: string[]) => {
-    for (const sessionId of sessionIds) {
-      void window.electronAPI.agentRemoveSession(sessionId);
-    }
+    void SessionCommandCoordinator.closeSession(sessionId);
   };
 
   const handleDeleteProject = () => {
     const sessionIds = project.sessions.map((session) => session.id);
-    disposeAgentSessions(sessionIds);
-    deleteSessionsMessages(sessionIds);
-    removeProject(project.id);
+    void Promise.all(sessionIds.map((sessionId) => SessionCommandCoordinator.closeSession(sessionId)))
+      .finally(() => {
+        deleteSessionsMessages(sessionIds);
+        removeProject(project.id);
+      });
   };
 
   const handleResumeSession = (session: ProjectSession) => {
-    reopenSession(project.id, session.id);
-    handleSelectSession(session);
-    setShowHistory(false);
+    void SessionCommandCoordinator.reopenSession(session.id, { activate: true })
+      .finally(() => setShowHistory(false));
   };
 
   const handleDeleteHistorySession = (sessionId: string) => {
-    void window.electronAPI.agentRemoveSession(sessionId);
-    deleteSessionMessages(sessionId);
-    removeSession(project.id, sessionId);
+    void SessionCommandCoordinator.closeSession(sessionId).finally(() => {
+      deleteSessionMessages(sessionId);
+      removeSession(project.id, sessionId);
+    });
   };
 
   const orderedAgents = useMemo(

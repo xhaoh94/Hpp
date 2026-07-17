@@ -63,12 +63,26 @@ import type {
 import { MAX_REMOTE_IMAGES, MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { formatModelSwitchToastText } from "@shared/model-switch";
 import {
+  THINKING_LEVELS,
+  getThinkingLevelLabel,
+  groupModelsByProvider,
+  includeCurrentModel,
+} from "@shared/models";
+import {
+  getProcessGroupState,
+  getVisibleProcessEntries,
+  groupProcessEntries,
+  splitCommandDetail,
+} from "@shared/process-view";
+import { buildDiffSummary, collectProcessDiffs, type ProcessDiffEntry } from "@shared/diff-summary";
+import { areAssistantMessageActionsVisible, formatHistoryMessageTime } from "@shared/message-display";
+import {
   chooseRemoteImage,
   getImageErrorMessage,
   isImageSelectionCancelled,
   type PendingRemoteImage,
 } from "./images";
-import { buildQuestionnaireAnswers, getQuestionnaireSummary } from "./questionnaire";
+import { buildQuestionnaireAnswers, getQuestionnaireSummary, isQuestionnaireComplete } from "./questionnaire";
 import {
   pairHost,
   probeHostAvailability,
@@ -101,17 +115,6 @@ type SessionPage = {
 
 type PairingMode = "closed" | "manual";
 
-const THINKING_LEVELS = [
-  { id: "off", label: "关闭" },
-  { id: "minimal", label: "最低" },
-  { id: "low", label: "低" },
-  { id: "medium", label: "中" },
-  { id: "high", label: "高" },
-  { id: "xhigh", label: "极高" },
-];
-
-const getThinkingLevelLabel = (levelId: string) =>
-  THINKING_LEVELS.find((level) => level.id === levelId)?.label || levelId;
 const IS_NATIVE_APP = Capacitor.isNativePlatform();
 const DEMO_SESSION_ID = "demo-session";
 const DEMO_HOST: PairedHost = {
@@ -241,13 +244,7 @@ function MobileModelPicker({
   const [open, setOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(currentModel?.provider || null);
   const modelsByProvider = useMemo(() => {
-    const grouped = new Map<string, RemoteModel[]>();
-    for (const model of models) {
-      const providerModels = grouped.get(model.provider);
-      if (providerModels) providerModels.push(model);
-      else grouped.set(model.provider, [model]);
-    }
-    return grouped;
+    return groupModelsByProvider(models);
   }, [models]);
 
   useEffect(() => {
@@ -396,60 +393,6 @@ function MobileThinkingPicker({
   );
 }
 
-function formatHistoryMessageTime(timestamp: number) {
-  const date = new Date(timestamp);
-  const now = new Date();
-  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-  if (date.toDateString() === now.toDateString()) return time;
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")} ${time}`;
-}
-
-const isCommandProcessEntry = (entry: RemoteProcessEntry) => (
-  entry.toolKind === "run_command" || (
-    entry.type === "tool" && /^(?:已运行|正在运行)\s+/.test(entry.title)
-  )
-);
-
-const isBodyOutputProcessEntry = (entry: RemoteProcessEntry) => (
-  entry.type === "info" && entry.title.trim() === "正文输出"
-);
-
-const splitCommandDetail = (entry: RemoteProcessEntry) => {
-  if (!entry.detail) return { command: entry.command || "", output: "" };
-  const lines = entry.detail.split("\n");
-  if ((lines[0] || "").startsWith("$ ")) {
-    return {
-      command: entry.command || lines[0].slice(2).trim(),
-      output: lines.slice(1).join("\n").trim(),
-    };
-  }
-  return { command: entry.command || "", output: entry.detail.trim() };
-};
-
-type ProcessEntryGroup =
-  | { kind: "entry"; entry: RemoteProcessEntry }
-  | { kind: "commands"; entries: RemoteProcessEntry[] };
-
-function groupProcessEntries(entries: RemoteProcessEntry[]): ProcessEntryGroup[] {
-  const groups: ProcessEntryGroup[] = [];
-  let commands: RemoteProcessEntry[] = [];
-  const flushCommands = () => {
-    if (commands.length === 0) return;
-    groups.push({ kind: "commands", entries: commands });
-    commands = [];
-  };
-  for (const entry of entries) {
-    if (isCommandProcessEntry(entry)) {
-      commands.push(entry);
-    } else {
-      flushCommands();
-      groups.push({ kind: "entry", entry });
-    }
-  }
-  flushCommands();
-  return groups;
-}
-
 function ProcessEntryRow({ entry }: { entry: RemoteProcessEntry }) {
   const hasDetails = Boolean(entry.detail?.trim() || entry.files?.length);
   const row = (
@@ -477,9 +420,7 @@ function ProcessEntryRow({ entry }: { entry: RemoteProcessEntry }) {
 }
 
 function CommandGroup({ entries }: { entries: RemoteProcessEntry[] }) {
-  const groupState = entries.some((entry) => entry.state === "running")
-    ? "running"
-    : entries.some((entry) => entry.state === "error") ? "error" : "completed";
+  const groupState = getProcessGroupState(entries);
   return (
     <details className="process-entry command-group">
       <summary className="process-entry-summary command-group-summary">
@@ -515,7 +456,7 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
     }
   }, [message.isStreaming, processStartedAt]);
   if (!message.process) return null;
-  const visibleEntries = message.process.entries.filter((entry) => !isBodyOutputProcessEntry(entry));
+  const visibleEntries = getVisibleProcessEntries(message.process.entries);
   const hasPlan = !!message.process.planSteps?.length;
   if (!hasPlan && visibleEntries.length === 0 && !message.process.changeSummary) return null;
   return (
@@ -562,11 +503,11 @@ function MessageItem({
   onEdit: (content: string) => void;
   onFork: (message: RemoteChatMessage) => void;
 }) {
-  const assistantActionsReady =
-    message.role === "assistant" &&
-    message.content.trim().length > 0 &&
-    message.isStreaming !== true &&
-    (!message.process || message.process.endedAt !== undefined);
+  const assistantActionsReady = areAssistantMessageActionsVisible(message);
+  const diffSummary = buildDiffSummary([
+    ...(message.diffs || []),
+    ...collectProcessDiffs(message.process as unknown as { entries?: ProcessDiffEntry[] }),
+  ]);
   const showActions = message.role === "user" || assistantActionsReady;
   return (
     <article id={`message-${message.id}`} className={`message ${message.role}`}>
@@ -597,7 +538,7 @@ function MessageItem({
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{message.content}</ReactMarkdown>
         </div>
       )}
-      {message.diffs?.map((diff) => (
+      {diffSummary.files.map((diff) => (
         <details className="diff-block" key={`${message.id}-${diff.file}`}>
           <summary>
             <code>{diff.file}</code>
@@ -606,7 +547,7 @@ function MessageItem({
               <ChevronDown className="expand-indicator" size={14} />
             </span>
           </summary>
-          <pre>{diff.patch}</pre>
+          <pre>{diff.patches.join("\n")}</pre>
         </details>
       ))}
       {showActions && (
@@ -696,7 +637,7 @@ function Questionnaire({
 
   const buildAnswers = () => buildQuestionnaireAnswers(interaction.questions, answers, custom);
   const summary = () => getQuestionnaireSummary(interaction.questions, answers, custom);
-  const complete = interaction.questions.every((_question, index) => !!custom[index]?.trim() || (answers[index] || []).length > 0);
+  const complete = isQuestionnaireComplete(interaction.questions, answers, custom);
 
   return (
     <section
@@ -1253,12 +1194,7 @@ export default function App() {
     [messages, selectedSessionId],
   );
   const selectedModels = useMemo(() => {
-    const available = [...(selectedConfig?.availableModels || [])];
-    const current = selectedConfig?.model;
-    if (current && !available.some((model) => model.provider === current.provider && model.id === current.id)) {
-      available.unshift(current);
-    }
-    return available;
+    return includeCurrentModel(selectedConfig?.availableModels || [], selectedConfig?.model);
   }, [selectedConfig]);
   const selectedUserMessages = useMemo(
     () => selectedMessages.filter((message) => message.role === "user").slice().reverse(),

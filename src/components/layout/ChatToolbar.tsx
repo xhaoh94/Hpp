@@ -2,6 +2,7 @@ import { useMemo, type ReactNode, type RefObject } from "react";
 import { Settings } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
+import { groupModelsByProvider, includeCurrentModel } from "@shared/models";
 
 type ThinkingLevelOption = {
   id: string;
@@ -20,7 +21,7 @@ type ChatToolbarProps = {
   modelProviders: string[];
   planModeEnabled: boolean;
   thinkingLevel: string;
-  thinkingLevels: ThinkingLevelOption[];
+  thinkingLevels: readonly ThinkingLevelOption[];
   thinkingOpen: boolean;
   modelRef: RefObject<HTMLDivElement | null>;
   thinkingRef: RefObject<HTMLDivElement | null>;
@@ -68,15 +69,13 @@ export function ChatToolbar({
     () => new Set(favoriteModels.map((model) => `${model.provider}:${model.id}`)),
     [favoriteModels]
   );
+  const selectableModels = useMemo(
+    () => includeCurrentModel(availableModels, currentModel),
+    [availableModels, currentModel]
+  );
   const modelsByProvider = useMemo(() => {
-    const grouped = new Map<string, ModelInfo[]>();
-    for (const model of availableModels) {
-      const providerModels = grouped.get(model.provider);
-      if (providerModels) providerModels.push(model);
-      else grouped.set(model.provider, [model]);
-    }
-    return grouped;
-  }, [availableModels]);
+    return groupModelsByProvider(selectableModels);
+  }, [selectableModels]);
   const isFavoriteModel = (model: ModelInfo) => favoriteModelKeys.has(`${model.provider}:${model.id}`);
 
   return (
@@ -125,7 +124,7 @@ export function ChatToolbar({
           <div className="chat-dropdown">
             <div className="chat-model-dropdown-header">
               <span className="chat-model-dropdown-title">{getAgentName(agentId)} 模型</span>
-              <span className="chat-model-dropdown-meta">{availableModels.length} 个可用</span>
+              <span className="chat-model-dropdown-meta">{selectableModels.length} 个可用</span>
               <button
                 type="button"
                 className="chat-model-config-btn"
@@ -139,7 +138,7 @@ export function ChatToolbar({
                 <Settings size={13} />
               </button>
             </div>
-            {availableModels.length === 0 && (
+            {selectableModels.length === 0 && (
               <div className="chat-dropdown-empty">暂无可用模型</div>
             )}
             {modelProviders.map((provider) => {

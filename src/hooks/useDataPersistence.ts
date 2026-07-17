@@ -34,9 +34,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const getString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
-const getErrorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
-
 const getStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
@@ -411,14 +408,6 @@ export function selectSessionModel(sessionId: string, models: ModelInfo[]): Mode
   return models[0];
 }
 
-export function applySessionModels(sessionId: string, models?: ModelInfo[]) {
-  if (!models || models.length === 0) return;
-  const chatState = useChatStore.getState();
-  const selectedModel = selectSessionModel(sessionId, models);
-  chatState.setAvailableModels(models);
-  if (selectedModel) chatState.setCurrentModel(selectedModel);
-}
-
 export function useDataPersistence() {
   // Load everything on mount in a single coordinated flow
   useEffect(() => {
@@ -508,46 +497,7 @@ export function useDataPersistence() {
 
       if (!persistenceHydration.complete(hydrationGeneration)) return;
 
-      // 4. Restart agent backend for the active session (async, in background)
-      if (activeSessionId && activeProject && activeSession) {
-        window.electronAPI.agentCreateSession(
-          activeSession.agentId, activeProject.path, activeSession.id, activeSession.sessionFilePath
-        ).then((result) => {
-          const projectState = useProjectStore.getState();
-          if (result.success) {
-            useChatStore.getState().clearAgentStartupErrors(activeSessionId!);
-          } else {
-            const chatStore = useChatStore.getState();
-            chatStore.clearAgentStartupErrors(activeSessionId!);
-            chatStore.addMessage({
-              id: crypto.randomUUID(),
-              role: "system",
-              content: `Agent 启动失败: ${result.error || "Agent 会话初始化失败"}`,
-              timestamp: Date.now(),
-              systemType: "agent_startup_error",
-            }, activeSessionId);
-          }
-          if (result.sessionFilePath) {
-            projectState.setSessionFilePath(activeProject!.id, activeSessionId!, result.sessionFilePath);
-          }
-          if (useProjectStore.getState().activeSessionId === activeSessionId) {
-            applySessionModels(activeSessionId!, result.models);
-          }
-          projectState.markSessionInitialized(activeSessionId!);
-        }).catch((error: unknown) => {
-          const projectState = useProjectStore.getState();
-          projectState.markSessionInitialized(activeSessionId!);
-          const chatStore = useChatStore.getState();
-          chatStore.clearAgentStartupErrors(activeSessionId!);
-          chatStore.addMessage({
-            id: crypto.randomUUID(),
-            role: "system",
-            content: `Agent 启动失败: ${getErrorMessage(error)}`,
-            timestamp: Date.now(),
-            systemType: "agent_startup_error",
-          }, activeSessionId);
-        });
-      }
+      // The active ChatPanel initializes its restored session through SessionCommandCoordinator.
     });
 
     return () => {
@@ -555,9 +505,7 @@ export function useDataPersistence() {
     };
   }, []);
 
-  // NOTE: Model and thinking level saving is done directly in handleSelectModel
-  // and handleSelectThinking (ChatPanel) to avoid race conditions from
-  // subscription-based saves during session switches.
+  // Model and thinking settings are persisted by SessionCommandCoordinator.
 
   // Save projects, activeProjectId, and activeSessionId when they change
   useEffect(() => {

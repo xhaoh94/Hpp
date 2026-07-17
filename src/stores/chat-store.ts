@@ -1,8 +1,11 @@
 import { create } from "zustand";
 import type { SessionReference } from "./project-store";
 import type { AgentImagePayload } from "@/types";
+import type { DiffLike } from "@shared/diff-summary";
+import type { SharedModel } from "@shared/models";
+import type { ProcessEntryView } from "@shared/process-view";
 
-export interface FileDiff {
+export interface FileDiff extends DiffLike {
   file: string;
   patch: string;
   additions: number;
@@ -21,7 +24,7 @@ export interface AgentProcessFile {
   changeKey?: string;
 }
 
-export interface AgentProcessEntry {
+export interface AgentProcessEntry extends ProcessEntryView {
   id: string;
   type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question";
   title: string;
@@ -103,13 +106,7 @@ export interface ChatDraft {
   sessionReferences: SessionReference[];
 }
 
-export interface ModelInfo {
-  id: string;
-  name: string;
-  provider: string;
-  reasoning: boolean;
-  supportsImages?: boolean;
-}
+export interface ModelInfo extends SharedModel {}
 
 export type QueuedMessageStatus = "queued" | "sending" | "failed";
 
