@@ -12,9 +12,9 @@ const { isAbsolute, join, relative, resolve, sep } = require("path");
 const MANIFEST_FILE = "hpp-agent-plugin.json";
 const rootDir = resolve(__dirname, "..");
 const sourceRoot = join(rootDir, "electron", "agent-plugins");
-const outputRoot = join(rootDir, "release", "agent-plugins");
 const releaseDownloadBaseUrl = "https://github.com/xhaoh94/Hpp/releases/latest/download";
 const currentHppVersion = require(join(rootDir, "package.json")).version;
+const outputRoot = join(rootDir, "release", `v${currentHppVersion}`, "agent-plugins");
 
 const defaultCapabilities = {
   planMode: "prompt",

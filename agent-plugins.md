@@ -287,8 +287,8 @@ npm run build
 生成：
 
 ```text
-release/agent-plugins/<id>.zip
-release/agent-plugins/agent-plugins.json
+release/v<version>/agent-plugins/<id>.zip
+release/v<version>/agent-plugins/agent-plugins.json
 ```
 
 插件目录、官方目录顺序和发布 ZIP 均由 manifest 与目录扫描生成，不维护固定 Agent ID 列表。

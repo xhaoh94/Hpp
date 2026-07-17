@@ -76,7 +76,7 @@ Build the signed release APK:
 npm run mobile:release
 ```
 
-The release APK and update metadata are written to `release/Hpp-Android.apk` and `release/android-latest.json`. On the first release build, Hpp creates a persistent signing key under `%USERPROFILE%\.hpp\android-signing`. Back up that directory securely: every future Android update must be signed with the same key.
+The release APK and update metadata are written to `release/v<version>/Hpp-Android.apk` and `release/v<version>/android-latest.json`. On the first release build, Hpp creates a persistent signing key under `%USERPROFILE%\.hpp\android-signing`. Back up that directory securely: every future Android update must be signed with the same key.
 
 `mobile:sync` rebuilds the Web application and copies it into the native Android project. Run it after changing files under `mobile/src`.
 

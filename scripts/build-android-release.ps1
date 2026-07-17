@@ -66,7 +66,7 @@ if (-not (Test-Path $apkSigner)) {
 & $apkSigner verify --verbose --print-certs $sourceApk
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$releaseDir = Join-Path $workspace "release"
+$releaseDir = Join-Path $workspace "release\v$version"
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 $releaseApk = Join-Path $releaseDir "Hpp-Android.apk"
 Copy-Item -Force $sourceApk $releaseApk

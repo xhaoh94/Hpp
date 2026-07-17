@@ -1,11 +1,12 @@
 const { createReadStream, readdirSync, statSync } = require("fs");
-const { basename, resolve } = require("path");
+const { basename, join, resolve } = require("path");
 const https = require("https");
 
 const owner = "xhaoh94";
 const repo = "Hpp";
 const version = require("../package.json").version;
 const tag = `v${version}`;
+const releaseDir = resolve("release", tag);
 const token = process.env.GH_TOKEN;
 
 if (!token) throw new Error("GH_TOKEN is required.");
@@ -79,19 +80,20 @@ function uploadFile(uploadUrl, filePath, contentType) {
 }
 
 async function main() {
-  const pluginAssets = readdirSync(resolve("release/agent-plugins"), { withFileTypes: true })
+  const pluginDir = join(releaseDir, "agent-plugins");
+  const pluginAssets = readdirSync(pluginDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
     .sort((left, right) => left.name.localeCompare(right.name))
     .map((entry) => [
-      `release/agent-plugins/${entry.name}`,
+      join(pluginDir, entry.name),
       entry.name.endsWith(".zip") ? "application/zip" : "application/json",
   ]);
   const assets = [
-    [`release/hpp-Setup-${version}.exe`, "application/vnd.microsoft.portable-executable"],
-    [`release/hpp-Setup-${version}.exe.blockmap`, "application/octet-stream"],
-    ["release/latest.yml", "text/yaml"],
-    ["release/Hpp-Android.apk", "application/vnd.android.package-archive"],
-    ["release/android-latest.json", "application/json"],
+    [join(releaseDir, `hpp-Setup-${version}.exe`), "application/vnd.microsoft.portable-executable"],
+    [join(releaseDir, `hpp-Setup-${version}.exe.blockmap`), "application/octet-stream"],
+    [join(releaseDir, "latest.yml"), "text/yaml"],
+    [join(releaseDir, "Hpp-Android.apk"), "application/vnd.android.package-archive"],
+    [join(releaseDir, "android-latest.json"), "application/json"],
     ...pluginAssets,
   ];
   const preparedAssets = assets.map(([relativePath, contentType]) => {
