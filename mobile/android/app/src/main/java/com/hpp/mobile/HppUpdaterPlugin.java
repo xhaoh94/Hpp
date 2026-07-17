@@ -18,6 +18,7 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -156,6 +157,20 @@ public class HppUpdaterPlugin extends Plugin {
     }
 
     private void download(String source, File target) throws Exception {
+        IOException lastFailure = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                downloadOnce(source, target);
+                return;
+            } catch (IOException error) {
+                lastFailure = error;
+                deleteQuietly(target);
+            }
+        }
+        throw lastFailure;
+    }
+
+    private void downloadOnce(String source, File target) throws Exception {
         HttpURLConnection connection = openConnection(source);
         long total = connection.getContentLengthLong();
         if (total > MAX_APK_BYTES) throw new DownloadTooLargeException();
@@ -197,6 +212,8 @@ public class HppUpdaterPlugin extends Plugin {
             connection.setConnectTimeout(20_000);
             connection.setReadTimeout(30_000);
             connection.setRequestProperty("User-Agent", "Hpp-Android-Updater");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Connection", "close");
             int status = connection.getResponseCode();
             if (status >= 300 && status < 400) {
                 String location = connection.getHeaderField("Location");

@@ -105,8 +105,10 @@ import { getComposerAction } from "./composer";
 import { HppUpdater } from "./android-updater";
 import {
   ANDROID_UPDATE_METADATA_URL,
+  ANDROID_UPDATE_RELEASE_API_URL,
   getAndroidUpdateErrorMessage,
   isAndroidUpdateAvailable,
+  parseGitHubReleaseUpdateMetadata,
   parseAndroidUpdateMetadata,
   type AndroidUpdateMetadata,
 } from "./updater";
@@ -222,6 +224,53 @@ const DEMO_AGENTS: RemoteAgent[] = [
   { id: "pi", name: "Pi", description: "Pi coding agent", runtime: "sdk", supportsGuidance: true },
   { id: "opencode", name: "OpenCode", description: "OpenCode agent", runtime: "cli" },
 ];
+
+async function requestAndroidUpdateJson(url: string) {
+  const separator = url.includes("?") ? "&" : "?";
+  const requestUrl = `${url}${separator}t=${Date.now()}`;
+  let nativeFailure: unknown;
+  try {
+    const response = await CapacitorHttp.get({
+      url: requestUrl,
+      headers: {
+        Accept: "application/json",
+        "Cache-Control": "no-cache",
+        "User-Agent": "Hpp-Android-Updater",
+      },
+      connectTimeout: 12_000,
+      readTimeout: 12_000,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`UPDATE_CHECK_HTTP_${response.status}`);
+    }
+    return response.data as unknown;
+  } catch (error) {
+    nativeFailure = error;
+  }
+
+  try {
+    const response = await fetch(requestUrl, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`UPDATE_CHECK_HTTP_${response.status}`);
+    return await response.json() as unknown;
+  } catch {
+    throw nativeFailure;
+  }
+}
+
+async function fetchAndroidUpdateMetadata() {
+  try {
+    return parseGitHubReleaseUpdateMetadata(
+      await requestAndroidUpdateJson(ANDROID_UPDATE_RELEASE_API_URL),
+    );
+  } catch {
+    return parseAndroidUpdateMetadata(
+      await requestAndroidUpdateJson(ANDROID_UPDATE_METADATA_URL),
+    );
+  }
+}
 
 function findSession(projects: RemoteProject[], sessionId: string | null) {
   if (!sessionId) return null;
@@ -1059,20 +1108,7 @@ export default function App() {
     try {
       const info = await CapacitorApp.getInfo();
       setAppVersion(info.version || mobilePackage.version);
-      const separator = ANDROID_UPDATE_METADATA_URL.includes("?") ? "&" : "?";
-      const response = await CapacitorHttp.get({
-        url: `${ANDROID_UPDATE_METADATA_URL}${separator}t=${Date.now()}`,
-        headers: {
-          Accept: "application/json",
-          "Cache-Control": "no-cache",
-        },
-        connectTimeout: 12_000,
-        readTimeout: 12_000,
-      });
-      if (response.status < 200 || response.status >= 300) {
-        throw new Error(`UPDATE_CHECK_HTTP_${response.status}`);
-      }
-      const metadata = parseAndroidUpdateMetadata(response.data);
+      const metadata = await fetchAndroidUpdateMetadata();
       if (isAndroidUpdateAvailable(info.build, metadata)) {
         updateMetadataRef.current = metadata;
         setUpdateMetadata(metadata);

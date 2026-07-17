@@ -1,4 +1,4 @@
-const { createReadStream, readdirSync, statSync } = require("fs");
+const { createReadStream, readFileSync, readdirSync, statSync } = require("fs");
 const { basename, join, resolve } = require("path");
 const https = require("https");
 
@@ -46,11 +46,12 @@ function requestJson(method, path, body) {
   });
 }
 
-function uploadFile(uploadUrl, filePath, contentType) {
+function uploadFile(uploadUrl, filePath, contentType, label) {
   return new Promise((resolvePromise, reject) => {
     const fileName = basename(filePath);
     const url = new URL(uploadUrl.replace("{?name,label}", ""));
     url.searchParams.set("name", fileName);
+    if (label) url.searchParams.set("label", label);
     const size = statSync(filePath).size;
     const request = https.request({
       hostname: url.hostname,
@@ -80,6 +81,10 @@ function uploadFile(uploadUrl, filePath, contentType) {
 }
 
 async function main() {
+  const androidMetadata = JSON.parse(readFileSync(join(releaseDir, "android-latest.json"), "utf8"));
+  if (!Number.isSafeInteger(androidMetadata.versionCode) || androidMetadata.versionCode <= 0) {
+    throw new Error("android-latest.json contains an invalid versionCode");
+  }
   const pluginDir = join(releaseDir, "agent-plugins");
   const pluginAssets = readdirSync(pluginDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
@@ -92,13 +97,17 @@ async function main() {
     [join(releaseDir, `hpp-Setup-${version}.exe`), "application/vnd.microsoft.portable-executable"],
     [join(releaseDir, `hpp-Setup-${version}.exe.blockmap`), "application/octet-stream"],
     [join(releaseDir, "latest.yml"), "text/yaml"],
-    [join(releaseDir, "Hpp-Android.apk"), "application/vnd.android.package-archive"],
+    [
+      join(releaseDir, "Hpp-Android.apk"),
+      "application/vnd.android.package-archive",
+      `hpp-version-code:${androidMetadata.versionCode}`,
+    ],
     [join(releaseDir, "android-latest.json"), "application/json"],
     ...pluginAssets,
   ];
-  const preparedAssets = assets.map(([relativePath, contentType]) => {
+  const preparedAssets = assets.map(([relativePath, contentType, label]) => {
     const filePath = resolve(relativePath);
-    return { filePath, contentType, size: statSync(filePath).size };
+    return { filePath, contentType, label, size: statSync(filePath).size };
   });
   console.log(`Validated ${preparedAssets.length} local release assets`);
 
@@ -132,6 +141,7 @@ async function main() {
       "- 增加业务边界与协调器测试，防止 Agent 命令逻辑重新分散到桌面和远程 UI。",
       "- Android App 新增 GitHub Release 自动更新：启动或恢复前台时检查新版本，下载后校验 SHA-256 并调用系统安装器。",
       "- Android 主机列表底部新增版本号与手动检查入口，并补充安装未知应用权限引导。",
+      "- 修复部分 Android 网络环境检查更新出现 connection closed 的问题，新增 GitHub API 与 WebView 网络备用通道。",
       "- 此次为 0.1.2 同版本覆盖包，需手动安装一次；后续更高 versionCode 可直接在 App 内更新。",
     ].join("\n"),
     draft: false,
@@ -139,9 +149,9 @@ async function main() {
     make_latest: "true",
   });
 
-  for (const { filePath, contentType, size } of preparedAssets) {
+  for (const { filePath, contentType, label, size } of preparedAssets) {
     console.log(`Streaming ${basename(filePath)} (${size} bytes)`);
-    await uploadFile(release.upload_url, filePath, contentType);
+    await uploadFile(release.upload_url, filePath, contentType, label);
   }
 
   console.log(`Published ${release.html_url}`);
