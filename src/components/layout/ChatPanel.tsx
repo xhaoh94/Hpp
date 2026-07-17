@@ -63,8 +63,6 @@ import { useQuestionnaireResize } from "./useQuestionnaireResize";
 import { useSessionModels } from "./useSessionModels";
 import {
   asRecord,
-  createSessionRuntime,
-  createProcessEntryId,
   getBooleanField,
   resetSessionRuntimeAfterTurn,
   type SessionRuntime,
@@ -1621,7 +1619,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     return unsubscribe;
   }, []);
 
-  const { finishManualAbort } = useAgentEvents({
+  const { requestManualAbort } = useAgentEvents({
     activeAgentId,
     sessionRuntimeRef,
     pendingUIResponseRef,
@@ -1632,6 +1630,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   useRemoteBridge({
     pendingInteraction: pendingUIResponse,
     setPendingInteraction: setPendingUIResponseState,
+    abortSession: requestManualAbort,
   });
 
   const {
@@ -2005,40 +2004,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const handleAbort = useCallback(() => {
     const currentSessionId = useProjectStore.getState().activeSessionId;
     if (!currentSessionId) return;
-    const runtime = sessionRuntimeRef.current[currentSessionId] || createSessionRuntime();
-    sessionRuntimeRef.current[currentSessionId] = runtime;
-    if (runtime.manualAbortRequested) {
-      return;
-    }
-    runtime.manualAbortRequested = true;
-    if (runtime?.streamWatchdog) {
-      clearTimeout(runtime.streamWatchdog);
-      runtime.streamWatchdog = null;
-    }
-    useChatStore.getState().appendLastAssistantProcessEntry({
-      id: createProcessEntryId(),
-      timestamp: Date.now(),
-      type: "status",
-      title: "用户已手动中断",
-      state: "interrupted",
-      expanded: false,
-    }, currentSessionId);
-    setPendingUIResponseState((current) => current?.sessionId === currentSessionId ? null : current);
-    setStreaming(true);
-    useProjectStore.getState().setAgentStatus(currentSessionId, "running");
-
-    void window.electronAPI.agentAbort(currentSessionId)
-      .then((result) => {
-        finishManualAbort(currentSessionId);
-        if (!result.success) {
-          console.error("[agent] abort failed: no active agent");
-        }
-      })
-      .catch((err) => {
-        runtime.manualAbortRequested = false;
-        console.error("[agent] abort failed:", err);
-      });
-  }, [finishManualAbort, setPendingUIResponseState, setStreaming]);
+    void requestManualAbort(currentSessionId).catch(() => undefined);
+  }, [requestManualAbort]);
 
   const handleSelectModel = async (model: ModelInfo) => {
     const previousModel = useChatStore.getState().currentModel;

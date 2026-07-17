@@ -33,8 +33,9 @@ import type {
 } from "@/types";
 import { MAX_REMOTE_SESSION_REFERENCES } from "../../shared/remote-protocol";
 
-type RemoteCommandContext = {
+export type RemoteCommandContext = {
   pendingInteraction: PendingUIResponse;
+  abortSession: (sessionId: string) => Promise<boolean>;
   clearPendingInteraction: (sessionId: string) => void;
 };
 
@@ -612,6 +613,13 @@ function removeQueuedMessage(payload: Record<string, unknown>) {
   return { success: true, queueItemId };
 }
 
+export async function abortRemoteSession(sessionId: string, context: RemoteCommandContext) {
+  const success = await context.abortSession(sessionId);
+  if (!success) throw new Error("ABORT_FAILED");
+  context.clearPendingInteraction(sessionId);
+  return { success: true };
+}
+
 export async function executeRemoteSessionCommand(
   command: RemoteRendererCommand,
   context: RemoteCommandContext,
@@ -630,10 +638,7 @@ export async function executeRemoteSessionCommand(
     case "session.abort": {
       const sessionId = getString(command.payload.sessionId);
       await ensureSession(sessionId);
-      const result = await window.electronAPI.agentAbort(sessionId);
-      if (!result.success) throw new Error("ABORT_FAILED");
-      context.clearPendingInteraction(sessionId);
-      return { success: true };
+      return abortRemoteSession(sessionId, context);
     }
     case "session.reload":
       return reloadSession(command.payload);

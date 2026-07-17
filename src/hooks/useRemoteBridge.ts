@@ -18,6 +18,7 @@ import type {
 type UseRemoteBridgeOptions = {
   pendingInteraction: PendingUIResponse;
   setPendingInteraction: (next: PendingUIResponseUpdate) => void;
+  abortSession: (sessionId: string) => Promise<boolean>;
 };
 
 const normalizeSlashes = (value: string) => value.replace(/\\/g, "/");
@@ -182,7 +183,7 @@ export function shouldFlushPendingMessageUpdate(
     pending.message.id !== update.message.id;
 }
 
-export function useRemoteBridge({ pendingInteraction, setPendingInteraction }: UseRemoteBridgeOptions) {
+export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abortSession }: UseRemoteBridgeOptions) {
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const pendingInteractionRef = useRef(pendingInteraction);
   const publishedInteractionSessionRef = useRef<string | null>(null);
@@ -439,6 +440,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction }: U
   useEffect(() => window.electronAPI.onRemoteCommand((command) => {
     void executeRemoteSessionCommand(command, {
       pendingInteraction: pendingInteractionRef.current,
+      abortSession,
       clearPendingInteraction: (sessionId) => {
         setPendingInteraction((current) => current?.sessionId === sessionId ? null : current);
         publish({ type: "session.interaction", sessionId, interaction: null });
@@ -452,7 +454,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction }: U
         error: error instanceof Error ? error.message : String(error),
       });
     });
-  }), [publish, setPendingInteraction]);
+  }), [abortSession, publish, setPendingInteraction]);
 
   useEffect(() => {
     const timer = setTimeout(publishSnapshot, 750);

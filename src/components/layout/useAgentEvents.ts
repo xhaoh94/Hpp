@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
+import { useChatStore } from "@/stores/chat-store";
+import { useProjectStore } from "@/stores/project-store";
 import { createAgentEventController } from "./agentEventController";
 import { dispatchAgentEvent } from "./agentEventDispatcher";
 import type {
@@ -6,7 +8,11 @@ import type {
   PendingUIResponse,
   PendingUIResponseUpdate,
 } from "./agentEventTypes";
-import type { SessionRuntime } from "./agentEventUtils";
+import {
+  createProcessEntryId,
+  createSessionRuntime,
+  type SessionRuntime,
+} from "./agentEventUtils";
 
 type UseAgentEventsOptions = {
   activeAgentId: string;
@@ -65,5 +71,43 @@ export function useAgentEvents({
     controllerRef.current?.finishManualAbort(sessionId);
   }, []);
 
-  return { finishManualAbort };
+  const requestManualAbort = useCallback(async (sessionId: string) => {
+    const runtime = sessionRuntimeRef.current[sessionId] || createSessionRuntime();
+    sessionRuntimeRef.current[sessionId] = runtime;
+    if (runtime.manualAbortRequested) return true;
+
+    runtime.manualAbortRequested = true;
+    if (runtime.streamWatchdog) {
+      clearTimeout(runtime.streamWatchdog);
+      runtime.streamWatchdog = null;
+    }
+    useChatStore.getState().appendLastAssistantProcessEntry({
+      id: createProcessEntryId(),
+      timestamp: Date.now(),
+      type: "status",
+      title: "用户已手动中断",
+      state: "interrupted",
+      expanded: false,
+    }, sessionId);
+    latestSettersRef.current.setPendingUIResponseState((current) =>
+      current?.sessionId === sessionId ? null : current
+    );
+    if (useProjectStore.getState().activeSessionId === sessionId) {
+      latestSettersRef.current.setStreaming(true);
+    }
+    useProjectStore.getState().setAgentStatus(sessionId, "running");
+
+    try {
+      const result = await window.electronAPI.agentAbort(sessionId);
+      finishManualAbort(sessionId);
+      if (!result.success) console.error("[agent] abort failed: no active agent");
+      return result.success;
+    } catch (error) {
+      runtime.manualAbortRequested = false;
+      console.error("[agent] abort failed:", error);
+      throw error;
+    }
+  }, [finishManualAbort, sessionRuntimeRef]);
+
+  return { finishManualAbort, requestManualAbort };
 }
