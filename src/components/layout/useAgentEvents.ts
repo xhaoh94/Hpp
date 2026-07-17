@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { createAgentEventController } from "./agentEventController";
 import { dispatchAgentEvent } from "./agentEventDispatcher";
 import type {
+  AgentEventRuntimeController,
   PendingUIResponse,
   PendingUIResponseUpdate,
 } from "./agentEventTypes";
@@ -23,6 +24,7 @@ export function useAgentEvents({
   setStreaming,
 }: UseAgentEventsOptions) {
   const activeAgentIdRef = useRef(activeAgentId);
+  const controllerRef = useRef<AgentEventRuntimeController | null>(null);
   const latestSettersRef = useRef({
     setPendingUIResponseState,
     setStreaming,
@@ -46,6 +48,7 @@ export function useAgentEvents({
         latestSettersRef.current.setStreaming(streaming);
       },
     });
+    controllerRef.current = controller;
 
     const unsubscribe = window.electronAPI.onAgentEvent((event) => {
       dispatchAgentEvent(event, controller);
@@ -53,7 +56,14 @@ export function useAgentEvents({
 
     return () => {
       controller.clearAllStreamWatchdogs();
+      if (controllerRef.current === controller) controllerRef.current = null;
       unsubscribe();
     };
   }, []);
+
+  const finishManualAbort = useCallback((sessionId: string) => {
+    controllerRef.current?.finishManualAbort(sessionId);
+  }, []);
+
+  return { finishManualAbort };
 }

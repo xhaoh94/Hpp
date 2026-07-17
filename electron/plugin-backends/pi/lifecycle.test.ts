@@ -89,6 +89,31 @@ describe("Pi lifecycle", () => {
     expect(agent.isIdle()).toBe(true);
   });
 
+  it("emits aborted and returns to idle after a manual abort", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    child.stdin.on("data", (chunk) => {
+      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
+        const command = JSON.parse(line) as Record<string, unknown>;
+        if (command.type === "abort") {
+          child.stdout.write(`${JSON.stringify({ type: "aborted", id: command.id })}\n`);
+        }
+      }
+    });
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-1" });
+
+    expect(agent.isIdle()).toBe(false);
+    await agent.abort();
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ type: "aborted" }));
+    agent.dispose();
+  });
+
   it("relays Pi history and native turn metadata", async () => {
     const child = new FakePiProcess();
     child.stdin.on("data", (chunk) => {

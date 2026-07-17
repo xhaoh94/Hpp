@@ -351,6 +351,7 @@ export class PiSDKAgent {
 
     if (!this.process) {
       this.finishAbortState();
+      this.emitEvent({ type: "aborted" });
       return;
     }
     await new Promise<void>((resolve) => {
@@ -370,6 +371,7 @@ export class PiSDKAgent {
       }
     });
     this.finishAbortState();
+    this.emitEvent({ type: "aborted" });
   }
 
   async getModels(): Promise<AgentModel[]> {

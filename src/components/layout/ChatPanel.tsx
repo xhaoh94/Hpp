@@ -1621,7 +1621,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     return unsubscribe;
   }, []);
 
-  useAgentEvents({
+  const { finishManualAbort } = useAgentEvents({
     activeAgentId,
     sessionRuntimeRef,
     pendingUIResponseRef,
@@ -2029,11 +2029,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
 
     void window.electronAPI.agentAbort(currentSessionId)
       .then((result) => {
+        finishManualAbort(currentSessionId);
         if (!result.success) {
-          useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
-          resetSessionRuntimeAfterTurn(runtime);
-          if (useProjectStore.getState().activeSessionId === currentSessionId) setStreaming(false);
-          useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
           console.error("[agent] abort failed: no active agent");
         }
       })
@@ -2041,7 +2038,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         runtime.manualAbortRequested = false;
         console.error("[agent] abort failed:", err);
       });
-  }, [setPendingUIResponseState, setStreaming]);
+  }, [finishManualAbort, setPendingUIResponseState, setStreaming]);
 
   const handleSelectModel = async (model: ModelInfo) => {
     const previousModel = useChatStore.getState().currentModel;
