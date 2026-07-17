@@ -87,6 +87,7 @@ import {
   pairHost,
   probeHostAvailability,
   RemoteClient,
+  withPreferredHostBaseUrl,
   type ConnectionState,
   type HostAvailability,
 } from "./remote-client";
@@ -98,6 +99,7 @@ import {
   saveLastPairedHostId,
   savePairedHosts,
   saveSessionDraft,
+  withPairedHostMetadata,
   type PairedHost,
 } from "./storage";
 import { copyText, createClientId } from "./web-platform";
@@ -922,6 +924,7 @@ export default function App() {
   const [editingHostAlias, setEditingHostAlias] = useState("");
   const [editingHostNote, setEditingHostNote] = useState("");
   const [editingAddress, setEditingAddress] = useState("");
+  const [savingHostId, setSavingHostId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyProjectId, setHistoryProjectId] = useState<string | null>(null);
   const [createProject, setCreateProject] = useState<RemoteProject | null>(null);
@@ -1375,7 +1378,19 @@ export default function App() {
     setMessages({});
     const client = new RemoteClient(host);
     clientRef.current = client;
+    client.onHostUpdated((nextHost) => {
+      if (clientRef.current !== client) return;
+      setActiveHost(nextHost);
+      setHosts((current) => {
+        const next = current.map((item) => item.id === nextHost.id ? nextHost : item);
+        void savePairedHosts(next).catch((err) => {
+          setError(`无法记住自动选择的连接地址：${err instanceof Error ? err.message : String(err)}`);
+        });
+        return next;
+      });
+    });
     client.onState((state) => {
+      if (clientRef.current !== client) return;
       setConnectionState(state);
       if (state === "connected") void loadCatalog(client).catch((err) => setError(err instanceof Error ? err.message : String(err)));
     });
@@ -2126,21 +2141,27 @@ export default function App() {
     }
   }, [pendingImages.length]);
 
-  const updateHostDetails = async (host: PairedHost) => {
-    const alias = editingHostAlias.trim().slice(0, 80);
-    const note = editingHostNote.trim().slice(0, 200);
-    const nextHost: PairedHost = {
-      ...host,
-      baseUrl: editingAddress.trim().replace(/\/$/, ""),
-    };
-    if (alias) nextHost.alias = alias;
-    else delete nextHost.alias;
-    if (note) nextHost.note = note;
-    else delete nextHost.note;
-    const next = hosts.map((item) => item.id === host.id ? nextHost : item);
-    await updateHosts(next);
-    setEditingHostId(null);
-    if (activeHost?.id === host.id) connectHost(nextHost);
+  const updateHostDetails = async (host: PairedHost, form: HTMLFormElement) => {
+    if (savingHostId === host.id) return;
+    setSavingHostId(host.id);
+    setError("");
+    try {
+      const formData = new FormData(form);
+      const alias = String(formData.get("alias") ?? editingHostAlias);
+      const note = String(formData.get("note") ?? editingHostNote);
+      const address = String(formData.get("baseUrl") ?? editingAddress);
+      const nextHost = withPairedHostMetadata(withPreferredHostBaseUrl(host, address), alias, note);
+      const next = hosts.map((item) => item.id === host.id ? nextHost : item);
+      await savePairedHosts(next);
+      setHosts(next);
+      setEditingHostId(null);
+      showFloatingToast("桌面信息已保存");
+      if (activeHost?.id === host.id) connectHost(nextHost);
+    } catch (err) {
+      setError(`保存桌面信息失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingHostId(null);
+    }
   };
 
   const updateDialog = (
@@ -2210,26 +2231,35 @@ export default function App() {
                   <MoreVertical size={18} />
                 </button>
                 {editingHostId === host.id && (
-                  <div className="host-edit">
+                  <form
+                    className="host-edit"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void updateHostDetails(host, event.currentTarget);
+                    }}
+                  >
                     <div className="host-edit-fields">
                       <label>
                         <span>名称</span>
-                        <input value={editingHostAlias} onChange={(event) => setEditingHostAlias(event.target.value)} placeholder={host.hostName} maxLength={80} />
+                        <input name="alias" value={editingHostAlias} onChange={(event) => setEditingHostAlias(event.target.value)} placeholder={host.hostName} maxLength={80} />
                       </label>
                       <label>
                         <span>备注</span>
-                        <input value={editingHostNote} onChange={(event) => setEditingHostNote(event.target.value)} placeholder="例如：办公室电脑" maxLength={200} />
+                        <input name="note" value={editingHostNote} onChange={(event) => setEditingHostNote(event.target.value)} placeholder="例如：办公室电脑" maxLength={200} />
                       </label>
                       <label>
                         <span>连接地址</span>
-                        <input value={editingAddress} onChange={(event) => setEditingAddress(event.target.value)} />
+                        <input name="baseUrl" value={editingAddress} onChange={(event) => setEditingAddress(event.target.value)} />
                       </label>
                     </div>
                     <div className="host-edit-actions">
-                      <button onClick={() => void updateHostDetails(host)}>保存</button>
-                      <button className="danger" onClick={() => void updateHosts(hosts.filter((item) => item.id !== host.id))} title="删除配对"><Trash2 size={15} /></button>
+                      <button type="submit" disabled={savingHostId === host.id}>
+                        {savingHostId === host.id && <LoaderCircle className="spin" size={15} />}
+                        {savingHostId === host.id ? "保存中" : "保存"}
+                      </button>
+                      <button type="button" className="danger" disabled={savingHostId === host.id} onClick={() => void updateHosts(hosts.filter((item) => item.id !== host.id))} title="删除配对"><Trash2 size={15} /></button>
                     </div>
-                  </div>
+                  </form>
                 )}
               </article>
             );

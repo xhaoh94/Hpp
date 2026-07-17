@@ -4,6 +4,11 @@ import {
   type RemoteRequestName,
   type RemoteServerEnvelope,
 } from "@shared/remote-protocol";
+import {
+  isLikelyLanRemoteUrl,
+  normalizeRemoteBaseUrl,
+  uniqueRemoteBaseUrls,
+} from "@shared/remote-addresses";
 import type { PairedHost } from "./storage";
 import { createClientId } from "./web-platform";
 
@@ -18,30 +23,19 @@ type PendingRequest = {
 
 type RemoteEventListener = (name: RemoteEventName, payload: unknown, revision?: number, hostEpoch?: string) => void;
 
-function isPrivateHttpHost(hostname: string) {
-  const host = hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local")) return true;
-  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) return true;
-  const parts = host.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  return parts[0] === 10 ||
-    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
-    (parts[0] === 192 && parts[1] === 168) ||
-    (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) ||
-    parts[0] === 127 ||
-    (parts[0] === 169 && parts[1] === 254);
+export { normalizeRemoteBaseUrl } from "@shared/remote-addresses";
+
+export function getHostBaseUrls(host: Pick<PairedHost, "baseUrl" | "baseUrls">) {
+  return uniqueRemoteBaseUrls([host.baseUrl, ...(host.baseUrls || [])]);
 }
 
-export function normalizeRemoteBaseUrl(baseUrl: string) {
-  const url = new URL(baseUrl.trim());
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Only http:// or https:// desktop addresses are supported.");
-  if (url.protocol === "http:" && !isPrivateHttpHost(url.hostname)) {
-    throw new Error("Unencrypted connections are limited to LAN, localhost, and private VPN addresses.");
-  }
-  url.pathname = "";
-  url.search = "";
-  url.hash = "";
-  return url.toString().replace(/\/$/, "");
+export function withPreferredHostBaseUrl(host: PairedHost, baseUrl: string, discoveredUrls: string[] = []) {
+  const normalized = normalizeRemoteBaseUrl(baseUrl);
+  return {
+    ...host,
+    baseUrl: normalized,
+    baseUrls: uniqueRemoteBaseUrls([normalized, ...discoveredUrls, ...(host.baseUrls || []), host.baseUrl]),
+  };
 }
 
 function toWebSocketUrl(baseUrl: string) {
@@ -54,22 +48,57 @@ function toWebSocketUrl(baseUrl: string) {
   return url.toString();
 }
 
-export async function probeHostAvailability(host: PairedHost, timeoutMs = 2500): Promise<Exclude<HostAvailability, "checking">> {
+async function probeRemoteBaseUrl(baseUrl: string, expectedHostId: string | undefined, timeoutMs: number) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${normalizeRemoteBaseUrl(host.baseUrl)}/api/v1/health`, {
+    const response = await fetch(`${normalizeRemoteBaseUrl(baseUrl)}/api/v1/health`, {
       cache: "no-store",
       signal: controller.signal,
     });
-    if (!response.ok) return "offline";
+    if (!response.ok) return false;
     const result = await response.json() as Record<string, unknown>;
-    return result.ok === true && result.hostId === host.hostId ? "online" : "offline";
+    return result.ok === true &&
+      result.protocolVersion === REMOTE_PROTOCOL_VERSION &&
+      (!expectedHostId || result.hostId === expectedHostId);
   } catch {
-    return "offline";
+    return false;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function probeCandidateGroup(baseUrls: string[], expectedHostId: string | undefined, timeoutMs: number) {
+  if (baseUrls.length === 0) return null;
+  return new Promise<string | null>((resolve) => {
+    let remaining = baseUrls.length;
+    let settled = false;
+    for (const baseUrl of baseUrls) {
+      void probeRemoteBaseUrl(baseUrl, expectedHostId, timeoutMs).then((available) => {
+        if (settled) return;
+        if (available) {
+          settled = true;
+          resolve(baseUrl);
+          return;
+        }
+        remaining -= 1;
+        if (remaining === 0) resolve(null);
+      });
+    }
+  });
+}
+
+export async function resolveHostBaseUrl(host: Pick<PairedHost, "baseUrl" | "baseUrls" | "hostId">, timeoutMs = 2500) {
+  const candidates = getHostBaseUrls(host);
+  const lanCandidates = candidates.filter(isLikelyLanRemoteUrl);
+  const fallbackCandidates = candidates.filter((url) => !isLikelyLanRemoteUrl(url));
+  const lanResult = await probeCandidateGroup(lanCandidates, host.hostId || undefined, Math.min(timeoutMs, 1000));
+  if (lanResult) return lanResult;
+  return probeCandidateGroup(fallbackCandidates, host.hostId || undefined, timeoutMs);
+}
+
+export async function probeHostAvailability(host: PairedHost, timeoutMs = 2500): Promise<Exclude<HostAvailability, "checking">> {
+  return await resolveHostBaseUrl(host, timeoutMs) ? "online" : "offline";
 }
 
 export class RemoteClient {
@@ -77,6 +106,7 @@ export class RemoteClient {
   private pending = new Map<string, PendingRequest>();
   private eventListeners = new Set<RemoteEventListener>();
   private stateListeners = new Set<(state: ConnectionState) => void>();
+  private hostListeners = new Set<(host: PairedHost) => void>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private shouldReconnect = true;
@@ -95,15 +125,27 @@ export class RemoteClient {
     return () => this.stateListeners.delete(listener);
   }
 
+  onHostUpdated(listener: (host: PairedHost) => void) {
+    this.hostListeners.add(listener);
+    return () => this.hostListeners.delete(listener);
+  }
+
   updateHost(host: PairedHost) {
     this.host = host;
   }
 
   async connect() {
     this.shouldReconnect = true;
-    if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
+    if (this.state === "connecting" || this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
     this.setState("connecting");
-    const socket = new WebSocket(toWebSocketUrl(this.host.baseUrl));
+    const baseUrl = await resolveHostBaseUrl(this.host);
+    if (!this.shouldReconnect) return;
+    if (!baseUrl) {
+      this.setState("disconnected");
+      this.scheduleReconnect();
+      return;
+    }
+    const socket = new WebSocket(toWebSocketUrl(baseUrl));
     this.socket = socket;
     socket.onopen = () => {
       const requestId = createClientId();
@@ -112,15 +154,23 @@ export class RemoteClient {
         socket.close();
       }, 5000);
       this.pending.set(requestId, {
-        resolve: () => {
+        resolve: (value) => {
+          const auth = value && typeof value === "object" ? value as Record<string, unknown> : {};
+          if (auth.hostId !== this.host.hostId) {
+            this.setState("unauthorized");
+            this.shouldReconnect = false;
+            socket.close(4401, "Desktop identity changed");
+            return;
+          }
+          const discoveredUrls = Array.isArray(auth.connectionUrls)
+            ? auth.connectionUrls.filter((url): url is string => typeof url === "string")
+            : [];
+          this.host = withPreferredHostBaseUrl(this.host, baseUrl, discoveredUrls);
+          for (const listener of this.hostListeners) listener(this.host);
           this.reconnectDelay = 1000;
           this.setState("connected");
         },
-        reject: () => {
-          this.setState("unauthorized");
-          this.shouldReconnect = false;
-          socket.close();
-        },
+        reject: () => undefined,
         timer,
       });
       socket.send(JSON.stringify({
@@ -271,23 +321,38 @@ export function parsePairingUri(value: string) {
   const pairingId = url.searchParams.get("pairingId");
   const secret = url.searchParams.get("secret");
   if (!baseUrl || !pairingId || !secret) throw new Error("配对链接不完整或已被截断，请重新生成。");
-  return { baseUrl: normalizeRemoteBaseUrl(baseUrl), pairingId, secret };
+  const normalizedBaseUrl = normalizeRemoteBaseUrl(baseUrl);
+  const baseUrls = uniqueRemoteBaseUrls([
+    ...url.searchParams.getAll("candidate"),
+    normalizedBaseUrl,
+  ]);
+  return { baseUrl: normalizedBaseUrl, baseUrls, pairingId, secret };
 }
 
 export async function pairHost(pairingUri: string, deviceName: string): Promise<PairedHost> {
   const offer = parsePairingUri(pairingUri);
-  const response = await fetch(`${offer.baseUrl}/api/v1/pair`, {
+  const pairingBaseUrl = await resolveHostBaseUrl({
+    baseUrl: offer.baseUrl,
+    baseUrls: offer.baseUrls,
+    hostId: "",
+  });
+  if (!pairingBaseUrl) throw new Error("无法连接桌面，请确认手机与桌面位于同一局域网或已加入组网。");
+  const response = await fetch(`${pairingBaseUrl}/api/v1/pair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pairingId: offer.pairingId, secret: offer.secret, deviceName }),
   });
   const result = await response.json() as Record<string, unknown>;
   if (!response.ok || result.ok !== true) throw new Error(String(result.error || "Pairing failed."));
+  const discoveredUrls = Array.isArray(result.connectionUrls)
+    ? result.connectionUrls.filter((url): url is string => typeof url === "string")
+    : [];
   return {
     id: createClientId(),
     hostId: String(result.hostId),
     hostName: String(result.hostName || "Hpp Desktop"),
-    baseUrl: offer.baseUrl,
+    baseUrl: pairingBaseUrl,
+    baseUrls: uniqueRemoteBaseUrls([pairingBaseUrl, ...offer.baseUrls, ...discoveredUrls]),
     deviceId: String(result.deviceId),
     token: String(result.token),
   };

@@ -8,6 +8,11 @@ import QRCode from "qrcode";
 import { WebSocket, WebSocketServer } from "ws";
 import { ZodError } from "zod";
 import {
+  buildRemoteCandidateUrls,
+  createRemotePairingUri,
+  formatRemoteOrigin,
+} from "../../shared/remote-addresses";
+import {
   DEFAULT_REMOTE_PORT,
   MAX_REMOTE_REQUEST_BYTES,
   REMOTE_HISTORY_PAGE_SIZE,
@@ -105,13 +110,6 @@ function normalizePort(value: unknown) {
     throw new Error("Port must be between 1024 and 65535.");
   }
   return port;
-}
-
-function formatHttpOrigin(address: string, port: number) {
-  const normalized = address.trim() || "127.0.0.1";
-  if (/^https?:\/\//i.test(normalized)) return normalized.replace(/\/$/, "");
-  const host = normalized.includes(":") && !normalized.startsWith("[") ? `[${normalized}]` : normalized;
-  return `http://${host}:${port}`;
 }
 
 function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -291,6 +289,13 @@ class RemoteAccessServer {
     };
   }
 
+  private getConnectionUrls() {
+    const status = this.getStatus();
+    const listensOnAllInterfaces = status.bindAddress === "0.0.0.0" || status.bindAddress === "::";
+    const addresses = listensOnAllInterfaces ? status.addresses : [status.bindAddress];
+    return buildRemoteCandidateUrls(status.advertiseAddress, addresses, status.port);
+  }
+
   private async start() {
     if (this.httpServer || !this.config?.enabled) return;
     const config = this.config;
@@ -435,6 +440,7 @@ class RemoteAccessServer {
           hostName: hostname(),
           deviceId: device.id,
           token,
+          connectionUrls: this.getConnectionUrls(),
         });
       } catch (error) {
         this.writeJson(response, error instanceof ZodError ? 400 : 500, { ok: false, error: errorMessage(error) });
@@ -481,6 +487,7 @@ class RemoteAccessServer {
             hostId: this.config!.hostId,
             hostName: hostname(),
             protocolVersion: REMOTE_PROTOCOL_VERSION,
+            connectionUrls: this.getConnectionUrls(),
           });
           return;
         }
@@ -668,8 +675,15 @@ class RemoteAccessServer {
     const expiresAt = Date.now() + PAIRING_TTL_MS;
     this.pairing = { id: pairingId, secretHash: sha256(secret), expiresAt };
     const status = this.getStatus();
-    const origin = formatHttpOrigin(status.advertiseAddress, status.port);
-    const pairingUri = `hpp://pair?v=${REMOTE_PROTOCOL_VERSION}&url=${encodeURIComponent(origin)}&pairingId=${encodeURIComponent(pairingId)}&secret=${encodeURIComponent(secret)}`;
+    const candidateUrls = this.getConnectionUrls();
+    const origin = candidateUrls[0] || formatRemoteOrigin(status.advertiseAddress, status.port);
+    const pairingUri = createRemotePairingUri({
+      version: REMOTE_PROTOCOL_VERSION,
+      primaryUrl: origin,
+      candidateUrls,
+      pairingId,
+      secret,
+    });
     const webPairingUrl = `${origin}/?pair=${encodeURIComponent(pairingUri)}`;
     return {
       pairingUri,

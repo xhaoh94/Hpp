@@ -9,6 +9,7 @@ export interface PairedHost {
   alias?: string;
   note?: string;
   baseUrl: string;
+  baseUrls?: string[];
   deviceId: string;
   token: string;
 }
@@ -17,6 +18,17 @@ export interface MobileSessionDraft {
   text: string;
   referenceSessionIds: string[];
   updatedAt: number;
+}
+
+export function withPairedHostMetadata(host: PairedHost, aliasValue: string, noteValue: string): PairedHost {
+  const { alias: _alias, note: _note, ...base } = host;
+  const alias = aliasValue.trim().slice(0, 80);
+  const note = noteValue.trim().slice(0, 200);
+  return {
+    ...base,
+    ...(alias ? { alias } : {}),
+    ...(note ? { note } : {}),
+  };
 }
 
 const HOSTS_KEY = "hpp-mobile-hosts";
@@ -34,6 +46,12 @@ export function sanitizePairedHosts(value: unknown): PairedHost[] {
     if (!valid) return [];
     const alias = typeof host.alias === "string" ? host.alias.trim().slice(0, 80) : "";
     const note = typeof host.note === "string" ? host.note.trim().slice(0, 200) : "";
+    const baseUrls = Array.isArray(host.baseUrls)
+      ? [...new Set(host.baseUrls
+        .filter((url): url is string => typeof url === "string" && !!url.trim())
+        .map((url) => url.trim())
+        .filter((url) => url.length <= 2048))].slice(0, 16)
+      : [];
     return [{
       id: host.id as string,
       hostId: host.hostId as string,
@@ -41,6 +59,7 @@ export function sanitizePairedHosts(value: unknown): PairedHost[] {
       ...(alias ? { alias } : {}),
       ...(note ? { note } : {}),
       baseUrl: host.baseUrl as string,
+      ...(baseUrls.length > 0 ? { baseUrls } : {}),
       deviceId: host.deviceId as string,
       token: host.token as string,
     }];

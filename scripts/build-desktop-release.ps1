@@ -6,6 +6,7 @@ $version = [string]$package.version
 $releaseDir = Join-Path $workspace "release\v$version"
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $stagingDir = [System.IO.Path]::GetFullPath((Join-Path $tempRoot "hpp-desktop-$version-$PID"))
+$electronDist = [System.IO.Path]::GetFullPath((Join-Path $workspace "node_modules\electron\dist"))
 
 if (-not $stagingDir.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "Desktop staging directory must remain under $tempRoot"
@@ -13,8 +14,12 @@ if (-not $stagingDir.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgn
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
+if (-not (Test-Path -LiteralPath (Join-Path $electronDist "electron.exe"))) {
+  throw "Installed Electron runtime was not found at $electronDist"
+}
+
 try {
-  & npx electron-builder "--config.directories.output=$stagingDir"
+  & npx electron-builder "--config.directories.output=$stagingDir" "--config.electronDist=$electronDist"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   $artifacts = @(

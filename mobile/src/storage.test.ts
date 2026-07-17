@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearSessionDraft, loadSessionDraft, sanitizePairedHosts, sanitizeSessionDraft, saveSessionDraft } from "./storage";
+import { clearSessionDraft, loadSessionDraft, sanitizePairedHosts, sanitizeSessionDraft, saveSessionDraft, withPairedHostMetadata } from "./storage";
 
 describe("paired host metadata", () => {
   it("keeps a local alias and note without requiring them for older saved hosts", () => {
@@ -16,6 +16,48 @@ describe("paired host metadata", () => {
         base,
         { ...base, id: "saved-2", alias: "Work PC", note: "Office" },
       ]);
+  });
+
+  it("keeps unique candidate addresses while loading new saved hosts", () => {
+    const host = {
+      id: "saved-1",
+      hostId: "host-1",
+      hostName: "DESKTOP-123",
+      baseUrl: "http://192.168.1.2:47831",
+      baseUrls: [" http://192.168.1.2:47831 ", "http://100.64.0.2:47831", "http://100.64.0.2:47831"],
+      deviceId: "device-1",
+      token: "token-1",
+    };
+    expect(sanitizePairedHosts([host])[0].baseUrls).toEqual([
+      "http://192.168.1.2:47831",
+      "http://100.64.0.2:47831",
+    ]);
+  });
+
+  it("updates and clears a saved desktop alias and note without changing credentials", () => {
+    const host = {
+      id: "saved-1",
+      hostId: "host-1",
+      hostName: "DESKTOP-123",
+      alias: "Old name",
+      note: "Old note",
+      baseUrl: "http://192.168.1.2:47831",
+      deviceId: "device-1",
+      token: "token-1",
+    };
+    expect(withPairedHostMetadata(host, " Work PC ", " Office ")).toEqual({
+      ...host,
+      alias: "Work PC",
+      note: "Office",
+    });
+    expect(withPairedHostMetadata(host, " ", " ")).toEqual({
+      id: host.id,
+      hostId: host.hostId,
+      hostName: host.hostName,
+      baseUrl: host.baseUrl,
+      deviceId: host.deviceId,
+      token: host.token,
+    });
   });
 });
 
