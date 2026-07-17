@@ -29,6 +29,7 @@ describe("Android updater native integration", () => {
 
     expect(buildScript).toContain('"android-latest.json"');
     expect(buildScript).toContain("Get-FileHash $releaseApk -Algorithm SHA256");
+    expect(buildScript).toContain('Join-Path $workspace "updates"');
     expect(publishScript).toContain("createReadStream(filePath)");
     expect(publishScript).toContain('join(releaseDir, "android-latest.json")');
     expect(publishScript).toContain("hpp-version-code:${androidMetadata.versionCode}");

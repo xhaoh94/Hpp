@@ -1,5 +1,7 @@
 export const ANDROID_UPDATE_METADATA_URL =
   "https://github.com/xhaoh94/Hpp/releases/latest/download/android-latest.json";
+export const ANDROID_UPDATE_METADATA_MIRROR_URL =
+  "https://cdn.jsdelivr.net/gh/xhaoh94/Hpp@main/updates/android-latest.json";
 export const ANDROID_UPDATE_RELEASE_API_URL =
   "https://api.github.com/repos/xhaoh94/Hpp/releases/latest";
 

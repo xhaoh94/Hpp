@@ -104,6 +104,7 @@ import { copyText, createClientId } from "./web-platform";
 import { getComposerAction } from "./composer";
 import { HppUpdater } from "./android-updater";
 import {
+  ANDROID_UPDATE_METADATA_MIRROR_URL,
   ANDROID_UPDATE_METADATA_URL,
   ANDROID_UPDATE_RELEASE_API_URL,
   getAndroidUpdateErrorMessage,
@@ -261,14 +262,20 @@ async function requestAndroidUpdateJson(url: string) {
 }
 
 async function fetchAndroidUpdateMetadata() {
+  let lastFailure: unknown;
+  for (const url of [ANDROID_UPDATE_METADATA_URL, ANDROID_UPDATE_METADATA_MIRROR_URL]) {
+    try {
+      return parseAndroidUpdateMetadata(await requestAndroidUpdateJson(url));
+    } catch (error) {
+      lastFailure = error;
+    }
+  }
   try {
     return parseGitHubReleaseUpdateMetadata(
       await requestAndroidUpdateJson(ANDROID_UPDATE_RELEASE_API_URL),
     );
-  } catch {
-    return parseAndroidUpdateMetadata(
-      await requestAndroidUpdateJson(ANDROID_UPDATE_METADATA_URL),
-    );
+  } catch (error) {
+    throw lastFailure || error;
   }
 }
 

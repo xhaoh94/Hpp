@@ -82,7 +82,12 @@ $metadata = [ordered]@{
 $metadataJson = $metadata | ConvertTo-Json
 $metadataPath = Join-Path $releaseDir "android-latest.json"
 [System.IO.File]::WriteAllText($metadataPath, $metadataJson, [System.Text.UTF8Encoding]::new($false))
+$trackedMetadataDir = Join-Path $workspace "updates"
+New-Item -ItemType Directory -Force -Path $trackedMetadataDir | Out-Null
+$trackedMetadataPath = Join-Path $trackedMetadataDir "android-latest.json"
+[System.IO.File]::WriteAllText($trackedMetadataPath, $metadataJson, [System.Text.UTF8Encoding]::new($false))
 
 Write-Output "Android release APK: $releaseApk"
 Write-Output "Android update metadata: $metadataPath"
+Write-Output "Tracked Android update metadata: $trackedMetadataPath"
 Write-Output "SHA-256: $sha256"
