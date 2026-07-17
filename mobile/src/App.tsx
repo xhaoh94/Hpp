@@ -87,6 +87,7 @@ import {
   type PairedHost,
 } from "./storage";
 import { copyText, createClientId } from "./web-platform";
+import { getComposerAction } from "./composer";
 
 type SessionPage = {
   sessionId: string;
@@ -1274,14 +1275,57 @@ export default function App() {
   const selectedQueue = selectedSessionId ? queues[selectedSessionId] || [] : [];
   const selectedInteraction = selectedSessionId ? interactions[selectedSessionId] : null;
   const isConnected = connectionState === "connected";
-  const composerHasContent = composer.trim().length > 0 || pendingImages.length > 0 || selectedReferenceSessions.length > 0;
-  const showAbortButton = selected?.session.status === "running" && !composerHasContent;
+  const composerAction = getComposerAction({
+    text: composer,
+    imageCount: pendingImages.length,
+    referenceCount: selectedReferenceSessions.length,
+    running: selected?.session.status === "running",
+  });
+  const composerHasContent = composerAction === "send";
+  const showAbortButton = composerAction === "abort";
   const queueSend = selected?.session.status === "running" && composerHasContent;
 
   const updateComposer = useCallback((value: string) => {
     draftValueRef.current = { ...draftValueRef.current, text: value };
-    setComposer(value);
+    setComposer((current) => current === value ? current : value);
   }, []);
+
+  const replaceComposer = useCallback((value: string) => {
+    const textarea = composerRef.current;
+    if (textarea && textarea.value !== value) textarea.value = value;
+    updateComposer(value);
+  }, [updateComposer]);
+
+  useEffect(() => {
+    const textarea = composerRef.current;
+    if (!textarea) return;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const sync = () => {
+      if (textarea.value !== draftValueRef.current.text) updateComposer(textarea.value);
+    };
+    const stop = () => {
+      sync();
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    const start = () => {
+      sync();
+      if (!timer) timer = setInterval(sync, 100);
+    };
+
+    textarea.addEventListener("focus", start);
+    textarea.addEventListener("blur", stop);
+    textarea.addEventListener("input", sync);
+    textarea.addEventListener("compositionend", sync);
+    if (document.activeElement === textarea) start();
+    return () => {
+      textarea.removeEventListener("focus", start);
+      textarea.removeEventListener("blur", stop);
+      textarea.removeEventListener("input", sync);
+      textarea.removeEventListener("compositionend", sync);
+      if (timer) clearInterval(timer);
+    };
+  }, [updateComposer]);
 
   const handleMessagesScroll = useCallback(() => {
     const view = messagesViewRef.current;
@@ -1324,7 +1368,7 @@ export default function App() {
     setComposerAddMenuOpen(false);
     setReferenceSheetOpen(false);
     setPendingImages([]);
-    setComposer("");
+    replaceComposer("");
     setPendingReferenceIds([]);
     draftValueRef.current = { text: "", referenceSessionIds: [] };
     loadedDraftKeyRef.current = null;
@@ -1347,12 +1391,12 @@ export default function App() {
       const referenceSessionIds = (draft?.referenceSessionIds || []).filter((id) => validReferenceIds.has(id));
       const nextDraft = { text: draft?.text || "", referenceSessionIds };
       draftValueRef.current = nextDraft;
-      setComposer(nextDraft.text);
+      replaceComposer(nextDraft.text);
       setPendingReferenceIds(nextDraft.referenceSessionIds);
       loadedDraftKeyRef.current = identity.key;
     }).catch((error) => console.error("[mobile-draft] load failed", error));
     return () => { cancelled = true; };
-  }, [activeHost?.hostId, demoMode, flushCurrentDraft, selectedSessionId]);
+  }, [activeHost?.hostId, demoMode, flushCurrentDraft, replaceComposer, selectedSessionId]);
 
   useEffect(() => {
     const identity = draftIdentityRef.current;
@@ -1403,9 +1447,9 @@ export default function App() {
   }, []);
 
   const editMessage = useCallback((content: string) => {
-    setComposer(content);
+    replaceComposer(content);
     requestAnimationFrame(() => composerRef.current?.focus());
-  }, []);
+  }, [replaceComposer]);
 
   const runCommand = useCallback(async <T,>(name: Parameters<RemoteClient["request"]>[0], payload: Record<string, unknown>) => {
     const client = clientRef.current;
@@ -1724,7 +1768,7 @@ export default function App() {
           ],
         };
       });
-      setComposer("");
+      replaceComposer("");
       setPendingImages([]);
       setPendingReferenceIds([]);
       draftValueRef.current = { text: "", referenceSessionIds: [] };
@@ -1736,7 +1780,7 @@ export default function App() {
     } catch {
       // The command error remains visible; sends are never retried automatically.
     }
-  }, [activeHost, composer, configs, demoMode, pendingImages, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
+  }, [activeHost, composer, configs, demoMode, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
 
   const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false) => {
     if (!selectedSessionId || !selectedInteraction) return;
@@ -2344,7 +2388,7 @@ export default function App() {
               <textarea
                 ref={composerRef}
                 rows={1}
-                value={composer}
+                defaultValue=""
                 onInput={(event) => updateComposer(event.currentTarget.value)}
                 onChange={(event) => updateComposer(event.currentTarget.value)}
                 onCompositionEnd={(event) => updateComposer(event.currentTarget.value)}
@@ -2352,11 +2396,21 @@ export default function App() {
                 disabled={!isConnected}
               />
               <button
-                className={`send-button ${showAbortButton ? "abort" : queueSend ? "queue" : ""}`}
-                disabled={!isConnected || commandBusy || (!showAbortButton && !composerHasContent)}
-                onClick={() => showAbortButton
-                  ? void runCommand("session.abort", { sessionId: selected.session.id })
-                  : void sendMessage()}
+                className={`send-button ${showAbortButton ? "abort" : queueSend ? "queue" : composerAction === "none" ? "empty" : ""}`}
+                disabled={!isConnected || commandBusy}
+                onClick={() => {
+                  const action = getComposerAction({
+                    text: composerRef.current?.value ?? composer,
+                    imageCount: pendingImages.length,
+                    referenceCount: selectedReferenceSessions.length,
+                    running: selected.session.status === "running",
+                  });
+                  if (action === "abort") {
+                    void runCommand("session.abort", { sessionId: selected.session.id });
+                  } else if (action === "send") {
+                    void sendMessage();
+                  }
+                }}
                 title={showAbortButton ? "中止任务" : queueSend ? "加入队列" : "发送"}
               >
                 {commandBusy

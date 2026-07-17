@@ -847,7 +847,9 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
 .send-button.abort,
 .send-button.queue { border-color: #fff; background: #fff; color: #000; }
 .send-button:active:not(:disabled) { transform: scale(0.94); background: #e0e0e0; border-color: #e0e0e0; }
+.send-button.empty,
 .send-button:disabled { border-color: var(--border); background: var(--surface-raised); color: var(--faint); opacity: 0.72; }
+.send-button.empty:active { transform: none; border-color: var(--border); background: var(--surface-raised); }
 
 .reference-session-sheet { padding-right: 14px; padding-left: 14px; }
 .reference-session-list { max-height: min(58dvh, 480px); margin-top: 12px; overflow-y: auto; border-top: 1px solid var(--border); }
