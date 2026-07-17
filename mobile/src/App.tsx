@@ -1278,6 +1278,11 @@ export default function App() {
   const showAbortButton = selected?.session.status === "running" && !composerHasContent;
   const queueSend = selected?.session.status === "running" && composerHasContent;
 
+  const updateComposer = useCallback((value: string) => {
+    draftValueRef.current = { ...draftValueRef.current, text: value };
+    setComposer(value);
+  }, []);
+
   const handleMessagesScroll = useCallback(() => {
     const view = messagesViewRef.current;
     if (!view) return;
@@ -1678,8 +1683,9 @@ export default function App() {
   }, [forkingMessageId, loadSession, runCommand, selected]);
 
   const sendMessage = useCallback(async () => {
-    if (!selectedSessionId || (!composer.trim() && pendingImages.length === 0 && selectedReferenceSessions.length === 0)) return;
-    const content = composer.trim() || (pendingImages.length > 0 ? "请查看附件图片。" : "");
+    const composerText = composerRef.current?.value ?? composer;
+    if (!selectedSessionId || (!composerText.trim() && pendingImages.length === 0 && selectedReferenceSessions.length === 0)) return;
+    const content = composerText.trim() || (pendingImages.length > 0 ? "请查看附件图片。" : "");
     const config = configs[selectedSessionId];
     const clientMessageId = createClientId();
     const optimisticImages = pendingImages.map(({ id, name, preview }) => ({ id, name, src: preview }));
@@ -2335,7 +2341,16 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <textarea ref={composerRef} rows={1} value={composer} onChange={(event) => setComposer(event.target.value)} placeholder={isConnected ? "发送指令" : "桌面未连接"} disabled={!isConnected} />
+              <textarea
+                ref={composerRef}
+                rows={1}
+                value={composer}
+                onInput={(event) => updateComposer(event.currentTarget.value)}
+                onChange={(event) => updateComposer(event.currentTarget.value)}
+                onCompositionEnd={(event) => updateComposer(event.currentTarget.value)}
+                placeholder={isConnected ? "发送指令" : "桌面未连接"}
+                disabled={!isConnected}
+              />
               <button
                 className={`send-button ${showAbortButton ? "abort" : queueSend ? "queue" : ""}`}
                 disabled={!isConnected || commandBusy || (!showAbortButton && !composerHasContent)}
