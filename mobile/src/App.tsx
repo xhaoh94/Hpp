@@ -5,6 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type CompositionEvent as ReactCompositionEvent,
+  type FormEvent as ReactFormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -104,7 +106,7 @@ import {
 } from "./storage";
 import { copyText, createClientId } from "./web-platform";
 import { getComposerAction } from "./composer";
-import { HppUpdater } from "./android-updater";
+import { HppUpdater, type AndroidUpdaterDownloadStatus } from "./android-updater";
 import {
   ANDROID_UPDATE_METADATA_MIRROR_URL,
   ANDROID_UPDATE_METADATA_URL,
@@ -133,6 +135,7 @@ type AndroidUpdateStage =
   | "checking"
   | "available"
   | "downloading"
+  | "downloaded"
   | "permission"
   | "installing"
   | "up-to-date"
@@ -821,17 +824,19 @@ function AndroidUpdateDialog({
     ? "正在检查"
     : stage === "downloading"
       ? progress >= 0 ? `下载中 ${progress}%` : "正在下载"
-      : stage === "permission"
-        ? "允许安装更新"
-        : stage === "installing"
-          ? "重新打开安装器"
-          : stage === "up-to-date"
-            ? "重新检查"
-            : stage === "error" && !metadata
-              ? "重试"
-              : stage === "error"
-                ? "重新下载"
-                : "下载并安装";
+      : stage === "downloaded"
+        ? "安装更新"
+        : stage === "permission"
+          ? "允许安装更新"
+          : stage === "installing"
+            ? "重新打开安装器"
+            : stage === "up-to-date"
+              ? "重新检查"
+              : stage === "error" && !metadata
+                ? "重试"
+                : stage === "error"
+                  ? "重新下载"
+                  : "下载并安装";
 
   return (
     <div
@@ -873,14 +878,14 @@ function AndroidUpdateDialog({
           {stage === "permission" && (
             <p className="android-update-notice">Android 需要先允许 Hpp 安装未知应用。授权后返回 Hpp，会自动继续打开系统安装器。</p>
           )}
+          {stage === "downloaded" && (
+            <p className="android-update-notice">安装包已下载完成，可以继续安装。</p>
+          )}
           {stage === "installing" && (
             <p className="android-update-notice">系统安装界面已打开，请确认安装。若没有显示，可以重新打开安装器。</p>
           )}
           {stage === "up-to-date" && <p className="android-update-notice">当前安装的 Hpp 已经是最新版本。</p>}
           {error && <p className="android-update-error" role="alert">{error}</p>}
-          {metadata && stage !== "up-to-date" && (
-            <p className="android-update-security">安装包下载完成后会校验 SHA-256，再交给 Android 系统安装器。</p>
-          )}
         </div>
         <footer className="android-update-actions">
           <button type="button" className="secondary-command" disabled={busy} onClick={onClose}>稍后</button>
@@ -913,6 +918,7 @@ export default function App() {
   const [loadingSession, setLoadingSession] = useState(false);
   const [commandBusy, setCommandBusy] = useState(false);
   const [composer, setComposer] = useState("");
+  const [composerComposition, setComposerComposition] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingRemoteImage[]>([]);
   const [pendingReferenceIds, setPendingReferenceIds] = useState<string[]>([]);
   const [composerAddMenuOpen, setComposerAddMenuOpen] = useState(false);
@@ -965,7 +971,8 @@ export default function App() {
   const updateMetadataRef = useRef<AndroidUpdateMetadata | null>(null);
   const updateCheckInFlightRef = useRef(false);
   const dismissedUpdateVersionRef = useRef<number | null>(null);
-  const awaitingInstallPermissionRef = useRef(false);
+  const updateStageRef = useRef<AndroidUpdateStage>("idle");
+  const updateInstallInFlightRef = useRef(false);
   const incomingWebPairingRef = useRef(
     !IS_NATIVE_APP ? new URLSearchParams(window.location.search).get("pair") : null,
   );
@@ -974,6 +981,7 @@ export default function App() {
   projectsRef.current = projects;
   agentsRef.current = agents;
   configsRef.current = configs;
+  updateStageRef.current = updateStage;
   draftValueRef.current = { text: composer, referenceSessionIds: pendingReferenceIds };
 
   const flushCurrentDraft = useCallback(() => {
@@ -995,8 +1003,8 @@ export default function App() {
         setHostAvailability({ [DEMO_HOST.id]: "online" });
         if (demoVariant === "update") {
           const previewMetadata: AndroidUpdateMetadata = {
-            version: "0.1.3",
-            versionCode: 103,
+            version: "0.1.4",
+            versionCode: 104,
             url: "https://github.com/xhaoh94/Hpp/releases/latest/download/Hpp-Android.apk",
             sha256: "a".repeat(64),
             publishedAt: new Date().toISOString(),
@@ -1105,6 +1113,30 @@ export default function App() {
     if (floatingToastTimerRef.current) clearTimeout(floatingToastTimerRef.current);
   }, []);
 
+  const applyAndroidDownloadStatus = useCallback((status: AndroidUpdaterDownloadStatus, openDialog = true) => {
+    if (status.status === "downloading") {
+      setUpdateProgress(status.progress);
+      setUpdateError("");
+      setUpdateStage("downloading");
+      if (openDialog) setUpdateDialogOpen(true);
+      return true;
+    }
+    if (status.status === "downloaded") {
+      setUpdateProgress(100);
+      setUpdateError("");
+      setUpdateStage("downloaded");
+      if (openDialog) setUpdateDialogOpen(true);
+      return true;
+    }
+    if (status.status === "failed") {
+      setUpdateError(getAndroidUpdateErrorMessage({ code: status.errorCode || "DOWNLOAD_FAILED" }));
+      setUpdateStage("error");
+      if (openDialog) setUpdateDialogOpen(true);
+      return true;
+    }
+    return false;
+  }, []);
+
   const checkAndroidUpdate = useCallback(async (manual: boolean) => {
     if (!IS_NATIVE_APP) return;
     if (updateCheckInFlightRef.current) {
@@ -1122,6 +1154,8 @@ export default function App() {
       if (isAndroidUpdateAvailable(info.build, metadata)) {
         updateMetadataRef.current = metadata;
         setUpdateMetadata(metadata);
+        const nativeStatus = await HppUpdater.getUpdateStatus({ sha256: metadata.sha256 });
+        if (applyAndroidDownloadStatus(nativeStatus)) return;
         setUpdateStage("available");
         if (manual || dismissedUpdateVersionRef.current !== metadata.versionCode) {
           setUpdateDialogOpen(true);
@@ -1146,11 +1180,12 @@ export default function App() {
     } finally {
       updateCheckInFlightRef.current = false;
     }
-  }, []);
+  }, [applyAndroidDownloadStatus]);
 
   const continueDownloadedInstall = useCallback(async () => {
     const metadata = updateMetadataRef.current;
-    if (!metadata) return;
+    if (!metadata || updateInstallInFlightRef.current) return;
+    updateInstallInFlightRef.current = true;
     setUpdateError("");
     setUpdateStage("installing");
     setUpdateDialogOpen(true);
@@ -1158,7 +1193,6 @@ export default function App() {
       const result = await HppUpdater.installDownloaded({ sha256: metadata.sha256 });
       if (result.status === "permission-required") {
         setUpdateStage("permission");
-        setUpdateError("尚未允许 Hpp 安装未知应用，请授权后重试");
         return;
       }
       dismissedUpdateVersionRef.current = metadata.versionCode;
@@ -1166,6 +1200,8 @@ export default function App() {
     } catch (installFailure) {
       setUpdateError(getAndroidUpdateErrorMessage(installFailure));
       setUpdateStage("error");
+    } finally {
+      updateInstallInFlightRef.current = false;
     }
   }, []);
 
@@ -1173,14 +1209,14 @@ export default function App() {
     if (!updateMetadataRef.current) return;
     setUpdateError("");
     try {
-      awaitingInstallPermissionRef.current = true;
       const result = await HppUpdater.requestInstallPermission();
-      if (!result.opened) {
-        awaitingInstallPermissionRef.current = false;
+      if (result.granted) {
         await continueDownloadedInstall();
+      } else {
+        setUpdateError("尚未允许 Hpp 安装未知应用，请授权后重试");
+        setUpdateStage("permission");
       }
     } catch (permissionFailure) {
-      awaitingInstallPermissionRef.current = false;
       setUpdateError(getAndroidUpdateErrorMessage(permissionFailure));
       setUpdateStage("permission");
     }
@@ -1197,21 +1233,38 @@ export default function App() {
     setUpdateStage("downloading");
     setUpdateDialogOpen(true);
     try {
-      const result = await HppUpdater.downloadAndInstall({
+      const status = await HppUpdater.startDownload({
         url: metadata.url,
         sha256: metadata.sha256,
       });
-      if (result.status === "permission-required") {
-        setUpdateStage("permission");
-        return;
-      }
-      dismissedUpdateVersionRef.current = metadata.versionCode;
-      setUpdateStage("installing");
+      if (status.status === "downloaded") await continueDownloadedInstall();
+      else applyAndroidDownloadStatus(status);
     } catch (downloadFailure) {
       setUpdateError(getAndroidUpdateErrorMessage(downloadFailure));
       setUpdateStage("error");
     }
-  }, [checkAndroidUpdate]);
+  }, [applyAndroidDownloadStatus, checkAndroidUpdate, continueDownloadedInstall]);
+
+  const syncAndroidUpdateDownload = useCallback(async (installWhenDownloaded: boolean) => {
+    const metadata = updateMetadataRef.current;
+    if (!metadata) return;
+    try {
+      const status = await HppUpdater.getUpdateStatus({ sha256: metadata.sha256 });
+      if (status.status === "downloaded" && installWhenDownloaded) {
+        await continueDownloadedInstall();
+        return;
+      }
+      if (!applyAndroidDownloadStatus(status) && updateStageRef.current === "downloading") {
+        setUpdateError("安装包下载已中断，请重新下载");
+        setUpdateStage("error");
+        setUpdateDialogOpen(true);
+      }
+    } catch (statusFailure) {
+      setUpdateError(getAndroidUpdateErrorMessage(statusFailure));
+      setUpdateStage("error");
+      setUpdateDialogOpen(true);
+    }
+  }, [applyAndroidDownloadStatus, continueDownloadedInstall]);
 
   const closeUpdateDialog = useCallback(() => {
     const metadata = updateMetadataRef.current;
@@ -1224,7 +1277,7 @@ export default function App() {
       void requestInstallPermission();
       return;
     }
-    if (updateStage === "installing") {
+    if (updateStage === "downloaded" || updateStage === "installing") {
       void continueDownloadedInstall();
       return;
     }
@@ -1241,13 +1294,25 @@ export default function App() {
   }, [checkAndroidUpdate, demoMode]);
 
   useEffect(() => {
-    if (!IS_NATIVE_APP) return;
-    let listener: { remove: () => Promise<void> } | undefined;
-    void HppUpdater.addListener("downloadProgress", ({ progress }) => {
-      setUpdateProgress(progress);
-    }).then((handle) => { listener = handle; });
-    return () => { void listener?.remove(); };
-  }, []);
+    if (!IS_NATIVE_APP || updateStage !== "downloading") return;
+    let disposed = false;
+    let polling = false;
+    const poll = async () => {
+      if (disposed || polling) return;
+      polling = true;
+      try {
+        await syncAndroidUpdateDownload(true);
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 750);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [syncAndroidUpdateDownload, updateStage]);
 
   const updateHosts = useCallback(async (next: PairedHost[]) => {
     setHosts(next);
@@ -1429,10 +1494,12 @@ export default function App() {
     void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
       if (isActive) {
         void clientRef.current?.connect();
-        if (awaitingInstallPermissionRef.current) {
-          awaitingInstallPermissionRef.current = false;
-          void continueDownloadedInstall();
-        } else {
+        const stage = updateStageRef.current;
+        if (stage === "downloading" || stage === "permission") {
+          void syncAndroidUpdateDownload(true);
+        } else if (stage === "downloaded") {
+          void syncAndroidUpdateDownload(false);
+        } else if (stage !== "installing") {
           void checkAndroidUpdate(false);
         }
       } else {
@@ -1440,7 +1507,7 @@ export default function App() {
       }
     }).then((handle) => { listener = handle; });
     return () => { void listener?.remove(); };
-  }, [checkAndroidUpdate, continueDownloadedInstall, flushCurrentDraft]);
+  }, [checkAndroidUpdate, flushCurrentDraft, syncAndroidUpdateDownload]);
 
   useEffect(() => () => clientRef.current?.disconnect(), []);
 
@@ -1588,6 +1655,7 @@ export default function App() {
   const isConnected = connectionState === "connected";
   const composerAction = getComposerAction({
     text: composer,
+    composingText: composerComposition,
     imageCount: pendingImages.length,
     referenceCount: selectedReferenceSessions.length,
     running: selected?.session.status === "running",
@@ -1601,9 +1669,41 @@ export default function App() {
     setComposer((current) => current === value ? current : value);
   }, []);
 
+  const syncComposerFromElement = useCallback((textarea: HTMLTextAreaElement | null = composerRef.current) => {
+    if (!textarea) return;
+    updateComposer(textarea.value);
+  }, [updateComposer]);
+
+  const scheduleComposerSync = useCallback((textarea: HTMLTextAreaElement) => {
+    syncComposerFromElement(textarea);
+    queueMicrotask(() => {
+      if (composerRef.current === textarea) syncComposerFromElement(textarea);
+    });
+    requestAnimationFrame(() => {
+      if (composerRef.current === textarea) syncComposerFromElement(textarea);
+    });
+  }, [syncComposerFromElement]);
+
+  const handleComposerBeforeInput = useCallback((event: ReactFormEvent<HTMLTextAreaElement>) => {
+    const inputEvent = event.nativeEvent as InputEvent;
+    if (inputEvent.isComposing && inputEvent.data) setComposerComposition(inputEvent.data);
+    scheduleComposerSync(event.currentTarget);
+  }, [scheduleComposerSync]);
+
+  const handleComposerComposition = useCallback((event: ReactCompositionEvent<HTMLTextAreaElement>) => {
+    setComposerComposition(event.data || event.currentTarget.value || " ");
+    scheduleComposerSync(event.currentTarget);
+  }, [scheduleComposerSync]);
+
+  const handleComposerCompositionEnd = useCallback((event: ReactCompositionEvent<HTMLTextAreaElement>) => {
+    setComposerComposition("");
+    scheduleComposerSync(event.currentTarget);
+  }, [scheduleComposerSync]);
+
   const replaceComposer = useCallback((value: string) => {
     const textarea = composerRef.current;
     if (textarea && textarea.value !== value) textarea.value = value;
+    setComposerComposition("");
     updateComposer(value);
   }, [updateComposer]);
 
@@ -1613,6 +1713,19 @@ export default function App() {
     let timer: ReturnType<typeof setInterval> | null = null;
     const sync = () => {
       if (textarea.value !== draftValueRef.current.text) updateComposer(textarea.value);
+    };
+    const schedule = () => scheduleComposerSync(textarea);
+    const onBeforeInput = (event: InputEvent) => {
+      if (event.isComposing && event.data) setComposerComposition(event.data);
+      schedule();
+    };
+    const onComposition = (event: CompositionEvent) => {
+      setComposerComposition(event.data || textarea.value || "");
+      schedule();
+    };
+    const onCompositionEnd = () => {
+      setComposerComposition("");
+      schedule();
     };
     const stop = () => {
       sync();
@@ -1627,16 +1740,22 @@ export default function App() {
     textarea.addEventListener("focus", start);
     textarea.addEventListener("blur", stop);
     textarea.addEventListener("input", sync);
-    textarea.addEventListener("compositionend", sync);
+    textarea.addEventListener("beforeinput", onBeforeInput);
+    textarea.addEventListener("compositionstart", onComposition);
+    textarea.addEventListener("compositionupdate", onComposition);
+    textarea.addEventListener("compositionend", onCompositionEnd);
     if (document.activeElement === textarea) start();
     return () => {
       textarea.removeEventListener("focus", start);
       textarea.removeEventListener("blur", stop);
       textarea.removeEventListener("input", sync);
-      textarea.removeEventListener("compositionend", sync);
+      textarea.removeEventListener("beforeinput", onBeforeInput);
+      textarea.removeEventListener("compositionstart", onComposition);
+      textarea.removeEventListener("compositionupdate", onComposition);
+      textarea.removeEventListener("compositionend", onCompositionEnd);
       if (timer) clearInterval(timer);
     };
-  }, [updateComposer]);
+  }, [scheduleComposerSync, updateComposer]);
 
   const handleMessagesScroll = useCallback(() => {
     const view = messagesViewRef.current;
@@ -2038,7 +2157,7 @@ export default function App() {
   }, [forkingMessageId, loadSession, runCommand, selected]);
 
   const sendMessage = useCallback(async () => {
-    const composerText = composerRef.current?.value ?? composer;
+    const composerText = composerRef.current?.value || composer || composerComposition;
     if (!selectedSessionId || (!composerText.trim() && pendingImages.length === 0 && selectedReferenceSessions.length === 0)) return;
     const content = composerText.trim() || (pendingImages.length > 0 ? "请查看附件图片。" : "");
     const config = configs[selectedSessionId];
@@ -2091,7 +2210,7 @@ export default function App() {
     } catch {
       // The command error remains visible; sends are never retried automatically.
     }
-  }, [activeHost, composer, configs, demoMode, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
+  }, [activeHost, composer, composerComposition, configs, demoMode, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
 
   const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false) => {
     if (!selectedSessionId || !selectedInteraction) return;
@@ -2748,9 +2867,12 @@ export default function App() {
                 ref={composerRef}
                 rows={1}
                 defaultValue=""
-                onInput={(event) => updateComposer(event.currentTarget.value)}
-                onChange={(event) => updateComposer(event.currentTarget.value)}
-                onCompositionEnd={(event) => updateComposer(event.currentTarget.value)}
+                onBeforeInput={handleComposerBeforeInput}
+                onInput={(event) => scheduleComposerSync(event.currentTarget)}
+                onChange={(event) => scheduleComposerSync(event.currentTarget)}
+                onCompositionStart={handleComposerComposition}
+                onCompositionUpdate={handleComposerComposition}
+                onCompositionEnd={handleComposerCompositionEnd}
                 placeholder={isConnected ? "发送指令" : "桌面未连接"}
                 disabled={!isConnected}
               />
@@ -2760,6 +2882,7 @@ export default function App() {
                 onClick={() => {
                   const action = getComposerAction({
                     text: composerRef.current?.value ?? composer,
+                    composingText: composerComposition,
                     imageCount: pendingImages.length,
                     referenceCount: selectedReferenceSessions.length,
                     running: selected.session.status === "running",

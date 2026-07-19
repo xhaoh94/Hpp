@@ -414,10 +414,8 @@ button:disabled { opacity: 0.48; }
 .android-update-version strong { color: var(--text); font-size: 14px; }
 .android-update-status { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 11px; }
 .android-update-notice,
-.android-update-security,
 .android-update-error { margin: 0; font-size: 11px; line-height: 1.6; }
 .android-update-notice { color: var(--text); }
-.android-update-security { color: var(--faint); }
 .android-update-error { padding: 9px 10px; border: 1px solid rgba(244, 71, 71, 0.38); border-radius: 5px; background: rgba(244, 71, 71, 0.08); color: #fca5a5; }
 .android-update-progress { display: grid; gap: 8px; }
 .android-update-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }

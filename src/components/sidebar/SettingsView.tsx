@@ -1,5 +1,19 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, RotateCcw, Settings, Smartphone } from "lucide-react";
+import {
+  AppWindow,
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  Image as ImageIcon,
+  Keyboard,
+  ListFilter,
+  Palette,
+  RotateCcw,
+  Settings,
+  SlidersHorizontal,
+  Smartphone,
+} from "lucide-react";
 import { AgentSettingsView } from "./AgentSettingsView";
 import { AgentConfigModal } from "./AgentConfigModal";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
@@ -30,6 +44,8 @@ interface GeneralSettings {
   closeToTray: boolean;
   theme: AppTheme;
 }
+
+type GeneralSectionId = "appearance" | "behavior" | "editing" | "images";
 
 const SHORTCUT_LABELS: Record<string, string> = {
   fileSearch: "文件搜索",
@@ -155,6 +171,7 @@ export function SettingsView() {
   const [showShortcutModal, setShowShortcutModal] = useState(false);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [showGeneralModal, setShowGeneralModal] = useState(false);
+  const [expandedGeneralSection, setExpandedGeneralSection] = useState<GeneralSectionId | null>("appearance");
   const [showAgentSettingsModal, setShowAgentSettingsModal] = useState(false);
   const [showRemoteAccessModal, setShowRemoteAccessModal] = useState(false);
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
@@ -356,6 +373,36 @@ export function SettingsView() {
     }
   };
 
+  const openShortcutSettings = () => {
+    setShowGeneralModal(false);
+    setRecordingKey(null);
+    setShowShortcutModal(true);
+  };
+
+  const closeShortcutSettings = () => {
+    setShowShortcutModal(false);
+    setRecordingKey(null);
+    setShowGeneralModal(true);
+  };
+
+  const openFilterSettings = () => {
+    setShowGeneralModal(false);
+    setShowFilterModal(true);
+  };
+
+  const closeFilterSettings = () => {
+    setShowFilterModal(false);
+    setShowGeneralModal(true);
+  };
+
+  const filterRuleCount = filters.excludeFolders.length
+    + filters.excludeExtensions.length
+    + filters.excludeFiles.length;
+
+  const toggleGeneralSection = (section: GeneralSectionId) => {
+    setExpandedGeneralSection((current) => current === section ? null : section);
+  };
+
   return (
     <div className="settings">
       <div className="settings-header">
@@ -365,14 +412,13 @@ export function SettingsView() {
 
       <div className="settings-content">
         <div className="settings-section">
-          <h3>快速操作</h3>
           <div className="settings-quick-buttons">
             <button
               onClick={() => setShowAgentSettingsModal(true)}
               className="btn-quick-setting"
             >
               <Bot size={16} strokeWidth={1.8} />
-              Agent 设置
+              Agent
             </button>
             <button
               onClick={() => setShowRemoteAccessModal(true)}
@@ -382,33 +428,10 @@ export function SettingsView() {
               远程访问
             </button>
             <button
-              onClick={() => { setShowShortcutModal(true); setRecordingKey(null); }}
-              className="btn-quick-setting"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="currentColor" strokeWidth="1.5" />
-                <path d="M19.4 15a2 2 0 00.4 2.2l.1.1a2 2 0 01-2.8 2.8l-.1-.1a2 2 0 00-2.2-.4 2 2 0 00-1.2 1.2v.1a2 2 0 01-4 0v-.1a2 2 0 00-1.1-1.1 2 2 0 00-2.2.4l-.1.1a2 2 0 01-2.8-2.8l.1-.1a2 2 0 00.4-2.2 2 2 0 00-1.2-1.2h-.1a2 2 0 01 0-4h.1A2 2 0 004.6 9a2 2 0 00-.4-2.2l-.1-.1a2 2 0 012.8-2.8l.1.1a2 2 0 002.2.4h.1a2 2 0 001.1-1.1v-.1a2 2 0 014 0v.1a2 2 0 001.1 1.1h.1a2 2 0 002.2-.4l.1-.1a2 2 0 012.8 2.8l-.1.1a2 2 0 00-.4 2.2v.1a2 2 0 001.2 1.2h.1a2 2 0 010 4h-.1a2 2 0 00-1.2 1.2z" stroke="currentColor" strokeWidth="1.5" />
-              </svg>
-              快捷键设置
-            </button>
-
-            <button
-              onClick={() => setShowFilterModal(true)}
-              className="btn-quick-setting"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <path d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707L14 14v7a1 1 0 01-1 1h-2a1 1 0 01-1-1v-7L3.293 7.293A1 1 0 013 6.586V4z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              过滤规则
-            </button>
-            <button
               onClick={() => setShowGeneralModal(true)}
               className="btn-quick-setting"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <SlidersHorizontal size={16} strokeWidth={1.8} />
               通用设置
             </button>
           </div>
@@ -416,11 +439,11 @@ export function SettingsView() {
       </div>
 
       {showShortcutModal && (
-        <div className="settings-modal-overlay" onClick={() => { setShowShortcutModal(false); setRecordingKey(null); }}>
+        <div className="settings-modal-overlay" onClick={closeShortcutSettings}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
               <h3>快捷键设置</h3>
-              <button onClick={() => { setShowShortcutModal(false); setRecordingKey(null); }} className="settings-modal-close">×</button>
+              <button onClick={closeShortcutSettings} className="settings-modal-close">×</button>
             </div>
             <div className="settings-modal-content">
               <div className="shortcut-list">
@@ -483,11 +506,11 @@ export function SettingsView() {
       )}
 
       {showFilterModal && (
-        <div className="settings-modal-overlay" onClick={() => setShowFilterModal(false)}>
+        <div className="settings-modal-overlay" onClick={closeFilterSettings}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
               <h3>过滤规则</h3>
-              <button onClick={() => setShowFilterModal(false)} className="settings-modal-close">×</button>
+              <button onClick={closeFilterSettings} className="settings-modal-close">×</button>
             </div>
             <div className="settings-modal-content">
               <div className="filter-group">
@@ -548,7 +571,7 @@ export function SettingsView() {
           <div className="settings-modal settings-modal-agent" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
               <div className="settings-modal-title-actions">
-                <h3>Agent 设置</h3>
+                <h3>Agent</h3>
                 <button
                   type="button"
                   className="btn-icon settings-modal-header-icon"
@@ -580,97 +603,192 @@ export function SettingsView() {
       )}
       {showGeneralModal && (
         <div className="settings-modal-overlay" onClick={() => setShowGeneralModal(false)}>
-          <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="settings-modal settings-general-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
-              <h3>通用设置</h3>
+              <div className="settings-general-title">
+                <span className="settings-general-title-icon"><SlidersHorizontal size={17} /></span>
+                <div>
+                  <h3>通用设置</h3>
+                  <span>管理外观、应用行为与工作区偏好</span>
+                </div>
+              </div>
               <button onClick={() => setShowGeneralModal(false)} className="settings-modal-close">×</button>
             </div>
-            <div className="settings-modal-content">
-              <div className="settings-section">
-                <h3>主题</h3>
-                <div className="settings-theme-options" role="radiogroup" aria-label="主题">
-                  {THEME_OPTIONS.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      role="radio"
-                      aria-checked={theme === option.value}
-                      className={`settings-theme-option ${theme === option.value ? "selected" : ""}`}
-                      onClick={() => updateTheme(option.value)}
-                    >
-                      <span className={`settings-theme-preview ${option.value}`} aria-hidden="true">
-                        <span className="settings-theme-preview-rail" />
-                        <span className="settings-theme-preview-panel">
-                          <span className="settings-theme-preview-line wide" />
-                          <span className="settings-theme-preview-line" />
-                          <span className="settings-theme-preview-line short" />
-                        </span>
+            <div className="settings-modal-content settings-general-content">
+              <section className={`settings-general-section ${expandedGeneralSection === "appearance" ? "expanded" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="settings-general-heading settings-general-heading-button"
+                  onClick={() => toggleGeneralSection("appearance")}
+                  aria-expanded={expandedGeneralSection === "appearance"}
+                  aria-controls="general-settings-appearance"
+                >
+                  <span className="settings-general-heading-icon"><Palette size={15} /></span>
+                  <div>
+                    <h4>外观</h4>
+                    <p>选择 Hpp 的界面明暗模式</p>
+                  </div>
+                  <ChevronDown className="settings-general-collapse-icon" size={16} />
+                </button>
+                {expandedGeneralSection === "appearance" && (
+                  <div id="general-settings-appearance" className="settings-general-section-body">
+                    <div className="settings-theme-options" role="radiogroup" aria-label="主题">
+                      {THEME_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={theme === option.value}
+                          className={`settings-theme-option ${theme === option.value ? "selected" : ""}`}
+                          onClick={() => updateTheme(option.value)}
+                        >
+                          <span className={`settings-theme-preview ${option.value}`} aria-hidden="true">
+                            <span className="settings-theme-preview-rail" />
+                            <span className="settings-theme-preview-panel">
+                              <span className="settings-theme-preview-line wide" />
+                              <span className="settings-theme-preview-line" />
+                              <span className="settings-theme-preview-line short" />
+                            </span>
+                          </span>
+                          <span className="settings-theme-option-label">{option.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className={`settings-general-section ${expandedGeneralSection === "behavior" ? "expanded" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="settings-general-heading settings-general-heading-button"
+                  onClick={() => toggleGeneralSection("behavior")}
+                  aria-expanded={expandedGeneralSection === "behavior"}
+                  aria-controls="general-settings-behavior"
+                >
+                  <span className="settings-general-heading-icon"><AppWindow size={15} /></span>
+                  <div>
+                    <h4>应用行为</h4>
+                    <p>控制桌面窗口关闭时的行为</p>
+                  </div>
+                  <ChevronDown className="settings-general-collapse-icon" size={16} />
+                </button>
+                {expandedGeneralSection === "behavior" && (
+                  <div id="general-settings-behavior" className="settings-general-section-body">
+                    <label className="settings-general-row settings-general-toggle">
+                      <span className="settings-general-row-main">
+                        <strong>关闭时最小化到托盘</strong>
+                        <span>关闭主窗口后保持 Hpp 在后台运行，可从系统托盘重新打开</span>
                       </span>
-                      <span className="settings-theme-option-label">{option.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="settings-section">
-                <h3>窗口设置</h3>
-                <div className="filter-group">
-                  <label className="settings-toggle-row">
-                    <span>
-                      <span className="settings-toggle-title">关闭时最小化到托盘</span>
-                      <span className="settings-toggle-desc">开启后点击关闭按钮会隐藏窗口，可从系统托盘重新打开。</span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={closeToTray}
-                      onChange={(event) => updateCloseToTray(event.target.checked)}
-                    />
-                  </label>
-                </div>
-              </div>
-              <div className="settings-section">
-                <h3>图片设置</h3>
-                <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>
-                  临时图片将在 12 小时后自动清理
-                </p>
-                <div className="filter-group">
-                  <div className="filter-row">
-                    <label>临时图片存储路径</label>
-                    <div style={{ display: "flex", gap: 6 }}>
                       <input
-                        value={tempImagePath}
-                        readOnly
-                        placeholder="留空使用默认路径"
-                        className="filter-custom-input"
-                        style={{ flex: 1 }}
-                        title={tempImagePath || "留空使用默认路径"}
+                        type="checkbox"
+                        checked={closeToTray}
+                        onChange={(event) => updateCloseToTray(event.target.checked)}
+                        aria-label="关闭时最小化到托盘"
                       />
-                      <button
-                        type="button"
-                        className="filter-add-btn"
-                        onClick={() => updateTempImagePath("")}
-                        disabled={!tempImagePath}
-                        title="恢复默认路径"
-                        aria-label="恢复默认路径"
-                      >
-                        <RotateCcw size={14} />
+                    </label>
+                  </div>
+                )}
+              </section>
+
+              <section className={`settings-general-section ${expandedGeneralSection === "editing" ? "expanded" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="settings-general-heading settings-general-heading-button"
+                  onClick={() => toggleGeneralSection("editing")}
+                  aria-expanded={expandedGeneralSection === "editing"}
+                  aria-controls="general-settings-editing"
+                >
+                  <span className="settings-general-heading-icon"><Settings size={15} /></span>
+                  <div>
+                    <h4>编辑与文件</h4>
+                    <p>配置输入方式和项目文件的索引范围</p>
+                  </div>
+                  <ChevronDown className="settings-general-collapse-icon" size={16} />
+                </button>
+                {expandedGeneralSection === "editing" && (
+                  <div id="general-settings-editing" className="settings-general-section-body">
+                    <div className="settings-general-links">
+                      <button type="button" className="settings-general-link" onClick={openShortcutSettings}>
+                        <span className="settings-general-link-icon"><Keyboard size={16} /></span>
+                        <span className="settings-general-row-main">
+                          <strong>快捷键</strong>
+                          <span>{shortcuts.sendKey} 发送，支持文件搜索与模型切换</span>
+                        </span>
+                        <span className="settings-general-link-meta">{Object.keys(shortcuts).length} 项</span>
+                        <ChevronRight size={16} />
                       </button>
-                      <button
-                        type="button"
-                        className="filter-add-btn"
-                        onClick={async () => {
-                          const result = await window.electronAPI.openDirectory();
-                          if (!result.canceled && result.path) {
-                            updateTempImagePath(result.path);
-                          }
-                        }}
-                        title="选择文件夹"
-                      >
-                        浏览
+                      <button type="button" className="settings-general-link" onClick={openFilterSettings}>
+                        <span className="settings-general-link-icon"><ListFilter size={16} /></span>
+                        <span className="settings-general-row-main">
+                          <strong>过滤规则</strong>
+                          <span>排除不需要索引的文件夹、后缀和文件名</span>
+                        </span>
+                        <span className="settings-general-link-meta">{filterRuleCount} 条</span>
+                        <ChevronRight size={16} />
                       </button>
                     </div>
                   </div>
-                </div>
-              </div>
+                )}
+              </section>
+
+              <section className={`settings-general-section ${expandedGeneralSection === "images" ? "expanded" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="settings-general-heading settings-general-heading-button"
+                  onClick={() => toggleGeneralSection("images")}
+                  aria-expanded={expandedGeneralSection === "images"}
+                  aria-controls="general-settings-images"
+                >
+                  <span className="settings-general-heading-icon"><ImageIcon size={15} /></span>
+                  <div>
+                    <h4>图片与缓存</h4>
+                    <p>临时图片将在 12 小时后自动清理</p>
+                  </div>
+                  <ChevronDown className="settings-general-collapse-icon" size={16} />
+                </button>
+                {expandedGeneralSection === "images" && (
+                  <div id="general-settings-images" className="settings-general-section-body">
+                    <div className="settings-general-row settings-general-path-row">
+                      <span className="settings-general-row-main">
+                        <strong>临时图片存储路径</strong>
+                        <span>留空时使用 Hpp 默认缓存目录</span>
+                      </span>
+                      <div className="settings-general-path-control">
+                        <input
+                          value={tempImagePath}
+                          readOnly
+                          placeholder="默认路径"
+                          className="filter-custom-input"
+                          title={tempImagePath || "使用默认路径"}
+                        />
+                        <button
+                          type="button"
+                          className="settings-general-icon-button"
+                          onClick={() => updateTempImagePath("")}
+                          disabled={!tempImagePath}
+                          title="恢复默认路径"
+                          aria-label="恢复默认路径"
+                        >
+                          <RotateCcw size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-general-icon-button"
+                          onClick={async () => {
+                            const result = await window.electronAPI.openDirectory();
+                            if (!result.canceled && result.path) updateTempImagePath(result.path);
+                          }}
+                          title="选择文件夹"
+                          aria-label="选择文件夹"
+                        >
+                          <FolderOpen size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </section>
             </div>
           </div>
         </div>

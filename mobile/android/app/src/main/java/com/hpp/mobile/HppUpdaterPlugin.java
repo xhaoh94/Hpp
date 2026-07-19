@@ -1,16 +1,23 @@
 package com.hpp.mobile;
 
+import android.app.DownloadManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.provider.Settings;
 
+import androidx.activity.result.ActivityResult;
 import androidx.core.content.FileProvider;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.BufferedInputStream;
@@ -18,9 +25,7 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -35,16 +40,21 @@ import java.util.concurrent.Executors;
 @CapacitorPlugin(name = "HppUpdater")
 public class HppUpdaterPlugin extends Plugin {
     private static final long MAX_APK_BYTES = 220L * 1024L * 1024L;
-    private static final int MAX_REDIRECTS = 6;
+    private static final long NO_DOWNLOAD = -1L;
+    private static final String UPDATE_FILE_NAME = "Hpp-update.apk";
+    private static final String PREFERENCES_NAME = "hpp-android-updater";
+    private static final String KEY_DOWNLOAD_ID = "downloadId";
+    private static final String KEY_DOWNLOAD_SHA = "downloadSha";
+    private static final String KEY_COMPLETED_SHA = "completedSha";
     private static final Set<String> ALLOWED_HOSTS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
         "github.com",
         "objects.githubusercontent.com",
         "release-assets.githubusercontent.com"
     )));
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
 
     @PluginMethod
-    public void downloadAndInstall(PluginCall call) {
+    public void startDownload(PluginCall call) {
         String downloadUrl = call.getString("url", "").trim();
         String expectedSha = normalizeSha256(call.getString("sha256", ""));
         if (!isAllowedUrl(downloadUrl) || expectedSha == null) {
@@ -52,36 +62,33 @@ public class HppUpdaterPlugin extends Plugin {
             return;
         }
 
-        executor.execute(() -> {
-            File target = getUpdateFile();
-            File temporary = new File(target.getParentFile(), target.getName() + ".download");
+        EXECUTOR.execute(() -> {
             try {
-                if (!target.getParentFile().exists() && !target.getParentFile().mkdirs()) {
-                    throw new IllegalStateException("Unable to create update cache directory");
+                JSObject current = readUpdateStatus(expectedSha);
+                String status = current.getString("status");
+                if ("downloading".equals(status) || "downloaded".equals(status)) {
+                    call.resolve(current);
+                    return;
                 }
-                if (temporary.exists() && !temporary.delete()) {
-                    throw new IllegalStateException("Unable to replace temporary update");
-                }
-                download(downloadUrl, temporary);
-                verifySha256(temporary, expectedSha);
-                if (target.exists() && !target.delete()) {
-                    throw new IllegalStateException("Unable to replace cached update");
-                }
-                if (!temporary.renameTo(target)) {
-                    copyFile(temporary, target);
-                    deleteQuietly(temporary);
-                }
-                finishInstallRequest(call, target);
-            } catch (ChecksumException error) {
-                deleteQuietly(temporary);
-                deleteQuietly(target);
-                call.reject("安装包校验失败", "CHECKSUM_MISMATCH", error);
-            } catch (DownloadTooLargeException error) {
-                deleteQuietly(temporary);
-                call.reject("安装包大小异常", "DOWNLOAD_TOO_LARGE", error);
+                call.resolve(enqueueDownload(downloadUrl, expectedSha));
             } catch (Exception error) {
-                deleteQuietly(temporary);
                 call.reject("安装包下载失败", "DOWNLOAD_FAILED", error);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void getUpdateStatus(PluginCall call) {
+        String expectedSha = normalizeSha256(call.getString("sha256", ""));
+        if (expectedSha == null) {
+            call.reject("校验信息无效", "UPDATE_REQUEST_INVALID");
+            return;
+        }
+        EXECUTOR.execute(() -> {
+            try {
+                call.resolve(readUpdateStatus(expectedSha));
+            } catch (Exception error) {
+                call.reject("无法读取下载状态", "DOWNLOAD_STATUS_FAILED", error);
             }
         });
     }
@@ -89,19 +96,19 @@ public class HppUpdaterPlugin extends Plugin {
     @PluginMethod
     public void requestInstallPermission(PluginCall call) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || canInstallPackages()) {
-            JSObject result = new JSObject();
-            result.put("opened", false);
-            call.resolve(result);
+            call.resolve(permissionResult(false));
             return;
         }
         Intent intent = new Intent(
             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
             Uri.parse("package:" + getContext().getPackageName())
         );
-        getActivity().startActivity(intent);
-        JSObject result = new JSObject();
-        result.put("opened", true);
-        call.resolve(result);
+        startActivityForResult(call, intent, "installPermissionResult");
+    }
+
+    @ActivityCallback
+    private void installPermissionResult(PluginCall call, ActivityResult result) {
+        if (call != null) call.resolve(permissionResult(true));
     }
 
     @PluginMethod
@@ -116,17 +123,123 @@ public class HppUpdaterPlugin extends Plugin {
             call.reject("安装包已失效", "INSTALL_FILE_MISSING");
             return;
         }
-        executor.execute(() -> {
+        EXECUTOR.execute(() -> {
             try {
                 verifySha256(target, expectedSha);
                 finishInstallRequest(call, target);
             } catch (ChecksumException error) {
                 deleteQuietly(target);
+                preferences().edit().remove(KEY_COMPLETED_SHA).apply();
                 call.reject("安装包校验失败", "CHECKSUM_MISMATCH", error);
             } catch (Exception error) {
                 call.reject("无法打开系统安装器", "INSTALL_FAILED", error);
             }
         });
+    }
+
+    private JSObject enqueueDownload(String source, String expectedSha) {
+        clearActiveDownload(true);
+        deleteQuietly(getUpdateFile());
+        preferences().edit().remove(KEY_COMPLETED_SHA).apply();
+
+        DownloadManager.Request request = new DownloadManager.Request(Uri.parse(source));
+        request.setTitle("Hpp");
+        request.setDescription("正在下载安装包");
+        request.setMimeType("application/vnd.android.package-archive");
+        request.setAllowedOverMetered(true);
+        request.setAllowedOverRoaming(true);
+        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
+        request.setDestinationInExternalFilesDir(
+            getContext(),
+            Environment.DIRECTORY_DOWNLOADS,
+            UPDATE_FILE_NAME
+        );
+
+        long downloadId = downloadManager().enqueue(request);
+        preferences().edit()
+            .putLong(KEY_DOWNLOAD_ID, downloadId)
+            .putString(KEY_DOWNLOAD_SHA, expectedSha)
+            .apply();
+        return statusResult("downloading", 0, 0, -1, null);
+    }
+
+    private JSObject readUpdateStatus(String expectedSha) throws Exception {
+        File completed = getUpdateFile();
+        String completedSha = preferences().getString(KEY_COMPLETED_SHA, "");
+        if (completed.isFile() && expectedSha.equals(completedSha)) {
+            return statusResult("downloaded", 100, completed.length(), completed.length(), null);
+        }
+        if (completed.exists()) {
+            deleteQuietly(completed);
+            preferences().edit().remove(KEY_COMPLETED_SHA).apply();
+        }
+
+        SharedPreferences state = preferences();
+        long downloadId = state.getLong(KEY_DOWNLOAD_ID, NO_DOWNLOAD);
+        String downloadSha = state.getString(KEY_DOWNLOAD_SHA, "");
+        if (downloadId == NO_DOWNLOAD || !expectedSha.equals(downloadSha)) {
+            if (downloadId != NO_DOWNLOAD) clearActiveDownload(true);
+            return statusResult("idle", -1, 0, -1, null);
+        }
+
+        DownloadManager.Query query = new DownloadManager.Query().setFilterById(downloadId);
+        try (Cursor cursor = downloadManager().query(query)) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                clearActiveDownload(true);
+                return statusResult("idle", -1, 0, -1, null);
+            }
+            int status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+            long downloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+            long total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+            int progress = total > 0 ? (int) Math.min(100, downloaded * 100 / total) : -1;
+
+            if (total > MAX_APK_BYTES || downloaded > MAX_APK_BYTES) {
+                clearActiveDownload(true);
+                return statusResult("failed", progress, downloaded, total, "DOWNLOAD_TOO_LARGE");
+            }
+            if (
+                status == DownloadManager.STATUS_PENDING ||
+                status == DownloadManager.STATUS_RUNNING ||
+                status == DownloadManager.STATUS_PAUSED
+            ) {
+                return statusResult("downloading", progress, downloaded, total, null);
+            }
+            if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                return finishCompletedDownload(downloadId, expectedSha, downloaded, total);
+            }
+
+            clearActiveDownload(true);
+            return statusResult("failed", progress, downloaded, total, "DOWNLOAD_FAILED");
+        }
+    }
+
+    private JSObject finishCompletedDownload(long downloadId, String expectedSha, long downloaded, long total) throws Exception {
+        File temporary = getDownloadManagerFile();
+        if (!temporary.isFile()) {
+            clearActiveDownload(true);
+            return statusResult("failed", -1, downloaded, total, "INSTALL_FILE_MISSING");
+        }
+        if (temporary.length() > MAX_APK_BYTES) {
+            clearActiveDownload(true);
+            return statusResult("failed", 100, temporary.length(), total, "DOWNLOAD_TOO_LARGE");
+        }
+        try {
+            verifySha256(temporary, expectedSha);
+        } catch (ChecksumException error) {
+            clearActiveDownload(true);
+            return statusResult("failed", 100, temporary.length(), total, "CHECKSUM_MISMATCH");
+        }
+
+        File target = getUpdateFile();
+        if (!target.getParentFile().exists() && !target.getParentFile().mkdirs()) {
+            throw new IllegalStateException("Unable to create update cache directory");
+        }
+        copyFile(temporary, target);
+        preferences().edit().putString(KEY_COMPLETED_SHA, expectedSha).apply();
+        downloadManager().remove(downloadId);
+        clearActiveState();
+        deleteQuietly(temporary);
+        return statusResult("downloaded", 100, target.length(), target.length(), null);
     }
 
     private void finishInstallRequest(PluginCall call, File apk) {
@@ -156,79 +269,40 @@ public class HppUpdaterPlugin extends Plugin {
         });
     }
 
-    private void download(String source, File target) throws Exception {
-        IOException lastFailure = null;
-        for (int attempt = 0; attempt < 2; attempt++) {
-            try {
-                downloadOnce(source, target);
-                return;
-            } catch (IOException error) {
-                lastFailure = error;
-                deleteQuietly(target);
-            }
-        }
-        throw lastFailure;
+    private JSObject permissionResult(boolean opened) {
+        JSObject result = new JSObject();
+        result.put("opened", opened);
+        result.put("granted", canInstallPackages());
+        return result;
     }
 
-    private void downloadOnce(String source, File target) throws Exception {
-        HttpURLConnection connection = openConnection(source);
-        long total = connection.getContentLengthLong();
-        if (total > MAX_APK_BYTES) throw new DownloadTooLargeException();
-        long downloaded = 0;
-        int lastProgress = -1;
-        try (
-            InputStream input = new BufferedInputStream(connection.getInputStream());
-            BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(target))
-        ) {
-            byte[] buffer = new byte[64 * 1024];
-            int count;
-            while ((count = input.read(buffer)) != -1) {
-                downloaded += count;
-                if (downloaded > MAX_APK_BYTES) throw new DownloadTooLargeException();
-                output.write(buffer, 0, count);
-                int progress = total > 0 ? (int) Math.min(100, downloaded * 100 / total) : -1;
-                if (progress != lastProgress) {
-                    lastProgress = progress;
-                    JSObject event = new JSObject();
-                    event.put("progress", progress);
-                    event.put("downloadedBytes", downloaded);
-                    event.put("totalBytes", total);
-                    notifyListeners("downloadProgress", event);
-                }
-            }
-        } finally {
-            connection.disconnect();
-        }
+    private JSObject statusResult(String status, int progress, long downloaded, long total, String errorCode) {
+        JSObject result = new JSObject();
+        result.put("status", status);
+        result.put("progress", progress);
+        result.put("downloadedBytes", downloaded);
+        result.put("totalBytes", total);
+        if (errorCode != null) result.put("errorCode", errorCode);
+        return result;
     }
 
-    private HttpURLConnection openConnection(String source) throws Exception {
-        URL url = new URL(source);
-        for (int redirect = 0; redirect <= MAX_REDIRECTS; redirect++) {
-            if (!"https".equalsIgnoreCase(url.getProtocol()) || !ALLOWED_HOSTS.contains(url.getHost().toLowerCase(Locale.ROOT))) {
-                throw new SecurityException("Update redirect host is not allowed");
-            }
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(20_000);
-            connection.setReadTimeout(30_000);
-            connection.setRequestProperty("User-Agent", "Hpp-Android-Updater");
-            connection.setRequestProperty("Accept-Encoding", "identity");
-            connection.setRequestProperty("Connection", "close");
-            int status = connection.getResponseCode();
-            if (status >= 300 && status < 400) {
-                String location = connection.getHeaderField("Location");
-                connection.disconnect();
-                if (location == null) throw new IllegalStateException("Update redirect is missing a location");
-                url = new URL(url, location);
-                continue;
-            }
-            if (status < 200 || status >= 300) {
-                connection.disconnect();
-                throw new IllegalStateException("Update download returned HTTP " + status);
-            }
-            return connection;
-        }
-        throw new IllegalStateException("Too many update redirects");
+    private DownloadManager downloadManager() {
+        return (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
+    }
+
+    private SharedPreferences preferences() {
+        return getContext().getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE);
+    }
+
+    private void clearActiveDownload(boolean deleteFile) {
+        long downloadId = preferences().getLong(KEY_DOWNLOAD_ID, NO_DOWNLOAD);
+        if (downloadId != NO_DOWNLOAD) downloadManager().remove(downloadId);
+        clearActiveState();
+        if (deleteFile) deleteQuietly(getDownloadManagerFile());
+    }
+
+    private void clearActiveState() {
+        preferences().edit().remove(KEY_DOWNLOAD_ID).remove(KEY_DOWNLOAD_SHA).apply();
     }
 
     private void verifySha256(File file, String expected) throws Exception {
@@ -252,7 +326,13 @@ public class HppUpdaterPlugin extends Plugin {
     }
 
     private File getUpdateFile() {
-        return new File(new File(getContext().getCacheDir(), "updates"), "Hpp-update.apk");
+        return new File(new File(getContext().getCacheDir(), "updates"), UPDATE_FILE_NAME);
+    }
+
+    private File getDownloadManagerFile() {
+        File downloads = getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (downloads == null) throw new IllegalStateException("External downloads directory is unavailable");
+        return new File(downloads, UPDATE_FILE_NAME);
     }
 
     private static String normalizeSha256(String value) {
@@ -282,9 +362,8 @@ public class HppUpdaterPlugin extends Plugin {
     }
 
     private static void deleteQuietly(File file) {
-        if (file.exists()) file.delete();
+        if (file != null && file.exists()) file.delete();
     }
 
     private static final class ChecksumException extends Exception {}
-    private static final class DownloadTooLargeException extends Exception {}
 }

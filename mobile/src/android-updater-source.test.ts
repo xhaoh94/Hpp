@@ -23,6 +23,20 @@ describe("Android updater native integration", () => {
     expect(plugin).toContain('Uri.parse("package:" + getContext().getPackageName())');
   });
 
+  it("keeps downloads alive outside the WebView and resumes installation after permission settings", () => {
+    const plugin = readWorkspaceFile("mobile/android/app/src/main/java/com/hpp/mobile/HppUpdaterPlugin.java");
+    const app = readWorkspaceFile("mobile/src/App.tsx");
+
+    expect(plugin).toContain("DownloadManager.Request");
+    expect(plugin).toContain("setDestinationInExternalFilesDir");
+    expect(plugin).toContain("KEY_DOWNLOAD_ID");
+    expect(plugin).toContain("@ActivityCallback");
+    expect(plugin).toContain('startActivityForResult(call, intent, "installPermissionResult")');
+    expect(app).toContain('updateStage !== "downloading"');
+    expect(app).toContain("syncAndroidUpdateDownload(true)");
+    expect(app).not.toContain("安装包下载完成后会校验 SHA-256");
+  });
+
   it("keeps release metadata wired into the streaming GitHub publisher", () => {
     const buildScript = readWorkspaceFile("scripts/build-android-release.ps1");
     const publishScript = readWorkspaceFile("scripts/reset-github-release.cjs");
