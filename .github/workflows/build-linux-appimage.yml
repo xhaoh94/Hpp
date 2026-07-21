@@ -32,7 +32,7 @@ jobs:
         run: npm run build
 
       - name: Build AppImage
-        run: npx electron-builder --linux AppImage --x64 --config.directories.output=linux-release
+        run: npx electron-builder --linux AppImage --x64 --publish never --config.directories.output=linux-release
 
       - name: Upload AppImage artifacts
         uses: actions/upload-artifact@v4

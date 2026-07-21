@@ -9,7 +9,7 @@
     "test:watch": "vitest",
     "build": "electron-vite build && node scripts/package-agent-plugins.cjs && npm run mobile:build && node scripts/package-mobile-web.cjs",
     "dist": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-release.ps1",
-    "dist:linux": "npm run build && electron-builder --linux AppImage --x64",
+    "dist:linux": "npm run build && electron-builder --linux AppImage --x64 --publish never",
     "dist:publish": "npm run build && electron-builder --publish always",
     "preview": "electron-vite preview",
     "web:dev": "npm run mobile:dev",
