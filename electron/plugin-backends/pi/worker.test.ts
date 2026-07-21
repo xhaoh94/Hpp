@@ -139,8 +139,10 @@ const startWorker = (runtimeRoot: string, agentDir: string) => {
     clearTimeout(waiter.timeout);
     waiter.resolve(message);
   });
-  const waitFor = (predicate: (message: WorkerMessage) => boolean, timeoutMs = 10000) =>
-    new Promise<WorkerMessage>((resolvePromise, reject) => {
+  const waitFor = (predicate: (message: WorkerMessage) => boolean, timeoutMs = 10000) => {
+    const existing = messages.find(predicate);
+    if (existing) return Promise.resolve(existing);
+    return new Promise<WorkerMessage>((resolvePromise, reject) => {
       const waiter = {
         predicate,
         resolve: resolvePromise,
@@ -153,6 +155,7 @@ const startWorker = (runtimeRoot: string, agentDir: string) => {
       };
       waiters.push(waiter);
     });
+  };
   const send = (message: WorkerMessage) => child.stdin.write(`${JSON.stringify(message)}\n`);
   return { child, messages, send, waitFor };
 };
