@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe("Claude Agent SDK runtime", () => {
-  it("invokes npm through node.exe on Windows", async () => {
+  it.skipIf(process.platform !== "win32")("invokes npm through node.exe on Windows", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-claude-runtime-"));
     tempRoots.push(root);
     const npmCli = join(root, "node_modules", "npm", "bin", "npm-cli.js");

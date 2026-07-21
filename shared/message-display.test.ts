@@ -11,8 +11,8 @@ describe("shared message display rules", () => {
   });
 
   it("formats today and earlier history timestamps consistently", () => {
-    const now = new Date("2026-07-17T10:30:00+08:00");
-    expect(formatHistoryMessageTime(new Date("2026-07-17T09:05:00+08:00").getTime(), now)).toMatch(/09:05/);
-    expect(formatHistoryMessageTime(new Date("2026-07-16T09:05:00+08:00").getTime(), now)).toMatch(/^07\/16 /);
+    const now = new Date(2026, 6, 17, 10, 30);
+    expect(formatHistoryMessageTime(new Date(2026, 6, 17, 9, 5).getTime(), now)).toMatch(/09:05/);
+    expect(formatHistoryMessageTime(new Date(2026, 6, 16, 9, 5).getTime(), now)).toMatch(/^07\/16 /);
   });
 });

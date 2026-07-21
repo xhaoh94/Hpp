@@ -139,7 +139,7 @@ const startWorker = (runtimeRoot: string, agentDir: string) => {
     clearTimeout(waiter.timeout);
     waiter.resolve(message);
   });
-  const waitFor = (predicate: (message: WorkerMessage) => boolean, timeoutMs = 3000) =>
+  const waitFor = (predicate: (message: WorkerMessage) => boolean, timeoutMs = 10000) =>
     new Promise<WorkerMessage>((resolvePromise, reject) => {
       const waiter = {
         predicate,

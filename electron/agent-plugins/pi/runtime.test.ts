@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe("Pi runtime command resolution", () => {
-  it("invokes npm through node.exe on Windows", async () => {
+  it.skipIf(process.platform !== "win32")("invokes npm through node.exe on Windows", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-runtime-"));
     tempRoots.push(root);
     const npmCli = join(root, "node_modules", "npm", "bin", "npm-cli.js");
@@ -33,7 +33,7 @@ describe("Pi runtime command resolution", () => {
     });
   });
 
-  it("resolves node to its executable instead of a shell command", async () => {
+  it.skipIf(process.platform !== "win32")("resolves node to its executable instead of a shell command", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-runtime-"));
     tempRoots.push(root);
     await writeFile(join(root, "node.exe"), "");

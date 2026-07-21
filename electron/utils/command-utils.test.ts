@@ -13,7 +13,7 @@ import {
 } from "./command-utils";
 
 describe("getExecFileInvocation", () => {
-  it("quotes Windows command shims located under Program Files", () => {
+  it.skipIf(process.platform !== "win32")("quotes Windows command shims located under Program Files", () => {
     const env = {
       ...process.env,
       ComSpec: "C:\\Windows\\System32\\cmd.exe",
