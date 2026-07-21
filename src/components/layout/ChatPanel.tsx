@@ -8,11 +8,12 @@ import {
   useMemo,
   type RefObject,
   type DragEvent as ReactDragEvent,
+  type PointerEvent as ReactPointerEvent,
   type UIEvent as ReactUIEvent,
 } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { Copy, CornerDownRight, GitBranch, Link2, ListCollapse, MessageCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -24,20 +25,22 @@ import {
   type PendingFile,
   type PendingImage,
   type PendingPathAttachment,
+  type QueuedMessageEditableDraft,
   EMPTY_CHAT_DRAFT,
+  cloneChatDraft,
 } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentName, getAgentPlanModeTooltip, supportsGuidance } from "@/lib/agents";
+import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import {
-  buildSessionReferencesContext,
   createSessionReferenceSnapshot,
   getSessionReferenceTitle,
 } from "@/lib/session-references";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
-import { getSessionModel } from "@/hooks/useDataPersistence";
-import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
+import { getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersistence";
+import { SessionCommandCoordinator, type PreparedSessionMessage } from "@/lib/session-command-coordinator";
+import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
@@ -59,26 +62,32 @@ import {
   resetSessionRuntimeAfterTurn,
   type SessionRuntime,
 } from "./agentEventUtils";
-import { THINKING_LEVELS, getOrderedModelProviders, includeCurrentModel } from "@shared/models";
+import { getModelThinkingLevels, getOrderedModelProviders, includeCurrentModel } from "@shared/models";
 import { collectProcessDiffs } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime } from "@shared/message-display";
+import type { AgentActionInvocation } from "@shared/agent-actions";
+import {
+  ComposerHistoryController,
+  draftFromMessage,
+  type LegacyReferenceResolver,
+} from "@/lib/composer-history";
+import { matchShortcut } from "@/lib/shortcuts";
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
-type AgentImagePayload = { type: string; data: string; mimeType: string };
-type MessageImagePayload = { id: string; src: string; name: string };
 type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: string };
-
-type MessagePayload = {
-  displayContent: string;
-  sendContent: string;
-  messageImages?: MessageImagePayload[];
-  sessionReferences?: MessageSessionReferencePayload[];
-  agentImages?: AgentImagePayload[];
-  forkContextUsed?: boolean;
-};
+type MessagePayload = PreparedSessionMessage;
 
 const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+
+const copyMessageText = async (content: string) => {
+  try {
+    await navigator.clipboard.writeText(content);
+    showFloatingToastMessage("已复制");
+  } catch {
+    showFloatingToastMessage("复制失败");
+  }
+};
 
 type SendPayloadNow = (
   targetSessionId: string,
@@ -96,27 +105,13 @@ type MessageQueueDispatcherProps = {
   sendPayloadNow: SendPayloadNow;
 };
 
-const escapeXmlAttribute = (value: string) =>
-  value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
-const buildPathAttachmentBlock = (attachments: PendingPathAttachment[]) => {
-  if (attachments.length === 0) return "";
-  const lines = attachments.map((attachment) => {
-    const tag = attachment.kind === "folder" ? "folder" : "file";
-    return `<${tag} path="${escapeXmlAttribute(attachment.path)}" />`;
-  });
-  return ["<attached_paths>", ...lines, "</attached_paths>"].join("\n");
-};
-
 type QueuePanelProps = {
   items: QueuedMessage[];
   canGuide: boolean;
   currentSessionRunning: boolean;
   onGuide: (item: QueuedMessage) => void;
+  onEdit: (item: QueuedMessage) => void;
+  onReorder: (itemId: string, toIndex: number) => void;
   onRemove: (itemId: string) => void;
 };
 
@@ -125,6 +120,7 @@ const getQueuePreview = (item: QueuedMessage) => {
   if (content) return content.length > 120 ? `${content.slice(0, 120)}...` : content;
   if (item.sessionReferences?.length) return `[引用会话: ${item.sessionReferences.map((reference) => reference.sourceTitle).join(", ")}]`;
   if (item.messageImages?.length) return `[${item.messageImages.length} 张图片]`;
+  if (item.action) return `${item.action.kind === "skill" ? "技能" : "命令"} · ${item.action.name}`;
   return "空消息";
 };
 
@@ -133,9 +129,53 @@ function MessageQueuePanel({
   canGuide,
   currentSessionRunning,
   onGuide,
+  onEdit,
+  onReorder,
   onRemove,
 }: QueuePanelProps) {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const draggingIdRef = useRef<string | null>(null);
+  const dropIndexRef = useRef<number | null>(null);
   if (items.length === 0) return null;
+
+  const finishDragging = () => {
+    draggingIdRef.current = null;
+    dropIndexRef.current = null;
+    setDraggingId(null);
+    setDropIndex(null);
+  };
+
+  const startDragging = (event: ReactPointerEvent<HTMLButtonElement>, item: QueuedMessage, index: number) => {
+    if (item.status === "sending") return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    draggingIdRef.current = item.id;
+    dropIndexRef.current = index;
+    setDraggingId(item.id);
+    setDropIndex(index);
+  };
+
+  const moveDragging = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!draggingIdRef.current) return;
+    event.preventDefault();
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-queue-id]");
+    if (!target) return;
+    const index = items.findIndex((item) => item.id === target.dataset.queueId);
+    if (index < 0 || dropIndexRef.current === index) return;
+    dropIndexRef.current = index;
+    setDropIndex(index);
+  };
+
+  const stopDragging = (event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) => {
+    const itemId = draggingIdRef.current;
+    const targetIndex = dropIndexRef.current;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    finishDragging();
+    if (commit && itemId && targetIndex !== null) onReorder(itemId, targetIndex);
+  };
 
   return (
     <div className="chat-queue-panel">
@@ -145,36 +185,365 @@ function MessageQueuePanel({
       </div>
       <div className="chat-queue-list">
         {items.map((item, index) => (
-          <div key={item.id} className={`chat-queue-item ${item.status}`}>
-            <div className="chat-queue-index">{index + 1}</div>
+          <div
+            key={item.id}
+            data-queue-id={item.id}
+            className={`chat-queue-item ${item.status} ${draggingId === item.id ? "dragging" : ""} ${dropIndex === index && draggingId !== item.id ? "drop-target" : ""}`}
+          >
+            <button
+              type="button"
+              className="chat-queue-drag"
+              disabled={item.status === "sending"}
+              title="拖动调整顺序"
+              aria-label={`拖动第 ${index + 1} 条队列消息`}
+              onPointerDown={(event) => startDragging(event, item, index)}
+              onPointerMove={moveDragging}
+              onPointerUp={(event) => stopDragging(event, true)}
+              onPointerCancel={(event) => stopDragging(event, false)}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                event.preventDefault();
+                onReorder(item.id, index + (event.key === "ArrowUp" ? -1 : 1));
+              }}
+            >
+              <GripVertical size={14} />
+              <span>{index + 1}</span>
+            </button>
             <div className="chat-queue-main">
+              {item.action && (
+                <div className="chat-action-badge">
+                  {item.action.kind === "skill" ? "技能" : "命令"} · {item.action.name}
+                </div>
+              )}
               <div className="chat-queue-preview">{getQueuePreview(item)}</div>
               {item.error && <div className="chat-queue-error">{item.error}</div>}
             </div>
-            {canGuide && (
-              <button
-                type="button"
-                className="chat-queue-action"
-                onClick={() => onGuide(item)}
-                disabled={!currentSessionRunning || item.status === "sending"}
-                title={currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
-              >
-                <CornerDownRight size={14} />
-                <span>引导</span>
+            <div className="chat-queue-controls">
+              <button type="button" className="chat-queue-icon-btn" onClick={() => onEdit(item)} disabled={item.status === "sending"} title="编辑">
+                <Pencil size={14} />
               </button>
-            )}
-            <button
-              type="button"
-              className="chat-queue-icon-btn"
-              onClick={() => onRemove(item.id)}
-              disabled={item.status === "sending"}
-              title="移除"
-            >
-              <Trash2 size={14} />
-            </button>
+              {canGuide && !item.action && (
+                <button
+                  type="button"
+                  className="chat-queue-action"
+                  onClick={() => onGuide(item)}
+                  disabled={!currentSessionRunning || item.status === "sending"}
+                  title={currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
+                >
+                  <CornerDownRight size={14} />
+                  <span>引导</span>
+                </button>
+              )}
+              <button type="button" className="chat-queue-icon-btn" onClick={() => onRemove(item.id)} disabled={item.status === "sending"} title="移除">
+                <Trash2 size={14} />
+              </button>
+            </div>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+type QueueEditDialogProps = {
+  item: QueuedMessage;
+  project: Project;
+  session: ProjectSession;
+  onClose: () => void;
+  onSave: (draft: QueuedMessageEditableDraft) => Promise<boolean>;
+};
+
+const getQueuedImageMimeType = (src: string) =>
+  /^data:([^;,]+)[;,]/.exec(src)?.[1] || "image/png";
+
+function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditDialogProps) {
+  const sessionMessages = useChatStore((state) => state.sessionMessages);
+  const fallbackReferences = (item.sessionReferences || []).map((reference): SessionReference => {
+    const source = project.sessions.find((candidate) => candidate.id === reference.sourceSessionId);
+    return source
+      ? createSessionReferenceSnapshot(source, sessionMessages[source.id] || [])
+      : {
+          sourceSessionId: reference.sourceSessionId,
+          sourceAgentId: "",
+          sourceTitle: reference.sourceTitle,
+          sourceUpdatedAt: "",
+          addedAt: new Date().toISOString(),
+          summary: "",
+        };
+  });
+  const initialDraft = item.editableDraft || {
+    text: item.editableContent ?? item.displayContent,
+    images: (item.messageImages || []).map((image) => ({ ...image, mimeType: getQueuedImageMimeType(image.src) })),
+    pendingFiles: [],
+    pendingPathAttachments: [],
+    sessionReferences: fallbackReferences,
+    action: item.action,
+  };
+  const [draft, setDraft] = useState<QueuedMessageEditableDraft>(initialDraft);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
+  const [addMenuPosition, setAddMenuPosition] = useState<{ left: number; width: number; top?: number; bottom?: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const referenceCandidates = project.sessions.filter((candidate) => candidate.id !== session.id);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setAddMenuOpen(false);
+      setReferencePickerOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [addMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!addMenuOpen) {
+      setAddMenuPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const anchor = addMenuRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const width = referencePickerOpen ? Math.min(420, window.innerWidth - 32) : 170;
+      const estimatedHeight = referencePickerOpen ? 266 : 150;
+      const opensUpward = anchor.top >= estimatedHeight + 16;
+      setAddMenuPosition({
+        left: Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16)),
+        width,
+        ...(opensUpward
+          ? { bottom: Math.max(16, window.innerHeight - anchor.top + 7) }
+          : { top: Math.max(16, Math.min(window.innerHeight - estimatedHeight - 16, anchor.bottom + 7)) }),
+      });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [addMenuOpen, referencePickerOpen]);
+
+  const addImages = useCallback((files: File[]) => {
+    files.filter(isSupportedImageAttachment).forEach((file) => {
+      if (file.size > 10 * 1024 * 1024) {
+        setError(`图片不能超过 10MB：${file.name}`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        setDraft((current) => ({
+          ...current,
+          images: [...current.images, {
+            id: crypto.randomUUID(),
+            src: String(reader.result || ""),
+            name: file.name,
+            mimeType: file.type || "image/png",
+          }],
+        }));
+        setError("");
+      };
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  const addLocalFiles = useCallback((files: File[]) => {
+    void (async () => {
+      for (const file of files) {
+        if (isSupportedImageAttachment(file)) {
+          addImages([file]);
+          continue;
+        }
+        const path = window.electronAPI.getPathForFile(file);
+        const result = await window.electronAPI.statPath(path);
+        if (!result.success || !result.attachment) {
+          setError(result.error || `无法添加文件：${file.name}`);
+          continue;
+        }
+        setDraft((current) => ({
+          ...current,
+          pendingPathAttachments: current.pendingPathAttachments.some((entry) => entry.path === result.attachment?.path)
+            ? current.pendingPathAttachments
+            : [...current.pendingPathAttachments, { id: crypto.randomUUID(), ...result.attachment! }],
+        }));
+      }
+    })();
+  }, [addImages]);
+
+  const addFolder = useCallback(() => {
+    void (async () => {
+      const result = await window.electronAPI.openAttachmentFolder();
+      if (result.canceled) return;
+      if (!result.attachment) {
+        setError(result.error || "无法添加文件夹");
+        return;
+      }
+      setDraft((current) => ({
+        ...current,
+        pendingPathAttachments: current.pendingPathAttachments.some((entry) => entry.path === result.attachment?.path)
+          ? current.pendingPathAttachments
+          : [...current.pendingPathAttachments, { id: crypto.randomUUID(), ...result.attachment! }],
+      }));
+    })();
+  }, []);
+
+  const toggleReference = useCallback((source: ProjectSession) => {
+    setDraft((current) => {
+      const exists = current.sessionReferences.some((reference) => reference.sourceSessionId === source.id);
+      return {
+        ...current,
+        sessionReferences: exists
+          ? current.sessionReferences.filter((reference) => reference.sourceSessionId !== source.id)
+          : [...current.sessionReferences, createSessionReferenceSnapshot(source, sessionMessages[source.id] || [])],
+      };
+    });
+  }, [sessionMessages]);
+
+  const hasContent = !!draft.text.trim() || draft.images.length > 0 || draft.pendingFiles.length > 0
+    || draft.pendingPathAttachments.length > 0 || draft.sessionReferences.length > 0 || !!draft.action;
+  const submit = async () => {
+    if (!hasContent || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      if (await onSave(draft)) onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="chat-queue-edit-overlay" onMouseDown={onClose}>
+      <section
+        className="chat-queue-edit-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="chat-queue-edit-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="chat-queue-edit-header">
+          <div><h3 id="chat-queue-edit-title">编辑队列消息</h3><span>保存后会按当前附件重新生成发送内容</span></div>
+          <button type="button" onClick={onClose} disabled={saving} title="关闭"><X size={16} /></button>
+        </header>
+        <div className="chat-queue-edit-body">
+          {(draft.action || draft.images.length > 0 || draft.pendingFiles.length > 0 || draft.pendingPathAttachments.length > 0 || draft.sessionReferences.length > 0) && (
+            <div className="chat-queue-edit-contexts">
+                {draft.action && (
+                  <div className="chat-queue-edit-chip action"><WandSparkles size={13} /><span>{draft.action.kind === "skill" ? "技能" : "命令"} · {draft.action.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, action: undefined }))}><X size={12} /></button></div>
+                )}
+                {draft.images.map((image) => (
+                  <div className="chat-queue-edit-chip image" key={image.id}><img src={image.src} alt="" /><span>{image.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, images: current.images.filter((entry) => entry.id !== image.id) }))}><X size={12} /></button></div>
+                ))}
+                {draft.pendingFiles.map((file) => (
+                  <div className="chat-queue-edit-chip" key={file.id}><FileText size={13} /><span>{file.fileName}:{file.startLine}-{file.endLine}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, pendingFiles: current.pendingFiles.filter((entry) => entry.id !== file.id) }))}><X size={12} /></button></div>
+                ))}
+                {draft.pendingPathAttachments.map((attachment) => (
+                  <div className="chat-queue-edit-chip" key={attachment.id}>{attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}<span>{attachment.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, pendingPathAttachments: current.pendingPathAttachments.filter((entry) => entry.id !== attachment.id) }))}><X size={12} /></button></div>
+                ))}
+                {draft.sessionReferences.map((reference) => (
+                  <div className="chat-queue-edit-chip reference" key={reference.sourceSessionId}><Link2 size={13} /><span>{reference.sourceTitle}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))}><X size={12} /></button></div>
+                ))}
+            </div>
+          )}
+
+          <div className="chat-queue-edit-composer">
+            <textarea
+              value={draft.text}
+              autoFocus
+              rows={5}
+              placeholder={draft.action ? "添加技能参数或说明" : "编辑消息内容"}
+              onChange={(event) => setDraft((current) => ({ ...current, text: event.target.value }))}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") onClose();
+                if (event.key === "Enter" && event.ctrlKey) { event.preventDefault(); void submit(); }
+              }}
+            />
+            <div className="chat-queue-edit-add-control" ref={addMenuRef}>
+              <button
+                type="button"
+                className={`chat-queue-edit-add-button${addMenuOpen ? " active" : ""}`}
+                aria-label="添加附件或引用"
+                aria-expanded={addMenuOpen}
+                title="添加附件或引用"
+                onClick={() => {
+                  setAddMenuOpen((open) => {
+                    if (open) setReferencePickerOpen(false);
+                    return !open;
+                  });
+                }}
+              >
+                <Plus size={16} />
+              </button>
+              {addMenuOpen && addMenuPosition && createPortal(
+                <>
+                  <div
+                    className="chat-queue-edit-add-backdrop"
+                    aria-hidden="true"
+                    onMouseDown={(event) => {
+                      event.stopPropagation();
+                      setAddMenuOpen(false);
+                      setReferencePickerOpen(false);
+                    }}
+                  />
+                  <div
+                    className={`chat-queue-edit-add-menu${referencePickerOpen ? " references" : ""}`}
+                    role="menu"
+                    style={addMenuPosition}
+                    onMouseDown={(event) => event.stopPropagation()}
+                  >
+                  {referencePickerOpen ? (
+                    <>
+                      <div className="chat-queue-edit-add-menu-header">
+                        <button type="button" onClick={() => setReferencePickerOpen(false)} title="返回"><ChevronLeft size={15} /></button>
+                        <span>引用会话</span>
+                        <small>{draft.sessionReferences.length > 0 ? `已选 ${draft.sessionReferences.length}` : ""}</small>
+                      </div>
+                      <div className="chat-queue-edit-reference-list">
+                        {referenceCandidates.length === 0 ? (
+                          <div className="chat-queue-edit-reference-empty">暂无可引用的会话</div>
+                        ) : referenceCandidates.map((candidate) => {
+                          const selected = draft.sessionReferences.some((reference) => reference.sourceSessionId === candidate.id);
+                          return (
+                            <button type="button" className={selected ? "selected" : ""} key={candidate.id} onClick={() => toggleReference(candidate)}>
+                              <Link2 size={14} />
+                              <span>{candidate.title}</span>
+                              {selected && <Check size={14} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); imageInputRef.current?.click(); }}><ImagePlus size={15} /><span>图片</span></button>
+                      <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); fileInputRef.current?.click(); }}><FileText size={15} /><span>文件</span></button>
+                      <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); addFolder(); }}><Folder size={15} /><span>文件夹</span></button>
+                      <button type="button" role="menuitem" onClick={() => setReferencePickerOpen(true)}><Link2 size={15} /><span>引用会话</span></button>
+                    </>
+                  )}
+                  </div>
+                </>,
+                document.body,
+              )}
+              <input ref={imageInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImages(Array.from(event.target.files || [])); event.target.value = ""; }} />
+              <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => { addLocalFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
+            </div>
+          </div>
+          {error && <div className="chat-queue-edit-error">{error}</div>}
+        </div>
+        <footer className="chat-queue-edit-actions">
+          <button type="button" className="btn-action" onClick={onClose} disabled={saving}>取消</button>
+          <button type="button" className="filter-add-btn" onClick={() => void submit()} disabled={!hasContent || saving}>{saving ? "保存中..." : "保存修改"}</button>
+        </footer>
+      </section>
     </div>
   );
 }
@@ -405,7 +774,7 @@ type ChatMessagesViewProps = {
   onMessagesScroll: (event: ReactUIEvent<HTMLDivElement>) => void;
   onScrollToBottom: () => void;
   onContentChange: () => void;
-  onEditMessage: (content: string) => void;
+  onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string) => void;
@@ -419,7 +788,7 @@ type ChatMessagesViewProps = {
 type ChatMessageItemProps = {
   msg: ChatMessage;
   projectPath?: string;
-  onEditMessage: (content: string) => void;
+  onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string) => void;
@@ -459,14 +828,15 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
   const hasImages = !!msg.images?.length;
   const hasSessionReferences = !!msg.sessionReferences?.length;
+  const hasAction = !!msg.action;
   const processDiffs = collectProcessDiffs(msg.process);
   const visibleDiffs = !processRunning ? [...(msg.diffs || []), ...processDiffs] : [];
   const hasDiffs = visibleDiffs.length > 0;
   const hasContent = msg.content.trim().length > 0;
   const hasVisibleBubble =
     msg.role === "assistant"
-      ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences)
-      : hasContent || hasImages || hasDiffs || hasSessionReferences;
+      ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction)
+      : hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction;
   const showAssistantActions = hasVisibleBubble && areAssistantMessageActionsVisible(msg);
   const isForkingThisMessage = forkingMessageId === msg.id;
   const renderSessionReferences = () => (
@@ -510,23 +880,36 @@ const ChatMessageItem = memo(function ChatMessageItem({
               ))}
             </div>
           )}
-          {hasContent && (
+          {(hasContent || hasAction || msg.role === "user") && (
             <div className="chat-bubble-row">
               <div className="chat-bubble-stack">
-                <div className={`chat-bubble ${msg.role}`}>
-                  {msg.role === "assistant" ? (
-                    <MarkdownRenderer content={msg.content} />
-                  ) : (
-                    msg.content
-                  )}
-                </div>
+                {(hasContent || hasAction) && (
+                  <div className={`chat-bubble ${msg.role} ${msg.action ? "has-action" : ""}`}>
+                    {msg.action && (
+                      <div className={`chat-action-label ${hasContent ? "with-content" : ""}`}>
+                        <WandSparkles size={14} strokeWidth={1.9} />
+                        <span>{msg.action.kind === "skill" ? "技能" : "命令"}</span>
+                        <strong>{msg.action.name}</strong>
+                      </div>
+                    )}
+                    {hasContent && (
+                      <div className="chat-bubble-content">
+                      {msg.role === "assistant" ? (
+                          <MarkdownRenderer content={msg.content} />
+                        ) : (
+                          msg.content
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {msg.role === "user" && renderSessionReferences()}
               </div>
-              {msg.role === "user" && (
+              {msg.role === "user" && hasVisibleBubble && (
                 <div className="chat-msg-actions">
                   <button
                     className="chat-copy-btn"
-                    onClick={() => onEditMessage(msg.content)}
+                    onClick={() => onEditMessage(msg)}
                     title="编辑"
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -536,8 +919,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
                   </button>
                   <button
                     className="chat-copy-btn"
-                    onClick={() => navigator.clipboard.writeText(msg.content)}
+                    onClick={() => void copyMessageText(msg.content)}
                     title="复制"
+                    disabled={!hasContent}
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <rect x="9" y="9" width="13" height="13" rx="2" />
@@ -548,7 +932,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
               )}
             </div>
           )}
-          {(!hasContent || msg.role !== "user") && renderSessionReferences()}
+          {msg.role !== "user" && renderSessionReferences()}
           {hasDiffs && (
             <DiffBlock diffs={visibleDiffs} projectPath={projectPath} />
           )}
@@ -557,7 +941,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
               <button
                 type="button"
                 className="chat-assistant-action-btn"
-                onClick={() => void navigator.clipboard.writeText(msg.content)}
+                onClick={() => void copyMessageText(msg.content)}
                 title="复制回复"
                 aria-label="复制回复"
                 disabled={!hasContent}
@@ -750,10 +1134,10 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
         planModeEnabled: !!nextItem.planModeEnabled,
         onSendFailure: (error) => {
           upsertQueuedMessage({
-            ...nextItem,
-            status: "failed",
-            error,
-          });
+          ...nextItem,
+          status: "failed",
+          error,
+        });
         },
       }).finally(() => {
         queueDispatchingRef.current.delete(sessionId);
@@ -774,7 +1158,17 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
   return null;
 });
 
-export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
+type ChatPanelProps = {
+  sendKey?: string;
+  previousMessageKey?: string;
+  nextMessageKey?: string;
+};
+
+export function ChatPanel({
+  sendKey = "Enter",
+  previousMessageKey = "Ctrl+Up",
+  nextMessageKey = "Ctrl+Down",
+}: ChatPanelProps) {
   const isStreaming = useChatStore((state) => state.isStreaming);
   const activeAgentId = useChatStore((state) => state.activeAgentId);
   const currentModel = useChatStore((state) => state.currentModel);
@@ -789,6 +1183,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     toggleFavorite,
     setThinkingLevel,
     setDraftText,
+    replaceSessionDraft,
     addPendingImage: addPendingImageToDraft,
     removePendingImage,
     removePendingFile,
@@ -808,6 +1203,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     toggleFavorite: state.toggleFavorite,
     setThinkingLevel: state.setThinkingLevel,
     setDraftText: state.setDraftText,
+    replaceSessionDraft: state.replaceSessionDraft,
     addPendingImage: state.addPendingImage,
     removePendingImage: state.removePendingImage,
     removePendingFile: state.removePendingFile,
@@ -855,6 +1251,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeSessionId ? state.messageQueues[activeSessionId] || EMPTY_QUEUED_MESSAGES : EMPTY_QUEUED_MESSAGES
   ));
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
+  const activeSessionSupportsActions = supportsAgentActions(activeSession?.agentId || activeAgentId);
   const openSessions = useMemo(
     () => activeProject?.sessions.filter((session) => !session.closed) || [],
     [activeProject?.sessions]
@@ -883,6 +1280,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   }, [currentAgentId, refreshModelProviderOrder]);
 
   const inputValueRef = useRef("");
+  const composerHistoryRef = useRef(new ComposerHistoryController());
   const inputHasTextRef = useRef(false);
   const [inputHasText, setInputHasText] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
@@ -900,6 +1298,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
   const [agentReloadConfirmOpen, setAgentReloadConfirmOpen] = useState(false);
   const [agentReloading, setAgentReloading] = useState(false);
   const [agentReloadError, setAgentReloadError] = useState("");
+  const [queueEditingId, setQueueEditingId] = useState<string | null>(null);
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const referenceRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -915,6 +1314,15 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     showAttachmentError,
     handlePaste,
   } = usePendingImages(addPendingImageToDraft);
+
+  useEffect(() => {
+    const handleSessionDataPurged = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionIds?: string[] }>).detail;
+      for (const sessionId of detail?.sessionIds || []) composerHistoryRef.current.reset(sessionId);
+    };
+    window.addEventListener(SESSION_DATA_PURGED_EVENT, handleSessionDataPurged);
+    return () => window.removeEventListener(SESSION_DATA_PURGED_EVENT, handleSessionDataPurged);
+  }, []);
 
   useEffect(() => {
     const openSessionIds = new Set<string>();
@@ -1014,6 +1422,58 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     resizeTextarea(textarea);
   }, [resizeTextarea, syncInputValue]);
 
+  const resolveLegacyReference = useCallback<LegacyReferenceResolver>((reference) => {
+    const projectState = useProjectStore.getState();
+    const source = projectState.projects
+      .flatMap((project) => project.sessions)
+      .find((session) => session.id === reference.sourceSessionId);
+    if (!source) return undefined;
+    const chatState = useChatStore.getState();
+    return createSessionReferenceSnapshot(source, chatState.sessionMessages[source.id] || []);
+  }, []);
+
+  const getCurrentSessionDraft = useCallback((sessionId: string) => {
+    const chatState = useChatStore.getState();
+    const draft = cloneChatDraft(chatState.sessionDrafts[sessionId] || EMPTY_CHAT_DRAFT);
+    if (draft.sessionReferences.length > 0) return draft;
+    const projectState = useProjectStore.getState();
+    const session = projectState.projects
+      .flatMap((project) => project.sessions)
+      .find((candidate) => candidate.id === sessionId);
+    if (session?.references?.length) {
+      draft.sessionReferences = session.references.map((reference) => ({ ...reference }));
+    }
+    return draft;
+  }, []);
+
+  const restoreComposerDraft = useCallback((sessionId: string, draft: ChatDraft) => {
+    if (useProjectStore.getState().activeSessionId !== sessionId) return;
+    replaceSessionDraft(sessionId, draft);
+    setComposerInput(draft.text);
+    clearAttachmentError();
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+      resizeTextarea(textarea);
+    });
+  }, [clearAttachmentError, replaceSessionDraft, resizeTextarea, setComposerInput]);
+
+  const handleEditMessage = useCallback((message: ChatMessage) => {
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (!sessionId) return;
+    composerHistoryRef.current.reset(sessionId);
+    const draft = draftFromMessage(message, resolveLegacyReference);
+    if (
+      !message.composerDraft &&
+      (message.sessionReferences?.length || 0) > draft.sessionReferences.length
+    ) {
+      showFloatingToastMessage("部分旧引用会话已不存在，未能恢复");
+    }
+    restoreComposerDraft(sessionId, draft);
+  }, [resolveLegacyReference, restoreComposerDraft]);
+
   useEffect(() => {
     setComposerInput(activeDraft.text);
     clearAttachmentError();
@@ -1095,6 +1555,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     setThinkingOpen(false);
     setExpandedProvider(null);
     setUserMsgHistoryOpen(false);
+    setQueueEditingId(null);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -1376,88 +1837,27 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     text: string,
     files: PendingFile[],
     images: PendingImage[],
-    pathAttachments: PendingPathAttachment[]
+    pathAttachments: PendingPathAttachment[],
+    sessionReferences: SessionReference[] = activeSessionReferences,
+    action: AgentActionInvocation | undefined = activeDraft.action,
+    forkContext: string | undefined = activeSessionForkContext?.context,
   ): Promise<MessagePayload> => {
-    let displayContent = text;
-    let sendContent = text;
-
-    // Handle pending files - read content and build detailed message
-    if (files.length > 0) {
-      const fileParts: string[] = [];
-      const fileRefs: string[] = [];
-
-      for (const pf of files) {
-        fileRefs.push(`[${pf.fileName}:${pf.startLine}-${pf.endLine}]`);
-        try {
-          const result = await window.electronAPI.readFile(pf.filePath);
-          if (result.success && result.content) {
-            const lines = result.content.split("\n");
-            const selectedLines = lines.slice(pf.startLine - 1, pf.endLine);
-            fileParts.push(
-              `<file path="${pf.filePath}" lines="${pf.startLine}-${pf.endLine}">\n${selectedLines.join("\n")}\n</file>`
-            );
-          } else {
-            fileParts.push(`[无法读取文件: ${pf.fileName}]`);
-          }
-        } catch {
-          fileParts.push(`[无法读取文件: ${pf.fileName}]`);
-        }
-      }
-
-      const fileRefStr = fileRefs.join(" ");
-      displayContent = text ? `${text}\n${fileRefStr}` : fileRefStr;
-      sendContent = text ? `${text}\n\n${fileParts.join("\n\n")}` : fileParts.join("\n\n");
-    }
-
-    if (pathAttachments.length > 0) {
-      const pathRefStr = pathAttachments
-        .map((attachment) => `[${attachment.kind}: ${attachment.name}]`)
-        .join(" ");
-      const pathBlock = buildPathAttachmentBlock(pathAttachments);
-      displayContent = displayContent ? `${displayContent}\n${pathRefStr}` : pathRefStr;
-      sendContent = sendContent ? `${sendContent}\n\n${pathBlock}` : pathBlock;
-    }
-
-    const messageSessionReferences = activeSessionReferences.map((reference) => ({
-      sourceSessionId: reference.sourceSessionId,
-      sourceTitle: reference.sourceTitle,
-    }));
-    const contextBlocks = [
-      activeSessionForkContext?.context,
-      buildSessionReferencesContext(activeSessionReferences),
-    ].filter((context): context is string => !!context);
-    if (contextBlocks.length > 0) {
-      sendContent = [
-        ...contextBlocks,
-        "",
-        "<current_user_message>",
-        sendContent,
-        "</current_user_message>",
-      ].join("\n");
-    }
-
-    // Handle pending images
-    let agentImages: AgentImagePayload[] | undefined;
-    let messageImages: MessageImagePayload[] | undefined;
-    if (images.length > 0) {
-      // Don't add text refs to displayContent - images are shown visually
-      messageImages = images.map((img) => ({ id: img.id, src: img.src, name: img.name }));
-      agentImages = images.map((img) => ({
-        type: "image",
-        data: img.src.split(",")[1], // Remove data:image/...;base64, prefix
-        mimeType: img.file.type || "image/png",
-      }));
-    }
-
-    return {
-      displayContent,
-      sendContent,
-      messageImages,
-      sessionReferences: messageSessionReferences.length > 0 ? messageSessionReferences : undefined,
-      agentImages,
-      forkContextUsed: !!activeSessionForkContext?.context,
-    };
-  }, [activeSessionForkContext?.context, activeSessionReferences]);
+    return buildSessionMessagePayload({
+      text,
+      images: images.map((image) => ({
+        id: image.id,
+        src: image.src,
+        name: image.name,
+        mimeType: image.file.type || "image/png",
+      })),
+      pendingFiles: files,
+      pendingPathAttachments: pathAttachments,
+      sessionReferences,
+      forkContext,
+      action,
+      readFile: (path) => window.electronAPI.readFile(path),
+    });
+  }, [activeDraft.action, activeSessionForkContext?.context, activeSessionReferences]);
 
   const sendPayloadNow = useCallback(async (
     targetSessionId: string,
@@ -1512,7 +1912,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         onSendFailureCleanup: cleanupRuntime,
       },
     });
-    if (result.error && options?.onSendFailure) options.onSendFailure(result.error);
+    if ("error" in result && result.error && options?.onSendFailure) options.onSendFailure(result.error);
   }, [
     enableAutoFollow,
     scrollToBottomNow,
@@ -1528,7 +1928,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       return;
     }
 
-    const text = inputValueRef.current.trim();
+    const rawText = inputValueRef.current;
+    const text = rawText.trim();
     const targetSessionId = useProjectStore.getState().activeSessionId;
     if (
       !targetSessionId ||
@@ -1536,11 +1937,11 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         pendingImages.length === 0 &&
         pendingFiles.length === 0 &&
         pendingPathAttachments.length === 0 &&
-        activeSessionReferences.length === 0)
+        activeSessionReferences.length === 0 &&
+        !activeDraft.action)
     ) {
       return;
     }
-
     const modelForSend = getSessionModel(targetSessionId) || useChatStore.getState().currentModel;
     if (pendingImages.length > 0 && modelForSend?.supportsImages === false) {
       addMessage({
@@ -1552,7 +1953,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
       return;
     }
 
-    const payload = await buildMessagePayload(text, pendingFiles, pendingImages, pendingPathAttachments);
+    const payload = await buildMessagePayload(rawText, pendingFiles, pendingImages, pendingPathAttachments);
+    composerHistoryRef.current.reset(targetSessionId);
     if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
     clearSessionDraft(targetSessionId);
     clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
@@ -1562,6 +1964,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     });
   }, [
     activeQuestionnaire,
+    activeDraft.action,
     activeSessionReferences.length,
     addMessage,
     buildMessagePayload,
@@ -1574,6 +1977,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     pendingPathAttachments,
     planModeEnabled,
     sendPayloadNow,
+    sessionRuntimeRef,
     setComposerInput,
   ]);
 
@@ -1584,8 +1988,62 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     activeSessionSupportsGuidance,
   ]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+  const handleEditQueuedMessage = useCallback(async (item: QueuedMessage, draft: QueuedMessageEditableDraft) => {
+    try {
+      const payload = await buildSessionMessagePayload({
+        text: draft.text,
+        images: draft.images,
+        pendingFiles: draft.pendingFiles,
+        pendingPathAttachments: draft.pendingPathAttachments,
+        sessionReferences: draft.sessionReferences,
+        forkContext: draft.forkContext,
+        action: draft.action,
+        readFile: (path) => window.electronAPI.readFile(path),
+      });
+      SessionCommandCoordinator.editQueuedMessage(item.sessionId, item.id, payload);
+      return true;
+    } catch (error) {
+      showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }, []);
+
+  const handleReorderQueuedMessage = useCallback((itemId: string, toIndex: number) => {
+    if (!activeSessionId) return;
+    const queue = useChatStore.getState().messageQueues[activeSessionId] || [];
+    if (queue.length < 2) return;
+    const boundedIndex = Math.max(0, Math.min(toIndex, queue.length - 1));
+    try {
+      SessionCommandCoordinator.reorderQueuedMessage(activeSessionId, itemId, boundedIndex);
+    } catch (error) {
+      showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [activeSessionId]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
+
+    const historyDirection = matchShortcut(e, previousMessageKey)
+      ? "previous"
+      : matchShortcut(e, nextMessageKey)
+        ? "next"
+        : null;
+    if (historyDirection) {
+      if (activeQuestionnaire || isForkingSession || e.currentTarget.disabled) return;
+      const sessionId = useProjectStore.getState().activeSessionId;
+      if (!sessionId) return;
+      e.preventDefault();
+      const currentDraft = getCurrentSessionDraft(sessionId);
+      const chatState = useChatStore.getState();
+      const messages = chatState.activeSessionId === sessionId
+        ? chatState.messages
+        : chatState.sessionMessages[sessionId] || [];
+      const nextDraft = historyDirection === "previous"
+        ? composerHistoryRef.current.previous(sessionId, currentDraft, messages, resolveLegacyReference)
+        : composerHistoryRef.current.next(sessionId, currentDraft);
+      if (nextDraft) restoreComposerDraft(sessionId, nextDraft);
+      return;
+    }
 
     const shouldSend =
       (sendKey === "Ctrl+Enter" && e.key === "Enter" && e.ctrlKey) ||
@@ -1608,7 +2066,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         });
       }
     }
-  }, [handleSend, sendKey, setComposerInput]);
+  }, [
+    activeQuestionnaire,
+    getCurrentSessionDraft,
+    handleSend,
+    isForkingSession,
+    nextMessageKey,
+    previousMessageKey,
+    resolveLegacyReference,
+    restoreComposerDraft,
+    sendKey,
+    setComposerInput,
+  ]);
 
   const handleAbort = useCallback(() => {
     const currentSessionId = useProjectStore.getState().activeSessionId;
@@ -1731,8 +2200,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
     }
   };
 
-  const thinkingLevels = THINKING_LEVELS;
-  const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel) || thinkingLevels[3];
+  const thinkingLevels = getModelThinkingLevels(currentModel);
+  const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel)
+    || thinkingLevels.find((level) => level.id === "medium")
+    || thinkingLevels[0];
 
   // No project open - show placeholder
   if (!activeProject) {
@@ -1832,7 +2303,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         onMessagesScroll={handleMessagesScroll}
         onScrollToBottom={scrollToBottom}
         onContentChange={handleContentChange}
-        onEditMessage={setComposerInput}
+        onEditMessage={handleEditMessage}
         onImageContextMenu={handleImageContextMenu}
         onOpenImage={handleOpenImage}
         onOpenFile={handleOpenFile}
@@ -1872,6 +2343,8 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           canGuide={activeSessionSupportsGuidance}
           currentSessionRunning={currentSessionRunning}
           onGuide={handleGuideQueuedMessage}
+          onEdit={(item) => setQueueEditingId(item.id)}
+          onReorder={handleReorderQueuedMessage}
           onRemove={(itemId) => {
             if (activeSessionId) SessionCommandCoordinator.removeQueuedMessage(activeSessionId, itemId);
           }}
@@ -1888,6 +2361,10 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           pendingImages={pendingImages}
           pendingPathAttachments={pendingPathAttachments}
           sessionReferences={activeSessionReferences}
+          selectedAction={activeDraft.action}
+          agentId={activeSession?.agentId || activeAgentId}
+          actionSupported={activeSessionSupportsActions}
+          actionContextKey={activeSessionId || ""}
           sendKey={sendKey}
           fileInputRef={fileInputRef}
           textareaRef={textareaRef}
@@ -1897,6 +2374,18 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
             setModelOpen(false);
             setThinkingOpen(false);
             setReferenceOpen(true);
+          }}
+          onLoadActions={(reload) => activeSessionId
+            ? SessionCommandCoordinator.getActions(activeSessionId, reload)
+            : Promise.resolve([])}
+          onSelectAction={(action) => {
+            const sessionId = useProjectStore.getState().activeSessionId;
+            if (sessionId) useChatStore.getState().setDraftAction(sessionId, action);
+          }}
+          onSelectedActionInvalid={() => {
+            const sessionId = useProjectStore.getState().activeSessionId;
+            if (sessionId) useChatStore.getState().setDraftAction(sessionId, undefined);
+            showFloatingToastMessage("所选技能或命令已失效，已从草稿中移除");
           }}
           onClearAttachmentError={clearAttachmentError}
           onRemovePendingFile={removePendingFile}
@@ -1925,7 +2414,7 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
           modelOpen={modelOpen}
           modelProviders={modelProviders}
           planModeEnabled={planModeEnabled}
-          thinkingLevel={thinkingLevel}
+          thinkingLevel={currentThinking.id}
           thinkingLevels={thinkingLevels}
           thinkingOpen={thinkingOpen}
           modelRef={modelRef}
@@ -2011,6 +2500,19 @@ export function ChatPanel({ sendKey = "Enter" }: { sendKey?: string }) {
         </div>
       )}
       <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />
+      {queueEditingId && activeProject && activeSession && (() => {
+        const item = activeQueuedMessages.find((queued) => queued.id === queueEditingId);
+        return item ? (
+          <QueueEditDialog
+            key={item.id}
+            item={item}
+            project={activeProject}
+            session={activeSession}
+            onClose={() => setQueueEditingId(null)}
+            onSave={(draft) => handleEditQueuedMessage(item, draft)}
+          />
+        ) : null;
+      })()}
       {modelConfigAgentId && (
         <AgentConfigModal
           agentId={modelConfigAgentId}

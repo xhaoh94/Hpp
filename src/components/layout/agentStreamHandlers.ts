@@ -157,7 +157,8 @@ export function handleStreamEndEvent(
 ) {
   if (!runtime.processActive) {
     const eventContent = event.content ? String(event.content) : "";
-    if (!eventContent.trim()) return;
+    const sessionMarkedRunning = useProjectStore.getState().agentStatuses[currentSessionId] === "running";
+    if (!eventContent.trim() && (!event.force || !sessionMarkedRunning)) return;
     ctx.ensureAssistantContinuation(currentSessionId);
   }
   if (ctx.pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) return;

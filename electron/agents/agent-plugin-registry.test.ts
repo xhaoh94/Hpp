@@ -126,6 +126,36 @@ describe("AgentPluginRegistry", () => {
     ]);
   });
 
+  it("waits for plugin capabilities across concurrent status checks", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "concurrent-status-agent",
+      "1.0.0",
+      undefined,
+      `
+await new Promise((resolve) => setTimeout(resolve, 40));
+${backendModule}
+export function getStatus() {
+  return {
+    installed: false,
+    updateAvailable: false,
+    canUpdate: true,
+    latestVersion: "2.0.0",
+  };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+
+    const [first, second] = await Promise.all([
+      registry.getStatus("concurrent-status-agent"),
+      registry.getStatus("concurrent-status-agent"),
+    ]);
+
+    expect(first).toMatchObject({ installed: false, latestVersion: "2.0.0" });
+    expect(second).toMatchObject({ installed: false, latestVersion: "2.0.0" });
+  });
+
   it("preserves plugin-declared backend model visibility controls", async () => {
     const source = await createPluginSource(tempRoot, "visibility-agent", "1.0.0", {
       planMode: "prompt",

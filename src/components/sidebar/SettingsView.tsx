@@ -1,15 +1,18 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   AppWindow,
   Bot,
   ChevronDown,
   ChevronRight,
+  Eraser,
   FolderOpen,
+  HardDrive,
   Image as ImageIcon,
   Keyboard,
   ListFilter,
   Palette,
   RotateCcw,
+  RefreshCw,
   Settings,
   SlidersHorizontal,
   Smartphone,
@@ -21,15 +24,17 @@ import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import { applyAppTheme, normalizeAppTheme, type AppTheme } from "@/lib/theme";
+import {
+  DEFAULT_SHORTCUTS,
+  formatShortcut,
+  normalizeShortcuts,
+  SHORTCUTS_UPDATED_EVENT,
+  type ShortcutConfig,
+} from "@/lib/shortcuts";
 import "./Settings.css";
-
-interface ShortcutConfig {
-  sendKey: string;
-  fileSearch: string;
-  switchToFiles: string;
-  prevModel: string;
-  nextModel: string;
-}
+import type { DiskUsageCategoryId, DiskUsageStats } from "@/types";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
+import { DISK_USAGE_INVALIDATED_EVENT } from "@/hooks/useDataPersistence";
 
 interface FilterConfig {
   excludeFolders: string[];
@@ -45,21 +50,15 @@ interface GeneralSettings {
   theme: AppTheme;
 }
 
-type GeneralSectionId = "appearance" | "behavior" | "editing" | "images";
+type GeneralSectionId = "appearance" | "behavior" | "editing" | "images" | "storage";
 
 const SHORTCUT_LABELS: Record<string, string> = {
   fileSearch: "文件搜索",
   switchToFiles: "切换到资源管理器",
   prevModel: "上一个模型",
   nextModel: "下一个模型",
-};
-
-const DEFAULT_SHORTCUTS: ShortcutConfig = {
-  sendKey: "Enter",
-  fileSearch: "Ctrl+P",
-  switchToFiles: "Ctrl+Shift+F",
-  prevModel: "Ctrl+[",
-  nextModel: "Ctrl+]",
+  previousMessage: "上一条消息",
+  nextMessage: "下一条消息",
 };
 
 const DEFAULT_FILTERS: FilterConfig = {
@@ -75,30 +74,30 @@ const THEME_OPTIONS: Array<{ value: AppTheme; label: string }> = [
   { value: "dark", label: "深色" },
 ];
 
-function formatKey(e: KeyboardEvent): string {
-  const parts: string[] = [];
-  if (e.ctrlKey) parts.push("Ctrl");
-  if (e.shiftKey) parts.push("Shift");
-  if (e.altKey) parts.push("Alt");
-  if (e.metaKey) parts.push("Cmd");
+const DISK_CATEGORY_LABELS: Record<DiskUsageCategoryId, string> = {
+  conversations: "会话与快照",
+  configuration: "应用配置",
+  agentPlugins: "Agent 插件",
+  agentRuntimes: "Agent 运行时",
+  browserCache: "浏览器缓存",
+  browserStorage: "浏览器存储",
+  other: "其他数据",
+};
 
-  const key = e.key;
-  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return "";
-  if (key === " ") parts.push("Space");
-  else if (key === "Enter") parts.push("Enter");
-  else if (key === "Backspace") parts.push("Backspace");
-  else if (key === "Escape") parts.push("Esc");
-  else if (key === "ArrowUp") parts.push("Up");
-  else if (key === "ArrowDown") parts.push("Down");
-  else if (key === "ArrowLeft") parts.push("Left");
-  else if (key === "ArrowRight") parts.push("Right");
-  else if (key === "Tab") parts.push("Tab");
-  else if (key === "<") parts.push("<");
-  else if (key.length === 1) parts.push(key.toUpperCase());
-  else parts.push(key);
+const DISK_CATEGORY_DESCRIPTIONS: Partial<Record<DiskUsageCategoryId, string>> = {
+  conversations: "项目与会话索引、消息、草稿快照和每会话模型配置",
+  configuration: "通用设置、快捷键、过滤规则、主题和远程访问配置",
+  agentRuntimes: "已安装 Agent 正常运行所需的本地依赖",
+  browserCache: "可重建缓存，使用应用或重启后会再次生成",
+};
 
-  return parts.join("+");
-}
+const formatDiskSize = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** unitIndex);
+  return `${value >= 100 || unitIndex === 0 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+};
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -112,16 +111,6 @@ function getStringArray(value: unknown): string[] | undefined {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : undefined;
-}
-
-function normalizeShortcuts(value: unknown): ShortcutConfig {
-  const shortcuts = asRecord(value);
-  return {
-    ...DEFAULT_SHORTCUTS,
-    ...Object.fromEntries(
-      Object.entries(shortcuts).filter(([, shortcut]) => typeof shortcut === "string")
-    ),
-  };
 }
 
 function normalizeFilters(value: unknown): FilterConfig {
@@ -180,11 +169,22 @@ export function SettingsView() {
   const [appVersion, setAppVersion] = useState("");
   const [closeToTray, setCloseToTray] = useState(true);
   const [theme, setTheme] = useState<AppTheme>("dark");
+  const [diskUsage, setDiskUsage] = useState<DiskUsageStats | null>(null);
+  const [diskUsageLoading, setDiskUsageLoading] = useState(false);
+  const [diskCleanupLoading, setDiskCleanupLoading] = useState(false);
+  const [diskUsageError, setDiskUsageError] = useState("");
+  const storageSectionOpenRef = useRef(false);
   const [newFolder, setNewFolder] = useState("");
   const [newExt, setNewExt] = useState("");
   const [newFile, setNewFile] = useState("");
   const agents = useAgentCatalogStore((state) => state.agents);
   const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
+  const projects = useProjectStore((state) => state.projects);
+  const retainedSessionCount = projects.reduce((total, project) => total + project.sessions.length, 0);
+  const closedSessionCount = projects.reduce(
+    (total, project) => total + project.sessions.filter((session) => session.closed).length,
+    0,
+  );
 
   useEffect(() => {
     void loadAgents();
@@ -216,6 +216,76 @@ export function SettingsView() {
       }
     });
   }, []);
+
+  const refreshDiskUsage = useCallback(async () => {
+    if (diskUsageLoading) return;
+    setDiskUsageLoading(true);
+    setDiskUsageError("");
+    try {
+      setDiskUsage(await window.electronAPI.getDiskUsage());
+    } catch (error) {
+      setDiskUsageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDiskUsageLoading(false);
+    }
+  }, [diskUsageLoading]);
+
+  const cleanupDiskUsage = useCallback(async () => {
+    if (diskCleanupLoading || diskUsageLoading) return;
+    const sessionSummary = closedSessionCount > 0
+      ? `当前保留 ${retainedSessionCount} 个会话，其中 ${closedSessionCount} 个在历史中。`
+      : `当前保留 ${retainedSessionCount} 个会话。`;
+    const cleanupNotice = [
+      "将清理无主会话数据、已卸载插件遗留的运行时和可重建缓存。",
+      "",
+      sessionSummary,
+      "删除会话只会减少“会话与快照”。",
+      "浏览器缓存会在使用或重启后重新生成。",
+      "",
+      "不会删除现有会话、插件或正在使用的 Agent 运行时。继续清理吗？",
+    ].join("\n");
+    if (!window.confirm(cleanupNotice)) return;
+    setDiskCleanupLoading(true);
+    setDiskUsageError("");
+    try {
+      const projects = useProjectStore.getState().projects;
+      const validSessionIds = projects.flatMap((project) => project.sessions.map((session) => session.id));
+      const purgeResult = await window.electronAPI.purgeSessionData({
+        validSessionIds,
+        validProjectIds: projects.map((project) => project.id),
+      });
+      if (!purgeResult.success) throw new Error(purgeResult.error || "清理无主会话数据失败");
+      const result = await window.electronAPI.cleanupDiskCache();
+      setDiskUsage(result.stats);
+      showFloatingToastMessage(
+        result.reclaimedBytes > 0
+          ? `已清理 ${formatDiskSize(result.reclaimedBytes)}`
+          : "未发现可清理数据",
+      );
+    } catch (error) {
+      setDiskUsageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDiskCleanupLoading(false);
+    }
+  }, [closedSessionCount, diskCleanupLoading, diskUsageLoading, retainedSessionCount]);
+
+  useEffect(() => {
+    const storageOpen = showGeneralModal && expandedGeneralSection === "storage";
+    if (storageOpen && !storageSectionOpenRef.current && !diskUsageLoading) {
+      void refreshDiskUsage();
+    }
+    storageSectionOpenRef.current = storageOpen;
+  }, [diskUsageLoading, expandedGeneralSection, refreshDiskUsage, showGeneralModal]);
+
+  useEffect(() => {
+    const handleDiskUsageInvalidated = () => {
+      if (showGeneralModal && expandedGeneralSection === "storage") {
+        void refreshDiskUsage();
+      }
+    };
+    window.addEventListener(DISK_USAGE_INVALIDATED_EVENT, handleDiskUsageInvalidated);
+    return () => window.removeEventListener(DISK_USAGE_INVALIDATED_EVENT, handleDiskUsageInvalidated);
+  }, [expandedGeneralSection, refreshDiskUsage, showGeneralModal]);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,6 +346,7 @@ export function SettingsView() {
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
     void saveSettings(s, filters);
+    window.dispatchEvent(new CustomEvent(SHORTCUTS_UPDATED_EVENT, { detail: s }));
   };
 
   const saveFilters = (f: FilterConfig) => {
@@ -333,7 +404,7 @@ export function SettingsView() {
     e.preventDefault();
     e.stopPropagation();
 
-    const combo = formatKey(e);
+    const combo = formatShortcut(e);
     if (!combo) return; // modifier-only, ignore
 
     const newShortcuts = { ...shortcuts, [recordingKey]: combo };
@@ -395,6 +466,11 @@ export function SettingsView() {
     setShowGeneralModal(true);
   };
 
+  const openGeneralSettings = () => {
+    setExpandedGeneralSection("appearance");
+    setShowGeneralModal(true);
+  };
+
   const filterRuleCount = filters.excludeFolders.length
     + filters.excludeExtensions.length
     + filters.excludeFiles.length;
@@ -428,7 +504,7 @@ export function SettingsView() {
               远程访问
             </button>
             <button
-              onClick={() => setShowGeneralModal(true)}
+              onClick={openGeneralSettings}
               className="btn-quick-setting"
             >
               <SlidersHorizontal size={16} strokeWidth={1.8} />
@@ -461,7 +537,13 @@ export function SettingsView() {
                     </select>
                   </div>
                 </div>
-                {Object.entries(shortcuts).filter(([k]) => k !== "sendKey" && k !== "prevModel" && k !== "nextModel").map(([key, value]) => {
+                {Object.entries(shortcuts).filter(([k]) =>
+                  k !== "sendKey" &&
+                  k !== "prevModel" &&
+                  k !== "nextModel" &&
+                  k !== "previousMessage" &&
+                  k !== "nextMessage"
+                ).map(([key, value]) => {
                   const isRecording = recordingKey === key;
                   return (
                     <div key={key} className="shortcut-item">
@@ -491,6 +573,24 @@ export function SettingsView() {
                           title={key === "prevModel" ? "上一个" : "下一个"}
                         >
                           {isRecording ? "按下..." : `${key === "prevModel" ? "上一个" : "下一个"}: ${shortcuts[key]}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="shortcut-item">
+                  <span className="shortcut-label">切换消息</span>
+                  <div className="shortcut-control" style={{ display: "flex", gap: 8 }}>
+                    {(["previousMessage", "nextMessage"] as const).map((key) => {
+                      const isRecording = recordingKey === key;
+                      return (
+                        <button
+                          key={key}
+                          className={`shortcut-btn ${isRecording ? "recording" : ""}`}
+                          onClick={() => setRecordingKey(isRecording ? null : key)}
+                          title={key === "previousMessage" ? "上一条" : "下一条"}
+                        >
+                          {isRecording ? "按下..." : `${key === "previousMessage" ? "上一条" : "下一条"}: ${shortcuts[key]}`}
                         </button>
                       );
                     })}
@@ -786,6 +886,95 @@ export function SettingsView() {
                         </button>
                       </div>
                     </div>
+                  </div>
+                )}
+              </section>
+
+              <section className={`settings-general-section ${expandedGeneralSection === "storage" ? "expanded" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="settings-general-heading settings-general-heading-button"
+                  onClick={() => toggleGeneralSection("storage")}
+                  aria-expanded={expandedGeneralSection === "storage"}
+                  aria-controls="general-settings-storage"
+                >
+                  <span className="settings-general-heading-icon"><HardDrive size={15} /></span>
+                  <div>
+                    <h4>存储</h4>
+                    <p>{diskUsage ? `${formatDiskSize(diskUsage.totalSizeBytes)} · ${diskUsage.totalFileCount} 个文件` : "查看 Hpp 本地磁盘占用"}</p>
+                  </div>
+                  <ChevronDown className="settings-general-collapse-icon" size={16} />
+                </button>
+                {expandedGeneralSection === "storage" && (
+                  <div id="general-settings-storage" className="settings-general-section-body settings-storage-body">
+                    <div className="settings-storage-summary">
+                      <div>
+                        <span>当前占用</span>
+                        <strong>{diskUsage ? formatDiskSize(diskUsage.totalSizeBytes) : "--"}</strong>
+                      </div>
+                      <div className="settings-storage-actions">
+                        <button
+                          type="button"
+                          className="settings-general-icon-button"
+                          onClick={() => void cleanupDiskUsage()}
+                          disabled={diskCleanupLoading || diskUsageLoading}
+                          title="清理无用数据"
+                          aria-label="清理无用数据"
+                        >
+                          <Eraser size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-general-icon-button"
+                          onClick={() => void refreshDiskUsage()}
+                          disabled={diskUsageLoading || diskCleanupLoading}
+                          title="刷新磁盘占用"
+                          aria-label="刷新磁盘占用"
+                        >
+                          <RefreshCw size={14} className={diskUsageLoading ? "settings-storage-refreshing" : undefined} />
+                        </button>
+                      </div>
+                    </div>
+                    {diskUsageError && <div className="settings-storage-state error">读取失败：{diskUsageError}</div>}
+                    {(diskUsageLoading || diskCleanupLoading) && !diskUsage && (
+                      <div className="settings-storage-state">{diskCleanupLoading ? "正在清理..." : "正在统计..."}</div>
+                    )}
+                    {diskUsage && (
+                      <div className="settings-storage-list">
+                        {diskUsage.categories.map((category) => {
+                          const percentage = diskUsage.totalSizeBytes > 0
+                            ? Math.max(1, (category.sizeBytes / diskUsage.totalSizeBytes) * 100)
+                            : 0;
+                          return (
+                            <div
+                              key={category.id}
+                              className="settings-storage-row"
+                              title={DISK_CATEGORY_DESCRIPTIONS[category.id]}
+                            >
+                              <div className="settings-storage-row-label">
+                                <span>{DISK_CATEGORY_LABELS[category.id]}</span>
+                                <strong>{formatDiskSize(category.sizeBytes)}</strong>
+                              </div>
+                              <div className="settings-storage-meter" aria-hidden="true">
+                                <span style={{ width: `${percentage}%` }} />
+                              </div>
+                              <small>
+                                {category.id === "conversations"
+                                  ? `${retainedSessionCount} 个会话 · ${category.fileCount} 个文件`
+                                  : `${category.fileCount} 个文件`}
+                              </small>
+                            </div>
+                          );
+                        })}
+                        {diskUsage.categories.length === 0 && <div className="settings-storage-state">暂无本地数据</div>}
+                      </div>
+                    )}
+                    {diskUsage && (
+                      <div className="settings-storage-path" title={diskUsage.dataPath}>
+                        <span>存储位置</span>
+                        <code>{diskUsage.dataPath}</code>
+                      </div>
+                    )}
                   </div>
                 )}
               </section>

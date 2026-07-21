@@ -103,7 +103,7 @@ export function useAgentEvents({
       if (!result.success) console.error("[agent] abort failed: no active agent");
       return result.success;
     } catch (error) {
-      runtime.manualAbortRequested = false;
+      finishManualAbort(sessionId);
       console.error("[agent] abort failed:", error);
       throw error;
     }

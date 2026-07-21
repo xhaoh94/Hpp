@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, useEffect, useRef } from "react";
+import { useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import { useChatStore } from "@/stores/chat-store";
@@ -6,6 +6,8 @@ import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
+import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
+import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
 import { GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
@@ -53,7 +55,6 @@ export function ProjectCard({ project }: Props) {
   const { removeProject, removeSession, activeProjectId, activeSessionId, agentStatuses } = useProjectStore();
   const {
     sessionMessages,
-    deleteSessionMessages,
     deleteSessionsMessages,
   } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
@@ -61,7 +62,10 @@ export function ProjectCard({ project }: Props) {
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [visibleAgentCount, setVisibleAgentCount] = useState(0);
   const [agentMenuPosition, setAgentMenuPosition] = useState<{ left: number; top: number } | null>(null);
+  const agentShortcutsRef = useRef<HTMLDivElement>(null);
+  const agentMeasurementsRef = useRef<HTMLDivElement>(null);
   const agentPickerRef = useRef<HTMLDivElement>(null);
   const agentMoreButtonRef = useRef<HTMLButtonElement>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
@@ -207,6 +211,9 @@ export function ProjectCard({ project }: Props) {
       .finally(() => {
         deleteSessionsMessages(sessionIds);
         removeProject(project.id);
+        void purgeDeletedSessionData(sessionIds, [project.id]).catch((error) => {
+          console.error("[persistence] project cleanup failed:", error);
+        });
       });
   };
 
@@ -215,19 +222,79 @@ export function ProjectCard({ project }: Props) {
       .finally(() => setShowHistory(false));
   };
 
-  const handleDeleteHistorySession = (sessionId: string) => {
-    void SessionCommandCoordinator.closeSession(sessionId).finally(() => {
-      deleteSessionMessages(sessionId);
+  const handleDeleteHistorySessions = async (sessionIds: string[]) => {
+    const uniqueSessionIds = [...new Set(sessionIds)].filter((sessionId) =>
+      project.sessions.some((session) => session.id === sessionId && session.closed)
+    );
+    if (uniqueSessionIds.length === 0) return;
+
+    await Promise.allSettled(uniqueSessionIds.map((sessionId) =>
+      SessionCommandCoordinator.closeSession(sessionId)
+    ));
+    deleteSessionsMessages(uniqueSessionIds);
+    for (const sessionId of uniqueSessionIds) {
       removeSession(project.id, sessionId);
-    });
+    }
+    try {
+      await purgeDeletedSessionData(uniqueSessionIds);
+    } catch (error) {
+      console.error("[persistence] session cleanup failed:", error);
+      alert(`会话已从列表移除，但磁盘数据清理失败：${getErrorMessage(error)}`);
+      throw error;
+    }
   };
+
+  const handleDeleteHistorySession = (sessionId: string) =>
+    handleDeleteHistorySessions([sessionId]);
 
   const orderedAgents = useMemo(
     () => orderAgents(agents, agentOrder),
     [agents, agentOrder]
   );
-  const cardAgents = orderedAgents.slice(0, 2);
-  const overflowAgents = orderedAgents.slice(2);
+  const cardAgents = orderedAgents.slice(0, visibleAgentCount);
+  const overflowAgents = orderedAgents.slice(visibleAgentCount);
+
+  useLayoutEffect(() => {
+    if (loading) return;
+    const container = agentShortcutsRef.current;
+    const measurements = agentMeasurementsRef.current;
+    if (!container || !measurements) return;
+
+    let animationFrame = 0;
+    const measure = () => {
+      const buttons = Array.from(
+        measurements.querySelectorAll<HTMLElement>("[data-agent-shortcut-measure]")
+      );
+      const moreButton = measurements.querySelector<HTMLElement>("[data-agent-more-measure]");
+      const styles = window.getComputedStyle(container);
+      const nextCount = calculateVisibleAgentCount(
+        buttons.map((button) => button.getBoundingClientRect().width),
+        container.clientWidth,
+        moreButton?.getBoundingClientRect().width || 24,
+        Number.parseFloat(styles.columnGap || styles.gap) || 0,
+      );
+      setVisibleAgentCount((current) => current === nextCount ? current : nextCount);
+    };
+    const scheduleMeasure = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(measure);
+    };
+
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleMeasure);
+    observer?.observe(container);
+    window.addEventListener("resize", scheduleMeasure);
+    void document.fonts?.ready.then(scheduleMeasure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", scheduleMeasure);
+      window.cancelAnimationFrame(animationFrame);
+    };
+  }, [loading, orderedAgents]);
+
+  useEffect(() => {
+    if (overflowAgents.length === 0) setShowAgentPicker(false);
+  }, [overflowAgents.length]);
   const openSessions = useMemo(
     () => project.sessions.filter((session) => !session.closed),
     [project.sessions]
@@ -268,7 +335,7 @@ export function ProjectCard({ project }: Props) {
           )}
           <div className="project-name">{project.name}</div>
           <div className="project-path" title={project.path}>{project.path}</div>
-          <div className="project-terminals">
+          <div className="project-terminals" ref={agentShortcutsRef}>
             {loading ? (
               <div className="project-terminals-loading">
                 <BrailleSpinner />
@@ -340,6 +407,27 @@ export function ProjectCard({ project }: Props) {
                     )}
                   </div>
                 )}
+                <div className="project-terminal-measurements" ref={agentMeasurementsRef} aria-hidden="true">
+                  {orderedAgents.map((agent) => (
+                    <button
+                      type="button"
+                      key={agent.id}
+                      className="project-terminal-btn"
+                      data-agent-shortcut-measure
+                      tabIndex={-1}
+                    >
+                      <span>{agent.name}</span>
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="project-terminal-btn project-agent-more-btn"
+                    data-agent-more-measure
+                    tabIndex={-1}
+                  >
+                    <Terminal size={13} strokeWidth={1.8} />
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -390,6 +478,8 @@ export function ProjectCard({ project }: Props) {
                 <button
                   className="terminal-child-close"
                   onClick={(e) => handleCloseSession(e, session.id)}
+                  title="关闭并移到历史会话"
+                  aria-label={`关闭并移到历史会话：${session.title}`}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                     <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
@@ -408,6 +498,7 @@ export function ProjectCard({ project }: Props) {
         sessionMessages={sessionMessages}
         onResume={handleResumeSession}
         onDelete={handleDeleteHistorySession}
+        onDeleteAll={() => handleDeleteHistorySessions(closedSessions.map((session) => session.id))}
       />
     </>
   );

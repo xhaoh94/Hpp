@@ -128,6 +128,17 @@ function normalizeProviderConfiguration(value) {
   });
   if (endpoints.length === 0) return "none";
   const defaultEndpoint = String(input.defaultEndpoint || "").trim();
+  const seenAuthModes = new Set();
+  const authModes = Array.isArray(input.authModes)
+    ? input.authModes.flatMap((rawAuthMode) => {
+        if (!rawAuthMode || typeof rawAuthMode !== "object" || Array.isArray(rawAuthMode)) return [];
+        const id = String(rawAuthMode.id || "").trim();
+        if ((id !== "bearer" && id !== "x-api-key") || seenAuthModes.has(id)) return [];
+        seenAuthModes.add(id);
+        return [{ id, label: String(rawAuthMode.label || id).trim() || id }];
+      })
+    : [];
+  const defaultAuthMode = String(input.defaultAuthMode || "").trim();
   const modelDefaults = input.modelDefaults && typeof input.modelDefaults === "object" && !Array.isArray(input.modelDefaults)
     ? input.modelDefaults
     : {};
@@ -146,11 +157,19 @@ function normalizeProviderConfiguration(value) {
     defaultEndpoint: endpoints.some((endpoint) => endpoint.id === defaultEndpoint)
       ? defaultEndpoint
       : endpoints[0].id,
+    authModes: authModes.length > 0 ? authModes : undefined,
+    defaultAuthMode: authModes.some((mode) => mode.id === defaultAuthMode)
+      ? defaultAuthMode
+      : authModes[0]?.id,
     pathLabel: typeof input.pathLabel === "string" && input.pathLabel.trim() ? input.pathLabel.trim() : undefined,
     hint: typeof input.hint === "string" && input.hint.trim() ? input.hint.trim() : undefined,
     modelDefaults: {
       reasoning: modelDefaults.reasoning === true,
       imageInput: modelDefaults.imageInput === true,
+      supportedThinkingLevels: Array.isArray(modelDefaults.supportedThinkingLevels)
+        ? modelDefaults.supportedThinkingLevels.filter((level) =>
+            typeof level === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(level))
+        : undefined,
     },
     fixedModelCapabilities: input.fixedModelCapabilities === true,
     modelListMode,
@@ -218,6 +237,7 @@ function addDirectory(zip, currentDir, pluginDir) {
     if (entry.isDirectory()) {
       addDirectory(zip, entryPath, pluginDir);
     } else if (entry.isFile()) {
+      if (/\.test\.[cm]?[jt]s$/i.test(entry.name)) continue;
       zip.addFile(zipPathFor(entryPath, pluginDir), readFileSync(entryPath));
     }
   }

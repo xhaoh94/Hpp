@@ -15,7 +15,7 @@ const isRecord = (value: unknown): value is UnknownRecord =>
 const getString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() ? value.trim() : undefined;
 
-export function buildProviderModelsUrl(baseUrl: string): string {
+export function buildProviderModelsUrl(baseUrl: string, endpoint?: string): string {
   const trimmedBaseUrl = baseUrl.trim();
   if (!trimmedBaseUrl) throw new Error("请先填写渠道 URL。");
 
@@ -29,8 +29,11 @@ export function buildProviderModelsUrl(baseUrl: string): string {
     throw new Error("渠道 URL 仅支持 HTTP 或 HTTPS。");
   }
 
-  if (!url.pathname.replace(/\/+$/, "").endsWith("/models")) {
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/models`;
+  const normalizedPath = url.pathname.replace(/\/+$/, "");
+  if (!normalizedPath.endsWith("/models")) {
+    url.pathname = endpoint === "anthropic-messages"
+      ? `${normalizedPath.replace(/\/v1$/, "")}/v1/models`
+      : `${normalizedPath}/models`;
   }
   url.search = "";
   url.hash = "";
@@ -80,18 +83,24 @@ function getProviderErrorMessage(responseText: string): string | undefined {
 export async function fetchProviderModels(
   baseUrl: string,
   apiKey: string,
+  endpointOrFetch?: string | FetchLike,
+  authMode: "bearer" | "x-api-key" = "bearer",
   fetchImpl: FetchLike = fetch
 ): Promise<RemoteProviderModel[]> {
-  const modelsUrl = buildProviderModelsUrl(baseUrl);
+  const endpoint = typeof endpointOrFetch === "string" ? endpointOrFetch : undefined;
+  const resolvedFetch = typeof endpointOrFetch === "function" ? endpointOrFetch : fetchImpl;
+  const modelsUrl = buildProviderModelsUrl(baseUrl, endpoint);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MODEL_FETCH_TIMEOUT_MS);
 
   try {
-    const response = await fetchImpl(modelsUrl, {
+    const response = await resolvedFetch(modelsUrl, {
       method: "GET",
       headers: {
         Accept: "application/json",
-        ...(apiKey.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {}),
+        ...(apiKey.trim() && authMode === "x-api-key"
+          ? { "x-api-key": apiKey.trim(), "anthropic-version": "2023-06-01" }
+          : apiKey.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {}),
       },
       signal: controller.signal,
     });

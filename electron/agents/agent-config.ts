@@ -1,7 +1,9 @@
 import { app } from "electron";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
-import type { AgentProviderConfiguration } from "../../src/types/ipc";
+import type { AgentProviderAuthMode, AgentProviderConfiguration } from "../../src/types/ipc";
+import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "../../shared/agent-provider-copy";
+import { asString, isRecord } from "../utils/unknown-value";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
 
 export interface AgentCustomModelConfig {
@@ -18,6 +20,7 @@ export interface AgentProviderConfig {
   displayName: string;
   baseUrl: string;
   apiKey: string;
+  authMode: AgentProviderAuthMode;
   endpoint: AgentProviderEndpoint;
   models: AgentCustomModelConfig[];
 }
@@ -31,12 +34,14 @@ export interface AgentConfigResult {
   success: boolean;
   error?: string;
   config?: AgentConfigState;
+  copiedProviderId?: string;
   models?: Array<{
     id: string;
     name: string;
     provider: string;
     reasoning: boolean;
     supportsImages?: boolean;
+    supportedThinkingLevels?: string[];
   }>;
   reloadedSessionIds?: string[];
 }
@@ -57,14 +62,6 @@ type JsonRecord = Record<string, unknown>;
 
 const SETTINGS_KEY = "agentConfigs";
 const MODEL_PREFERENCES_KEY = "agentModelPreferences";
-
-function isRecord(value: unknown): value is JsonRecord {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function asString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
 
 function getDataDir() {
   return join(app.getPath("userData"), "hpp-data");
@@ -105,6 +102,11 @@ function normalizeProvider(value: unknown, configuration: AgentProviderConfigura
   const providerId = asString(value.providerId);
   if (!providerId) return null;
   const endpoint = asString(value.endpoint);
+  const declaredAuthModes = configuration.authModes?.map((option) => option.id) || ["bearer"];
+  const requestedAuthMode = asString(value.authMode) as AgentProviderAuthMode;
+  const authMode = declaredAuthModes.includes(requestedAuthMode)
+    ? requestedAuthMode
+    : configuration.defaultAuthMode || declaredAuthModes[0] || "bearer";
   const models = Array.isArray(value.models)
     ? value.models.map(normalizeModel).filter((model): model is AgentCustomModelConfig => !!model)
     : [];
@@ -113,6 +115,7 @@ function normalizeProvider(value: unknown, configuration: AgentProviderConfigura
     displayName: asString(value.displayName) || providerId,
     baseUrl: asString(value.baseUrl),
     apiKey: asString(value.apiKey),
+    authMode,
     endpoint: endpoint || configuration.defaultEndpoint,
     models,
   };
@@ -275,6 +278,10 @@ function validateProviderConfig(provider: AgentProviderConfig, configuration: Ag
   if (!configuration.endpoints.some((endpoint) => endpoint.id === provider.endpoint)) {
     throw new Error(`当前插件不支持 Endpoint：${provider.endpoint || "空"}`);
   }
+  const authModes = configuration.authModes?.map((option) => option.id) || ["bearer"];
+  if (!authModes.includes(provider.authMode)) {
+    throw new Error(`当前插件不支持鉴权方式：${provider.authMode || "空"}`);
+  }
   if (!provider.apiKey) throw new Error("请填写 sk-key。");
   if (provider.models.length === 0) throw new Error("至少需要添加一个模型。");
   for (const model of provider.models) {
@@ -335,6 +342,55 @@ export async function saveAgentProviderConfig(agentId: string, providerValue: un
     };
     await persistAgentConfigState(agentId, nextState, configuration);
     return { success: true, config: nextState };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function copyAgentProviderConfig(
+  sourceAgentId: string,
+  sourceProviderId: string,
+  targetAgentId: string,
+): Promise<AgentConfigResult> {
+  try {
+    if (!sourceAgentId || !targetAgentId) throw new Error("请选择渠道复制目标。");
+    const sourceConfiguration = await getProviderConfiguration(sourceAgentId);
+    const targetConfiguration = sourceAgentId === targetAgentId
+      ? sourceConfiguration
+      : await getProviderConfiguration(targetAgentId);
+    const sourceState = await readCurrentAgentConfigState(sourceAgentId, sourceConfiguration);
+    const targetState = sourceAgentId === targetAgentId
+      ? sourceState
+      : await readCurrentAgentConfigState(targetAgentId, targetConfiguration);
+    const sourceProvider = sourceState.providers.find((provider) => provider.providerId === sourceProviderId);
+    if (!sourceProvider) throw new Error(`未找到要复制的渠道：${sourceProviderId}`);
+    const endpoint = resolveCompatibleProviderEndpoint(sourceProvider.endpoint, targetConfiguration.endpoints);
+    if (!endpoint) {
+      throw new Error(`目标 Agent 不支持 Endpoint：${sourceProvider.endpoint}`);
+    }
+    const targetAuthModes = targetConfiguration.authModes?.map((option) => option.id) || ["bearer"];
+    const authMode = targetAuthModes.includes(sourceProvider.authMode)
+      ? sourceProvider.authMode
+      : targetConfiguration.defaultAuthMode || targetAuthModes[0] || "bearer";
+    const copiedProviderId = createCopiedProviderId(
+      sourceProvider.providerId,
+      targetState.providers.map((provider) => provider.providerId),
+    );
+    const models = sourceProvider.models.map((model) => targetConfiguration.fixedModelCapabilities
+      ? {
+          ...model,
+          reasoning: targetConfiguration.modelDefaults.reasoning,
+          imageInput: targetConfiguration.modelDefaults.imageInput,
+        }
+      : { ...model });
+    const result = await saveAgentProviderConfig(targetAgentId, {
+      ...sourceProvider,
+      providerId: copiedProviderId,
+      endpoint,
+      authMode,
+      models,
+    });
+    return result.success ? { ...result, copiedProviderId } : result;
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -437,6 +493,7 @@ export async function getConfiguredAgentModels(
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }>> {
   const registry = getAgentPluginRegistry();
   const capabilities = await registry.getCapabilities(agentId);
@@ -451,5 +508,6 @@ export async function getConfiguredAgentModels(
     provider: provider.providerId,
     reasoning: model.reasoning === true,
     supportsImages: model.imageInput === true,
+    supportedThinkingLevels: configuration.modelDefaults.supportedThinkingLevels,
   })));
 }

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { CheckCircle2, Copy, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
+import { CheckCircle2, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
+import { resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
 import "./Settings.css";
 
 type AgentConfigModalProps = {
@@ -25,6 +26,7 @@ const createProvider = (index: number, configuration: AgentProviderConfiguration
   displayName: `Custom ${index}`,
   baseUrl: "",
   apiKey: "",
+  authMode: configuration.defaultAuthMode || configuration.authModes?.[0]?.id || "bearer",
   endpoint: configuration.defaultEndpoint,
   models: [emptyModel(configuration)],
 });
@@ -36,21 +38,6 @@ function cloneProvider(provider: AgentProviderConfig): AgentProviderConfig {
   return {
     ...provider,
     models: provider.models.map((model) => ({ ...model })),
-  };
-}
-
-function createCopiedProvider(provider: AgentProviderConfig, existingIds: Set<string>): AgentProviderConfig {
-  const baseId = `${provider.providerId}-copy`;
-  let providerId = baseId;
-  let index = 2;
-  while (existingIds.has(providerId)) {
-    providerId = `${baseId}-${index}`;
-    index += 1;
-  }
-  return {
-    ...cloneProvider(provider),
-    providerId,
-    displayName: `${provider.displayName || provider.providerId} Copy`,
   };
 }
 
@@ -81,6 +68,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const configurable = !!providerConfiguration;
   const usesActivation = activeAgent?.capabilities.providerActivation === "single-active";
   const endpointOptions = providerConfiguration?.endpoints || [];
+  const authModeOptions = providerConfiguration?.authModes || [];
   const backendModelVisibility = providerConfiguration?.backendModelVisibility;
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
@@ -109,6 +97,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [modelSearch, setModelSearch] = useState("");
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [copySourceProvider, setCopySourceProvider] = useState<AgentProviderConfig | null>(null);
+  const [copyingTargetAgentId, setCopyingTargetAgentId] = useState("");
+  const [copyProviderError, setCopyProviderError] = useState("");
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelFetchRequest = useRef(0);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -126,6 +117,23 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     [config.providers, selectedProviderId]
   );
 
+  const providerCopyTargets = useMemo(() => {
+    if (!copySourceProvider) return [];
+    const orderedAgents = [
+      ...configurableAgentList.filter((agent) => agent.id === agentId),
+      ...configurableAgentList.filter((agent) => agent.id !== agentId),
+    ];
+    return orderedAgents.map((agent) => {
+      const configuration = agent.capabilities.configuration === "none"
+        ? undefined
+        : agent.capabilities.configuration;
+      const endpoint = configuration
+        ? resolveCompatibleProviderEndpoint(copySourceProvider.endpoint, configuration.endpoints)
+        : undefined;
+      return { agent, configuration, endpoint };
+    });
+  }, [agentId, configurableAgentList, copySourceProvider]);
+
   const getPreferredProviderId = useCallback((state: AgentConfigState) => {
     const currentProviderId = agentId === activeAgentId ? currentModelProvider : "";
     return resolvePreferredProviderId(state, currentProviderId);
@@ -138,6 +146,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setDeletingProviderId("");
     setDeleteConfirmProvider(null);
     setDeleteError("");
+    setCopySourceProvider(null);
+    setCopyingTargetAgentId("");
+    setCopyProviderError("");
     setReorderingProviderId("");
     setDragProviderId("");
     setDragOverProviderId("");
@@ -307,16 +318,47 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setStatus(null);
   }, []);
 
-  const handleCopyProvider = useCallback((provider: AgentProviderConfig) => {
-    const existingIds = new Set(config.providers.map((item) => item.providerId));
-    const copiedProvider = createCopiedProvider(provider, existingIds);
-    if (!usesActivation) setSelectedProviderId(copiedProvider.providerId);
-    setDraft(copiedProvider);
-    setEditorBaseline(cloneProvider(copiedProvider));
-    setEditorOriginalProviderId("");
-    setEditorOpen(true);
-    setStatus({ type: "success", text: "已复制为新渠道草稿，保存后写入配置" });
-  }, [config.providers, usesActivation]);
+  const handleOpenProviderCopy = useCallback((provider: AgentProviderConfig) => {
+    setCopySourceProvider(cloneProvider(provider));
+    setCopyingTargetAgentId("");
+    setCopyProviderError("");
+  }, []);
+
+  const handleCopyToAgent = useCallback(async (targetAgentId: string) => {
+    if (!copySourceProvider || copyingTargetAgentId) return;
+    setCopyingTargetAgentId(targetAgentId);
+    setCopyProviderError("");
+    setStatus(null);
+    try {
+      const result = await window.electronAPI.agentConfigCopy(
+        agentId,
+        copySourceProvider.providerId,
+        targetAgentId,
+      );
+      if (!result.success || !result.config) {
+        setCopyProviderError(result.error || "复制渠道失败");
+        return;
+      }
+      if (result.models) onModelsUpdated(targetAgentId, result.models);
+      const targetAgent = configurableAgentList.find((agent) => agent.id === targetAgentId);
+      const targetName = targetAgent?.name || targetAgentId;
+      const copiedProviderId = result.copiedProviderId || copySourceProvider.providerId;
+      const needsActivation = targetAgent?.capabilities.providerActivation === "single-active";
+      setCopySourceProvider(null);
+      setStatus({
+        type: result.error ? "error" : "success",
+        text: result.error
+          ? `渠道已复制到 ${targetName}（${copiedProviderId}），但${result.error}`
+          : needsActivation
+            ? `渠道已复制到 ${targetName}（${copiedProviderId}），需要在目标 Agent 中启用`
+            : `渠道已复制到 ${targetName}（${copiedProviderId}）`,
+      });
+    } catch (error) {
+      setCopyProviderError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCopyingTargetAgentId("");
+    }
+  }, [agentId, configurableAgentList, copyingTargetAgentId, copySourceProvider, onModelsUpdated]);
 
   const handleUndoDraft = useCallback(() => {
     if (!editorBaseline) return;
@@ -356,7 +398,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setFetchingModels(true);
     setModelFetchError("");
     try {
-      const result = await window.electronAPI.agentConfigFetchModels(draft.baseUrl, draft.apiKey);
+      const result = await window.electronAPI.agentConfigFetchModels(
+        draft.baseUrl,
+        draft.apiKey,
+        draft.endpoint,
+        draft.authMode,
+      );
       if (modelFetchRequest.current !== requestId) return;
       if (!result.success || result.models.length === 0) {
         setModelFetchError(result.error || "没有获取到可用模型。");
@@ -814,7 +861,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         <button
                           type="button"
                           className="btn-action"
-                          onClick={() => handleCopyProvider(selectedSavedProvider)}
+                          onClick={() => handleOpenProviderCopy(selectedSavedProvider)}
                         >
                           <Copy size={13} />
                           复制
@@ -852,6 +899,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         <span>Endpoint</span>
                         <strong>{providerConfiguration ? getEndpointLabel(providerConfiguration, selectedSavedProvider.endpoint) : selectedSavedProvider.endpoint}</strong>
                       </div>
+                      {authModeOptions.length > 1 && (
+                        <div className="agent-config-summary-row">
+                          <span>鉴权方式</span>
+                          <strong>{authModeOptions.find((option) => option.id === selectedSavedProvider.authMode)?.label || selectedSavedProvider.authMode}</strong>
+                        </div>
+                      )}
                       <div className="agent-config-summary-row">
                         <span>模型数量</span>
                         <strong>{selectedSavedProvider.models.length}</strong>
@@ -964,7 +1017,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     value={draft.baseUrl}
                     onChange={(event) => updateDraft({ baseUrl: event.target.value })}
                     className="input-field"
-                    placeholder="https://api.example.com/v1"
+                    placeholder={draft.endpoint === "anthropic-messages"
+                      ? "https://api.anthropic.com"
+                      : "https://api.example.com/v1"}
                   />
                 </label>
                 <label>
@@ -979,6 +1034,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     ))}
                   </select>
                 </label>
+                {authModeOptions.length > 1 && (
+                  <label>
+                    <span>鉴权方式</span>
+                    <select
+                      value={draft.authMode}
+                      onChange={(event) => updateDraft({ authMode: event.target.value as AgentProviderConfig["authMode"] })}
+                      className="input-field"
+                    >
+                      {authModeOptions.map((option) => (
+                        <option key={option.id} value={option.id}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <label className="agent-config-field-wide">
                   <span>sk-key</span>
                   <div className="agent-config-secret-input">
@@ -1160,6 +1229,72 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 <Plus size={13} />
                 添加已选（{selectedRemoteModelIds.size}）
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {copySourceProvider && (
+        <div
+          className="settings-modal-overlay agent-provider-copy-overlay"
+          onMouseDown={() => {
+            if (!copyingTargetAgentId) setCopySourceProvider(null);
+          }}
+        >
+          <div className="settings-modal agent-provider-copy-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="settings-modal-header">
+              <div>
+                <h3>复制渠道到 Agent</h3>
+                <div className="agent-config-subtitle">{copySourceProvider.displayName || copySourceProvider.providerId}</div>
+              </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={() => setCopySourceProvider(null)}
+                disabled={!!copyingTargetAgentId}
+                aria-label="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="settings-modal-content agent-provider-copy-content">
+              <div className="agent-provider-copy-source">
+                <span>来源</span>
+                <strong>{getAgentName(agentId)}</strong>
+                <code>{copySourceProvider.providerId}</code>
+              </div>
+              <div className="agent-provider-copy-list">
+                {providerCopyTargets.length === 0 ? (
+                  <div className="agent-config-empty">没有可用的复制目标</div>
+                ) : providerCopyTargets.map(({ agent, configuration, endpoint }) => {
+                  const endpointLabel = endpoint
+                    ? configuration?.endpoints.find((option) => option.id === endpoint)?.label || endpoint
+                    : `不支持 ${copySourceProvider.endpoint}`;
+                  const copying = copyingTargetAgentId === agent.id;
+                  const isCurrentAgent = agent.id === agentId;
+                  return (
+                    <div key={agent.id} className={`agent-provider-copy-row ${endpoint ? "" : "incompatible"}`}>
+                      <div className="agent-provider-copy-avatar">{(agent.shortName || agent.name || agent.id).slice(0, 2).toUpperCase()}</div>
+                      <div className="agent-provider-copy-main">
+                        <div className="agent-provider-copy-title">
+                          <strong>{agent.name}</strong>
+                          {isCurrentAgent && <span className="agent-provider-copy-current">当前</span>}
+                        </div>
+                        <span>{endpointLabel}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-action agent-provider-copy-btn"
+                        onClick={() => void handleCopyToAgent(agent.id)}
+                        disabled={!endpoint || !!copyingTargetAgentId}
+                      >
+                        {copying ? <Loader2 size={13} className="agent-config-spin" /> : <CopyPlus size={13} />}
+                        {copying ? "复制中..." : isCurrentAgent ? "复制到当前" : "复制"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {copyProviderError && <div className="status-message error agent-provider-copy-error">{copyProviderError}</div>}
             </div>
           </div>
         </div>

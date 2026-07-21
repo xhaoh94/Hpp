@@ -339,9 +339,10 @@ const getToolPath = (
 };
 
 const getPatch = (data: unknown, args: unknown, result: unknown): string => {
-  return findFirstString(
+  const directPatch = findFirstString(
     { data, args, result },
     [
+      ["result", "gitDiff", "patch"],
       ["result", "details", "patch"],
       ["result", "details", "diff"],
       ["result", "patch"],
@@ -352,6 +353,19 @@ const getPatch = (data: unknown, args: unknown, result: unknown): string => {
       ["data", "diff"],
     ]
   );
+  if (directPatch) return directPatch;
+
+  const resultRecord = asRecord(result);
+  const structuredPatch = Array.isArray(resultRecord.structuredPatch) ? resultRecord.structuredPatch : [];
+  return structuredPatch.flatMap((rawHunk) => {
+    const hunk = asRecord(rawHunk);
+    if (!Array.isArray(hunk.lines)) return [];
+    const oldStart = Number(hunk.oldStart || 0);
+    const oldLines = Number(hunk.oldLines || 0);
+    const newStart = Number(hunk.newStart || 0);
+    const newLines = Number(hunk.newLines || 0);
+    return [`@@ -${oldStart},${oldLines} +${newStart},${newLines} @@`, ...hunk.lines.map(String)];
+  }).join("\n");
 };
 
 const getCommand = (args: unknown, data: unknown): string =>

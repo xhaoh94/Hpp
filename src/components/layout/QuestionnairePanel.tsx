@@ -237,14 +237,19 @@ export function QuestionnairePanel({
                       key={option.label}
                       className={`chat-questionnaire-option ${checked ? "selected" : ""}`}
                       onClick={() => {
+                        setCustomText((current) => ({ ...current, [questionIndex]: "" }));
                         if (question.multiSelect) {
-                          const prev = multiChoice[questionIndex] || [];
-                          setMultiChoice({
-                            ...multiChoice,
-                            [questionIndex]: checked ? prev.filter((item) => item !== option.label) : [...prev, option.label],
+                          setMultiChoice((current) => {
+                            const previous = current[questionIndex] || [];
+                            return {
+                              ...current,
+                              [questionIndex]: previous.includes(option.label)
+                                ? previous.filter((item) => item !== option.label)
+                                : [...previous, option.label],
+                            };
                           });
                         } else {
-                          setSingleChoice({ ...singleChoice, [questionIndex]: option.label });
+                          setSingleChoice((current) => ({ ...current, [questionIndex]: option.label }));
                         }
                       }}
                     >
@@ -265,7 +270,18 @@ export function QuestionnairePanel({
                 rows={2}
                 placeholder="自定义回答"
                 value={customText[questionIndex] || ""}
-                onChange={(event) => setCustomText({ ...customText, [questionIndex]: event.target.value })}
+                onFocus={() => {
+                  setSingleChoice((current) => ({ ...current, [questionIndex]: "" }));
+                  setMultiChoice((current) => ({ ...current, [questionIndex]: [] }));
+                }}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setCustomText((current) => ({ ...current, [questionIndex]: value }));
+                  if (value.trim()) {
+                    setSingleChoice((current) => ({ ...current, [questionIndex]: "" }));
+                    setMultiChoice((current) => ({ ...current, [questionIndex]: [] }));
+                  }
+                }}
               />
             )}
           </div>

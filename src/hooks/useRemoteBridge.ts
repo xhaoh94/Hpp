@@ -40,6 +40,7 @@ export function sanitizeRemoteMessage(message: ChatMessage, projectPath: string)
     isStreaming: message.isStreaming,
     systemType: message.systemType,
     nativeTurnId: message.nativeTurnId,
+    action: message.action ? { kind: message.action.kind, name: message.action.name } : undefined,
     sessionReferences: message.sessionReferences?.map((reference) => ({
       sourceSessionId: reference.sourceSessionId,
       sourceTitle: reference.sourceTitle,
@@ -74,14 +75,41 @@ export function sanitizeRemoteMessage(message: ChatMessage, projectPath: string)
   };
 }
 
-function sanitizeQueue(queue: QueuedMessage[]): RemoteQueuedMessage[] {
+export function sanitizeQueue(queue: QueuedMessage[]): RemoteQueuedMessage[] {
   return queue.map((item) => ({
     id: item.id,
     sessionId: item.sessionId,
+    editableContent: item.editableContent,
     displayContent: item.displayContent,
     status: item.status,
     createdAt: item.createdAt,
     error: item.error,
+    action: item.action ? { kind: item.action.kind, name: item.action.name } : undefined,
+    images: (item.editableDraft?.images || item.messageImages?.map((image) => ({
+      ...image,
+      mimeType: /^data:([^;,]+)[;,]/.exec(image.src)?.[1] || "image/png",
+    })) || []).map((image) => ({
+        id: image.id,
+        name: image.name,
+        src: image.src,
+        mimeType: image.mimeType,
+      })),
+    sessionReferences: item.editableDraft?.sessionReferences.map((reference) => ({
+      sourceSessionId: reference.sourceSessionId,
+      sourceTitle: reference.sourceTitle,
+    })) || item.sessionReferences,
+    attachments: item.editableDraft ? [
+      ...item.editableDraft.pendingFiles.map((file) => ({
+        id: file.id,
+        name: `${file.fileName}:${file.startLine}-${file.endLine}`,
+        kind: "snippet" as const,
+      })),
+      ...item.editableDraft.pendingPathAttachments.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        kind: attachment.kind,
+      })),
+    ] : undefined,
   }));
 }
 
@@ -139,7 +167,7 @@ export function sanitizeRemoteAgent(agent: {
   desc?: string;
   description?: string;
   runtime: "cli" | "sdk" | "plugin";
-  capabilities?: { providerActivation?: string; guidance?: boolean };
+  capabilities?: { providerActivation?: string; guidance?: boolean; actions?: boolean };
 }): RemoteAgent {
   const description = agent.description || agent.desc;
   return {
@@ -151,6 +179,7 @@ export function sanitizeRemoteAgent(agent: {
       ? { requiresProviderActivation: true }
       : {}),
     ...(agent.capabilities?.guidance === true ? { supportsGuidance: true } : {}),
+    ...(agent.capabilities?.actions === true ? { supportsActions: true } : {}),
   };
 }
 

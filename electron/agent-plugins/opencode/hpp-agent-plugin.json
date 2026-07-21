@@ -17,6 +17,7 @@
     "planMode": "native",
     "guidance": false,
     "fork": true,
+    "actions": true,
     "configuration": {
       "type": "provider",
       "storage": "plugin",

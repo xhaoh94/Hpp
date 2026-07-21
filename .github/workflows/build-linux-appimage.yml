@@ -1,0 +1,42 @@
+name: Build Linux AppImage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build application
+        run: npm run build
+
+      - name: Build AppImage
+        run: npx electron-builder --linux AppImage --x64 --config.directories.output=linux-release
+
+      - name: Upload AppImage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hpp-linux-appimage
+          path: |
+            linux-release/Hpp-Linux-*-x86_64.AppImage
+            linux-release/latest-linux.yml
+          if-no-files-found: error
+          retention-days: 1

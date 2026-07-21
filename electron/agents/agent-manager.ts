@@ -8,11 +8,13 @@ import {
 } from "./official-agent-plugins";
 import type {
   AgentImagePayload,
-  AgentSendOptions as BaseAgentSendOptions,
+  AgentActionCatalogEntry,
+  AgentActionListOptions,
   AgentUIResponse,
 } from "../../src/types/ipc";
 import {
   activateAgentProviderConfig,
+  copyAgentProviderConfig,
   deleteAgentProviderConfig,
   getAgentConfigStateForBackend,
   getAgentModelVisibility,
@@ -28,56 +30,14 @@ import {
 import { fetchProviderModels } from "./agent-model-fetch";
 import { combineAgentModels } from "./agent-model-list";
 import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
-
-interface AgentModel {
-  id: string;
-  name: string;
-  provider: string;
-  reasoning: boolean;
-  supportsImages?: boolean;
-}
-
-/** Common interface for all agent backends */
-interface AgentBackend {
-  setWindow(win: BrowserWindow): void;
-  init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
-  isIdle(): boolean;
-  sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
-  abort(): Promise<void>;
-  getModels(): Promise<AgentModel[]>;
-  setModel(provider: string, modelId: string): Promise<void>;
-  setThinkingLevel(level: string): Promise<void>;
-  sendUIResponse(response: AgentUIResponse): void;
-  dispose(): void | Promise<void>;
-  readonly sessionFilePath: string | null;
-}
-
-interface AgentSendOptions extends BaseAgentSendOptions {
-  planModeEnabled?: boolean;
-  displayMessage?: string;
-  permissionMode?: "plan" | "full-access";
-}
-
-interface AgentForkTarget {
-  newSessionId: string;
-  sourceSessionFilePath?: string;
-  sourceUserMessageIndex: number;
-  rollbackUserMessageCount?: number;
-  targetTurnId?: string;
-  sourceMessageContent?: string;
-  throughMessageId?: string;
-}
-
-interface AgentForkResult {
-  supported: boolean;
-  success: boolean;
-  sessionFilePath?: string;
-  nativeEntryId?: string;
-  error?: string;
-  reason?: string;
-}
+import type {
+  AgentBackend,
+  AgentForkResult,
+  AgentForkTarget,
+  AgentModel,
+  AgentSendOptions,
+} from "./agent-backend";
+import { getErrorMessage } from "../utils/unknown-value";
 
 interface AgentReloadConfigResult {
   success: boolean;
@@ -131,15 +91,6 @@ function withPromptPlanMode(message: string): string {
     "",
     message,
   ].join("\n");
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -292,6 +243,12 @@ export class AgentManager {
     const models = await agent.getModels();
     const agentType = this.sessionAgentTypes.get(sessionId);
     return mergeModelsWithConfiguredAgentModels(agentType, models);
+  }
+
+  async listActions(sessionId?: string, options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
+    const agent = this.getAgentForSession(sessionId);
+    if (!agent) return [];
+    return agent.listActions(options);
   }
 
   async getModelsByAgentId(agentId: string): Promise<AgentModel[]> {
@@ -748,6 +705,12 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     });
   });
 
+  ipcMain.handle("agent:getSessionState", (_event, sessionId: string) => {
+    const agent = agentManager.getAgentBySessionId(sessionId);
+    if (!agent) return { success: false, idle: true, error: "No active agent" };
+    return { success: true, idle: agent.isIdle() };
+  });
+
   ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
     try {
       const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
@@ -770,6 +733,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         permissionMode,
         displayMessage: message,
         clientMessageId: options?.clientMessageId,
+        action: options?.action,
       });
       return { success: true };
     } catch (err: unknown) {
@@ -810,9 +774,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     };
   });
 
-  ipcMain.handle("agentConfig:fetchModels", async (_event, baseUrl: string, apiKey: string) => {
+  ipcMain.handle("agentConfig:fetchModels", async (
+    _event,
+    baseUrl: string,
+    apiKey: string,
+    endpoint?: string,
+    authMode?: "bearer" | "x-api-key",
+  ) => {
     try {
-      const models = await fetchProviderModels(baseUrl, apiKey);
+      const models = await fetchProviderModels(baseUrl, apiKey, endpoint, authMode);
       return { success: true, models };
     } catch (error: unknown) {
       return { success: false, error: getErrorMessage(error), models: [] };
@@ -845,6 +815,44 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return { ...reloadResult, config: saveResult.config };
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err), config: saveResult.config, reloadedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agentConfig:copy", async (
+    _event,
+    sourceAgentId: string,
+    sourceProviderId: string,
+    targetAgentId: string,
+  ) => {
+    const copyResult = await copyAgentProviderConfig(sourceAgentId, sourceProviderId, targetAgentId);
+    if (!copyResult.success || !copyResult.config) return copyResult;
+    if (await usesSingleActiveProvider(targetAgentId)) {
+      const models = await mergeModelsWithConfiguredAgentModels(targetAgentId, []);
+      return { ...copyResult, models };
+    }
+
+    const idleCheck = agentManager.canReloadConfig(targetAgentId);
+    if (!idleCheck.success) {
+      const models = await mergeModelsWithConfiguredAgentModels(targetAgentId, []);
+      return {
+        ...copyResult,
+        models,
+        error: `渠道已复制，但${idleCheck.error || "目标 Agent 会话当前不为空闲状态，暂未重载。"}`,
+        reloadedSessionIds: [],
+      };
+    }
+
+    try {
+      const reloadResult = await agentManager.reloadConfig(targetAgentId);
+      return { ...copyResult, ...reloadResult, config: copyResult.config };
+    } catch (error: unknown) {
+      const models = await mergeModelsWithConfiguredAgentModels(targetAgentId, []);
+      return {
+        ...copyResult,
+        models,
+        error: `渠道已复制，但目标 Agent 重载失败：${getErrorMessage(error)}`,
+        reloadedSessionIds: [],
+      };
     }
   });
 
@@ -950,6 +958,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     const models = await agent.getModels();
     const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
     return mergeModelsWithConfiguredAgentModels(agentType, models);
+  });
+
+  ipcMain.handle("agent:listActions", async (_event, sessionId?: string, options?: AgentActionListOptions) => {
+    try {
+      return await agentManager.listActions(sessionId, options);
+    } catch (err: unknown) {
+      console.error("[agent-manager] listActions failed:", getErrorMessage(err));
+      return [];
+    }
   });
 
   ipcMain.handle("agent:setModel", async (_event, provider: string, modelId: string, sessionId?: string) => {

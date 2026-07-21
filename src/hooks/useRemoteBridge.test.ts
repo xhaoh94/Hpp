@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage } from "@/stores/chat-store";
+import type { ChatMessage, QueuedMessage } from "@/stores/chat-store";
 import {
   canPublishMessageUpsert,
   getRemoteSessionTitle,
   relativeRemotePath,
   sanitizeRemoteAgent,
   sanitizeRemoteMessage,
+  sanitizeQueue,
   shouldFlushPendingMessageUpdate,
   toRemoteInteraction,
 } from "./useRemoteBridge";
@@ -21,6 +22,14 @@ describe("remote renderer serialization", () => {
   it("never exposes absolute project paths in structured fields", () => {
     const sanitized = sanitizeRemoteMessage({
       ...message("assistant-1"),
+      action: { kind: "skill", name: "review" },
+      composerDraft: {
+        text: "private draft",
+        images: [],
+        pendingFiles: [{ id: "private", fileName: "secret.ts", filePath: "C:\\work\\secret.ts", startLine: 1, endLine: 2 }],
+        pendingPathAttachments: [],
+        sessionReferences: [],
+      },
       sessionReferences: [{ sourceSessionId: "session-2", sourceTitle: "Prior work" }],
       diffs: [{ file: "C:\\work\\app\\src\\main.ts", patch: "@@", additions: 1, deletions: 0 }],
       process: {
@@ -40,11 +49,41 @@ describe("remote renderer serialization", () => {
     expect(sanitized.process?.entries[0].files?.[0].file).toBe("src/main.ts");
     expect(sanitized.process?.entries[0].toolKind).toBe("read_file");
     expect(sanitized.sessionReferences).toEqual([{ sourceSessionId: "session-2", sourceTitle: "Prior work" }]);
+    expect(sanitized.action).toEqual({ kind: "skill", name: "review" });
+    expect(sanitized).not.toHaveProperty("composerDraft");
     expect(JSON.stringify(sanitized)).not.toContain("C:\\\\work");
   });
 
   it("reduces unrelated absolute paths to their basename", () => {
     expect(relativeRemotePath("D:\\secret\\outside.txt", "C:\\work\\app")).toBe("outside.txt");
+  });
+
+  it("exposes editable queue attachment names without desktop paths", () => {
+    const queue: QueuedMessage[] = [{
+      id: "queued-1",
+      sessionId: "session-1",
+      editableContent: "review",
+      displayContent: "review",
+      sendContent: "private payload",
+      createdAt: 1,
+      status: "queued",
+      editableDraft: {
+        text: "review",
+        images: [],
+        pendingFiles: [{ id: "snippet-1", fileName: "secret.ts", filePath: "C:\\work\\private\\secret.ts", startLine: 2, endLine: 4 }],
+        pendingPathAttachments: [{ id: "file-1", name: "notes.txt", path: "D:\\private\\notes.txt", kind: "file" }],
+        sessionReferences: [],
+      },
+    }];
+
+    const sanitized = sanitizeQueue(queue);
+    expect(sanitized[0].attachments).toEqual([
+      { id: "snippet-1", name: "secret.ts:2-4", kind: "snippet" },
+      { id: "file-1", name: "notes.txt", kind: "file" },
+    ]);
+    expect(JSON.stringify(sanitized)).not.toContain("C:\\\\work");
+    expect(JSON.stringify(sanitized)).not.toContain("D:\\\\private");
+    expect(JSON.stringify(sanitized)).not.toContain("private payload");
   });
 
   it("only publishes non-sensitive agent metadata", () => {
@@ -53,7 +92,7 @@ describe("remote renderer serialization", () => {
       name: "Codex",
       description: "Coding agent",
       runtime: "cli" as const,
-      capabilities: { providerActivation: "single-active", guidance: true },
+      capabilities: { providerActivation: "single-active", guidance: true, actions: true },
       command: "secret-command",
       installedPath: "C:\\private\\plugins\\codex",
     };
@@ -66,6 +105,7 @@ describe("remote renderer serialization", () => {
       runtime: "cli",
       requiresProviderActivation: true,
       supportsGuidance: true,
+      supportsActions: true,
     });
     expect(JSON.stringify(sanitized)).not.toContain("secret-command");
     expect(JSON.stringify(sanitized)).not.toContain("private");

@@ -5,6 +5,7 @@ import { is } from "@electron-toolkit/utils";
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
+import { registerStorageUsageHandlers } from "./ipc/storage-usage-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
@@ -367,6 +368,7 @@ if (singleInstanceLock) {
     // Register IPC handlers
     registerFileHandlers();
     registerStoreHandlers();
+    registerStorageUsageHandlers();
     registerPiSDKHandlers();
     registerAgentStatusHandlers();
     registerAgentHandlers(() => mainWindow);

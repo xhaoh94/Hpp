@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearSessionDraft, loadSessionDraft, sanitizePairedHosts, sanitizeSessionDraft, saveSessionDraft, withPairedHostMetadata } from "./storage";
+import { clearHostSessionDrafts, clearSessionDraft, loadSessionDraft, pruneSessionDrafts, sanitizePairedHosts, sanitizeSessionDraft, saveSessionDraft, withPairedHostMetadata } from "./storage";
 
 describe("paired host metadata", () => {
   it("keeps a local alias and note without requiring them for older saved hosts", () => {
@@ -70,6 +70,8 @@ describe("mobile session drafts", () => {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => values.set(key, value),
       removeItem: (key: string) => values.delete(key),
+      get length() { return values.size; },
+      key: (index: number) => [...values.keys()][index] ?? null,
     });
   });
 
@@ -87,6 +89,21 @@ describe("mobile session drafts", () => {
     });
   });
 
+  it("keeps a valid selected action and ignores malformed legacy values", () => {
+    expect(sanitizeSessionDraft({
+      text: "",
+      referenceSessionIds: [],
+      action: { kind: "skill", name: " review " },
+      updatedAt: 123,
+    })).toMatchObject({ action: { kind: "skill", name: "review" } });
+    expect(sanitizeSessionDraft({
+      text: "legacy",
+      referenceSessionIds: [],
+      action: { kind: "tool", name: "review" },
+      updatedAt: 123,
+    })).not.toHaveProperty("action");
+  });
+
   it("rejects malformed or oversized draft text", () => {
     expect(sanitizeSessionDraft(null)).toBeNull();
     expect(sanitizeSessionDraft({ text: 1 })).toBeNull();
@@ -97,13 +114,29 @@ describe("mobile session drafts", () => {
     await saveSessionDraft("host-1", "session-1", {
       text: "continue here",
       referenceSessionIds: ["session-2"],
+      action: { kind: "skill", name: "review" },
     });
     await expect(loadSessionDraft("host-1", "session-1")).resolves.toMatchObject({
       text: "continue here",
       referenceSessionIds: ["session-2"],
+      action: { kind: "skill", name: "review" },
     });
 
     await clearSessionDraft("host-1", "session-1");
     await expect(loadSessionDraft("host-1", "session-1")).resolves.toBeNull();
+  });
+
+  it("prunes drafts for removed sessions and removed desktops", async () => {
+    await saveSessionDraft("host-1", "kept", { text: "keep", referenceSessionIds: [] });
+    await saveSessionDraft("host-1", "removed", { text: "remove", referenceSessionIds: [] });
+    await saveSessionDraft("host-2", "other", { text: "other", referenceSessionIds: [] });
+
+    await pruneSessionDrafts("host-1", ["kept"]);
+    await expect(loadSessionDraft("host-1", "kept")).resolves.toMatchObject({ text: "keep" });
+    await expect(loadSessionDraft("host-1", "removed")).resolves.toBeNull();
+    await expect(loadSessionDraft("host-2", "other")).resolves.toMatchObject({ text: "other" });
+
+    await clearHostSessionDrafts("host-2");
+    await expect(loadSessionDraft("host-2", "other")).resolves.toBeNull();
   });
 });

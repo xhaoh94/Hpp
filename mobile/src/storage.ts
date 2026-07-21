@@ -1,6 +1,7 @@
 import { SecureStorage, type DataType } from "@aparajita/capacitor-secure-storage";
 import { Capacitor } from "@capacitor/core";
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
+import { isAgentActionInvocation, type AgentActionInvocation } from "@shared/agent-actions";
 
 export interface PairedHost {
   id: string;
@@ -17,6 +18,7 @@ export interface PairedHost {
 export interface MobileSessionDraft {
   text: string;
   referenceSessionIds: string[];
+  action?: AgentActionInvocation;
   updatedAt: number;
 }
 
@@ -34,6 +36,7 @@ export function withPairedHostMetadata(host: PairedHost, aliasValue: string, not
 const HOSTS_KEY = "hpp-mobile-hosts";
 const LAST_HOST_KEY = "hpp-mobile-last-host";
 const SESSION_DRAFT_KEY_PREFIX = "hpp-mobile-draft-v1";
+const SESSION_DRAFT_INDEX_PREFIX = "hpp-mobile-draft-index-v1";
 const KEY_PREFIX = "hpp_mobile_";
 
 export function sanitizePairedHosts(value: unknown): PairedHost[] {
@@ -103,6 +106,50 @@ async function removeValue(key: string) {
 const sessionDraftKey = (hostId: string, sessionId: string) =>
   `${SESSION_DRAFT_KEY_PREFIX}:${encodeURIComponent(hostId)}:${encodeURIComponent(sessionId)}`;
 
+const sessionDraftIndexKey = (hostId: string) =>
+  `${SESSION_DRAFT_INDEX_PREFIX}:${encodeURIComponent(hostId)}`;
+
+const sanitizeDraftIndex = (value: unknown) => Array.isArray(value)
+  ? [...new Set(value.filter((item): item is string => typeof item === "string" && !!item.trim()))]
+  : [];
+
+async function loadDraftIndex(hostId: string) {
+  return sanitizeDraftIndex(await readValue(sessionDraftIndexKey(hostId)));
+}
+
+async function saveDraftIndex(hostId: string, sessionIds: string[]) {
+  const normalized = sanitizeDraftIndex(sessionIds);
+  if (normalized.length === 0) {
+    await removeValue(sessionDraftIndexKey(hostId));
+    return;
+  }
+  await writeValue(sessionDraftIndexKey(hostId), normalized);
+}
+
+async function listStoredDraftSessionIds(hostId: string) {
+  const indexed = await loadDraftIndex(hostId);
+  const prefix = `${SESSION_DRAFT_KEY_PREFIX}:${encodeURIComponent(hostId)}:`;
+  let keys: string[] = [];
+  if (Capacitor.isNativePlatform()) {
+    await SecureStorage.setKeyPrefix(KEY_PREFIX);
+    keys = await SecureStorage.keys();
+  } else {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(KEY_PREFIX)) keys.push(key.slice(KEY_PREFIX.length));
+    }
+  }
+  const discovered = keys.flatMap((key): string[] => {
+    if (!key.startsWith(prefix)) return [];
+    try {
+      return [decodeURIComponent(key.slice(prefix.length))];
+    } catch {
+      return [];
+    }
+  });
+  return [...new Set([...indexed, ...discovered])];
+}
+
 export function sanitizeSessionDraft(value: unknown): MobileSessionDraft | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const draft = value as Record<string, unknown>;
@@ -113,6 +160,9 @@ export function sanitizeSessionDraft(value: unknown): MobileSessionDraft | null 
   return {
     text: draft.text,
     referenceSessionIds,
+    ...(isAgentActionInvocation(draft.action)
+      ? { action: { kind: draft.action.kind, name: draft.action.name.trim() } }
+      : {}),
     updatedAt: typeof draft.updatedAt === "number" && Number.isFinite(draft.updatedAt) ? draft.updatedAt : 0,
   };
 }
@@ -122,23 +172,42 @@ export async function loadSessionDraft(hostId: string, sessionId: string): Promi
   return sanitizeSessionDraft(await readValue(sessionDraftKey(hostId, sessionId)));
 }
 
-export async function saveSessionDraft(hostId: string, sessionId: string, draft: Pick<MobileSessionDraft, "text" | "referenceSessionIds">) {
+export async function saveSessionDraft(hostId: string, sessionId: string, draft: Pick<MobileSessionDraft, "text" | "referenceSessionIds" | "action">) {
   if (!hostId || !sessionId) return;
   const normalized = sanitizeSessionDraft({ ...draft, updatedAt: Date.now() });
-  if (!normalized || (!normalized.text && normalized.referenceSessionIds.length === 0)) {
-    await removeValue(sessionDraftKey(hostId, sessionId));
+  if (!normalized || (!normalized.text && normalized.referenceSessionIds.length === 0 && !normalized.action)) {
+    await clearSessionDraft(hostId, sessionId);
     return;
   }
   await writeValue(sessionDraftKey(hostId, sessionId), {
     text: normalized.text,
     referenceSessionIds: normalized.referenceSessionIds,
+    action: normalized.action,
     updatedAt: normalized.updatedAt,
   });
+  const indexed = await loadDraftIndex(hostId);
+  if (!indexed.includes(sessionId)) await saveDraftIndex(hostId, [...indexed, sessionId]);
 }
 
 export async function clearSessionDraft(hostId: string, sessionId: string) {
   if (!hostId || !sessionId) return;
   await removeValue(sessionDraftKey(hostId, sessionId));
+  const indexed = await loadDraftIndex(hostId);
+  if (indexed.includes(sessionId)) await saveDraftIndex(hostId, indexed.filter((id) => id !== sessionId));
+}
+
+export async function pruneSessionDrafts(hostId: string, validSessionIds: Iterable<string>) {
+  if (!hostId) return;
+  const valid = new Set([...validSessionIds].filter(Boolean));
+  const stored = await listStoredDraftSessionIds(hostId);
+  await Promise.all(stored
+    .filter((sessionId) => !valid.has(sessionId))
+    .map((sessionId) => removeValue(sessionDraftKey(hostId, sessionId))));
+  await saveDraftIndex(hostId, stored.filter((sessionId) => valid.has(sessionId)));
+}
+
+export async function clearHostSessionDrafts(hostId: string) {
+  await pruneSessionDrafts(hostId, []);
 }
 
 export async function loadPairedHosts(): Promise<PairedHost[]> {

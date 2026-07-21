@@ -30,6 +30,10 @@ export function supportsNativeFork(id: string): boolean {
   return getAgentById(id)?.capabilities.fork === true;
 }
 
+export function supportsAgentActions(id: string): boolean {
+  return getAgentById(id)?.capabilities.actions === true;
+}
+
 export function getAgentProviderConfiguration(id: string): AgentProviderConfiguration | undefined {
   const configuration = getAgentById(id)?.capabilities.configuration;
   return configuration && configuration !== "none" ? configuration : undefined;

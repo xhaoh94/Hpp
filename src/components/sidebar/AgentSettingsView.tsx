@@ -17,6 +17,13 @@ import "./Settings.css";
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 const VERSION_CACHE_MS = 60_000;
 
+const createPendingSDKStatus = (): AgentPackageStatus => ({
+  installed: false,
+  updateAvailable: false,
+  canUpdate: false,
+  source: "plugin",
+});
+
 let cachedAgentStatuses: Record<string, AgentPackageStatus> = {};
 let lastAgentChecks: Record<string, number> = {};
 
@@ -270,12 +277,22 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
       setAgentOrder(nextAgentOrder);
       delete cachedAgentStatuses[installedAgent.id];
       delete lastAgentChecks[installedAgent.id];
+      setAgentStatuses((prev) => {
+        const next = { ...prev };
+        if (installedAgent.runtime === "sdk") {
+          next[installedAgent.id] = createPendingSDKStatus();
+        } else {
+          delete next[installedAgent.id];
+        }
+        return next;
+      });
       await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
+      await refreshAgentStatus(installedAgent.id);
     });
 
     installResultQueueRef.current = applyResult.catch(() => undefined);
     return applyResult;
-  }, [agentOrder, agents, enabledAgents, saveAgentSettings]);
+  }, [agentOrder, agents, enabledAgents, refreshAgentStatus, saveAgentSettings]);
 
   const handleInstallPlugin = useCallback(async () => {
     const nextPath = pluginPath.trim();
@@ -566,23 +583,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 </label>
 
                 <div className="agent-settings-actions">
-                  {agentStatus && (isInstallAction || agentStatus.updateAvailable) && (
-                    <button
-                      className="filter-add-btn agent-settings-update-btn"
-                      onClick={() => void handleAgentUpdate(agent.id)}
-                      disabled={isAnyAgentUpdating || !agentStatus.canUpdate}
-                      title={isAnyAgentUpdating && activeAgentUpdateId !== agent.id
-                        ? "请等待其他 Agent 更新完成"
-                        : agentStatus.canUpdate
-                        ? isInstallAction ? "安装" : "更新"
-                        : agentStatus.error || "请先安装 Node.js 和 npm"}
-                    >
-                      {agentUpdating[agent.id]
-                        ? isInstallAction ? "安装中..." : "更新中..."
-                        : isInstallAction ? "安装" : "更新"}
-                    </button>
-                  )}
-                  {isInstalled && agent.removable && (
+                  {agent.removable && (
                     <button
                       className="btn-action agent-settings-refresh-btn"
                       onClick={() => openRemovePluginConfirm(agent.id)}
@@ -590,6 +591,24 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                       title="卸载插件"
                     >
                       {removingAgentId === agent.id ? "卸载中..." : "卸载"}
+                    </button>
+                  )}
+                  {agentStatus && (isInstallAction || agentStatus.updateAvailable) && (
+                    <button
+                      className="filter-add-btn agent-settings-update-btn"
+                      onClick={() => void handleAgentUpdate(agent.id)}
+                      disabled={isChecking || isAnyAgentUpdating || !agentStatus.canUpdate}
+                      title={isAnyAgentUpdating && activeAgentUpdateId !== agent.id
+                        ? "请等待其他 Agent 更新完成"
+                        : isChecking
+                        ? "正在检查运行时"
+                        : agentStatus.canUpdate
+                        ? isInstallAction ? "安装" : "更新"
+                        : agentStatus.error || "请先安装 Node.js 和 npm"}
+                    >
+                      {agentUpdating[agent.id]
+                        ? isInstallAction ? "安装中..." : "更新中..."
+                        : isInstallAction ? "安装" : "更新"}
                     </button>
                   )}
                   {isInstalled && (

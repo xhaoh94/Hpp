@@ -92,6 +92,7 @@ let pendingUIRequest = null;
 let activeImageCleanups = [];
 let forkRequestActive = false;
 let shuttingDown = false;
+let skillPathsByName = new Map();
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -182,6 +183,45 @@ const getModels = async () => {
     process.stderr.write(`[codex-models] ${error?.message || String(error)}\n`);
   }
   return [DEFAULT_CODEX_MODEL];
+};
+
+const getActions = async (forceReload = false) => {
+  await startAppServer();
+  const result = await rpcRequest("skills/list", {
+    cwds: projectPath ? [projectPath] : [],
+    forceReload,
+  }, 30000);
+  const entries = Array.isArray(result?.data) ? result.data : [];
+  const nextPaths = new Map();
+  const actions = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    for (const skill of Array.isArray(entry?.skills) ? entry.skills : []) {
+      const name = String(skill?.name || "").trim();
+      const path = String(skill?.path || "").trim();
+      if (!name || !path || skill?.enabled === false || seen.has(name)) continue;
+      seen.add(name);
+      nextPaths.set(name, path);
+      actions.push({
+        kind: "skill",
+        name,
+        description: String(skill?.interface?.shortDescription || skill?.shortDescription || skill?.description || "").trim() || undefined,
+      });
+    }
+  }
+  skillPathsByName = nextPaths;
+  return actions;
+};
+
+const resolveActionInput = async (action) => {
+  if (!action) return null;
+  const kind = String(action.kind || "");
+  const name = String(action.name || "").trim();
+  if (kind !== "skill" || !name) throw new Error("ACTION_NOT_SUPPORTED");
+  await getActions(false);
+  const path = skillPathsByName.get(name);
+  if (!path) throw new Error("ACTION_NOT_FOUND");
+  return { type: "skill", name, path };
 };
 
 const pathEnvKey = (env, platform = process.platform) => {
@@ -679,9 +719,14 @@ const registerActiveImageCleanup = (cleanup) => {
   if (typeof cleanup === "function") activeImageCleanups.push(cleanup);
 };
 
-const buildInput = (message, images) => {
+const buildInput = (message, images, actionInput) => {
   const text = activePlanModeEnabled ? `${PLAN_MODE_INSTRUCTIONS}\n\n${message || ""}` : (message || "");
-  const input = [{ type: "text", text: text || "Please continue.", text_elements: [] }];
+  const input = [];
+  if (actionInput) input.push(actionInput);
+  if (text) input.push({ type: "text", text, text_elements: [] });
+  if (input.length === 0 && images.length === 0) {
+    input.push({ type: "text", text: "Please continue.", text_elements: [] });
+  }
   return [...input, ...images];
 };
 
@@ -1546,12 +1591,13 @@ const runPrompt = async (command) => {
     await cleanupActiveImages();
     const imagePayload = await materializeImages(command.images);
     registerActiveImageCleanup(imagePayload.cleanup);
+    const actionInput = await resolveActionInput(command.action);
     const nextThreadId = await ensureThread();
     if (!promptRunning || activePromptId !== command.id) return;
     const result = await rpcRequest("turn/start", {
       threadId: nextThreadId,
       clientUserMessageId: command.id,
-      input: buildInput(command.message, imagePayload.entries),
+      input: buildInput(command.message, imagePayload.entries, actionInput),
       cwd: projectPath,
       approvalPolicy: "never",
       sandboxPolicy: activePermissionMode === "plan"
@@ -1732,6 +1778,9 @@ const handleCommand = async (command) => {
         break;
       case "getModels":
         send({ type: "models", id: command.id, models: await getModels() });
+        break;
+      case "listActions":
+        send({ type: "actions", id: command.id, actions: await getActions(command.reload === true) });
         break;
       case "setModel":
         currentModelId =

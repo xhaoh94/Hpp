@@ -1,5 +1,13 @@
 export type UnknownRecord = Record<string, unknown>;
 
+import type { AgentActionInvocation } from "@shared/agent-actions";
+export type {
+  AgentActionCatalogEntry,
+  AgentActionInvocation,
+  AgentActionKind,
+  AgentActionListOptions,
+} from "@shared/agent-actions";
+
 export const isRecord = (value: unknown): value is UnknownRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -14,6 +22,7 @@ export type AgentImagePayload = AgentImagePayloadItem[];
 export interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
+  action?: AgentActionInvocation;
 }
 
 export interface AgentEvent {
@@ -79,6 +88,13 @@ export interface AgentProviderEndpointOption {
   label: string;
 }
 
+export type AgentProviderAuthMode = "bearer" | "x-api-key";
+
+export interface AgentProviderAuthOption {
+  id: AgentProviderAuthMode;
+  label: string;
+}
+
 export interface AgentBackendModelVisibility {
   userConfigurable: boolean;
   defaultVisible: boolean;
@@ -91,11 +107,14 @@ export interface AgentProviderConfiguration {
   storage: "hpp" | "plugin";
   endpoints: AgentProviderEndpointOption[];
   defaultEndpoint: string;
+  authModes?: AgentProviderAuthOption[];
+  defaultAuthMode?: AgentProviderAuthMode;
   pathLabel?: string;
   hint?: string;
   modelDefaults: {
     reasoning: boolean;
     imageInput: boolean;
+    supportedThinkingLevels?: string[];
   };
   fixedModelCapabilities: boolean;
   modelListMode: "configured" | "backend" | "merge";
@@ -108,8 +127,45 @@ export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
   guidance: boolean;
   fork: boolean;
+  actions: boolean;
   configuration: AgentConfigurationSupport;
   providerActivation: AgentProviderActivationSupport;
+}
+
+export interface SessionDataPurgeRequest {
+  sessionIds?: string[];
+  projectIds?: string[];
+  validSessionIds?: string[];
+  validProjectIds?: string[];
+}
+
+export type DiskUsageCategoryId =
+  | "conversations"
+  | "configuration"
+  | "agentPlugins"
+  | "agentRuntimes"
+  | "browserCache"
+  | "browserStorage"
+  | "other";
+
+export interface DiskUsageCategory {
+  id: DiskUsageCategoryId;
+  sizeBytes: number;
+  fileCount: number;
+}
+
+export interface DiskUsageStats {
+  totalSizeBytes: number;
+  totalFileCount: number;
+  dataPath: string;
+  categories: DiskUsageCategory[];
+  measuredAt: number;
+}
+
+export interface DiskCleanupResult {
+  reclaimedBytes: number;
+  removedFileCount: number;
+  stats: DiskUsageStats;
 }
 
 export interface AgentPluginManifest {

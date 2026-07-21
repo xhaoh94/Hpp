@@ -168,4 +168,38 @@ describe("Droid protocol adapter", () => {
     expect(agent.isIdle()).toBe(true);
     expect(events).toContainEqual(expect.objectContaining({ type: "aborted" }));
   });
+
+  it("lists user-invocable skills and commands without paths and sends native slash syntax", async () => {
+    const agent = new DroidAgent("hpp-session");
+    const internals = agent as unknown as DroidInternals;
+    internals.process = { stdin: { writable: true, write: vi.fn() } };
+    internals.isReady = true;
+    internals.sessionId = "droid-session";
+    const sendRpcAsync = vi.fn(async (method: string) => method === "droid.list_skills"
+      ? {
+          result: {
+            skills: [
+              { name: "review", description: "Review changes", filePath: "C:\\project\\.factory\\skills\\review\\SKILL.md" },
+              { name: "release", description: "Prepare release", filePath: "C:\\project\\.factory\\commands\\release.md" },
+              { name: "disabled", enabled: false, filePath: "C:\\project\\.factory\\skills\\disabled\\SKILL.md" },
+            ],
+          },
+        }
+      : { result: {} });
+    internals.sendRpcAsync = sendRpcAsync;
+
+    const actions = await agent.listActions({ reload: true });
+    expect(actions).toEqual([
+      { kind: "skill", name: "review", description: "Review changes" },
+      { kind: "command", name: "release", description: "Prepare release" },
+    ]);
+    expect(JSON.stringify(actions)).not.toContain(".factory");
+
+    await agent.sendMessage("src", undefined, { action: { kind: "skill", name: "review" } });
+    expect(sendRpcAsync).toHaveBeenCalledWith("droid.add_user_message", { text: "/review src" }, 30000, expect.any(String));
+
+    internals.turnActive = false;
+    await expect(agent.sendMessage("", undefined, { action: { kind: "skill", name: "missing" } }))
+      .rejects.toThrow("ACTION_NOT_FOUND");
+  });
 });

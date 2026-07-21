@@ -11,8 +11,13 @@ interface Props {
   sessions: ProjectSession[];
   sessionMessages: Record<string, ChatMessage[]>;
   onResume: (session: ProjectSession) => void;
-  onDelete: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void | Promise<void>;
+  onDeleteAll: () => void | Promise<void>;
 }
+
+type DeleteTarget =
+  | { kind: "session"; sessionId: string }
+  | { kind: "all" };
 
 function formatTime(timestamp: string): string {
   try {
@@ -53,8 +58,26 @@ const getSessionPreviewText = (
     : session.title;
 };
 
-export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onResume, onDelete }: Props) {
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onResume, onDelete, onDeleteAll }: Props) {
+  const [confirmDelete, setConfirmDelete] = useState<DeleteTarget | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleConfirmDelete = async () => {
+    if (!confirmDelete || deleting) return;
+    setDeleting(true);
+    try {
+      if (confirmDelete.kind === "all") {
+        await onDeleteAll();
+      } else {
+        await onDelete(confirmDelete.sessionId);
+      }
+      setConfirmDelete(null);
+    } catch {
+      // The parent reports the persistence error and the confirmation stays open for retry.
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -62,8 +85,22 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
     <div className="session-modal-overlay" onClick={onClose}>
       <div className="session-modal" onClick={(e) => e.stopPropagation()}>
         <div className="session-modal-header">
-          <span className="session-modal-title">历史会话</span>
-          <button onClick={onClose} className="session-modal-close">×</button>
+          <div className="session-modal-title-group">
+            <span className="session-modal-title">历史会话</span>
+            <span className="session-modal-count">{sessions.length}</span>
+          </div>
+          <div className="session-modal-header-actions">
+            {sessions.length > 0 && (
+              <button
+                type="button"
+                className="session-modal-delete-all"
+                onClick={() => setConfirmDelete({ kind: "all" })}
+              >
+                彻底删除全部
+              </button>
+            )}
+            <button onClick={onClose} className="session-modal-close" aria-label="关闭历史会话">×</button>
+          </div>
         </div>
 
         <div className="session-modal-body">
@@ -88,10 +125,10 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
                         恢复
                       </button>
                       <button
-                        onClick={() => setConfirmDelete(session.id)}
+                        onClick={() => setConfirmDelete({ kind: "session", sessionId: session.id })}
                         className="session-btn delete"
                       >
-                        删除
+                        彻底删除
                       </button>
                     </div>
                   </div>
@@ -117,11 +154,15 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
         {confirmDelete && (
           <div className="session-confirm-overlay" onClick={(e) => e.stopPropagation()}>
             <div className="session-confirm">
-              <div className="session-confirm-title">确定删除此会话？</div>
-              <div className="session-confirm-desc">删除后无法恢复。</div>
+              <div className="session-confirm-title">
+                {confirmDelete.kind === "all" ? `永久删除全部 ${sessions.length} 个历史会话？` : "永久删除此会话？"}
+              </div>
+              <div className="session-confirm-desc">会话、消息与草稿快照会从本机删除，删除后无法恢复。</div>
               <div className="session-confirm-actions">
-                <button onClick={() => setConfirmDelete(null)} className="session-btn cancel">取消</button>
-                <button onClick={() => { onDelete(confirmDelete); setConfirmDelete(null); }} className="session-btn delete">删除</button>
+                <button disabled={deleting} onClick={() => setConfirmDelete(null)} className="session-btn cancel">取消</button>
+                <button disabled={deleting} onClick={() => void handleConfirmDelete()} className="session-btn delete">
+                  {deleting ? "正在删除..." : "彻底删除"}
+                </button>
               </div>
             </div>
           </div>

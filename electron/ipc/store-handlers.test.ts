@@ -71,4 +71,66 @@ describe("store handlers", () => {
 
     await expect(load({}, "projects")).resolves.toEqual({ projects: [{ id: "first" }] });
   });
+
+  it("purges deleted sessions and projects from primary and backup stores", async () => {
+    const save = electronState.handlers.get("store:save")!;
+    const purge = electronState.handlers.get("store:purgeSessions")!;
+    const messages = {
+      sessionMessages: {
+        kept: [{ content: "keep" }],
+        removed: [{ content: "private snapshot", composerDraft: { text: "private" } }],
+      },
+    };
+    const projects = {
+      projects: [
+        { id: "kept-project", sessions: [{ id: "kept" }, { id: "removed" }] },
+        { id: "removed-project", sessions: [{ id: "project-session" }] },
+      ],
+      activeProjectId: "removed-project",
+      activeSessionId: "removed",
+    };
+    const models = {
+      modelVersion: 5,
+      models: { kept: { id: "keep" }, removed: { id: "private" } },
+      thinkingLevels: { kept: "medium", removed: "high" },
+    };
+    for (const [key, value] of [["sessionMessages", messages], ["projects", projects], ["currentModel", models]] as const) {
+      await save({}, key, value);
+      await save({}, key, value);
+    }
+
+    await expect(purge({}, {
+      sessionIds: ["removed", "project-session"],
+      projectIds: ["removed-project"],
+    })).resolves.toEqual({ success: true });
+
+    for (const suffix of ["", ".bak"]) {
+      const storedMessages = JSON.parse(await readFile(join(tempRoot, "hpp-data", `sessionMessages.json${suffix}`), "utf8"));
+      const storedProjects = JSON.parse(await readFile(join(tempRoot, "hpp-data", `projects.json${suffix}`), "utf8"));
+      const storedModels = JSON.parse(await readFile(join(tempRoot, "hpp-data", `currentModel.json${suffix}`), "utf8"));
+      expect(storedMessages.sessionMessages).toEqual({ kept: [{ content: "keep" }] });
+      expect(storedProjects).toMatchObject({
+        projects: [{ id: "kept-project", sessions: [{ id: "kept" }] }],
+        activeProjectId: null,
+        activeSessionId: null,
+      });
+      expect(storedModels.models).toEqual({ kept: { id: "keep" } });
+      expect(storedModels.thinkingLevels).toEqual({ kept: "medium" });
+    }
+  });
+
+  it("removes orphaned per-session data using the current catalog", async () => {
+    const save = electronState.handlers.get("store:save")!;
+    const purge = electronState.handlers.get("store:purgeSessions")!;
+    await save({}, "sessionMessages", { sessionMessages: { kept: [], orphan: [{ content: "old" }] } });
+    await save({}, "currentModel", { models: { kept: {}, orphan: {} }, thinkingLevels: { orphan: "high" } });
+
+    await purge({}, { validSessionIds: ["kept"], validProjectIds: [] });
+
+    const storedMessages = JSON.parse(await readFile(join(tempRoot, "hpp-data", "sessionMessages.json"), "utf8"));
+    const storedModels = JSON.parse(await readFile(join(tempRoot, "hpp-data", "currentModel.json"), "utf8"));
+    expect(storedMessages.sessionMessages).toEqual({ kept: [] });
+    expect(storedModels.models).toEqual({ kept: {} });
+    expect(storedModels.thinkingLevels).toEqual({});
+  });
 });

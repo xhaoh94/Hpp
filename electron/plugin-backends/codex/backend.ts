@@ -4,7 +4,14 @@ import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { normalizeQuestionProcessEvent } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
 import { loadCodexHistorySnapshot } from "./history";
-import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
+import type {
+  AgentActionCatalogEntry,
+  AgentActionInvocation,
+  AgentActionListOptions,
+  AgentImagePayload,
+  AgentUIResponse,
+  UnknownRecord,
+} from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
 
 interface AgentModel {
@@ -20,6 +27,7 @@ interface AgentSendOptions {
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
   clientMessageId?: string;
+  action?: AgentActionInvocation;
 }
 
 interface AgentForkTarget {
@@ -237,6 +245,7 @@ export class CodexAgent {
       images,
       planModeEnabled: !!options?.planModeEnabled,
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+      action: options?.action,
     });
   }
 
@@ -348,6 +357,17 @@ export class CodexAgent {
         clearTimeout(timeout);
         this.models = normalizeModels(data.models);
         resolve(this.models);
+      });
+    });
+  }
+
+  async listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
+    if (!this.process) return [];
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve([]), 15000);
+      this.sendWorkerCommand({ type: "listActions", reload: options?.reload === true }, (data) => {
+        clearTimeout(timeout);
+        resolve(Array.isArray(data.actions) ? data.actions as AgentActionCatalogEntry[] : []);
       });
     });
   }

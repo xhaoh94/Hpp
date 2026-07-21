@@ -42,6 +42,13 @@ input.on("line", async (line) => {
     ], nextCursor: null } });
     return;
   }
+  if (message.method === "skills/list") {
+    write({ id: message.id, result: { data: [{ cwd: process.cwd(), skills: [
+      { name: "review", path: "/private/review/SKILL.md", enabled: true, interface: { shortDescription: "Review changes" } },
+      { name: "disabled", path: "/private/disabled/SKILL.md", enabled: false }
+    ] }] } });
+    return;
+  }
   if (message.method === "thread/start") {
     write({ id: message.id, result: { thread: { id: "thread-1" } } });
     write({ method: "thread/started", params: { thread: { id: "thread-1" } } });
@@ -182,5 +189,34 @@ describe("Codex worker protocol", () => {
       .resolves.toMatchObject({ type: "context_compaction" });
     await expect(worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-1"))
       .resolves.toMatchObject({ type: "prompt_done", id: "prompt-1" });
+  });
+
+  it("lists native skills without paths and sends the native skill input", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "actions", type: "listActions", reload: true });
+    const catalog = await worker.waitFor((message) => message.id === "actions" && message.type === "actions");
+    expect(catalog.actions).toEqual([{ kind: "skill", name: "review", description: "Review changes" }]);
+    expect(JSON.stringify(catalog)).not.toContain("SKILL.md");
+
+    worker.send({
+      id: "skill-prompt",
+      type: "prompt",
+      message: "src",
+      action: { kind: "skill", name: "review" },
+      permissionMode: "full-access",
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "skill-prompt");
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const turnStart = calls.find((call) => call.method === "turn/start" && call.params?.clientUserMessageId === "skill-prompt");
+    expect(turnStart.params.input).toEqual([
+      { type: "skill", name: "review", path: "/private/review/SKILL.md" },
+      { type: "text", text: "src", text_elements: [] },
+    ]);
+    worker.send({ id: "missing-skill", type: "prompt", message: "", action: { kind: "skill", name: "missing" } });
+    await expect(worker.waitFor((message) => message.type === "process_event" && message.detail === "ACTION_NOT_FOUND"))
+      .resolves.toMatchObject({ state: "error" });
   });
 });

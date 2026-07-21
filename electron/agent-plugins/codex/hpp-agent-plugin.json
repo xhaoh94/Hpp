@@ -17,6 +17,7 @@
     "planMode": "native",
     "guidance": true,
     "fork": true,
+    "actions": true,
     "configuration": {
       "type": "provider",
       "storage": "hpp",

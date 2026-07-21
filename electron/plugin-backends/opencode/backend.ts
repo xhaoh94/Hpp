@@ -13,6 +13,11 @@ import {
 } from "../../utils/command-utils";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
+import type {
+  AgentActionCatalogEntry,
+  AgentActionInvocation,
+  AgentActionListOptions,
+} from "../../../shared/agent-actions";
 
 interface AgentModel {
   id: string;
@@ -27,6 +32,7 @@ interface AgentSendOptions {
   clientMessageId?: string;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
+  action?: AgentActionInvocation;
 }
 
 interface AgentForkTarget {
@@ -67,6 +73,15 @@ interface OpenCodePromptBody {
   agent?: "plan" | "build";
   model?: { providerID: string; modelID: string };
   variant?: string;
+}
+
+interface OpenCodeCommandBody {
+  command: string;
+  arguments: string;
+  agent?: "plan" | "build";
+  model?: { providerID: string; modelID: string };
+  variant?: string;
+  parts?: OpenCodePromptPart[];
 }
 
 const asRecord = (value: unknown): UnknownRecord =>
@@ -245,6 +260,31 @@ function getPermissionReply(response: AgentUIResponse): "once" | "always" | "rej
   return "once";
 }
 
+const OPENCODE_BUILTIN_COMMANDS = new Set(["init", "review"]);
+
+function normalizeOpenCodeCatalog(value: unknown, kind: "skill" | "command"): AgentActionCatalogEntry[] {
+  const source = Array.isArray(value)
+    ? value
+    : isRecord(value)
+      ? Object.entries(value).map(([name, item]) => ({ name, ...asRecord(item) }))
+      : [];
+  return source.flatMap((rawEntry) => {
+    const entry = asRecord(rawEntry);
+    const name = String(entry.name || entry.id || entry.command || "").trim().replace(/^\//, "");
+    if (!name) return [];
+    const entrySource = String(entry.source || entry.type || "").trim().toLowerCase();
+    if (kind === "command" && (entrySource === "mcp" || OPENCODE_BUILTIN_COMMANDS.has(name.toLowerCase()))) return [];
+    const description = String(entry.description || entry.summary || "").trim();
+    const argumentHint = String(entry.argumentHint || entry.argument_hint || entry.usage || entry.arguments || "").trim();
+    return [{
+      kind,
+      name,
+      ...(description ? { description } : {}),
+      ...(argumentHint ? { argumentHint } : {}),
+    }];
+  });
+}
+
 // ============================================================
 // OpenCode Agent - communicates with opencode serve via HTTP/SSE
 // ============================================================
@@ -272,6 +312,7 @@ export class OpenCodeAgent {
   private activeClientMessageId: string | null = null;
   private activeAssistantMessageId: string | null = null;
   private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
+  private actionKeys = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
@@ -412,6 +453,7 @@ export class OpenCodeAgent {
       return;
     }
 
+    const selectedAction = options?.action ? await this.resolveAction(options.action) : null;
     this.emitEvent({ type: "stream_start", role: "assistant" });
 
     try {
@@ -444,7 +486,20 @@ export class OpenCodeAgent {
         const variant = selectThinkingVariant(this.currentThinkingLevel, variants);
         if (variant) body.variant = variant;
       }
-      await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
+      if (selectedAction) {
+        const commandParts = parts.filter((part) => part.type === "file");
+        const commandBody: OpenCodeCommandBody = {
+          command: selectedAction.name,
+          arguments: message,
+          ...(commandParts.length > 0 ? { parts: commandParts } : {}),
+          ...(body.agent ? { agent: body.agent } : {}),
+          ...(body.model ? { model: body.model } : {}),
+          ...(body.variant ? { variant: body.variant } : {}),
+        };
+        await this.httpPost(`/session/${this.sessionId}/command`, commandBody);
+      } else {
+        await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
+      }
     } catch (e) {
       console.error("[opencode] sendMessage failed:", e);
       this.emitEvent({ type: "stream_delta", delta: `\n\n发送失败: ${e}` });
@@ -455,6 +510,35 @@ export class OpenCodeAgent {
       this.pendingUIRequests.clear();
       this.clearActiveTurn();
     }
+  }
+
+  async listActions(_options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
+    const [skillsResult, commandsResult] = await Promise.allSettled([
+      this.httpGet("/skill"),
+      this.httpGet("/command"),
+    ]);
+    const actions = [
+      ...(skillsResult.status === "fulfilled" ? normalizeOpenCodeCatalog(skillsResult.value, "skill") : []),
+      ...(commandsResult.status === "fulfilled" ? normalizeOpenCodeCatalog(commandsResult.value, "command") : []),
+    ];
+    if (skillsResult.status === "rejected" && commandsResult.status === "rejected") {
+      throw skillsResult.reason instanceof Error ? skillsResult.reason : new Error(String(skillsResult.reason));
+    }
+    const unique = actions.filter((entry, index) =>
+      actions.findIndex((candidate) => candidate.kind === entry.kind && candidate.name === entry.name) === index
+    );
+    this.actionKeys = new Set(unique.map((entry) => `${entry.kind}:${entry.name}`));
+    return unique;
+  }
+
+  private async resolveAction(action: AgentActionInvocation): Promise<AgentActionInvocation> {
+    const kind = action.kind === "skill" || action.kind === "command" ? action.kind : null;
+    const name = String(action.name || "").trim().replace(/^\//, "");
+    if (!kind || !name) throw new Error("ACTION_NOT_SUPPORTED: Invalid OpenCode action");
+    const key = `${kind}:${name}`;
+    await this.listActions();
+    if (!this.actionKeys.has(key)) throw new Error(`ACTION_NOT_FOUND: ${name}`);
+    return { kind, name };
   }
 
   isIdle(): boolean {
@@ -921,6 +1005,7 @@ export class OpenCodeAgent {
     if (this.models.length > 0) return this.models;
 
     this.modelVariants.clear();
+    this.actionKeys.clear();
     try {
       const result = asRecord(await this.httpGet("/config/providers"));
       if (Array.isArray(result.providers)) {

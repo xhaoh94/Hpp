@@ -62,6 +62,37 @@ describe("official agent plugins", () => {
     expect(plugins[0]).toMatchObject({ minHppVersion: "0.0.1", compatible: true });
   });
 
+  it("preserves provider authentication and thinking declarations", () => {
+    const plugins = validateOfficialPluginCatalog({
+      ...validCatalog,
+      plugins: [{
+        ...validCatalog.plugins[0],
+        capabilities: {
+          ...validCatalog.plugins[0].capabilities,
+          configuration: {
+            ...validCatalog.plugins[0].capabilities.configuration,
+            authModes: [
+              { id: "bearer", label: "Bearer" },
+              { id: "x-api-key", label: "X-Api-Key" },
+            ],
+            defaultAuthMode: "x-api-key",
+            modelDefaults: {
+              reasoning: true,
+              imageInput: true,
+              supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"],
+            },
+          },
+        },
+      }],
+    }, "0.1.5");
+
+    expect(plugins[0].capabilities.configuration).toMatchObject({
+      defaultAuthMode: "x-api-key",
+      authModes: [{ id: "bearer" }, { id: "x-api-key" }],
+      modelDefaults: { supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"] },
+    });
+  });
+
   it("marks plugins requiring a newer Hpp version as incompatible", () => {
     const plugins = validateOfficialPluginCatalog({
       ...validCatalog,

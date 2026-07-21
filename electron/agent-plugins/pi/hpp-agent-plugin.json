@@ -16,6 +16,7 @@
     "planMode": "prompt",
     "guidance": true,
     "fork": true,
+    "actions": true,
     "configuration": {
       "type": "provider",
       "storage": "plugin",

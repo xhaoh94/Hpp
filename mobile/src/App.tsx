@@ -10,6 +10,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { BarcodeFormat, BarcodeScanner } from "@capacitor-mlkit/barcode-scanning";
@@ -19,12 +20,15 @@ import {
   ArrowUp,
   Bot,
   Camera,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
   CornerDownRight,
+  FileText,
   FolderGit2,
   GitBranch,
+  GripVertical,
   History,
   Link2,
   Lightbulb,
@@ -39,9 +43,11 @@ import {
   QrCode,
   RefreshCw,
   RotateCcw,
+  Search,
   Square,
   Smartphone,
   Trash2,
+  WandSparkles,
   Wifi,
   WifiOff,
   X,
@@ -52,6 +58,8 @@ import remarkGfm from "remark-gfm";
 import type {
   RemoteCatalogSnapshot,
   RemoteAgent,
+  RemoteAgentAction,
+  RemoteAgentActionInvocation,
   RemoteChatMessage,
   RemoteInteraction,
   RemoteModel,
@@ -65,11 +73,12 @@ import type {
 import { MAX_REMOTE_IMAGES, MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { formatModelSwitchToastText } from "@shared/model-switch";
 import {
-  THINKING_LEVELS,
+  getModelThinkingLevels,
   getThinkingLevelLabel,
   groupModelsByProvider,
   includeCurrentModel,
 } from "@shared/models";
+import { getAgentActionDisplayDescription } from "@shared/agent-actions";
 import {
   getProcessGroupState,
   getVisibleProcessEntries,
@@ -94,14 +103,17 @@ import {
   type HostAvailability,
 } from "./remote-client";
 import {
+  clearHostSessionDrafts,
   clearSessionDraft,
   loadLastPairedHostId,
   loadPairedHosts,
   loadSessionDraft,
+  pruneSessionDrafts,
   saveLastPairedHostId,
   savePairedHosts,
   saveSessionDraft,
   withPairedHostMetadata,
+  type MobileSessionDraft,
   type PairedHost,
 } from "./storage";
 import { copyText, createClientId } from "./web-platform";
@@ -130,6 +142,7 @@ type SessionPage = {
 };
 
 type PairingMode = "closed" | "manual";
+type ComposerDraftValue = Pick<MobileSessionDraft, "text" | "referenceSessionIds" | "action">;
 type AndroidUpdateStage =
   | "idle"
   | "checking"
@@ -226,9 +239,14 @@ const DEMO_CONFIG: RemoteSessionConfig = {
   ],
 };
 const DEMO_AGENTS: RemoteAgent[] = [
-  { id: "codex", name: "Codex", description: "OpenAI Codex agent", runtime: "cli", requiresProviderActivation: true, supportsGuidance: true },
+  { id: "codex", name: "Codex", description: "OpenAI Codex agent", runtime: "cli", requiresProviderActivation: true, supportsGuidance: true, supportsActions: true },
   { id: "pi", name: "Pi", description: "Pi coding agent", runtime: "sdk", supportsGuidance: true },
   { id: "opencode", name: "OpenCode", description: "OpenCode agent", runtime: "cli" },
+];
+const DEMO_ACTIONS: RemoteAgentAction[] = [
+  { kind: "skill", name: "frontend-design", description: "优化前端布局、视觉细节和交互体验。" },
+  { kind: "skill", name: "review", description: "检查当前改动中的错误、风险和缺失测试。" },
+  { kind: "command", name: "test", description: "运行当前项目的测试。", argumentHint: "测试名称（可选）" },
 ];
 
 async function requestAndroidUpdateJson(url: string) {
@@ -405,15 +423,20 @@ function MobileModelPicker({
 
 function MobileThinkingPicker({
   value,
+  levels,
   disabled,
   onSelect,
 }: {
   value: string;
+  levels: ReturnType<typeof getModelThinkingLevels>;
   disabled: boolean;
   onSelect: (level: string) => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
+  const currentLevel = levels.find((level) => level.id === value)
+    || levels.find((level) => level.id === "medium")
+    || levels[0];
 
   useEffect(() => {
     if (!open) return;
@@ -446,12 +469,12 @@ function MobileThinkingPicker({
         onClick={() => setOpen((current) => !current)}
       >
         <Lightbulb size={14} />
-        <span>{getThinkingLevelLabel(value)}</span>
+        <span>{currentLevel?.label || getThinkingLevelLabel(value)}</span>
         <ChevronDown size={10} />
       </button>
       {open && (
-        <div className="thinking-picker-menu" role="listbox" aria-label="鎬濊€冪瓑绾?">
-          {THINKING_LEVELS.map((level) => (
+        <div className="thinking-picker-menu" role="listbox" aria-label="思考等级">
+          {levels.map((level) => (
             <button
               type="button"
               role="option"
@@ -468,6 +491,103 @@ function MobileThinkingPicker({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+type AgentActionSheetProps = {
+  agentId?: string;
+  actions: RemoteAgentAction[];
+  selectedAction?: RemoteAgentActionInvocation;
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+  onRefresh: () => void;
+  onSelect: (action: RemoteAgentActionInvocation) => void;
+};
+
+function AgentActionSheet({
+  agentId,
+  actions,
+  selectedAction,
+  loading,
+  error,
+  onClose,
+  onRefresh,
+  onSelect,
+}: AgentActionSheetProps) {
+  const [search, setSearch] = useState("");
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleActions = actions.filter((entry) => {
+    const description = getAgentActionDisplayDescription(agentId, entry);
+    return !normalizedSearch
+      || `${entry.name} ${description} ${entry.description || ""}`.toLowerCase().includes(normalizedSearch);
+  });
+  const skills = visibleActions.filter((entry) => entry.kind === "skill");
+  const commands = visibleActions.filter((entry) => entry.kind === "command");
+
+  const renderGroup = (label: string, entries: RemoteAgentAction[], divided = false) => entries.length > 0 && (
+    <>
+      <div className={`action-sheet-group${divided ? " divided" : ""}`}>{label}</div>
+      {entries.map((entry) => {
+        const active = selectedAction?.kind === entry.kind && selectedAction.name === entry.name;
+        const description = getAgentActionDisplayDescription(agentId, entry);
+        return (
+          <button
+            type="button"
+            className={`action-sheet-item${active ? " active" : ""}`}
+            key={`${entry.kind}:${entry.name}`}
+            onClick={() => onSelect({ kind: entry.kind, name: entry.name })}
+          >
+            {entry.kind === "skill" ? <WandSparkles size={16} /> : <span className="action-sheet-command">/</span>}
+            <span>
+              <strong>{entry.name}</strong>
+              {description && <small>{description}</small>}
+            </span>
+          </button>
+        );
+      })}
+    </>
+  );
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <section
+        className="bottom-sheet action-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="选择技能或命令"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="sheet-handle" />
+        <div className="sheet-title">
+          <div><h2>技能与命令</h2><p>选择后可继续输入参数或说明</p></div>
+          <div className="action-sheet-title-actions">
+            <button type="button" className="icon-button" onClick={onRefresh} disabled={loading} title="刷新技能列表" aria-label="刷新技能列表">
+              <RefreshCw className={loading ? "spin" : undefined} size={17} />
+            </button>
+            <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={19} /></button>
+          </div>
+        </div>
+        <label className="action-sheet-search">
+          <Search size={14} />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索技能或命令" autoFocus />
+        </label>
+        <div className="action-sheet-list">
+          {loading && actions.length === 0 ? (
+            <div className="action-sheet-state"><LoaderCircle className="spin" size={16} />正在读取技能</div>
+          ) : error ? (
+            <div className="action-sheet-state error">{error}</div>
+          ) : visibleActions.length === 0 ? (
+            <div className="action-sheet-state">{normalizedSearch ? "没有匹配的技能或命令" : "当前 Agent 没有可用的技能或命令"}</div>
+          ) : (
+            <>
+              {renderGroup("技能", skills)}
+              {renderGroup("命令", commands, skills.length > 0)}
+            </>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
@@ -574,12 +694,14 @@ function MessageItem({
   actionsDisabled,
   forking,
   onEdit,
+  onCopy,
   onFork,
 }: {
   message: RemoteChatMessage;
   actionsDisabled: boolean;
   forking: boolean;
   onEdit: (content: string) => void;
+  onCopy: (content: string) => void;
   onFork: (message: RemoteChatMessage) => void;
 }) {
   const assistantActionsReady = areAssistantMessageActionsVisible(message);
@@ -612,6 +734,13 @@ function MessageItem({
         </div>
       )}
       <MessageProcess message={message} />
+      {message.action && (
+        <div className={`message-action-label${message.content ? " with-content" : ""}`}>
+          <WandSparkles size={13} />
+          <span>{message.action.kind === "skill" ? "技能" : "命令"}</span>
+          <strong>{message.action.name}</strong>
+        </div>
+      )}
       {message.content && (
         <div className="message-content">
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{message.content}</ReactMarkdown>
@@ -636,7 +765,7 @@ function MessageItem({
               <Pencil size={15} />
             </button>
           )}
-          <button type="button" onClick={() => void copyText(message.content)} disabled={!message.content} title="复制" aria-label="复制">
+          <button type="button" onClick={() => onCopy(message.content)} disabled={!message.content} title="复制" aria-label="复制">
             <Copy size={15} />
           </button>
           {assistantActionsReady && (
@@ -898,6 +1027,381 @@ function AndroidUpdateDialog({
   );
 }
 
+type QueueEditDraft = {
+  content: string;
+  images: NonNullable<RemoteQueuedMessage["images"]>;
+  sessionReferences: NonNullable<RemoteQueuedMessage["sessionReferences"]>;
+  attachments: NonNullable<RemoteQueuedMessage["attachments"]>;
+  action: RemoteQueuedMessage["action"];
+};
+
+type QueueEditDialogProps = {
+  item: RemoteQueuedMessage;
+  referenceCandidates: RemoteSession[];
+  onClose: () => void;
+  onSave: (draft: QueueEditDraft) => Promise<void>;
+};
+
+function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEditDialogProps) {
+  const [draft, setDraft] = useState<QueueEditDraft>({
+    content: item.editableContent ?? item.displayContent,
+    images: item.images || [],
+    sessionReferences: item.sessionReferences || [],
+    attachments: item.attachments || [],
+    action: item.action,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
+  const [addMenuPosition, setAddMenuPosition] = useState<{
+    left: number;
+    width: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
+  const addMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setAddMenuOpen(false);
+      setReferencePickerOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => document.removeEventListener("keydown", closeOnEscape, true);
+  }, [addMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!addMenuOpen) {
+      setAddMenuPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const anchor = addMenuRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const width = referencePickerOpen ? Math.min(390, window.innerWidth - 28) : 160;
+      const estimatedHeight = referencePickerOpen ? 260 : 92;
+      const opensUpward = anchor.top >= estimatedHeight + 14;
+      setAddMenuPosition({
+        left: Math.max(14, Math.min(anchor.left, window.innerWidth - width - 14)),
+        width,
+        ...(opensUpward
+          ? { bottom: Math.max(14, window.innerHeight - anchor.top + 7) }
+          : { top: Math.max(14, Math.min(window.innerHeight - estimatedHeight - 14, anchor.bottom + 7)) }),
+      });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [addMenuOpen, referencePickerOpen]);
+
+  const addImage = useCallback(async () => {
+    setAddMenuOpen(false);
+    setReferencePickerOpen(false);
+    if (draft.images.length >= MAX_REMOTE_IMAGES) {
+      setError(`最多添加 ${MAX_REMOTE_IMAGES} 张图片`);
+      return;
+    }
+    try {
+      const image = await chooseRemoteImage();
+      setDraft((current) => ({
+        ...current,
+        images: [...current.images, {
+          id: image.id,
+          name: image.name,
+          mimeType: image.mimeType,
+          src: image.preview,
+        }].slice(0, MAX_REMOTE_IMAGES),
+      }));
+      setError("");
+    } catch (imageError) {
+      if (!isImageSelectionCancelled(imageError)) setError(getImageErrorMessage(imageError));
+    }
+  }, [draft.images.length]);
+
+  const toggleReference = useCallback((session: RemoteSession) => {
+    setDraft((current) => {
+      const exists = current.sessionReferences.some((reference) => reference.sourceSessionId === session.id);
+      if (!exists && current.sessionReferences.length >= MAX_REMOTE_SESSION_REFERENCES) return current;
+      return {
+        ...current,
+        sessionReferences: exists
+          ? current.sessionReferences.filter((reference) => reference.sourceSessionId !== session.id)
+          : [...current.sessionReferences, { sourceSessionId: session.id, sourceTitle: session.title }],
+      };
+    });
+  }, []);
+
+  const hasContent = !!draft.content.trim() || draft.images.length > 0 || draft.sessionReferences.length > 0
+    || draft.attachments.length > 0 || !!draft.action;
+  const submit = useCallback(async () => {
+    if (!hasContent || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onSave(draft);
+      onClose();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setSaving(false);
+    }
+  }, [draft, hasContent, onClose, onSave, saving]);
+
+  return (
+    <div className="sheet-backdrop queue-edit-backdrop" onPointerDown={onClose}>
+      <section
+        className="queue-edit-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="queue-edit-title"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <header className="sheet-title queue-edit-title">
+          <div><h2 id="queue-edit-title">编辑队列消息</h2><p>保存后会按当前附件重新生成发送内容</p></div>
+          <button type="button" className="icon-button" onClick={onClose} disabled={saving} title="关闭"><X size={18} /></button>
+        </header>
+        <div className="queue-edit-body">
+          {(draft.action || draft.images.length > 0 || draft.sessionReferences.length > 0 || draft.attachments.length > 0) && (
+            <div className="queue-edit-contexts">
+              {draft.action && (
+                <div className="queue-edit-chip action">
+                  <Bot size={13} />
+                  <span>{draft.action.kind === "skill" ? "技能" : "命令"} · {draft.action.name}</span>
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, action: undefined }))} title="移除"><X size={12} /></button>
+                </div>
+              )}
+              {draft.images.map((image) => (
+                <div className="queue-edit-chip image" key={image.id}>
+                  <img src={image.src} alt="" />
+                  <span>{image.name}</span>
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, images: current.images.filter((entry) => entry.id !== image.id) }))} title="移除图片"><X size={12} /></button>
+                </div>
+              ))}
+              {draft.attachments.map((attachment) => (
+                <div className="queue-edit-chip" key={attachment.id}>
+                  <FileText size={13} />
+                  <span>{attachment.name}</span>
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, attachments: current.attachments.filter((entry) => entry.id !== attachment.id) }))} title="移除文件"><X size={12} /></button>
+                </div>
+              ))}
+              {draft.sessionReferences.map((reference) => (
+                <div className="queue-edit-chip reference" key={reference.sourceSessionId}>
+                  <Link2 size={13} />
+                  <span>{reference.sourceTitle}</span>
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))} title="移除引用"><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="queue-edit-composer">
+            <textarea
+              value={draft.content}
+              autoFocus
+              rows={5}
+              placeholder={draft.action ? "添加技能参数或说明" : "编辑消息内容"}
+              onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") onClose();
+                if (event.key === "Enter" && event.ctrlKey) {
+                  event.preventDefault();
+                  void submit();
+                }
+              }}
+            />
+          </div>
+          {error && <div className="queue-edit-error" role="alert">{error}</div>}
+        </div>
+        <footer className="queue-edit-actions">
+          <div className="queue-edit-add-control" ref={addMenuRef}>
+            <button
+              type="button"
+              className={`queue-edit-add-button${addMenuOpen ? " active" : ""}`}
+              aria-label="添加图片或引用"
+              aria-expanded={addMenuOpen}
+              title="添加图片或引用"
+              onClick={() => {
+                setAddMenuOpen((open) => {
+                  if (open) setReferencePickerOpen(false);
+                  return !open;
+                });
+              }}
+            >
+              <Plus size={16} />
+            </button>
+            {addMenuOpen && addMenuPosition && createPortal(
+              <>
+                <div
+                  className="queue-edit-add-backdrop"
+                  aria-hidden="true"
+                  onPointerDown={() => {
+                    setAddMenuOpen(false);
+                    setReferencePickerOpen(false);
+                  }}
+                />
+                <div
+                  className={`queue-edit-add-menu${referencePickerOpen ? " references" : ""}`}
+                  role="menu"
+                  style={addMenuPosition}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  {referencePickerOpen ? (
+                    <>
+                      <div className="queue-edit-add-menu-header">
+                        <button type="button" onClick={() => setReferencePickerOpen(false)} title="返回"><ArrowLeft size={15} /></button>
+                        <span>引用会话</span>
+                        <small>{draft.sessionReferences.length > 0 ? `已选 ${draft.sessionReferences.length}` : ""}</small>
+                      </div>
+                      <div className="queue-edit-reference-list">
+                        {referenceCandidates.length === 0 ? (
+                          <div className="queue-edit-reference-empty">暂无可引用的会话</div>
+                        ) : referenceCandidates.map((candidate) => {
+                          const checked = draft.sessionReferences.some((reference) => reference.sourceSessionId === candidate.id);
+                          return (
+                            <button type="button" className={checked ? "selected" : ""} key={candidate.id} onClick={() => toggleReference(candidate)}>
+                              <Link2 size={14} />
+                              <span>{candidate.title}</span>
+                              {checked && <Check size={14} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" role="menuitem" disabled={draft.images.length >= MAX_REMOTE_IMAGES} onClick={() => void addImage()}><Camera size={15} /><span>图片</span></button>
+                      <button type="button" role="menuitem" disabled={referenceCandidates.length === 0} onClick={() => setReferencePickerOpen(true)}><Link2 size={15} /><span>引用会话</span></button>
+                    </>
+                  )}
+                </div>
+              </>,
+              document.body,
+            )}
+          </div>
+          <div className="queue-edit-action-buttons">
+            <button type="button" className="secondary-command" onClick={onClose} disabled={saving}>取消</button>
+            <button type="button" className="primary-command" onClick={() => void submit()} disabled={!hasContent || saving}>{saving ? "保存中..." : "保存修改"}</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+type QueuePanelProps = {
+  items: RemoteQueuedMessage[];
+  disabled: boolean;
+  canGuide: boolean;
+  currentSessionRunning: boolean;
+  onEdit: (item: RemoteQueuedMessage) => void;
+  onGuide: (item: RemoteQueuedMessage) => void;
+  onReorder: (itemId: string, toIndex: number) => void;
+  onRemove: (item: RemoteQueuedMessage) => void;
+};
+
+function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, onGuide, onReorder, onRemove }: QueuePanelProps) {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const draggingIdRef = useRef<string | null>(null);
+  const dropIndexRef = useRef<number | null>(null);
+
+  const finishDragging = () => {
+    draggingIdRef.current = null;
+    dropIndexRef.current = null;
+    setDraggingId(null);
+    setDropIndex(null);
+  };
+  const startDragging = (event: ReactPointerEvent<HTMLButtonElement>, item: RemoteQueuedMessage, index: number) => {
+    if (disabled || item.status === "sending") return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    draggingIdRef.current = item.id;
+    dropIndexRef.current = index;
+    setDraggingId(item.id);
+    setDropIndex(index);
+  };
+  const moveDragging = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!draggingIdRef.current) return;
+    event.preventDefault();
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-queue-id]");
+    if (!target) return;
+    const index = items.findIndex((item) => item.id === target.dataset.queueId);
+    if (index < 0 || dropIndexRef.current === index) return;
+    dropIndexRef.current = index;
+    setDropIndex(index);
+  };
+  const stopDragging = (event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) => {
+    const itemId = draggingIdRef.current;
+    const targetIndex = dropIndexRef.current;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    finishDragging();
+    if (commit && itemId && targetIndex !== null) onReorder(itemId, targetIndex);
+  };
+
+  return (
+    <div className="queue-strip">
+      <div className="queue-header"><span>发送队列</span><small>{items.length}</small></div>
+      <div className="queue-list">
+        {items.map((item, index) => (
+          <div
+            className={`queue-item ${item.status} ${draggingId === item.id ? "dragging" : ""} ${dropIndex === index && draggingId !== item.id ? "drop-target" : ""}`}
+            data-queue-id={item.id}
+            key={item.id}
+          >
+            <button
+              type="button"
+              className="queue-drag"
+              disabled={disabled || item.status === "sending"}
+              title="拖动调整顺序"
+              aria-label={`拖动第 ${index + 1} 条队列消息`}
+              onPointerDown={(event) => startDragging(event, item, index)}
+              onPointerMove={moveDragging}
+              onPointerUp={(event) => stopDragging(event, true)}
+              onPointerCancel={(event) => stopDragging(event, false)}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                event.preventDefault();
+                onReorder(item.id, index + (event.key === "ArrowUp" ? -1 : 1));
+              }}
+            >
+              <GripVertical size={13} />
+              <span>{index + 1}</span>
+            </button>
+            <div className="queue-main">
+              {item.action && <span className="queue-action-badge">{item.action.kind === "skill" ? "技能" : "命令"} · {item.action.name}</span>}
+              <span>{item.displayContent || (item.sessionReferences?.length ? `引用会话：${item.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "空消息")}</span>
+              {item.error && <small>{item.error}</small>}
+            </div>
+            <div className="queue-controls">
+              <button type="button" className="queue-icon-button" disabled={disabled || item.status === "sending"} onClick={() => onEdit(item)} title="编辑" aria-label="编辑队列消息"><Pencil size={13} /></button>
+              {canGuide && !item.action && (
+                <button
+                  type="button"
+                  className="queue-guide"
+                  disabled={disabled || !currentSessionRunning || item.status === "sending"}
+                  onClick={() => onGuide(item)}
+                  title={currentSessionRunning ? "立即作为引导发送" : "Agent 运行中才能引导"}
+                >
+                  {item.status === "sending" ? <LoaderCircle className="spin" size={13} /> : <CornerDownRight size={13} />}
+                  <span>引导</span>
+                </button>
+              )}
+              <button type="button" className="queue-icon-button queue-remove" disabled={disabled || item.status === "sending"} onClick={() => onRemove(item)} title="移出队列" aria-label="移出队列"><Trash2 size={14} /></button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const demoVariant = import.meta.env.DEV ? new URLSearchParams(window.location.search).get("demo") : null;
   const demoMode = demoVariant !== null;
@@ -913,6 +1417,7 @@ export default function App() {
   const [messages, setMessages] = useState<Record<string, RemoteChatMessage[]>>({});
   const [nextBefore, setNextBefore] = useState<Record<string, number | null>>({});
   const [queues, setQueues] = useState<Record<string, RemoteQueuedMessage[]>>({});
+  const [editingQueueItem, setEditingQueueItem] = useState<RemoteQueuedMessage | null>(null);
   const [interactions, setInteractions] = useState<Record<string, RemoteInteraction | null>>({});
   const [configs, setConfigs] = useState<Record<string, RemoteSessionConfig>>({});
   const [loadingSession, setLoadingSession] = useState(false);
@@ -921,8 +1426,13 @@ export default function App() {
   const [composerComposition, setComposerComposition] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingRemoteImage[]>([]);
   const [pendingReferenceIds, setPendingReferenceIds] = useState<string[]>([]);
+  const [pendingAction, setPendingAction] = useState<RemoteAgentActionInvocation | undefined>();
   const [composerAddMenuOpen, setComposerAddMenuOpen] = useState(false);
   const [referenceSheetOpen, setReferenceSheetOpen] = useState(false);
+  const [actionSheetOpen, setActionSheetOpen] = useState(false);
+  const [actionCatalog, setActionCatalog] = useState<RemoteAgentAction[]>([]);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState("");
   const [pairingMode, setPairingMode] = useState<PairingMode>("closed");
   const [pairingLink, setPairingLink] = useState("");
   const [pairingBusy, setPairingBusy] = useState(false);
@@ -950,11 +1460,15 @@ export default function App() {
   const [updateError, setUpdateError] = useState("");
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const clientRef = useRef<RemoteClient | null>(null);
+  const activeHostRef = useRef<PairedHost | null>(null);
+  const hostsRef = useRef<PairedHost[]>([]);
   const selectedSessionRef = useRef<string | null>(null);
   const projectsRef = useRef<RemoteProject[]>([]);
   const agentsRef = useRef<RemoteAgent[]>([]);
   const configsRef = useRef<Record<string, RemoteSessionConfig>>({});
   const revisionsRef = useRef<Record<string, number>>({});
+  const staleSessionIdsRef = useRef(new Set<string>());
+  const loadingSessionIdsRef = useRef(new Set<string>());
   const hostEpochRef = useRef<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const composerAddMenuRef = useRef<HTMLDivElement | null>(null);
@@ -966,7 +1480,7 @@ export default function App() {
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftIdentityRef = useRef<{ hostId: string; sessionId: string; key: string } | null>(null);
   const loadedDraftKeyRef = useRef<string | null>(null);
-  const draftValueRef = useRef({ text: "", referenceSessionIds: [] as string[] });
+  const draftValueRef = useRef<ComposerDraftValue>({ text: "", referenceSessionIds: [] });
   const autoConnectAttemptedRef = useRef(false);
   const updateMetadataRef = useRef<AndroidUpdateMetadata | null>(null);
   const updateCheckInFlightRef = useRef(false);
@@ -978,11 +1492,13 @@ export default function App() {
   );
 
   selectedSessionRef.current = selectedSessionId;
+  activeHostRef.current = activeHost;
+  hostsRef.current = hosts;
   projectsRef.current = projects;
   agentsRef.current = agents;
   configsRef.current = configs;
   updateStageRef.current = updateStage;
-  draftValueRef.current = { text: composer, referenceSessionIds: pendingReferenceIds };
+  draftValueRef.current = { text: composer, referenceSessionIds: pendingReferenceIds, action: pendingAction };
 
   const flushCurrentDraft = useCallback(() => {
     if (draftSaveTimerRef.current) {
@@ -1315,21 +1831,68 @@ export default function App() {
   }, [syncAndroidUpdateDownload, updateStage]);
 
   const updateHosts = useCallback(async (next: PairedHost[]) => {
+    const retainedHostIds = new Set(next.map((host) => host.hostId));
+    await Promise.all(hostsRef.current
+      .filter((host) => !retainedHostIds.has(host.hostId))
+      .map((host) => clearHostSessionDrafts(host.hostId)));
+    hostsRef.current = next;
     setHosts(next);
     await savePairedHosts(next);
+  }, []);
+
+  const applyCatalog = useCallback((nextProjects: RemoteProject[], nextAgents: RemoteAgent[]) => {
+    const validSessionIds = new Set(nextProjects.flatMap((project) => project.sessions.map((session) => session.id)));
+    const retainSessions = <T,>(record: Record<string, T>) => Object.fromEntries(
+      Object.entries(record).filter(([sessionId]) => validSessionIds.has(sessionId))
+    );
+    const selectedSessionId = selectedSessionRef.current;
+    if (selectedSessionId && !validSessionIds.has(selectedSessionId)) {
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+      draftIdentityRef.current = null;
+      loadedDraftKeyRef.current = null;
+      draftValueRef.current = { text: "", referenceSessionIds: [] };
+      selectedSessionRef.current = null;
+      setSelectedSessionId(null);
+    }
+    setPendingReferenceIds((current) => current.filter((sessionId) => validSessionIds.has(sessionId)));
+    setMessages((current) => retainSessions(current));
+    setNextBefore((current) => retainSessions(current));
+    setQueues((current) => retainSessions(current));
+    setInteractions((current) => retainSessions(current));
+    setConfigs((current) => {
+      const next = retainSessions(current);
+      configsRef.current = next;
+      return next;
+    });
+    revisionsRef.current = retainSessions(revisionsRef.current);
+    staleSessionIdsRef.current = new Set([...staleSessionIdsRef.current].filter((sessionId) => validSessionIds.has(sessionId)));
+    loadingSessionIdsRef.current = new Set([...loadingSessionIdsRef.current].filter((sessionId) => validSessionIds.has(sessionId)));
+    projectsRef.current = nextProjects;
+    agentsRef.current = nextAgents;
+    setProjects(nextProjects);
+    setAgents(nextAgents);
+    const hostId = activeHostRef.current?.hostId;
+    if (hostId) {
+      void pruneSessionDrafts(hostId, validSessionIds)
+        .catch((error) => console.error("[mobile-draft] cleanup failed", error));
+    }
   }, []);
 
   const loadCatalog = useCallback(async (client = clientRef.current) => {
     if (!client) return;
     const snapshot = await client.request<RemoteCatalogSnapshot>("catalog.get");
     hostEpochRef.current = snapshot.hostEpoch;
-    setProjects(snapshot.projects);
-    setAgents(snapshot.agents || []);
-  }, []);
+    applyCatalog(snapshot.projects, snapshot.agents || []);
+  }, [applyCatalog]);
 
   const loadSession = useCallback(async (sessionId: string, replace = true, before?: number | null) => {
     const client = clientRef.current;
     if (!client) return;
+    if (replace && loadingSessionIdsRef.current.has(sessionId)) return;
+    if (replace) loadingSessionIdsRef.current.add(sessionId);
     setLoadingSession(true);
     try {
       const page = await client.request<SessionPage>("session.get", {
@@ -1338,6 +1901,7 @@ export default function App() {
         limit: 50,
       });
       revisionsRef.current[sessionId] = page.revision;
+      staleSessionIdsRef.current.delete(sessionId);
       setMessages((current) => ({
         ...current,
         [sessionId]: replace ? page.messages : [...page.messages, ...(current[sessionId] || [])],
@@ -1354,28 +1918,59 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (replace) loadingSessionIdsRef.current.delete(sessionId);
       setLoadingSession(false);
     }
   }, []);
 
+  const copyMessage = useCallback((content: string) => {
+    void copyText(content).then(() => {
+      showFloatingToast("已复制");
+    }).catch(() => {
+      showFloatingToast("复制失败");
+    });
+  }, [showFloatingToast]);
+
   const handleRemoteEvent = useCallback((name: string, payload: unknown, revision?: number, hostEpoch?: string) => {
     if (hostEpochRef.current && hostEpoch && hostEpochRef.current !== hostEpoch) {
       hostEpochRef.current = hostEpoch;
+      staleSessionIdsRef.current = new Set([
+        ...Object.keys(configsRef.current),
+        ...Object.keys(revisionsRef.current),
+      ]);
       revisionsRef.current = {};
       setMessages({});
-      void loadCatalog();
+      setQueues({});
+      setInteractions({});
+      setConfigs({});
+      const selectedSessionId = selectedSessionRef.current;
+      void loadCatalog().then(() => {
+        if (selectedSessionId) void loadSession(selectedSessionId);
+      });
+      return;
     }
     const data = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
     if (name === "catalog.updated") {
-      if (Array.isArray(data.projects)) setProjects(data.projects as RemoteProject[]);
-      if (Array.isArray(data.agents)) setAgents(data.agents as RemoteAgent[]);
+      if (Array.isArray(data.projects)) {
+        applyCatalog(
+          data.projects as RemoteProject[],
+          Array.isArray(data.agents) ? data.agents as RemoteAgent[] : agentsRef.current,
+        );
+      } else if (Array.isArray(data.agents)) {
+        agentsRef.current = data.agents as RemoteAgent[];
+        setAgents(data.agents as RemoteAgent[]);
+      }
       return;
     }
     const sessionId = typeof data.sessionId === "string" ? data.sessionId : "";
     if (!sessionId) return;
+    if (staleSessionIdsRef.current.has(sessionId)) {
+      if (selectedSessionRef.current === sessionId) void loadSession(sessionId);
+      return;
+    }
     const previousRevision = revisionsRef.current[sessionId] || 0;
     if (revision && previousRevision && revision !== previousRevision + 1) {
-      revisionsRef.current[sessionId] = revision;
+      staleSessionIdsRef.current.add(sessionId);
       if (selectedSessionRef.current === sessionId) void loadSession(sessionId);
       return;
     }
@@ -1425,7 +2020,7 @@ export default function App() {
         }).catch(() => undefined);
       }
     }
-  }, [loadCatalog, loadSession, showFloatingToast]);
+  }, [applyCatalog, loadCatalog, loadSession, showFloatingToast]);
 
   const connectHost = useCallback((host: PairedHost) => {
     autoConnectAttemptedRef.current = true;
@@ -1435,16 +2030,26 @@ export default function App() {
     });
     clientRef.current?.disconnect();
     setError("");
+    activeHostRef.current = host;
     setActiveHost(host);
     setProjects([]);
     setAgents([]);
     setSelectedSessionId(null);
     setHistoryOpen(false);
     setMessages({});
+    setNextBefore({});
+    setQueues({});
+    setInteractions({});
+    setConfigs({});
+    revisionsRef.current = {};
+    staleSessionIdsRef.current.clear();
+    loadingSessionIdsRef.current.clear();
+    hostEpochRef.current = null;
     const client = new RemoteClient(host);
     clientRef.current = client;
     client.onHostUpdated((nextHost) => {
       if (clientRef.current !== client) return;
+      activeHostRef.current = nextHost;
       setActiveHost(nextHost);
       setHosts((current) => {
         const next = current.map((item) => item.id === nextHost.id ? nextHost : item);
@@ -1457,11 +2062,23 @@ export default function App() {
     client.onState((state) => {
       if (clientRef.current !== client) return;
       setConnectionState(state);
-      if (state === "connected") void loadCatalog(client).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+      if (state === "disconnected") {
+        staleSessionIdsRef.current = new Set([
+          ...staleSessionIdsRef.current,
+          ...Object.keys(revisionsRef.current),
+          ...Object.keys(configsRef.current),
+        ]);
+      }
+      if (state === "connected") {
+        void loadCatalog(client).then(() => {
+          const sessionId = selectedSessionRef.current;
+          if (sessionId) void loadSession(sessionId);
+        }).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+      }
     });
     client.onEvent(handleRemoteEvent);
     void client.connect();
-  }, [handleRemoteEvent, loadCatalog]);
+  }, [handleRemoteEvent, loadCatalog, loadSession]);
 
   const openSavedHost = useCallback((host: PairedHost, availability: HostAvailability) => {
     if (availability !== "online") {
@@ -1612,7 +2229,7 @@ export default function App() {
     setSelectedSessionId(sessionId);
     setDrawerOpen(false);
     setHistoryOpen(false);
-    if (!messages[sessionId]) void loadSession(sessionId);
+    if (!messages[sessionId] || staleSessionIdsRef.current.has(sessionId)) void loadSession(sessionId);
   }, [loadSession, messages]);
 
   const selected = useMemo(() => findSession(projects, selectedSessionId), [projects, selectedSessionId]);
@@ -1638,6 +2255,10 @@ export default function App() {
   const selectedModels = useMemo(() => {
     return includeCurrentModel(selectedConfig?.availableModels || [], selectedConfig?.model);
   }, [selectedConfig]);
+  const thinkingLevels = useMemo(
+    () => getModelThinkingLevels(selectedConfig?.model),
+    [selectedConfig?.model],
+  );
   const selectedUserMessages = useMemo(
     () => selectedMessages.filter((message) => message.role === "user").slice().reverse(),
     [selectedMessages],
@@ -1658,6 +2279,7 @@ export default function App() {
     composingText: composerComposition,
     imageCount: pendingImages.length,
     referenceCount: selectedReferenceSessions.length,
+    actionCount: pendingAction ? 1 : 0,
     running: selected?.session.status === "running",
   });
   const composerHasContent = composerAction === "send";
@@ -1797,9 +2419,13 @@ export default function App() {
 
     setComposerAddMenuOpen(false);
     setReferenceSheetOpen(false);
+    setActionSheetOpen(false);
+    setActionCatalog([]);
+    setActionError("");
     setPendingImages([]);
     replaceComposer("");
     setPendingReferenceIds([]);
+    setPendingAction(undefined);
     draftValueRef.current = { text: "", referenceSessionIds: [] };
     loadedDraftKeyRef.current = null;
 
@@ -1819,14 +2445,19 @@ export default function App() {
         target?.project.sessions.filter((session) => session.id !== selectedSessionId).map((session) => session.id) || [],
       );
       const referenceSessionIds = (draft?.referenceSessionIds || []).filter((id) => validReferenceIds.has(id));
-      const nextDraft = { text: draft?.text || "", referenceSessionIds };
+      const nextDraft: ComposerDraftValue = {
+        text: draft?.text || "",
+        referenceSessionIds,
+        action: selectedAgent?.supportsActions === true ? draft?.action : undefined,
+      };
       draftValueRef.current = nextDraft;
       replaceComposer(nextDraft.text);
       setPendingReferenceIds(nextDraft.referenceSessionIds);
+      setPendingAction(nextDraft.action);
       loadedDraftKeyRef.current = identity.key;
     }).catch((error) => console.error("[mobile-draft] load failed", error));
     return () => { cancelled = true; };
-  }, [activeHost?.hostId, demoMode, flushCurrentDraft, replaceComposer, selectedSessionId]);
+  }, [activeHost?.hostId, demoMode, flushCurrentDraft, replaceComposer, selectedAgent?.supportsActions, selectedSessionId]);
 
   useEffect(() => {
     const identity = draftIdentityRef.current;
@@ -1843,7 +2474,7 @@ export default function App() {
         draftSaveTimerRef.current = null;
       }
     };
-  }, [composer, pendingReferenceIds]);
+  }, [composer, pendingAction, pendingReferenceIds]);
 
   useEffect(() => {
     const handlePageHide = () => flushCurrentDraft();
@@ -1894,6 +2525,57 @@ export default function App() {
     } finally {
       setCommandBusy(false);
     }
+  }, []);
+
+  const loadAgentActions = useCallback(async (reload = false) => {
+    if (!selectedSessionId || selectedAgent?.supportsActions !== true) {
+      setActionCatalog([]);
+      setActionError("");
+      return;
+    }
+    setActionLoading(true);
+    setActionError("");
+    try {
+      const actions = demoMode
+        ? DEMO_ACTIONS
+        : (await clientRef.current?.request<{ actions: RemoteAgentAction[] }>("session.actions.get", {
+            sessionId: selectedSessionId,
+            reload,
+          }))?.actions || [];
+      setActionCatalog(actions);
+      const selectedDraftAction = draftValueRef.current.action;
+      if (
+        selectedDraftAction &&
+        !actions.some((entry) => entry.kind === selectedDraftAction.kind && entry.name === selectedDraftAction.name)
+      ) {
+        draftValueRef.current = { ...draftValueRef.current, action: undefined };
+        setPendingAction(undefined);
+        showFloatingToast("所选技能或命令已失效，已从草稿中移除");
+      }
+    } catch (actionLoadError) {
+      setActionError(actionLoadError instanceof Error ? actionLoadError.message : String(actionLoadError));
+    } finally {
+      setActionLoading(false);
+    }
+  }, [demoMode, selectedAgent?.supportsActions, selectedSessionId, showFloatingToast]);
+
+  const openActionSheet = useCallback(() => {
+    if (selectedAgent?.supportsActions !== true) return;
+    setComposerAddMenuOpen(false);
+    setActionSheetOpen(true);
+    void loadAgentActions(false);
+  }, [loadAgentActions, selectedAgent?.supportsActions]);
+
+  const selectAgentAction = useCallback((action: RemoteAgentActionInvocation) => {
+    draftValueRef.current = { ...draftValueRef.current, action };
+    setPendingAction(action);
+    setActionSheetOpen(false);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, []);
+
+  const clearAgentAction = useCallback(() => {
+    draftValueRef.current = { ...draftValueRef.current, action: undefined };
+    setPendingAction(undefined);
   }, []);
 
   const applySessionResult = useCallback((result: RemoteSessionCreateResult) => {
@@ -2022,6 +2704,7 @@ export default function App() {
   useEffect(() => {
     setReloadConfirmOpen(false);
     setReloadingSession(false);
+    setEditingQueueItem(null);
   }, [selectedSessionId]);
 
   const guideQueuedMessage = useCallback(async (item: RemoteQueuedMessage) => {
@@ -2080,6 +2763,84 @@ export default function App() {
       [selected.session.id]: (current[selected.session.id] || []).filter((queued) => queued.id !== item.id),
     }));
   }, [commandBusy, demoMode, runCommand, selected]);
+
+  const reorderQueuedMessage = useCallback(async (itemId: string, toIndex: number) => {
+    if (!selected || commandBusy) return;
+    const queue = queues[selected.session.id] || [];
+    const fromIndex = queue.findIndex((item) => item.id === itemId);
+    if (fromIndex < 0 || queue[fromIndex].status === "sending") return;
+    const boundedIndex = Math.max(0, Math.min(toIndex, queue.length - 1));
+    if (boundedIndex === fromIndex) return;
+    if (!demoMode) {
+      try {
+        await runCommand("session.queue.reorder", {
+          sessionId: selected.session.id,
+          queueItemId: itemId,
+          toIndex: boundedIndex,
+        });
+      } catch {
+        return;
+      }
+    }
+    setQueues((current) => {
+      const currentQueue = current[selected.session.id] || [];
+      const currentIndex = currentQueue.findIndex((item) => item.id === itemId);
+      if (currentIndex < 0) return current;
+      const next = currentQueue.slice();
+      const [moved] = next.splice(currentIndex, 1);
+      next.splice(Math.max(0, Math.min(boundedIndex, next.length)), 0, moved);
+      return { ...current, [selected.session.id]: next };
+    });
+  }, [commandBusy, demoMode, queues, runCommand, selected]);
+
+  const saveQueuedMessage = useCallback(async (draft: QueueEditDraft) => {
+    if (!selected || !editingQueueItem || commandBusy || editingQueueItem.status === "sending") return;
+    const images = draft.images.map((image) => {
+      const match = /^data:([^;,]+);base64,(.+)$/i.exec(image.src);
+      if (!match) throw new Error(`无法读取图片：${image.name}`);
+      return {
+        id: image.id,
+        name: image.name,
+        mimeType: image.mimeType || match[1],
+        data: match[2],
+      };
+    });
+    const sessionReferences = draft.sessionReferences.map(({ sourceSessionId }) => ({ sourceSessionId }));
+    if (!demoMode) {
+      await runCommand("session.queue.edit", {
+        sessionId: selected.session.id,
+        queueItemId: editingQueueItem.id,
+        content: draft.content,
+        images,
+        sessionReferences,
+        retainedAttachmentIds: draft.attachments.map((attachment) => attachment.id),
+        action: draft.action || null,
+      });
+    }
+
+    const displayContent = draft.content.trim()
+      || (draft.images.length > 0 ? "请查看附件图片。" : "")
+      || (draft.sessionReferences.length > 0 ? `引用会话：${draft.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "")
+      || (draft.attachments.length > 0 ? `附件：${draft.attachments.map((attachment) => attachment.name).join("、")}` : "")
+      || (draft.action ? `${draft.action.kind === "skill" ? "技能" : "命令"} · ${draft.action.name}` : "");
+    setQueues((current) => ({
+      ...current,
+      [selected.session.id]: (current[selected.session.id] || []).map((item) => item.id === editingQueueItem.id
+        ? {
+            ...item,
+            editableContent: draft.content,
+            displayContent,
+            images: draft.images,
+            sessionReferences: draft.sessionReferences,
+            attachments: draft.attachments,
+            action: draft.action,
+            status: "queued",
+            error: undefined,
+          }
+        : item),
+    }));
+    showFloatingToast("队列消息已更新");
+  }, [commandBusy, demoMode, editingQueueItem, runCommand, selected, showFloatingToast]);
 
   const openSessionCreator = useCallback((project: RemoteProject) => {
     setCreateProject(project);
@@ -2158,8 +2919,12 @@ export default function App() {
 
   const sendMessage = useCallback(async () => {
     const composerText = composerRef.current?.value || composer || composerComposition;
-    if (!selectedSessionId || (!composerText.trim() && pendingImages.length === 0 && selectedReferenceSessions.length === 0)) return;
+    if (
+      !selectedSessionId ||
+      (!composerText.trim() && pendingImages.length === 0 && selectedReferenceSessions.length === 0 && !pendingAction)
+    ) return;
     const content = composerText.trim() || (pendingImages.length > 0 ? "请查看附件图片。" : "");
+    const action = pendingAction;
     const config = configs[selectedSessionId];
     const clientMessageId = createClientId();
     const optimisticImages = pendingImages.map(({ id, name, preview }) => ({ id, name, src: preview }));
@@ -2168,49 +2933,56 @@ export default function App() {
       sourceTitle: session.title,
     }));
     try {
+      let queued = false;
       if (!demoMode) {
-        await runCommand("session.send", {
+        const result = await runCommand<{ queued?: boolean }>("session.send", {
           sessionId: selectedSessionId,
           clientMessageId,
           content,
           planModeEnabled: config?.planModeEnabled === true,
           images: pendingImages.map(({ preview: _preview, ...image }) => image),
           sessionReferences: optimisticReferences.map(({ sourceSessionId }) => ({ sourceSessionId })),
+          action,
         });
+        queued = result.queued === true;
       }
       followMessageBottomRef.current = false;
       returningToBottomRef.current = false;
-      setMessages((current) => {
-        const sessionMessages = current[selectedSessionId] || [];
-        if (sessionMessages.some((message) => message.id === clientMessageId)) return current;
-        return {
-          ...current,
-          [selectedSessionId]: [
-            ...sessionMessages,
-            {
-              id: clientMessageId,
-              role: "user",
-              content,
-              timestamp: Date.now(),
-              images: optimisticImages.length > 0 ? optimisticImages : undefined,
-              sessionReferences: optimisticReferences.length > 0 ? optimisticReferences : undefined,
-            },
-          ],
-        };
-      });
+      if (!queued) {
+        setMessages((current) => {
+          const sessionMessages = current[selectedSessionId] || [];
+          if (sessionMessages.some((message) => message.id === clientMessageId)) return current;
+          return {
+            ...current,
+            [selectedSessionId]: [
+              ...sessionMessages,
+              {
+                id: clientMessageId,
+                role: "user",
+                content,
+                timestamp: Date.now(),
+                images: optimisticImages.length > 0 ? optimisticImages : undefined,
+                sessionReferences: optimisticReferences.length > 0 ? optimisticReferences : undefined,
+                action,
+              },
+            ],
+          };
+        });
+      }
       replaceComposer("");
       setPendingImages([]);
       setPendingReferenceIds([]);
+      setPendingAction(undefined);
       draftValueRef.current = { text: "", referenceSessionIds: [] };
       if (!demoMode && activeHost) {
         void clearSessionDraft(activeHost.hostId, selectedSessionId)
           .catch((error) => console.error("[mobile-draft] clear failed", error));
       }
-      requestAnimationFrame(returnToMessageBottom);
+      if (!queued) requestAnimationFrame(returnToMessageBottom);
     } catch {
       // The command error remains visible; sends are never retried automatically.
     }
-  }, [activeHost, composer, composerComposition, configs, demoMode, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
+  }, [activeHost, composer, composerComposition, configs, demoMode, pendingAction, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
 
   const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false) => {
     if (!selectedSessionId || !selectedInteraction) return;
@@ -2471,6 +3243,16 @@ export default function App() {
 
       {updateDialog}
 
+      {editingQueueItem && selected && (
+        <QueueEditDialog
+          key={`${selected.session.id}:${editingQueueItem.id}`}
+          item={editingQueueItem}
+          referenceCandidates={referenceCandidates}
+          onClose={() => setEditingQueueItem(null)}
+          onSave={saveQueuedMessage}
+        />
+      )}
+
       {reloadConfirmOpen && selected && (
         <div className="sheet-backdrop session-reload-backdrop" onClick={() => { if (!reloadingSession) setReloadConfirmOpen(false); }}>
           <section
@@ -2520,7 +3302,7 @@ export default function App() {
             <strong>{activeHost.alias || activeHost.hostName}</strong>
             <span className={connectionState}>{connectionLabel(connectionState)} · {activeHost.baseUrl}</span>
           </div>
-          <button className="icon-button" onClick={() => { clientRef.current?.disconnect(); setActiveHost(null); }} title="返回主机列表"><ArrowLeft size={18} /></button>
+          <button className="icon-button" onClick={() => { clientRef.current?.disconnect(); activeHostRef.current = null; setActiveHost(null); }} title="返回主机列表"><ArrowLeft size={18} /></button>
         </div>
         <div className="drawer-header">
           <div><strong>Projects</strong><span>{projects.length}</span></div>
@@ -2727,6 +3509,20 @@ export default function App() {
         </div>
       )}
 
+      {actionSheetOpen && selected && selectedAgent?.supportsActions === true && (
+        <AgentActionSheet
+          key={selected.session.id}
+          agentId={selected.session.agentId}
+          actions={actionCatalog}
+          selectedAction={pendingAction}
+          loading={actionLoading}
+          error={actionError}
+          onClose={() => setActionSheetOpen(false)}
+          onRefresh={() => void loadAgentActions(true)}
+          onSelect={selectAgentAction}
+        />
+      )}
+
       {!selected ? (
         <section className="empty-chat"><MessageSquare size={30} /><strong>选择一个会话</strong></section>
       ) : (
@@ -2751,6 +3547,7 @@ export default function App() {
                   actionsDisabled={commandBusy || forkingMessageId !== null}
                   forking={forkingMessageId === message.id}
                   onEdit={editMessage}
+                  onCopy={copyMessage}
                   onFork={(target) => void forkMessage(target)}
                 />
               ))}
@@ -2770,45 +3567,16 @@ export default function App() {
           </div>
 
           {selectedQueue.length > 0 && (
-            <div className="queue-strip">
-              <div className="queue-header">
-                <span>发送队列</span>
-                <small>{selectedQueue.length}</small>
-              </div>
-              <div className="queue-list">
-                {selectedQueue.map((item, index) => (
-                  <div className={`queue-item ${item.status}`} key={item.id}>
-                    <span className="queue-index">{index + 1}</span>
-                    <div className="queue-main">
-                      <span>{item.displayContent || "空消息"}</span>
-                      {item.error && <small>{item.error}</small>}
-                    </div>
-                    {selectedAgent?.supportsGuidance === true && (
-                      <button
-                        type="button"
-                        className="queue-guide"
-                        disabled={commandBusy || selected.session.status !== "running" || item.status === "sending"}
-                        onClick={() => void guideQueuedMessage(item)}
-                        title={selected.session.status === "running" ? "立即作为引导发送" : "Agent 运行中才能引导"}
-                      >
-                        {item.status === "sending" ? <LoaderCircle className="spin" size={13} /> : <CornerDownRight size={13} />}
-                        <span>引导</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="queue-remove"
-                      disabled={commandBusy || item.status === "sending"}
-                      onClick={() => void removeQueuedMessage(item)}
-                      title="移出队列"
-                      aria-label="移出队列"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <QueuePanel
+              items={selectedQueue}
+              disabled={commandBusy}
+              canGuide={selectedAgent?.supportsGuidance === true}
+              currentSessionRunning={selected.session.status === "running"}
+              onEdit={setEditingQueueItem}
+              onGuide={(item) => void guideQueuedMessage(item)}
+              onReorder={(itemId, toIndex) => void reorderQueuedMessage(itemId, toIndex)}
+              onRemove={(item) => void removeQueuedMessage(item)}
+            />
           )}
 
           {selectedInteraction && (
@@ -2821,8 +3589,15 @@ export default function App() {
           )}
 
           <footer className="composer">
-            {(pendingImages.length > 0 || selectedReferenceSessions.length > 0) && (
+            {(pendingAction || pendingImages.length > 0 || selectedReferenceSessions.length > 0) && (
               <div className="composer-preview-bar">
+                {pendingAction && (
+                  <div className="composer-preview-chip action">
+                    <WandSparkles size={12} />
+                    <span>{pendingAction.kind === "skill" ? "技能" : "命令"} · {pendingAction.name}</span>
+                    <button type="button" onClick={clearAgentAction} title="移除技能或命令" aria-label="移除技能或命令"><X size={12} /></button>
+                  </div>
+                )}
                 {selectedReferenceSessions.map((session) => (
                   <div className="composer-preview-chip reference" key={session.id}>
                     <Link2 size={12} />
@@ -2860,6 +3635,11 @@ export default function App() {
                     <button type="button" role="menuitem" disabled={referenceCandidates.length === 0} onClick={() => { setComposerAddMenuOpen(false); setReferenceSheetOpen(true); }}>
                       <Link2 size={15} /><span>会话</span>
                     </button>
+                    {selectedAgent?.supportsActions === true && (
+                      <button type="button" role="menuitem" onClick={openActionSheet}>
+                        <WandSparkles size={15} /><span>技能</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -2885,6 +3665,7 @@ export default function App() {
                     composingText: composerComposition,
                     imageCount: pendingImages.length,
                     referenceCount: selectedReferenceSessions.length,
+                    actionCount: pendingAction ? 1 : 0,
                     running: selected.session.status === "running",
                   });
                   if (action === "abort") {
@@ -2933,6 +3714,7 @@ export default function App() {
               />
               <MobileThinkingPicker
                 value={selectedConfig?.thinkingLevel || "medium"}
+                levels={thinkingLevels}
                 disabled={commandBusy || selected.session.status === "running"}
                 onSelect={(level) => void runCommand<RemoteSessionConfig>("session.setThinking", { sessionId: selected.session.id, level }).then((config) => setConfigs((current) => ({ ...current, [selected.session.id]: config })))}
               />

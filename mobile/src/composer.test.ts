@@ -34,5 +34,11 @@ describe("mobile composer action", () => {
       .toBe("send");
     expect(getComposerAction({ text: "", imageCount: 0, referenceCount: 1, running: false }))
       .toBe("send");
+    expect(getComposerAction({ text: "", imageCount: 0, referenceCount: 0, actionCount: 1, running: false }))
+      .toBe("send");
+    expect(getComposerAction({ text: "", imageCount: 0, fileCount: 1, referenceCount: 0, running: true }))
+      .toBe("send");
+    expect(getComposerAction({ text: "", imageCount: 0, pathAttachmentCount: 1, referenceCount: 0, running: true }))
+      .toBe("send");
   });
 });

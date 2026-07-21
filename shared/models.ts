@@ -4,6 +4,7 @@ export interface SharedModel {
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }
 
 export const THINKING_LEVELS = [
@@ -55,3 +56,22 @@ export function includeCurrentModel<T extends SharedModel>(models: T[], current?
 
 export const getThinkingLevelLabel = (levelId: string) =>
   THINKING_LEVELS.find((level) => level.id === levelId)?.label || levelId;
+
+export function getModelThinkingLevels(model?: Pick<SharedModel, "supportedThinkingLevels"> | null) {
+  const supported = model?.supportedThinkingLevels;
+  if (!supported || supported.length === 0) return [...THINKING_LEVELS];
+  const allowed = new Set(supported);
+  const levels = THINKING_LEVELS.filter((level) => allowed.has(level.id));
+  return levels.length > 0 ? levels : [...THINKING_LEVELS];
+}
+
+export function normalizeModelThinkingLevel(
+  level: string,
+  model?: Pick<SharedModel, "supportedThinkingLevels"> | null,
+  fallback = "medium",
+) {
+  const supported = getModelThinkingLevels(model);
+  if (supported.some((candidate) => candidate.id === level)) return level;
+  if (supported.some((candidate) => candidate.id === fallback)) return fallback;
+  return supported[0]?.id || fallback;
+}

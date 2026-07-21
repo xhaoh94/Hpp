@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const testState = vi.hoisted(() => ({
   userDataDir: "",
   capabilities: {} as Record<string, unknown>,
+  capabilitiesByAgent: {} as Record<string, Record<string, unknown>>,
   nativeState: undefined as unknown,
   writtenState: undefined as unknown,
   activationResult: {} as Record<string, unknown>,
@@ -17,7 +18,7 @@ vi.mock("electron", () => ({
 
 vi.mock("./agent-plugin-registry", () => ({
   getAgentPluginRegistry: () => ({
-    getCapabilities: async () => testState.capabilities,
+    getCapabilities: async (agentId: string) => testState.capabilitiesByAgent[agentId] || testState.capabilities,
     readProviderConfig: async () => testState.nativeState,
     writeProviderConfig: async (_agentId: string, state: unknown) => {
       testState.writtenState = state;
@@ -52,6 +53,7 @@ const provider = (providerId: string, endpoint = "responses") => ({
 describe("agent provider config", () => {
   let tempRoot = "";
   let deleteAgentProviderConfig: typeof import("./agent-config").deleteAgentProviderConfig;
+  let copyAgentProviderConfig: typeof import("./agent-config").copyAgentProviderConfig;
   let getAgentConfigStateForBackend: typeof import("./agent-config").getAgentConfigStateForBackend;
   let getConfiguredAgentModels: typeof import("./agent-config").getConfiguredAgentModels;
   let getAgentModelVisibility: typeof import("./agent-config").getAgentModelVisibility;
@@ -79,12 +81,14 @@ describe("agent provider config", () => {
       configuration: providerConfiguration("hpp"),
       providerActivation: "single-active",
     };
+    testState.capabilitiesByAgent = {};
     testState.nativeState = undefined;
     testState.writtenState = undefined;
     testState.activationResult = {};
     vi.resetModules();
     ({
       activateAgentProviderConfig,
+      copyAgentProviderConfig,
       deleteAgentProviderConfig,
       getAgentConfigStateForBackend,
       getAgentModelVisibility,
@@ -151,6 +155,68 @@ describe("agent provider config", () => {
     });
   });
 
+  it("copies a compatible channel across agents and resolves id collisions", async () => {
+    const settingsPath = join(tempRoot, "hpp-data", "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    settings.agentConfigs["test-agent"].providers.push(provider("opencode", "openai-completions"));
+    settings.agentConfigs["target-agent"] = {
+      providers: [provider("opencode", "chat-completions"), provider("opencode-copy", "chat-completions")],
+    };
+    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+    testState.capabilitiesByAgent["target-agent"] = {
+      configuration: {
+        ...providerConfiguration("hpp"),
+        endpoints: [{ id: "chat-completions", label: "Chat Completions" }],
+        defaultEndpoint: "chat-completions",
+        modelDefaults: { reasoning: true, imageInput: false },
+        fixedModelCapabilities: true,
+      },
+      providerActivation: "none",
+    };
+
+    await expect(copyAgentProviderConfig("test-agent", "opencode", "target-agent")).resolves.toMatchObject({
+      success: true,
+      copiedProviderId: "opencode-copy-2",
+      config: {
+        providers: expect.arrayContaining([expect.objectContaining({
+          providerId: "opencode-copy-2",
+          endpoint: "chat-completions",
+          models: [expect.objectContaining({ reasoning: true, imageInput: false })],
+        })]),
+      },
+    });
+  });
+
+  it("copies a channel inside the current agent through the same API", async () => {
+    await expect(copyAgentProviderConfig("test-agent", "provider-a", "test-agent")).resolves.toMatchObject({
+      success: true,
+      copiedProviderId: "provider-a-copy",
+      config: {
+        activeProviderId: "provider-a",
+        providers: expect.arrayContaining([
+          expect.objectContaining({ providerId: "provider-a" }),
+          expect.objectContaining({ providerId: "provider-a-copy", endpoint: "responses" }),
+        ]),
+      },
+    });
+  });
+
+  it("rejects cross-agent copies when the target has no compatible endpoint", async () => {
+    testState.capabilitiesByAgent["target-agent"] = {
+      configuration: {
+        ...providerConfiguration("hpp"),
+        endpoints: [{ id: "anthropic-messages", label: "Anthropic Messages" }],
+        defaultEndpoint: "anthropic-messages",
+      },
+      providerActivation: "none",
+    };
+
+    await expect(copyAgentProviderConfig("test-agent", "provider-a", "target-agent")).resolves.toMatchObject({
+      success: false,
+      error: "目标 Agent 不支持 Endpoint：responses",
+    });
+  });
+
   it("discovers an initial Hpp-owned configuration through the plugin", async () => {
     await rm(join(tempRoot, "hpp-data", "settings.json"), { force: true });
     testState.nativeState = { activeProviderId: "native", providers: [provider("native")] };
@@ -161,6 +227,28 @@ describe("agent provider config", () => {
     });
     const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
     expect(settings.agentConfigs["test-agent"].providers[0].providerId).toBe("native");
+  });
+
+  it("keeps legacy providers on Bearer and honors declared auth defaults", async () => {
+    await expect(getAgentConfigStateForBackend("test-agent")).resolves.toMatchObject({
+      providers: expect.arrayContaining([expect.objectContaining({ providerId: "provider-a", authMode: "bearer" })]),
+    });
+
+    testState.capabilities = {
+      configuration: {
+        ...providerConfiguration("hpp"),
+        authModes: [
+          { id: "bearer", label: "Bearer" },
+          { id: "x-api-key", label: "X-Api-Key" },
+        ],
+        defaultAuthMode: "x-api-key",
+      },
+      providerActivation: "none",
+    };
+    await expect(saveAgentProviderConfig("test-agent", provider("new-provider"))).resolves.toMatchObject({
+      success: true,
+      config: { providers: expect.arrayContaining([expect.objectContaining({ providerId: "new-provider", authMode: "x-api-key" })]) },
+    });
   });
 
   it("delegates single-active provider activation and returns snapshots", async () => {

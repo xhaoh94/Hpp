@@ -8,6 +8,7 @@ import type {
   OfficialAgentPluginDescriptor,
 } from "../../src/types/ipc";
 import { isValidVersion, meetsMinimumVersion } from "../../src/lib/version";
+import { asString, getErrorMessage, isRecord } from "../utils/unknown-value";
 
 export const OFFICIAL_RELEASE_DOWNLOAD_BASE_URL =
   "https://github.com/xhaoh94/Hpp/releases/latest/download";
@@ -31,26 +32,10 @@ const DEFAULT_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
   guidance: false,
   fork: false,
+  actions: false,
   configuration: "none",
   providerActivation: "none",
 };
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function asString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
 
 function formatHttpStatus(status: number, statusText?: string): string {
   const knownStatusText: Record<number, string> = {
@@ -85,6 +70,17 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
   if (endpoints.length === 0) return "none";
 
   const defaultEndpoint = asString(value.defaultEndpoint);
+  const seenAuthModes = new Set<string>();
+  const authModes = Array.isArray(value.authModes)
+    ? value.authModes.flatMap((rawAuthMode) => {
+        if (!isRecord(rawAuthMode)) return [];
+        const id = asString(rawAuthMode.id);
+        if ((id !== "bearer" && id !== "x-api-key") || seenAuthModes.has(id)) return [];
+        seenAuthModes.add(id);
+        return [{ id, label: asString(rawAuthMode.label) || id }];
+      })
+    : [];
+  const defaultAuthMode = asString(value.defaultAuthMode);
   const modelDefaults = isRecord(value.modelDefaults) ? value.modelDefaults : {};
   const modelListMode = value.modelListMode === "configured" || value.modelListMode === "backend"
     ? value.modelListMode
@@ -99,11 +95,19 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
     defaultEndpoint: endpoints.some((endpoint) => endpoint.id === defaultEndpoint)
       ? defaultEndpoint
       : endpoints[0].id,
+    authModes: authModes.length > 0 ? authModes : undefined,
+    defaultAuthMode: authModes.some((mode) => mode.id === defaultAuthMode)
+      ? defaultAuthMode as "bearer" | "x-api-key"
+      : authModes[0]?.id,
     pathLabel: asString(value.pathLabel) || undefined,
     hint: asString(value.hint) || undefined,
     modelDefaults: {
       reasoning: modelDefaults.reasoning === true,
       imageInput: modelDefaults.imageInput === true,
+      supportedThinkingLevels: Array.isArray(modelDefaults.supportedThinkingLevels)
+        ? modelDefaults.supportedThinkingLevels.filter((level): level is string =>
+            typeof level === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(level))
+        : undefined,
     },
     fixedModelCapabilities: value.fixedModelCapabilities === true,
     modelListMode,
@@ -124,6 +128,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     planMode: normalizePlanMode(input.planMode),
     guidance: input.guidance === true,
     fork: input.fork === true,
+    actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
   };

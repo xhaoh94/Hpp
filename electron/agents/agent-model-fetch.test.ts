@@ -11,6 +11,13 @@ describe("provider model fetching", () => {
     expect(buildProviderModelsUrl("https://api.example.com/v1/models")).toBe("https://api.example.com/v1/models");
   });
 
+  it("normalizes Anthropic API roots to /v1/models", () => {
+    expect(buildProviderModelsUrl("https://api.anthropic.com", "anthropic-messages"))
+      .toBe("https://api.anthropic.com/v1/models");
+    expect(buildProviderModelsUrl("https://gateway.example.com/v1/", "anthropic-messages"))
+      .toBe("https://gateway.example.com/v1/models");
+  });
+
   it("normalizes and deduplicates common model responses", () => {
     expect(normalizeRemoteProviderModels({
       data: [
@@ -36,6 +43,28 @@ describe("provider model fetching", () => {
     expect(fetchImpl).toHaveBeenCalledWith("https://api.example.com/v1/models", expect.objectContaining({
       headers: expect.objectContaining({ Authorization: "Bearer sk-test" }),
     }));
+  });
+
+  it("uses Anthropic x-api-key headers when configured", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "claude-test" }] }), {
+      status: 200,
+    }));
+
+    await fetchProviderModels(
+      "https://gateway.example.com/v1",
+      "anthropic-key",
+      "anthropic-messages",
+      "x-api-key",
+      fetchImpl,
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith("https://gateway.example.com/v1/models", expect.objectContaining({
+      headers: expect.objectContaining({
+        "x-api-key": "anthropic-key",
+        "anthropic-version": "2023-06-01",
+      }),
+    }));
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
   });
 
   it("returns the provider error message", async () => {

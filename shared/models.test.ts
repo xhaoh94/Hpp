@@ -5,6 +5,8 @@ import {
   groupModelsByProvider,
   includeCurrentModel,
   isSameModel,
+  getModelThinkingLevels,
+  normalizeModelThinkingLevel,
 } from "./models";
 
 const models = [
@@ -26,5 +28,17 @@ describe("shared model rules", () => {
 
   it("keeps one canonical thinking-level catalog", () => {
     expect(THINKING_LEVELS.map((level) => level.id)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+  });
+
+  it("uses model-specific thinking levels without changing legacy defaults", () => {
+    const claudeModel = {
+      ...models[0],
+      supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"],
+    };
+    expect(getModelThinkingLevels(claudeModel).map((level) => level.id))
+      .toEqual(["off", "low", "medium", "high", "xhigh"]);
+    expect(normalizeModelThinkingLevel("minimal", claudeModel)).toBe("medium");
+    expect(getModelThinkingLevels(models[0]).map((level) => level.id))
+      .toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
   });
 });

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 3,
+  "id": "claude",
+  "name": "Claude Code",
+  "version": "1.0.1",
+  "minHppVersion": "0.1.5",
+  "description": "Anthropic Claude Code Agent SDK",
+  "entry": "agent.mjs",
+  "runtime": "sdk",
+  "packageName": "@anthropic-ai/claude-agent-sdk",
+  "order": 15,
+  "installHint": "在 Agent 设置中安装 Claude Code SDK 运行时",
+  "updateCommand": "npm install @anthropic-ai/claude-agent-sdk@0.3.215 --save-exact --omit=dev",
+  "shortName": "CC",
+  "capabilities": {
+    "planMode": "native",
+    "guidance": false,
+    "fork": true,
+    "actions": true,
+    "configuration": {
+      "type": "provider",
+      "storage": "hpp",
+      "endpoints": [
+        { "id": "anthropic-messages", "label": "Anthropic Messages (/v1/messages)" },
+        { "id": "chat-completions", "label": "OpenAI Chat Completions（本地转发）" }
+      ],
+      "defaultEndpoint": "anthropic-messages",
+      "authModes": [
+        { "id": "bearer", "label": "Bearer Token" },
+        { "id": "x-api-key", "label": "X-Api-Key" }
+      ],
+      "defaultAuthMode": "bearer",
+      "pathLabel": "Anthropic API 根地址",
+      "hint": "原生 Anthropic 渠道直接连接；OpenAI Chat Completions 渠道由 Hpp 在本机转换后转发。",
+      "modelDefaults": {
+        "reasoning": true,
+        "imageInput": true,
+        "supportedThinkingLevels": ["off", "low", "medium", "high", "xhigh"]
+      },
+      "fixedModelCapabilities": true,
+      "modelListMode": "configured"
+    },
+    "providerActivation": "none"
+  }
+}

@@ -2,6 +2,8 @@ import type {
   AgentEvent,
   AgentImagePayload,
   AgentSendOptions,
+  AgentActionCatalogEntry,
+  AgentActionListOptions,
   AgentUIResponse,
   AgentDescriptor,
   AgentPackageStatus,
@@ -11,6 +13,8 @@ import type {
   OfficialAgentPluginDescriptor,
   AppUpdateResult,
   AppUpdateStatus,
+  DiskUsageStats,
+  DiskCleanupResult,
 } from "./ipc";
 import type {
   RemoteAccessStatus,
@@ -50,18 +54,28 @@ export type {
   AgentPackageStatus,
   AgentPlanModeSupport,
   AgentProviderConfiguration,
+  AgentProviderAuthMode,
+  AgentProviderAuthOption,
   AgentProviderEndpointOption,
   AgentProviderActivationSupport,
   AgentPluginInstallResult,
   AgentPluginManifest,
   AgentSource,
   AgentSendOptions,
+  AgentActionCatalogEntry,
+  AgentActionInvocation,
+  AgentActionKind,
+  AgentActionListOptions,
   AgentUIResponse,
   OfficialAgentPluginCatalogResult,
   OfficialAgentPluginDescriptor,
   AppUpdateResult,
   AppUpdateState,
   AppUpdateStatus,
+  DiskUsageCategory,
+  DiskUsageCategoryId,
+  DiskUsageStats,
+  DiskCleanupResult,
 } from "./ipc";
 
 export interface FileEntry {
@@ -83,6 +97,7 @@ export interface AgentModel {
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }
 
 export interface AgentCustomModelConfig {
@@ -99,6 +114,7 @@ export interface AgentProviderConfig {
   displayName: string;
   baseUrl: string;
   apiKey: string;
+  authMode: AgentProviderAuthMode;
   endpoint: AgentProviderEndpoint;
   models: AgentCustomModelConfig[];
 }
@@ -112,6 +128,7 @@ export interface AgentConfigResult {
   success: boolean;
   error?: string;
   config?: AgentConfigState;
+  copiedProviderId?: string;
   models?: AgentModel[];
   reloadedSessionIds?: string[];
 }
@@ -207,6 +224,9 @@ export interface ElectronAPI {
   // Data persistence
   loadData: (key: string) => Promise<unknown>;
   saveData: (key: string, data: unknown) => Promise<{ success: boolean; error?: string }>;
+  purgeSessionData: (request: import("./ipc").SessionDataPurgeRequest) => Promise<{ success: boolean; error?: string }>;
+  getDiskUsage: () => Promise<DiskUsageStats>;
+  cleanupDiskCache: () => Promise<DiskCleanupResult>;
   remoteGetAccessStatus: () => Promise<RemoteAccessStatus>;
   remoteConfigureAccess: (patch: Partial<Pick<RemoteAccessStatus, "enabled" | "bindAddress" | "advertiseAddress" | "port">>) => Promise<RemoteAccessStatus>;
   remoteBeginPairing: () => Promise<RemotePairingOffer>;
@@ -222,20 +242,23 @@ export interface ElectronAPI {
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
+  agentGetSessionState: (sessionId: string) => Promise<{ success: boolean; idle: boolean; error?: string }>;
   agentSendMessage: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
   agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) => Promise<AgentModelVisibilityResult>;
-  agentConfigFetchModels: (baseUrl: string, apiKey: string) => Promise<AgentConfigFetchModelsResult>;
+  agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: AgentProviderAuthMode) => Promise<AgentConfigFetchModelsResult>;
   agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
+  agentConfigCopy: (sourceAgentId: string, sourceProviderId: string, targetAgentId: string) => Promise<AgentConfigResult>;
   agentConfigActivate: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigDelete: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigReorder: (agentId: string, providerIds: string[]) => Promise<AgentConfigResult>;
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
+  agentListActions: (sessionId?: string, options?: AgentActionListOptions) => Promise<AgentActionCatalogEntry[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;
   agentSetThinkingLevel: (level: string, sessionId?: string) => Promise<{ success: boolean }>;
   agentSendUIResponse: (response: AgentUIResponse) => Promise<{ success: boolean }>;

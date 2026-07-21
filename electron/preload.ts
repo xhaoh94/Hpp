@@ -3,8 +3,12 @@ import type {
   AgentEvent,
   AgentImagePayload,
   AgentSendOptions,
+  AgentActionListOptions,
   AgentUIResponse,
   AppUpdateStatus,
+  SessionDataPurgeRequest,
+  DiskUsageStats,
+  DiskCleanupResult,
 } from "../src/types/ipc";
 import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
 import type {
@@ -67,11 +71,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentPluginRemove: (agentId: string, removeRuntime = false) =>
     ipcRenderer.invoke("agentPlugin:remove", agentId, removeRuntime),
   agentPluginReload: () => ipcRenderer.invoke("agentPlugin:reload"),
+  agentGetSessionState: (sessionId: string) => ipcRenderer.invoke("agent:getSessionState", sessionId),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),
   saveData: (key: string, data: unknown) =>
     ipcRenderer.invoke("store:save", key, data),
+  purgeSessionData: (request: SessionDataPurgeRequest) =>
+    ipcRenderer.invoke("store:purgeSessions", request),
+  getDiskUsage: (): Promise<DiskUsageStats> => ipcRenderer.invoke("storage:getUsage"),
+  cleanupDiskCache: (): Promise<DiskCleanupResult> => ipcRenderer.invoke("storage:cleanup"),
 
   // Remote access
   remoteGetAccessStatus: (): Promise<RemoteAccessStatus> =>
@@ -115,10 +124,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:getModelVisibility", agentId),
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) =>
     ipcRenderer.invoke("agentConfig:setBackendModelsVisible", agentId, visible),
-  agentConfigFetchModels: (baseUrl: string, apiKey: string) =>
-    ipcRenderer.invoke("agentConfig:fetchModels", baseUrl, apiKey),
+  agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: "bearer" | "x-api-key") =>
+    ipcRenderer.invoke("agentConfig:fetchModels", baseUrl, apiKey, endpoint, authMode),
   agentConfigSave: (agentId: string, config: unknown) =>
     ipcRenderer.invoke("agentConfig:save", agentId, config),
+  agentConfigCopy: (sourceAgentId: string, sourceProviderId: string, targetAgentId: string) =>
+    ipcRenderer.invoke("agentConfig:copy", sourceAgentId, sourceProviderId, targetAgentId),
   agentConfigActivate: (agentId: string, providerId: string) =>
     ipcRenderer.invoke("agentConfig:activate", agentId, providerId),
   agentConfigDelete: (agentId: string, providerId: string) =>
@@ -129,6 +140,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
   agentGetModels: (sessionId?: string) => ipcRenderer.invoke("agent:getModels", sessionId),
+  agentListActions: (sessionId?: string, options?: AgentActionListOptions) =>
+    ipcRenderer.invoke("agent:listActions", sessionId, options),
   agentSetModel: (provider: string, modelId: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:setModel", provider, modelId, sessionId),
   agentSetThinkingLevel: (level: string, sessionId?: string) =>

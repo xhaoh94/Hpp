@@ -67,6 +67,28 @@ describe("process event normalization", () => {
     });
   });
 
+  it("normalizes Claude Code gitDiff and structuredPatch outputs", () => {
+    const gitPatch = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new";
+    expect(normalizeToolEvent("tool_end", {
+      name: "Edit",
+      args: { file_path: "src/a.ts" },
+      result: { filePath: "src/a.ts", gitDiff: { patch: gitPatch } },
+    })).toMatchObject({ filePath: "src/a.ts", patch: gitPatch, additions: 1, deletions: 1 });
+
+    expect(normalizeToolEvent("tool_end", {
+      name: "Write",
+      result: {
+        filePath: "src/b.ts",
+        structuredPatch: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: ["+created"] }],
+      },
+    })).toMatchObject({
+      filePath: "src/b.ts",
+      patch: "@@ -0,0 +1,1 @@\n+created",
+      additions: 1,
+      deletions: 0,
+    });
+  });
+
   it("builds command details from command args and output text", () => {
     expect(normalizeToolEvent("tool_end", {
       name: "bash",

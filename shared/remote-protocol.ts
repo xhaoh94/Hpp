@@ -3,6 +3,7 @@ import type { DiffLike } from "./diff-summary";
 import type { SharedModel } from "./models";
 import type { ProcessEntryView } from "./process-view";
 import type { QuestionnaireQuestion } from "./questionnaire";
+import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-actions";
 
 export const REMOTE_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_REMOTE_PORT = 47831;
@@ -23,10 +24,13 @@ export const REMOTE_REQUEST_NAMES = [
   "session.abort",
   "session.reload",
   "session.queue.guide",
+  "session.queue.edit",
+  "session.queue.reorder",
   "session.queue.remove",
   "session.setModel",
   "session.setThinking",
   "session.models.get",
+  "session.actions.get",
   "settings.setPlanMode",
   "interaction.respond",
 ] as const;
@@ -82,6 +86,11 @@ const remoteSessionReferenceSchema = z.object({
   sourceSessionId: sessionIdSchema,
 });
 
+const remoteAgentActionSchema = z.object({
+  kind: z.enum(["skill", "command"]),
+  name: z.string().trim().min(1).max(128),
+});
+
 const sessionSendPayloadSchema = z.object({
   sessionId: sessionIdSchema,
   clientMessageId: z.string().trim().min(1).max(128),
@@ -89,16 +98,34 @@ const sessionSendPayloadSchema = z.object({
   planModeEnabled: z.boolean().default(false),
   images: z.array(remoteImageSchema).max(MAX_REMOTE_IMAGES).default([]),
   sessionReferences: z.array(remoteSessionReferenceSchema).max(MAX_REMOTE_SESSION_REFERENCES).default([]),
+  action: remoteAgentActionSchema.optional(),
 }).superRefine((value, context) => {
-  if (value.content.trim() || value.images.length > 0 || value.sessionReferences.length > 0) return;
+  if (value.content.trim() || value.images.length > 0 || value.sessionReferences.length > 0 || value.action) return;
   context.addIssue({ code: "custom", message: "A message, image, or session reference is required." });
 });
 
 const sessionIdPayloadSchema = z.object({ sessionId: sessionIdSchema });
 
+const sessionActionsPayloadSchema = z.object({
+  sessionId: sessionIdSchema,
+  reload: z.boolean().default(false),
+});
+
 const sessionQueueItemPayloadSchema = z.object({
   sessionId: sessionIdSchema,
   queueItemId: z.string().trim().min(1).max(128),
+});
+
+const sessionQueueEditPayloadSchema = sessionQueueItemPayloadSchema.extend({
+  content: z.string().max(200_000),
+  images: z.array(remoteImageSchema).max(MAX_REMOTE_IMAGES).default([]),
+  sessionReferences: z.array(remoteSessionReferenceSchema).max(MAX_REMOTE_SESSION_REFERENCES).default([]),
+  retainedAttachmentIds: z.array(z.string().trim().min(1).max(128)).max(64).default([]),
+  action: remoteAgentActionSchema.nullable().optional(),
+});
+
+const sessionQueueReorderPayloadSchema = sessionQueueItemPayloadSchema.extend({
+  toIndex: z.number().int().nonnegative(),
 });
 
 const sessionSetModelPayloadSchema = z.object({
@@ -181,9 +208,18 @@ export function parseRemoteRequest(value: unknown): RemoteRequestEnvelope {
     case "session.models.get":
       payload = sessionIdPayloadSchema.parse(envelope.payload);
       break;
+    case "session.actions.get":
+      payload = sessionActionsPayloadSchema.parse(envelope.payload);
+      break;
     case "session.queue.guide":
     case "session.queue.remove":
       payload = sessionQueueItemPayloadSchema.parse(envelope.payload);
+      break;
+    case "session.queue.edit":
+      payload = sessionQueueEditPayloadSchema.parse(envelope.payload);
+      break;
+    case "session.queue.reorder":
+      payload = sessionQueueReorderPayloadSchema.parse(envelope.payload);
       break;
     case "session.setModel":
       payload = sessionSetModelPayloadSchema.parse(envelope.payload);
@@ -219,7 +255,11 @@ export interface RemoteAgent {
   runtime: "cli" | "sdk" | "plugin";
   requiresProviderActivation?: boolean;
   supportsGuidance?: boolean;
+  supportsActions?: boolean;
 }
+
+export interface RemoteAgentAction extends AgentActionCatalogEntry {}
+export interface RemoteAgentActionInvocation extends AgentActionInvocation {}
 
 export interface RemoteSession {
   id: string;
@@ -270,15 +310,21 @@ export interface RemoteChatMessage {
     changeSummary?: { filesChanged: number; additions: number; deletions: number };
   };
   nativeTurnId?: string;
+  action?: RemoteAgentActionInvocation;
 }
 
 export interface RemoteQueuedMessage {
   id: string;
   sessionId: string;
+  editableContent?: string;
   displayContent: string;
   status: "queued" | "sending" | "failed";
   createdAt: number;
   error?: string;
+  action?: RemoteAgentActionInvocation;
+  images?: Array<{ id: string; name: string; src: string; mimeType: string }>;
+  sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
+  attachments?: Array<{ id: string; name: string; kind: "file" | "folder" | "snippet" }>;
 }
 
 export interface RemoteInteraction {

@@ -4,6 +4,7 @@ import type { AgentImagePayload } from "@/types";
 import type { DiffLike } from "@shared/diff-summary";
 import type { SharedModel } from "@shared/models";
 import type { ProcessEntryView } from "@shared/process-view";
+import type { AgentActionInvocation } from "@shared/agent-actions";
 
 export interface FileDiff extends DiffLike {
   file: string;
@@ -74,6 +75,8 @@ export interface ChatMessage {
   diffs?: FileDiff[];
   process?: AgentProcess;
   nativeTurnId?: string;
+  action?: AgentActionInvocation;
+  composerDraft?: ComposerDraftSnapshot;
 }
 
 export interface PendingFile {
@@ -98,12 +101,39 @@ export interface PendingImage {
   file: File;
 }
 
+export interface QueuedMessageImage {
+  id: string;
+  src: string;
+  name: string;
+  mimeType: string;
+}
+
+export interface QueuedMessageEditableDraft {
+  text: string;
+  images: QueuedMessageImage[];
+  pendingFiles: PendingFile[];
+  pendingPathAttachments: PendingPathAttachment[];
+  sessionReferences: SessionReference[];
+  forkContext?: string;
+  action?: AgentActionInvocation;
+}
+
+export interface ComposerDraftSnapshot {
+  text: string;
+  images: QueuedMessageImage[];
+  pendingFiles: PendingFile[];
+  pendingPathAttachments: PendingPathAttachment[];
+  sessionReferences: SessionReference[];
+  action?: AgentActionInvocation;
+}
+
 export interface ChatDraft {
   text: string;
   pendingImages: PendingImage[];
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
+  action?: AgentActionInvocation;
 }
 
 export interface ModelInfo extends SharedModel {}
@@ -113,6 +143,7 @@ export type QueuedMessageStatus = "queued" | "sending" | "failed";
 export interface QueuedMessage {
   id: string;
   sessionId: string;
+  editableContent?: string;
   displayContent: string;
   sendContent: string;
   messageImages?: Array<{ id: string; src: string; name: string }>;
@@ -122,6 +153,8 @@ export interface QueuedMessage {
   createdAt: number;
   status: QueuedMessageStatus;
   error?: string;
+  action?: AgentActionInvocation;
+  editableDraft?: QueuedMessageEditableDraft;
 }
 
 interface ChatState {
@@ -163,6 +196,8 @@ interface ChatState {
   clearAgentStartupErrors: (sessionId?: string | null) => void;
   setHighlightedFile: (path: string | null) => void;
   setDraftText: (sessionId: string, text: string) => void;
+  replaceSessionDraft: (sessionId: string, draft: ChatDraft) => void;
+  setDraftAction: (sessionId: string, action?: AgentActionInvocation) => void;
   addPendingImage: (image: PendingImage, sessionId?: string | null) => void;
   removePendingImage: (id: string, sessionId?: string | null) => void;
   clearPendingImages: (sessionId?: string | null) => void;
@@ -178,6 +213,7 @@ interface ChatState {
   clearSessionDraft: (sessionId: string) => void;
   enqueueMessage: (item: QueuedMessage) => void;
   upsertQueuedMessage: (item: QueuedMessage) => void;
+  reorderQueuedMessage: (sessionId: string, itemId: string, toIndex: number) => void;
   removeQueuedMessage: (sessionId: string, itemId: string) => void;
   markQueuedMessageSending: (sessionId: string, itemId: string) => void;
   markQueuedMessageFailed: (sessionId: string, itemId: string, error: string) => void;
@@ -326,6 +362,16 @@ export const createEmptyChatDraft = (): ChatDraft => ({
   pendingFiles: [],
   pendingPathAttachments: [],
   sessionReferences: [],
+  action: undefined,
+});
+
+export const cloneChatDraft = (draft: ChatDraft): ChatDraft => ({
+  text: draft.text,
+  pendingImages: draft.pendingImages.map((image) => ({ ...image })),
+  pendingFiles: draft.pendingFiles.map((file) => ({ ...file })),
+  pendingPathAttachments: draft.pendingPathAttachments.map((attachment) => ({ ...attachment })),
+  sessionReferences: draft.sessionReferences.map((reference) => ({ ...reference })),
+  action: draft.action ? { ...draft.action } : undefined,
 });
 
 export const EMPTY_CHAT_DRAFT = createEmptyChatDraft();
@@ -589,7 +635,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     s.currentModel.provider === m.provider &&
     s.currentModel.name === m.name &&
     s.currentModel.reasoning === m.reasoning &&
-    s.currentModel.supportsImages === m.supportsImages
+    s.currentModel.supportsImages === m.supportsImages &&
+    JSON.stringify(s.currentModel.supportedThinkingLevels) === JSON.stringify(m.supportedThinkingLevels)
       ? {}
       : { currentModel: m }
   )),
@@ -604,7 +651,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         model.provider === models[index]?.provider &&
         model.name === models[index]?.name &&
         model.reasoning === models[index]?.reasoning &&
-        model.supportsImages === models[index]?.supportsImages
+        model.supportsImages === models[index]?.supportsImages &&
+        JSON.stringify(model.supportedThinkingLevels) === JSON.stringify(models[index]?.supportedThinkingLevels)
       )
     ) {
       return {};
@@ -635,6 +683,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => updateSessionDraft(s, sessionId, (draft) => (
       draft.text === text ? draft : { ...draft, text }
     ))),
+  replaceSessionDraft: (sessionId, draft) =>
+    set((s) => ({
+      sessionDrafts: {
+        ...s.sessionDrafts,
+        [sessionId]: cloneChatDraft(draft),
+      },
+    })),
+  setDraftAction: (sessionId, action) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({ ...draft, action }))),
   addPendingImage: (image, sessionId) =>
     set((s) => updateSessionDraft(s, sessionId, (draft) => ({
       ...draft,
@@ -726,6 +783,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : [item, ...queue],
         },
       };
+    }),
+  reorderQueuedMessage: (sessionId, itemId, toIndex) =>
+    set((s) => {
+      const queue = s.messageQueues[sessionId] || [];
+      const fromIndex = queue.findIndex((item) => item.id === itemId);
+      if (fromIndex < 0 || queue.length < 2) return {};
+      const targetIndex = Math.max(0, Math.min(Math.trunc(toIndex), queue.length - 1));
+      if (fromIndex === targetIndex) return {};
+      const nextQueue = [...queue];
+      const [item] = nextQueue.splice(fromIndex, 1);
+      nextQueue.splice(targetIndex, 0, item);
+      return { messageQueues: { ...s.messageQueues, [sessionId]: nextQueue } };
     }),
   removeQueuedMessage: (sessionId, itemId) =>
     set((s) => ({

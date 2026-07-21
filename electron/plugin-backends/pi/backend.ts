@@ -6,6 +6,11 @@ import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProc
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
+import type {
+  AgentActionCatalogEntry,
+  AgentActionInvocation,
+  AgentActionListOptions,
+} from "../../../shared/agent-actions";
 
 interface AgentModel {
   id: string;
@@ -20,6 +25,7 @@ interface AgentSendOptions {
   permissionMode?: "plan" | "full-access";
   displayMessage?: string;
   clientMessageId?: string;
+  action?: AgentActionInvocation;
 }
 
 interface AgentForkTarget {
@@ -248,6 +254,31 @@ export class PiSDKAgent {
       images,
       planModeEnabled: !!options?.planModeEnabled,
       permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+      action: options?.action,
+    });
+  }
+
+  async listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    return new Promise((resolve, reject) => {
+      let requestId = "";
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        reject(new Error("Pi SDK list actions timed out"));
+      }, 30000);
+      try {
+        requestId = this.sendWorkerCommand({ type: "listActions", reload: options?.reload === true }, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "actions") {
+            resolve(Array.isArray(data.actions) ? data.actions as AgentActionCatalogEntry[] : []);
+            return;
+          }
+          reject(new Error(optionalString(data.error) || "Pi SDK list actions failed"));
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
     });
   }
 

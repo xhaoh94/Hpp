@@ -50,6 +50,26 @@ describe("remote protocol", () => {
     }))).toThrow();
   });
 
+  it("accepts an action-only send and validates action catalogs requests", () => {
+    expect(parseRemoteRequest(request("session.send", {
+      sessionId: "session-1",
+      clientMessageId: "message-with-action",
+      action: { kind: "skill", name: "review" },
+    })).payload).toMatchObject({
+      content: "",
+      action: { kind: "skill", name: "review" },
+    });
+    expect(parseRemoteRequest(request("session.actions.get", {
+      sessionId: "session-1",
+      reload: true,
+    })).payload).toEqual({ sessionId: "session-1", reload: true });
+    expect(() => parseRemoteRequest(request("session.send", {
+      sessionId: "session-1",
+      clientMessageId: "invalid-action",
+      action: { kind: "tool", name: "review" },
+    }))).toThrow();
+  });
+
   it("validates remote session creation identifiers", () => {
     const parsed = parseRemoteRequest(request("session.create", {
       projectId: "project-1",
@@ -110,6 +130,37 @@ describe("remote protocol", () => {
       sessionId: "session-1",
       queueItemId: "queued-message-2",
     })).payload).toEqual({ sessionId: "session-1", queueItemId: "queued-message-2" });
+    expect(parseRemoteRequest(request("session.queue.edit", {
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+      content: "updated",
+    })).payload).toEqual({
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+      content: "updated",
+      images: [],
+      sessionReferences: [],
+      retainedAttachmentIds: [],
+    });
+    expect(parseRemoteRequest(request("session.queue.reorder", {
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+      toIndex: 1,
+    })).payload).toEqual({ sessionId: "session-1", queueItemId: "queued-message-1", toIndex: 1 });
+    expect(parseRemoteRequest(request("session.queue.edit", {
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+      content: "with attachments",
+      images: [{ id: "image-1", name: "screen.png", mimeType: "image/png", data: "YWJj" }],
+      sessionReferences: [{ sourceSessionId: "session-2" }],
+      retainedAttachmentIds: ["file-1"],
+      action: null,
+    })).payload).toMatchObject({
+      images: [{ id: "image-1", name: "screen.png", mimeType: "image/png", data: "YWJj" }],
+      sessionReferences: [{ sourceSessionId: "session-2" }],
+      retainedAttachmentIds: ["file-1"],
+      action: null,
+    });
     expect(() => parseRemoteRequest(request("session.queue.guide", {
       sessionId: "session-1",
       queueItemId: "",

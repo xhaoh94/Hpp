@@ -2,3 +2,4 @@ node_modules
 release
 dist
 out
+mobile/android/.idea

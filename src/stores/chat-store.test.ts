@@ -93,3 +93,25 @@ describe("chat process entry defaults", () => {
     expect(assistants[1].process?.entries[0].state).toBe("running");
   });
 });
+
+describe("session draft replacement", () => {
+  it("atomically clones every composer field", () => {
+    const draft = {
+      text: "draft",
+      pendingImages: [],
+      pendingFiles: [{ id: "file", fileName: "a.ts", filePath: "C:\\a.ts", startLine: 1, endLine: 2 }],
+      pendingPathAttachments: [{ id: "folder", name: "src", path: "C:\\src", kind: "folder" as const }],
+      sessionReferences: [],
+      action: { kind: "skill" as const, name: "review" },
+    };
+    useChatStore.getState().replaceSessionDraft("session", draft);
+    draft.pendingFiles[0].fileName = "mutated.ts";
+    draft.action.name = "mutated";
+    expect(useChatStore.getState().sessionDrafts.session).toMatchObject({
+      text: "draft",
+      pendingFiles: [{ fileName: "a.ts" }],
+      pendingPathAttachments: [{ kind: "folder" }],
+      action: { kind: "skill", name: "review" },
+    });
+  });
+});

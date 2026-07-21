@@ -11,6 +11,7 @@ const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "ques
 
 let sdk = null;
 let session = null;
+let resourceLoader = null;
 let uiBridge = null;
 let unsubscribe = null;
 let projectPath = "";
@@ -19,6 +20,7 @@ let activePermissionMode = "full-access";
 let fullAccessToolNames = [];
 let activeCompactionId = null;
 const completedPromptIds = new Set();
+const actionKeys = new Set();
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -486,6 +488,8 @@ const disposeSession = () => {
   uiBridge = null;
   session?.dispose();
   session = null;
+  resourceLoader = null;
+  actionKeys.clear();
 };
 
 const stripUtf8Bom = (filePath) => {
@@ -544,7 +548,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   const authStorage = sdk.AuthStorage.create(join(agentDir, "auth.json"));
   const modelRegistry = sdk.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
   const settingsManager = sdk.SettingsManager.create(cwd, agentDir);
-  const resourceLoader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, eventBus });
+  resourceLoader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, eventBus });
   await resourceLoader.reload();
   const sessionManager = sessionFilePath
     ? sdk.SessionManager.open(sessionFilePath, undefined, cwd)
@@ -570,6 +574,74 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   unsubscribe = session.subscribe(handleSessionEvent);
   send({ type: "history_snapshot", messages: buildHistorySnapshot(session.sessionManager) });
   send({ type: "ready", id, sessionFilePath: session.sessionFile });
+};
+
+const actionText = (value) => typeof value === "string" ? value.trim() : "";
+
+const actionEntry = (kind, value) => {
+  if (!isRecord(value)) return null;
+  const name = actionText(value.name || value.command || value.id).replace(/^\//, "");
+  if (!name) return null;
+  const description = actionText(value.description || value.summary);
+  const argumentHint = actionText(value.argumentHint || value.argument_hint || value.usage || value.arguments);
+  return {
+    kind,
+    name,
+    ...(description ? { description } : {}),
+    ...(argumentHint ? { argumentHint } : {}),
+  };
+};
+
+const getActions = async (reload = false) => {
+  if (!resourceLoader) throw new Error("Pi SDK resource loader is not initialized");
+  if (reload) await resourceLoader.reload();
+  const entries = [];
+  const skills = resourceLoader.getSkills?.()?.skills;
+  if (Array.isArray(skills)) {
+    for (const value of skills) {
+      const entry = actionEntry("skill", value);
+      if (entry) entries.push(entry);
+    }
+  }
+  const prompts = resourceLoader.getPrompts?.()?.prompts;
+  if (Array.isArray(prompts)) {
+    for (const value of prompts) {
+      const entry = actionEntry("command", value);
+      if (entry) entries.push(entry);
+    }
+  }
+  const extensions = resourceLoader.getExtensions?.()?.extensions;
+  if (Array.isArray(extensions)) {
+    for (const extension of extensions) {
+      const commands = isRecord(extension) && Array.isArray(extension.commands) ? extension.commands : [];
+      for (const value of commands) {
+        const entry = actionEntry("command", value);
+        if (entry) entries.push(entry);
+      }
+    }
+  }
+  const unique = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const key = `${entry.kind}:${entry.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(entry);
+  }
+  actionKeys.clear();
+  for (const key of seen) actionKeys.add(key);
+  return unique;
+};
+
+const resolveActionPrompt = async (action, message) => {
+  if (!action) return message;
+  const kind = action.kind === "skill" || action.kind === "command" ? action.kind : "";
+  const name = actionText(action.name).replace(/^\//, "");
+  if (!kind || !name) throw new Error("ACTION_NOT_SUPPORTED: Invalid Pi action");
+  await getActions(false);
+  if (!actionKeys.has(`${kind}:${name}`)) throw new Error(`ACTION_NOT_FOUND: ${name}`);
+  const command = kind === "skill" ? `/skill:${name}` : `/${name}`;
+  return message ? `${command} ${message}` : command;
 };
 
 const handleSessionEvent = (event) => {
@@ -697,7 +769,7 @@ const handleCommand = async (command) => {
         activePromptId = command.id;
         completedPromptIds.delete(command.id);
         send({ type: "accepted", id: command.id });
-        session.prompt(command.message, { images: command.images })
+        session.prompt(await resolveActionPrompt(command.action, command.message), { images: command.images })
           .then(() => {
             finishPrompt(command.id);
           })
@@ -726,6 +798,9 @@ const handleCommand = async (command) => {
         break;
       case "getModels":
         send({ type: "models", id: command.id, models: getModels() });
+        break;
+      case "listActions":
+        send({ type: "actions", id: command.id, actions: await getActions(command.reload === true) });
         break;
       case "setModel": {
         if (!session) throw new Error("Pi SDK session is not initialized");

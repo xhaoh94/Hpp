@@ -9,6 +9,7 @@ import {
 } from "@/stores/project-store";
 import { isAgentStartupFailureMessage, useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
+import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 
 interface PersistedData {
   projects: Project[];
@@ -158,7 +159,7 @@ const parsePersistedData = (value: unknown): PersistedData | null => {
   };
 };
 
-const parseChatMessage = (value: unknown): ChatMessage | null => {
+export const parsePersistedChatMessage = (value: unknown): ChatMessage | null => {
   if (!isRecord(value)) return null;
   const id = getString(value.id);
   const role = value.role;
@@ -169,12 +170,14 @@ const parseChatMessage = (value: unknown): ChatMessage | null => {
   }
 
   const persistedMessage = value as Partial<ChatMessage>;
+  const composerDraft = parseComposerDraftSnapshot(value.composerDraft);
   return {
     ...persistedMessage,
     id,
     role,
     content,
     timestamp,
+    composerDraft,
     // Never restore a stale streaming state after app restart.
     isStreaming: false,
   };
@@ -186,7 +189,7 @@ const parsePersistedMessages = (value: unknown): PersistedMessages | null => {
   for (const [sessionId, messages] of Object.entries(value.sessionMessages)) {
     if (!Array.isArray(messages)) continue;
     sessionMessages[sessionId] = messages
-      .map(parseChatMessage)
+      .map(parsePersistedChatMessage)
       .filter((message): message is ChatMessage => !!message && !isAgentStartupFailureMessage(message));
   }
   return { sessionMessages };
@@ -212,6 +215,9 @@ const parseModelInfo = (value: unknown): ModelInfo | null => {
     provider,
     reasoning: typeof value.reasoning === "boolean" ? value.reasoning : false,
     supportsImages: typeof value.supportsImages === "boolean" ? value.supportsImages : undefined,
+    supportedThinkingLevels: Array.isArray(value.supportedThinkingLevels)
+      ? value.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
+      : undefined,
   };
 };
 
@@ -254,6 +260,8 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
 let _sessionModelsCache: Record<string, ModelInfo> = {};
 let _sessionThinkingCache: Record<string, string> = {};
 export const SESSION_CONFIG_UPDATED_EVENT = "session-config-updated";
+export const SESSION_DATA_PURGED_EVENT = "session-data-purged";
+export const DISK_USAGE_INVALIDATED_EVENT = "disk-usage-invalidated";
 
 const notifySessionConfigUpdated = (sessionId: string) => {
   if (typeof window === "undefined") return;
@@ -378,6 +386,63 @@ export function getSessionThinking(sessionId: string): string | null {
   return _sessionThinkingCache[sessionId] || null;
 }
 
+const withoutSessionKeys = <T>(record: Record<string, T>, sessionIds: Set<string>) =>
+  Object.fromEntries(Object.entries(record).filter(([sessionId]) => !sessionIds.has(sessionId)));
+
+export async function purgeDeletedSessionData(sessionIds: string[], projectIds: string[] = []) {
+  const normalizedSessionIds = new Set(sessionIds.map((id) => id.trim()).filter(Boolean));
+  const normalizedProjectIds = new Set(projectIds.map((id) => id.trim()).filter(Boolean));
+  if (normalizedSessionIds.size === 0 && normalizedProjectIds.size === 0) return { success: true };
+
+  const previousModelCount = Object.keys(_sessionModelsCache).length;
+  const previousThinkingCount = Object.keys(_sessionThinkingCache).length;
+  _sessionModelsCache = withoutSessionKeys(_sessionModelsCache, normalizedSessionIds);
+  _sessionThinkingCache = withoutSessionKeys(_sessionThinkingCache, normalizedSessionIds);
+  if (
+    Object.keys(_sessionModelsCache).length !== previousModelCount ||
+    Object.keys(_sessionThinkingCache).length !== previousThinkingCount
+  ) {
+    _cacheDirty = true;
+    saveScheduler.schedule("models", 500, flushModelsToDisk);
+  }
+
+  if (_pendingMessagesData) {
+    _pendingMessagesData = {
+      sessionMessages: withoutSessionKeys(_pendingMessagesData.sessionMessages, normalizedSessionIds),
+    };
+  }
+  if (_pendingProjectsData) {
+    const projects = _pendingProjectsData.projects
+      .filter((project) => !normalizedProjectIds.has(project.id))
+      .map((project) => ({
+        ...project,
+        sessions: project.sessions.filter((session) => !normalizedSessionIds.has(session.id)),
+      }));
+    _pendingProjectsData = {
+      projects,
+      activeProjectId: _pendingProjectsData.activeProjectId && normalizedProjectIds.has(_pendingProjectsData.activeProjectId)
+        ? null
+        : _pendingProjectsData.activeProjectId,
+      activeSessionId: _pendingProjectsData.activeSessionId && normalizedSessionIds.has(_pendingProjectsData.activeSessionId)
+        ? null
+        : _pendingProjectsData.activeSessionId,
+    };
+  }
+
+  window.dispatchEvent(new CustomEvent(SESSION_DATA_PURGED_EVENT, {
+    detail: { sessionIds: [...normalizedSessionIds], projectIds: [...normalizedProjectIds] },
+  }));
+  const result = await window.electronAPI.purgeSessionData({
+    sessionIds: [...normalizedSessionIds],
+    projectIds: [...normalizedProjectIds],
+  });
+  if (!result.success) {
+    throw new Error(result.error || "Failed to purge deleted session data.");
+  }
+  window.dispatchEvent(new CustomEvent(DISK_USAGE_INVALIDATED_EVENT));
+  return result;
+}
+
 export async function getSessionThinkingOrDefault(sessionId: string, agentId?: string): Promise<string> {
   const persisted = getSessionThinking(sessionId);
   if (persisted) return persisted;
@@ -432,9 +497,11 @@ export function useDataPersistence() {
       let activeAgentId: string | null = null;
       let activeProject: Project | undefined;
       let activeSession: ProjectSession | undefined;
+      let validSessionIds: Set<string> | null = null;
 
       const d = parsePersistedData(projectData);
       if (d) {
+        validSessionIds = new Set(d.projects.flatMap((project) => project.sessions.map((session) => session.id)));
         activeSessionId = d.activeSessionId || null;
         useProjectStore.setState({
           projects: d.projects,
@@ -454,7 +521,10 @@ export function useDataPersistence() {
       // 2. Load session messages
       const md = parsePersistedMessages(msgData);
       if (md) {
-        useChatStore.setState({ sessionMessages: md.sessionMessages });
+        const sessionMessages = validSessionIds
+          ? Object.fromEntries(Object.entries(md.sessionMessages).filter(([sessionId]) => validSessionIds!.has(sessionId)))
+          : md.sessionMessages;
+        useChatStore.setState({ sessionMessages });
         if (activeSessionId) {
           useChatStore.getState().switchSession(activeSessionId);
         }
@@ -482,6 +552,14 @@ export function useDataPersistence() {
         } else {
           if (model.models) _sessionModelsCache = { ...model.models };
           if (model.thinkingLevels) _sessionThinkingCache = { ...model.thinkingLevels };
+          if (validSessionIds) {
+            _sessionModelsCache = Object.fromEntries(
+              Object.entries(_sessionModelsCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
+            );
+            _sessionThinkingCache = Object.fromEntries(
+              Object.entries(_sessionThinkingCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
+            );
+          }
         }
 
         // Restore active session's model from cache
@@ -496,6 +574,14 @@ export function useDataPersistence() {
       }
 
       if (!persistenceHydration.complete(hydrationGeneration)) return;
+
+      if (validSessionIds) {
+        void window.electronAPI.purgeSessionData({
+          validSessionIds: [...validSessionIds],
+          validProjectIds: d?.projects.map((project) => project.id) || [],
+        })
+          .catch((error) => console.error("[persistence] orphan cleanup failed:", error));
+      }
 
       // The active ChatPanel initializes its restored session through SessionCommandCoordinator.
     });

@@ -16,65 +16,28 @@ import { getLatestNpmPackageVersion } from "../utils/npm-registry";
 import type {
   AgentCapabilities,
   AgentDescriptor,
-  AgentImagePayload,
   AgentPackageStatus,
   AgentPlanModeSupport,
   AgentProviderConfiguration,
   AgentPluginInstallResult,
   AgentPluginManifest,
-  AgentUIResponse,
 } from "../../src/types/ipc";
 import { isValidVersion, meetsMinimumVersion } from "../../src/lib/version";
-
-export interface AgentModel {
-  id: string;
-  name: string;
-  provider: string;
-  reasoning: boolean;
-  supportsImages?: boolean;
-}
-
-export interface AgentSendOptions {
-  planModeEnabled?: boolean;
-  displayMessage?: string;
-  permissionMode?: "plan" | "full-access";
-  clientMessageId?: string;
-}
-
-export interface AgentForkTarget {
-  newSessionId: string;
-  sourceSessionFilePath?: string;
-  sourceUserMessageIndex: number;
-  rollbackUserMessageCount?: number;
-  targetTurnId?: string;
-  sourceMessageContent?: string;
-  throughMessageId?: string;
-}
-
-export interface AgentForkResult {
-  supported: boolean;
-  success: boolean;
-  sessionFilePath?: string;
-  nativeEntryId?: string;
-  error?: string;
-  reason?: string;
-}
-
-export interface AgentBackend {
-  setWindow(win: BrowserWindow): void;
-  init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
-  isIdle(): boolean;
-  sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
-  abort(): Promise<void>;
-  getModels(): Promise<AgentModel[]>;
-  setModel(provider: string, modelId: string): Promise<void>;
-  setThinkingLevel(level: string): Promise<void>;
-  sendUIResponse(response: AgentUIResponse): void;
-  dispose(): void | Promise<void>;
-  readonly sessionFilePath: string | null;
-}
+import { sanitizeAgentActionCatalog } from "../../shared/agent-actions";
+import type {
+  AgentBackend,
+  AgentForkResult,
+  AgentModel,
+  AgentSendOptions,
+} from "./agent-backend";
+export type {
+  AgentBackend,
+  AgentForkResult,
+  AgentForkTarget,
+  AgentModel,
+  AgentSendOptions,
+} from "./agent-backend";
+import { asString, getErrorMessage, isRecord } from "../utils/unknown-value";
 
 interface PluginRecord {
   descriptor: AgentDescriptor;
@@ -131,6 +94,7 @@ const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
   guidance: false,
   fork: false,
+  actions: false,
   configuration: "none",
   providerActivation: "none",
 };
@@ -141,19 +105,6 @@ function getDataDir() {
 
 function getPluginInstallDir() {
   return join(getDataDir(), "agent-plugins");
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizePluginEvent(event: unknown): Record<string, unknown> {
@@ -170,10 +121,6 @@ function normalizePluginEvent(event: unknown): Record<string, unknown> {
     throw new Error("Plugin event exceeds the 1 MB size limit.");
   }
   return event;
-}
-
-function asString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
 }
 
 function normalizePlanMode(value: unknown): AgentPlanModeSupport {
@@ -195,6 +142,17 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
   if (endpoints.length === 0) return "none";
 
   const defaultEndpoint = asString(value.defaultEndpoint);
+  const seenAuthModes = new Set<string>();
+  const authModes = Array.isArray(value.authModes)
+    ? value.authModes.flatMap((rawAuthMode) => {
+        if (!isRecord(rawAuthMode)) return [];
+        const id = asString(rawAuthMode.id);
+        if ((id !== "bearer" && id !== "x-api-key") || seenAuthModes.has(id)) return [];
+        seenAuthModes.add(id);
+        return [{ id, label: asString(rawAuthMode.label) || id }];
+      })
+    : [];
+  const defaultAuthMode = asString(value.defaultAuthMode);
   const modelDefaults = isRecord(value.modelDefaults) ? value.modelDefaults : {};
   const modelListMode = value.modelListMode === "configured" || value.modelListMode === "backend"
     ? value.modelListMode
@@ -217,11 +175,19 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
     defaultEndpoint: endpoints.some((endpoint) => endpoint.id === defaultEndpoint)
       ? defaultEndpoint
       : endpoints[0].id,
+    authModes: authModes.length > 0 ? authModes : undefined,
+    defaultAuthMode: authModes.some((mode) => mode.id === defaultAuthMode)
+      ? defaultAuthMode as "bearer" | "x-api-key"
+      : authModes[0]?.id,
     pathLabel: asString(value.pathLabel) || undefined,
     hint: asString(value.hint) || undefined,
     modelDefaults: {
       reasoning: modelDefaults.reasoning === true,
       imageInput: modelDefaults.imageInput === true,
+      supportedThinkingLevels: Array.isArray(modelDefaults.supportedThinkingLevels)
+        ? modelDefaults.supportedThinkingLevels.filter((level): level is string =>
+            typeof level === "string" && VALID_THINKING_LEVELS.has(level))
+        : undefined,
     },
     fixedModelCapabilities: value.fixedModelCapabilities === true,
     modelListMode,
@@ -235,6 +201,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     planMode: normalizePlanMode(input.planMode),
     guidance: input.guidance === true,
     fork: input.fork === true,
+    actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
   };
@@ -248,7 +215,13 @@ function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
       : {
           ...capabilities.configuration,
           endpoints: capabilities.configuration.endpoints.map((endpoint) => ({ ...endpoint })),
-          modelDefaults: { ...capabilities.configuration.modelDefaults },
+          authModes: capabilities.configuration.authModes?.map((authMode) => ({ ...authMode })),
+          modelDefaults: {
+            ...capabilities.configuration.modelDefaults,
+            supportedThinkingLevels: capabilities.configuration.modelDefaults.supportedThinkingLevels
+              ? [...capabilities.configuration.modelDefaults.supportedThinkingLevels]
+              : undefined,
+          },
           backendModelVisibility: capabilities.configuration.backendModelVisibility
             ? { ...capabilities.configuration.backendModelVisibility }
             : undefined,
@@ -1080,6 +1053,8 @@ export class AgentPluginRegistry {
         },
         hostApi as unknown as Record<string, (...args: unknown[]) => unknown>,
       );
+    }
+    if (!record.processCapabilities) {
       record.processCapabilities = await record.process.ensureLoaded();
     }
     return record.process;
@@ -1141,6 +1116,9 @@ export class AgentPluginRegistry {
         }
       },
       getModels: () => pluginProcess.backendCall(backendId, "getModels") as Promise<AgentModel[]>,
+      listActions: async (listOptions) => capabilities.listActions
+        ? sanitizeAgentActionCatalog(await pluginProcess.backendCall(backendId, "listActions", [listOptions]))
+        : [],
       setModel: (provider, modelId) => pluginProcess.backendCall(backendId, "setModel", [provider, modelId]) as Promise<void>,
       setThinkingLevel: (level) => pluginProcess.backendCall(backendId, "setThinkingLevel", [level]) as Promise<void>,
       sendUIResponse: (response) => {

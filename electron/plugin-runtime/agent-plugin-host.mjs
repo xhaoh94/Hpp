@@ -18,10 +18,10 @@ console.info = writeLog;
 console.debug = writeLog;
 console.warn = writeLog;
 
-const loadBuiltinBackend = async (backendName, sessionId, emit) => {
+const loadBuiltinBackend = async (backendName, sessionId, emit, context) => {
   const backendDir = process.env.HPP_AGENT_BACKEND_DIR || dirname(fileURLToPath(import.meta.url));
   const module = await import(pathToFileURL(`${backendDir}/plugin-backend-${backendName}.mjs`).href);
-  return module.createBackend(sessionId, emit);
+  return module.createBackend(sessionId, emit, context);
 };
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -62,6 +62,11 @@ const createContext = (sessionId, backendId) => ({
     backendName,
     sessionId,
     (event) => send({ kind: "event", backendId, event: validateEvent(event) }),
+    {
+      getConfigState: () => requestHost("getConfigState", [backendId]),
+      dataDir: pluginMeta.dataDir,
+      pluginDir: pluginMeta.pluginDir,
+    },
   ),
 });
 
@@ -109,6 +114,7 @@ const methods = {
     return {
       sendGuidance: typeof backend.sendGuidance === "function",
       forkSession: typeof backend.forkSession === "function",
+      listActions: typeof backend.listActions === "function",
     };
   },
   async backendCall({ backendId, method, args = [] }) {
@@ -120,7 +126,7 @@ const methods = {
     }
     const fn = backend[method];
     if (typeof fn !== "function") {
-      if (["isIdle", "sendGuidance", "forkSession", "sendUIResponse"].includes(method)) return undefined;
+      if (["isIdle", "sendGuidance", "forkSession", "listActions", "sendUIResponse"].includes(method)) return undefined;
       throw new Error(`Plugin backend is missing ${method}().`);
     }
     return fn.apply(backend, args);

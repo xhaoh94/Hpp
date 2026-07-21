@@ -71,7 +71,7 @@ export class AgentPluginProcess {
     sessionId: string,
     onEvent: (event: unknown) => void,
     getConfigState?: () => Promise<unknown>,
-  ): Promise<{ backendId: string; capabilities: { sendGuidance: boolean; forkSession: boolean } }> {
+  ): Promise<{ backendId: string; capabilities: { sendGuidance: boolean; forkSession: boolean; listActions: boolean } }> {
     await this.ensureLoaded();
     const backendId = `plugin-backend-${++this.nextBackendId}`;
     this.eventHandlers.set(backendId, onEvent);
@@ -80,6 +80,7 @@ export class AgentPluginProcess {
       const capabilities = await this.request("createBackend", { backendId, sessionId }) as {
         sendGuidance: boolean;
         forkSession: boolean;
+        listActions: boolean;
       };
       return { backendId, capabilities };
     } catch (error) {

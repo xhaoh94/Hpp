@@ -414,8 +414,21 @@
   align-items: center;
   gap: 4px;
   margin-top: 6px;
+  width: 100%;
   max-width: 100%;
   overflow: visible;
+}
+
+.project-terminal-measurements {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  width: max-content;
+  align-items: center;
+  gap: inherit;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .project-terminals-loading {

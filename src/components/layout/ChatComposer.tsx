@@ -6,9 +6,15 @@ import type {
   RefObject,
 } from "react";
 import { memo, useEffect, useRef, useState } from "react";
-import { FileText, Folder, Image as ImageIcon, Link2, Square, X } from "lucide-react";
+import { FileText, Folder, Image as ImageIcon, Link2, RefreshCw, Search, Square, WandSparkles, X } from "lucide-react";
 import type { PendingFile, PendingImage, PendingPathAttachment } from "@/stores/chat-store";
 import type { SessionReference } from "@/stores/project-store";
+import {
+  getAgentActionDisplayDescription,
+  type AgentActionCatalogEntry,
+  type AgentActionInvocation,
+} from "@shared/agent-actions";
+import { getComposerAction, type ComposerAction } from "@shared/composer-action";
 import {
   getChatComposerPlaceholder,
   getChatComposerSendTitle,
@@ -27,12 +33,19 @@ type ChatComposerProps = {
   pendingImages: PendingImage[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
+  selectedAction?: AgentActionInvocation;
+  agentId?: string;
+  actionSupported: boolean;
+  actionContextKey: string;
   sendKey: string;
   fileInputRef: RefObject<HTMLInputElement | null>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onAddInputFiles: (files: File[]) => void;
   onOpenAttachmentFolder: () => void;
   onOpenSessionReferences: () => void;
+  onLoadActions: (reload: boolean) => Promise<AgentActionCatalogEntry[]>;
+  onSelectAction: (action?: AgentActionInvocation) => void;
+  onSelectedActionInvalid: () => void;
   onClearAttachmentError: () => void;
   onRemovePendingFile: (id: string) => void;
   onRemovePendingImage: (id: string) => void;
@@ -60,12 +73,19 @@ export const ChatComposer = memo(function ChatComposer({
   pendingImages,
   pendingPathAttachments,
   sessionReferences,
+  selectedAction,
+  agentId,
+  actionSupported,
+  actionContextKey,
   sendKey,
   fileInputRef,
   textareaRef,
   onAddInputFiles,
   onOpenAttachmentFolder,
   onOpenSessionReferences,
+  onLoadActions,
+  onSelectAction,
+  onSelectedActionInvalid,
   onClearAttachmentError,
   onRemovePendingFile,
   onRemovePendingImage,
@@ -86,7 +106,8 @@ export const ChatComposer = memo(function ChatComposer({
     pendingImages.length > 0 ||
     pendingFiles.length > 0 ||
     pendingPathAttachments.length > 0 ||
-    sessionReferences.length > 0;
+    sessionReferences.length > 0 ||
+    !!selectedAction;
   const inputDisabled = activeQuestionnaire || interactionDisabled;
   const showAbortButton = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
   const queueSend = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
@@ -105,7 +126,35 @@ export const ChatComposer = memo(function ChatComposer({
     currentSessionRunning
   );
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const [actionPickerOpen, setActionPickerOpen] = useState(false);
+  const [actionSearch, setActionSearch] = useState("");
+  const [actionCatalog, setActionCatalog] = useState<AgentActionCatalogEntry[]>([]);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState("");
   const uploadMenuRef = useRef<HTMLDivElement>(null);
+  const primaryActionIntentRef = useRef<ComposerAction | null>(null);
+
+  const resolvePrimaryAction = () => {
+    if (interactionDisabled || activeQuestionnaire) return "none" as const;
+    const text = textareaRef.current?.value || "";
+    if (isAwaitingUIResponse) return text.trim() ? "send" as const : "none" as const;
+    return getComposerAction({
+      text,
+      imageCount: pendingImages.length,
+      fileCount: pendingFiles.length,
+      pathAttachmentCount: pendingPathAttachments.length,
+      referenceCount: sessionReferences.length,
+      actionCount: selectedAction ? 1 : 0,
+      running: currentSessionRunning,
+    });
+  };
+
+  const handlePrimaryAction = () => {
+    const action = primaryActionIntentRef.current || resolvePrimaryAction();
+    primaryActionIntentRef.current = null;
+    if (action === "send") onSend();
+    if (action === "abort" && currentSessionRunning) onAbort();
+  };
 
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (interactionDisabled) {
@@ -117,15 +166,17 @@ export const ChatComposer = memo(function ChatComposer({
   };
 
   useEffect(() => {
-    if (!uploadMenuOpen) return;
+    if (!uploadMenuOpen && !actionPickerOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
         setUploadMenuOpen(false);
+        setActionPickerOpen(false);
       }
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         setUploadMenuOpen(false);
+        setActionPickerOpen(false);
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -134,11 +185,23 @@ export const ChatComposer = memo(function ChatComposer({
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [uploadMenuOpen]);
+  }, [actionPickerOpen, uploadMenuOpen]);
 
   useEffect(() => {
-    if (interactionDisabled) setUploadMenuOpen(false);
+    if (interactionDisabled) {
+      setUploadMenuOpen(false);
+      setActionPickerOpen(false);
+    }
   }, [interactionDisabled]);
+
+  useEffect(() => {
+    primaryActionIntentRef.current = null;
+    setUploadMenuOpen(false);
+    setActionPickerOpen(false);
+    setActionSearch("");
+    setActionCatalog([]);
+    setActionError("");
+  }, [actionContextKey]);
 
   const handleChooseFiles = () => {
     if (interactionDisabled) return;
@@ -158,10 +221,67 @@ export const ChatComposer = memo(function ChatComposer({
     onOpenSessionReferences();
   };
 
+  const loadActions = async (reload: boolean) => {
+    setActionLoading(true);
+    setActionError("");
+    try {
+      const actions = await onLoadActions(reload);
+      setActionCatalog(actions);
+      if (selectedAction && !actions.some((entry) => entry.kind === selectedAction.kind && entry.name === selectedAction.name)) {
+        onSelectedActionInvalid();
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleChooseAction = () => {
+    if (interactionDisabled || !actionSupported) return;
+    setUploadMenuOpen(false);
+    setActionPickerOpen(true);
+    void loadActions(false);
+  };
+
+  const handleSelectAction = (entry: AgentActionCatalogEntry) => {
+    onSelectAction({ kind: entry.kind, name: entry.name });
+    setActionPickerOpen(false);
+    setUploadMenuOpen(false);
+    setActionSearch("");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
+  const normalizedSearch = actionSearch.trim().toLowerCase();
+  const visibleActions = actionCatalog.filter((entry) => {
+    const description = getAgentActionDisplayDescription(agentId, entry);
+    return !normalizedSearch || `${entry.name} ${description} ${entry.description || ""}`.toLowerCase().includes(normalizedSearch);
+  });
+  const skillActions = visibleActions.filter((entry) => entry.kind === "skill");
+  const commandActions = visibleActions.filter((entry) => entry.kind === "command");
+
   return (
     <>
-      {(sessionReferences.length > 0 || pendingFiles.length > 0 || pendingImages.length > 0 || pendingPathAttachments.length > 0) && (
+      {(selectedAction || sessionReferences.length > 0 || pendingFiles.length > 0 || pendingImages.length > 0 || pendingPathAttachments.length > 0) && (
         <div className="chat-preview-bar">
+          {selectedAction && (
+            <div className="chat-preview-chip chat-preview-chip-action">
+              <WandSparkles size={12} strokeWidth={2} className="chat-preview-icon" />
+              <span className="chat-preview-label">
+                {selectedAction.kind === "skill" ? "技能" : "命令"} · {selectedAction.name}
+              </span>
+              <button
+                type="button"
+                className="chat-preview-remove"
+                onClick={() => onSelectAction(undefined)}
+                disabled={interactionDisabled}
+                title="移除"
+                aria-label="移除技能或命令"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
           {sessionReferences.map((reference) => (
             <div key={reference.sourceSessionId} className="chat-preview-chip chat-preview-chip-reference">
               <Link2 size={12} strokeWidth={2} className="chat-preview-icon" />
@@ -296,6 +416,78 @@ export const ChatComposer = memo(function ChatComposer({
                   <Link2 size={13} />
                   <span>{uiText.chatComposer.session}</span>
                 </button>
+                {actionSupported && (
+                  <button type="button" role="menuitem" onClick={handleChooseAction}>
+                    <WandSparkles size={13} />
+                    <span>技能</span>
+                  </button>
+                )}
+              </div>
+            )}
+            {actionPickerOpen && (
+              <div className="chat-action-picker" role="dialog" aria-label="选择技能或命令">
+                <div className="chat-action-picker-header">
+                  <strong>技能与命令</strong>
+                  <div>
+                    <button type="button" onClick={() => void loadActions(true)} disabled={actionLoading} title="刷新">
+                      <RefreshCw size={13} className={actionLoading ? "spin" : undefined} />
+                    </button>
+                    <button type="button" onClick={() => setActionPickerOpen(false)} title="关闭"><X size={13} /></button>
+                  </div>
+                </div>
+                <label className="chat-action-search">
+                  <Search size={13} />
+                  <input
+                    value={actionSearch}
+                    onChange={(event) => setActionSearch(event.target.value)}
+                    placeholder="搜索技能或命令"
+                    autoFocus
+                  />
+                </label>
+                <div className="chat-action-list">
+                  {actionLoading && actionCatalog.length === 0 ? (
+                    <div className="chat-action-state">正在加载...</div>
+                  ) : actionError ? (
+                    <div className="chat-action-state error">加载失败：{actionError}</div>
+                  ) : visibleActions.length === 0 ? (
+                    <div className="chat-action-state">{normalizedSearch ? "没有匹配项" : "当前 Agent 没有可用技能或命令"}</div>
+                  ) : (
+                    <>
+                      {skillActions.length > 0 && <div className="chat-action-group-title">技能</div>}
+                      {skillActions.map((entry) => {
+                        const description = getAgentActionDisplayDescription(agentId, entry);
+                        return (
+                          <button
+                            type="button"
+                            className="chat-action-item"
+                            key={`skill:${entry.name}`}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={() => handleSelectAction(entry)}
+                          >
+                            <span>{entry.name}</span>
+                            {description && <small>{description}</small>}
+                          </button>
+                        );
+                      })}
+                      {commandActions.length > 0 && <div className="chat-action-group-title">命令</div>}
+                      {commandActions.map((entry) => {
+                        const description = getAgentActionDisplayDescription(agentId, entry);
+                        return (
+                          <button
+                            type="button"
+                            className="chat-action-item"
+                            key={`command:${entry.name}`}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={() => handleSelectAction(entry)}
+                          >
+                            <span>/{entry.name}</span>
+                            {description && <small>{description}</small>}
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -314,29 +506,25 @@ export const ChatComposer = memo(function ChatComposer({
           className="chat-textarea"
           disabled={inputDisabled}
         />
-        {showAbortButton && (
-          <button
-            type="button"
-            onClick={onAbort}
-            className="chat-send-btn abort"
-            title={uiText.chatComposer.stop}
-          >
-            <Square size={14} fill="currentColor" strokeWidth={0} />
-          </button>
-        )}
-        {!showAbortButton && (
-          <button
-            onClick={onSend}
-            disabled={sendDisabled}
-            className={`chat-send-btn ${queueSend ? "queue" : ""}`}
-            title={sendTitle}
-          >
+        <button
+          type="button"
+          onPointerDown={() => { primaryActionIntentRef.current = resolvePrimaryAction(); }}
+          onPointerCancel={() => { primaryActionIntentRef.current = null; }}
+          onPointerLeave={(event) => { if (event.buttons !== 0) primaryActionIntentRef.current = null; }}
+          onClick={handlePrimaryAction}
+          disabled={showAbortButton ? false : sendDisabled}
+          className={`chat-send-btn ${showAbortButton ? "abort" : queueSend ? "queue" : ""}`}
+          title={showAbortButton ? uiText.chatComposer.stop : sendTitle}
+        >
+          {showAbortButton
+            ? <Square size={14} fill="currentColor" strokeWidth={0} />
+            : (
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 19V5" />
               <path d="M5 12l7-7 7 7" />
             </svg>
-          </button>
-        )}
+              )}
+        </button>
       </div>
     </>
   );

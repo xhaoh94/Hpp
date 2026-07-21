@@ -47,6 +47,13 @@ class FakeSession {
   }
 
   async runPrompt(message) {
+    if (message.startsWith("/skill:review")) {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message === "retry") {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "temporary" } });
@@ -85,7 +92,12 @@ export const ModelRegistry = { create: () => ({
   hasConfiguredAuth: () => true,
 }) };
 export const SettingsManager = { create: () => ({}) };
-export class DefaultResourceLoader { async reload() {} }
+export class DefaultResourceLoader {
+  async reload() {}
+  getSkills() { return { skills: [{ name: "review", description: "Review changes" }] }; }
+  getPrompts() { return { prompts: [{ name: "release", description: "Prepare release", usage: "[version]" }] }; }
+  getExtensions() { return { extensions: [{ commands: [{ name: "inspect", description: "Inspect project" }] }] }; }
+}
 export const SessionManager = FakeSessionManager;
 export const createAgentSession = async ({ sessionManager, modelRegistry }) => ({
   session: new FakeSession(sessionManager, modelRegistry),
@@ -241,5 +253,34 @@ describe("Pi SDK worker protocol", () => {
       cancelled: false,
       answers: [{ selected: ["Pi"], values: ["pi"] }],
     });
+  });
+
+  it("lists native resources and expands selected skills with Pi slash syntax", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "actions", type: "listActions", reload: true });
+    await expect(worker.waitFor((message) => message.type === "actions" && message.id === "actions"))
+      .resolves.toMatchObject({
+        actions: [
+          { kind: "skill", name: "review", description: "Review changes" },
+          { kind: "command", name: "release", description: "Prepare release", argumentHint: "[version]" },
+          { kind: "command", name: "inspect", description: "Inspect project" },
+        ],
+      });
+    worker.send({
+      id: "skill-prompt",
+      type: "prompt",
+      message: "src",
+      action: { kind: "skill", name: "review" },
+      permissionMode: "full-access",
+    });
+    await expect(worker.waitFor((message) => message.type === "message_end" && (message.message as { text?: unknown })?.text === "/skill:review src"))
+      .resolves.toMatchObject({ type: "message_end" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "skill-prompt");
+    worker.send({ id: "missing-skill", type: "prompt", message: "", action: { kind: "skill", name: "missing" } });
+    await expect(worker.waitFor((message) => message.type === "error" && message.id === "missing-skill"))
+      .resolves.toMatchObject({ error: "ACTION_NOT_FOUND: missing" });
   });
 });

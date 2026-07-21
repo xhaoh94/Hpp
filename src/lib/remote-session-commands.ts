@@ -1,16 +1,18 @@
 import {
   SessionCommandCoordinator,
 } from "@/lib/session-command-coordinator";
+import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import type { ProjectSession } from "@/stores/project-store";
+import { useChatStore } from "@/stores/chat-store";
 import type { PendingUIResponse } from "@/components/layout/agentEventTypes";
 import type {
-  AgentImagePayload,
   RemoteRendererCommand,
   RemoteSession,
   RemoteSessionConfig,
   RemoteSessionCreateResult,
 } from "@/types";
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
+import { isAgentActionInvocation } from "@shared/agent-actions";
 
 export type RemoteCommandContext = {
   pendingInteraction: PendingUIResponse;
@@ -112,8 +114,8 @@ async function sendRemoteMessage(payload: Record<string, unknown>) {
   const sessionId = getString(payload.sessionId);
   const clientMessageId = getString(payload.clientMessageId);
   if (!sessionId || !clientMessageId) throw new Error("INVALID_REQUEST");
-  await SessionCommandCoordinator.initializeSession(sessionId);
   const content = getString(payload.content).trim();
+  const action = isAgentActionInvocation(payload.action) ? payload.action : undefined;
   const rawReferenceIds = Array.isArray(payload.sessionReferences)
     ? payload.sessionReferences.map((value) => getString(
         value && typeof value === "object" && !Array.isArray(value)
@@ -127,32 +129,32 @@ async function sendRemoteMessage(payload: Record<string, unknown>) {
     MAX_REMOTE_SESSION_REFERENCES,
   );
   const rawImages = Array.isArray(payload.images) ? payload.images : [];
-  const messageImages = rawImages.map((image) => {
+  const editableImages = rawImages.map((image) => {
     const raw = image as { id: string; name: string; mimeType: string; data: string };
-    return { id: raw.id, name: raw.name, src: `data:${raw.mimeType};base64,${raw.data}` };
-  });
-  const agentImages: AgentImagePayload = rawImages.map((image) => {
-    const raw = image as { mimeType: string; data: string };
-    return { type: "image", mimeType: raw.mimeType, data: raw.data };
+    return { id: raw.id, name: raw.name, mimeType: raw.mimeType, src: `data:${raw.mimeType};base64,${raw.data}` };
   });
   const displayContent = content || (rawImages.length > 0 ? "请查看附件图片。" : "");
-  const contextBlocks = referenceContext.contextBlocks;
-  if (!displayContent && contextBlocks.length === 0) throw new Error("INVALID_REQUEST");
-  const sendContent = contextBlocks.length > 0
-    ? [...contextBlocks, "", "<current_user_message>", displayContent, "</current_user_message>"].join("\n")
-    : displayContent;
+  if (!displayContent && referenceContext.contextBlocks.length === 0 && !action) throw new Error("INVALID_REQUEST");
+  const prepared = await buildSessionMessagePayload({
+    text: displayContent,
+    images: editableImages,
+    pendingFiles: [],
+    pendingPathAttachments: [],
+    sessionReferences: referenceContext.references,
+    forkContext: referenceContext.session.forkContext?.context,
+    action,
+    readFile: (path) => window.electronAPI.readFile(path),
+  });
   const result = await SessionCommandCoordinator.sendMessage({
     sessionId,
     clientMessageId,
     throwOnFailure: true,
     message: {
-      displayContent: displayContent || referenceContext.displayText,
-      sendContent,
-      messageImages: messageImages.length > 0 ? messageImages : undefined,
-      sessionReferences: referenceContext.messageReferences.length > 0 ? referenceContext.messageReferences : undefined,
-      agentImages: agentImages.length > 0 ? agentImages : undefined,
+      ...prepared,
+      editableContent: content,
+      displayContent: prepared.displayContent || referenceContext.displayText,
+      editableDraft: prepared.editableDraft ? { ...prepared.editableDraft, text: content } : undefined,
       planModeEnabled: payload.planModeEnabled === true,
-      forkContextUsed: !!referenceContext.session.forkContext,
     },
   });
   return { ...result, agentId: referenceContext.session.agentId };
@@ -165,6 +167,52 @@ async function setRemoteModel(payload: Record<string, unknown>) {
     id: getString(payload.modelId),
   });
   return publishSessionConfig(sessionId, true);
+}
+
+async function editRemoteQueuedMessage(payload: Record<string, unknown>) {
+  const sessionId = getString(payload.sessionId);
+  const queueItemId = getString(payload.queueItemId);
+  const item = (useChatStore.getState().messageQueues[sessionId] || [])
+    .find((candidate) => candidate.id === queueItemId);
+  if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
+  const original = item.editableDraft;
+  const retainedAttachmentIds = new Set(
+    Array.isArray(payload.retainedAttachmentIds)
+      ? payload.retainedAttachmentIds.map(getString).filter(Boolean)
+      : [],
+  );
+  const rawReferenceIds = Array.isArray(payload.sessionReferences)
+    ? payload.sessionReferences.map((value) => getString(
+        value && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>).sourceSessionId
+          : undefined,
+      )).filter(Boolean)
+    : [];
+  const referenceContext = SessionCommandCoordinator.prepareSessionReferenceContext(
+    sessionId,
+    rawReferenceIds,
+    MAX_REMOTE_SESSION_REFERENCES,
+  );
+  const rawImages = Array.isArray(payload.images) ? payload.images : [];
+  const images = rawImages.map((image) => {
+    const raw = image as { id: string; name: string; mimeType: string; data: string };
+    return { id: raw.id, name: raw.name, mimeType: raw.mimeType, src: `data:${raw.mimeType};base64,${raw.data}` };
+  });
+  const action = payload.action === null
+    ? undefined
+    : isAgentActionInvocation(payload.action) ? payload.action : item.action;
+  const prepared = await buildSessionMessagePayload({
+    text: getString(payload.content),
+    images,
+    pendingFiles: (original?.pendingFiles || []).filter((file) => retainedAttachmentIds.has(file.id)),
+    pendingPathAttachments: (original?.pendingPathAttachments || [])
+      .filter((attachment) => retainedAttachmentIds.has(attachment.id)),
+    sessionReferences: referenceContext.references,
+    forkContext: original?.forkContext,
+    action,
+    readFile: (path) => window.electronAPI.readFile(path),
+  });
+  return SessionCommandCoordinator.editQueuedMessage(sessionId, queueItemId, prepared);
 }
 
 async function setRemoteThinking(payload: Record<string, unknown>) {
@@ -211,7 +259,7 @@ export async function executeRemoteSessionCommand(
     case "session.send": return sendRemoteMessage(payload);
     case "session.abort": {
       const sessionId = getString(payload.sessionId);
-      await SessionCommandCoordinator.initializeSession(sessionId);
+      SessionCommandCoordinator.getSessionCommandTarget(sessionId);
       return abortRemoteSession(sessionId, context);
     }
     case "session.reload": {
@@ -224,6 +272,14 @@ export async function executeRemoteSessionCommand(
     }
     case "session.queue.guide":
       return SessionCommandCoordinator.guideQueuedMessage(getString(payload.sessionId), getString(payload.queueItemId));
+    case "session.queue.edit":
+      return editRemoteQueuedMessage(payload);
+    case "session.queue.reorder":
+      return SessionCommandCoordinator.reorderQueuedMessage(
+        getString(payload.sessionId),
+        getString(payload.queueItemId),
+        Number(payload.toIndex),
+      );
     case "session.queue.remove":
       return SessionCommandCoordinator.removeQueuedMessage(getString(payload.sessionId), getString(payload.queueItemId));
     case "session.setModel": return setRemoteModel(payload);
@@ -231,6 +287,10 @@ export async function executeRemoteSessionCommand(
     case "session.models.get": {
       const sessionId = getString(payload.sessionId);
       return publishSessionConfig(sessionId, true);
+    }
+    case "session.actions.get": {
+      const sessionId = getString(payload.sessionId);
+      return { actions: await SessionCommandCoordinator.getActions(sessionId, payload.reload === true) };
     }
     case "settings.setPlanMode": return setRemotePlanMode(payload);
     case "interaction.respond": return respondToRemoteInteraction(payload, context);

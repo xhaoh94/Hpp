@@ -26,6 +26,13 @@ import TitleBar from "./components/layout/TitleBar";
 import { CheckCircle2 } from "lucide-react";
 import { isSameModel } from "@shared/models";
 import { SessionCommandCoordinator } from "./lib/session-command-coordinator";
+import {
+  DEFAULT_SHORTCUTS,
+  matchShortcut,
+  normalizeShortcuts,
+  SHORTCUTS_UPDATED_EVENT,
+  type ShortcutConfig,
+} from "./lib/shortcuts";
 
 const ACTIVITY_BAR_WIDTH = 48;
 const SIDEBAR_COLLAPSE_THRESHOLD = 160;
@@ -33,40 +40,6 @@ const SIDEBAR_MAX_WIDTH = 520;
 const CHAT_MIN_WIDTH = 360;
 const SIDEBAR_KEYBOARD_STEP = 16;
 const SIDEBAR_KEYBOARD_LARGE_STEP = 48;
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
-function getShortcutPatch(value: unknown): Partial<typeof DEFAULT_SHORTCUTS> {
-  const shortcuts = asRecord(value);
-  return Object.fromEntries(
-    Object.entries(shortcuts).filter(([, shortcut]) => typeof shortcut === "string")
-  ) as Partial<typeof DEFAULT_SHORTCUTS>;
-}
-
-const DEFAULT_SHORTCUTS = {
-  sendKey: "Enter",
-  fileSearch: "Ctrl+P",
-  switchToFiles: "Ctrl+Shift+F",
-  prevModel: "Ctrl+[",
-  nextModel: "Ctrl+]",
-};
-
-function matchShortcut(event: KeyboardEvent, shortcut: string): boolean {
-  const parts = shortcut.split("+").map((s) => s.trim().toLowerCase());
-  const key = event.key.toLowerCase();
-  return (
-    parts.includes("ctrl") === event.ctrlKey &&
-    parts.includes("shift") === event.shiftKey &&
-    parts.includes("alt") === event.altKey &&
-    parts.includes("cmd") === event.metaKey &&
-    !["ctrl", "shift", "alt", "cmd"].includes(key) &&
-    parts.includes(key)
-  );
-}
 
 export default function App() {
   useDataPersistence();
@@ -91,13 +64,16 @@ export default function App() {
 
   useEffect(() => {
     window.electronAPI.loadData("settings").then((data) => {
-      const settings = asRecord(data);
-      const savedShortcuts = asRecord(settings.shortcuts);
-      if (Object.keys(savedShortcuts).length > 0) {
-        const { cycleModel: _cycleModel, ...rest } = savedShortcuts;
-        setShortcuts((prev) => ({ ...prev, ...getShortcutPatch(rest) }));
-      }
+      const settings = data && typeof data === "object" && !Array.isArray(data)
+        ? data as Record<string, unknown>
+        : {};
+      setShortcuts(normalizeShortcuts(settings.shortcuts));
     });
+    const handleShortcutsUpdated = (event: Event) => {
+      setShortcuts(normalizeShortcuts((event as CustomEvent<ShortcutConfig>).detail));
+    };
+    window.addEventListener(SHORTCUTS_UPDATED_EVENT, handleShortcutsUpdated);
+    return () => window.removeEventListener(SHORTCUTS_UPDATED_EVENT, handleShortcutsUpdated);
   }, []);
 
   const showFloatingToast = useCallback((text: string) => {
@@ -364,7 +340,11 @@ export default function App() {
           onPointerDown={handleSidebarResizePointerDown}
           onKeyDown={handleSidebarResizeKeyDown}
         />
-        <ChatPanel sendKey={shortcuts.sendKey} />
+        <ChatPanel
+          sendKey={shortcuts.sendKey}
+          previousMessageKey={shortcuts.previousMessage}
+          nextMessageKey={shortcuts.nextMessage}
+        />
       </div>
       <FileSearch
         isOpen={showFileSearch}

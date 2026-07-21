@@ -20,6 +20,11 @@ import {
 } from "../../plugin-runtime/process-events";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
+import type {
+  AgentActionCatalogEntry,
+  AgentActionInvocation,
+  AgentActionListOptions,
+} from "../../../shared/agent-actions";
 
 interface AgentModel {
   id: string;
@@ -34,6 +39,7 @@ interface AgentSendOptions {
   clientMessageId?: string;
   displayMessage?: string;
   permissionMode?: "plan" | "full-access";
+  action?: AgentActionInvocation;
 }
 
 interface AgentForkTarget {
@@ -200,6 +206,7 @@ export class DroidAgent {
   private isAborting = false;
   private runningToolUses = new Map<string, RunningDroidTool>();
   private completedToolUses = new Set<string>();
+  private actionKeys = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
@@ -343,7 +350,9 @@ export class DroidAgent {
       const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
       await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
 
-      const msgParams: DroidUserMessageParams = { text: message };
+      const action = options?.action ? await this.resolveAction(options.action) : null;
+      const actionText = action ? `/${action.name}${message ? ` ${message}` : ""}` : message;
+      const msgParams: DroidUserMessageParams = { text: actionText };
       if (images && images.length > 0) {
         msgParams.images = images.map((img) => ({
           type: "base64",
@@ -362,6 +371,55 @@ export class DroidAgent {
       if (this.process) this.failActiveTurn("Droid request failed", getErrorMessage(error));
       throw error;
     }
+  }
+
+  async listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
+    if (!this.process || !this.isReady) throw new Error("Droid is not ready");
+    const response = await this.sendRpcAsync("droid.list_skills", {
+      forceReload: options?.reload === true,
+    });
+    const result = asRecord(response).result;
+    const resultRecord = asRecord(result);
+    const values = Array.isArray(result)
+      ? result
+      : Array.isArray(resultRecord.skills)
+        ? resultRecord.skills
+        : Array.isArray(resultRecord.items)
+          ? resultRecord.items
+          : [];
+    const actions = values.flatMap((rawEntry): AgentActionCatalogEntry[] => {
+      const entry = asRecord(rawEntry);
+      if (entry.enabled === false || entry.userInvocable === false || entry.user_invocable === false) return [];
+      const name = String(entry.name || entry.id || entry.command || "").trim().replace(/^\//, "");
+      if (!name) return [];
+      const filePath = String(entry.filePath || entry.file_path || "").replace(/\\/g, "/").toLowerCase();
+      const kind = filePath.includes("/.factory/commands/") || filePath.includes("/.claude/commands/")
+        ? "command"
+        : "skill";
+      const description = String(entry.description || entry.summary || "").trim();
+      const argumentHint = String(entry.argumentHint || entry.argument_hint || entry.usage || "").trim();
+      return [{
+        kind,
+        name,
+        ...(description ? { description } : {}),
+        ...(argumentHint ? { argumentHint } : {}),
+      }];
+    });
+    const unique = actions.filter((entry, index) =>
+      actions.findIndex((candidate) => candidate.kind === entry.kind && candidate.name === entry.name) === index
+    );
+    this.actionKeys = new Set(unique.map((entry) => `${entry.kind}:${entry.name}`));
+    return unique;
+  }
+
+  private async resolveAction(action: AgentActionInvocation): Promise<AgentActionInvocation> {
+    const kind = action.kind === "skill" || action.kind === "command" ? action.kind : null;
+    const name = String(action.name || "").trim().replace(/^\//, "");
+    if (!kind || !name) throw new Error("ACTION_NOT_SUPPORTED: Invalid Droid action");
+    const key = `${kind}:${name}`;
+    await this.listActions();
+    if (!this.actionKeys.has(key)) throw new Error(`ACTION_NOT_FOUND: ${name}`);
+    return { kind, name };
   }
 
   isIdle(): boolean {
@@ -398,6 +456,7 @@ export class DroidAgent {
     this.activeClientMessageId = null;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
+    this.actionKeys.clear();
     this.isAborting = false;
     this.emitEvent({ type: "aborted", detail: detail || undefined });
   }
@@ -575,6 +634,7 @@ export class DroidAgent {
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
+    this.actionKeys.clear();
     this.eventBuffer.flush();
     if (!childProcess) return;
     if (await this.waitForExit(childProcess, 750)) return;

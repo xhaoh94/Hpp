@@ -1,4 +1,4 @@
-import { getAgentName, requiresProviderActivation, supportsGuidance, supportsNativeFork } from "@/lib/agents";
+import { getAgentName, requiresProviderActivation, supportsAgentActions, supportsGuidance, supportsNativeFork } from "@/lib/agents";
 import {
   cloneMessagesForFork,
   createSessionForkContext,
@@ -20,12 +20,16 @@ import {
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
-import { useChatStore, type ChatMessage, type ModelInfo, type QueuedMessage } from "@/stores/chat-store";
+import { useChatStore, type ChatMessage, type ModelInfo, type QueuedMessage, type QueuedMessageEditableDraft } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import type { AgentForkResult, AgentImagePayload, AgentReloadConfigResult } from "@/types";
 import { getQuestionnaireAnswerLabel } from "@shared/questionnaire";
+import { getModelThinkingLevels, normalizeModelThinkingLevel } from "@shared/models";
+import type { AgentActionCatalogEntry, AgentActionInvocation } from "@shared/agent-actions";
+import { createComposerDraftSnapshot } from "@/lib/composer-history";
 
 export type PreparedSessionMessage = {
+  editableContent?: string;
   displayContent: string;
   sendContent: string;
   messageImages?: Array<{ id: string; src: string; name: string }>;
@@ -33,6 +37,8 @@ export type PreparedSessionMessage = {
   agentImages?: AgentImagePayload;
   planModeEnabled?: boolean;
   forkContextUsed?: boolean;
+  action?: AgentActionInvocation;
+  editableDraft?: QueuedMessageEditableDraft;
 };
 
 export type SendMessageHooks = {
@@ -119,7 +125,8 @@ async function runInitialization(
   let models: ModelInfo[] = [];
   let warning: string | undefined;
   try {
-    if (!useProjectStore.getState().initializedSessionIds.has(sessionId)) {
+    const needsRuntimeInitialization = !useProjectStore.getState().initializedSessionIds.has(sessionId);
+    if (needsRuntimeInitialization) {
       const result = await window.electronAPI.agentCreateSession(
         session.agentId,
         project.path,
@@ -145,18 +152,20 @@ async function runInitialization(
     }
 
     const selectedModel = selectSessionModel(sessionId, models);
-    if (selectedModel) {
-      saveSessionModel(sessionId, selectedModel);
-      const modelResult = await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, sessionId);
-      if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
+    if (needsRuntimeInitialization) {
+      if (selectedModel) {
+        saveSessionModel(sessionId, selectedModel);
+        const modelResult = await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, sessionId);
+        if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
+      }
+
+      const thinking = await getSessionThinkingOrDefault(sessionId, session.agentId);
+      const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, sessionId);
+      if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
+      saveSessionThinking(sessionId, thinking);
+      if (useProjectStore.getState().activeSessionId === sessionId) useChatStore.getState().setThinkingLevel(thinking);
     }
     applyActiveModels(sessionId, models, selectedModel);
-
-    const thinking = await getSessionThinkingOrDefault(sessionId, session.agentId);
-    const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, sessionId);
-    if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
-    saveSessionThinking(sessionId, thinking);
-    if (useProjectStore.getState().activeSessionId === sessionId) useChatStore.getState().setThinkingLevel(thinking);
 
     if (options.activate && useProjectStore.getState().activeSessionId === sessionId) {
       await window.electronAPI.agentSwitchSession(sessionId);
@@ -387,29 +396,55 @@ export async function sendMessage(input: {
   hooks?: SendMessageHooks;
 }) {
   if (!input.sessionId || !input.clientMessageId) throw new Error("INVALID_REQUEST");
-  await initializeSession(input.sessionId);
+  let { session } = getSessionCommandTarget(input.sessionId);
   const message = input.message;
-  if (!message.displayContent.trim() && !message.sendContent.trim() && !message.messageImages?.length && !message.sessionReferences?.length) {
+  if (!message.displayContent.trim() && !message.sendContent.trim() && !message.messageImages?.length && !message.sessionReferences?.length && !message.action) {
     throw new Error("INVALID_REQUEST");
   }
+  if (message.action && !supportsAgentActions(session.agentId)) {
+    throw new Error("ACTION_NOT_SUPPORTED");
+  }
 
-  if (input.queueIfRunning !== false && isRunning(input.sessionId, input.hooks)) {
+  const enqueue = () => {
     const queued: QueuedMessage = {
       id: input.clientMessageId,
       sessionId: input.sessionId,
+      editableContent: message.editableContent,
       displayContent: message.displayContent,
       sendContent: message.sendContent,
       messageImages: message.messageImages,
       sessionReferences: message.sessionReferences,
       agentImages: message.agentImages,
       planModeEnabled: message.planModeEnabled,
+      action: message.action,
+      editableDraft: message.editableDraft,
       createdAt: Date.now(),
-      status: "queued",
+      status: "queued" as const,
     };
     useChatStore.getState().enqueueMessage(queued);
     if (message.forkContextUsed) clearForkContext(input.sessionId);
     return { queued: true, clientMessageId: input.clientMessageId };
-  }
+  };
+
+  const isSessionRunning = async () => {
+    let running = isRunning(input.sessionId, input.hooks);
+    if (!running && session.agentId === "claude") {
+      const state = await window.electronAPI.agentGetSessionState(input.sessionId).catch(() => null);
+      if (state?.success === true && state.idle === false) {
+        running = true;
+        // Keep the renderer authoritative state aligned so the queue dispatcher waits for Claude's real stream_end.
+        useProjectStore.getState().setAgentStatus(input.sessionId, "running");
+      }
+    }
+    return running;
+  };
+
+  // Queue before initialization: Claude rejects model/thinking synchronization while a turn is active.
+  if (input.queueIfRunning !== false && await isSessionRunning()) return enqueue();
+
+  ({ session } = await initializeSession(input.sessionId));
+  // Initialization is asynchronous, so re-check in case another sender started the session meanwhile.
+  if (input.queueIfRunning !== false && await isSessionRunning()) return enqueue();
 
   const commit = input.hooks?.commit || ((action: () => void) => action());
   commit(() => {
@@ -420,6 +455,8 @@ export async function sendMessage(input: {
       timestamp: Date.now(),
       images: message.messageImages,
       sessionReferences: message.sessionReferences,
+      action: message.action,
+      composerDraft: createComposerDraftSnapshot(message.editableDraft),
     }, input.sessionId);
     useProjectStore.getState().setAgentStatus(input.sessionId, "running");
     if (useChatStore.getState().activeSessionId === input.sessionId) useChatStore.getState().setStreaming(true);
@@ -436,10 +473,15 @@ export async function sendMessage(input: {
       const modelResult = await window.electronAPI.agentSetModel(model.provider, model.id, input.sessionId);
       if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
     }
-    const thinking = getSessionThinking(input.sessionId);
+    const storedThinking = getSessionThinking(input.sessionId);
+    const thinking = storedThinking ? normalizeModelThinkingLevel(storedThinking, model) : undefined;
     if (thinking) {
       const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, input.sessionId);
       if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
+      if (thinking !== storedThinking) {
+        saveSessionThinking(input.sessionId, thinking);
+        if (chat.activeSessionId === input.sessionId) chat.setThinkingLevel(thinking);
+      }
     }
     if (!sessionExists(input.sessionId)) {
       input.hooks?.onSendFailureCleanup?.(input.sessionId);
@@ -449,7 +491,11 @@ export async function sendMessage(input: {
       message.sendContent,
       message.agentImages,
       input.sessionId,
-      { planModeEnabled: !!message.planModeEnabled, clientMessageId: input.clientMessageId },
+      {
+        planModeEnabled: !!message.planModeEnabled,
+        clientMessageId: input.clientMessageId,
+        ...(message.action ? { action: message.action } : {}),
+      },
     );
     if (!result.success) throw new Error(result.error || "SEND_FAILED");
   } catch (error) {
@@ -470,7 +516,7 @@ export async function sendMessage(input: {
 }
 
 export async function abortSession(sessionId: string, context: AbortCommandContext) {
-  await initializeSession(sessionId);
+  getSessionCommandTarget(sessionId);
   const success = await context.abortSession(sessionId);
   if (!success) throw new Error("ABORT_FAILED");
   context.clearPendingInteraction?.(sessionId);
@@ -508,7 +554,16 @@ export async function setThinking(
   options: { isProcessActive?: (sessionId: string) => boolean } = {},
 ) {
   if (isRunning(sessionId, { isProcessActive: options.isProcessActive })) throw new Error("SESSION_BUSY");
+  const chat = useChatStore.getState();
+  const knownModel = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
+  if (knownModel && !getModelThinkingLevels(knownModel).some((candidate) => candidate.id === level)) {
+    throw new Error("UNSUPPORTED_THINKING_LEVEL");
+  }
   await initializeSession(sessionId);
+  const model = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
+  if (!getModelThinkingLevels(model).some((candidate) => candidate.id === level)) {
+    throw new Error("UNSUPPORTED_THINKING_LEVEL");
+  }
   const previous = getSessionThinking(sessionId) ||
     (useChatStore.getState().activeSessionId === sessionId ? useChatStore.getState().thinkingLevel : "medium");
   const result = await window.electronAPI.agentSetThinkingLevel(level, sessionId);
@@ -539,12 +594,21 @@ export async function getAvailableModels(sessionId: string) {
   return window.electronAPI.agentGetModels(sessionId) as Promise<ModelInfo[]>;
 }
 
+export async function getActions(sessionId: string, reload = false): Promise<AgentActionCatalogEntry[]> {
+  const { session } = getSessionCommandTarget(sessionId);
+  if (!supportsAgentActions(session.agentId)) return [];
+  await initializeSession(sessionId, { refreshModels: false });
+  return window.electronAPI.agentListActions(sessionId, { reload });
+}
+
 export async function getSessionCommandConfig(sessionId: string, includeModels = false) {
   const chat = useChatStore.getState();
+  const model = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
+  const storedThinking = getSessionThinking(sessionId) ||
+    (chat.activeSessionId === sessionId ? chat.thinkingLevel : "medium");
   return {
-    model: getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null),
-    thinkingLevel: getSessionThinking(sessionId) ||
-      (chat.activeSessionId === sessionId ? chat.thinkingLevel : "medium"),
+    model,
+    thinkingLevel: normalizeModelThinkingLevel(storedThinking, model),
     availableModels: includeModels ? await getAvailableModels(sessionId) : undefined,
   };
 }
@@ -573,6 +637,7 @@ export function prepareSessionReferenceContext(
     createSessionReferenceSnapshot(source, sessionMessages[source.id] || []));
   return {
     session,
+    references,
     contextBlocks: [session.forkContext?.context, buildSessionReferencesContext(references)]
       .filter((value): value is string => !!value),
     messageReferences: references.map((reference) => ({
@@ -591,6 +656,7 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
   const item = (chat.messageQueues[sessionId] || []).find((candidate) => candidate.id === queueItemId);
   if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
   if (item.status === "sending") throw new Error("QUEUE_ITEM_BUSY");
+  if (item.action) throw new Error("GUIDANCE_NOT_SUPPORTED_FOR_ACTION");
   chat.markQueuedMessageSending(sessionId, queueItemId);
   try {
     const result = await window.electronAPI.agentSendGuidance(
@@ -606,6 +672,60 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
     useChatStore.getState().markQueuedMessageFailed(sessionId, queueItemId, getErrorMessage(error));
     throw error;
   }
+}
+
+export function editQueuedMessage(sessionId: string, queueItemId: string, message: PreparedSessionMessage) {
+  getSessionCommandTarget(sessionId);
+  if ((message.editableContent || "").length > 200_000) throw new Error("MESSAGE_TOO_LARGE");
+  const chat = useChatStore.getState();
+  const item = (chat.messageQueues[sessionId] || []).find((candidate) => candidate.id === queueItemId);
+  if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
+  if (item.status === "sending") throw new Error("QUEUE_ITEM_BUSY");
+  if (
+    !message.displayContent.trim() && !message.sendContent.trim() && !message.messageImages?.length &&
+    !message.sessionReferences?.length && !message.action
+  ) throw new Error("INVALID_REQUEST");
+  const updated: QueuedMessage = {
+    id: item.id,
+    sessionId: item.sessionId,
+    editableContent: message.editableContent,
+    displayContent: message.displayContent,
+    sendContent: message.sendContent,
+    messageImages: message.messageImages,
+    sessionReferences: message.sessionReferences,
+    agentImages: message.agentImages,
+    planModeEnabled: item.planModeEnabled,
+    action: message.action,
+    editableDraft: message.editableDraft,
+    createdAt: item.createdAt,
+    status: "queued",
+    error: undefined,
+  };
+  chat.upsertQueuedMessage(updated);
+  return {
+    success: true,
+    queueItem: {
+      id: updated.id,
+      editableContent: updated.editableContent,
+      displayContent: updated.displayContent,
+      messageImages: updated.messageImages,
+      sessionReferences: updated.sessionReferences,
+      action: updated.action,
+      status: updated.status,
+    },
+  };
+}
+
+export function reorderQueuedMessage(sessionId: string, queueItemId: string, toIndex: number) {
+  getSessionCommandTarget(sessionId);
+  const chat = useChatStore.getState();
+  const queue = chat.messageQueues[sessionId] || [];
+  const item = queue.find((candidate) => candidate.id === queueItemId);
+  if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
+  if (item.status === "sending") throw new Error("QUEUE_ITEM_BUSY");
+  if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex >= queue.length) throw new Error("INVALID_QUEUE_INDEX");
+  chat.reorderQueuedMessage(sessionId, queueItemId, toIndex);
+  return { success: true, queueItemId, toIndex };
 }
 
 export function removeQueuedMessage(sessionId: string, queueItemId: string) {
@@ -642,7 +762,7 @@ export async function respondToInteraction(
   const cancelled = input.cancelled === true;
   const answers = input.answers;
   const summary = input.text || answers?.map(getQuestionnaireAnswerLabel)
-    .filter(Boolean).join("\n") || (cancelled ? "Cancelled" : "Submitted response");
+    .filter(Boolean).join("\n") || (cancelled ? "" : "已提交问卷回答");
   const result = await window.electronAPI.agentSendUIResponse({
     sessionId: input.sessionId,
     type: "extension_ui_response",
@@ -671,7 +791,9 @@ export async function respondToInteraction(
   } else {
     chat.finishLastAssistantProcess(Date.now(), cancelled ? "interrupted" : "completed", input.sessionId);
   }
-  chat.addMessage({ id: crypto.randomUUID(), role: "user", content: summary, timestamp: Date.now() }, input.sessionId);
+  if (!cancelled) {
+    chat.addMessage({ id: crypto.randomUUID(), role: "user", content: summary, timestamp: Date.now() }, input.sessionId);
+  }
   return { cancelled };
 }
 
@@ -688,11 +810,14 @@ export const SessionCommandCoordinator = {
   setPlanMode,
   reloadSession,
   getAvailableModels,
+  getActions,
   getSessionCommandConfig,
   getSessionCommandStatus,
   getAllSessionCommandIds,
   prepareSessionReferenceContext,
   guideQueuedMessage,
+  editQueuedMessage,
+  reorderQueuedMessage,
   removeQueuedMessage,
   respondToInteraction,
 };
