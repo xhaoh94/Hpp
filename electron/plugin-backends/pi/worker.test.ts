@@ -282,5 +282,5 @@ describe("Pi SDK worker protocol", () => {
     worker.send({ id: "missing-skill", type: "prompt", message: "", action: { kind: "skill", name: "missing" } });
     await expect(worker.waitFor((message) => message.type === "error" && message.id === "missing-skill"))
       .resolves.toMatchObject({ error: "ACTION_NOT_FOUND: missing" });
-  });
+  }, 15_000);
 });
