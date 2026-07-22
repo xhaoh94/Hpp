@@ -4,24 +4,11 @@ import { basename, extname, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
 import { commandExists } from "../utils/command-utils";
+import { isFileEntryExcluded, normalizeFileFilters } from "../../shared/file-filters";
+import { collectProjectFileIndex } from "./project-file-indexer";
 
 const SEARCH_RESULT_LIMIT = 50;
 const MAX_IMAGE_PREVIEW_BYTES = 25 * 1024 * 1024;
-const SEARCH_EXCLUDED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "__pycache__",
-  ".next",
-  ".nuxt",
-  "out",
-  "release",
-  "coverage",
-  "target",
-  "vendor",
-]);
-
 const IMAGE_MIME_TYPES: Record<string, string> = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
@@ -64,21 +51,22 @@ function getImageMimeType(filePath: string) {
 }
 
 export function registerFileHandlers() {
-  ipcMain.handle("fs:readDirectory", async (_event, dirPath: string) => {
+  ipcMain.handle("fs:readDirectory", async (_event, dirPath: string, rawFilters?: unknown) => {
     if (typeof dirPath !== "string" || !dirPath.trim()) return [];
     try {
+      const filters = normalizeFileFilters(rawFilters);
       const entries = await readdir(dirPath, { withFileTypes: true });
       const result: FileEntry[] = [];
 
       for (const entry of entries) {
-        // Skip hidden files and common large directories
-        if (entry.name.startsWith(".")) continue;
+        const type = entry.isDirectory() ? "folder" : "file";
+        if (isFileEntryExcluded({ name: entry.name, type }, filters)) continue;
 
         const fullPath = join(dirPath, entry.name);
         const entryData: FileEntry = {
           name: entry.name,
           path: fullPath,
-          type: entry.isDirectory() ? "folder" : "file",
+          type,
         };
 
         if (entry.isDirectory()) {
@@ -98,6 +86,11 @@ export function registerFileHandlers() {
     } catch (err) {
       return [];
     }
+  });
+
+  ipcMain.handle("fs:indexProjectFiles", async (_event, dirPath: string, rawFilters?: unknown) => {
+    if (typeof dirPath !== "string" || !dirPath.trim()) return [];
+    return collectProjectFileIndex(dirPath, rawFilters);
   });
 
   ipcMain.handle("fs:readFile", async (_event, filePath: string) => {
@@ -204,12 +197,13 @@ export function registerFileHandlers() {
 
   ipcMain.handle(
     "fs:searchFiles",
-    async (_event, dirPath: string, query: string) => {
+    async (_event, dirPath: string, query: string, rawFilters?: unknown) => {
       const results: FileEntry[] = [];
       const maxDepth = 5;
       if (typeof dirPath !== "string" || !dirPath.trim()) return results;
       const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
       if (!normalizedQuery) return results;
+      const filters = normalizeFileFilters(rawFilters);
 
       async function walk(dir: string, depth: number) {
         if (results.length >= SEARCH_RESULT_LIMIT) return;
@@ -218,8 +212,8 @@ export function registerFileHandlers() {
           const entries = await readdir(dir, { withFileTypes: true });
           for (const entry of entries) {
             if (results.length >= SEARCH_RESULT_LIMIT) return;
-            if (entry.name.startsWith(".")) continue;
-            if (entry.isDirectory() && SEARCH_EXCLUDED_DIRS.has(entry.name)) continue;
+            const type = entry.isDirectory() ? "folder" : "file";
+            if (isFileEntryExcluded({ name: entry.name, type }, filters)) continue;
 
             const fullPath = join(dir, entry.name);
 
@@ -227,7 +221,7 @@ export function registerFileHandlers() {
               results.push({
                 name: entry.name,
                 path: fullPath,
-                type: entry.isDirectory() ? "folder" : "file",
+                type,
               });
             }
 

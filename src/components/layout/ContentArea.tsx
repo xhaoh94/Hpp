@@ -10,7 +10,9 @@ export function ContentArea() {
   return (
     <aside className={`sidebar-panel ${sidebarCollapsed ? "collapsed" : ""}`}>
       {sidebarTab === "projects" && <ProjectView />}
-      {sidebarTab === "files" && <FileExplorer />}
+      <div className="sidebar-tab-view" hidden={sidebarTab !== "files"}>
+        <FileExplorer />
+      </div>
       {sidebarTab === "settings" && <SettingsView />}
     </aside>
   );

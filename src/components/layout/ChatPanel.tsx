@@ -1235,9 +1235,18 @@ export function ChatPanel({
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
   const currentAgentId = activeSession?.agentId || activeAgentId;
-  const activeDraft: ChatDraft = useChatStore(useShallow((state) =>
-    activeSessionId ? state.sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT : EMPTY_CHAT_DRAFT
-  ));
+  const activeDraft = useChatStore(useShallow((state) => {
+    const draft = activeSessionId
+      ? state.sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT
+      : EMPTY_CHAT_DRAFT;
+    return {
+      action: draft.action,
+      pendingFiles: draft.pendingFiles,
+      pendingImages: draft.pendingImages,
+      pendingPathAttachments: draft.pendingPathAttachments,
+      sessionReferences: draft.sessionReferences,
+    };
+  }));
   const pendingImages = activeDraft.pendingImages;
   const pendingFiles = activeDraft.pendingFiles;
   const pendingPathAttachments = activeDraft.pendingPathAttachments;
@@ -1475,7 +1484,10 @@ export function ChatPanel({
   }, [resolveLegacyReference, restoreComposerDraft]);
 
   useEffect(() => {
-    setComposerInput(activeDraft.text);
+    const draftText = activeSessionId
+      ? useChatStore.getState().sessionDrafts[activeSessionId]?.text || ""
+      : "";
+    setComposerInput(draftText);
     clearAttachmentError();
   }, [activeSessionId, setComposerInput, clearAttachmentError]);
 
@@ -1628,21 +1640,37 @@ export function ChatPanel({
   }, [activeProject, removePersistedSessionReference]);
 
   const addPathAttachmentFromPath = useCallback(async (path: string) => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId) {
+      showAttachmentError("当前没有可添加附件的会话");
+      return false;
+    }
     if (!path) {
       showAttachmentError("无法获取文件路径");
-      return;
+      return false;
     }
 
     const result = await window.electronAPI.statPath(path);
     if (!result.success || !result.attachment) {
       showAttachmentError(result.error ? `无法添加路径：${result.error}` : "无法添加路径");
-      return;
+      return false;
     }
 
     addPendingPathAttachment({
       id: crypto.randomUUID(),
       ...result.attachment,
-    });
+    }, targetSessionId);
+    clearAttachmentError();
+    return true;
+  }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
+
+  const addIndexedFileAttachment = useCallback((attachment: Omit<PendingPathAttachment, "id">) => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId) {
+      showAttachmentError("当前没有可添加附件的会话");
+      return;
+    }
+    addPendingPathAttachment({ id: crypto.randomUUID(), ...attachment }, targetSessionId);
     clearAttachmentError();
   }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
 
@@ -2369,6 +2397,7 @@ export function ChatPanel({
           fileInputRef={fileInputRef}
           textareaRef={textareaRef}
           onAddInputFiles={handleAddInputFiles}
+          onAddPathAttachment={addIndexedFileAttachment}
           onOpenAttachmentFolder={handleOpenAttachmentFolder}
           onOpenSessionReferences={() => {
             setModelOpen(false);
@@ -2394,6 +2423,7 @@ export function ChatPanel({
           onRemoveSessionReference={handleRemoveReference}
           onOpenImage={handleOpenImage}
           onSyncInputValue={syncInputValue}
+          onSetInputValue={setComposerInput}
           onResizeTextarea={resizeTextarea}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}

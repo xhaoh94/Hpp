@@ -11,6 +11,7 @@ import type {
   DiskCleanupResult,
 } from "../src/types/ipc";
 import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
+import type { FileFilterConfig } from "../shared/file-filters";
 import type {
   RemoteAccessStatus,
   RemotePairingOffer,
@@ -39,8 +40,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("app:showNotification", options),
 
   // File system
-  readDirectory: (dirPath: string) =>
-    ipcRenderer.invoke("fs:readDirectory", dirPath),
+  readDirectory: (dirPath: string, filters?: FileFilterConfig) =>
+    ipcRenderer.invoke("fs:readDirectory", dirPath, filters),
+  indexProjectFiles: (dirPath: string, filters?: FileFilterConfig) =>
+    ipcRenderer.invoke("fs:indexProjectFiles", dirPath, filters),
   readFile: (filePath: string) => ipcRenderer.invoke("fs:readFile", filePath),
   readFileDataUrl: (filePath: string) => ipcRenderer.invoke("fs:readFileDataUrl", filePath),
   statPath: (filePath: string) => ipcRenderer.invoke("fs:statPath", filePath),
@@ -49,8 +52,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("fs:fileExists", filePath),
   reverseApplyPatch: (projectPath: string, patches: string[]) =>
     ipcRenderer.invoke("fs:reverseApplyPatch", projectPath, patches),
-  searchFiles: (dirPath: string, query: string) =>
-    ipcRenderer.invoke("fs:searchFiles", dirPath, query),
+  searchFiles: (dirPath: string, query: string, filters?: FileFilterConfig) =>
+    ipcRenderer.invoke("fs:searchFiles", dirPath, query, filters),
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),
   openAttachmentFolder: () => ipcRenderer.invoke("fs:openAttachmentFolder"),
   getHomeDir: () => ipcRenderer.invoke("fs:getHomeDir"),

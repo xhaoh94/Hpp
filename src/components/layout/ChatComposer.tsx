@@ -5,10 +5,15 @@ import type {
   ClipboardEvent,
   RefObject,
 } from "react";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { FileText, Folder, Image as ImageIcon, Link2, RefreshCw, Search, Square, WandSparkles, X } from "lucide-react";
+import { useFileFilters } from "@/hooks/useFileFilters";
+import { parseActiveFileMention, replaceFileMentionToken, type ActiveFileMention } from "@/lib/file-mention";
+import { queryProjectFileIndex, type ProjectFileIndexItem } from "@/lib/project-file-index";
+import { scheduleAbortableTask } from "@/lib/abortable-task-scheduler";
 import type { PendingFile, PendingImage, PendingPathAttachment } from "@/stores/chat-store";
-import type { SessionReference } from "@/stores/project-store";
+import { useProjectStore, type SessionReference } from "@/stores/project-store";
+import { getFileFilterKey } from "@shared/file-filters";
 import {
   getAgentActionDisplayDescription,
   type AgentActionCatalogEntry,
@@ -21,6 +26,27 @@ import {
   getRemovePathAttachmentLabel,
   uiText,
 } from "@/i18n/text";
+import { ComposerFileMentionPicker } from "./ComposerFileMentionPicker";
+
+const FILE_MENTION_LIST_ID = "chat-composer-file-mentions";
+const FILE_MENTION_RESULT_LIMIT = 12;
+const FILE_MENTION_SEARCH_DEBOUNCE_MS = 100;
+
+interface FileMentionResultState {
+  items: ProjectFileIndexItem[];
+  query: string | null;
+}
+
+function areFileMentionsEqual(
+  left: ActiveFileMention | null,
+  right: ActiveFileMention | null,
+) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.start === right.start
+    && left.end === right.end
+    && left.query === right.query;
+}
 
 type ChatComposerProps = {
   activeQuestionnaire: boolean;
@@ -41,6 +67,7 @@ type ChatComposerProps = {
   fileInputRef: RefObject<HTMLInputElement | null>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onAddInputFiles: (files: File[]) => void;
+  onAddPathAttachment: (attachment: Omit<PendingPathAttachment, "id">) => void;
   onOpenAttachmentFolder: () => void;
   onOpenSessionReferences: () => void;
   onLoadActions: (reload: boolean) => Promise<AgentActionCatalogEntry[]>;
@@ -53,6 +80,7 @@ type ChatComposerProps = {
   onRemoveSessionReference: (sourceSessionId: string) => void;
   onOpenImage: (src: string) => void;
   onSyncInputValue: (value: string) => void;
+  onSetInputValue: (value: string) => void;
   onResizeTextarea: (textarea?: HTMLTextAreaElement | null) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
@@ -81,6 +109,7 @@ export const ChatComposer = memo(function ChatComposer({
   fileInputRef,
   textareaRef,
   onAddInputFiles,
+  onAddPathAttachment,
   onOpenAttachmentFolder,
   onOpenSessionReferences,
   onLoadActions,
@@ -93,6 +122,7 @@ export const ChatComposer = memo(function ChatComposer({
   onRemoveSessionReference,
   onOpenImage,
   onSyncInputValue,
+  onSetInputValue,
   onResizeTextarea,
   onKeyDown,
   onPaste,
@@ -131,8 +161,26 @@ export const ChatComposer = memo(function ChatComposer({
   const [actionCatalog, setActionCatalog] = useState<AgentActionCatalogEntry[]>([]);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [fileMention, setFileMention] = useState<ActiveFileMention | null>(null);
+  const [fileMentionResultState, setFileMentionResultState] = useState<FileMentionResultState>({
+    items: [],
+    query: null,
+  });
+  const fileMentionResults = fileMentionResultState.items;
+  const [fileMentionSelectedIndex, setFileMentionSelectedIndex] = useState(0);
+  const [fileMentionLoading, setFileMentionLoading] = useState(false);
+  const [fileMentionError, setFileMentionError] = useState(false);
   const uploadMenuRef = useRef<HTMLDivElement>(null);
+  const inputContainerRef = useRef<HTMLDivElement>(null);
   const primaryActionIntentRef = useRef<ComposerAction | null>(null);
+  const fileMentionRequestRef = useRef(0);
+  const composingRef = useRef(false);
+  const projects = useProjectStore((state) => state.projects);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const activeProjectPath = projects.find((project) => project.id === activeProjectId)?.path || "";
+  const fileFilters = useFileFilters();
+  const fileFilterKey = getFileFilterKey(fileFilters);
+  const fileMentionOpen = fileMention !== null;
 
   const resolvePrimaryAction = () => {
     if (interactionDisabled || activeQuestionnaire) return "none" as const;
@@ -152,6 +200,7 @@ export const ChatComposer = memo(function ChatComposer({
   const handlePrimaryAction = () => {
     const action = primaryActionIntentRef.current || resolvePrimaryAction();
     primaryActionIntentRef.current = null;
+    setFileMention(null);
     if (action === "send") onSend();
     if (action === "abort" && currentSessionRunning) onAbort();
   };
@@ -166,17 +215,21 @@ export const ChatComposer = memo(function ChatComposer({
   };
 
   useEffect(() => {
-    if (!uploadMenuOpen && !actionPickerOpen) return;
+    if (!uploadMenuOpen && !actionPickerOpen && !fileMention) return;
     const handlePointerDown = (event: MouseEvent) => {
       if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
         setUploadMenuOpen(false);
         setActionPickerOpen(false);
+      }
+      if (inputContainerRef.current && !inputContainerRef.current.contains(event.target as Node)) {
+        setFileMention(null);
       }
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         setUploadMenuOpen(false);
         setActionPickerOpen(false);
+        setFileMention(null);
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -185,14 +238,15 @@ export const ChatComposer = memo(function ChatComposer({
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [actionPickerOpen, uploadMenuOpen]);
+  }, [actionPickerOpen, fileMentionOpen, uploadMenuOpen]);
 
   useEffect(() => {
-    if (interactionDisabled) {
+    if (inputDisabled || isAwaitingUIResponse) {
       setUploadMenuOpen(false);
       setActionPickerOpen(false);
+      setFileMention(null);
     }
-  }, [interactionDisabled]);
+  }, [inputDisabled, isAwaitingUIResponse]);
 
   useEffect(() => {
     primaryActionIntentRef.current = null;
@@ -201,22 +255,162 @@ export const ChatComposer = memo(function ChatComposer({
     setActionSearch("");
     setActionCatalog([]);
     setActionError("");
+    setFileMention(null);
+    setFileMentionResultState({ items: [], query: null });
+    setFileMentionSelectedIndex(0);
+    setFileMentionLoading(false);
+    setFileMentionError(false);
+    fileMentionRequestRef.current += 1;
   }, [actionContextKey]);
+
+  useEffect(() => {
+    setFileMention(null);
+  }, [activeProjectPath]);
+
+  useEffect(() => {
+    const requestId = fileMentionRequestRef.current + 1;
+    fileMentionRequestRef.current = requestId;
+    setFileMentionSelectedIndex(0);
+    setFileMentionError(false);
+
+    if (!fileMention || !activeProjectPath) {
+      setFileMentionResultState({ items: [], query: null });
+      setFileMentionLoading(false);
+      return;
+    }
+
+    setFileMentionLoading(true);
+    const scheduledSearch = scheduleAbortableTask((signal) => {
+      void queryProjectFileIndex({
+        projectPath: activeProjectPath,
+        filters: fileFilters,
+        query: fileMention.query,
+        limit: FILE_MENTION_RESULT_LIMIT,
+        signal,
+      }).then((results) => {
+        if (fileMentionRequestRef.current !== requestId || signal.aborted) return;
+        setFileMentionSelectedIndex(0);
+        setFileMentionResultState({ items: results, query: fileMention.query });
+      }).catch(() => {
+        if (fileMentionRequestRef.current !== requestId || signal.aborted) return;
+        setFileMentionResultState({ items: [], query: fileMention.query });
+        setFileMentionError(true);
+      }).finally(() => {
+        if (fileMentionRequestRef.current === requestId && !signal.aborted) {
+          setFileMentionLoading(false);
+        }
+      });
+    }, FILE_MENTION_SEARCH_DEBOUNCE_MS);
+
+    return scheduledSearch.cancel;
+  }, [activeProjectPath, fileFilterKey, fileFilters, fileMention?.query]);
+
+  const updateFileMentionFromTextarea = useCallback((textarea: HTMLTextAreaElement) => {
+    if (inputDisabled || isAwaitingUIResponse || composingRef.current) {
+      setFileMention(null);
+      return;
+    }
+
+    const mention = parseActiveFileMention(
+      textarea.value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+    );
+    setFileMention((current) => areFileMentionsEqual(current, mention) ? current : mention);
+    if (mention) {
+      setUploadMenuOpen(false);
+      setActionPickerOpen(false);
+    }
+  }, [inputDisabled, isAwaitingUIResponse]);
+
+  const handleSelectFileMention = useCallback((item: ProjectFileIndexItem) => {
+    const textarea = textareaRef.current;
+    if (!textarea || !fileMention) return;
+    if (fileMentionResultState.query !== fileMention.query) return;
+
+    const currentMention = parseActiveFileMention(
+      textarea.value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+    );
+    if (!currentMention || currentMention.start !== fileMention.start) {
+      updateFileMentionFromTextarea(textarea);
+      return;
+    }
+
+    const replacement = replaceFileMentionToken(textarea.value, currentMention);
+    setFileMention(null);
+    onSetInputValue(replacement.value);
+    onAddPathAttachment({
+      name: item.name,
+      path: item.path,
+      kind: item.isDirectory ? "folder" : "file",
+    });
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(replacement.caret, replacement.caret);
+      onResizeTextarea(textarea);
+    });
+  }, [fileMention, fileMentionResultState.query, onAddPathAttachment, onResizeTextarea, onSetInputValue, textareaRef, updateFileMentionFromTextarea]);
+
+  const handleTextareaKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || composingRef.current) {
+      return;
+    }
+
+    if (fileMention) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (fileMentionResults.length > 0) {
+          const direction = event.key === "ArrowDown" ? 1 : -1;
+          setFileMentionSelectedIndex((index) => (
+            (index + direction + fileMentionResults.length) % fileMentionResults.length
+          ));
+        }
+        return;
+      }
+
+      if (event.key === "Enter" || event.key === "Tab") {
+        const selected = fileMentionResults[fileMentionSelectedIndex];
+        if (event.key === "Tab" && !selected) {
+          onKeyDown(event);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (selected) handleSelectFileMention(selected);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setFileMention(null);
+        return;
+      }
+    }
+
+    onKeyDown(event);
+  };
 
   const handleChooseFiles = () => {
     if (interactionDisabled) return;
+    setFileMention(null);
     setUploadMenuOpen(false);
     fileInputRef.current?.click();
   };
 
   const handleChooseFolder = () => {
     if (interactionDisabled) return;
+    setFileMention(null);
     setUploadMenuOpen(false);
     onOpenAttachmentFolder();
   };
 
   const handleChooseSession = () => {
     if (interactionDisabled) return;
+    setFileMention(null);
     setUploadMenuOpen(false);
     onOpenSessionReferences();
   };
@@ -239,6 +433,7 @@ export const ChatComposer = memo(function ChatComposer({
 
   const handleChooseAction = () => {
     if (interactionDisabled || !actionSupported) return;
+    setFileMention(null);
     setUploadMenuOpen(false);
     setActionPickerOpen(true);
     void loadActions(false);
@@ -369,6 +564,7 @@ export const ChatComposer = memo(function ChatComposer({
       )}
 
       <div
+        ref={inputContainerRef}
         className="chat-input-container"
         onDrop={(event) => {
           event.stopPropagation();
@@ -387,6 +583,24 @@ export const ChatComposer = memo(function ChatComposer({
           onChange={handleFileInputChange}
           disabled={interactionDisabled}
         />
+        {fileMention && (
+          <ComposerFileMentionPicker
+            id={FILE_MENTION_LIST_ID}
+            error={fileMentionError}
+            interactive={fileMentionResultState.query === fileMention.query}
+            loading={fileMentionLoading}
+            projectPath={activeProjectPath}
+            query={fileMention.query}
+            results={fileMentionResults}
+            selectedIndex={fileMentionSelectedIndex}
+            onHighlight={(index) => {
+              if (fileMentionResultState.query === fileMention.query) {
+                setFileMentionSelectedIndex(index);
+              }
+            }}
+            onSelect={handleSelectFileMention}
+          />
+        )}
         <div className="chat-input-actions-left">
           <div ref={uploadMenuRef} className="chat-upload-control">
             <button
@@ -395,7 +609,10 @@ export const ChatComposer = memo(function ChatComposer({
               title={uiText.chatComposer.addAttachment}
               aria-haspopup="menu"
               aria-expanded={uploadMenuOpen}
-              onClick={() => setUploadMenuOpen((open) => !open)}
+              onClick={() => {
+                setFileMention(null);
+                setUploadMenuOpen((open) => !open);
+              }}
               disabled={interactionDisabled}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -498,13 +715,39 @@ export const ChatComposer = memo(function ChatComposer({
           onChange={(event) => {
             onSyncInputValue(event.currentTarget.value);
             onResizeTextarea(event.currentTarget);
+            updateFileMentionFromTextarea(event.currentTarget);
           }}
-          onKeyDown={onKeyDown}
+          onKeyDown={handleTextareaKeyDown}
+          onKeyUp={(event) => {
+            if (event.key !== "Escape") updateFileMentionFromTextarea(event.currentTarget);
+          }}
+          onClick={(event) => updateFileMentionFromTextarea(event.currentTarget)}
+          onCompositionStart={() => {
+            composingRef.current = true;
+            setFileMention(null);
+          }}
+          onCompositionEnd={(event) => {
+            composingRef.current = false;
+            const textarea = event.currentTarget;
+            requestAnimationFrame(() => updateFileMentionFromTextarea(textarea));
+          }}
+          onBlur={(event) => {
+            const nextTarget = event.relatedTarget as Node | null;
+            if (!nextTarget || !inputContainerRef.current?.contains(nextTarget)) setFileMention(null);
+          }}
           onPaste={onPaste}
           placeholder={placeholder}
           rows={1}
           className="chat-textarea"
           disabled={inputDisabled}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={!!fileMention}
+          aria-controls={fileMention ? FILE_MENTION_LIST_ID : undefined}
+          aria-activedescendant={fileMentionResults[fileMentionSelectedIndex]
+            ? `${FILE_MENTION_LIST_ID}-option-${fileMentionSelectedIndex}`
+            : undefined}
+          aria-haspopup="listbox"
         />
         <button
           type="button"

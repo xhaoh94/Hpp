@@ -10,7 +10,7 @@ import {
 import { Sidebar } from "./components/layout/Sidebar";
 import { ContentArea } from "./components/layout/ContentArea";
 import { ChatPanel } from "./components/layout/ChatPanel";
-import { FileSearch } from "./components/shared/FileSearch";
+import { FileSearch, type FileSearchSelection } from "./components/shared/FileSearch";
 import { useDataPersistence } from "./hooks/useDataPersistence";
 import { DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useAppStore } from "./stores/app-store";
 import { useAgentCatalogStore } from "./stores/agent-catalog-store";
@@ -158,10 +158,8 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [shortcuts, cycleModel]);
 
-  const handleFileSelect = useCallback((filePath: string) => {
-    // Switch to files tab and could highlight the file
-    useAppStore.getState().setSidebarTab("files");
-    useChatStore.getState().setHighlightedFile(filePath);
+  const handleFileSelect = useCallback((selection: FileSearchSelection) => {
+    useAppStore.getState().revealFile(selection.path, { preview: !selection.isDirectory });
   }, []);
 
   const getSidebarMaxWidth = useCallback(() => {

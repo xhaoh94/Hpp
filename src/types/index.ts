@@ -23,6 +23,7 @@ import type {
   RemoteRendererCommandResult,
   RemoteRendererPublish,
 } from "../../shared/remote-protocol";
+import type { FileFilterConfig } from "../../shared/file-filters";
 
 export type {
   RemoteAccessStatus,
@@ -196,14 +197,15 @@ export interface ElectronAPI {
   showNotification: (options: { title?: string; body?: string }) => Promise<{ success: boolean; error?: string }>;
 
   // File system
-  readDirectory: (dirPath: string) => Promise<FileEntry[]>;
+  readDirectory: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
+  indexProjectFiles?: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
   readFileDataUrl: (filePath: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>;
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
   reverseApplyPatch: (projectPath: string, patches: string[]) => Promise<{ success: boolean; error?: string }>;
-  searchFiles: (dirPath: string, query: string) => Promise<FileEntry[]>;
+  searchFiles: (dirPath: string, query: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
   openAttachmentFolder: () => Promise<{ canceled: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getHomeDir: () => Promise<string>;

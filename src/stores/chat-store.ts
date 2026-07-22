@@ -167,7 +167,6 @@ interface ChatState {
   availableModels: ModelInfo[];
   favoriteModels: ModelInfo[];
   activeAgentId: string;
-  highlightedFile: string | null;
   sessionDrafts: Record<string, ChatDraft>;
   messageQueues: Record<string, QueuedMessage[]>;
 
@@ -194,7 +193,6 @@ interface ChatState {
   setActiveAgent: (id: string) => void;
   clearMessages: () => void;
   clearAgentStartupErrors: (sessionId?: string | null) => void;
-  setHighlightedFile: (path: string | null) => void;
   setDraftText: (sessionId: string, text: string) => void;
   replaceSessionDraft: (sessionId: string, draft: ChatDraft) => void;
   setDraftAction: (sessionId: string, action?: AgentActionInvocation) => void;
@@ -407,7 +405,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   availableModels: [],
   favoriteModels: [],
   activeAgentId: "",
-  highlightedFile: null,
   sessionDrafts: {},
   messageQueues: {},
 
@@ -678,7 +675,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearMessages: () => set({ messages: [] }),
   clearAgentStartupErrors: (sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => messages.filter((message) => !isAgentStartupFailureMessage(message)))),
-  setHighlightedFile: (path) => set({ highlightedFile: path }),
   setDraftText: (sessionId, text) =>
     set((s) => updateSessionDraft(s, sessionId, (draft) => (
       draft.text === text ? draft : { ...draft, text }

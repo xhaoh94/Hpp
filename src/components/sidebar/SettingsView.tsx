@@ -35,12 +35,14 @@ import "./Settings.css";
 import type { DiskUsageCategoryId, DiskUsageStats } from "@/types";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { DISK_USAGE_INVALIDATED_EVENT } from "@/hooks/useDataPersistence";
+import { publishFileFilters } from "@/hooks/useFileFilters";
+import {
+  DEFAULT_FILE_FILTERS,
+  normalizeFileFilters,
+  type FileFilterConfig,
+} from "@shared/file-filters";
 
-interface FilterConfig {
-  excludeFolders: string[];
-  excludeExtensions: string[];
-  excludeFiles: string[];
-}
+type FilterConfig = FileFilterConfig;
 
 interface GeneralSettings {
   tempImagePath: string;
@@ -61,11 +63,7 @@ const SHORTCUT_LABELS: Record<string, string> = {
   nextMessage: "下一条消息",
 };
 
-const DEFAULT_FILTERS: FilterConfig = {
-  excludeFolders: ["node_modules", ".git", "dist"],
-  excludeExtensions: [".pyc", ".class"],
-  excludeFiles: [".env"],
-};
+const DEFAULT_FILTERS = DEFAULT_FILE_FILTERS;
 
 const IMAGE_RETENTION_HOURS = 12;
 const THEME_OPTIONS: Array<{ value: AppTheme; label: string }> = [
@@ -105,21 +103,6 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-}
-
-function getStringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : undefined;
-}
-
-function normalizeFilters(value: unknown): FilterConfig {
-  const filters = asRecord(value);
-  return {
-    excludeFolders: getStringArray(filters.excludeFolders) || DEFAULT_FILTERS.excludeFolders,
-    excludeExtensions: getStringArray(filters.excludeExtensions) || DEFAULT_FILTERS.excludeExtensions,
-    excludeFiles: getStringArray(filters.excludeFiles) || DEFAULT_FILTERS.excludeFiles,
-  };
 }
 
 function normalizeGeneral(value: unknown): GeneralSettings {
@@ -195,7 +178,7 @@ export function SettingsView() {
     window.electronAPI.loadData("settings").then((data) => {
       const settings = asRecord(data);
       if (settings.shortcuts) setShortcuts(normalizeShortcuts(settings.shortcuts));
-      if (settings.filters) setFilters(normalizeFilters(settings.filters));
+      if (settings.filters) setFilters(normalizeFileFilters(settings.filters));
       if (settings.general) {
         const originalGeneral = asRecord(settings.general);
         const general = normalizeGeneral(settings.general);
@@ -350,8 +333,10 @@ export function SettingsView() {
   };
 
   const saveFilters = (f: FilterConfig) => {
-    setFilters(f);
-    void saveSettings(shortcuts, f);
+    const normalized = normalizeFileFilters(f);
+    setFilters(normalized);
+    void saveSettings(shortcuts, normalized);
+    publishFileFilters(normalized);
   };
 
   const updateCloseToTray = (enabled: boolean) => {

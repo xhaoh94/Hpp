@@ -344,6 +344,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       const targetName = targetAgent?.name || targetAgentId;
       const copiedProviderId = result.copiedProviderId || copySourceProvider.providerId;
       const needsActivation = targetAgent?.capabilities.providerActivation === "single-active";
+      if (targetAgentId === agentId) {
+        setConfig(result.config);
+        setSelectedProviderId(copiedProviderId);
+      }
       setCopySourceProvider(null);
       setStatus({
         type: result.error ? "error" : "success",
