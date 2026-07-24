@@ -89,21 +89,26 @@ async function loadCloseToTraySetting() {
 function createTray() {
   if (tray) return;
 
-  const trayIcon = nativeImage.createFromPath(getIconPath());
-  tray = new Tray(trayIcon.isEmpty() ? getIconPath() : trayIcon.resize({ width: 16, height: 16 }));
-  tray.setToolTip("Hpp");
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: "显示 Hpp", click: focusMainWindow },
-    { type: "separator" },
-    {
-      label: "退出",
-      click: () => {
-        isQuitting = true;
-        app.quit();
+  try {
+    const trayIcon = nativeImage.createFromPath(getIconPath());
+    tray = new Tray(trayIcon.isEmpty() ? getIconPath() : trayIcon.resize({ width: 16, height: 16 }));
+    tray.setToolTip("Hpp");
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: "显示 Hpp", click: focusMainWindow },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
       },
-    },
-  ]));
-  tray.on("click", focusMainWindow);
+    ]));
+    tray.on("click", focusMainWindow);
+  } catch (error) {
+    tray = null;
+    console.warn("System tray is unavailable; continuing without tray integration.", error);
+  }
 }
 
 function getUpdateFeedLabel() {
