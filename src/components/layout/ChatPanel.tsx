@@ -42,6 +42,7 @@ import { getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersi
 import { SessionCommandCoordinator, type PreparedSessionMessage } from "@/lib/session-command-coordinator";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
+import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ChatComposer } from "./ChatComposer";
@@ -64,7 +65,7 @@ import {
 } from "./agentEventUtils";
 import { getModelThinkingLevels, getOrderedModelProviders, includeCurrentModel } from "@shared/models";
 import { collectProcessDiffs } from "@shared/diff-summary";
-import { areAssistantMessageActionsVisible, formatHistoryMessageTime } from "@shared/message-display";
+import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import {
   ComposerHistoryController,
@@ -117,7 +118,7 @@ type QueuePanelProps = {
 
 const getQueuePreview = (item: QueuedMessage) => {
   const content = item.displayContent.trim();
-  if (content) return content.length > 120 ? `${content.slice(0, 120)}...` : content;
+  if (content) return <AttachmentPreviewText content={content} maxLength={120} />;
   if (item.sessionReferences?.length) return `[引用会话: ${item.sessionReferences.map((reference) => reference.sourceTitle).join(", ")}]`;
   if (item.messageImages?.length) return `[${item.messageImages.length} 张图片]`;
   if (item.action) return `${item.action.kind === "skill" ? "技能" : "命令"} · ${item.action.name}`;
@@ -449,7 +450,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
                   <div className="chat-queue-edit-chip" key={attachment.id}>{attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}<span>{attachment.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, pendingPathAttachments: current.pendingPathAttachments.filter((entry) => entry.id !== attachment.id) }))}><X size={12} /></button></div>
                 ))}
                 {draft.sessionReferences.map((reference) => (
-                  <div className="chat-queue-edit-chip reference" key={reference.sourceSessionId}><Link2 size={13} /><span>{reference.sourceTitle}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))}><X size={12} /></button></div>
+                  <div className="chat-queue-edit-chip reference" key={reference.sourceSessionId}><Link2 size={13} /><span><AttachmentPreviewText content={reference.sourceTitle} /></span><button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))}><X size={12} /></button></div>
                 ))}
             </div>
           )}
@@ -514,7 +515,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
                           return (
                             <button type="button" className={selected ? "selected" : ""} key={candidate.id} onClick={() => toggleReference(candidate)}>
                               <Link2 size={14} />
-                              <span>{candidate.title}</span>
+                              <AttachmentPreviewText content={candidate.title} />
                               {selected && <Check size={14} />}
                             </button>
                           );
@@ -599,7 +600,7 @@ function SessionReferenceControl({
             </button>
           </div>
 
-          <div className="chat-reference-section">
+          <div className="chat-reference-section chat-reference-selected-section">
             <div className="chat-reference-section-title">已引用</div>
             {references.length === 0 ? (
               <div className="chat-reference-empty">暂无引用</div>
@@ -609,7 +610,7 @@ function SessionReferenceControl({
                 return (
                   <div className="chat-reference-item" key={reference.sourceSessionId}>
                     <div className="chat-reference-item-main">
-                      <div className="chat-reference-item-title">{reference.sourceTitle}</div>
+                      <div className="chat-reference-item-title"><AttachmentPreviewText content={reference.sourceTitle} /></div>
                       <div className="chat-reference-item-meta">
                         {getAgentName(reference.sourceAgentId)}
                         {sourceSession?.closed ? " · 已关闭" : ""}
@@ -640,22 +641,24 @@ function SessionReferenceControl({
 
           <div className="chat-reference-section">
             <div className="chat-reference-section-title">可添加</div>
-            {unreferencedSessions.length === 0 ? (
+            {availableSessions.length === 0 ? (
               <div className="chat-reference-empty">没有其他可引用会话</div>
             ) : (
-              unreferencedSessions.map((session) => {
+              availableSessions.map((session) => {
                 const messages = sessionMessages[session.id] || [];
+                const selected = referencedSessionIds.has(session.id);
+                const selectedReference = references.find((reference) => reference.sourceSessionId === session.id);
                 return (
                   <button
                     type="button"
-                    className="chat-reference-add-item"
+                    className={`chat-reference-add-item ${selected ? "selected" : ""}`}
                     key={session.id}
-                    onClick={() => onAddOrRefresh(session)}
+                    onClick={() => selected ? onRemove(session.id) : onAddOrRefresh(session)}
                   >
-                    <Plus size={13} />
+                    {selected ? <Check size={13} /> : <Plus size={13} />}
                     <span className="chat-reference-add-main">
                       <span className="chat-reference-item-title">
-                        {getSessionReferenceTitle(session, messages)}
+                        <AttachmentPreviewText content={selectedReference?.sourceTitle || getSessionReferenceTitle(session, messages)} />
                       </span>
                       <span className="chat-reference-item-meta">
                         {getAgentName(session.agentId)} · {messages.length} 条消息{session.closed ? " · 已关闭" : ""}
@@ -711,7 +714,7 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
                   className="chat-user-history-item"
                   onClick={() => onScrollToMessage(msg.id)}
                 >
-                  <span className="chat-user-history-text">{msg.content}</span>
+                  <AttachmentPreviewText content={msg.content} className="chat-user-history-text" />
                   <span className="chat-user-history-time">
                     {formatHistoryMessageTime(msg.timestamp)}
                   </span>
@@ -756,7 +759,9 @@ const SessionStarterList = memo(function SessionStarterList({
               <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-            <span>{firstUserMsg ? (firstUserMsg.content.length > 30 ? `${firstUserMsg.content.substring(0, 30)}...` : firstUserMsg.content) : session.title}</span>
+            {firstUserMsg
+              ? <AttachmentPreviewText content={firstUserMsg.content} maxLength={30} />
+              : <span>{session.title}</span>}
           </button>
         );
       })}
@@ -812,6 +817,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   onForkMessage,
   forkingMessageId,
 }: ChatMessageItemProps) {
+  const [userMessageExpanded, setUserMessageExpanded] = useState(false);
   if (msg.role === "system" && msg.systemType === "context_compaction") {
     return (
       <div data-msg-id={msg.id} className="chat-context-divider">
@@ -829,10 +835,31 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const hasImages = !!msg.images?.length;
   const hasSessionReferences = !!msg.sessionReferences?.length;
   const hasAction = !!msg.action;
+  const commentary = msg.role === "assistant"
+    ? (msg.commentary || []).filter((item) => item.content.trim().length > 0)
+    : [];
   const processDiffs = collectProcessDiffs(msg.process);
   const visibleDiffs = !processRunning ? [...(msg.diffs || []), ...processDiffs] : [];
   const hasDiffs = visibleDiffs.length > 0;
   const hasContent = msg.content.trim().length > 0;
+  const userMessageLines = msg.role === "user" ? msg.content.split(/\r?\n/) : [];
+  const userMessageIsLong = userMessageLines.length > 10;
+  const displayedUserContent = userMessageIsLong && !userMessageExpanded
+    ? userMessageLines.slice(0, 10).join("\n")
+    : msg.content;
+  const renderUserContent = (content: string) => {
+    const parts = content.split(/(\[(?:file|folder):[^\]]+\])/g);
+    return parts.map((part, index) => {
+      const match = part.match(/^\[(file|folder):\s*([^\]]+)\]$/);
+      if (!match) return <span key={index}>{part}</span>;
+      return (
+        <span className={`chat-attached-path-chip ${match[1]}`} key={index}>
+          {match[1] === "folder" ? <Folder size={13} /> : <FileText size={13} />}
+          <span>{match[2]}</span>
+        </span>
+      );
+    });
+  };
   const hasVisibleBubble =
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction)
@@ -845,7 +872,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
         {msg.sessionReferences.map((reference) => (
           <div key={reference.sourceSessionId} className="chat-message-reference-chip">
             <Link2 size={12} strokeWidth={2} />
-            <span>引用会话: {reference.sourceTitle}</span>
+            <span>引用会话: <AttachmentPreviewText content={reference.sourceTitle} /></span>
           </div>
         ))}
       </div>
@@ -858,11 +885,24 @@ const ChatMessageItem = memo(function ChatMessageItem({
         <ProcessBlock
           messageId={msg.id}
           process={msg.process}
+          commentary={commentary}
           onToggle={onToggleAssistantProcess}
           onToggleEntry={onToggleAssistantProcessEntry}
           onOpenFile={onOpenFile}
           onPreserveScroll={onPreserveScroll}
         />
+      )}
+      {!msg.process && commentary.length > 0 && (
+        <div className="chat-commentary" aria-label="处理说明">
+          {commentary.map((item) => (
+            <div
+              key={item.id}
+              className={`chat-commentary-item ${item.isStreaming ? "streaming" : ""}`}
+            >
+              <MarkdownRenderer content={item.content} />
+            </div>
+          ))}
+        </div>
       )}
       {hasVisibleBubble && (
         <div className={`chat-msg ${msg.role}`}>
@@ -897,7 +937,21 @@ const ChatMessageItem = memo(function ChatMessageItem({
                       {msg.role === "assistant" ? (
                           <MarkdownRenderer content={msg.content} />
                         ) : (
-                          msg.content
+                          <>
+                            <span className={`chat-user-content ${userMessageIsLong && !userMessageExpanded ? "collapsed" : ""}`}>
+                              {renderUserContent(displayedUserContent)}
+                            </span>
+                            {userMessageIsLong && (
+                              <button
+                                type="button"
+                                className="chat-user-expand-btn"
+                                onClick={() => setUserMessageExpanded((expanded) => !expanded)}
+                              >
+                                {userMessageExpanded ? "收起" : "显示更多"}
+                                <span className={`chat-user-expand-chevron ${userMessageExpanded ? "expanded" : ""}`}>⌄</span>
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     )}
@@ -907,6 +961,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
               </div>
               {msg.role === "user" && hasVisibleBubble && (
                 <div className="chat-msg-actions">
+                  <time className="chat-message-time">{formatMessageActionTime(msg.timestamp)}</time>
                   <button
                     className="chat-copy-btn"
                     onClick={() => onEditMessage(msg)}
@@ -958,6 +1013,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
               >
                 <GitBranch size={15} strokeWidth={1.9} />
               </button>
+              <time className="chat-message-time">{formatMessageActionTime(msg.timestamp)}</time>
             </div>
           )}
         </div>

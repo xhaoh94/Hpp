@@ -1,4 +1,8 @@
 import { getAgentName } from "@/lib/agents";
+import { uiText } from "@/i18n/text";
+import {
+  ASSISTANT_NARRATION_PROCESS_KIND,
+} from "@shared/process-view";
 import {
   useChatStore,
   type AgentProcessEntry,
@@ -96,7 +100,8 @@ export function createAgentEventController({
 
     if (runtime.processTextEntryId && runtime.pendingProcessTextDetail !== "") {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
-        title: "正文输出",
+        kind: ASSISTANT_NARRATION_PROCESS_KIND,
+        title: uiText.process.narration,
         detail: runtime.pendingProcessTextDetail,
         state: "running",
       }, sessionId);
@@ -119,15 +124,20 @@ export function createAgentEventController({
     if (!runtime.processActive) return;
     if (entry.id && hasLastAssistantProcessEntry(sessionId, entry.id)) {
       useChatStore.getState().updateLastAssistantProcessEntry(entry.id, {
-        timestamp: entry.timestamp || Date.now(),
         type: entry.type,
         title: entry.title,
-        detail: entry.detail,
-        files: entry.files,
-        toolKind: entry.toolKind,
-        command: entry.command,
-        state: entry.state,
-        expanded: entry.expanded,
+        ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+        ...(entry.files !== undefined ? { files: entry.files } : {}),
+        ...(entry.toolKind !== undefined ? { toolKind: entry.toolKind } : {}),
+        ...(entry.command !== undefined ? { command: entry.command } : {}),
+        ...(entry.state !== undefined ? { state: entry.state } : {}),
+        ...(entry.subagents !== undefined ? { subagents: entry.subagents } : {}),
+        ...(entry.phase !== undefined ? { phase: entry.phase } : {}),
+        ...(entry.action !== undefined ? { action: entry.action } : {}),
+        ...(entry.tool !== undefined ? { tool: entry.tool } : {}),
+        ...(entry.activityKind !== undefined ? { activityKind: entry.activityKind } : {}),
+        ...(entry.startedAt !== undefined ? { startedAt: entry.startedAt } : {}),
+        ...(entry.completedAt !== undefined ? { completedAt: entry.completedAt } : {}),
       }, sessionId);
       return;
     }
@@ -142,6 +152,13 @@ export function createAgentEventController({
       command: entry.command,
       state: entry.state,
       expanded: entry.expanded,
+      subagents: entry.subagents,
+      phase: entry.phase,
+      action: entry.action,
+      tool: entry.tool,
+      activityKind: entry.activityKind,
+      startedAt: entry.startedAt,
+      completedAt: entry.completedAt,
     }, sessionId);
   };
 
@@ -328,7 +345,8 @@ export function createAgentEventController({
 
     if (runtime.processTextEntryId) {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
-        title: "正文输出",
+        kind: ASSISTANT_NARRATION_PROCESS_KIND,
+        title: uiText.process.narration,
         detail: runtime.processTextBuffer,
         state: "running",
       }, sessionId);
@@ -341,7 +359,8 @@ export function createAgentEventController({
     appendProcessEntry(sessionId, {
       id: entryId,
       type: "info",
-      title: "正文输出",
+      kind: ASSISTANT_NARRATION_PROCESS_KIND,
+      title: uiText.process.narration,
       detail: runtime.processTextBuffer,
       state: "running",
     });
@@ -352,7 +371,8 @@ export function createAgentEventController({
     const runtime = getRuntime(sessionId);
     if (runtime.processTextEntryId) {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
-        title: "正文输出",
+        kind: ASSISTANT_NARRATION_PROCESS_KIND,
+        title: uiText.process.narration,
         detail: runtime.processTextBuffer,
         state: "completed",
       }, sessionId);

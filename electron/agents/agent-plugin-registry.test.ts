@@ -291,6 +291,55 @@ export function createAgentBackend(context) {
     await vi.waitFor(() => expect(backend.isIdle()).toBe(true));
   });
 
+  it("refreshes cached idle state when a request ends with an error event", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "failed-agent",
+      "1.0.0",
+      undefined,
+      `
+export function createAgentBackend(context) {
+  let idle = true;
+  return {
+    setWindow() {},
+    async init() {},
+    isIdle() { return idle; },
+    async sendMessage() {
+      idle = false;
+      context.sendEvent({ type: "stream_start" });
+      setTimeout(() => {
+        idle = true;
+        context.sendEvent({
+          type: "process_event",
+          entryType: "error",
+          kind: "error",
+          title: "Request failed",
+          state: "error",
+        });
+      }, 20);
+    },
+    async abort() { idle = true; context.sendEvent({ type: "aborted" }); },
+    async getModels() { return []; },
+    async setModel() {},
+    async setThinkingLevel() {},
+    sendUIResponse() {},
+    dispose() {},
+    get sessionFilePath() { return null; },
+  };
+}
+`,
+    );
+    await registry.installFromPath(source);
+    const backend = await registry.createBackend("failed-agent", "session-1", {
+      window: { webContents: { send: vi.fn() } } as never,
+    });
+    await backend.init(tempRoot);
+
+    await backend.sendMessage("hello");
+    expect(backend.isIdle()).toBe(false);
+    await vi.waitFor(() => expect(backend.isIdle()).toBe(true));
+  });
+
   it("rejects malformed plugin events", async () => {
     const source = await createPluginSource(
       tempRoot,

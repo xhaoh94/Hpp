@@ -151,6 +151,13 @@ describe("agentEventUtils", () => {
       type: "tool",
       toolKind: "write_file",
       isError: true,
-    } as AgentEvent, false)).toBe("写入文件失败");
+    } as AgentEvent, false)).toBe("写入文件未成功");
+
+    expect(getToolSummary({
+      type: "tool",
+      toolKind: "run_command",
+      isError: true,
+      exitCode: 1,
+    } as AgentEvent, false)).toBe("命令返回非零退出码 1");
   });
 });

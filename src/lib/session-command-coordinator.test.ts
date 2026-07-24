@@ -366,6 +366,18 @@ describe("SessionCommandCoordinator", () => {
     expect(useProjectStore.getState().projects[0].sessions[0].closed).toBe(false);
   });
 
+  it("keeps renderer session state intact when backend disposal fails", async () => {
+    electronAPI.agentRemoveSession.mockRejectedValueOnce(new Error("dispose failed"));
+
+    await expect(SessionCommandCoordinator.closeSession("session-one"))
+      .rejects.toThrow("dispose failed");
+
+    expect(useProjectStore.getState().projects[0].sessions[0].closed).not.toBe(true);
+    expect(useProjectStore.getState().activeSessionId).toBe("session-one");
+    expect(useProjectStore.getState().initializedSessionIds.has("session-one")).toBe(true);
+    expect(useChatStore.getState().activeSessionId).toBe("session-one");
+  });
+
   it("creates a compatibility fork with the same visible history and hidden context", async () => {
     const sourceMessages = [
       { id: "user", role: "user" as const, content: "question", timestamp: 1 },

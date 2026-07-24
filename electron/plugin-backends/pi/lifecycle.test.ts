@@ -70,6 +70,32 @@ describe("Pi lifecycle", () => {
     agent.dispose();
   });
 
+  it("forwards Pi runtime warnings without failing the turn", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-warning" });
+
+    child.stdout.write(`${JSON.stringify({
+      type: "status",
+      id: "pi-shell-unavailable",
+      status: "warning",
+      title: "Pi Shell 不可用，已改用文件发现工具",
+      detail: "WSL is not installed",
+    })}\n`);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "process_event",
+      state: "warning",
+      title: "Pi Shell 不可用，已改用文件发现工具",
+    }));
+    expect(events.some((event) => event.type === "process_event" && event.state === "error")).toBe(false);
+    agent.dispose();
+  });
+
   it("finishes an active turn when the Pi worker crashes", async () => {
     const child = new FakePiProcess();
     respondToInit(child);

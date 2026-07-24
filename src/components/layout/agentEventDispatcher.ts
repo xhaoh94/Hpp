@@ -1,6 +1,11 @@
 import { getAgentName } from "@/lib/agents";
 import { useProjectStore } from "@/stores/project-store";
-import { useChatStore, type AgentProcessFile, type ChatMessage } from "@/stores/chat-store";
+import {
+  useChatStore,
+  type AgentCommentary,
+  type AgentProcessFile,
+  type ChatMessage,
+} from "@/stores/chat-store";
 import type { AgentEvent } from "@/types";
 import {
   createProcessEntryId,
@@ -19,6 +24,8 @@ import {
 } from "./agentQuestionHandlers";
 import {
   handleAgentDisconnectedEvent,
+  handleCommentaryDeltaEvent,
+  handleCommentaryEndEvent,
   handleDiffUpdateEvent,
   handleMessageStartEvent,
   handleStreamDeltaEvent,
@@ -32,11 +39,49 @@ import {
   handleToolStartEvent,
 } from "./agentToolHandlers";
 import type { AgentEventRuntimeController } from "./agentEventTypes";
+import { getSubagentProcessEntry } from "./subagentEvents";
 
-const parseHistorySnapshotMessages = (value: unknown): ChatMessage[] => {
+const parseHistoryCommentary = (value: unknown, fallbackTimestamp: number): AgentCommentary[] => {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
+  return value.flatMap((item, index) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const commentary = item as Record<string, unknown>;
+    const content = typeof commentary.content === "string"
+      ? commentary.content
+      : typeof commentary.message === "string"
+        ? commentary.message
+        : "";
+    if (!content.trim()) return [];
+    const timestamp = typeof commentary.timestamp === "number" && Number.isFinite(commentary.timestamp)
+      ? commentary.timestamp
+      : fallbackTimestamp;
+    const id = typeof commentary.id === "string" && commentary.id.trim()
+      ? commentary.id
+      : typeof commentary.itemId === "string" && commentary.itemId.trim()
+        ? commentary.itemId
+        : `history-commentary-${fallbackTimestamp}-${index}`;
+    return [{ id, content, timestamp, isStreaming: false }];
+  });
+};
+
+export const parseHistorySnapshotMessages = (value: unknown): ChatMessage[] => {
+  if (!Array.isArray(value)) return [];
+  const messages: ChatMessage[] = [];
+  let pendingCommentary: AgentCommentary[] = [];
+  const flushPendingCommentary = () => {
+    if (pendingCommentary.length === 0) return;
+    messages.push({
+      id: `history-commentary-message-${pendingCommentary[0].id}`,
+      role: "assistant",
+      content: "",
+      timestamp: pendingCommentary[0].timestamp,
+      commentary: pendingCommentary,
+    });
+    pendingCommentary = [];
+  };
+
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const message = item as Record<string, unknown>;
     const role = message.role;
     const timestamp = message.timestamp;
@@ -47,16 +92,115 @@ const parseHistorySnapshotMessages = (value: unknown): ChatMessage[] => {
       typeof timestamp !== "number" ||
       !Number.isFinite(timestamp)
     ) {
-      return [];
+      continue;
     }
-    return [{
+
+    if (message.phase === "commentary") {
+      if (message.content.trim()) {
+        pendingCommentary.push({
+          id: typeof message.itemId === "string" && message.itemId.trim() ? message.itemId : message.id,
+          content: message.content,
+          timestamp,
+          isStreaming: false,
+        });
+      }
+      continue;
+    }
+
+    if (role !== "assistant") flushPendingCommentary();
+    const directCommentary = role === "assistant"
+      ? parseHistoryCommentary(message.commentary, timestamp)
+      : [];
+    const commentary = role === "assistant"
+      ? [...pendingCommentary, ...directCommentary]
+      : [];
+    if (role === "assistant") pendingCommentary = [];
+    messages.push({
       id: message.id,
       role,
       content: message.content,
       timestamp,
       nativeTurnId: typeof message.nativeTurnId === "string" ? message.nativeTurnId : undefined,
-    }];
+      commentary: commentary.length > 0 ? commentary : undefined,
+    });
+  }
+  flushPendingCommentary();
+  return messages;
+};
+
+export const mergeHistoryCommentary = (
+  existingMessages: ChatMessage[],
+  recoveredMessages: ChatMessage[],
+): ChatMessage[] => {
+  const recoveredByTurn = new Map(
+    recoveredMessages
+      .filter((message) => message.role === "assistant" && message.nativeTurnId && message.commentary?.length)
+      .map((message) => [message.nativeTurnId!, message.commentary!] as const),
+  );
+  if (recoveredByTurn.size === 0) return existingMessages;
+
+  let changed = false;
+  const merged = existingMessages.map((message) => {
+    if (message.role !== "assistant" || !message.nativeTurnId) return message;
+    const recovered = recoveredByTurn.get(message.nativeTurnId);
+    if (!recovered?.length) return message;
+
+    const commentary = [...(message.commentary || [])];
+    const seenIds = new Set(commentary.map((item) => item.id));
+    const remainingContentMatches = new Map<string, number>();
+    for (const item of commentary) {
+      const key = item.content.trim();
+      remainingContentMatches.set(key, (remainingContentMatches.get(key) || 0) + 1);
+    }
+    let messageChanged = false;
+    for (const item of recovered) {
+      const contentKey = item.content.trim();
+      const matchingContentCount = remainingContentMatches.get(contentKey) || 0;
+      if (seenIds.has(item.id) || matchingContentCount > 0) {
+        if (matchingContentCount > 0) {
+          remainingContentMatches.set(contentKey, matchingContentCount - 1);
+        }
+        continue;
+      }
+      commentary.push({ ...item, isStreaming: false });
+      seenIds.add(item.id);
+      messageChanged = true;
+    }
+    if (!messageChanged) return message;
+    changed = true;
+    commentary.sort((left, right) => left.timestamp - right.timestamp);
+    return { ...message, commentary };
   });
+
+  const existingAssistantTurns = new Set(
+    existingMessages
+      .filter((message) => message.role === "assistant" && message.nativeTurnId)
+      .map((message) => message.nativeTurnId!),
+  );
+  for (const recovered of recoveredMessages) {
+    if (
+      recovered.role !== "assistant" ||
+      recovered.content.trim() ||
+      !recovered.nativeTurnId ||
+      !recovered.commentary?.length ||
+      existingAssistantTurns.has(recovered.nativeTurnId)
+    ) {
+      continue;
+    }
+    let insertAfter = -1;
+    for (let index = merged.length - 1; index >= 0; index -= 1) {
+      if (merged[index].nativeTurnId === recovered.nativeTurnId) {
+        insertAfter = index;
+        break;
+      }
+    }
+    if (insertAfter < 0) continue;
+    merged.splice(insertAfter + 1, 0, recovered);
+    existingAssistantTurns.add(recovered.nativeTurnId);
+    changed = true;
+  }
+
+  return changed ? merged : existingMessages;
 };
 
 export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRuntimeController) {
@@ -118,6 +262,12 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     case "stream_delta":
       handleStreamDeltaEvent(event, currentSessionId, handlerContext);
       break;
+    case "commentary_delta":
+      handleCommentaryDeltaEvent(event, currentSessionId, handlerContext);
+      break;
+    case "commentary_end":
+      handleCommentaryEndEvent(event, currentSessionId, handlerContext);
+      break;
     case "stream_snapshot":
       handleStreamSnapshotEvent(event, currentSessionId, handlerContext);
       break;
@@ -126,6 +276,13 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       break;
     case "thinking_end":
       finishThinkingEntry(currentSessionId);
+      break;
+    case "subagent_event":
+      ensureAssistantContinuation(currentSessionId);
+      finishAssistantProcessText(currentSessionId);
+      finishThinkingEntry(currentSessionId);
+      updateInferredPlanSteps(currentSessionId, "operate");
+      appendProcessEntry(currentSessionId, getSubagentProcessEntry(event));
       break;
     case "user_ask_question":
     case "ask_user_question":
@@ -214,6 +371,14 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         appendOrRefreshAlreadyRunningNotice(currentSessionId);
         break;
       }
+      if (eventType === "subagent") {
+        ensureAssistantContinuation(currentSessionId);
+        finishAssistantProcessText(currentSessionId);
+        finishThinkingEntry(currentSessionId);
+        updateInferredPlanSteps(currentSessionId, "operate");
+        appendProcessEntry(currentSessionId, getSubagentProcessEntry(event));
+        break;
+      }
       ensureAssistantContinuation(currentSessionId);
       finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
@@ -291,10 +456,16 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         const chatState = useChatStore.getState();
         const storedMessages = chatState.sessionMessages[currentSessionId] || [];
         const visibleMessages = chatState.activeSessionId === currentSessionId ? chatState.messages : [];
-        if (storedMessages.length > 0 || visibleMessages.length > 0) break;
         const recoveredMessages = parseHistorySnapshotMessages(event.messages);
-        if (recoveredMessages.length > 0) {
+        if (recoveredMessages.length === 0) break;
+        const existingMessages = visibleMessages.length > 0 ? visibleMessages : storedMessages;
+        if (existingMessages.length === 0) {
           chatState.loadSessionMessages(currentSessionId, recoveredMessages);
+          break;
+        }
+        const mergedMessages = mergeHistoryCommentary(existingMessages, recoveredMessages);
+        if (mergedMessages !== existingMessages) {
+          chatState.loadSessionMessages(currentSessionId, mergedMessages);
         }
       }
       break;

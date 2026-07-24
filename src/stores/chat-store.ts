@@ -25,17 +25,41 @@ export interface AgentProcessFile {
   changeKey?: string;
 }
 
+export type AgentSubagentStatus = "pending" | "running" | "completed" | "error" | "interrupted";
+export type AgentSubagentTool = "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent";
+export type AgentSubagentActivityKind = "started" | "interacted" | "interrupted";
+export type AgentSubagentAction =
+  | AgentSubagentTool
+  | AgentSubagentActivityKind;
+
+export interface AgentSubagent {
+  id: string;
+  label: string;
+  status?: AgentSubagentStatus;
+  model?: string;
+  path?: string;
+  message?: string;
+}
+
 export interface AgentProcessEntry extends ProcessEntryView {
   id: string;
-  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question";
+  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question" | "subagent";
   title: string;
   detail?: string;
   files?: AgentProcessFile[];
   toolKind?: string;
   command?: string;
+  exitCode?: number;
   timestamp: number;
-  state?: "running" | "completed" | "error" | "interrupted";
+  state?: "running" | "completed" | "warning" | "error" | "interrupted";
   expanded?: boolean;
+  subagents?: AgentSubagent[];
+  phase?: "started" | "completed";
+  action?: AgentSubagentAction;
+  tool?: AgentSubagentTool;
+  activityKind?: AgentSubagentActivityKind;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 export type AgentProcessStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -62,6 +86,13 @@ export interface AgentProcess {
   entries: AgentProcessEntry[];
 }
 
+export interface AgentCommentary {
+  id: string;
+  content: string;
+  timestamp: number;
+  isStreaming?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -74,6 +105,7 @@ export interface ChatMessage {
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   diffs?: FileDiff[];
   process?: AgentProcess;
+  commentary?: AgentCommentary[];
   nativeTurnId?: string;
   action?: AgentActionInvocation;
   composerDraft?: ComposerDraftSnapshot;
@@ -176,6 +208,8 @@ interface ChatState {
   appendLastAssistantDiffs: (diffs: FileDiff[], sessionId?: string | null) => void;
   appendContextCompactionDivider: (eventId?: string, sessionId?: string | null) => void;
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
+  appendLastAssistantCommentaryDelta: (itemId: string, delta: string, timestamp?: number, sessionId?: string | null) => void;
+  finishLastAssistantCommentary: (itemId: string, content?: string, timestamp?: number, sessionId?: string | null) => void;
   appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
@@ -296,6 +330,93 @@ const findAssistantProcessEntryIndex = (messages: ChatMessage[], entryId: string
   return -1;
 };
 
+const isPlaceholderSubagentLabel = (label: string, id: string) => {
+  const normalized = label.trim();
+  return !normalized ||
+    normalized === "Subagent" ||
+    normalized === "Sub-agent" ||
+    normalized === id ||
+    normalized.toLowerCase() === `agent ${id.slice(0, 8)}`.toLowerCase();
+};
+
+const mergeProcessEntrySubagents = (
+  existing: AgentSubagent[] | undefined,
+  incoming: AgentSubagent[] | undefined,
+) => {
+  if (incoming === undefined) return existing;
+  const merged = new Map((existing || []).map((subagent) => [subagent.id, subagent] as const));
+  for (const subagent of incoming) {
+    const previous = merged.get(subagent.id);
+    if (!previous) {
+      merged.set(subagent.id, subagent);
+      continue;
+    }
+    merged.set(subagent.id, {
+      ...previous,
+      ...subagent,
+      label: isPlaceholderSubagentLabel(subagent.label, subagent.id) && !isPlaceholderSubagentLabel(previous.label, previous.id)
+        ? previous.label
+        : subagent.label,
+      path: subagent.path || previous.path,
+      model: subagent.model || previous.model,
+    });
+  }
+  return Array.from(merged.values());
+};
+
+const enrichProcessSubagentIdentities = (entries: AgentProcessEntry[]) => {
+  const identities = new Map<string, Pick<AgentSubagent, "id" | "label" | "path" | "model">>();
+  for (const entry of entries) {
+    for (const subagent of entry.subagents || []) {
+      const existing = identities.get(subagent.id);
+      if (!existing) {
+        identities.set(subagent.id, {
+          id: subagent.id,
+          label: subagent.label,
+          path: subagent.path,
+          model: subagent.model,
+        });
+        continue;
+      }
+      identities.set(subagent.id, {
+        id: subagent.id,
+        label: !isPlaceholderSubagentLabel(subagent.label, subagent.id) || isPlaceholderSubagentLabel(existing.label, existing.id)
+          ? subagent.label
+          : existing.label,
+        path: subagent.path || existing.path,
+        model: subagent.model || existing.model,
+      });
+    }
+  }
+
+  return entries.map((entry) => {
+    if (!entry.subagents?.length) return entry;
+    let changed = false;
+    const subagents = entry.subagents.map((subagent) => {
+      const identity = identities.get(subagent.id);
+      if (!identity) return subagent;
+      const label = !isPlaceholderSubagentLabel(identity.label, identity.id)
+        ? identity.label
+        : subagent.label;
+      const path = subagent.path || identity.path;
+      const model = subagent.model || identity.model;
+      if (label === subagent.label && path === subagent.path && model === subagent.model) return subagent;
+      changed = true;
+      return { ...subagent, label, path, model };
+    });
+    return changed ? { ...entry, subagents } : entry;
+  });
+};
+
+const finishSubagentState = (
+  subagents: AgentSubagent[] | undefined,
+  finalState: "completed" | "interrupted",
+) => subagents?.map((subagent) => (
+  subagent.status === "pending" || subagent.status === "running"
+    ? { ...subagent, status: finalState }
+    : subagent
+));
+
 const finishAssistantProcessMessage = (
   message: ChatMessage,
   endedAt: number | undefined,
@@ -303,19 +424,27 @@ const finishAssistantProcessMessage = (
 ): ChatMessage => ({
   ...message,
   isStreaming: false,
+  commentary: message.commentary?.map((item) => (
+    item.isStreaming ? { ...item, isStreaming: false } : item
+  )),
   process: message.process
     ? {
         ...message.process,
         endedAt: message.process.endedAt || endedAt || Date.now(),
-        entries: message.process.entries.map((entry) =>
-          entry.state === "running"
-            ? {
-                ...entry,
-                state: finalState,
-                expanded: entry.type === "thinking" ? entry.expanded : false,
-              }
-            : entry
-        ),
+        entries: message.process.entries.map((entry) => {
+          const subagents = finishSubagentState(entry.subagents, finalState);
+          if (entry.state !== "running" && subagents === entry.subagents) return entry;
+          return {
+            ...entry,
+            ...(entry.state === "running"
+              ? {
+                  state: finalState,
+                  expanded: entry.type === "thinking" ? entry.expanded : false,
+                }
+              : {}),
+            subagents,
+          };
+        }),
       }
     : message.process,
 });
@@ -475,6 +604,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }),
 
+  appendLastAssistantCommentaryDelta: (itemId, delta, timestamp = Date.now(), sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      if (!itemId || !delta) return messages;
+      const { msgs, index } = ensureAssistantProcess(messages, timestamp);
+      const message = msgs[index];
+      const commentary = message.commentary || [];
+      const itemIndex = commentary.findIndex((item) => item.id === itemId);
+      const nextCommentary = [...commentary];
+
+      if (itemIndex >= 0) {
+        const item = commentary[itemIndex];
+        nextCommentary[itemIndex] = {
+          ...item,
+          content: `${item.content}${delta}`,
+          isStreaming: true,
+        };
+      } else {
+        nextCommentary.push({ id: itemId, content: delta, timestamp, isStreaming: true });
+      }
+
+      msgs[index] = { ...message, commentary: nextCommentary };
+      return msgs;
+    })),
+
+  finishLastAssistantCommentary: (itemId, content, timestamp = Date.now(), sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      if (!itemId) return messages;
+      const { msgs, index } = ensureAssistantProcess(messages, timestamp);
+      const message = msgs[index];
+      const commentary = message.commentary || [];
+      const itemIndex = commentary.findIndex((item) => item.id === itemId);
+
+      if (itemIndex < 0) {
+        if (!content) return msgs;
+        msgs[index] = {
+          ...message,
+          commentary: [...commentary, { id: itemId, content, timestamp, isStreaming: false }],
+        };
+        return msgs;
+      }
+
+      const nextCommentary = [...commentary];
+      const item = commentary[itemIndex];
+      nextCommentary[itemIndex] = {
+        ...item,
+        // Some app-server versions finish an item without repeating its full
+        // text. Keep the streamed body instead of replacing it with "".
+        content: content ? content : item.content,
+        isStreaming: false,
+      };
+      msgs[index] = { ...message, commentary: nextCommentary };
+      return msgs;
+    })),
+
   appendLastAssistantProcessEntry: (entry, sessionId) =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
@@ -489,7 +672,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...msg,
         process: {
           ...process,
-          entries: [...process.entries, normalizedEntry],
+          entries: enrichProcessSubagentIdentities([...process.entries, normalizedEntry]),
         },
       };
       return msgs;
@@ -506,13 +689,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const msg = msgs[index];
       if (!msg.process) return msgs;
 
+      const entries = msg.process.entries.map((entry) => entry.id === entryId
+        ? {
+            ...entry,
+            ...patch,
+            subagents: mergeProcessEntrySubagents(entry.subagents, patch.subagents),
+          }
+        : entry
+      );
       msgs[index] = {
         ...msg,
         process: {
           ...msg.process,
-          entries: msg.process.entries.map((entry) =>
-            entry.id === entryId ? { ...entry, ...patch } : entry
-          ),
+          entries: enrichProcessSubagentIdentities(entries),
         },
       };
       return msgs;

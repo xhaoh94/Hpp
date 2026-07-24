@@ -7,11 +7,12 @@ import type {
   AgentProcessStepStatus,
 } from "@/stores/chat-store";
 import {
+  getCommandNonZeroSummary,
   getPlanStepFallbackTitle,
   getProcessFileEntryTitle,
   getQuestionTitle as getLocalizedQuestionTitle,
   getToolActionSummary,
-  getToolErrorSummary,
+  getToolWarningSummary,
   isNegativeConfirmResponse,
   uiText,
 } from "@/i18n/text";
@@ -375,14 +376,23 @@ export const getToolSummary = (event: AgentEvent, running = false): string => {
   const toolKind = normalizeToolKind(event.toolKind);
   const toolName = getToolName(event);
   const files = getToolProcessFiles(event);
+  if (isCommandNonZeroExit(event)) {
+    return getCommandNonZeroSummary(event.exitCode);
+  }
   if (event.isError) {
-    return getToolErrorSummary(toolKind, toolName);
+    return getToolWarningSummary(toolKind, toolName);
   }
 
   if (files.length > 0) return getProcessFileEntryTitle(files[0].action, files.length, running);
 
   return getToolActionSummary(toolKind, toolName, running);
 };
+
+export const isCommandNonZeroExit = (event: AgentEvent): boolean =>
+  normalizeToolKind(event.toolKind) === "run_command" &&
+  event.isError === true &&
+  typeof event.exitCode === "number" &&
+  event.exitCode !== 0;
 
 export const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["type"] => {
   if (
@@ -392,7 +402,8 @@ export const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["ty
     value === "error" ||
     value === "info" ||
     value === "thinking" ||
-    value === "question"
+    value === "question" ||
+    value === "subagent"
   ) {
     return value;
   }
@@ -400,7 +411,7 @@ export const normalizeProcessEntryType = (value: unknown): AgentProcessEntry["ty
 };
 
 export const normalizeProcessEntryState = (value: unknown): AgentProcessEntry["state"] | undefined => {
-  if (value === "running" || value === "completed" || value === "error" || value === "interrupted") return value;
+  if (value === "running" || value === "completed" || value === "warning" || value === "error" || value === "interrupted") return value;
   return undefined;
 };
 

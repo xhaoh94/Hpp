@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, QueuedMessage } from "@/stores/chat-store";
+import { ASSISTANT_NARRATION_PROCESS_KIND } from "@shared/process-view";
 import {
   canPublishMessageUpsert,
   getRemoteSessionTitle,
@@ -31,6 +32,12 @@ describe("remote renderer serialization", () => {
         sessionReferences: [],
       },
       sessionReferences: [{ sourceSessionId: "session-2", sourceTitle: "Prior work" }],
+      commentary: [{
+        id: "commentary-1",
+        content: "I am checking the release configuration.",
+        timestamp: 2,
+        isStreaming: true,
+      }],
       diffs: [{ file: "C:\\work\\app\\src\\main.ts", patch: "@@", additions: 1, deletions: 0 }],
       process: {
         startedAt: 1,
@@ -49,9 +56,115 @@ describe("remote renderer serialization", () => {
     expect(sanitized.process?.entries[0].files?.[0].file).toBe("src/main.ts");
     expect(sanitized.process?.entries[0].toolKind).toBe("read_file");
     expect(sanitized.sessionReferences).toEqual([{ sourceSessionId: "session-2", sourceTitle: "Prior work" }]);
+    expect(sanitized.commentary).toEqual([{
+      id: "commentary-1",
+      content: "I am checking the release configuration.",
+      timestamp: 2,
+      isStreaming: true,
+    }]);
     expect(sanitized.action).toEqual({ kind: "skill", name: "review" });
     expect(sanitized).not.toHaveProperty("composerDraft");
     expect(JSON.stringify(sanitized)).not.toContain("C:\\\\work");
+  });
+
+  it("preserves subagent lifecycle details for remote timelines", () => {
+    const sanitized = sanitizeRemoteMessage({
+      ...message("assistant-subagents"),
+      process: {
+        startedAt: 1,
+        entries: [{
+          id: "subagent-1",
+          type: "subagent",
+          title: "已开始工作",
+          timestamp: 2,
+          state: "running",
+          phase: "started",
+          action: "spawnAgent",
+          tool: "spawnAgent",
+          startedAt: 2,
+          subagents: [{
+            id: "agent-1",
+            label: "Frontend commentary",
+            status: "running",
+            model: "gpt-5",
+            path: "/root/frontend",
+            message: "Inspecting the renderer",
+          }],
+        }],
+      },
+    }, "C:\\work\\app");
+
+    expect(sanitized.process?.entries[0]).toEqual({
+      id: "subagent-1",
+      type: "subagent",
+      title: "已开始工作",
+      toolKind: undefined,
+      detail: undefined,
+      command: undefined,
+      exitCode: undefined,
+      timestamp: 2,
+      state: "running",
+      phase: "started",
+      action: "spawnAgent",
+      tool: "spawnAgent",
+      activityKind: undefined,
+      startedAt: 2,
+      completedAt: undefined,
+      files: undefined,
+      subagents: [{
+        id: "agent-1",
+        label: "Frontend commentary",
+        status: "running",
+        model: "gpt-5",
+        path: "/root/frontend",
+        message: "Inspecting the renderer",
+      }],
+    });
+  });
+
+  it("preserves the structured assistant narration kind for remote rendering", () => {
+    const sanitized = sanitizeRemoteMessage({
+      ...message("assistant-narration"),
+      process: {
+        startedAt: 1,
+        entries: [{
+          id: "narration-1",
+          type: "info",
+          kind: ASSISTANT_NARRATION_PROCESS_KIND,
+          title: "任意标题",
+          detail: "我先检查项目配置。",
+          timestamp: 2,
+        }],
+      },
+    }, "C:\\work\\app");
+
+    expect(sanitized.process?.entries[0].kind).toBe(ASSISTANT_NARRATION_PROCESS_KIND);
+  });
+
+  it("preserves command warning details for remote rendering", () => {
+    const sanitized = sanitizeRemoteMessage({
+      ...message("assistant-command-warning"),
+      process: {
+        startedAt: 1,
+        entries: [{
+          id: "command-1",
+          type: "tool",
+          title: "命令返回非零退出码 1",
+          toolKind: "run_command",
+          command: "rg missing",
+          exitCode: 1,
+          timestamp: 2,
+          state: "warning",
+        }],
+      },
+    }, "C:\\work\\app");
+
+    expect(sanitized.process?.entries[0]).toMatchObject({
+      toolKind: "run_command",
+      command: "rg missing",
+      exitCode: 1,
+      state: "warning",
+    });
   });
 
   it("reduces unrelated absolute paths to their basename", () => {

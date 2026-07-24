@@ -358,6 +358,22 @@
   font-weight: 500;
 }
 
+.terminal-child-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px;
+  padding: 2px 5px;
+  border: 1px solid rgba(140, 140, 140, 0.35);
+  border-radius: 4px;
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.terminal-child-attachment.file svg { color: var(--text-secondary); }
+.terminal-child-attachment.folder svg { color: #dcab5f; }
+.terminal-child-attachment span { overflow: hidden; text-overflow: ellipsis; }
+
 .terminal-child-fork-badge {
   display: inline-flex;
   align-items: center;

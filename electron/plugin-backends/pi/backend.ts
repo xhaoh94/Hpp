@@ -136,6 +136,9 @@ export class PiSDKAgent {
 
     const worker = getPluginWorkerInvocation("pi-sdk-worker.mjs", ["PI_NODE_PATH"], true);
     const userRuntimeRoot = join(process.env.HPP_DATA_DIR || process.cwd(), "pi-sdk-runtime");
+    // Let Pi use its own default config directory (~/.pi/agent), where its
+    // CLI and SDK share auth.json/models.json. Hpp only supplies the runtime
+    // package location and must not redirect credentials to a separate folder.
     const workerEnv = { ...worker.env, PI_SDK_PACKAGE_ROOT: userRuntimeRoot };
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
@@ -561,7 +564,14 @@ export class PiSDKAgent {
           clientUserMessageId: record.clientUserMessageId,
         });
         break;
-      case "status":
+      case "status": {
+        const statusState = record.status === "error"
+          ? "error"
+          : record.status === "warning"
+            ? "warning"
+            : record.status === "completed"
+              ? "completed"
+              : "running";
         this.emitEvent({
           type: "process_event",
           id: record.id,
@@ -569,9 +579,10 @@ export class PiSDKAgent {
           kind: record.status === "error" ? "error" : "status",
           title: optionalString(record.title) || "Pi 状态更新",
           detail: record.detail,
-          state: record.status === "error" ? "error" : record.status === "completed" ? "completed" : "running",
+          state: statusState,
         });
         break;
+      }
       case "agent_start":
         this.beginTurn();
         break;

@@ -27,6 +27,7 @@ import {
   uiText,
 } from "@/i18n/text";
 import { ComposerFileMentionPicker } from "./ComposerFileMentionPicker";
+import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 
 const FILE_MENTION_LIST_ID = "chat-composer-file-mentions";
 const FILE_MENTION_RESULT_LIMIT = 12;
@@ -480,7 +481,7 @@ export const ChatComposer = memo(function ChatComposer({
           {sessionReferences.map((reference) => (
             <div key={reference.sourceSessionId} className="chat-preview-chip chat-preview-chip-reference">
               <Link2 size={12} strokeWidth={2} className="chat-preview-icon" />
-              <span className="chat-preview-label">{reference.sourceTitle} {uiText.chatComposer.session}</span>
+              <span className="chat-preview-label"><AttachmentPreviewText content={reference.sourceTitle} /> {uiText.chatComposer.session}</span>
               <button
                 type="button"
                 className="chat-preview-remove"

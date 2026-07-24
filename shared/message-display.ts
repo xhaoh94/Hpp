@@ -15,6 +15,16 @@ export function formatHistoryMessageTime(timestamp: number, now = new Date()) {
   return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")} ${time}`;
 }
 
+export function formatMessageActionTime(timestamp: number, now = new Date()) {
+  const date = new Date(timestamp);
+  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === now.toDateString()) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${time}`;
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${time}`;
+}
+
 export const areAssistantMessageActionsVisible = (message: DisplayMessage) =>
   message.role === "assistant" &&
   message.content.trim().length > 0 &&

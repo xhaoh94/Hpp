@@ -1,4 +1,9 @@
-export type AgentRuntimeOperationKind = "update" | "uninstall" | "session-dispose";
+export type AgentRuntimeOperationKind =
+  | "update"
+  | "uninstall"
+  | "session-dispose"
+  | "plugin-install"
+  | "plugin-reload";
 
 export interface AgentRuntimeOperationState {
   agentId: string;

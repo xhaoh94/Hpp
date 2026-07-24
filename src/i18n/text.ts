@@ -1,7 +1,7 @@
 export type AttachmentKind = "file" | "folder" | string;
 export type ProcessFileAction = "read" | "listed" | "written" | "edited" | "modified" | undefined;
 export type ProcessStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
-export type CommandState = "running" | "completed" | "error" | "interrupted" | undefined;
+export type CommandState = "running" | "completed" | "warning" | "error" | "interrupted" | undefined;
 export type ToolSummaryKind =
   | "read_file"
   | "list_dir"
@@ -37,6 +37,7 @@ export const uiText = {
     session: "会话",
   },
   process: {
+    narration: "正文输出",
     thinking: "思考中",
     waitingEvent: "等待事件",
     interrupted: "已中断",
@@ -66,6 +67,7 @@ export const uiText = {
     },
     commandState: {
       running: "运行中",
+      warning: "非零退出",
       error: "失败",
       interrupted: "已中断",
       completed: "完成",
@@ -170,10 +172,16 @@ export const getProcessFileActionLabel = (action: ProcessFileAction) => {
 
 export const getCommandStateLabel = (state: CommandState) => {
   if (state === "running") return uiText.process.commandState.running;
+  if (state === "warning") return uiText.process.commandState.warning;
   if (state === "error") return uiText.process.commandState.error;
   if (state === "interrupted") return uiText.process.commandState.interrupted;
   return uiText.process.commandState.completed;
 };
+
+export const getCommandNonZeroSummary = (exitCode?: number) =>
+  typeof exitCode === "number"
+    ? `命令返回非零退出码 ${exitCode}`
+    : "命令返回非零状态";
 
 export const formatCommandGroupTitle = (count: number) =>
   `已运行 ${count} ${uiText.process.commandGroupUnit}`;
@@ -186,19 +194,19 @@ export const getQuestionTitle = (running = false, isError = false) => {
 export const isNegativeConfirmResponse = (value: string) =>
   (uiText.process.confirmNegativeTokens as readonly string[]).includes(value.trim().toLowerCase());
 
-export const getToolErrorSummary = (toolKind: ToolSummaryKind, toolName: string) => {
+export const getToolWarningSummary = (toolKind: ToolSummaryKind, toolName: string) => {
   switch (toolKind) {
-    case "read_file": return "读取文件失败";
-    case "list_dir": return "读取目录失败";
-    case "write_file": return "写入文件失败";
-    case "edit_file": return "编辑文件失败";
-    case "run_command": return "命令执行失败";
-    case "search_files": return "文件搜索失败";
-    case "search_text": return "内容搜索失败";
-    case "web_fetch": return "网页获取失败";
-    case "web_search": return "网络搜索失败";
+    case "read_file": return "读取文件未成功";
+    case "list_dir": return "读取目录未成功";
+    case "write_file": return "写入文件未成功";
+    case "edit_file": return "编辑文件未成功";
+    case "run_command": return "命令执行未成功";
+    case "search_files": return "文件搜索未成功";
+    case "search_text": return "内容搜索未成功";
+    case "web_fetch": return "网页获取未成功";
+    case "web_search": return "网络搜索未成功";
     case "question": return getQuestionTitle(false, true);
-    default: return `${toolName} 执行失败`;
+    default: return `${toolName} 执行未成功`;
   }
 };
 

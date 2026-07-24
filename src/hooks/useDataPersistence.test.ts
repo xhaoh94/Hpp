@@ -112,4 +112,52 @@ describe("persisted composer snapshots", () => {
       composerDraft: { text: "broken" },
     })?.composerDraft).toBeUndefined();
   });
+
+  it("restores commentary without reviving its streaming indicator", () => {
+    expect(parsePersistedChatMessage({
+      id: "assistant",
+      role: "assistant",
+      content: "完成",
+      timestamp: 2,
+      commentary: [{
+        id: "note",
+        content: "正在检查。",
+        timestamp: 1,
+        isStreaming: true,
+      }],
+    })?.commentary).toEqual([{
+      id: "note",
+      content: "正在检查。",
+      timestamp: 1,
+      isStreaming: false,
+    }]);
+  });
+
+  it("keeps persisted subagent lifecycle entries", () => {
+    expect(parsePersistedChatMessage({
+      id: "assistant-subagent",
+      role: "assistant",
+      content: "done",
+      timestamp: 3,
+      process: {
+        startedAt: 1,
+        endedAt: 3,
+        entries: [{
+          id: "spawn",
+          type: "subagent",
+          title: "已开始工作",
+          timestamp: 2,
+          state: "completed",
+          phase: "completed",
+          action: "spawnAgent",
+          subagents: [{ id: "thread-1", label: "Backend", status: "completed" }],
+        }],
+      },
+    })?.process?.entries[0]).toEqual(expect.objectContaining({
+      type: "subagent",
+      phase: "completed",
+      action: "spawnAgent",
+      subagents: [{ id: "thread-1", label: "Backend", status: "completed" }],
+    }));
+  });
 });

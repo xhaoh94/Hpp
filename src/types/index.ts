@@ -7,6 +7,7 @@ import type {
   AgentUIResponse,
   AgentDescriptor,
   AgentPackageStatus,
+  AgentPackageVersions,
   AgentPluginInstallResult,
   AgentPluginManifest,
   OfficialAgentPluginCatalogResult,
@@ -53,6 +54,7 @@ export type {
   AgentImagePayload,
   AgentImagePayloadItem,
   AgentPackageStatus,
+  AgentPackageVersions,
   AgentPlanModeSupport,
   AgentProviderConfiguration,
   AgentProviderAuthMode,
@@ -214,7 +216,9 @@ export interface ElectronAPI {
   piSDKUpdate: () => Promise<{ success: boolean; error?: string; status?: PiSDKStatus }>;
   agentList: () => Promise<AgentDescriptor[]>;
   agentGetStatus: (agentId: string) => Promise<AgentPackageStatus>;
-  agentUpdate: (agentId: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
+  agentGetVersions: (agentId: string) => Promise<AgentPackageVersions>;
+  agentUpdate: (agentId: string, versionSpec?: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
+  agentRollback: (agentId: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
   agentGetDefaultThinkingLevel: (agentId: string) => Promise<string>;
   agentPluginChoosePath: (kind?: "zip" | "directory") => Promise<{ canceled: boolean; path: string }>;
   agentPluginInstallFromPath: (pluginPath: string) => Promise<AgentPluginInstallResult>;

@@ -101,7 +101,7 @@ const methods = {
     };
   },
   async getStatus() { return pluginModule.getStatus?.(createStatusContext()); },
-  async update() { return pluginModule.update?.(createStatusContext()); },
+  async update(args) { return pluginModule.update?.(createStatusContext(), args); },
   async uninstall() { return pluginModule.uninstall?.(createStatusContext()); },
   async getDefaultThinkingLevel() { return pluginModule.getDefaultThinkingLevel?.(createStatusContext()); },
   async readProviderConfig(args) { return pluginModule.configProvider?.read?.(createStatusContext(), args); },

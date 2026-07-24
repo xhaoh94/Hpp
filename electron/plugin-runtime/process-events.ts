@@ -40,6 +40,7 @@ export interface NormalizedToolPayload {
   additions?: number;
   deletions?: number;
   command?: string;
+  exitCode?: number;
   pattern?: string;
   question?: unknown;
   prompt?: unknown;
@@ -63,6 +64,21 @@ const isRecord = (value: unknown): value is UnknownRecord =>
 
 const asRecord = (value: unknown): UnknownRecord =>
   isRecord(value) ? value : {};
+
+const getExitCode = (data: UnknownRecord, result: unknown): number | undefined => {
+  const resultRecord = asRecord(result);
+  const candidates = [
+    data.exitCode,
+    data.exit_code,
+    resultRecord.exitCode,
+    resultRecord.exit_code,
+    resultRecord.code,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate;
+  }
+  return undefined;
+};
 
 const normalizeEventToken = (value: unknown) =>
   String(value || "")
@@ -423,11 +439,18 @@ const buildFiles = (
   }];
 };
 
-const getErrorText = (data: UnknownRecord) => {
+const getErrorText = (data: UnknownRecord, result: unknown) => {
   const direct = unwrapToolText(data.error);
   if (direct) return direct;
   if (typeof data.message === "string") return data.message;
   if (data.error) return stringifyProcessValue(data.error);
+  const resultRecord = asRecord(result);
+  const resultError = unwrapToolText(resultRecord.error);
+  if (resultError) return resultError;
+  if (resultRecord.error) return stringifyProcessValue(resultRecord.error);
+  const resultText = unwrapToolText(result);
+  if (resultText) return resultText;
+  if (result !== undefined && result !== null) return stringifyProcessValue(result);
   return "";
 };
 
@@ -476,6 +499,7 @@ export const normalizeToolEvent = (
     dataRecord.tool_input ||
     dataRecord.arguments;
   const result = dataRecord.result !== undefined ? dataRecord.result : dataRecord.output;
+  const exitCode = getExitCode(dataRecord, result);
   const toolName = String(dataRecord.toolName || dataRecord.name || dataRecord.tool || "tool");
   const toolCallId = dataRecord.toolCallId || dataRecord.callId || dataRecord.callID || dataRecord.id;
   const patch = getPatch(data, args || {}, result || {});
@@ -488,7 +512,7 @@ export const normalizeToolEvent = (
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
   const outputText = unwrapToolText(result);
-  const errorText = dataRecord.isError ? getErrorText(dataRecord) : undefined;
+  const errorText = dataRecord.isError ? getErrorText(dataRecord, result) : undefined;
   const files = buildFiles(toolKind, filePath, patch, changes.additions, changes.deletions);
   const detail = buildDetail({
     phase,
@@ -519,6 +543,7 @@ export const normalizeToolEvent = (
     additions: changes.additions,
     deletions: changes.deletions,
     command: command || undefined,
+    exitCode,
     pattern: pattern || undefined,
     question: dataRecord.question || detailObject.question || argsObject.question || argsObject.prompt || undefined,
     prompt: dataRecord.prompt || detailObject.prompt || argsObject.prompt || undefined,

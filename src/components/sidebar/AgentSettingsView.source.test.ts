@@ -17,4 +17,9 @@ describe("Agent settings plugin and runtime actions", () => {
     expect(source).toContain("await refreshAgentStatus(installedAgent.id)");
     expect(source).toContain("isChecking || isAnyAgentUpdating || !agentStatus.canUpdate");
   });
+
+  it("moves idle open sessions to recoverable history after plugin removal", () => {
+    expect(source).toContain("result.detachedSessionIds?.length");
+    expect(source).toContain("个会话已移入历史");
+  });
 });

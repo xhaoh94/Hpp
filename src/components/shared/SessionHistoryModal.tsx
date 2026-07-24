@@ -3,6 +3,7 @@ import { GitBranch } from "lucide-react";
 import type { ProjectSession } from "@/stores/project-store";
 import type { ChatMessage } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
+import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import "./SessionHistory.css";
 
 interface Props {
@@ -141,9 +142,10 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
                         <GitBranch size={12} strokeWidth={2} />
                       </span>
                     )}
-                    <span className="session-preview-text">
-                      {getSessionPreviewText(session, sessionMessages)}
-                    </span>
+                    <AttachmentPreviewText
+                      content={getSessionPreviewText(session, sessionMessages)}
+                      className="session-preview-text"
+                    />
                   </div>
                 </div>
               ))}

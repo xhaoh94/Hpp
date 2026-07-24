@@ -54,9 +54,117 @@ input.on("line", async (line) => {
     write({ method: "thread/started", params: { thread: { id: "thread-1" } } });
     return;
   }
+  if (message.method === "thread/resume") {
+    if (message.params?.threadId === "missing-thread") {
+      write({ id: message.id, error: { code: -32600, message: "no rollout found for thread id missing-thread" } });
+      return;
+    }
+    if (message.params?.threadId === "auth-error-thread") {
+      write({ id: message.id, error: { code: -32000, message: "authentication failed" } });
+      return;
+    }
+    write({ id: message.id, result: { thread: { id: message.params?.threadId } } });
+    return;
+  }
   if (message.method === "turn/start") {
     write({ id: message.id, result: { turn: { id: "turn-1" } } });
     write({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+    const promptText = message.params?.input?.find((item) => item.type === "text")?.text;
+    if (promptText === "commentary") {
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "commentary-1", type: "agentMessage", phase: "commentary", text: "" } } });
+      write({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "commentary-1", delta: "Working on it" } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "commentary-1", type: "agentMessage", phase: "commentary", text: "Working on it" } } });
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "final-1", type: "agentMessage", phase: "final_answer", text: "" } } });
+      write({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "final-1", delta: "Done" } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "final-1", type: "agentMessage", phase: "final_answer", text: "Done" } } });
+      write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      return;
+    }
+    if (promptText === "legacy") {
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "legacy-1", type: "agentMessage", phase: null, text: "" } } });
+      write({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "legacy-1", delta: "Legacy answer" } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "legacy-1", type: "agentMessage", phase: null, text: "Legacy answer" } } });
+      write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      return;
+    }
+    if (promptText === "subagents") {
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 900, item: {
+        id: "collab-empty-1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: "thread-1",
+        receiverThreadIds: [],
+        prompt: "Starting before a receiver id is assigned",
+        model: "gpt-5",
+        reasoningEffort: "high",
+        agentsStates: {},
+      } } });
+      const spawnItem = {
+        id: "collab-spawn-1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: "thread-1",
+        receiverThreadIds: ["agent-thread-1"],
+        prompt: "Inspect the backend commentary flow",
+        model: "gpt-5",
+        reasoningEffort: "high",
+        agentsStates: { "agent-thread-1": { status: "pendingInit", message: null } },
+      };
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1000, item: spawnItem } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1010, item: { ...spawnItem, status: "completed", agentsStates: { "agent-thread-1": { status: "running", message: null } } } } });
+
+      const activityItem = { id: "activity-1", type: "subAgentActivity", kind: "started", agentThreadId: "agent-thread-1", agentPath: "/root/backend_commentary" };
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1020, item: activityItem } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1025, item: activityItem } });
+
+      const updateItem = { id: "activity-2", type: "subAgentActivity", kind: "interacted", agentThreadId: "agent-thread-1", agentPath: "/root/backend_commentary" };
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1050, item: updateItem } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1055, item: updateItem } });
+
+      const waitItem = {
+        id: "collab-wait-1",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        senderThreadId: "thread-1",
+        receiverThreadIds: ["agent-thread-1"],
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: { "agent-thread-1": { status: "completed", message: "Backend flow verified" } },
+      };
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1100, item: waitItem } });
+
+      const selfActivity = { id: "activity-self", type: "subAgentActivity", kind: "interacted", agentThreadId: "thread-1", agentPath: "/root" };
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1110, item: selfActivity } });
+
+      const lateSpawnItem = {
+        id: "collab-late-1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: "thread-1",
+        receiverThreadIds: [],
+        prompt: "Inspect the frontend commentary flow",
+        model: "gpt-5",
+        reasoningEffort: "medium",
+        agentsStates: {},
+      };
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1200, item: lateSpawnItem } });
+      const earlyActivityItem = { id: "activity-early-1", type: "subAgentActivity", kind: "started", agentThreadId: "agent-thread-2", agentPath: "/root/frontend_commentary" };
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 1210, item: earlyActivityItem } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1215, item: earlyActivityItem } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1220, item: {
+        ...lateSpawnItem,
+        status: "completed",
+        receiverThreadIds: ["agent-thread-2"],
+        agentsStates: { "agent-thread-2": { status: "running", message: null } },
+      } } });
+      write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      return;
+    }
     write({ method: "item/plan/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "plan-1", delta: "draft plan" } });
     write({ method: "thread/compacted", params: { threadId: "thread-1", turnId: "turn-1" } });
     write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "plan-1", type: "plan", text: "draft plan" } } });
@@ -189,6 +297,204 @@ describe("Codex worker protocol", () => {
       .resolves.toMatchObject({ type: "context_compaction" });
     await expect(worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-1"))
       .resolves.toMatchObject({ type: "prompt_done", id: "prompt-1" });
+  });
+
+  it("resumes an existing thread without creating a replacement", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot, sessionFilePath: "existing-thread" });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "resume-prompt", type: "prompt", message: "plan" });
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "resume-prompt");
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "thread/start")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
+    expect(calls.find((call) => call.method === "turn/start")?.params?.threadId).toBe("existing-thread");
+  });
+
+  it("replaces a thread whose rollout is missing and sends the prompt once", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot, sessionFilePath: "missing-thread" });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "recovery-prompt", type: "prompt", message: "plan" });
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "recovery-prompt");
+    expect(worker.messages).toContainEqual({
+      type: "session_file_path",
+      sessionFilePath: "thread-1",
+      threadId: "thread-1",
+    });
+    expect(worker.messages.some((message) =>
+      message.type === "process_event" && message.title === "Codex request failed"
+    )).toBe(false);
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "thread/start")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
+    expect(calls.find((call) => call.method === "turn/start")?.params?.threadId).toBe("thread-1");
+  });
+
+  it("does not replace a thread when resume fails for another reason", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot, sessionFilePath: "auth-error-thread" });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "failed-prompt", type: "prompt", message: "plan" });
+
+    await expect(worker.waitFor((message) =>
+      message.type === "process_event" && message.title === "Codex request failed"
+    )).resolves.toMatchObject({ detail: "authentication failed", state: "error" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "failed-prompt");
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "thread/start")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
+  });
+
+  it("separates commentary from the final response", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "commentary-prompt", type: "prompt", message: "commentary" });
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "commentary-prompt");
+    expect(worker.messages).toContainEqual({
+      type: "commentary_delta",
+      itemId: "commentary-1",
+      delta: "Working on it",
+    });
+    expect(worker.messages).toContainEqual({
+      type: "commentary_end",
+      itemId: "commentary-1",
+      content: "Working on it",
+    });
+    expect(worker.messages).toContainEqual({ type: "stream_delta", delta: "Done" });
+    expect(worker.messages).toContainEqual({ type: "stream_end", content: "Done", force: true });
+    expect(worker.messages).not.toContainEqual({ type: "stream_delta", delta: "Working on it" });
+  });
+
+  it("keeps phase-less agent messages on the final response stream", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "legacy-prompt", type: "prompt", message: "legacy" });
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "legacy-prompt");
+    expect(worker.messages).toContainEqual({ type: "stream_delta", delta: "Legacy answer" });
+    expect(worker.messages).toContainEqual({ type: "stream_end", content: "Legacy answer", force: true });
+    expect(worker.messages.some((message) => message.type === "commentary_delta")).toBe(false);
+  });
+
+  it("normalizes collab tools and sub-agent activity without generic tool duplicates", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "subagent-prompt", type: "prompt", message: "subagents" });
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "subagent-prompt");
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "collab-spawn-1",
+      toolCallId: "collab-spawn-1",
+      phase: "started",
+      action: "spawnAgent",
+      tool: "spawnAgent",
+      title: "已开始工作",
+      state: "running",
+      timestamp: 1000,
+      startedAt: 1000,
+      subagents: [{
+        id: "agent-thread-1",
+        label: "Agent agent-th",
+        status: "pending",
+        model: "gpt-5",
+      }],
+    }));
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "collab-spawn-1",
+      phase: "completed",
+      state: "running",
+      timestamp: 1000,
+      startedAt: 1000,
+      completedAt: 1010,
+      collabStatus: "completed",
+    }));
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "collab-spawn-1",
+      sourceActivityId: "activity-1",
+      phase: "completed",
+      action: "started",
+      activityKind: "started",
+      title: "已开始工作",
+      state: "running",
+      timestamp: 1000,
+      startedAt: 1000,
+      activityTimestamp: 1020,
+      activityCompletedAt: 1025,
+      subagents: [{
+        id: "agent-thread-1",
+        label: "Backend commentary",
+        status: "running",
+        model: "gpt-5",
+        path: "/root/backend_commentary",
+      }],
+    }));
+    expect(worker.messages.some((message) => message.type === "subagent_event" && message.id === "activity-1")).toBe(false);
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "activity-2",
+      action: "interacted",
+      title: "已更新",
+      state: "completed",
+      subagents: [expect.objectContaining({ status: "completed" })],
+    }));
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "collab-wait-1",
+      action: "wait",
+      title: "已完成",
+      state: "completed",
+      timestamp: 1100,
+      completedAt: 1100,
+      subagents: [expect.objectContaining({
+        id: "agent-thread-1",
+        label: "Backend commentary",
+        status: "completed",
+        message: "Backend flow verified",
+      })],
+    }));
+    expect(worker.messages.some((message) => message.type === "subagent_event" && message.id === "activity-self")).toBe(false);
+    expect(worker.messages.some((message) => message.type === "subagent_event" && message.id === "collab-empty-1")).toBe(false);
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "activity-early-1",
+      toolCallId: "collab-late-1",
+      action: "spawnAgent",
+      title: "已开始工作",
+      state: "running",
+      timestamp: 1200,
+      completedAt: 1220,
+      subagents: [{
+        id: "agent-thread-2",
+        label: "Frontend commentary",
+        status: "running",
+        model: "gpt-5",
+        path: "/root/frontend_commentary",
+      }],
+    }));
+    expect(worker.messages.some((message) => message.type === "subagent_event" && message.id === "collab-late-1")).toBe(false);
+    expect(worker.messages.some((message) =>
+      (message.type === "tool_start" || message.type === "tool_end") &&
+      (message.toolCallId === "collab-spawn-1" || message.toolCallId === "collab-wait-1")
+    )).toBe(false);
   });
 
   it("lists native skills without paths and sends the native skill input", async () => {

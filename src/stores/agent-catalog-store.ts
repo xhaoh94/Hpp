@@ -5,6 +5,8 @@ import type {
   OfficialAgentPluginDescriptor,
 } from "@/types";
 import { setAgentCatalog } from "@/lib/agents";
+import { archiveSessionsAfterBackendRemoval } from "@/lib/session-lifecycle";
+import { useProjectStore } from "@/stores/project-store";
 
 interface AgentCatalogState {
   agents: AgentDescriptor[];
@@ -114,10 +116,20 @@ export const useAgentCatalogStore = create<AgentCatalogState>((set, get) => ({
 
   removePlugin: async (agentId: string, removeRuntime = false) => {
     const result = await window.electronAPI.agentPluginRemove(agentId, removeRuntime);
+    const sessionsToArchive = new Set(result.detachedSessionIds || []);
+    if (result.success) {
+      for (const project of useProjectStore.getState().projects) {
+        for (const session of project.sessions) {
+          if (session.agentId === agentId && !session.closed) sessionsToArchive.add(session.id);
+        }
+      }
+    }
+    const detachedSessionIds = archiveSessionsAfterBackendRemoval([...sessionsToArchive]);
+    const reconciledResult = { ...result, detachedSessionIds };
     if (result.agents) {
       const agents = applyAgents(result.agents);
       set({ agents, loaded: true, error: result.success ? null : result.error || null });
     }
-    return result;
+    return reconciledResult;
   },
 }));

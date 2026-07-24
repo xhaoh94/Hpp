@@ -7,7 +7,13 @@ import {
   type SessionForkOrigin,
   type SessionReference,
 } from "@/stores/project-store";
-import { isAgentStartupFailureMessage, useChatStore, type ChatMessage, type ModelInfo } from "@/stores/chat-store";
+import {
+  isAgentStartupFailureMessage,
+  useChatStore,
+  type AgentCommentary,
+  type ChatMessage,
+  type ModelInfo,
+} from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 
@@ -37,6 +43,21 @@ const getString = (value: unknown): string | undefined =>
 
 const getStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+const parsePersistedCommentary = (value: unknown): AgentCommentary[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const commentary = value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const id = getString(item.id);
+    const content = getString(item.content);
+    const timestamp = typeof item.timestamp === "number" && Number.isFinite(item.timestamp)
+      ? item.timestamp
+      : undefined;
+    if (!id || content === undefined || timestamp === undefined) return [];
+    return [{ id, content, timestamp, isStreaming: false }];
+  });
+  return commentary.length > 0 ? commentary : undefined;
+};
 
 const parseSessionReference = (value: unknown): SessionReference | null => {
   if (!isRecord(value)) return null;
@@ -178,6 +199,7 @@ export const parsePersistedChatMessage = (value: unknown): ChatMessage | null =>
     content,
     timestamp,
     composerDraft,
+    commentary: parsePersistedCommentary(value.commentary),
     // Never restore a stale streaming state after app restart.
     isStreaming: false,
   };

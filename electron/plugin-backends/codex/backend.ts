@@ -460,6 +460,20 @@ export class CodexAgent {
       case "stream_delta":
         this.emitEvent({ type: "stream_delta", delta: String(record.delta || "") });
         break;
+      case "commentary_delta":
+        this.emitEvent({
+          type: "commentary_delta",
+          itemId: optionalString(record.itemId),
+          delta: String(record.delta || ""),
+        });
+        break;
+      case "commentary_end":
+        this.emitEvent({
+          type: "commentary_end",
+          itemId: optionalString(record.itemId),
+          content: String(record.content || ""),
+        });
+        break;
       case "stream_snapshot":
         this.emitEvent({ type: "stream_snapshot", content: String(record.content || "") });
         break;
@@ -474,6 +488,7 @@ export class CodexAgent {
         break;
       case "tool_start":
       case "tool_end":
+      case "subagent_event":
       case "plan_update":
       case "context_compaction":
       case "diff_update":

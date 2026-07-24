@@ -8,6 +8,7 @@ import {
   getToolName,
   getToolProcessFiles,
   getToolSummary,
+  isCommandNonZeroExit,
   normalizeToolKind,
   type SessionRuntime,
 } from "./agentEventUtils";
@@ -101,6 +102,8 @@ export function handleToolEndEvent(
   }
 
   const toolName = getToolName(event);
+  const commandExitWarning = isCommandNonZeroExit(event);
+  const toolWarning = event.isError === true;
   const toolFiles = getToolProcessFiles(event);
   const preservedToolFiles = toolFiles.length > 0 ? toolFiles : runtime.activeToolFile[key] || [];
   const changedToolFiles = preservedToolFiles
@@ -128,26 +131,25 @@ export function handleToolEndEvent(
         ].join("|"),
       };
     });
-  if (changedToolFiles.length > 0 && !event.isError) {
+  if (changedToolFiles.length > 0 && !toolWarning) {
     ctx.recordProcessFiles(currentSessionId, changedToolFiles, "modify");
   } else {
-    ctx.updateInferredPlanSteps(currentSessionId, event.isError ? "failed" : "operate");
+    ctx.updateInferredPlanSteps(currentSessionId, "operate");
   }
   const toolDetail = getToolDetail(event);
   const toolSummary = getToolSummary({
     ...event,
     files: preservedToolFiles.length > 0 ? preservedToolFiles : event.files,
   }, false);
-  const entryType: AgentProcessEntry["type"] = normalizeToolKind(event.toolKind) === "question"
-    ? (event.isError ? "error" : "question")
-    : (event.isError ? "error" : "tool");
+  const entryType: AgentProcessEntry["type"] = "tool";
   const patch = {
     title: toolSummary,
     detail: toolDetail || undefined,
-    files: preservedToolFiles.length > 0 && !event.isError ? preservedToolFiles : undefined,
+    files: preservedToolFiles.length > 0 ? preservedToolFiles : undefined,
     toolKind: normalizeToolKind(event.toolKind),
     command: typeof event.command === "string" ? event.command : undefined,
-    state: event.isError ? "error" : "completed",
+    exitCode: typeof event.exitCode === "number" ? event.exitCode : undefined,
+    state: toolWarning || commandExitWarning ? "warning" : "completed",
     type: entryType,
     expanded: false,
   } satisfies Partial<Omit<AgentProcessEntry, "id">>;
@@ -159,9 +161,12 @@ export function handleToolEndEvent(
   } else {
     ctx.appendProcessEntry(currentSessionId, {
       type: entryType,
-      title: patch.title || (event.isError ? `${toolName} 执行失败` : `已完成 ${toolName}`),
+      title: patch.title || (toolWarning ? `${toolName} 执行未成功` : `已完成 ${toolName}`),
       detail: patch.detail,
       files: patch.files,
+      toolKind: patch.toolKind,
+      command: patch.command,
+      exitCode: patch.exitCode,
       state: patch.state,
       expanded: patch.expanded,
     });

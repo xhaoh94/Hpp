@@ -34,6 +34,7 @@ export interface AgentEvent {
   force?: boolean;
   toolCallId?: string;
   callId?: string;
+  itemId?: string;
   id?: string;
   requestId?: string;
   toolName?: string;
@@ -66,6 +67,7 @@ export interface AgentEvent {
   outputText?: unknown;
   errorText?: unknown;
   isError?: boolean;
+  exitCode?: number;
   sessionFilePath?: unknown;
   nativeTurnId?: unknown;
   turnId?: unknown;
@@ -213,6 +215,7 @@ export interface AgentPluginInstallResult {
   agents?: AgentDescriptor[];
   installedPath?: string;
   replaced?: boolean;
+  detachedSessionIds?: string[];
 }
 
 export interface OfficialAgentPluginDescriptor {
@@ -255,6 +258,16 @@ export interface AgentPackageStatus {
   source?: AgentSource;
   installedPath?: string;
   removable?: boolean;
+  rollbackVersion?: string;
+  canRollback?: boolean;
+  error?: string;
+}
+
+export interface AgentPackageVersions {
+  packageName: string;
+  latestVersion?: string;
+  distTags: Record<string, string>;
+  versions: string[];
   error?: string;
 }
 
