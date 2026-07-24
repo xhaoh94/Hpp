@@ -26,6 +26,7 @@ import {
   Copy,
   CornerDownRight,
   FileText,
+  Folder,
   FolderGit2,
   GitBranch,
   GripVertical,
@@ -55,6 +56,18 @@ import {
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+
+function renderAttachmentPreview(content: string, maxLength?: number) {
+  const preview = maxLength && content.length > maxLength ? `${content.slice(0, maxLength)}...` : content;
+  return preview.split(/(\[(?:file|folder):[^\]]+\])/g).map((part, index) => {
+    const match = part.match(/^\[(file|folder):\s*([^\]]+)\]$/);
+    if (!match) return <span key={index}>{part}</span>;
+    const kind = match[1];
+    return <span className={`attachment-preview-token ${kind}`} key={index} title={match[2]}>
+      {kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}<span>{match[2]}</span>
+    </span>;
+  });
+}
 import type {
   RemoteCatalogSnapshot,
   RemoteAgent,
@@ -83,10 +96,11 @@ import {
   getProcessGroupState,
   getVisibleProcessEntries,
   groupProcessEntries,
+  isAssistantNarrationProcessEntry,
   splitCommandDetail,
 } from "@shared/process-view";
 import { buildDiffSummary, collectProcessDiffs, type ProcessDiffEntry } from "@shared/diff-summary";
-import { areAssistantMessageActionsVisible, formatHistoryMessageTime } from "@shared/message-display";
+import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
 import {
   chooseRemoteImage,
   getImageErrorMessage,
@@ -593,6 +607,18 @@ function AgentActionSheet({
 }
 
 function ProcessEntryRow({ entry }: { entry: RemoteProcessEntry }) {
+  if (entry.type === "subagent" && entry.subagents?.length) {
+    return <SubagentProcessEntry entry={entry} />;
+  }
+  if (isAssistantNarrationProcessEntry(entry)) {
+    return (
+      <div className="message-commentary-item message-content">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+          {entry.detail || entry.title}
+        </ReactMarkdown>
+      </div>
+    );
+  }
   const hasDetails = Boolean(entry.detail?.trim() || entry.files?.length);
   const row = (
     <>
@@ -644,6 +670,115 @@ function CommandGroup({ entries }: { entries: RemoteProcessEntry[] }) {
   );
 }
 
+function MessageCommentary({ items }: { items: NonNullable<RemoteChatMessage["commentary"]> }) {
+  return (
+    <div className="message-commentary message-content" aria-label="处理说明">
+      {items.map((item) => (
+        <div
+          className={`message-commentary-item${item.isStreaming ? " streaming" : ""}`}
+          key={item.id}
+        >
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+            {item.content}
+          </ReactMarkdown>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
+  const messages = (entry.subagents || [])
+    .map((subagent) => subagent.message?.trim())
+    .filter((message): message is string => !!message && message !== entry.detail?.trim());
+  const detail = [entry.detail?.trim(), ...new Set(messages)].filter(Boolean).join("\n\n");
+  const hasDetails = Boolean(detail || entry.files?.length);
+  const summary = (
+    <>
+      <span className="subagent-entry-content">
+        <span className="subagent-chip-list">
+          {entry.subagents!.map((subagent) => {
+            const status = subagent.status || "pending";
+            const statusLabel = getSubagentStatusLabel(status);
+            const description = [statusLabel, subagent.model, subagent.path, subagent.message].filter(Boolean).join(" · ");
+            return (
+              <span
+                className={`subagent-chip ${status}`}
+                key={subagent.id}
+                title={description || subagent.label}
+              >
+                <span className={`subagent-avatar tone-${getSubagentTone(subagent.id)}`}>
+                  <SubagentGlyph />
+                </span>
+                <span>{subagent.label}</span>
+              </span>
+            );
+          })}
+        </span>
+        {entry.title && <span className="subagent-entry-title">{entry.title}</span>}
+      </span>
+      {hasDetails && <ChevronDown className="expand-indicator" size={13} />}
+    </>
+  );
+  if (!hasDetails) {
+    return (
+      <div className="process-entry process-entry-static subagent-entry">
+        <div className="process-entry-summary subagent-entry-summary">{summary}</div>
+      </div>
+    );
+  }
+  return (
+    <details className="process-entry subagent-entry">
+      <summary className="process-entry-summary subagent-entry-summary">{summary}</summary>
+      {detail && (
+        <div className="subagent-entry-detail message-content">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{detail}</ReactMarkdown>
+        </div>
+      )}
+      {entry.files && entry.files.length > 0 && (
+        <div className="process-files">
+          {entry.files.map((file, index) => <code key={`${String(file.file)}-${index}`}>{String(file.file || "file")}</code>)}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function getSubagentTone(id: string) {
+  let hash = 0;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = ((hash << 5) - hash + id.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) % 4;
+}
+
+function getSubagentStatusLabel(status?: NonNullable<RemoteProcessEntry["subagents"]>[number]["status"]) {
+  switch (status) {
+    case "pending": return "等待中";
+    case "running": return "工作中";
+    case "completed": return "已完成";
+    case "error": return "失败";
+    case "interrupted": return "已中断";
+    default: return "";
+  }
+}
+
+function SubagentGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M10 1.8l1.6 3.1 3.45-.55-.55 3.45 3.1 1.6-3.1 1.6.55 3.45-3.45-.55L10 17.2l-1.6-3.3-3.45.55.55-3.45-3.1-1.6 3.1-1.6-.55-3.45 3.45.55L10 1.8z"
+        fill="currentColor"
+        fillOpacity="0.3"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <circle cx="10" cy="9.5" r="2.2" fill="currentColor" />
+    </svg>
+  );
+}
+
 function MessageProcess({ message }: { message: RemoteChatMessage }) {
   const processStartedAt = message.process?.startedAt;
   const [expanded, setExpanded] = useState(message.isStreaming === true);
@@ -654,38 +789,75 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
       setExpanded(message.isStreaming === true);
     }
   }, [message.isStreaming, processStartedAt]);
-  if (!message.process) return null;
-  const visibleEntries = getVisibleProcessEntries(message.process.entries);
+  const commentary = (message.commentary || []).filter((item) => item.content.trim());
+  const visibleEntries = getVisibleProcessEntries(message.process?.entries || []);
+  const timelineItems = useMemo(() => [
+    ...visibleEntries.map((entry, index) => ({
+      kind: "entry" as const,
+      id: entry.id,
+      timestamp: entry.timestamp,
+      order: index,
+      entry,
+    })),
+    ...commentary.map((item, index) => ({
+      kind: "commentary" as const,
+      id: item.id,
+      timestamp: item.timestamp,
+      order: visibleEntries.length + index,
+      commentary: item,
+    })),
+  ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, visibleEntries]);
+  if (!message.process) return commentary.length > 0 ? <MessageCommentary items={commentary} /> : null;
   const hasPlan = !!message.process.planSteps?.length;
-  if (!hasPlan && visibleEntries.length === 0 && !message.process.changeSummary) return null;
+  if (!hasPlan && visibleEntries.length === 0 && !message.process.changeSummary) {
+    return commentary.length > 0 ? <MessageCommentary items={commentary} /> : null;
+  }
   return (
-    <details className="process-block" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-      <summary>
-        <span>{message.process.endedAt ? "执行过程" : "正在执行"}</span>
-        <span className="process-summary-meta">
-          {message.process.changeSummary && (
-            <small>
-              {message.process.changeSummary.filesChanged} files · +{message.process.changeSummary.additions} -{message.process.changeSummary.deletions}
-            </small>
-          )}
-          <ChevronDown className="expand-indicator" size={14} />
-        </span>
-      </summary>
-      {hasPlan && (
-        <div className="process-plan">
-          {message.process.planSteps!.map((step) => (
-            <div key={step.id} data-status={step.status}><span /><span className="process-plan-title">{step.title}</span></div>
+    <>
+      <details className="process-block" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+        <summary>
+          <span>{message.process.endedAt ? "执行过程" : "正在执行"}</span>
+          <span className="process-summary-meta">
+            {message.process.changeSummary && (
+              <small>
+                {message.process.changeSummary.filesChanged} files · +{message.process.changeSummary.additions} -{message.process.changeSummary.deletions}
+              </small>
+            )}
+            <ChevronDown className="expand-indicator" size={14} />
+          </span>
+        </summary>
+        {hasPlan && (
+          <div className="process-plan">
+            {message.process.planSteps!.map((step) => (
+              <div key={step.id} data-status={step.status}><span /><span className="process-plan-title">{step.title}</span></div>
+            ))}
+          </div>
+        )}
+        {commentary.length === 0 && visibleEntries.length > 0 && (
+          <div className="process-entries">
+            {groupProcessEntries(visibleEntries).map((group) => group.kind === "commands"
+              ? <CommandGroup key={`commands-${group.entries[0].id}`} entries={group.entries} />
+              : <ProcessEntryRow key={group.entry.id} entry={group.entry} />)}
+          </div>
+        )}
+      </details>
+      {commentary.length > 0 && expanded && (
+        <div className="message-turn-timeline">
+          {timelineItems.map((item) => item.kind === "commentary" ? (
+            <div
+              className={`message-commentary-item message-content${item.commentary.isStreaming ? " streaming" : ""}`}
+              key={`commentary-${item.id}`}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                {item.commentary.content}
+              </ReactMarkdown>
+            </div>
+          ) : (
+            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} />
           ))}
         </div>
       )}
-      {visibleEntries.length > 0 && (
-        <div className="process-entries">
-          {groupProcessEntries(visibleEntries).map((group) => group.kind === "commands"
-            ? <CommandGroup key={`commands-${group.entries[0].id}`} entries={group.entries} />
-            : <ProcessEntryRow key={group.entry.id} entry={group.entry} />)}
-        </div>
-      )}
-    </details>
+    </>
   );
 }
 
@@ -728,7 +900,7 @@ function MessageItem({
           {message.sessionReferences.map((reference) => (
             <span className="message-reference-chip" key={reference.sourceSessionId}>
               <Link2 size={11} />
-              <span>引用会话: {reference.sourceTitle}</span>
+              <span>引用会话: {renderAttachmentPreview(reference.sourceTitle)}</span>
             </span>
           ))}
         </div>
@@ -761,6 +933,9 @@ function MessageItem({
       {showActions && (
         <div className={`message-actions ${message.role}`}>
           {message.role === "user" && (
+            <time className="message-action-time">{formatMessageActionTime(message.timestamp)}</time>
+          )}
+          {message.role === "user" && (
             <button type="button" onClick={() => onEdit(message.content)} disabled={actionsDisabled || !message.content} title="编辑" aria-label="编辑">
               <Pencil size={15} />
             </button>
@@ -773,6 +948,7 @@ function MessageItem({
               {forking ? <LoaderCircle className="spin" size={15} /> : <GitBranch size={15} />}
             </button>
           )}
+          {assistantActionsReady && <time className="message-action-time">{formatMessageActionTime(message.timestamp)}</time>}
         </div>
       )}
     </article>
@@ -1195,7 +1371,7 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
               {draft.sessionReferences.map((reference) => (
                 <div className="queue-edit-chip reference" key={reference.sourceSessionId}>
                   <Link2 size={13} />
-                  <span>{reference.sourceTitle}</span>
+                  <span>{renderAttachmentPreview(reference.sourceTitle)}</span>
                   <button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))} title="移除引用"><X size={12} /></button>
                 </div>
               ))}
@@ -1376,7 +1552,9 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
             </button>
             <div className="queue-main">
               {item.action && <span className="queue-action-badge">{item.action.kind === "skill" ? "技能" : "命令"} · {item.action.name}</span>}
-              <span>{item.displayContent || (item.sessionReferences?.length ? `引用会话：${item.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "空消息")}</span>
+              <span>{item.displayContent
+                ? renderAttachmentPreview(item.displayContent, 120)
+                : (item.sessionReferences?.length ? `引用会话：${item.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "空消息")}</span>
               {item.error && <small>{item.error}</small>}
             </div>
             <div className="queue-controls">
@@ -3460,7 +3638,7 @@ export default function App() {
             <div className="history-list">
               {selectedUserMessages.map((message) => (
                 <button type="button" className="history-item" key={message.id} onClick={() => openHistoryMessage(message.id)}>
-                  <span>{message.content || "图片消息"}</span>
+                  <span>{message.content ? renderAttachmentPreview(message.content) : "图片消息"}</span>
                   <time>{formatHistoryMessageTime(message.timestamp)}</time>
                 </button>
               ))}
@@ -3480,28 +3658,28 @@ export default function App() {
             </div>
             <div className="reference-session-list">
               <div className="reference-session-section-title">已引用</div>
-              {selectedReferenceSessions.length === 0 ? (
+              {false ? (
                 <div className="reference-session-empty">暂无引用</div>
               ) : selectedReferenceSessions.map((session) => (
                 <div className="reference-session-row selected" key={session.id}>
                   <Link2 size={14} />
-                  <span><strong>{session.title}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
+                  <span><strong>{renderAttachmentPreview(session.title)}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
                   <button type="button" onClick={() => setPendingReferenceIds((current) => current.filter((id) => id !== session.id))} title="移除引用"><X size={15} /></button>
                 </div>
               ))}
               <div className="reference-session-section-title">可添加</div>
-              {referenceCandidates.filter((session) => !pendingReferenceIds.includes(session.id)).length === 0 ? (
+              {referenceCandidates.length === 0 ? (
                 <div className="reference-session-empty">没有其他可引用会话</div>
-              ) : referenceCandidates.filter((session) => !pendingReferenceIds.includes(session.id)).map((session) => (
+              ) : referenceCandidates.map((session) => (
                 <button
                   type="button"
                   className="reference-session-row add"
                   key={session.id}
-                  disabled={pendingReferenceIds.length >= MAX_REMOTE_SESSION_REFERENCES}
-                  onClick={() => setPendingReferenceIds((current) => current.includes(session.id) ? current : [...current, session.id].slice(0, MAX_REMOTE_SESSION_REFERENCES))}
+                  disabled={pendingReferenceIds.length >= MAX_REMOTE_SESSION_REFERENCES && !pendingReferenceIds.includes(session.id)}
+                  onClick={() => setPendingReferenceIds((current) => current.includes(session.id) ? current.filter((id) => id !== session.id) : [...current, session.id].slice(0, MAX_REMOTE_SESSION_REFERENCES))}
                 >
-                  <Plus size={15} />
-                  <span><strong>{session.title}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
+                  {pendingReferenceIds.includes(session.id) ? <Check size={15} /> : <Plus size={15} />}
+                  <span><strong>{renderAttachmentPreview(session.title)}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
                 </button>
               ))}
             </div>
@@ -3601,7 +3779,7 @@ export default function App() {
                 {selectedReferenceSessions.map((session) => (
                   <div className="composer-preview-chip reference" key={session.id}>
                     <Link2 size={12} />
-                    <span>{session.title}</span>
+                    <span>{renderAttachmentPreview(session.title)}</span>
                     <button type="button" onClick={() => setPendingReferenceIds((current) => current.filter((id) => id !== session.id))} title="移除引用"><X size={12} /></button>
                   </div>
                 ))}

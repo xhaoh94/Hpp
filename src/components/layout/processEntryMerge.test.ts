@@ -118,6 +118,95 @@ describe("processEntryMerge", () => {
     ]);
   });
 
+  it("merges adjacent file warnings without turning them into successful reads", () => {
+    const entries = [
+      processEntry({
+        id: "warning-1",
+        type: "tool",
+        toolKind: "read_file",
+        state: "warning",
+        title: "读取文件未成功",
+        detail: "a.ts not found",
+        files: [fileEntry("src/a.ts", { action: "read" })],
+      }),
+      processEntry({
+        id: "warning-2",
+        type: "tool",
+        toolKind: "read_file",
+        state: "warning",
+        title: "读取文件未成功",
+        detail: "b.ts not found",
+        files: [fileEntry("src/b.ts", { action: "read" })],
+      }),
+    ];
+
+    expect(mergeProcessEntries(entries)).toEqual([
+      expect.objectContaining({
+        id: "warning-2",
+        state: "warning",
+        title: "读取文件未成功",
+        detail: "a.ts not found\n\nb.ts not found",
+        files: [
+          expect.objectContaining({ file: "src/a.ts" }),
+          expect.objectContaining({ file: "src/b.ts" }),
+        ],
+      }),
+    ]);
+  });
+
+  it("groups adjacent subagent lifecycle rows with the same result", () => {
+    const entries = [
+      processEntry({
+        id: "agent-a",
+        type: "subagent",
+        title: "已开始工作",
+        state: "completed",
+        subagents: [{ id: "thread-a", label: "Backend", status: "running" }],
+      }),
+      processEntry({
+        id: "agent-b",
+        type: "subagent",
+        title: "已开始工作",
+        state: "completed",
+        subagents: [{ id: "thread-b", label: "Frontend", status: "running" }],
+      }),
+    ];
+
+    expect(mergeProcessEntries(entries)).toEqual([
+      expect.objectContaining({
+        id: "agent-a",
+        type: "subagent",
+        subagents: [
+          expect.objectContaining({ id: "thread-a", label: "Backend" }),
+          expect.objectContaining({ id: "thread-b", label: "Frontend" }),
+        ],
+      }),
+    ]);
+  });
+
+  it("keeps individual subagent updates as separate timeline rows", () => {
+    const entries = [
+      processEntry({
+        id: "update-a",
+        type: "subagent",
+        title: "已更新",
+        state: "completed",
+        action: "interacted",
+        subagents: [{ id: "thread-a", label: "Backend", status: "completed" }],
+      }),
+      processEntry({
+        id: "update-b",
+        type: "subagent",
+        title: "已更新",
+        state: "completed",
+        action: "interacted",
+        subagents: [{ id: "thread-b", label: "Frontend", status: "completed" }],
+      }),
+    ];
+
+    expect(mergeProcessEntries(entries).map((entry) => entry.id)).toEqual(["update-a", "update-b"]);
+  });
+
   it("incrementally matches full merge and reuses unchanged prefix entries", () => {
     const merger = createProcessEntryMerger();
     const status = processEntry({ id: "status", title: "status" });

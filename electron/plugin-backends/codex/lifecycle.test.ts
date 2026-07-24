@@ -75,4 +75,79 @@ describe("Codex lifecycle", () => {
     expect(agent.isIdle()).toBe(true);
     await agent.dispose();
   });
+
+  it("forwards commentary events from the worker", async () => {
+    const child = new FakeCodexProcess();
+    respondToLifecycle(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new CodexAgent("session-1", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+
+    child.stdout.write(`${JSON.stringify({ type: "commentary_delta", itemId: "commentary-1", delta: "Working" })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "commentary_end", itemId: "commentary-1", content: "Working" })}\n`);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "commentary_delta",
+      itemId: "commentary-1",
+      delta: "Working",
+      sessionId: "session-1",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "commentary_end",
+      itemId: "commentary-1",
+      content: "Working",
+      sessionId: "session-1",
+    }));
+    await agent.dispose();
+  });
+
+  it("forwards normalized sub-agent lifecycle events from the worker", async () => {
+    const child = new FakeCodexProcess();
+    respondToLifecycle(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new CodexAgent("session-1", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+
+    child.stdout.write(`${JSON.stringify({
+      type: "subagent_event",
+      id: "collab-1",
+      toolCallId: "collab-1",
+      phase: "completed",
+      action: "wait",
+      tool: "wait",
+      title: "已完成",
+      state: "completed",
+      timestamp: 1000,
+      startedAt: 900,
+      completedAt: 1000,
+      subagents: [{
+        id: "agent-1",
+        label: "Backend commentary",
+        status: "completed",
+        model: "gpt-5",
+        path: "/root/backend_commentary",
+        message: "Done",
+      }],
+    })}\n`);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "subagent_event",
+      id: "collab-1",
+      action: "wait",
+      state: "completed",
+      timestamp: 1000,
+      sessionId: "session-1",
+      subagents: [{
+        id: "agent-1",
+        label: "Backend commentary",
+        status: "completed",
+        model: "gpt-5",
+        path: "/root/backend_commentary",
+        message: "Done",
+      }],
+    }));
+    await agent.dispose();
+  });
 });

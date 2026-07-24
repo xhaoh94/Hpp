@@ -61,7 +61,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   piSDKGetStatus: () => ipcRenderer.invoke("pi-sdk:getStatus"),
   piSDKUpdate: () => ipcRenderer.invoke("pi-sdk:update"),
   agentGetStatus: (agentId: string) => ipcRenderer.invoke("agent:getStatus", agentId),
-  agentUpdate: (agentId: string) => ipcRenderer.invoke("agent:update", agentId),
+  agentGetVersions: (agentId: string) => ipcRenderer.invoke("agent:versions", agentId),
+  agentUpdate: (agentId: string, versionSpec?: string) => ipcRenderer.invoke("agent:update", agentId, versionSpec),
+  agentRollback: (agentId: string) => ipcRenderer.invoke("agent:rollback", agentId),
   agentGetDefaultThinkingLevel: (agentId: string) =>
     ipcRenderer.invoke("agent:getDefaultThinkingLevel", agentId),
   agentList: () => ipcRenderer.invoke("agent:list"),

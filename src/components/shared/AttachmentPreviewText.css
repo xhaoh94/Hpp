@@ -1,0 +1,20 @@
+.attachment-preview-text {
+  min-width: 0;
+}
+
+.attachment-preview-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px;
+  padding: 2px 5px;
+  border: 1px solid rgba(140, 140, 140, 0.35);
+  border-radius: 4px;
+  color: var(--text-primary);
+  vertical-align: middle;
+  max-width: 100%;
+}
+
+.attachment-preview-token.file svg { color: var(--text-secondary); }
+.attachment-preview-token.folder svg { color: #dcab5f; }
+.attachment-preview-token > span { overflow: hidden; text-overflow: ellipsis; }

@@ -8,7 +8,7 @@ import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
-import { GitBranch, Terminal } from "lucide-react";
+import { FileText, Folder, GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -25,6 +25,20 @@ function getStringArray(value: unknown): string[] | undefined {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : undefined;
+}
+
+function renderSessionPreview(content: string) {
+  const parts = content.split(/(\[(?:file|folder):[^\]]+\])/g);
+  return parts.map((part, index) => {
+    const match = part.match(/^\[(file|folder):\s*([^\]]+)\]$/);
+    if (!match) return <span key={index}>{part}</span>;
+    return (
+      <span className={`terminal-child-attachment ${match[1]}`} key={index}>
+        {match[1] === "folder" ? <Folder size={13} /> : <FileText size={13} />}
+        <span>{match[2]}</span>
+      </span>
+    );
+  });
 }
 
 function getErrorMessage(error: unknown): string {
@@ -458,9 +472,9 @@ export function ProjectCard({ project }: Props) {
                     const msgs = sessionMessages[session.id];
                     const firstUserMsg = msgs?.find((m) => m.role === "user");
                     return firstUserMsg
-                      ? firstUserMsg.content.length > 30
+                      ? renderSessionPreview(firstUserMsg.content.length > 30
                         ? firstUserMsg.content.substring(0, 30) + "..."
-                        : firstUserMsg.content
+                        : firstUserMsg.content)
                       : session.title;
                   })()}
                 </span>

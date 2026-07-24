@@ -16,7 +16,7 @@ export function getStatus(context) {
   });
 }
 
-export function update(context) {
+export function update(context, options = {}) {
   return context.host.updateCliAgent({
     id: context.agentId,
     name: "Codex",
@@ -25,7 +25,7 @@ export function update(context) {
     command: "codex",
     packageName: "@openai/codex",
     installedPath: context.pluginDir
-  });
+  }, options.versionSpec);
 }
 
 export function getDefaultThinkingLevel() {

@@ -20,6 +20,7 @@ import {
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
+import { archiveSessionsAfterBackendRemoval } from "@/lib/session-lifecycle";
 import { useChatStore, type ChatMessage, type ModelInfo, type QueuedMessage, type QueuedMessageEditableDraft } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import type { AgentForkResult, AgentImagePayload, AgentReloadConfigResult } from "@/types";
@@ -242,18 +243,17 @@ export async function createSession(input: {
   return initializeSession(sessionId, { activate: input.activate, recordFailure: true });
 }
 
-export async function closeSession(sessionId: string, context?: { clearPendingInteraction?: (sessionId: string) => void }) {
-  const { project, session } = getSessionCommandTarget(sessionId);
+export async function closeSession(
+  sessionId: string,
+  context?: {
+    clearPendingInteraction?: (sessionId: string) => void;
+  },
+) {
+  const { session } = getSessionCommandTarget(sessionId);
   if (!session.closed) {
-    useProjectStore.getState().closeSession(project.id, sessionId);
     await window.electronAPI.agentRemoveSession(sessionId);
   }
-  const chat = useChatStore.getState();
-  chat.clearSessionQueue(sessionId);
-  if (chat.activeSessionId === sessionId) {
-    chat.switchSession(null);
-    chat.setStreaming(false);
-  }
+  archiveSessionsAfterBackendRemoval([sessionId]);
   context?.clearPendingInteraction?.(sessionId);
   return getSessionCommandTarget(sessionId);
 }

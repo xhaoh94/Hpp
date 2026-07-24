@@ -26,11 +26,15 @@ export const summarizeProcessEntries = (entries: AgentProcessEntry[]) => {
 
   if (entries.some((entry) => entry.state === "interrupted")) return uiText.process.interrupted;
 
-  const toolCount = entries.filter((entry) => entry.type === "tool" || entry.type === "question" || entry.type === "error").length;
+  const toolCount = entries.filter((entry) =>
+    entry.type === "tool" || entry.type === "question" || entry.type === "error" || entry.type === "subagent"
+  ).length;
   const diffCount = entries.filter((entry) => entry.type === "diff").length;
   const isThinking = entries.some((entry) => entry.type === "thinking" && entry.state === "running");
   const thinkingEntry = entries.find((entry) => entry.type === "thinking" && entry.state === "running");
-  const runningTool = entries.find((entry) => (entry.type === "tool" || entry.type === "question") && entry.state === "running");
+  const runningTool = entries.find((entry) =>
+    (entry.type === "tool" || entry.type === "question" || entry.type === "subagent") && entry.state === "running"
+  );
 
   if (isThinking && thinkingEntry) {
     return formatThinkingSummary(getThinkingPreview(thinkingEntry.detail));

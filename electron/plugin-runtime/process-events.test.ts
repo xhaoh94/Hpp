@@ -36,6 +36,24 @@ describe("process event normalization", () => {
     });
   });
 
+  it("preserves Pi file-read errors from the tool result", () => {
+    expect(normalizeToolEvent("tool_end", {
+      toolName: "read",
+      toolCallId: "pi-read-1",
+      args: { path: "src/missing.ts" },
+      result: { content: [{ type: "text", text: "File not found" }] },
+      isError: true,
+    })).toMatchObject({
+      type: "tool_end",
+      toolKind: "read_file",
+      filePath: "src/missing.ts",
+      isError: true,
+      errorText: "File not found",
+      detail: "File not found",
+      files: [{ file: "src/missing.ts", action: "read" }],
+    });
+  });
+
   it("extracts patch metadata from edit tool results", () => {
     const patch = [
       "*** Begin Patch",
@@ -99,6 +117,20 @@ describe("process event normalization", () => {
       command: "npm test",
       outputText: "passed",
       detail: "$ npm test\npassed",
+    });
+  });
+
+  it("preserves a command's non-zero exit code", () => {
+    expect(normalizeToolEvent("tool_end", {
+      name: "bash",
+      args: { command: "rg missing" },
+      result: { stdout: "", exit_code: 1 },
+      isError: true,
+    })).toMatchObject({
+      toolKind: "run_command",
+      command: "rg missing",
+      exitCode: 1,
+      isError: true,
     });
   });
 

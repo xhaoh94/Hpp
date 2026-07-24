@@ -9,8 +9,8 @@ export function getStatus(context) {
   return getRuntimeStatus(context);
 }
 
-export function update(context) {
-  return updateRuntime(context);
+export function update(context, options) {
+  return updateRuntime(context, options);
 }
 
 export function uninstall(context) {

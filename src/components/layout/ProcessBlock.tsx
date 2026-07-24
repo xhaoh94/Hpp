@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentCommentary,
   AgentProcess,
   AgentProcessEntry,
   AgentProcessFile,
+  AgentSubagent,
 } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import {
@@ -18,17 +20,37 @@ import {
   summarizeProcessEntries,
 } from "./processBlockUtils";
 import {
+  canMergeAdjacentSubagentEntries,
   createProcessEntryMerger,
   getProcessFileName,
+  mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
 import {
+  getProcessGroupState,
   groupProcessEntries,
   getVisibleProcessEntries,
+  isAssistantNarrationProcessEntry,
   isProcessInterrupted,
   splitCommandDetail,
 } from "@shared/process-view";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
+
+type ProcessTimelineItem =
+  | {
+      kind: "entry";
+      id: string;
+      timestamp: number;
+      order: number;
+      entry: AgentProcessEntry;
+    }
+  | {
+      kind: "commentary";
+      id: string;
+      timestamp: number;
+      order: number;
+      commentary: AgentCommentary;
+    };
 
 const formatProcessDuration = (ms: number) => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -284,7 +306,7 @@ function CommandDetail({
   };
 
   return (
-    <div className={`chat-command-detail ${outputExpanded ? "expanded" : "collapsed"}`}>
+    <div className={`chat-command-detail ${entry.state || ""} ${outputExpanded ? "expanded" : "collapsed"}`}>
       <button
         className="chat-command-header"
         onClick={canExpand ? (event) => toggleOutput(event.currentTarget) : undefined}
@@ -321,18 +343,20 @@ function CommandGroup({
   onPreserveScroll: PreserveScroll;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const state = getProcessGroupState(entries);
+  const warningTitle = entries.find((entry) => entry.state === "warning")?.title;
 
   return (
-    <div className="chat-process-entry tool chat-command-group">
+    <div className={`chat-process-entry tool chat-command-group ${state}`}>
       <span className="chat-process-entry-icon">
-        <ProcessEntryIcon type="tool" />
+        <ProcessEntryIcon type="tool" state={state} />
       </span>
       <div className="chat-process-entry-main">
         <button
           className="chat-process-entry-header expandable"
           onClick={(event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget)}
         >
-          <span className="chat-process-entry-title">{formatCommandGroupTitle(entries.length)}</span>
+          <span className="chat-process-entry-title">{warningTitle || formatCommandGroupTitle(entries.length)}</span>
           <svg
             className="chat-process-entry-chevron"
             width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
@@ -349,6 +373,108 @@ function CommandGroup({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+const getSubagentTone = (id: string) => {
+  let hash = 0;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = ((hash << 5) - hash + id.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) % 4;
+};
+
+const getSubagentStatusLabel = (status?: AgentSubagent["status"]) => {
+  switch (status) {
+    case "pending": return "等待中";
+    case "running": return "工作中";
+    case "completed": return "已完成";
+    case "error": return "失败";
+    case "interrupted": return "已中断";
+    default: return "";
+  }
+};
+
+function SubagentGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M10 1.8l1.6 3.1 3.45-.55-.55 3.45 3.1 1.6-3.1 1.6.55 3.45-3.45-.55L10 17.2l-1.6-3.3-3.45.55.55-3.45-3.1-1.6 3.1-1.6-.55-3.45 3.45.55L10 1.8z"
+        fill="currentColor"
+        fillOpacity="0.3"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <circle cx="10" cy="9.5" r="2.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+const getSubagentTooltip = (subagent: AgentSubagent) => [
+  getSubagentStatusLabel(subagent.status),
+  subagent.model,
+  subagent.path,
+  subagent.message,
+].filter(Boolean).join(" · ");
+
+function SubagentEntryRow({
+  messageId,
+  entry,
+  onToggleEntry,
+}: {
+  messageId: string;
+  entry: AgentProcessEntry;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+}) {
+  const subagents = entry.subagents || [];
+  const messages = subagents
+    .map((subagent) => subagent.message?.trim())
+    .filter((message): message is string => !!message && message !== entry.detail?.trim());
+  const detail = [entry.detail?.trim(), ...new Set(messages)].filter(Boolean).join("\n\n");
+  const canExpand = detail.length > 0;
+
+  return (
+    <div className={`chat-subagent-entry ${entry.state || ""}`}>
+      <button
+        type="button"
+        className={`chat-subagent-event ${canExpand ? "expandable" : ""}`}
+        onClick={canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : undefined}
+        disabled={!canExpand}
+        aria-expanded={canExpand ? !!entry.expanded : undefined}
+      >
+        <span className="chat-subagent-chips">
+          {subagents.map((subagent) => (
+            <span
+              className={`chat-subagent-chip ${subagent.status || ""}`}
+              key={subagent.id}
+              title={getSubagentTooltip(subagent) || subagent.label}
+            >
+              <span className={`chat-subagent-avatar tone-${getSubagentTone(subagent.id)}`}>
+                <SubagentGlyph />
+              </span>
+              <span className="chat-subagent-label">{subagent.label}</span>
+            </span>
+          ))}
+        </span>
+        <span className="chat-subagent-event-title">{entry.title}</span>
+        {canExpand && (
+          <svg
+            className="chat-subagent-chevron"
+            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
+            aria-hidden="true"
+          >
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+        )}
+      </button>
+      {canExpand && entry.expanded && (
+        <div className="chat-subagent-detail">
+          <MarkdownRenderer content={detail} />
+        </div>
+      )}
     </div>
   );
 }
@@ -377,7 +503,20 @@ function ProcessEntryRow({
       ? formatErrorDetailAsMarkdown(entry.detail)
       : null;
 
-  if (entry.type === "info") {
+  if (entry.type === "subagent") {
+    return (
+      <SubagentEntryRow
+        messageId={messageId}
+        entry={entry}
+        onToggleEntry={onToggleEntry}
+      />
+    );
+  }
+
+  // Narration is the assistant's actual body text; do not render a
+  // redundant "正文输出" process row above it (also handles entries created
+  // before the narration kind was attached).
+  if (isAssistantNarrationProcessEntry(entry) || entry.title === uiText.process.narration) {
     return (
       <div className="chat-process-output">
         <MarkdownRenderer content={entry.detail || entry.title} />
@@ -470,6 +609,7 @@ function useProcessTicker(enabled: boolean) {
 export function ProcessBlock({
   messageId,
   process,
+  commentary = [],
   onToggle,
   onToggleEntry,
   onOpenFile,
@@ -477,6 +617,7 @@ export function ProcessBlock({
 }: {
   messageId: string;
   process: AgentProcess;
+  commentary?: AgentCommentary[];
   onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string) => void;
@@ -503,34 +644,99 @@ export function ProcessBlock({
     () => expanded ? mergeProcessEntriesRef.current(visibleEntries) : [],
     [expanded, visibleEntries]
   );
+  const visibleCommentary = useMemo(
+    () => commentary.filter((item) => item.content.trim().length > 0),
+    [commentary]
+  );
+  const timelineItems = useMemo(() => {
+    const items: ProcessTimelineItem[] = [
+      ...visibleEntries.map((entry, index) => ({
+      kind: "entry" as const,
+      id: entry.id,
+      timestamp: entry.timestamp,
+      order: index,
+      entry,
+      })),
+      ...visibleCommentary.map((item, index) => ({
+      kind: "commentary" as const,
+      id: item.id,
+      timestamp: item.timestamp,
+      order: visibleEntries.length + index,
+      commentary: item,
+      })),
+    ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order);
+    const merged: ProcessTimelineItem[] = [];
+    for (const item of items) {
+      const previous = merged[merged.length - 1];
+      if (
+        item.kind === "entry" &&
+        previous?.kind === "entry" &&
+        canMergeAdjacentSubagentEntries(previous.entry, item.entry)
+      ) {
+        const entry = mergeAdjacentSubagentEntries(previous.entry, item.entry);
+        merged[merged.length - 1] = {
+          ...previous,
+          entry,
+          timestamp: Math.min(previous.timestamp, item.timestamp),
+        };
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged;
+  }, [visibleCommentary, visibleEntries]);
+  const hasCommentaryTimeline = visibleCommentary.length > 0;
 
   return (
-    <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
-      <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
-        <span>{interrupted ? uiText.process.interrupted : uiText.process.elapsed} {elapsed}</span>
-        <ProcessProgressSummary process={process} fallback={summary} />
-        <svg
-          width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
-          style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
-        >
-          <path d="M9 18l6-6-6-6" />
-        </svg>
-      </button>
-      {expanded && (
-        <div className="chat-process-content">
-          {visibleEntries.length === 0 ? (
-            <div className="chat-process-empty">{uiText.process.emptyEvents}</div>
-          ) : (
-            <ProcessEntries
-              entries={mergedEntries}
+    <>
+      <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
+        <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
+          <span>{interrupted ? uiText.process.interrupted : uiText.process.elapsed} {elapsed}</span>
+          <ProcessProgressSummary process={process} fallback={summary} />
+          <svg
+            width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
+            style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
+          >
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+        </button>
+        {expanded && !hasCommentaryTimeline && (
+          <div className="chat-process-content">
+            {visibleEntries.length === 0 ? (
+              <div className="chat-process-empty">{uiText.process.emptyEvents}</div>
+            ) : (
+              <ProcessEntries
+                entries={mergedEntries}
+                messageId={messageId}
+                onToggleEntry={onToggleEntry}
+                onOpenFile={onOpenFile}
+                onPreserveScroll={onPreserveScroll}
+              />
+            )}
+          </div>
+        )}
+      </div>
+      {expanded && hasCommentaryTimeline && (
+        <div className="chat-turn-timeline" aria-label="处理说明">
+          {timelineItems.map((item) => item.kind === "commentary" ? (
+            <div
+              key={`commentary-${item.id}`}
+              className={`chat-commentary-item ${item.commentary.isStreaming ? "streaming" : ""}`}
+            >
+              <MarkdownRenderer content={item.commentary.content} />
+            </div>
+          ) : expanded ? (
+            <ProcessEntryRow
+              key={`process-${item.id}`}
+              entry={item.entry}
               messageId={messageId}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}
               onPreserveScroll={onPreserveScroll}
             />
-          )}
+          ) : null)}
         </div>
       )}
-    </div>
+    </>
   );
 }

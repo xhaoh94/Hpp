@@ -44,6 +44,17 @@ interface AgentReloadConfigResult {
   error?: string;
   models?: AgentModel[];
   reloadedSessionIds?: string[];
+  detachedSessionIds?: string[];
+}
+
+interface SuspendedPluginSessions {
+  activeSessionId: string | null;
+  targets: Array<{
+    sessionId: string;
+    agentType: string;
+    projectPath: string;
+    sessionFilePath?: string;
+  }>;
 }
 
 const AGENT_SESSION_INIT_TIMEOUT_MS = 90_000;
@@ -112,6 +123,11 @@ export class AgentManager {
   private sessionFilePaths = new Map<string, string>();
   private sessionProjectPaths = new Map<string, string>();
   private runtimeUpdatingAgentIds = new Set<string>();
+  private pluginMutatingAgentIds = new Set<string>();
+  private suspendedPluginSessions = new Map<string, SuspendedPluginSessions>();
+  private initializingSessionAgentTypes = new Map<string, string>();
+  private disposingSessionIds = new Set<string>();
+  private pluginCatalogMutating = false;
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
 
@@ -141,40 +157,64 @@ export class AgentManager {
     sessionId: string, agentId: string, projectPath: string,
     existingSessionFilePath?: string
   ): Promise<void> {
+    if (this.pluginCatalogMutating) {
+      throw new Error("Agent 插件正在安装或刷新，请等待操作完成。");
+    }
     if (this.runtimeUpdatingAgentIds.has(agentId)) {
       throw new Error(`${agentId} CLI 正在更新，请等待更新完成。`);
     }
-    console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
-    let agent = this.sessionAgents.get(sessionId);
-    if (!agent) {
-      agent = await this.createAgentBackend(agentId, sessionId);
-      this.sessionAgents.set(sessionId, agent);
-      this.sessionAgentTypes.set(sessionId, agentId);
-      console.log("[agent-manager] Created new agent:", agent.constructor.name);
-    } else {
-      console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
+    if (this.pluginMutatingAgentIds.has(agentId)) {
+      throw new Error(`${agentId} 正在卸载，请等待操作完成。`);
     }
-    this.sessionProjectPaths.set(sessionId, projectPath);
-    if (this.window) agent.setWindow(this.window);
+    if (this.disposingSessionIds.has(sessionId)) {
+      throw new Error("Agent 会话正在关闭，请稍后重试。");
+    }
+    if (this.initializingSessionAgentTypes.has(sessionId)) {
+      throw new Error("Agent 会话正在初始化，请稍后重试。");
+    }
+    this.initializingSessionAgentTypes.set(sessionId, agentId);
     try {
-      await this.initAgentBackend(agent, projectPath, existingSessionFilePath);
-    } catch (error) {
-      if (this.sessionAgents.get(sessionId) === agent) {
-        agent.dispose();
-        this.sessionAgents.delete(sessionId);
-        this.sessionAgentTypes.delete(sessionId);
-        this.sessionFilePaths.delete(sessionId);
-        this.sessionProjectPaths.delete(sessionId);
+      console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
+      let agent = this.sessionAgents.get(sessionId);
+      if (!agent) {
+        agent = await this.createAgentBackend(agentId, sessionId);
+        this.sessionAgents.set(sessionId, agent);
+        this.sessionAgentTypes.set(sessionId, agentId);
+        console.log("[agent-manager] Created new agent:", agent.constructor.name);
+      } else {
+        console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
       }
-      if (this.activeSessionId === sessionId) this.activeSessionId = null;
-      throw error;
+      this.sessionProjectPaths.set(sessionId, projectPath);
+      if (this.window) agent.setWindow(this.window);
+      try {
+        await this.initAgentBackend(agent, projectPath, existingSessionFilePath);
+      } catch (error) {
+        if (this.sessionAgents.get(sessionId) === agent) {
+          await Promise.resolve(agent.dispose()).catch(() => undefined);
+          this.sessionAgents.delete(sessionId);
+          this.sessionAgentTypes.delete(sessionId);
+          this.sessionFilePaths.delete(sessionId);
+          this.sessionProjectPaths.delete(sessionId);
+        }
+        if (this.activeSessionId === sessionId) this.activeSessionId = null;
+        const message = getErrorMessage(error);
+        const status = await agentRegistry.getStatus(agentId).catch(() => undefined);
+        if (status?.canRollback && status.rollbackVersion) {
+          throw new Error(`${message}\n可在 Agent 设置中一键回退到 v${status.rollbackVersion}。`);
+        }
+        throw error;
+      }
+
+      const fp = agent.sessionFilePath;
+      console.log("[agent-manager] After init, sessionFilePath:", fp);
+      if (fp) this.sessionFilePaths.set(sessionId, fp);
+
+      this.activeSessionId = sessionId;
+    } finally {
+      if (this.initializingSessionAgentTypes.get(sessionId) === agentId) {
+        this.initializingSessionAgentTypes.delete(sessionId);
+      }
     }
-
-    const fp = agent.sessionFilePath;
-    console.log("[agent-manager] After init, sessionFilePath:", fp);
-    if (fp) this.sessionFilePaths.set(sessionId, fp);
-
-    this.activeSessionId = sessionId;
   }
 
   getSessionFilePath(sessionId: string): string | undefined {
@@ -182,11 +222,19 @@ export class AgentManager {
   }
 
   getSessionAgentType(sessionId: string): string | undefined {
-    return this.sessionAgentTypes.get(sessionId);
+    const activeType = this.sessionAgentTypes.get(sessionId);
+    if (activeType) return activeType;
+    const initializingType = this.initializingSessionAgentTypes.get(sessionId);
+    if (initializingType) return initializingType;
+    for (const suspended of this.suspendedPluginSessions.values()) {
+      const target = suspended.targets.find((candidate) => candidate.sessionId === sessionId);
+      if (target) return target.agentType;
+    }
+    return undefined;
   }
 
   switchSession(sessionId: string) {
-    if (this.sessionAgents.has(sessionId)) {
+    if (this.sessionAgents.has(sessionId) && !this.disposingSessionIds.has(sessionId)) {
       this.activeSessionId = sessionId;
     }
   }
@@ -196,8 +244,12 @@ export class AgentManager {
     return this.getAgentBySessionId(this.activeSessionId);
   }
   getAgentBySessionId(sessionId: string): AgentBackend | null {
-    const agentId = this.sessionAgentTypes.get(sessionId);
-    if (agentId && this.runtimeUpdatingAgentIds.has(agentId)) return null;
+    if (
+      this.disposingSessionIds.has(sessionId)
+      || this.initializingSessionAgentTypes.has(sessionId)
+    ) return null;
+    const agentId = this.getSessionAgentType(sessionId);
+    if (this.isAgentRuntimeUnavailable(agentId)) return null;
     return this.sessionAgents.get(sessionId) || null;
   }
 
@@ -389,18 +441,188 @@ export class AgentManager {
   }
 
   hasAgentSessions(agentId: string): boolean {
-    return Array.from(this.sessionAgentTypes.values()).includes(agentId);
+    return (
+      Array.from(this.sessionAgentTypes.values()).includes(agentId)
+      || Array.from(this.initializingSessionAgentTypes.values()).includes(agentId)
+      || Array.from(this.suspendedPluginSessions.values()).some((suspended) => (
+        suspended.targets.some((target) => target.agentType === agentId)
+      ))
+    );
   }
 
   hasBusyAgentSessions(agentId: string): boolean {
+    if (Array.from(this.initializingSessionAgentTypes.values()).includes(agentId)) return true;
     for (const [sessionId, agent] of this.sessionAgents.entries()) {
       if (this.sessionAgentTypes.get(sessionId) === agentId && !agent.isIdle()) return true;
     }
     return false;
   }
 
+  hasAnyAgentSessions(): boolean {
+    return (
+      this.sessionAgents.size > 0
+      || this.initializingSessionAgentTypes.size > 0
+      || Array.from(this.suspendedPluginSessions.values()).some((suspended) => (
+        suspended.targets.length > 0
+      ))
+    );
+  }
+
+  beginPluginCatalogMutation(): void {
+    this.pluginCatalogMutating = true;
+  }
+
+  finishPluginCatalogMutation(): void {
+    this.pluginCatalogMutating = false;
+  }
+
   isAgentRuntimeUpdating(agentId?: string): boolean {
     return !!agentId && this.runtimeUpdatingAgentIds.has(agentId);
+  }
+
+  isAgentRuntimeUnavailable(agentId?: string): boolean {
+    return !!agentId && (
+      this.runtimeUpdatingAgentIds.has(agentId)
+      || this.pluginMutatingAgentIds.has(agentId)
+    );
+  }
+
+  async suspendAgentSessionsForPluginRemoval(agentId: string): Promise<{
+    success: boolean;
+    sessionCount: number;
+    error?: string;
+    detachedSessionIds?: string[];
+  }> {
+    if (this.isAgentRuntimeUnavailable(agentId)) {
+      return { success: false, sessionCount: 0, error: "该 Agent 已在更新或卸载中。" };
+    }
+    if (Array.from(this.initializingSessionAgentTypes.values()).includes(agentId)) {
+      return {
+        success: false,
+        sessionCount: 0,
+        error: "该 Agent 仍有会话正在初始化，请等待初始化完成后再卸载插件。",
+      };
+    }
+
+    const targets = Array.from(this.sessionAgents.entries())
+      .filter(([sessionId]) => this.sessionAgentTypes.get(sessionId) === agentId);
+    if (targets.some(([, agent]) => !agent.isIdle())) {
+      return {
+        success: false,
+        sessionCount: targets.length,
+        error: "该 Agent 仍有会话正在运行，请等待任务结束后再卸载插件。",
+      };
+    }
+
+    const suspendedTargets: SuspendedPluginSessions["targets"] = [];
+    for (const [sessionId, agent] of targets) {
+      const projectPath = this.sessionProjectPaths.get(sessionId);
+      if (!projectPath) {
+        return {
+          success: false,
+          sessionCount: targets.length,
+          error: `会话 ${sessionId} 缺少项目路径，无法安全卸载插件。`,
+        };
+      }
+      suspendedTargets.push({
+        sessionId,
+        agentType: this.sessionAgentTypes.get(sessionId) || agentId,
+        projectPath,
+        sessionFilePath: agent.sessionFilePath || this.sessionFilePaths.get(sessionId),
+      });
+    }
+
+    this.pluginMutatingAgentIds.add(agentId);
+    const results = await Promise.allSettled(
+      targets.map(([, agent]) => Promise.resolve().then(() => agent.dispose()))
+    );
+    const activeSessionId = this.activeSessionId;
+    const disposedTargets = suspendedTargets.filter((_, index) => results[index]?.status === "fulfilled");
+    for (const [index, [sessionId, agent]] of targets.entries()) {
+      if (results[index]?.status !== "fulfilled" || this.sessionAgents.get(sessionId) !== agent) continue;
+      this.sessionAgents.delete(sessionId);
+      this.sessionAgentTypes.delete(sessionId);
+      this.sessionFilePaths.delete(sessionId);
+      this.sessionProjectPaths.delete(sessionId);
+      if (this.activeSessionId === sessionId) this.activeSessionId = null;
+    }
+
+    const failureIndex = results.findIndex((result) => result.status === "rejected");
+    if (failureIndex >= 0) {
+      this.suspendedPluginSessions.set(agentId, { activeSessionId, targets: disposedTargets });
+      const restoration = await this.finishAgentPluginRemoval(agentId, true);
+      const detail = getErrorMessage((results[failureIndex] as PromiseRejectedResult).reason);
+      return {
+        success: false,
+        sessionCount: targets.length,
+        error: restoration.success
+          ? `无法关闭 Agent 空闲会话：${detail}`
+          : `无法关闭 Agent 空闲会话：${detail}；会话恢复失败：${restoration.error || "未知错误"}`,
+        detachedSessionIds: restoration.detachedSessionIds,
+      };
+    }
+
+    this.suspendedPluginSessions.set(agentId, {
+      activeSessionId,
+      targets: disposedTargets,
+    });
+    return { success: true, sessionCount: targets.length };
+  }
+
+  async finishAgentPluginRemoval(agentId: string, restoreSessions: boolean): Promise<AgentReloadConfigResult> {
+    const suspended = this.suspendedPluginSessions.get(agentId);
+    try {
+      if (!suspended || suspended.targets.length === 0) {
+        return { success: true, reloadedSessionIds: [], detachedSessionIds: [] };
+      }
+      const detachedSessionIds = suspended.targets.map((target) => target.sessionId);
+      if (!restoreSessions) {
+        return { success: true, reloadedSessionIds: [], detachedSessionIds };
+      }
+
+      const restored: Array<{
+        target: SuspendedPluginSessions["targets"][number];
+        agent: AgentBackend;
+      }> = [];
+      try {
+        for (const target of suspended.targets) {
+          const agent = await this.createAgentBackend(target.agentType, target.sessionId);
+          restored.push({ target, agent });
+          if (this.window) agent.setWindow(this.window);
+          await this.initAgentBackend(agent, target.projectPath, target.sessionFilePath);
+        }
+      } catch (error) {
+        await Promise.allSettled(restored.map(({ agent }) => Promise.resolve(agent.dispose())));
+        return {
+          success: false,
+          error: getErrorMessage(error),
+          reloadedSessionIds: [],
+          detachedSessionIds,
+        };
+      }
+
+      for (const { target, agent } of restored) {
+        this.sessionAgents.set(target.sessionId, agent);
+        this.sessionAgentTypes.set(target.sessionId, target.agentType);
+        this.sessionProjectPaths.set(target.sessionId, target.projectPath);
+        const sessionFilePath = agent.sessionFilePath || target.sessionFilePath;
+        if (sessionFilePath) this.sessionFilePaths.set(target.sessionId, sessionFilePath);
+      }
+      if (
+        suspended.activeSessionId
+        && suspended.targets.some((target) => target.sessionId === suspended.activeSessionId)
+      ) {
+        this.activeSessionId = suspended.activeSessionId;
+      }
+      return {
+        success: true,
+        reloadedSessionIds: restored.map(({ target }) => target.sessionId),
+        detachedSessionIds: [],
+      };
+    } finally {
+      this.suspendedPluginSessions.delete(agentId);
+      this.pluginMutatingAgentIds.delete(agentId);
+    }
   }
 
   async suspendAgentSessionsForRuntimeUpdate(agentId: string): Promise<{
@@ -410,6 +632,13 @@ export class AgentManager {
   }> {
     if (this.runtimeUpdatingAgentIds.has(agentId)) {
       return { success: false, sessionCount: 0, error: "该 Agent CLI 已在更新中。" };
+    }
+    if (Array.from(this.initializingSessionAgentTypes.values()).includes(agentId)) {
+      return {
+        success: false,
+        sessionCount: 0,
+        error: "该 Agent 仍有会话正在初始化，请等待初始化完成后再更新。",
+      };
     }
 
     const targets = Array.from(this.sessionAgents.entries())
@@ -463,15 +692,26 @@ export class AgentManager {
   }
 
   async removeSession(sessionId: string) {
-    const agent = this.sessionAgents.get(sessionId);
-    if (agent) {
-      this.sessionAgents.delete(sessionId);
-      await Promise.resolve(agent.dispose());
+    if (this.initializingSessionAgentTypes.has(sessionId)) {
+      throw new Error("Agent 会话正在初始化，请稍后关闭。");
     }
-    this.sessionAgentTypes.delete(sessionId);
-    this.sessionFilePaths.delete(sessionId);
-    this.sessionProjectPaths.delete(sessionId);
-    if (this.activeSessionId === sessionId) this.activeSessionId = null;
+    if (this.disposingSessionIds.has(sessionId)) {
+      throw new Error("Agent 会话正在关闭，请稍后重试。");
+    }
+    const agent = this.sessionAgents.get(sessionId);
+    this.disposingSessionIds.add(sessionId);
+    try {
+      if (agent) {
+        await Promise.resolve(agent.dispose());
+      }
+      this.sessionAgents.delete(sessionId);
+      this.sessionAgentTypes.delete(sessionId);
+      this.sessionFilePaths.delete(sessionId);
+      this.sessionProjectPaths.delete(sessionId);
+      if (this.activeSessionId === sessionId) this.activeSessionId = null;
+    } finally {
+      this.disposingSessionIds.delete(sessionId);
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -480,6 +720,12 @@ export class AgentManager {
     this.sessionAgentTypes.clear();
     this.sessionFilePaths.clear();
     this.sessionProjectPaths.clear();
+    this.runtimeUpdatingAgentIds.clear();
+    this.pluginMutatingAgentIds.clear();
+    this.suspendedPluginSessions.clear();
+    this.initializingSessionAgentTypes.clear();
+    this.disposingSessionIds.clear();
+    this.pluginCatalogMutating = false;
     this.activeSessionId = null;
     await Promise.allSettled(agents.map((agent) => Promise.resolve(agent.dispose())));
   }
@@ -521,8 +767,11 @@ export async function shutdownAgentRuntime(): Promise<void> {
 // IPC handlers
 // ============================================================
 export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
-  ipcMain.handle("agent:update", async (_event, agentId: string) => {
-    return agentRuntimeOperationQueue.run(agentId, "update", async () => {
+  const runAgentRuntimeChange = async (
+    agentId: string,
+    operation: "update" | "rollback",
+    versionSpec?: string,
+  ) => agentRuntimeOperationQueue.run(agentId, operation, async () => {
       const suspension = await agentManager.suspendAgentSessionsForRuntimeUpdate(agentId);
       if (!suspension.success) {
         return {
@@ -535,7 +784,9 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       let updateResult: Awaited<ReturnType<typeof agentRegistry.updateAgent>> | undefined;
       let updateError = "";
       try {
-        updateResult = await agentRegistry.updateAgent(agentId);
+        updateResult = operation === "rollback"
+          ? await agentRegistry.rollbackAgent(agentId)
+          : await agentRegistry.updateAgent(agentId, versionSpec);
       } catch (error) {
         updateError = getErrorMessage(error);
       }
@@ -566,8 +817,12 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         };
       }
       return updateResult!;
-    });
   });
+
+  ipcMain.handle("agent:update", async (_event, agentId: string, versionSpec?: string) =>
+    runAgentRuntimeChange(agentId, "update", typeof versionSpec === "string" ? versionSpec : undefined));
+  ipcMain.handle("agent:rollback", async (_event, agentId: string) => runAgentRuntimeChange(agentId, "rollback"));
+  ipcMain.handle("agent:versions", async (_event, agentId: string) => agentRegistry.getPackageVersions(agentId));
 
   ipcMain.handle("agentPlugin:choosePath", async (event, kind?: "zip" | "directory") => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -587,8 +842,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agentPlugin:installFromPath", async (_event, pluginPath: string) => {
-    return agentRegistry.installFromPath(pluginPath, {
-      canReplace: (agentId) => !agentManager.hasAgentSessions(agentId),
+    return agentRuntimeOperationQueue.run("local-plugin", "plugin-install", async () => {
+      agentManager.beginPluginCatalogMutation();
+      try {
+        return await agentRegistry.installFromPath(pluginPath, {
+          canReplace: (agentId) => !agentManager.hasAgentSessions(agentId),
+        });
+      } finally {
+        agentManager.finishPluginCatalogMutation();
+      }
     });
   });
 
@@ -597,82 +859,129 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agentPlugin:installOfficial", async (_event, agentId: string) => {
-    const catalog = await listOfficialAgentPlugins(app.getVersion());
-    if (!catalog.success) {
-      return {
-        success: false,
-        error: catalog.error || "无法获取官方插件列表。",
-        agents: await agentRegistry.listAgents(),
-      };
-    }
-
-    const plugin = catalog.plugins.find((candidate) => candidate.id === agentId);
-    if (!plugin) {
-      return {
-        success: false,
-        error: `官方插件列表中不存在 ${agentId}。`,
-        agents: await agentRegistry.listAgents(),
-      };
-    }
-
-    if (!plugin.compatible) {
-      return {
-        success: false,
-        error: plugin.compatibilityError || `${plugin.name} 与当前 Hpp 版本不兼容。`,
-        agents: await agentRegistry.listAgents(),
-      };
-    }
-
-    if (agentManager.hasAgentSessions(agentId)) {
-      return {
-        success: false,
-        error: "该 Agent 仍有已打开会话，请先关闭相关会话后再安装或更新插件。",
-        agents: await agentRegistry.listAgents(),
-      };
-    }
-
-    let zipPath = "";
-    try {
-      zipPath = await downloadOfficialPluginZip(
-        plugin,
-        join(app.getPath("temp"), "hpp-agent-plugin-downloads")
-      );
-      return await agentRegistry.installFromPath(zipPath, {
-        expectedAgentId: plugin.id,
-        canReplace: (candidateAgentId) => !agentManager.hasAgentSessions(candidateAgentId),
-      });
-    } catch (error) {
-      return {
-        success: false,
-        error: getErrorMessage(error),
-        agents: await agentRegistry.listAgents(),
-      };
-    } finally {
-      if (zipPath) {
-        await rm(zipPath, { force: true }).catch(() => undefined);
+    return agentRuntimeOperationQueue.run(agentId, "plugin-install", async () => {
+      const catalog = await listOfficialAgentPlugins(app.getVersion());
+      if (!catalog.success) {
+        return {
+          success: false,
+          error: catalog.error || "无法获取官方插件列表。",
+          agents: await agentRegistry.listAgents(),
+        };
       }
-    }
+
+      const plugin = catalog.plugins.find((candidate) => candidate.id === agentId);
+      if (!plugin) {
+        return {
+          success: false,
+          error: `官方插件列表中不存在 ${agentId}。`,
+          agents: await agentRegistry.listAgents(),
+        };
+      }
+
+      if (!plugin.compatible) {
+        return {
+          success: false,
+          error: plugin.compatibilityError || `${plugin.name} 与当前 Hpp 版本不兼容。`,
+          agents: await agentRegistry.listAgents(),
+        };
+      }
+
+      if (agentManager.hasAgentSessions(agentId)) {
+        return {
+          success: false,
+          error: "该 Agent 仍有已打开会话，请先关闭相关会话后再安装或更新插件。",
+          agents: await agentRegistry.listAgents(),
+        };
+      }
+
+      let zipPath = "";
+      try {
+        zipPath = await downloadOfficialPluginZip(
+          plugin,
+          join(app.getPath("temp"), "hpp-agent-plugin-downloads")
+        );
+        agentManager.beginPluginCatalogMutation();
+        try {
+          return await agentRegistry.installFromPath(zipPath, {
+            expectedAgentId: plugin.id,
+            canReplace: (candidateAgentId) => !agentManager.hasAgentSessions(candidateAgentId),
+          });
+        } finally {
+          agentManager.finishPluginCatalogMutation();
+        }
+      } catch (error) {
+        return {
+          success: false,
+          error: getErrorMessage(error),
+          agents: await agentRegistry.listAgents(),
+        };
+      } finally {
+        if (zipPath) {
+          await rm(zipPath, { force: true }).catch(() => undefined);
+        }
+      }
+    });
   });
 
   ipcMain.handle("agentPlugin:remove", async (_event, agentId: string, removeRuntime = false) => {
     return agentRuntimeOperationQueue.run(agentId, "uninstall", async () => {
-      if (agentManager.hasAgentSessions(agentId)) {
+      const suspension = await agentManager.suspendAgentSessionsForPluginRemoval(agentId);
+      if (!suspension.success) {
         return {
           success: false,
-          error: "该 Agent 仍有已打开会话，请先关闭相关会话后再卸载插件。",
+          error: suspension.error,
           agents: await agentRegistry.listAgents(),
+          detachedSessionIds: suspension.detachedSessionIds,
         };
       }
-      return agentRegistry.removePlugin(agentId, removeRuntime);
+
+      let result: Awaited<ReturnType<typeof agentRegistry.removePlugin>>;
+      try {
+        result = await agentRegistry.removePlugin(agentId, removeRuntime);
+      } catch (error) {
+        const restoration = await agentManager.finishAgentPluginRemoval(agentId, true);
+        const detail = getErrorMessage(error);
+        return {
+          success: false,
+          error: restoration.success
+            ? detail
+            : `${detail}；会话恢复失败：${restoration.error || "未知错误"}`,
+          agents: await agentRegistry.listAgents(),
+          detachedSessionIds: restoration.detachedSessionIds,
+        };
+      }
+
+      const restoration = await agentManager.finishAgentPluginRemoval(agentId, !result.success);
+      if (!restoration.success) {
+        return {
+          ...result,
+          success: false,
+          error: `${result.error || "插件卸载失败"}；会话恢复失败：${restoration.error || "未知错误"}`,
+          detachedSessionIds: restoration.detachedSessionIds,
+        };
+      }
+      return { ...result, detachedSessionIds: restoration.detachedSessionIds };
     });
   });
 
   ipcMain.handle("agentPlugin:reload", async () => {
-    try {
-      return { success: true, agents: await agentRegistry.reload() };
-    } catch (error) {
-      return { success: false, error: getErrorMessage(error), agents: await agentRegistry.listAgents() };
-    }
+    return agentRuntimeOperationQueue.run("plugin-catalog", "plugin-reload", async () => {
+      if (agentManager.hasAnyAgentSessions()) {
+        return {
+          success: false,
+          error: "仍有 Agent 会话处于打开或初始化状态，请先关闭后再刷新插件。",
+          agents: await agentRegistry.listAgents(),
+        };
+      }
+      agentManager.beginPluginCatalogMutation();
+      try {
+        return { success: true, agents: await agentRegistry.reload() };
+      } catch (error) {
+        return { success: false, error: getErrorMessage(error), agents: await agentRegistry.listAgents() };
+      } finally {
+        agentManager.finishPluginCatalogMutation();
+      }
+    });
   });
 
   ipcMain.handle("agent:createSession", async (_event, agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => {
@@ -717,6 +1026,9 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       if (agentManager.isAgentRuntimeUpdating(agentType)) {
         return { success: false, error: "该 Agent CLI 正在更新，请等待更新完成。" };
       }
+      if (agentManager.isAgentRuntimeUnavailable(agentType)) {
+        return { success: false, error: "该 Agent 正在卸载，请等待操作完成。" };
+      }
       const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
       if (!agent) return { success: false, error: "No active agent" };
       const planModeEnabled = !!options?.planModeEnabled;
@@ -724,6 +1036,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       const nativePlanMode = await supportsNativePlanMode(agentType);
       if (agentManager.isAgentRuntimeUpdating(agentType)) {
         return { success: false, error: "该 Agent CLI 正在更新，请等待更新完成。" };
+      }
+      if (agentManager.isAgentRuntimeUnavailable(agentType)) {
+        return { success: false, error: "该 Agent 正在卸载，请等待操作完成。" };
+      }
+      const currentAgent = sessionId
+        ? agentManager.getAgentBySessionId(sessionId)
+        : agentManager.getActiveAgent();
+      if (currentAgent !== agent) {
+        return { success: false, error: "No active agent" };
       }
       const effectiveMessage = planModeEnabled && !nativePlanMode
         ? withPromptPlanMode(message)

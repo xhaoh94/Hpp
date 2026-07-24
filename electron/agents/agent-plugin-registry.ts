@@ -12,11 +12,12 @@ import {
   getExecFileInvocation,
   getNpmInvocation,
 } from "../utils/command-utils";
-import { getLatestNpmPackageVersion } from "../utils/npm-registry";
+import { getLatestNpmPackageVersion, getNpmPackageVersionInfo } from "../utils/npm-registry";
 import type {
   AgentCapabilities,
   AgentDescriptor,
   AgentPackageStatus,
+  AgentPackageVersions,
   AgentPlanModeSupport,
   AgentProviderConfiguration,
   AgentPluginInstallResult,
@@ -69,8 +70,10 @@ interface PluginActivateProviderResult {
 
 interface AgentHostApi {
   getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPackageStatus>;
-  updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }>;
+  updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }>;
 }
+
+type RuntimeVersionRecord = Record<string, { rollbackVersion?: string }>;
 
 interface CommandResult {
   stdout: string;
@@ -105,6 +108,31 @@ function getDataDir() {
 
 function getPluginInstallDir() {
   return join(getDataDir(), "agent-plugins");
+}
+
+function getRuntimeVersionRecordPath() {
+  return join(getDataDir(), "agent-runtime-versions.json");
+}
+
+async function readRuntimeVersionRecords(): Promise<RuntimeVersionRecord> {
+  try {
+    const value = JSON.parse(await readFile(getRuntimeVersionRecordPath(), "utf8"));
+    return isRecord(value) ? value as RuntimeVersionRecord : {};
+  } catch { return {}; }
+}
+
+async function writeRuntimeVersionRecord(agentId: string, rollbackVersion?: string) {
+  const records = await readRuntimeVersionRecords();
+  if (rollbackVersion) records[agentId] = { rollbackVersion };
+  else delete records[agentId];
+  await mkdir(getDataDir(), { recursive: true });
+  await writeFile(getRuntimeVersionRecordPath(), `${JSON.stringify(records, null, 2)}\n`, "utf8");
+}
+
+function normalizeVersionSpec(value: unknown): string | undefined {
+  const spec = String(value || "").trim();
+  if (!spec || spec.length > 120 || /[\r\n\\/]/.test(spec)) return undefined;
+  return spec;
 }
 
 function normalizePluginEvent(event: unknown): Record<string, unknown> {
@@ -545,7 +573,7 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
   };
 }
 
-async function updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }> {
+async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }> {
   if (!descriptor.packageName) {
     return { success: false, error: `${descriptor.name} 不支持自动更新`, status: await getCliAgentStatus(descriptor) };
   }
@@ -567,7 +595,7 @@ async function updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: b
 
   try {
     const currentStatus = await getCliAgentStatus(descriptor);
-    if (
+    if (!normalizeVersionSpec(versionSpec) &&
       currentStatus.installed &&
       currentStatus.currentVersion &&
       currentStatus.latestVersion &&
@@ -577,7 +605,8 @@ async function updateCliAgent(descriptor: AgentDescriptor): Promise<{ success: b
     }
 
     await terminateOrphanedWindowsCliProcesses(descriptor.command || descriptor.id);
-    await runNpmCommand(["install", "-g", `${descriptor.packageName}@latest`], { timeout: 180000 });
+    const requestedVersion = normalizeVersionSpec(versionSpec) || "latest";
+    await runNpmCommand(["install", "-g", `${descriptor.packageName}@${requestedVersion}`], { timeout: 180000 });
     return { success: true, status: await getCliAgentStatus(descriptor) };
   } catch (err) {
     return { success: false, error: formatError(err), status: await getCliAgentStatus(descriptor) };
@@ -759,6 +788,7 @@ export class AgentPluginRegistry {
         if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
         throw error;
       }
+      const rollbackVersion = (await readRuntimeVersionRecords())[agentId]?.rollbackVersion;
       return {
         installed: status.installed !== false,
         updateAvailable: status.updateAvailable === true,
@@ -769,11 +799,15 @@ export class AgentPluginRegistry {
         source: "plugin",
         installedPath: record.pluginDir,
         removable: true,
+        rollbackVersion,
+        canRollback: !!rollbackVersion,
       };
     }
 
     if (record.descriptor.command) {
-      return getCliAgentStatus(record.descriptor);
+      const status = await getCliAgentStatus(record.descriptor);
+      const rollbackVersion = (await readRuntimeVersionRecords())[agentId]?.rollbackVersion;
+      return { ...status, rollbackVersion, canRollback: !!rollbackVersion };
     }
 
     return {
@@ -787,19 +821,49 @@ export class AgentPluginRegistry {
     };
   }
 
-  async updateAgent(agentId: string): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }> {
+  async getPackageVersions(agentId: string): Promise<AgentPackageVersions> {
+    await this.ensureLoaded();
+    const packageName = this.pluginRecords.get(agentId)?.descriptor.packageName;
+    if (!packageName) return { packageName: "", distTags: {}, versions: [], error: "此 Agent 不支持 npm 版本管理。" };
+    try {
+      const info = await getNpmPackageVersionInfo(packageName);
+      const platform = process.platform;
+      const architecture = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch;
+      const currentPlatformVersions = new RegExp(`^\\d+\\.\\d+\\.\\d+(?:-${platform}-${architecture})?$`);
+      const stableVersions = info.versions.filter((version) => currentPlatformVersions.test(version));
+      return { packageName, ...info, versions: stableVersions.reverse() };
+    } catch (error) {
+      return { packageName, distTags: {}, versions: [], error: formatError(error) };
+    }
+  }
+
+  async updateAgent(agentId: string, versionSpec?: string): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }> {
     await this.ensureLoaded();
     const record = this.pluginRecords.get(agentId);
-    if (!record) return { success: false, error: `未安装 agent 插件：${agentId}` };
+    if (!record) return { success: false, error: `未安装 Agent 插件：${agentId}` };
+    const previousStatus = await this.getStatus(agentId);
     const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
+    const normalizedVersion = normalizeVersionSpec(versionSpec);
+    let result: { success: boolean; error?: string; status?: AgentPackageStatus };
     if (pluginProcess && record.processCapabilities?.update) {
-      return pluginProcess.call("update") as Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
+      result = await pluginProcess.call("update", { versionSpec: normalizedVersion }) as typeof result;
+    } else if (record.descriptor.command) {
+      result = await updateCliAgent(record.descriptor, normalizedVersion);
+    } else {
+      result = { success: false, error: "此插件不支持运行时版本更新。" };
     }
-    return {
-      success: false,
-      error: "外部插件请通过重新安装本地目录或 ZIP 进行更新。",
-      status: await this.getStatus(agentId),
-    };
+    if (result.success && previousStatus.currentVersion) {
+      await writeRuntimeVersionRecord(agentId, previousStatus.currentVersion);
+    }
+    return { ...result, status: result.status || await this.getStatus(agentId) };
+  }
+
+  async rollbackAgent(agentId: string): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }> {
+    const rollbackVersion = (await readRuntimeVersionRecords())[agentId]?.rollbackVersion;
+    if (!rollbackVersion) return { success: false, error: "没有可回退的版本。", status: await this.getStatus(agentId) };
+    const result = await this.updateAgent(agentId, rollbackVersion);
+    if (result.success) await writeRuntimeVersionRecord(agentId, undefined);
+    return { ...result, status: await this.getStatus(agentId) };
   }
 
   async getDefaultThinkingLevel(agentId: string): Promise<string> {
@@ -1068,6 +1132,7 @@ export class AgentPluginRegistry {
   ): Promise<AgentBackend> {
     let currentWindow = options.window || null;
     let idle = true;
+    let refreshIdleFromBackend: () => void = () => undefined;
     const sendEvent = (event: Record<string, unknown>) => {
       const normalizedEvent = normalizePluginEvent(event);
       if (normalizedEvent.type === "message_start" || normalizedEvent.type === "stream_start") {
@@ -1075,9 +1140,15 @@ export class AgentPluginRegistry {
       } else if (
         normalizedEvent.type === "stream_end" ||
         normalizedEvent.type === "aborted" ||
-        normalizedEvent.type === "agent_disconnected"
+        normalizedEvent.type === "agent_disconnected" ||
+        normalizedEvent.type === "agent_end"
       ) {
         idle = true;
+      } else if (
+        normalizedEvent.type === "process_event"
+        && normalizedEvent.state === "error"
+      ) {
+        refreshIdleFromBackend();
       }
       currentWindow?.webContents.send("agent:event", {
         ...normalizedEvent,
@@ -1091,6 +1162,13 @@ export class AgentPluginRegistry {
       (event) => sendEvent(event as Record<string, unknown>),
       options.getConfigState,
     );
+    refreshIdleFromBackend = () => {
+      void pluginProcess.backendCall(backendId, "isIdle")
+        .then((value) => {
+          idle = typeof value === "boolean" ? value : true;
+        })
+        .catch(() => undefined);
+    };
     let sessionFilePath: string | null = null;
 
     const wrapped: AgentBackend = {

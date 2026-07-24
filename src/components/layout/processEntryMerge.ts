@@ -1,4 +1,4 @@
-import type { AgentProcessEntry, AgentProcessFile } from "@/stores/chat-store";
+import type { AgentProcessEntry, AgentProcessFile, AgentSubagent } from "@/stores/chat-store";
 import { getProcessFileEntryTitle } from "@/i18n/text";
 
 type MergeState = {
@@ -58,6 +58,45 @@ export const mergeProcessFiles = (files: AgentProcessFile[]) => {
 const getEntryFiles = (entry: AgentProcessEntry) =>
   entry.files ? mergeProcessFiles(entry.files) : undefined;
 
+const mergeSubagentList = (left: AgentSubagent[] = [], right: AgentSubagent[] = []) => {
+  const merged = new Map<string, AgentSubagent>();
+  for (const subagent of [...left, ...right]) {
+    const existing = merged.get(subagent.id);
+    merged.set(subagent.id, existing ? { ...existing, ...subagent } : subagent);
+  }
+  return Array.from(merged.values());
+};
+
+export const canMergeAdjacentSubagentEntries = (
+  left: AgentProcessEntry | undefined,
+  right: AgentProcessEntry | undefined,
+) => {
+  if (!left || !right || left.type !== "subagent" || right.type !== "subagent") return false;
+  const isStartEntry = (entry: AgentProcessEntry) =>
+    entry.action === "spawnAgent" ||
+    entry.action === "started" ||
+    entry.activityKind === "started" ||
+    entry.title === "已开始工作";
+  return isStartEntry(left) && isStartEntry(right) && left.title === right.title && left.state === right.state;
+};
+
+export const mergeAdjacentSubagentEntries = (
+  left: AgentProcessEntry,
+  right: AgentProcessEntry,
+): AgentProcessEntry => {
+  const details = [left.detail?.trim(), right.detail?.trim()].filter(
+    (detail, index, values): detail is string => !!detail && values.indexOf(detail) === index,
+  );
+  return {
+    ...left,
+    detail: details.length > 0 ? details.join("\n\n") : undefined,
+    subagents: mergeSubagentList(left.subagents, right.subagents),
+    expanded: !!left.expanded || !!right.expanded,
+    startedAt: Math.min(left.startedAt || left.timestamp, right.startedAt || right.timestamp),
+    completedAt: Math.max(left.completedAt || 0, right.completedAt || 0) || undefined,
+  };
+};
+
 const toolKindToAction = (toolKind: string): AgentProcessFile["action"] => {
   switch (toolKind) {
     case "read_file": return "read";
@@ -73,6 +112,7 @@ const canMergeSourceEntries = (
   right: AgentProcessEntry | undefined
 ) => {
   if (!left || !right) return false;
+  if (canMergeAdjacentSubagentEntries(left, right)) return true;
   if (left.type !== "tool" || right.type !== "tool") return false;
   if (!left.toolKind || left.toolKind !== right.toolKind) return false;
   if (left.state !== right.state) return false;
@@ -94,6 +134,11 @@ const appendMergedEntry = (
   const last = merged[merged.length - 1];
   const entryFiles = getEntryFiles(entry);
 
+  if (canMergeAdjacentSubagentEntries(last, entry)) {
+    merged[merged.length - 1] = mergeAdjacentSubagentEntries(last, entry);
+    return;
+  }
+
   if (
     entry.type === "tool" && last?.type === "tool" &&
     entry.toolKind && last.toolKind === entry.toolKind &&
@@ -103,10 +148,18 @@ const appendMergedEntry = (
   ) {
     const files = mergeProcessFiles([...last.files, ...entryFiles]);
     const action = toolKindToAction(entry.toolKind);
+    const warningDetails = entry.state === "warning"
+      ? [last.detail?.trim(), entry.detail?.trim()].filter(
+          (detail, index, values): detail is string => !!detail && values.indexOf(detail) === index,
+        )
+      : [];
     merged[merged.length - 1] = {
       ...last,
       files,
-      title: getProcessFileEntryTitle(action, files.length, entry.state === "running"),
+      title: entry.state === "warning"
+        ? entry.title
+        : getProcessFileEntryTitle(action, files.length, entry.state === "running"),
+      detail: warningDetails.length > 0 ? warningDetails.join("\n\n") : last.detail,
       id: entry.id,
     };
     return;

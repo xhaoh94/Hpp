@@ -1,11 +1,13 @@
 export type ProcessEntryView = {
   id: string;
-  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question";
+  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question" | "subagent";
+  kind?: "assistant_narration";
   title: string;
   toolKind?: string;
   detail?: string;
   command?: string;
-  state?: "running" | "completed" | "error" | "interrupted";
+  exitCode?: number;
+  state?: "running" | "completed" | "warning" | "error" | "interrupted";
   files?: unknown[];
 };
 
@@ -18,11 +20,15 @@ export const isCommandProcessEntry = (entry: ProcessEntryView) =>
     entry.type === "tool" && /^(?:已运行|正在运行)\s+/.test(entry.title)
   );
 
-export const isBodyOutputProcessEntry = (entry: ProcessEntryView) =>
-  entry.type === "info" && entry.title.trim() === "正文输出";
+export const ASSISTANT_NARRATION_PROCESS_KIND = "assistant_narration" as const;
+
+export const isAssistantNarrationProcessEntry = (entry: ProcessEntryView) =>
+  entry.kind === ASSISTANT_NARRATION_PROCESS_KIND;
 
 export function getVisibleProcessEntries<T extends ProcessEntryView>(entries: T[]) {
-  return entries.filter((entry) => !isBodyOutputProcessEntry(entry));
+  return entries.filter((entry) =>
+    !isAssistantNarrationProcessEntry(entry) || Boolean(entry.detail?.trim())
+  );
 }
 
 export function splitCommandDetail(entry: Pick<ProcessEntryView, "detail" | "command">) {
@@ -63,7 +69,9 @@ export const getProcessGroupState = (entries: ProcessEntryView[]) =>
       ? "error"
       : entries.some((entry) => entry.state === "interrupted")
         ? "interrupted"
-        : "completed";
+        : entries.some((entry) => entry.state === "warning")
+          ? "warning"
+          : "completed";
 
 export const isProcessInterrupted = (entries: ProcessEntryView[]) =>
   entries.some((entry) => entry.state === "interrupted");

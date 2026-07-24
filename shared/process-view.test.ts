@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ASSISTANT_NARRATION_PROCESS_KIND,
   getProcessGroupState,
   getVisibleProcessEntries,
   groupProcessEntries,
@@ -24,12 +25,20 @@ describe("shared process view model", () => {
     expect(getProcessGroupState(entries.slice(0, 2))).toBe("running");
   });
 
-  it("filters body-output markers and reports interruption", () => {
+  it("reports a non-zero command group as a warning", () => {
+    expect(getProcessGroupState([
+      entry({ id: "warning", type: "tool", title: "non-zero", state: "warning", exitCode: 1 }),
+      entry({ id: "ok", type: "tool", title: "ok", state: "completed", exitCode: 0 }),
+    ])).toBe("warning");
+  });
+
+  it("keeps agent narration with content, filters empty markers, and reports interruption", () => {
     const entries = [
-      entry({ id: "body", type: "info", title: "正文输出" }),
+      entry({ id: "body", type: "info", kind: ASSISTANT_NARRATION_PROCESS_KIND, title: "任意标题" }),
+      entry({ id: "narration", type: "info", kind: ASSISTANT_NARRATION_PROCESS_KIND, title: "任意标题", detail: "我先检查项目配置。" }),
       entry({ id: "stop", type: "status", title: "用户已手动中断", state: "interrupted" }),
     ];
-    expect(getVisibleProcessEntries(entries).map((item) => item.id)).toEqual(["stop"]);
+    expect(getVisibleProcessEntries(entries).map((item) => item.id)).toEqual(["narration", "stop"]);
     expect(isProcessInterrupted(entries)).toBe(true);
   });
 });

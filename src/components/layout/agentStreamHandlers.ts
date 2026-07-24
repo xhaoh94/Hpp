@@ -125,6 +125,48 @@ export function handleStreamDeltaEvent(
   ctx.refreshStreamWatchdog(currentSessionId);
 }
 
+const getCommentaryItemId = (event: AgentEvent) =>
+  String(event.itemId || event.id || "").trim();
+
+export function handleCommentaryDeltaEvent(
+  event: AgentEvent,
+  currentSessionId: string,
+  ctx: AgentEventHandlerContext
+) {
+  const itemId = getCommentaryItemId(event);
+  const delta = typeof event.delta === "string" ? event.delta : "";
+  if (!itemId || !delta) return;
+  ctx.ensureAssistantContinuation(currentSessionId);
+  ctx.finishAssistantProcessText(currentSessionId);
+  ctx.finishThinkingEntry(currentSessionId);
+  useChatStore.getState().appendLastAssistantCommentaryDelta(
+    itemId,
+    delta,
+    Date.now(),
+    currentSessionId
+  );
+  ctx.refreshStreamWatchdog(currentSessionId);
+}
+
+export function handleCommentaryEndEvent(
+  event: AgentEvent,
+  currentSessionId: string,
+  ctx: AgentEventHandlerContext
+) {
+  const itemId = getCommentaryItemId(event);
+  if (!itemId) return;
+  ctx.ensureAssistantContinuation(currentSessionId);
+  ctx.finishAssistantProcessText(currentSessionId);
+  ctx.finishThinkingEntry(currentSessionId);
+  useChatStore.getState().finishLastAssistantCommentary(
+    itemId,
+    typeof event.content === "string" ? event.content : undefined,
+    Date.now(),
+    currentSessionId
+  );
+  ctx.refreshStreamWatchdog(currentSessionId);
+}
+
 export function handleStreamSnapshotEvent(
   event: AgentEvent,
   currentSessionId: string,

@@ -86,6 +86,12 @@ let finalResponse = "";
 let commandOutputByItemId = new Map();
 let reasoningTextByItemId = new Map();
 let agentTextByItemId = new Map();
+let agentMessagePhaseByItemId = new Map();
+let itemStartedAtMsByItemId = new Map();
+let subagentMetadataByThreadId = new Map();
+let spawnEventIdByThreadId = new Map();
+let activityDisplayEventIdByItemId = new Map();
+let startedActivityEventIdByThreadId = new Map();
 let completedItemIds = new Set();
 let contextCompactionEmitted = false;
 let pendingUIRequest = null;
@@ -765,25 +771,38 @@ const buildTurnCollaborationMode = () => ({
   },
 });
 
-const ensureThread = async () => {
-  await startAppServer();
-  if (threadId) {
-    const result = await rpcRequest("thread/resume", {
-      threadId,
-      ...buildThreadParams(),
-    });
-    threadId = result?.thread?.id || threadId;
-    activeThreadId = threadId;
-    send({ type: "session_file_path", sessionFilePath: threadId, threadId });
-    return threadId;
-  }
+const isMissingThreadRolloutError = (error) =>
+  /no rollout found for thread id\b/i.test(error?.message || String(error));
 
+const startThread = async () => {
   const result = await rpcRequest("thread/start", buildThreadParams());
   threadId = result?.thread?.id;
   activeThreadId = threadId;
   if (!threadId) throw new Error("Codex app-server did not return a thread id");
   send({ type: "session_file_path", sessionFilePath: threadId, threadId });
   return threadId;
+};
+
+const ensureThread = async () => {
+  await startAppServer();
+  if (threadId) {
+    try {
+      const result = await rpcRequest("thread/resume", {
+        threadId,
+        ...buildThreadParams(),
+      });
+      threadId = result?.thread?.id || threadId;
+      activeThreadId = threadId;
+      send({ type: "session_file_path", sessionFilePath: threadId, threadId });
+      return threadId;
+    } catch (error) {
+      if (!isMissingThreadRolloutError(error)) throw error;
+      threadId = null;
+      activeThreadId = null;
+    }
+  }
+
+  return startThread();
 };
 
 const startStream = () => {
@@ -812,6 +831,11 @@ const resetTurnState = () => {
   commandOutputByItemId = new Map();
   reasoningTextByItemId = new Map();
   agentTextByItemId = new Map();
+  agentMessagePhaseByItemId = new Map();
+  itemStartedAtMsByItemId = new Map();
+  spawnEventIdByThreadId = new Map();
+  activityDisplayEventIdByItemId = new Map();
+  startedActivityEventIdByThreadId = new Map();
   completedItemIds = new Set();
   contextCompactionEmitted = false;
   interruptedTurnIds = new Set();
@@ -1098,6 +1122,7 @@ const emitCommandItem = (item, phase) => {
     result: terminal ? { output: outputText, exit_code: item.exitCode, status: item.status } : undefined,
     outputText,
     detail: truncate([command ? `$ ${command}` : "", outputText].filter(Boolean).join("\n")),
+    exitCode: typeof item.exitCode === "number" ? item.exitCode : undefined,
     isError: item.status === "failed" || (typeof item.exitCode === "number" && item.exitCode !== 0),
   });
 };
@@ -1269,7 +1294,236 @@ const getDelta = (map, id, nextText) => {
   return nextText;
 };
 
-const handleItem = (item, phase) => {
+const getAgentMessagePhase = (item) => {
+  const hasExplicitPhase = Object.prototype.hasOwnProperty.call(item, "phase");
+  const explicitPhase = typeof item.phase === "string" ? item.phase : null;
+  if (hasExplicitPhase || !agentMessagePhaseByItemId.has(item.id)) {
+    agentMessagePhaseByItemId.set(item.id, explicitPhase);
+  }
+  return agentMessagePhaseByItemId.get(item.id) || null;
+};
+
+const getTimestampMs = (value) => {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : undefined;
+};
+
+const getItemLifecycleTiming = (itemId, phase, lifecycle) => {
+  const explicitStartedAt = getTimestampMs(lifecycle?.startedAtMs);
+  if (phase === "started" && !itemStartedAtMsByItemId.has(itemId)) {
+    itemStartedAtMsByItemId.set(itemId, explicitStartedAt ?? Date.now());
+  } else if (explicitStartedAt !== undefined) {
+    itemStartedAtMsByItemId.set(itemId, explicitStartedAt);
+  }
+
+  const startedAt = itemStartedAtMsByItemId.get(itemId);
+  const completedAt = phase === "completed"
+    ? getTimestampMs(lifecycle?.completedAtMs) ?? Date.now()
+    : undefined;
+  return {
+    timestamp: startedAt ?? completedAt ?? Date.now(),
+    startedAt,
+    completedAt,
+  };
+};
+
+const normalizeSubagentStatus = (status, fallback = "running") => {
+  switch (String(status || "")) {
+    case "pendingInit":
+    case "pending":
+      return "pending";
+    case "running":
+      return "running";
+    case "completed":
+    case "shutdown":
+      return "completed";
+    case "errored":
+    case "notFound":
+    case "error":
+    case "failed":
+      return "error";
+    case "interrupted":
+      return "interrupted";
+    default:
+      return fallback;
+  }
+};
+
+const getSubagentLabel = (agentPath, threadId) => {
+  const segment = String(agentPath || "").split(/[\\/]/).filter(Boolean).pop() || "";
+  if (segment && segment !== "root") {
+    const label = segment.replace(/[_-]+/g, " ").trim();
+    return label ? `${label.charAt(0).toUpperCase()}${label.slice(1)}` : segment;
+  }
+  const shortId = String(threadId || "").slice(0, 8);
+  return shortId ? `Agent ${shortId}` : "Sub-agent";
+};
+
+const rememberSubagentMetadata = (threadId, metadata) => {
+  const id = String(threadId || "");
+  if (!id) return;
+  const previous = subagentMetadataByThreadId.get(id) || {};
+  subagentMetadataByThreadId.set(id, {
+    ...previous,
+    ...(metadata.path ? { path: String(metadata.path) } : {}),
+    ...(metadata.model ? { model: String(metadata.model) } : {}),
+  });
+};
+
+const buildSubagent = (threadId, state, item, fallbackStatus = "running") => {
+  const id = String(threadId || "");
+  const metadata = subagentMetadataByThreadId.get(id) || {};
+  const path = String(metadata.path || "");
+  const model = String(item?.model || metadata.model || "");
+  const message = typeof state?.message === "string" && state.message ? state.message : undefined;
+  const status = normalizeSubagentStatus(state?.status, fallbackStatus);
+  return {
+    id,
+    label: getSubagentLabel(path, id),
+    status,
+    ...(model ? { model } : {}),
+    ...(path ? { path } : {}),
+    ...(message ? { message } : {}),
+  };
+};
+
+const getSubagentEventState = (subagents, fallback = "running") => {
+  const statuses = subagents.map((subagent) => subagent.status);
+  if (statuses.includes("error")) return "error";
+  if (statuses.includes("interrupted")) return "interrupted";
+  if (statuses.includes("running") || statuses.includes("pending")) return "running";
+  if (statuses.length > 0 && statuses.every((status) => status === "completed")) return "completed";
+  return fallback;
+};
+
+const getCollabEventTitle = (tool, state) => {
+  if (state === "error") return "工作失败";
+  if (state === "interrupted") return "已中断";
+  switch (tool) {
+    case "spawnAgent":
+      return "已开始工作";
+    case "sendInput":
+      return "已更新";
+    case "resumeAgent":
+      return "已继续工作";
+    case "closeAgent":
+      return "已停止";
+    case "wait":
+      return state === "completed" ? "已完成" : "正在工作";
+    default:
+      return state === "completed" ? "已完成" : "正在工作";
+  }
+};
+
+const emitCollabAgentItem = (item, phase, lifecycle) => {
+  const tool = String(item.tool || "");
+  const receiverThreadIds = Array.isArray(item.receiverThreadIds)
+    ? item.receiverThreadIds.map((id) => String(id || "")).filter(Boolean)
+    : [];
+  const agentsStates = isRecord(item.agentsStates) ? item.agentsStates : {};
+  const targetThreadIds = [...new Set([...receiverThreadIds, ...Object.keys(agentsStates)])];
+  const timing = getItemLifecycleTiming(item.id, phase, lifecycle);
+  if (targetThreadIds.length === 0) return;
+  const fallbackStatus = item.status === "failed"
+    ? "error"
+    : tool === "closeAgent"
+      ? "completed"
+      : "running";
+  const precedingActivityEventId = tool === "spawnAgent" && targetThreadIds.length === 1
+    ? startedActivityEventIdByThreadId.get(targetThreadIds[0])
+    : undefined;
+  const displayEventId = tool === "spawnAgent" && targetThreadIds.length === 1
+    ? precedingActivityEventId || item.id
+    : item.id;
+
+  for (const targetThreadId of targetThreadIds) {
+    rememberSubagentMetadata(targetThreadId, { model: item.model });
+    if (tool === "spawnAgent") spawnEventIdByThreadId.set(targetThreadId, displayEventId);
+  }
+  const subagents = targetThreadIds.map((targetThreadId) =>
+    buildSubagent(targetThreadId, isRecord(agentsStates[targetThreadId]) ? agentsStates[targetThreadId] : null, item, fallbackStatus)
+  );
+  const fallbackEventState = item.status === "failed"
+    ? "error"
+    : tool === "closeAgent"
+      ? "completed"
+      : "running";
+  const state = getSubagentEventState(subagents, fallbackEventState);
+  send({
+    type: "subagent_event",
+    id: displayEventId,
+    toolCallId: item.id,
+    phase,
+    action: tool || "collaboration",
+    tool: tool || undefined,
+    title: getCollabEventTitle(tool, state),
+    detail: item.prompt ? truncate(item.prompt) : undefined,
+    state,
+    subagents,
+    timestamp: timing.timestamp,
+    startedAt: timing.startedAt,
+    completedAt: timing.completedAt,
+    senderThreadId: item.senderThreadId,
+    receiverThreadIds,
+    prompt: item.prompt,
+    model: item.model,
+    reasoningEffort: item.reasoningEffort,
+    collabStatus: item.status,
+  });
+  if (tool === "spawnAgent" && phase === "completed") {
+    for (const targetThreadId of targetThreadIds) {
+      startedActivityEventIdByThreadId.delete(targetThreadId);
+      if (precedingActivityEventId) spawnEventIdByThreadId.delete(targetThreadId);
+    }
+  }
+};
+
+const emitSubagentActivityItem = (item, phase, lifecycle) => {
+  const agentThreadId = String(item.agentThreadId || "");
+  const currentThreadId = String(activeThreadId || threadId || "");
+  if (!agentThreadId || agentThreadId === currentThreadId) return;
+  const activityKind = String(item.kind || "interacted");
+  const status = activityKind === "started"
+    ? "running"
+    : activityKind === "interrupted"
+      ? "interrupted"
+      : "completed";
+  rememberSubagentMetadata(agentThreadId, { path: item.agentPath });
+  const subagent = buildSubagent(agentThreadId, { status }, null, status);
+  const activityTiming = getItemLifecycleTiming(item.id, phase, lifecycle);
+  let displayEventId = activityDisplayEventIdByItemId.get(item.id);
+  if (!displayEventId && activityKind === "started") {
+    displayEventId = spawnEventIdByThreadId.get(agentThreadId);
+    if (displayEventId) activityDisplayEventIdByItemId.set(item.id, displayEventId);
+    else startedActivityEventIdByThreadId.set(agentThreadId, item.id);
+  }
+  const eventId = displayEventId || item.id;
+  const relatedStartedAt = displayEventId ? itemStartedAtMsByItemId.get(displayEventId) : undefined;
+  send({
+    type: "subagent_event",
+    id: eventId,
+    toolCallId: displayEventId || undefined,
+    sourceActivityId: item.id,
+    phase,
+    action: activityKind,
+    activityKind,
+    title: activityKind === "started" ? "已开始工作" : activityKind === "interrupted" ? "已中断" : "已更新",
+    state: status,
+    subagents: [subagent],
+    timestamp: relatedStartedAt ?? activityTiming.timestamp,
+    startedAt: relatedStartedAt ?? activityTiming.startedAt,
+    completedAt: displayEventId ? undefined : activityTiming.completedAt,
+    activityTimestamp: activityTiming.timestamp,
+    activityStartedAt: activityTiming.startedAt,
+    activityCompletedAt: activityTiming.completedAt,
+  });
+  if (phase === "completed" && displayEventId) {
+    activityDisplayEventIdByItemId.delete(item.id);
+    spawnEventIdByThreadId.delete(agentThreadId);
+  }
+};
+
+const handleItem = (item, phase, lifecycle) => {
   if (!promptRunning || abortRequested) return;
   if (!item?.id || !item?.type) return;
   if (phase === "completed" && completedItemIds.has(item.id)) return;
@@ -1278,8 +1532,14 @@ const handleItem = (item, phase) => {
     case "agentMessage": {
       const text = String(item.text || "");
       const delta = getDelta(agentTextByItemId, item.id, text);
-      if (delta) send({ type: "stream_delta", delta });
-      if (phase === "completed") finalResponse = text;
+      const messagePhase = getAgentMessagePhase(item);
+      if (messagePhase === "commentary") {
+        if (delta) send({ type: "commentary_delta", itemId: item.id, delta });
+        if (phase === "completed") send({ type: "commentary_end", itemId: item.id, content: text });
+      } else {
+        if (delta) send({ type: "stream_delta", delta });
+        if (phase === "completed") finalResponse = text;
+      }
       break;
     }
     case "plan": {
@@ -1331,25 +1591,10 @@ const handleItem = (item, phase) => {
       }
       break;
     case "collabAgentToolCall":
-      send({
-        type: phase === "completed" ? "tool_end" : "tool_start",
-        toolName: String(item.tool || "multi_agent"),
-        toolCallId: item.id,
-        toolKind: "unknown",
-        args: { prompt: item.prompt, model: item.model, receiverThreadIds: item.receiverThreadIds },
-        result: phase === "completed" ? { status: item.status, agentsStates: item.agentsStates } : undefined,
-        detail: truncate(item.prompt || item.tool || "Codex multi-agent task"),
-        isError: item.status === "failed",
-      });
+      emitCollabAgentItem(item, phase, lifecycle);
       break;
     case "subAgentActivity":
-      send({
-        type: "process_event",
-        entryType: "status",
-        title: `Codex sub-agent: ${item.kind || "activity"}`,
-        detail: item.agentPath || item.agentThreadId,
-        state: phase === "completed" ? "completed" : "running",
-      });
+      emitSubagentActivityItem(item, phase, lifecycle);
       break;
     case "imageView":
       send({
@@ -1456,13 +1701,26 @@ const handleServerNotification = (method, params) => {
       break;
     case "item/started":
       if (!promptRunning || abortRequested) return;
-      handleItem(params.item, "started");
+      handleItem(params.item, "started", params);
       break;
     case "item/completed":
       if (!promptRunning || abortRequested) return;
-      handleItem(params.item, "completed");
+      handleItem(params.item, "completed", params);
       break;
     case "item/agentMessage/delta":
+      if (!promptRunning || abortRequested) return;
+      startStream();
+      if (params.itemId) {
+        const nextText = `${agentTextByItemId.get(params.itemId) || ""}${params.delta || ""}`;
+        agentTextByItemId.set(params.itemId, nextText);
+      }
+      if (params.delta) {
+        const messagePhase = agentMessagePhaseByItemId.get(params.itemId) || null;
+        send(messagePhase === "commentary"
+          ? { type: "commentary_delta", itemId: params.itemId, delta: params.delta }
+          : { type: "stream_delta", delta: params.delta });
+      }
+      break;
     case "item/plan/delta":
       if (!promptRunning || abortRequested) return;
       startStream();

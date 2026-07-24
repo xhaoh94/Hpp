@@ -16,7 +16,7 @@ export function getStatus(context) {
   });
 }
 
-export function update(context) {
+export function update(context, options = {}) {
   return context.host.updateCliAgent({
     id: context.agentId,
     name: "OpenCode",
@@ -25,7 +25,7 @@ export function update(context) {
     command: "opencode",
     packageName: "opencode-ai",
     installedPath: context.pluginDir
-  });
+  }, options.versionSpec);
 }
 
 export function getDefaultThinkingLevel() {

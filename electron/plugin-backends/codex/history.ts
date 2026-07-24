@@ -10,6 +10,13 @@ export interface CodexHistoryMessage {
   content: string;
   timestamp: number;
   nativeTurnId?: string;
+  commentary?: CodexHistoryCommentary[];
+}
+
+export interface CodexHistoryCommentary {
+  id: string;
+  content: string;
+  timestamp: number;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -73,9 +80,12 @@ export async function resolveCodexHistoryFile(
 export async function parseCodexHistoryFile(filePath: string): Promise<CodexHistoryMessage[]> {
   const messages: CodexHistoryMessage[] = [];
   const finalAnswers = new Map<string, { content: string; timestamp: number }>();
+  const commentaryByTurn = new Map<string, CodexHistoryCommentary[]>();
   const consumedFinalAnswers = new Set<string>();
+  const consumedCommentaryTurns = new Set<string>();
   let currentTurnId: string | undefined;
   let messageIndex = 0;
+  let commentaryIndex = 0;
 
   const lines = createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
@@ -118,12 +128,28 @@ export async function parseCodexHistoryFile(filePath: string): Promise<CodexHist
       continue;
     }
 
-    if (payload.type === "agent_message" && payload.phase === "final_answer") {
+    if (payload.type === "agent_message") {
       const content = getString(payload.message);
-      if (content) {
-        finalAnswers.set(payloadTurnId || currentTurnId || `unscoped-${messageIndex}`, { content, timestamp });
+      if (payload.phase === "commentary") {
+        if (!content) continue;
+        const turnId = payloadTurnId || currentTurnId || `unscoped-${messageIndex}`;
+        commentaryIndex += 1;
+        const commentary = commentaryByTurn.get(turnId) || [];
+        commentary.push({
+          id: `codex-history-commentary-${turnId}-${commentaryIndex}`,
+          content,
+          timestamp,
+        });
+        commentaryByTurn.set(turnId, commentary);
+        continue;
       }
-      continue;
+
+      if (payload.phase === "final_answer") {
+        if (content) {
+          finalAnswers.set(payloadTurnId || currentTurnId || `unscoped-${messageIndex}`, { content, timestamp });
+        }
+        continue;
+      }
     }
 
     if (payload.type === "task_complete") {
@@ -138,8 +164,10 @@ export async function parseCodexHistoryFile(filePath: string): Promise<CodexHist
           content,
           timestamp: fallback?.timestamp || timestamp,
           nativeTurnId: payloadTurnId || currentTurnId,
+          commentary: commentaryByTurn.get(turnId),
         });
         consumedFinalAnswers.add(turnId);
+        consumedCommentaryTurns.add(turnId);
       }
       currentTurnId = undefined;
     }
@@ -154,6 +182,21 @@ export async function parseCodexHistoryFile(filePath: string): Promise<CodexHist
       content: answer.content,
       timestamp: answer.timestamp,
       nativeTurnId: turnId.startsWith("unscoped-") ? undefined : turnId,
+      commentary: commentaryByTurn.get(turnId),
+    });
+    consumedCommentaryTurns.add(turnId);
+  }
+
+  for (const [turnId, commentary] of commentaryByTurn) {
+    if (consumedCommentaryTurns.has(turnId) || commentary.length === 0) continue;
+    messageIndex += 1;
+    messages.push({
+      id: `codex-history-assistant-${turnId}-${messageIndex}`,
+      role: "assistant",
+      content: "",
+      timestamp: commentary[commentary.length - 1].timestamp,
+      nativeTurnId: turnId.startsWith("unscoped-") ? undefined : turnId,
+      commentary,
     });
   }
 

@@ -282,14 +282,29 @@ export interface RemoteProject {
 
 export interface RemoteProcessEntry extends ProcessEntryView {
   id: string;
-  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question";
+  type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question" | "subagent";
   title: string;
   toolKind?: string;
   detail?: string;
   command?: string;
+  exitCode?: number;
   timestamp: number;
-  state?: "running" | "completed" | "error" | "interrupted";
+  state?: "running" | "completed" | "warning" | "error" | "interrupted";
   files?: Array<Record<string, unknown>>;
+  phase?: "started" | "completed";
+  action?: "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent" | "started" | "interacted" | "interrupted";
+  tool?: "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent";
+  activityKind?: "started" | "interacted" | "interrupted";
+  startedAt?: number;
+  completedAt?: number;
+  subagents?: Array<{
+    id: string;
+    label: string;
+    status?: "pending" | "running" | "completed" | "error" | "interrupted";
+    model?: string;
+    path?: string;
+    message?: string;
+  }>;
 }
 
 export interface RemoteChatMessage {
@@ -309,6 +324,12 @@ export interface RemoteChatMessage {
     planSteps?: Array<{ id: string; title: string; status: string }>;
     changeSummary?: { filesChanged: number; additions: number; deletions: number };
   };
+  commentary?: Array<{
+    id: string;
+    content: string;
+    timestamp: number;
+    isStreaming?: boolean;
+  }>;
   nativeTurnId?: string;
   action?: RemoteAgentActionInvocation;
 }

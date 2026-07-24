@@ -54,6 +54,95 @@ describe("chat process entry defaults", () => {
     expect(useChatStore.getState().messages[0].process?.entries[0].expanded).toBe(false);
   });
 
+  it("streams commentary independently from the final assistant content", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantCommentaryDelta("commentary-1", "先检查", 1);
+    store.appendLastAssistantCommentaryDelta("commentary-1", "项目配置", 2);
+    store.appendLastAssistantCommentaryDelta("commentary-2", "再运行测试", 3);
+    store.finishLastAssistantCommentary("commentary-1", "先检查项目配置。", 4);
+    store.finishLastAssistantCommentary("commentary-2", "", 5);
+
+    expect(useChatStore.getState().messages[0]).toMatchObject({
+      content: "",
+      commentary: [
+        { id: "commentary-1", content: "先检查项目配置。", isStreaming: false },
+        { id: "commentary-2", content: "再运行测试", isStreaming: false },
+      ],
+    });
+  });
+
+  it("marks unfinished commentary complete when the assistant process ends", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantCommentaryDelta("commentary-1", "处理中", 1);
+    store.finishLastAssistantProcess(2);
+
+    expect(useChatStore.getState().messages[0].commentary?.[0].isStreaming).toBe(false);
+  });
+
+  it("backfills readable subagent identity and finalizes active lifecycle state", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantProcessEntry({
+      id: "spawn",
+      type: "subagent",
+      title: "已开始工作",
+      timestamp: 1,
+      state: "completed",
+      subagents: [{ id: "thread-1", label: "Agent thread-1", status: "running" }],
+    });
+    store.appendLastAssistantProcessEntry({
+      id: "activity",
+      type: "subagent",
+      title: "已更新",
+      timestamp: 2,
+      state: "running",
+      subagents: [{
+        id: "thread-1",
+        label: "backend commentary",
+        path: "/root/backend_commentary",
+        status: "running",
+      }],
+    });
+
+    let entries = useChatStore.getState().messages[0].process?.entries || [];
+    expect(entries[0].subagents?.[0]).toEqual(expect.objectContaining({
+      label: "backend commentary",
+      path: "/root/backend_commentary",
+    }));
+
+    useChatStore.getState().finishLastAssistantProcess(3, "completed");
+    entries = useChatStore.getState().messages[0].process?.entries || [];
+    expect(entries.flatMap((entry) => entry.subagents || []).map((subagent) => subagent.status))
+      .toEqual(["completed", "completed"]);
+  });
+
+  it("merges partial subagent updates that share one lifecycle id", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantProcessEntry({
+      id: "spawn-group",
+      type: "subagent",
+      title: "已开始工作",
+      timestamp: 1,
+      state: "running",
+      subagents: [
+        { id: "thread-1", label: "Backend", status: "running" },
+        { id: "thread-2", label: "Frontend", status: "running" },
+      ],
+    });
+    store.updateLastAssistantProcessEntry("spawn-group", {
+      state: "completed",
+      subagents: [{ id: "thread-1", label: "Backend", status: "completed" }],
+    });
+
+    expect(useChatStore.getState().messages[0].process?.entries[0]).toEqual(expect.objectContaining({
+      timestamp: 1,
+      state: "completed",
+      subagents: [
+        expect.objectContaining({ id: "thread-1", status: "completed" }),
+        expect.objectContaining({ id: "thread-2", status: "running" }),
+      ],
+    }));
+  });
+
   it("finishes the process containing a questionnaire without ending a newer process", () => {
     useChatStore.setState({ activeSessionId: "session-1" });
     const store = useChatStore.getState();

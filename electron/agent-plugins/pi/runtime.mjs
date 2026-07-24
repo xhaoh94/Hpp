@@ -163,7 +163,7 @@ export const getStatus = async (context) => {
   };
 };
 
-export const update = async (context) => {
+export const update = async (context, options = {}) => {
   if (updateInProgress) return { success: false, error: "Pi SDK 正在更新中。" };
   updateInProgress = true;
   const runtimeRoot = getRuntimeRoot(context);
@@ -173,7 +173,10 @@ export const update = async (context) => {
       name: "hpp-pi-sdk-runtime",
       private: true,
     }, null, 2)}\n`, "utf8");
-    await run("npm", ["install", `${PACKAGE_NAME}@latest`, "--save-exact", "--omit=dev"], {
+    const versionSpec = typeof options.versionSpec === "string" && options.versionSpec.trim()
+      ? options.versionSpec.trim()
+      : "latest";
+    await run("npm", ["install", `${PACKAGE_NAME}@${versionSpec}`, "--save-exact", "--omit=dev"], {
       cwd: runtimeRoot,
       timeout: 180000,
     });

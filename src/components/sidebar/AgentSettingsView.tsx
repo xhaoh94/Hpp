@@ -10,7 +10,7 @@ import { compareVersions } from "@/lib/version";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
-import type { AgentDescriptor, AgentPackageStatus, AgentPluginInstallResult, OfficialAgentPluginDescriptor } from "@/types";
+import type { AgentDescriptor, AgentPackageStatus, AgentPackageVersions, AgentPluginInstallResult, OfficialAgentPluginDescriptor } from "@/types";
 import { AgentConfigModal } from "./AgentConfigModal";
 import "./Settings.css";
 
@@ -97,6 +97,11 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const [removeLocalRuntime, setRemoveLocalRuntime] = useState(false);
   const [showLocalPluginModal, setShowLocalPluginModal] = useState(false);
   const [showOfficialPluginModal, setShowOfficialPluginModal] = useState(false);
+  const [versionManagerAgentId, setVersionManagerAgentId] = useState<string | null>(null);
+  const [packageVersions, setPackageVersions] = useState<AgentPackageVersions | null>(null);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionSearch, setVersionSearch] = useState("");
+  const [versionSpec, setVersionSpec] = useState("latest");
   const officialInstallQueueRef = useRef<Promise<void>>(Promise.resolve());
   const installResultQueueRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -110,6 +115,13 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const loadOfficialPlugins = useAgentCatalogStore((state) => state.loadOfficialPlugins);
   const installOfficialPlugin = useAgentCatalogStore((state) => state.installOfficialPlugin);
   const removePlugin = useAgentCatalogStore((state) => state.removePlugin);
+  const openRemovalSessionCount = useProjectStore((state) => removeConfirmAgentId
+    ? state.projects.reduce((count, project) => (
+        count + project.sessions.filter((session) => (
+          session.agentId === removeConfirmAgentId && !session.closed
+        )).length
+      ), 0)
+    : 0);
 
   useEffect(() => {
     void loadAgents();
@@ -171,11 +183,11 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     }
   }, []);
 
-  const handleAgentUpdate = useCallback(async (agentId: string) => {
+  const handleAgentUpdate = useCallback(async (agentId: string, requestedVersion?: string) => {
     setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
     setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: "" }));
     try {
-      const result = await window.electronAPI.agentUpdate(agentId);
+      const result = await window.electronAPI.agentUpdate(agentId, requestedVersion);
       if (result.status) {
         cachedAgentStatuses[agentId] = result.status;
         lastAgentChecks[agentId] = Date.now();
@@ -186,6 +198,32 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
       }
     } catch (error) {
       setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }, []);
+
+  const openVersionManager = useCallback(async (agentId: string) => {
+    setVersionManagerAgentId(agentId);
+    setVersionsLoading(true);
+    setPackageVersions(null);
+    setVersionSearch("");
+    setVersionSpec(agentStatuses[agentId]?.latestVersion || "latest");
+    try {
+      const versions = await window.electronAPI.agentGetVersions(agentId);
+      setPackageVersions(versions);
+      setVersionSpec((current) => current === "latest" && versions.latestVersion ? versions.latestVersion : current);
+    } finally {
+      setVersionsLoading(false);
+    }
+  }, [agentStatuses]);
+
+  const handleAgentRollback = useCallback(async (agentId: string) => {
+    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
+    try {
+      const result = await window.electronAPI.agentRollback(agentId);
+      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status! }));
+      if (!result.success) setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "回退失败" }));
     } finally {
       setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
     }
@@ -373,7 +411,10 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const handleReloadPlugins = useCallback(async () => {
     setPluginStatus(null);
     const resultAgents = await reloadAgents();
-    setPluginStatus({ type: "success", text: `已加载 ${resultAgents.length} 个 Agent` });
+    const reloadError = useAgentCatalogStore.getState().error;
+    setPluginStatus(reloadError
+      ? { type: "error", text: reloadError }
+      : { type: "success", text: `已加载 ${resultAgents.length} 个 Agent` });
   }, [reloadAgents]);
 
   const handleReloadOfficialPlugins = useCallback(async () => {
@@ -403,6 +444,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
         setPluginStatus({ type: "error", text: result.error || "插件卸载失败" });
         return;
       }
+      const archivedSessionCount = result.detachedSessionIds?.length || 0;
       delete cachedAgentStatuses[agentId];
       delete lastAgentChecks[agentId];
       const nextAgents = result.agents || agents.filter((agent) => agent.id !== agentId);
@@ -418,7 +460,9 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
       await saveAgentSettings(nextEnabledAgents, nextAgentOrder, nextAgents);
       setPluginStatus({
         type: "success",
-        text: removeLocalRuntime ? "插件和本地 Agent 已卸载" : "插件已卸载",
+        text: `${removeLocalRuntime ? "插件和本地 Agent 已卸载" : "插件已卸载"}${
+          archivedSessionCount > 0 ? `，${archivedSessionCount} 个会话已移入历史` : ""
+        }`,
       });
       setRemoveConfirmAgentId(null);
       setRemoveLocalRuntime(false);
@@ -593,22 +637,24 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                       {removingAgentId === agent.id ? "卸载中..." : "卸载"}
                     </button>
                   )}
-                  {agentStatus && (isInstallAction || agentStatus.updateAvailable) && (
+                  {agentStatus && (isInstallAction || agentStatus.updateAvailable || isInstalled) && (
                     <button
-                      className="filter-add-btn agent-settings-update-btn"
-                      onClick={() => void handleAgentUpdate(agent.id)}
+                    className={isInstallAction || agentStatus.updateAvailable
+                      ? "filter-add-btn agent-settings-update-btn"
+                      : "btn-action agent-settings-refresh-btn"}
+                      onClick={() => void openVersionManager(agent.id)}
                       disabled={isChecking || isAnyAgentUpdating || !agentStatus.canUpdate}
                       title={isAnyAgentUpdating && activeAgentUpdateId !== agent.id
                         ? "请等待其他 Agent 更新完成"
                         : isChecking
                         ? "正在检查运行时"
                         : agentStatus.canUpdate
-                        ? isInstallAction ? "安装" : "更新"
+                        ? isInstallAction ? "安装" : agentStatus.updateAvailable ? "更新" : "版本"
                         : agentStatus.error || "请先安装 Node.js 和 npm"}
                     >
                       {agentUpdating[agent.id]
                         ? isInstallAction ? "安装中..." : "更新中..."
-                        : isInstallAction ? "安装" : "更新"}
+                        : isInstallAction ? "安装" : agentStatus.updateAvailable ? "更新" : "版本"}
                     </button>
                   )}
                   {isInstalled && (
@@ -713,6 +759,52 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
           </div>
         </div>
       )}
+      {versionManagerAgentId && (() => {
+        const agent = agents.find((item) => item.id === versionManagerAgentId);
+        const status = agentStatuses[versionManagerAgentId];
+        const filteredVersions = (packageVersions?.versions || []).filter((version) =>
+          version.toLowerCase().includes(versionSearch.trim().toLowerCase())
+        ).slice(0, 100);
+        return (
+          <div className="settings-modal-overlay" onClick={() => setVersionManagerAgentId(null)}>
+            <div className="settings-modal agent-runtime-version-modal" onClick={(event) => event.stopPropagation()}>
+              <div className="settings-modal-header">
+                <div>
+                  <h3>{agent?.name || versionManagerAgentId} 版本管理</h3>
+                  <div className="agent-runtime-version-meta">
+                    当前 {status?.currentVersion ? `v${status.currentVersion}` : "未安装"}
+                    {packageVersions?.latestVersion && ` · 最新 v${packageVersions.latestVersion}`}
+                  </div>
+                </div>
+                <button type="button" className="settings-modal-close" onClick={() => setVersionManagerAgentId(null)} aria-label="关闭"><X size={16} /></button>
+              </div>
+              <div className="settings-modal-content agent-runtime-version-content">
+                <label className="agent-runtime-version-label">安装版本或 npm tag</label>
+                <input className="input-field" value={versionSpec} onChange={(event) => setVersionSpec(event.target.value)} placeholder="latest、0.81.1、beta" />
+                {packageVersions?.error && <div className="status-message error">无法获取版本列表：{packageVersions.error}</div>}
+                <input className="input-field" value={versionSearch} onChange={(event) => setVersionSearch(event.target.value)} placeholder="搜索历史版本" disabled={versionsLoading} />
+                <div className="agent-runtime-version-list">
+                  {versionsLoading ? <span>正在获取 npm 版本…</span> : filteredVersions.map((version) => (
+                    <button type="button" key={version} className={versionSpec === version ? "selected" : ""} onClick={() => setVersionSpec(version)}>
+                      v{version}{version === packageVersions?.latestVersion ? " · latest" : ""}
+                    </button>
+                  ))}
+                  {!versionsLoading && filteredVersions.length === 0 && <span>没有匹配版本；仍可手动输入版本或 tag。</span>}
+                </div>
+                {status?.rollbackVersion && <div className="agent-runtime-version-rollback">可回退版本：v{status.rollbackVersion}</div>}
+                <div className="settings-modal-actions">
+                  {status?.canRollback && <button type="button" className="btn-action" disabled={isAnyAgentUpdating} onClick={() => void handleAgentRollback(versionManagerAgentId)}>回退到 v{status.rollbackVersion}</button>}
+                  {(!versionsLoading && packageVersions) && (
+                    <button type="button" className="filter-add-btn" disabled={isAnyAgentUpdating || !versionSpec.trim()} onClick={() => { void handleAgentUpdate(versionManagerAgentId, versionSpec.trim()); setVersionManagerAgentId(null); }}>
+                      安装 {versionSpec.trim() || "版本"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {showOfficialPluginModal && (
         <div className="settings-modal-overlay" onClick={() => setShowOfficialPluginModal(false)}>
           <div className="settings-modal agent-plugin-modal" onClick={(event) => event.stopPropagation()}>
@@ -836,6 +928,11 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
               <p>
                 确定要卸载 {agents.find((agent) => agent.id === removeConfirmAgentId)?.name || removeConfirmAgentId} 插件吗？
               </p>
+              {openRemovalSessionCount > 0 && (
+                <p className="agent-remove-session-note">
+                  {openRemovalSessionCount} 个已打开会话将在确认空闲后移入历史，聊天内容会保留；如有会话正在运行，本次卸载会被阻止。
+                </p>
+              )}
               <label className="settings-toggle-row agent-remove-runtime-toggle">
                 <span>
                   <span className="settings-toggle-title">同时卸载本地安装的 Agent</span>

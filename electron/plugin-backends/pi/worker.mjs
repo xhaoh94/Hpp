@@ -3,14 +3,23 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { getPiMessageText, resolvePiForkEntryId } from "./pi-fork-utils.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
+const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
 const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "ask_user_question", "questionnaire", "question"];
 const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
+const SHELL_PROBE_TOKEN = "hpp-shell-ready";
+const FILE_DISCOVERY_GUIDANCE = [
+  "When a target file path is unknown, use ls, find, or grep to discover it before calling read.",
+  "Do not guess multiple filenames and probe them one by one.",
+  "If bash is unavailable, continue with ls, find, and grep instead of retrying shell-based discovery.",
+].join(" ");
 
 let sdk = null;
 let session = null;
+let modelRegistry = null;
 let resourceLoader = null;
 let uiBridge = null;
 let unsubscribe = null;
@@ -18,6 +27,9 @@ let projectPath = "";
 let activePromptId = null;
 let activePermissionMode = "full-access";
 let fullAccessToolNames = [];
+let shellWarning = "";
+let shellNotice = "";
+let shellWarningEmitted = false;
 let activeCompactionId = null;
 const completedPromptIds = new Set();
 const actionKeys = new Set();
@@ -488,6 +500,7 @@ const disposeSession = () => {
   uiBridge = null;
   session?.dispose();
   session = null;
+  modelRegistry = null;
   resourceLoader = null;
   actionKeys.clear();
 };
@@ -506,14 +519,96 @@ const stripUtf8Bom = (filePath) => {
 
 const setPermissionMode = (permissionMode) => {
   if (!session?.setActiveToolsByName) return;
-  if (permissionMode === activePermissionMode) return;
   if (permissionMode === "plan") {
-    fullAccessToolNames = session.getActiveToolNames?.() || fullAccessToolNames;
+    // Keep the complete set captured during initialization; a repeated plan
+    // prompt must not overwrite it with the already-restricted tool set.
+    if (activePermissionMode !== "plan" && fullAccessToolNames.length === 0) {
+      fullAccessToolNames = session.getActiveToolNames?.() || fullAccessToolNames;
+    }
     session.setActiveToolsByName(PLAN_MODE_TOOLS);
   } else {
     session.setActiveToolsByName(fullAccessToolNames);
   }
   activePermissionMode = permissionMode;
+};
+
+const getAvailableToolNames = () => new Set(
+  (session?.getAllTools?.() || [])
+    .map((tool) => String(tool?.name || ""))
+    .filter(Boolean),
+);
+
+const probeShell = (settingsManager) => {
+  if (typeof sdk?.getShellConfig !== "function") return null;
+  try {
+    const config = sdk.getShellConfig(settingsManager?.getShellPath?.());
+    if (!config?.shell || !Array.isArray(config.args)) {
+      return "Pi 返回了无效的 Shell 配置";
+    }
+    const command = `printf ${SHELL_PROBE_TOKEN}`;
+    const usesStdin = config.commandTransport === "stdin";
+    const result = spawnSync(
+      config.shell,
+      usesStdin ? config.args : [...config.args, command],
+      {
+        input: usesStdin ? `${command}\n` : undefined,
+        encoding: "utf8",
+        timeout: 5000,
+        windowsHide: true,
+      },
+    );
+    if (result.status === 0 && String(result.stdout || "").includes(SHELL_PROBE_TOKEN)) return "";
+    const detail = [
+      result.error?.message,
+      String(result.stderr || "").trim(),
+      String(result.stdout || "").trim(),
+      typeof result.status === "number" ? `退出码 ${result.status}` : "",
+    ].filter(Boolean).join("\n");
+    return detail || "Shell 启动检查失败";
+  } catch (error) {
+    return error?.message || String(error);
+  }
+};
+
+// Keep the user's configured shell untouched, but fall back to an installed
+// shell (for example Git Bash) when that configuration points at a dead path.
+const resolveShellSettings = (settingsManager) => {
+  shellNotice = "";
+  const configuredPath = settingsManager?.getShellPath?.();
+  const configuredError = probeShell(settingsManager);
+  if (!configuredError) return settingsManager;
+  if (typeof sdk?.getShellConfig !== "function") return settingsManager;
+  try {
+    const fallback = sdk.getShellConfig();
+    if (!fallback?.shell || !Array.isArray(fallback.args)) return settingsManager;
+    const fallbackError = probeShell({ getShellPath: () => fallback.shell });
+    if (fallbackError) return settingsManager;
+    shellNotice = configuredPath
+      ? `已将不可用的 Shell ${configuredPath} 自动切换为 ${fallback.shell}`
+      : `已自动使用可用的 Shell ${fallback.shell}`;
+    return new Proxy(settingsManager, {
+      get(target, property, receiver) {
+        if (property === "getShellPath") return () => fallback.shell;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  } catch {
+    return settingsManager;
+  }
+};
+
+const configureFullAccessTools = (settingsManager) => {
+  const availableToolNames = getAvailableToolNames();
+  const supportsTool = (name) => availableToolNames.size === 0 || availableToolNames.has(name);
+  const currentToolNames = session?.getActiveToolNames?.() || [];
+  shellWarning = probeShell(settingsManager) || "";
+  if (shellNotice) shellWarning = "";
+  shellWarningEmitted = false;
+  fullAccessToolNames = [...new Set([
+    ...currentToolNames.filter((name) => name !== "bash" || !shellWarning),
+    ...DISCOVERY_TOOL_NAMES.filter(supportsTool),
+  ])];
+  session?.setActiveToolsByName?.(fullAccessToolNames);
 };
 
 const loadPiSDK = async () => {
@@ -537,6 +632,14 @@ const loadPiSDK = async () => {
   }
 };
 
+const requireSDKFactory = (name) => {
+  const factory = sdk?.[name];
+  if (!factory || typeof factory.create !== "function") {
+    throw new Error(`Pi SDK 不兼容：缺少 ${name}.create，请在 Hpp Agent 设置中重新安装或更新 Pi`);
+  }
+  return factory;
+};
+
 const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   disposeSession();
   projectPath = cwd;
@@ -545,31 +648,53 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   const agentDir = sdk.getAgentDir();
   stripUtf8Bom(join(agentDir, "models.json"));
   stripUtf8Bom(join(agentDir, "auth.json"));
-  const authStorage = sdk.AuthStorage.create(join(agentDir, "auth.json"));
-  const modelRegistry = sdk.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
-  const settingsManager = sdk.SettingsManager.create(cwd, agentDir);
-  resourceLoader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, eventBus });
+  // Pi 0.81+ replaced the public AuthStorage factory with ModelRuntime.
+  // Keep compatibility with older SDKs while using the current API when it is
+  // available.
+  let authStorage;
+  let createdModelRegistry;
+  let modelRuntime;
+  if (sdk.ModelRuntime && typeof sdk.ModelRuntime.create === "function") {
+    modelRuntime = await sdk.ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    createdModelRegistry = new sdk.ModelRegistry(modelRuntime);
+    await createdModelRegistry.refresh?.();
+  } else {
+    authStorage = requireSDKFactory("AuthStorage").create(join(agentDir, "auth.json"));
+    createdModelRegistry = requireSDKFactory("ModelRegistry").create(authStorage, join(agentDir, "models.json"));
+  }
+  const settingsManager = requireSDKFactory("SettingsManager").create(cwd, agentDir);
+  const effectiveSettingsManager = resolveShellSettings(settingsManager);
+  resourceLoader = new sdk.DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: effectiveSettingsManager,
+    eventBus,
+    appendSystemPrompt: [FILE_DISCOVERY_GUIDANCE],
+  });
   await resourceLoader.reload();
   const sessionManager = sessionFilePath
     ? sdk.SessionManager.open(sessionFilePath, undefined, cwd)
-    : sdk.SessionManager.create(cwd);
+    : requireSDKFactory("SessionManager").create(cwd);
   const result = await sdk.createAgentSession({
     cwd,
     agentDir,
-    authStorage,
-    modelRegistry,
-    settingsManager,
+    ...(modelRuntime ? { modelRuntime } : { authStorage, modelRegistry: createdModelRegistry }),
+    settingsManager: effectiveSettingsManager,
     resourceLoader,
     sessionManager,
   });
   session = result.session;
+  modelRegistry = createdModelRegistry || session.modelRegistry || null;
   uiBridge = new DesktopUIBridge(eventBus);
   await session.bindExtensions({
     uiContext: uiBridge.uiContext,
     mode: "tui",
     commandContextActions: buildCommandContextActions(session),
   });
-  fullAccessToolNames = session.getActiveToolNames?.() || [];
+  configureFullAccessTools(effectiveSettingsManager);
   activePermissionMode = "full-access";
   unsubscribe = session.subscribe(handleSessionEvent);
   send({ type: "history_snapshot", messages: buildHistorySnapshot(session.sessionManager) });
@@ -747,7 +872,7 @@ const handleSessionEvent = (event) => {
 };
 
 const getModels = () => {
-  const models = session?.modelRegistry.getAvailable() || [];
+  const models = modelRegistry?.getAvailable?.() || [];
   return models.map((model) => ({
     id: model.id || model.modelId,
     name: model.name || model.id || model.modelId,
@@ -768,6 +893,16 @@ const handleCommand = async (command) => {
         setPermissionMode(command.permissionMode === "plan" || command.planModeEnabled ? "plan" : "full-access");
         activePromptId = command.id;
         completedPromptIds.delete(command.id);
+        if (shellWarning && !shellWarningEmitted) {
+          shellWarningEmitted = true;
+          send({
+            type: "status",
+            id: "pi-shell-unavailable",
+            status: "warning",
+            title: "Pi Shell 不可用，已改用文件发现工具",
+            detail: shellWarning,
+          });
+        }
         send({ type: "accepted", id: command.id });
         session.prompt(await resolveActionPrompt(command.action, command.message), { images: command.images })
           .then(() => {
@@ -804,16 +939,16 @@ const handleCommand = async (command) => {
         break;
       case "setModel": {
         if (!session) throw new Error("Pi SDK session is not initialized");
-        const model = session?.modelRegistry.find(command.provider, command.modelId);
+        const model = modelRegistry?.find?.(command.provider, command.modelId);
         if (!model) {
-          const loadError = session.modelRegistry.getError?.();
+          const loadError = modelRegistry?.getError?.();
           throw new Error(
             loadError
               ? `Pi model config failed to load: ${loadError}`
               : `Pi model is not available: ${command.provider}/${command.modelId}`
           );
         }
-        if (!session.modelRegistry.hasConfiguredAuth(model)) {
+        if (!modelRegistry?.hasConfiguredAuth?.(model)) {
           throw new Error(`No API key found for model: ${command.provider}/${command.modelId}`);
         }
         await session.setModel(model);

@@ -24,7 +24,7 @@ class FakeSession {
   listener = null;
   uiContext = null;
   activeRun = null;
-  activeTools = ["read", "ask_user_question"];
+  activeTools = ["read", "bash", "edit", "write", "ask_user_question"];
 
   constructor(sessionManager, modelRegistry) {
     this.sessionManager = sessionManager;
@@ -35,7 +35,7 @@ class FakeSession {
   subscribe(listener) { this.listener = listener; return () => { this.listener = null; }; }
   getActiveToolNames() { return [...this.activeTools]; }
   setActiveToolsByName(names) { this.activeTools = [...names]; }
-  getAllTools() { return this.activeTools.map((name) => ({ name })); }
+  getAllTools() { return ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"].map((name) => ({ name })); }
   setThinkingLevel() {}
   async setModel() {}
   async steer() {}
@@ -47,6 +47,13 @@ class FakeSession {
   }
 
   async runPrompt(message) {
+    if (message.startsWith("active-tools")) {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(this.activeTools) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message.startsWith("/skill:review")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
@@ -102,6 +109,9 @@ export const SessionManager = FakeSessionManager;
 export const createAgentSession = async ({ sessionManager, modelRegistry }) => ({
   session: new FakeSession(sessionManager, modelRegistry),
 });
+export const getShellConfig = process.env.PI_TEST_BROKEN_SHELL === "1"
+  ? () => ({ shell: "hpp-definitely-missing-shell", args: ["-c"] })
+  : undefined;
 `;
 
 const writeFakeSDK = async (runtimeRoot: string) => {
@@ -116,10 +126,10 @@ const writeFakeSDK = async (runtimeRoot: string) => {
   await writeFile(join(packageDir, "index.mjs"), fakeSDKSource, "utf8");
 };
 
-const startWorker = (runtimeRoot: string, agentDir: string) => {
+const startWorker = (runtimeRoot: string, agentDir: string, extraEnv: NodeJS.ProcessEnv = {}) => {
   const workerPath = resolve("electron/plugin-backends/pi/worker.mjs");
   const child = spawn(process.execPath, [workerPath], {
-    env: { ...process.env, PI_SDK_PACKAGE_ROOT: runtimeRoot, PI_CODING_AGENT_DIR: agentDir },
+    env: { ...process.env, PI_SDK_PACKAGE_ROOT: runtimeRoot, PI_CODING_AGENT_DIR: agentDir, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const messages: WorkerMessage[] = [];
@@ -204,6 +214,46 @@ describe("Pi SDK worker protocol", () => {
     const types = worker.messages.map((message) => message.type);
     expect(types.filter((type) => type === "agent_start")).toHaveLength(2);
     expect(types.lastIndexOf("prompt_done")).toBeGreaterThan(types.lastIndexOf("agent_end"));
+  });
+
+  it("keeps directory and search tools enabled across permission modes", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    const readTools = async (id: string, permissionMode: "plan" | "full-access") => {
+      worker.send({ id, type: "prompt", message: `active-tools:${id}`, permissionMode });
+      await worker.waitFor((message) => message.type === "prompt_done" && message.id === id);
+      const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+      return JSON.parse(String((message?.message as { text?: unknown })?.text || "[]")) as string[];
+    };
+
+    const fullAccessTools = await readTools("full-1", "full-access");
+    expect(fullAccessTools).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "grep", "find", "ls"]));
+
+    const planTools = await readTools("plan-1", "plan");
+    expect(planTools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls"]));
+    expect(planTools).not.toEqual(expect.arrayContaining(["bash", "edit", "write"]));
+
+    const restoredTools = await readTools("full-2", "full-access");
+    expect(restoredTools).toEqual(expect.arrayContaining(["bash", "edit", "write", "grep", "find", "ls"]));
+  });
+
+  it("disables an unhealthy shell while preserving file discovery tools", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_BROKEN_SHELL: "1" });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tools", type: "prompt", message: "active-tools:broken-shell", permissionMode: "full-access" });
+
+    await expect(worker.waitFor((message) => message.type === "status" && message.status === "warning"))
+      .resolves.toMatchObject({ title: "Pi Shell 不可用，已改用文件发现工具" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "tools");
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const tools = JSON.parse(String((message?.message as { text?: unknown })?.text || "[]")) as string[];
+    expect(tools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls"]));
+    expect(tools).not.toContain("bash");
   });
 
   it("dismisses a pending questionnaire before waiting for abort", async () => {
