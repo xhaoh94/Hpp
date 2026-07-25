@@ -13,9 +13,17 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
   const [updateBusy, setUpdateBusy] = useState(false)
   const [showUpdatePrompt, setShowUpdatePrompt] = useState(false)
   const updatePromptRef = useRef<HTMLSpanElement | null>(null)
+  const [isNiri, setIsNiri] = useState(false)
 
   useEffect(() => {
     let cancelled = false
+    // Detect Niri compositor
+    window.electronAPI?.getAppEnv?.()
+      .then((env) => {
+        if (!cancelled && env) setIsNiri(env.isNiri)
+      })
+      .catch(() => undefined)
+    // Load update status
     window.electronAPI?.getAppUpdateStatus()
       .then((status) => {
         if (!cancelled) setUpdateStatus(status)
@@ -57,6 +65,15 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
     window.electronAPI?.maximize()
     setMaximized((prev) => !prev)
   }, [])
+
+  // Handle double-click on title bar (works on Wayland/Niri)
+  const lastClickTime = useRef(0)
+  const handleTitleBarDoubleClick = useCallback((e: React.MouseEvent) => {
+    // Ignore if clicking on buttons or interactive elements
+    const target = e.target as HTMLElement
+    if (target.closest('button') || target.closest('.titlebar-controls')) return
+    handleToggleMaximize()
+  }, [handleToggleMaximize])
 
   const handleClose = useCallback(() => {
     window.electronAPI?.close()
@@ -112,7 +129,7 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
 
   return (
     <div className="app-titlebar">
-      <div className="titlebar-drag-region" onDoubleClick={handleToggleMaximize}>
+      <div className="titlebar-drag-region" onDoubleClick={handleTitleBarDoubleClick}>
         <span className="titlebar-title-group">
           <span className="titlebar-title">{title}</span>
           {updateButtonVisible && (
@@ -175,14 +192,16 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
       </div>
 
       <div className="titlebar-controls">
-        <button
-          className="titlebar-btn titlebar-btn-minimize"
-          onClick={handleMinimize}
-          title="最小化"
-          aria-label="最小化窗口"
-        >
-          <Minus size={15} strokeWidth={1.5} />
-        </button>
+        {!isNiri && (
+          <button
+            className="titlebar-btn titlebar-btn-minimize"
+            onClick={handleMinimize}
+            title="最小化"
+            aria-label="最小化窗口"
+          >
+            <Minus size={15} strokeWidth={1.5} />
+          </button>
+        )}
         <button
           className="titlebar-btn titlebar-btn-maximize"
           onClick={handleToggleMaximize}

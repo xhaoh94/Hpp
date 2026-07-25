@@ -188,6 +188,7 @@ export interface ElectronAPI {
   maximize: () => void;
   close: () => void;
   platform: string;
+  getAppEnv: () => Promise<{ platform: string; isWayland: boolean; isNiri: boolean; isX11: boolean; displayServer: string }>;
   getAppVersion: () => Promise<string>;
   getAppUpdateStatus: () => Promise<AppUpdateStatus>;
   checkAppUpdate: () => Promise<AppUpdateResult>;

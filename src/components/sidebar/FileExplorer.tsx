@@ -15,6 +15,7 @@ import { isFileTreePathWithin, isSameFileTreePath } from "@/lib/file-tree-paths"
 import { writePathAttachmentDragData } from "@/lib/path-attachments";
 import { scheduleAbortableTask } from "@/lib/abortable-task-scheduler";
 import { invalidateProjectFileIndex, queryProjectFileIndex } from "@/lib/project-file-index";
+import { replaceEmojiWithImages } from "@/lib/emoji";
 import { getFileFilterKey, isFileEntryExcluded, type FileFilterConfig } from "@shared/file-filters";
 import type { FileEntry } from "@/types";
 import {
@@ -241,7 +242,7 @@ const FileTreeItem = memo(function FileTreeItem({
               : expanded
                 ? <FolderOpen size={16} strokeWidth={1.9} fill="currentColor" fillOpacity={0.14} />
                 : <Folder size={16} strokeWidth={1.9} fill="currentColor" fillOpacity={0.1} />
-          ) : fileInfo?.icon || '📄'}
+          ) : <span dangerouslySetInnerHTML={{ __html: replaceEmojiWithImages(fileInfo?.icon || '📄') }} />}
         </span>
         <span className="file-name">{entry.name}</span>
       </div>
