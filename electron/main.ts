@@ -2,6 +2,21 @@ import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme,
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
+import { execFile } from "child_process";
+
+// Environment detection for Wayland/Niri compositor
+const env = {
+  isWayland: !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland'),
+  isNiri: !!(process.env.NIRI_SOCKET || (process.env.WAYLAND_DISPLAY?.includes('niri'))),
+  isX11: process.env.XDG_SESSION_TYPE === 'x11',
+  displayServer: process.env.XDG_SESSION_TYPE || 'unknown',
+};
+
+// Log environment info in development
+if (is.dev) {
+  console.log('[Hpp] Display server:', env.displayServer);
+  console.log('[Hpp] Wayland:', env.isWayland, '| Niri:', env.isNiri);
+}
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
@@ -18,10 +33,20 @@ import {
 } from "./app-update-polling";
 import { AppShutdownCoordinator } from "./app-shutdown";
 
-// Enable IME support on Linux Wayland
+// Linux: Wayland + Niri compositor support
 if (process.platform === "linux") {
-  app.commandLine.appendSwitch("enable-wayland-ime");
-  app.commandLine.appendSwitch("wayland-text-input-version", "3");
+  // Use Wayland but run in XWayland mode for better IME compatibility
+  // This avoids gdk_window_set_user_time warnings that break IME input
+  app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+  
+  // Disable native Wayland IME to avoid Gdk warnings (use X11 IME instead)
+  app.commandLine.appendSwitch("disable-features", "WaylandIme");
+
+  // Enable hardware acceleration on Wayland (better performance)
+  app.commandLine.appendSwitch("enable-features", "VaapiVideoDecodeLinuxGL,VaapiVideoEncoder");
+
+  // Handle display scaling for HiDPI Wayland sessions
+  app.commandLine.appendSwitch("force-device-scale-factor", "1");
 }
 
 // Set app name
@@ -329,6 +354,10 @@ function createWindow() {
   // Load app icon for taskbar
   const iconPath = getIconPath();
 
+  // Detect Wayland environment
+  const isWayland = process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland';
+  const isNiri = process.env.NIRI_SOCKET || process.env.WAYLAND_DISPLAY?.includes('niri');
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -338,13 +367,27 @@ function createWindow() {
     title: "Hpp",
     icon: iconPath,
     frame: false,
+    // Wayland: use wayland display protocol for better integration
+    ...(isWayland && {
+      backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#f7f7f8",
+    }),
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
+      // Enable_SPELLCHECK for Wayland IME support
+      spellcheck: true,
     },
   });
+
+  // Wayland/Niri: Handle window state changes for tiling compositor
+  if (isWayland) {
+    mainWindow.on('ready-to-show', () => {
+      // Ensure window is properly shown on Wayland
+      mainWindow?.show();
+    });
+  }
 
   mainWindow.on("close", (event) => {
     if (isQuitting || !closeToTray) return;
@@ -414,6 +457,14 @@ app.on("window-all-closed", () => {
 // Window control IPC
 ipcMain.on("window:minimize", () => mainWindow?.minimize());
 ipcMain.on("window:maximize", () => {
+  // On Niri, use niri msg action maximize-column
+  if (env.isNiri) {
+    execFile("niri", ["msg", "action", "maximize-column"], (error) => {
+      if (error) console.warn("[Hpp] niri maximize-column failed:", error.message);
+    });
+    return;
+  }
+  // Fallback to Electron's maximize
   if (mainWindow?.isMaximized()) {
     mainWindow.unmaximize();
   } else {
@@ -423,6 +474,13 @@ ipcMain.on("window:maximize", () => {
 ipcMain.on("window:close", () => mainWindow?.close());
 
 ipcMain.handle("app:getVersion", () => app.getVersion());
+ipcMain.handle("app:getEnv", () => ({
+  platform: process.platform,
+  isWayland: env.isWayland,
+  isNiri: env.isNiri,
+  isX11: env.isX11,
+  displayServer: env.displayServer,
+}));
 ipcMain.handle("app:update:getStatus", () => updateStatus);
 ipcMain.handle("app:update:check", () => checkForAppUpdates());
 ipcMain.handle("app:update:download", () => downloadAppUpdate());
