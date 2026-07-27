@@ -1,8 +1,9 @@
 import { useMemo, type ReactNode, type RefObject } from "react";
-import { Settings } from "lucide-react";
+import { Check, Settings, Shield, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
 import { groupModelsByProvider, includeCurrentModel } from "@shared/models";
+import type { AgentPermissionMode } from "@shared/agent-permissions";
 
 type ThinkingLevelOption = {
   id: string;
@@ -20,17 +21,23 @@ type ChatToolbarProps = {
   modelOpen: boolean;
   modelProviders: string[];
   planModeEnabled: boolean;
+  permissionMode: AgentPermissionMode;
+  permissionModeSupported: boolean;
+  permissionOpen: boolean;
   thinkingLevel: string;
   thinkingLevels: readonly ThinkingLevelOption[];
   thinkingOpen: boolean;
   modelRef: RefObject<HTMLDivElement | null>;
   thinkingRef: RefObject<HTMLDivElement | null>;
+  permissionRef: RefObject<HTMLDivElement | null>;
   leadingContent?: ReactNode;
   getPlanModeTooltip: (agentId: string) => string;
   onExpandedProviderChange: (provider: string | null) => void;
   onModelOpenChange: (open: boolean) => void;
   onThinkingOpenChange: (open: boolean) => void;
+  onPermissionOpenChange: (open: boolean) => void;
   onPlanModeChange: (enabled: boolean) => void;
+  onPermissionModeChange: (mode: AgentPermissionMode) => void;
   onOpenModelConfig: () => void;
   onSelectModel: (model: ModelInfo) => void;
   onSelectThinking: (levelId: string) => void;
@@ -48,17 +55,23 @@ export function ChatToolbar({
   modelOpen,
   modelProviders,
   planModeEnabled,
+  permissionMode,
+  permissionModeSupported,
+  permissionOpen,
   thinkingLevel,
   thinkingLevels,
   thinkingOpen,
   modelRef,
   thinkingRef,
+  permissionRef,
   leadingContent,
   getPlanModeTooltip,
   onExpandedProviderChange,
   onModelOpenChange,
   onThinkingOpenChange,
+  onPermissionOpenChange,
   onPlanModeChange,
+  onPermissionModeChange,
   onOpenModelConfig,
   onSelectModel,
   onSelectThinking,
@@ -100,11 +113,75 @@ export function ChatToolbar({
         <span>Plan</span>
       </button>
 
+      {permissionModeSupported && <div ref={permissionRef} className="relative chat-permission-control">
+        <button
+          type="button"
+          onClick={() => {
+            onPermissionOpenChange(!permissionOpen);
+            onModelOpenChange(false);
+            onThinkingOpenChange(false);
+          }}
+          className={`chat-toolbar-select chat-permission-trigger ${permissionMode === "full-access" ? "danger" : ""}`}
+          aria-haspopup="menu"
+          aria-expanded={permissionOpen}
+          title="设置 Agent 权限"
+        >
+          {permissionMode === "full-access"
+            ? <ShieldAlert size={14} />
+            : permissionMode === "auto"
+              ? <ShieldCheck size={14} />
+              : <Shield size={14} />}
+          <span>{permissionMode === "ask" ? "请求权限" : permissionMode === "auto" ? "自动权限" : "完全访问"}</span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+        {permissionOpen && (
+          <div className="chat-permission-dropdown" role="menu" aria-label="Agent 权限模式">
+            <div className="chat-permission-heading">Agent 权限</div>
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={permissionMode === "ask"}
+              className={`chat-permission-option ${permissionMode === "ask" ? "active" : ""}`}
+              onClick={() => onPermissionModeChange("ask")}
+            >
+              <Shield size={16} />
+              <span><strong>请求权限</strong><small>写文件、运行命令、联网等操作都先询问</small></span>
+              {permissionMode === "ask" && <Check size={15} className="chat-permission-check" />}
+            </button>
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={permissionMode === "auto"}
+              className={`chat-permission-option ${permissionMode === "auto" ? "active" : ""}`}
+              onClick={() => onPermissionModeChange("auto")}
+            >
+              <ShieldCheck size={16} />
+              <span><strong>自动权限</strong><small>低风险操作自动执行，高风险操作先询问</small></span>
+              {permissionMode === "auto" && <Check size={15} className="chat-permission-check" />}
+            </button>
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={permissionMode === "full-access"}
+              className={`chat-permission-option danger ${permissionMode === "full-access" ? "active" : ""}`}
+              onClick={() => onPermissionModeChange("full-access")}
+            >
+              <ShieldAlert size={16} />
+              <span><strong>完全访问权限</strong><small>不再询问，可访问系统并执行高风险操作</small></span>
+              {permissionMode === "full-access" && <Check size={15} className="chat-permission-check" />}
+            </button>
+          </div>
+        )}
+      </div>}
+
       <div ref={modelRef} className="relative">
         <button
           onClick={() => {
             onModelOpenChange(!modelOpen);
             onThinkingOpenChange(false);
+            onPermissionOpenChange(false);
             if (modelOpen) onExpandedProviderChange(null);
           }}
           className="chat-toolbar-select"
@@ -203,6 +280,7 @@ export function ChatToolbar({
           onClick={() => {
             onThinkingOpenChange(!thinkingOpen);
             onModelOpenChange(false);
+            onPermissionOpenChange(false);
           }}
           className="chat-toolbar-select"
         >

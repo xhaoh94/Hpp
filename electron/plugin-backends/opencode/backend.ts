@@ -12,6 +12,8 @@ import {
   resolveCommand,
 } from "../../utils/command-utils";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
+import type { AgentPermissionMode } from "../../../shared/agent-permissions";
+import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
 import { isRecord } from "../../../src/types/ipc";
 import type {
   AgentActionCatalogEntry,
@@ -31,7 +33,7 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
   displayMessage?: string;
-  permissionMode?: "plan" | "full-access";
+  permissionMode?: AgentPermissionMode;
   action?: AgentActionInvocation;
 }
 
@@ -312,6 +314,7 @@ export class OpenCodeAgent {
   private activeClientMessageId: string | null = null;
   private activeAssistantMessageId: string | null = null;
   private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
+  private permissionMode: AgentPermissionMode = "auto";
   private actionKeys = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
@@ -475,7 +478,8 @@ export class OpenCodeAgent {
       this.activeClientMessageId = options?.clientMessageId?.trim() || null;
       this.activeAssistantMessageId = null;
       this.turnActive = true;
-      if (options?.planModeEnabled || options?.permissionMode === "plan") {
+      this.permissionMode = options?.permissionMode || "auto";
+      if (options?.planModeEnabled) {
         body.agent = "plan";
       } else {
         body.agent = "build";
@@ -679,18 +683,33 @@ export class OpenCodeAgent {
             : Array.isArray(props.patterns)
               ? props.patterns.map(String)
               : [];
+          const shouldApproveAutomatically = this.permissionMode === "full-access"
+            || (this.permissionMode === "auto" && !isHighRiskAgentPermissionRequest(action, resources));
+          if (shouldApproveAutomatically) {
+            void this.httpPost(`/permission/${encodeURIComponent(props.id)}/reply`, { reply: "once" })
+              .catch((error) => this.emitEvent({
+                type: "process_event",
+                entryType: "error",
+                title: "OpenCode permission response failed",
+                detail: error instanceof Error ? error.message : String(error),
+                state: "error",
+              }));
+            break;
+          }
           this.pendingUIRequests.set(props.id, { kind: "permission" });
           this.emitEvent(normalizeQuestionProcessEvent({
             type: eventType,
             requestId: props.id,
             method: "opencode.permission",
+            title: "OpenCode 请求权限",
+            message: resources.length > 0 ? `${action}\n\n${resources.join("\n")}` : action,
             questions: [{
-              header: "Permission",
+              header: "权限",
               question: resources.length > 0 ? `${action}: ${resources.join(", ")}` : action,
               options: [
-                { label: "Allow once", value: "once" },
-                { label: "Always allow", value: "always" },
-                { label: "Reject", value: "reject" },
+                { label: "允许一次", value: "once" },
+                { label: "始终允许", value: "always" },
+                { label: "拒绝", value: "reject" },
               ],
             }],
             detail: props,

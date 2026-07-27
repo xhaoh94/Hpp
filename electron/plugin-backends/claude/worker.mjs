@@ -16,7 +16,8 @@ let deferredFork = null;
 let activeProvider = null;
 let currentModelId = "";
 let thinkingLevel = "medium";
-let permissionMode = "full-access";
+let permissionMode = "auto";
+let planModeEnabled = false;
 let activeQuery = null;
 let activeQueryPermissionMode = null;
 let queryGeneration = 0;
@@ -324,6 +325,20 @@ const canUseTool = async (toolName, input, options) => {
     return requestPermission(toolName, input, options);
   }
   if (permissionMode === "full-access") return { behavior: "allow", updatedInput: input };
+  if (permissionMode === "auto" && [
+    "glob",
+    "grep",
+    "ls",
+    "read",
+    "notebookread",
+    "todowrite",
+    "taskcreate",
+    "taskget",
+    "tasklist",
+    "taskupdate",
+  ].includes(String(toolName || "").replace(/[^a-z]/gi, "").toLowerCase())) {
+    return { behavior: "allow", updatedInput: input };
+  }
   return requestPermission(toolName, input, options);
 };
 
@@ -480,7 +495,12 @@ const handleSDKMessage = (message) => {
   }
 };
 
-const createQueryOptions = (sdkProvider, queryPermissionMode) => {
+const createQueryOptions = (sdkProvider, queryPermissionMode, queryPlanModeEnabled) => {
+  const sdkPermissionMode = queryPlanModeEnabled
+    ? "plan"
+    : queryPermissionMode === "full-access"
+      ? "bypassPermissions"
+      : "default";
   const options = {
     cwd: projectPath,
     model: currentModelId,
@@ -488,8 +508,8 @@ const createQueryOptions = (sdkProvider, queryPermissionMode) => {
     tools: { type: "preset", preset: "claude_code" },
     settingSources: ["user", "project", "local"],
     includePartialMessages: true,
-    permissionMode: queryPermissionMode === "plan" ? "plan" : "bypassPermissions",
-    allowDangerouslySkipPermissions: queryPermissionMode !== "plan",
+    permissionMode: sdkPermissionMode,
+    allowDangerouslySkipPermissions: queryPermissionMode === "full-access",
     canUseTool,
     env: buildSDKEnv(sdkProvider),
     ...getThinkingOptions(thinkingLevel),
@@ -517,11 +537,13 @@ const dismissPermissions = (message) => {
 const startQuery = async () => {
   const generation = ++queryGeneration;
   const queryPermissionMode = permissionMode;
+  const queryPlanModeEnabled = planModeEnabled;
+  const queryModeKey = `${queryPermissionMode}:${queryPlanModeEnabled ? "plan" : "default"}`;
   inputQueue = new PushableInput();
   const sdkProvider = await prepareSDKProvider(activeProvider);
-  const queryInstance = sdk.query({ prompt: inputQueue, options: createQueryOptions(sdkProvider, queryPermissionMode) });
+  const queryInstance = sdk.query({ prompt: inputQueue, options: createQueryOptions(sdkProvider, queryPermissionMode, queryPlanModeEnabled) });
   activeQuery = queryInstance;
-  activeQueryPermissionMode = queryPermissionMode;
+  activeQueryPermissionMode = queryModeKey;
   void (async () => {
     try {
       for await (const message of queryInstance) {
@@ -637,8 +659,12 @@ const handleCommand = async (command) => {
       case "prompt":
         if (!activeQuery || !inputQueue) throw new Error("Claude Agent SDK session is not initialized");
         if (activePromptId) throw new Error("SESSION_BUSY");
-        permissionMode = command.permissionMode === "plan" ? "plan" : "full-access";
-        if (activeQueryPermissionMode !== permissionMode) await restartQuery();
+        permissionMode = ["ask", "auto", "full-access"].includes(command.permissionMode)
+          ? command.permissionMode
+          : "auto";
+        planModeEnabled = command.planModeEnabled === true;
+        const queryModeKey = `${permissionMode}:${planModeEnabled ? "plan" : "default"}`;
+        if (activeQueryPermissionMode !== queryModeKey) await restartQuery();
         command.message = await buildActionMessage(command.action, command.message);
         activePromptId = command.id;
         inputQueue.push({

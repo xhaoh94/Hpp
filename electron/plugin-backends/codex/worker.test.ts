@@ -289,7 +289,7 @@ describe("Codex worker protocol", () => {
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "prompt-1", type: "prompt", message: "plan", planModeEnabled: true, permissionMode: "plan" });
+    worker.send({ id: "prompt-1", type: "prompt", message: "plan", planModeEnabled: true, permissionMode: "ask" });
 
     await expect(worker.waitFor((message) => message.type === "stream_delta" && message.delta === "draft plan"))
       .resolves.toMatchObject({ type: "stream_delta", delta: "draft plan" });
@@ -297,6 +297,12 @@ describe("Codex worker protocol", () => {
       .resolves.toMatchObject({ type: "context_compaction" });
     await expect(worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-1"))
       .resolves.toMatchObject({ type: "prompt_done", id: "prompt-1" });
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.find((call) => call.method === "turn/start")?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+      collaborationMode: { mode: "plan" },
+    });
   });
 
   it("resumes an existing thread without creating a replacement", async () => {

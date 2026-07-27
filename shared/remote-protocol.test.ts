@@ -185,6 +185,12 @@ describe("remote protocol", () => {
     });
   });
 
+  it("validates permission mode updates", () => {
+    expect(parseRemoteRequest(request("settings.setPermissionMode", { mode: "auto" })).payload)
+      .toEqual({ mode: "auto" });
+    expect(() => parseRemoteRequest(request("settings.setPermissionMode", { mode: "unsafe" }))).toThrow();
+  });
+
   it("rejects unsupported versions and request names", () => {
     expect(() => parseRemoteRequest({ ...request("catalog.get", {}), version: 2 })).toThrow();
     expect(() => parseRemoteRequest(request("project.delete", {}))).toThrow();

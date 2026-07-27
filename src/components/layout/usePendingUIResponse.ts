@@ -8,10 +8,12 @@ import {
   resetSessionRuntimeAfterTurn,
   type SessionRuntime,
 } from "./agentEventUtils";
-import { getQuestionnaireAnswerLabel } from "./QuestionnairePanel";
+import { getQuestionnaireAnswerLabel, type AskQuestionOption } from "./QuestionnairePanel";
 import type { PendingUIResponse, PendingUIResponseUpdate } from "./agentEventTypes";
 
 type UsePendingUIResponseActionsOptions = {
+  activeConfirmation: PendingUIResponse;
+  activePermissionChoice: PendingUIResponse;
   activeQuestionnaire: PendingUIResponse;
   addMessage: (message: ChatMessage, sessionId?: string | null) => void;
   enableAutoFollow: () => void;
@@ -37,22 +39,39 @@ export function usePendingUIResponse(activeSessionId: string | null) {
   }, [pendingUIResponse]);
 
   const isAwaitingUIResponse = !!activeSessionId && pendingUIResponse?.sessionId === activeSessionId;
+  const normalizedMethod = pendingUIResponse?.method?.toLowerCase() || "";
+  const isConfirmation = normalizedMethod === "confirm";
+  const isPermissionChoice = !isConfirmation && normalizedMethod.includes("permission");
   const activeQuestionnaire = useMemo(() => (
-    isAwaitingUIResponse && pendingUIResponse?.questions?.length
+    isAwaitingUIResponse && !isConfirmation && !isPermissionChoice && pendingUIResponse?.questions?.length
       ? pendingUIResponse
       : null
-  ), [isAwaitingUIResponse, pendingUIResponse]);
+  ), [isAwaitingUIResponse, isConfirmation, isPermissionChoice, pendingUIResponse]);
+  const activeConfirmation = useMemo(() => (
+    isAwaitingUIResponse && isConfirmation
+      ? pendingUIResponse
+      : null
+  ), [isAwaitingUIResponse, isConfirmation, pendingUIResponse]);
+  const activePermissionChoice = useMemo(() => (
+    isAwaitingUIResponse && isPermissionChoice && pendingUIResponse?.questions?.length
+      ? pendingUIResponse
+      : null
+  ), [isAwaitingUIResponse, isPermissionChoice, pendingUIResponse]);
 
   return {
     pendingUIResponse,
     pendingUIResponseRef,
     setPendingUIResponseState,
     isAwaitingUIResponse,
+    activeConfirmation,
+    activePermissionChoice,
     activeQuestionnaire,
   };
 }
 
 export function usePendingUIResponseActions({
+  activeConfirmation,
+  activePermissionChoice,
   activeQuestionnaire,
   addMessage,
   enableAutoFollow,
@@ -206,6 +225,88 @@ export function usePendingUIResponseActions({
     setPendingUIResponseState,
   ]);
 
+  const handleConfirmUIResponse = useCallback(async (confirmed: boolean) => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !activeConfirmation || activeConfirmation.sessionId !== targetSessionId) return;
+    const pendingResponse = activeConfirmation;
+
+    flushSync(() => {
+      setPendingUIResponseState(null);
+      finishPendingQuestionTurn(targetSessionId, pendingResponse);
+    });
+
+    const result = await window.electronAPI.agentSendUIResponse(getUIResponsePayload({
+      sessionId: targetSessionId,
+      requestId: pendingResponse.requestId,
+      method: pendingResponse.method,
+      text: confirmed ? "是" : "否",
+    }));
+
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "发送权限选择失败",
+        timestamp: Date.now(),
+      }, targetSessionId);
+      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    }
+  }, [
+    activeConfirmation,
+    addMessage,
+    finishPendingQuestionEntry,
+    finishPendingQuestionTurn,
+    setPendingUIResponseState,
+  ]);
+
+  const handlePermissionChoiceUIResponse = useCallback(async (option: AskQuestionOption) => {
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId || !activePermissionChoice || activePermissionChoice.sessionId !== targetSessionId) return;
+    const pendingResponse = activePermissionChoice;
+    const question = pendingResponse.questions?.[0];
+    const value = String(option.value || option.label);
+    const answers = [{
+      id: question?.id,
+      questionIndex: 0,
+      selected: [option.label],
+      selectedOptions: [{ ...option, value }],
+      values: [value],
+    }];
+
+    flushSync(() => {
+      setPendingUIResponseState(null);
+      finishPendingQuestionTurn(targetSessionId, pendingResponse);
+    });
+
+    const result = await window.electronAPI.agentSendUIResponse({
+      sessionId: targetSessionId,
+      type: "extension_ui_response",
+      id: pendingResponse.requestId,
+      method: pendingResponse.method,
+      cancelled: false,
+      result: { cancelled: false, answers },
+      value,
+      text: value,
+      answers,
+    });
+
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: "发送权限选择失败",
+        timestamp: Date.now(),
+      }, targetSessionId);
+      finishPendingQuestionEntry(targetSessionId, pendingResponse, true);
+    }
+  }, [
+    activePermissionChoice,
+    addMessage,
+    finishPendingQuestionEntry,
+    finishPendingQuestionTurn,
+    setPendingUIResponseState,
+  ]);
+
   const handleCancelQuestionnaire = useCallback(async () => {
     const targetSessionId = useProjectStore.getState().activeSessionId;
     if (!targetSessionId || !activeQuestionnaire || activeQuestionnaire.sessionId !== targetSessionId) return;
@@ -222,6 +323,8 @@ export function usePendingUIResponseActions({
   }, [activeQuestionnaire, finishPendingQuestionTurn, setPendingUIResponseState]);
 
   return {
+    handleConfirmUIResponse,
+    handlePermissionChoiceUIResponse,
     handleSendUIResponse,
     handleSubmitQuestionnaire,
     handleCancelQuestionnaire,

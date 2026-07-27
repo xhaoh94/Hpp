@@ -2,21 +2,6 @@ import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme,
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
-import { execFile } from "child_process";
-
-// Environment detection for Wayland/Niri compositor
-const env = {
-  isWayland: !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland'),
-  isNiri: !!(process.env.NIRI_SOCKET || (process.env.WAYLAND_DISPLAY?.includes('niri'))),
-  isX11: process.env.XDG_SESSION_TYPE === 'x11',
-  displayServer: process.env.XDG_SESSION_TYPE || 'unknown',
-};
-
-// Log environment info in development
-if (is.dev) {
-  console.log('[Hpp] Display server:', env.displayServer);
-  console.log('[Hpp] Wayland:', env.isWayland, '| Niri:', env.isNiri);
-}
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { registerFileHandlers } from "./ipc/file-handlers";
 import { registerStoreHandlers } from "./ipc/store-handlers";
@@ -32,21 +17,22 @@ import {
   shouldStopAppUpdatePolling,
 } from "./app-update-polling";
 import { AppShutdownCoordinator } from "./app-shutdown";
+import { detectDesktopEnvironment, getLinuxChromiumSwitches } from "./linux-desktop";
+import { getDefaultCloseToTray, resolveCloseToTraySetting } from "../shared/desktop-platform";
 
-// Linux: Wayland + Niri compositor support
-if (process.platform === "linux") {
-  // Use Wayland but run in XWayland mode for better IME compatibility
-  // This avoids gdk_window_set_user_time warnings that break IME input
-  app.commandLine.appendSwitch("ozone-platform-hint", "auto");
-  
-  // Disable native Wayland IME to avoid Gdk warnings (use X11 IME instead)
-  app.commandLine.appendSwitch("disable-features", "WaylandIme");
+const env = detectDesktopEnvironment();
 
-  // Enable hardware acceleration on Wayland (better performance)
-  app.commandLine.appendSwitch("enable-features", "VaapiVideoDecodeLinuxGL,VaapiVideoEncoder");
+if (is.dev) {
+  console.log("[Hpp] Display server:", env.displayServer);
+  console.log("[Hpp] Wayland:", env.isWayland, "| Niri:", env.isNiri);
+}
 
-  // Handle display scaling for HiDPI Wayland sessions
-  app.commandLine.appendSwitch("force-device-scale-factor", "1");
+for (const chromiumSwitch of getLinuxChromiumSwitches()) {
+  if (chromiumSwitch.value === undefined) {
+    app.commandLine.appendSwitch(chromiumSwitch.name);
+  } else {
+    app.commandLine.appendSwitch(chromiumSwitch.name, chromiumSwitch.value);
+  }
 }
 
 // Set app name
@@ -55,7 +41,9 @@ if (process.platform === "win32") {
   app.setAppUserModelId(is.dev ? "com.hpp.app.dev" : "com.hpp.app");
 }
 
-const DEFAULT_CLOSE_TO_TRAY = true;
+// Linux compositors do not guarantee a StatusNotifier tray host. Closing the
+// only window must therefore quit by default; users can still opt in.
+const DEFAULT_CLOSE_TO_TRAY = getDefaultCloseToTray(process.platform);
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -96,10 +84,14 @@ async function loadCloseToTraySetting() {
   try {
     const settingsPath = join(app.getPath("userData"), "hpp-data", "settings.json");
     const content = await readFile(settingsPath, "utf-8");
-    const settings = JSON.parse(content) as { general?: { closeToTray?: unknown; theme?: unknown } };
-    closeToTray = typeof settings.general?.closeToTray === "boolean"
-      ? settings.general.closeToTray
-      : DEFAULT_CLOSE_TO_TRAY;
+    const settings = JSON.parse(content) as {
+      general?: { closeToTray?: unknown; closeToTrayExplicit?: unknown; theme?: unknown };
+    };
+    closeToTray = resolveCloseToTraySetting(
+      process.platform,
+      settings.general?.closeToTray,
+      settings.general?.closeToTrayExplicit === true,
+    );
     windowTheme = settings.general?.theme === "system" || settings.general?.theme === "light"
       ? settings.general.theme
       : "dark";
@@ -354,10 +346,6 @@ function createWindow() {
   // Load app icon for taskbar
   const iconPath = getIconPath();
 
-  // Detect Wayland environment
-  const isWayland = process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland';
-  const isNiri = process.env.NIRI_SOCKET || process.env.WAYLAND_DISPLAY?.includes('niri');
-
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -367,27 +355,14 @@ function createWindow() {
     title: "Hpp",
     icon: iconPath,
     frame: false,
-    // Wayland: use wayland display protocol for better integration
-    ...(isWayland && {
-      backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#f7f7f8",
-    }),
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
-      // Enable_SPELLCHECK for Wayland IME support
       spellcheck: true,
     },
   });
-
-  // Wayland/Niri: Handle window state changes for tiling compositor
-  if (isWayland) {
-    mainWindow.on('ready-to-show', () => {
-      // Ensure window is properly shown on Wayland
-      mainWindow?.show();
-    });
-  }
 
   mainWindow.on("close", (event) => {
     if (isQuitting || !closeToTray) return;
@@ -457,14 +432,6 @@ app.on("window-all-closed", () => {
 // Window control IPC
 ipcMain.on("window:minimize", () => mainWindow?.minimize());
 ipcMain.on("window:maximize", () => {
-  // On Niri, use niri msg action maximize-column
-  if (env.isNiri) {
-    execFile("niri", ["msg", "action", "maximize-column"], (error) => {
-      if (error) console.warn("[Hpp] niri maximize-column failed:", error.message);
-    });
-    return;
-  }
-  // Fallback to Electron's maximize
   if (mainWindow?.isMaximized()) {
     mainWindow.unmaximize();
   } else {

@@ -45,6 +45,9 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
   Square,
   Smartphone,
   Trash2,
@@ -92,6 +95,7 @@ import {
   includeCurrentModel,
 } from "@shared/models";
 import { getAgentActionDisplayDescription } from "@shared/agent-actions";
+import type { AgentPermissionMode } from "@shared/agent-permissions";
 import {
   getProcessGroupState,
   getVisibleProcessEntries,
@@ -245,6 +249,7 @@ const DEMO_CONFIG: RemoteSessionConfig = {
   model: { id: "gpt-5.6", name: "GPT-5.6", provider: "openai", reasoning: true, supportsImages: true },
   thinkingLevel: "high",
   planModeEnabled: true,
+  permissionMode: "auto",
   availableModels: [
     { id: "gpt-5.6", name: "GPT-5.6", provider: "openai", reasoning: true, supportsImages: true },
     { id: "gpt-5.4", name: "GPT-5.4", provider: "openai", reasoning: true, supportsImages: true },
@@ -253,8 +258,8 @@ const DEMO_CONFIG: RemoteSessionConfig = {
   ],
 };
 const DEMO_AGENTS: RemoteAgent[] = [
-  { id: "codex", name: "Codex", description: "OpenAI Codex agent", runtime: "cli", requiresProviderActivation: true, supportsGuidance: true, supportsActions: true },
-  { id: "pi", name: "Pi", description: "Pi coding agent", runtime: "sdk", supportsGuidance: true },
+  { id: "codex", name: "Codex", description: "OpenAI Codex agent", runtime: "cli", requiresProviderActivation: true, supportsGuidance: true, supportsActions: true, supportsPermissions: true },
+  { id: "pi", name: "Pi", description: "Pi coding agent", runtime: "sdk", supportsGuidance: true, supportsPermissions: true },
   { id: "opencode", name: "OpenCode", description: "OpenCode agent", runtime: "cli" },
 ];
 const DEMO_ACTIONS: RemoteAgentAction[] = [
@@ -503,6 +508,87 @@ function MobileThinkingPicker({
               <span>{level.label}</span>
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MobilePermissionPicker({
+  value,
+  disabled,
+  onSelect,
+}: {
+  value: AgentPermissionMode;
+  disabled: boolean;
+  onSelect: (mode: AgentPermissionMode) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const options: Array<{
+    mode: AgentPermissionMode;
+    label: string;
+    description: string;
+    icon: typeof Shield;
+  }> = [
+    { mode: "ask", label: "请求权限", description: "敏感操作执行前都先询问", icon: Shield },
+    { mode: "auto", label: "自动权限", description: "低风险自动执行，高风险先询问", icon: ShieldCheck },
+    { mode: "full-access", label: "完全访问", description: "不再询问，可执行高风险操作", icon: ShieldAlert },
+  ];
+  const selected = options.find((option) => option.mode === value) || options[1];
+  const SelectedIcon = selected.icon;
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  return (
+    <div ref={rootRef} className={`permission-picker ${open ? "open" : ""}`}>
+      <button
+        type="button"
+        className={`permission-picker-trigger ${value === "full-access" ? "danger" : ""}`}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="设置 Agent 权限"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <SelectedIcon size={14} />
+        <span>{selected.label}</span>
+        <ChevronDown size={10} />
+      </button>
+      {open && (
+        <div className="permission-picker-menu" role="menu" aria-label="Agent 权限模式">
+          <strong>Agent 权限</strong>
+          {options.map((option) => {
+            const Icon = option.icon;
+            return (
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={option.mode === value}
+                className={`permission-option ${option.mode === value ? "active" : ""} ${option.mode === "full-access" ? "danger" : ""}`}
+                key={option.mode}
+                onClick={() => {
+                  setOpen(false);
+                  onSelect(option.mode);
+                }}
+              >
+                <Icon size={16} />
+                <span><b>{option.label}</b><small>{option.description}</small></span>
+                {option.mode === value && <Check className="permission-check" size={14} />}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -1200,6 +1286,75 @@ function AndroidUpdateDialog({
         </footer>
       </section>
     </div>
+  );
+}
+
+function Confirmation({
+  interaction,
+  disabled,
+  onRespond,
+}: {
+  interaction: RemoteInteraction;
+  disabled: boolean;
+  onRespond: (confirmed: boolean) => void;
+}) {
+  return (
+    <section className="confirmation" role="alertdialog" aria-modal="false">
+      <div className="confirmation-heading">
+        <ShieldAlert size={17} />
+        <strong>{interaction.title || "Agent 请求权限"}</strong>
+      </div>
+      {interaction.description && <pre>{interaction.description}</pre>}
+      <div className="confirmation-actions">
+        <button type="button" className="secondary" disabled={disabled} onClick={() => onRespond(false)}>拒绝</button>
+        <button type="button" disabled={disabled} onClick={() => onRespond(true)}>允许</button>
+      </div>
+    </section>
+  );
+}
+
+function PermissionChoice({
+  interaction,
+  disabled,
+  onRespond,
+}: {
+  interaction: RemoteInteraction;
+  disabled: boolean;
+  onRespond: (answers: unknown[], value: string) => void;
+}) {
+  const question = interaction.questions[0];
+  return (
+    <section className="confirmation" role="alertdialog" aria-modal="false">
+      <div className="confirmation-heading">
+        <ShieldAlert size={17} />
+        <strong>{interaction.title || "Agent 请求权限"}</strong>
+      </div>
+      {(interaction.description || question?.question) && <pre>{interaction.description || question?.question}</pre>}
+      <div className="confirmation-actions">
+        {(question?.options || []).map((option) => {
+          const value = String(option.value || option.label);
+          const rejecting = ["reject", "deny", "cancel"].includes(value.toLowerCase());
+          const answers = [{
+            id: question.id,
+            questionIndex: 0,
+            selected: [option.label],
+            selectedOptions: [{ ...option, value }],
+            values: [value],
+          }];
+          return (
+            <button
+              type="button"
+              className={rejecting ? "secondary" : undefined}
+              disabled={disabled}
+              key={`${value}:${option.label}`}
+              onClick={() => onRespond(answers, value)}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -2316,20 +2471,39 @@ export default function App() {
   }, [composerAddMenuOpen]);
 
   useEffect(() => {
-    if (demoMode || !hostsLoaded || activeHost || hosts.length === 0) return;
+    // Pause availability updates while editing a desktop. In mobile WebView,
+    // the periodic state update can otherwise repaint the controlled form and
+    // make an in-progress note appear to reset while typing.
+    if (demoMode || !hostsLoaded || activeHost || editingHostId || hosts.length === 0) return;
     let disposed = false;
+    let probing = false;
 
     const probeSavedHosts = async (showChecking: boolean) => {
+      if (disposed || probing) return;
+      probing = true;
       if (showChecking) {
         setHostAvailability((current) => Object.fromEntries(
           hosts.map((host) => [host.id, current[host.id] || "checking"]),
         ));
       }
-      const results = await Promise.all(hosts.map(async (host) => [
-        host.id,
-        await probeHostAvailability(host),
-      ] as const));
-      if (!disposed) setHostAvailability(Object.fromEntries(results));
+      try {
+        const results = await Promise.all(hosts.map(async (host) => [
+          host.id,
+          await probeHostAvailability(host),
+        ] as const));
+        if (!disposed) {
+          const next = Object.fromEntries(results);
+          setHostAvailability((current) => {
+            const currentKeys = Object.keys(current);
+            const nextKeys = Object.keys(next);
+            if (currentKeys.length === nextKeys.length
+              && nextKeys.every((id) => current[id] === next[id])) return current;
+            return next;
+          });
+        }
+      } finally {
+        probing = false;
+      }
     };
 
     void probeSavedHosts(true);
@@ -2343,7 +2517,7 @@ export default function App() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [activeHost, demoMode, hosts, hostsLoaded]);
+  }, [activeHost, demoMode, editingHostId, hosts, hostsLoaded]);
 
   const pairFromLink = useCallback(async (link: string) => {
     setPairingBusy(true);
@@ -3118,6 +3292,7 @@ export default function App() {
           clientMessageId,
           content,
           planModeEnabled: config?.planModeEnabled === true,
+          permissionMode: config?.permissionMode || "auto",
           images: pendingImages.map(({ preview: _preview, ...image }) => image),
           sessionReferences: optimisticReferences.map(({ sourceSessionId }) => ({ sourceSessionId })),
           action,
@@ -3162,11 +3337,14 @@ export default function App() {
     }
   }, [activeHost, composer, composerComposition, configs, demoMode, pendingAction, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
 
-  const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false) => {
+  const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false, confirmed?: boolean) => {
     if (!selectedSessionId || !selectedInteraction) return;
+    const normalizedInteractionMethod = selectedInteraction.method?.toLowerCase() || "";
+    const isConfirmation = normalizedInteractionMethod === "confirm";
+    const isPermissionChoice = !isConfirmation && normalizedInteractionMethod.includes("permission");
     if (demoMode) {
       setInteractions((current) => ({ ...current, [selectedSessionId]: null }));
-      if (!cancelled) {
+      if (!cancelled && !isConfirmation && !isPermissionChoice) {
         followMessageBottomRef.current = false;
         returningToBottomRef.current = false;
         setMessages((current) => ({
@@ -3191,6 +3369,7 @@ export default function App() {
         requestId: selectedInteraction.requestId,
         method: selectedInteraction.method,
         cancelled,
+        confirmed,
         text,
         answers,
       });
@@ -3758,12 +3937,26 @@ export default function App() {
           )}
 
           {selectedInteraction && (
-            <Questionnaire
-              key={`${selected.session.id}:${selectedInteraction.requestId || selectedInteraction.questions.map((question) => question.question).join("|")}`}
-              interaction={selectedInteraction}
-              disabled={commandBusy}
-              onSubmit={(answers, text, cancelled) => void submitInteraction(answers, text, cancelled)}
-            />
+            selectedInteraction.method?.toLowerCase() === "confirm"
+              ? <Confirmation
+                  key={`${selected.session.id}:${selectedInteraction.requestId || "confirm"}`}
+                  interaction={selectedInteraction}
+                  disabled={commandBusy}
+                  onRespond={(confirmed) => void submitInteraction([], confirmed ? "允许" : "拒绝", false, confirmed)}
+                />
+              : selectedInteraction.method?.toLowerCase().includes("permission")
+                ? <PermissionChoice
+                    key={`${selected.session.id}:${selectedInteraction.requestId || "permission"}`}
+                    interaction={selectedInteraction}
+                    disabled={commandBusy}
+                    onRespond={(answers, value) => void submitInteraction(answers, value)}
+                  />
+              : <Questionnaire
+                  key={`${selected.session.id}:${selectedInteraction.requestId || selectedInteraction.questions.map((question) => question.question).join("|")}`}
+                  interaction={selectedInteraction}
+                  disabled={commandBusy}
+                  onSubmit={(answers, text, cancelled) => void submitInteraction(answers, text, cancelled)}
+                />
           )}
 
           <footer className="composer">
@@ -3882,6 +4075,13 @@ export default function App() {
                 <ListChecks size={14} />
                 <span>Plan</span>
               </button>
+              {selectedAgent?.supportsPermissions === true && (
+                <MobilePermissionPicker
+                  value={selectedConfig?.permissionMode || "auto"}
+                  disabled={commandBusy}
+                  onSelect={(mode) => void runCommand<{ mode: AgentPermissionMode }>("settings.setPermissionMode", { mode }).then(({ mode: nextMode }) => setConfigs((current) => Object.fromEntries(Object.entries(current).map(([id, config]) => [id, { ...config, permissionMode: nextMode }] ))))}
+                />
+              )}
               <MobileModelPicker
                 key={selected.session.id}
                 agentName={selectedAgent?.name || selected.session.agentId}

@@ -22,7 +22,7 @@ interface AgentModel {
 
 interface AgentSendOptions {
   planModeEnabled?: boolean;
-  permissionMode?: "plan" | "full-access";
+  permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   displayMessage?: string;
   clientMessageId?: string;
   action?: AgentActionInvocation;
@@ -256,7 +256,7 @@ export class PiSDKAgent {
       message,
       images,
       planModeEnabled: !!options?.planModeEnabled,
-      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+      permissionMode: options?.permissionMode || "auto",
       action: options?.action,
     });
   }
@@ -733,6 +733,7 @@ export class PiSDKAgent {
       requestId,
       method: method === "custom" ? kind : method,
       title,
+      message: optionalString(requestRecord.message),
       detail: request,
       questions: method === "custom" ? requestRecord.questions : undefined,
       toolName: requestRecord.toolName,

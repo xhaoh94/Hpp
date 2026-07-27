@@ -13,6 +13,7 @@ import type {
 } from "@/types";
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { isAgentActionInvocation } from "@shared/agent-actions";
+import { normalizeAgentPermissionMode } from "@shared/agent-permissions";
 
 export type RemoteCommandContext = {
   pendingInteraction: PendingUIResponse;
@@ -25,11 +26,12 @@ const getString = (value: unknown) => typeof value === "string" ? value : "";
 async function getSessionConfig(sessionId: string, includeModels = false): Promise<RemoteSessionConfig> {
   const state = await SessionCommandCoordinator.getSessionCommandConfig(sessionId, includeModels);
   const settings = await window.electronAPI.loadData("settings").catch(() => null) as
-    { general?: { planModeEnabled?: unknown } } | null;
+    { general?: { planModeEnabled?: unknown; permissionMode?: unknown } } | null;
   return {
     model: state.model,
     thinkingLevel: state.thinkingLevel,
     planModeEnabled: settings?.general?.planModeEnabled === true,
+    permissionMode: normalizeAgentPermissionMode(settings?.general?.permissionMode),
     availableModels: state.availableModels,
   };
 }
@@ -155,6 +157,7 @@ async function sendRemoteMessage(payload: Record<string, unknown>) {
       displayContent: prepared.displayContent || referenceContext.displayText,
       editableDraft: prepared.editableDraft ? { ...prepared.editableDraft, text: content } : undefined,
       planModeEnabled: payload.planModeEnabled === true,
+      permissionMode: normalizeAgentPermissionMode(payload.permissionMode),
     },
   });
   return { ...result, agentId: referenceContext.session.agentId };
@@ -227,10 +230,19 @@ async function setRemotePlanMode(payload: Record<string, unknown>) {
   return result;
 }
 
+async function setRemotePermissionMode(payload: Record<string, unknown>) {
+  const result = await SessionCommandCoordinator.setPermissionMode(
+    normalizeAgentPermissionMode(payload.mode),
+  );
+  for (const sessionId of SessionCommandCoordinator.getAllSessionCommandIds()) void publishSessionConfig(sessionId);
+  return result;
+}
+
 async function respondToRemoteInteraction(payload: Record<string, unknown>, context: RemoteCommandContext) {
   return SessionCommandCoordinator.respondToInteraction({
     sessionId: getString(payload.sessionId),
     cancelled: payload.cancelled === true,
+    confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : undefined,
     answers: Array.isArray(payload.answers) ? payload.answers : undefined,
     text: getString(payload.text),
   }, {
@@ -293,6 +305,7 @@ export async function executeRemoteSessionCommand(
       return { actions: await SessionCommandCoordinator.getActions(sessionId, payload.reload === true) };
     }
     case "settings.setPlanMode": return setRemotePlanMode(payload);
+    case "settings.setPermissionMode": return setRemotePermissionMode(payload);
     case "interaction.respond": return respondToRemoteInteraction(payload, context);
     default: throw new Error("UNSUPPORTED_REMOTE_COMMAND");
   }

@@ -106,6 +106,16 @@ export function handleToolEndEvent(
   const toolWarning = event.isError === true;
   const toolFiles = getToolProcessFiles(event);
   const preservedToolFiles = toolFiles.length > 0 ? toolFiles : runtime.activeToolFile[key] || [];
+  const displayedToolFiles = toolWarning
+    ? preservedToolFiles.filter((file) =>
+        file.action !== "edited" &&
+        file.action !== "written" &&
+        file.action !== "modified" &&
+        typeof file.patch !== "string" &&
+        typeof file.additions !== "number" &&
+        typeof file.deletions !== "number"
+      )
+    : preservedToolFiles;
   const changedToolFiles = preservedToolFiles
     .filter((file) =>
       file.action === "edited" ||
@@ -139,13 +149,13 @@ export function handleToolEndEvent(
   const toolDetail = getToolDetail(event);
   const toolSummary = getToolSummary({
     ...event,
-    files: preservedToolFiles.length > 0 ? preservedToolFiles : event.files,
+    files: displayedToolFiles.length > 0 ? displayedToolFiles : undefined,
   }, false);
   const entryType: AgentProcessEntry["type"] = "tool";
   const patch = {
     title: toolSummary,
     detail: toolDetail || undefined,
-    files: preservedToolFiles.length > 0 ? preservedToolFiles : undefined,
+    files: displayedToolFiles.length > 0 ? displayedToolFiles : undefined,
     toolKind: normalizeToolKind(event.toolKind),
     command: typeof event.command === "string" ? event.command : undefined,
     exitCode: typeof event.exitCode === "number" ? event.exitCode : undefined,

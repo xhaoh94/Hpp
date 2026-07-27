@@ -17,6 +17,7 @@ const copyAgentWorkerPlugin = () => ({
       ["electron/plugin-backends/codex/command-invocation.mjs", "command-invocation.mjs"],
       ["electron/plugin-backends/pi/worker.mjs", "pi-sdk-worker.mjs"],
       ["electron/plugin-backends/pi/pi-fork-utils.mjs", "pi-fork-utils.mjs"],
+      ["electron/plugin-backends/pi/shell-environment.mjs", "shell-environment.mjs"],
       ["electron/plugin-backends/claude/worker.mjs", "claude-sdk-worker.mjs"],
       ["electron/plugin-backends/claude/openai-anthropic-adapter.mjs", "openai-anthropic-adapter.mjs"],
     ];

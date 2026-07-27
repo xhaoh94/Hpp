@@ -14,6 +14,7 @@ import type {
   RemoteRendererPublish,
   RemoteSessionConfig,
 } from "@/types";
+import { normalizeAgentPermissionMode, type AgentPermissionMode } from "@shared/agent-permissions";
 
 type UseRemoteBridgeOptions = {
   pendingInteraction: PendingUIResponse;
@@ -139,7 +140,11 @@ function getProjectForSession(projects: Project[], sessionId: string) {
   return projects.find((project) => project.sessions.some((session) => session.id === sessionId));
 }
 
-function buildSessionConfig(sessionId: string, planModeEnabled: boolean): RemoteSessionConfig {
+function buildSessionConfig(
+  sessionId: string,
+  planModeEnabled: boolean,
+  permissionMode: AgentPermissionMode,
+): RemoteSessionConfig {
   const chatState = useChatStore.getState();
   return {
     model: getSessionModel(sessionId) || (chatState.activeSessionId === sessionId ? chatState.currentModel : null),
@@ -147,6 +152,7 @@ function buildSessionConfig(sessionId: string, planModeEnabled: boolean): Remote
       chatState.activeSessionId === sessionId ? chatState.thinkingLevel : "medium"
     ),
     planModeEnabled,
+    permissionMode,
     availableModels: chatState.activeSessionId === sessionId ? chatState.availableModels : undefined,
   };
 }
@@ -159,7 +165,11 @@ export function getRemoteSessionTitle(sessionTitle: string, messages: ChatMessag
     : firstUserMessage.content;
 }
 
-function buildCatalog(projects: Project[], planModeEnabled: boolean): RemoteProject[] {
+function buildCatalog(
+  projects: Project[],
+  planModeEnabled: boolean,
+  permissionMode: AgentPermissionMode,
+): RemoteProject[] {
   const statuses = useProjectStore.getState().agentStatuses;
   const messages = useChatStore.getState().sessionMessages;
   return projects.map((project) => ({
@@ -178,7 +188,7 @@ function buildCatalog(projects: Project[], planModeEnabled: boolean): RemoteProj
         sourceSessionId: session.forkedFrom.sourceSessionId,
         sourceTitle: session.forkedFrom.sourceTitle,
       } : undefined,
-      config: buildSessionConfig(session.id, planModeEnabled),
+      config: buildSessionConfig(session.id, planModeEnabled, permissionMode),
     })),
   }));
 }
@@ -189,7 +199,7 @@ export function sanitizeRemoteAgent(agent: {
   desc?: string;
   description?: string;
   runtime: "cli" | "sdk" | "plugin";
-  capabilities?: { providerActivation?: string; guidance?: boolean; actions?: boolean };
+  capabilities?: { providerActivation?: string; guidance?: boolean; actions?: boolean; permissions?: boolean };
 }): RemoteAgent {
   const description = agent.description || agent.desc;
   return {
@@ -202,6 +212,7 @@ export function sanitizeRemoteAgent(agent: {
       : {}),
     ...(agent.capabilities?.guidance === true ? { supportsGuidance: true } : {}),
     ...(agent.capabilities?.actions === true ? { supportsActions: true } : {}),
+    ...(agent.capabilities?.permissions === true ? { supportsPermissions: true } : {}),
   };
 }
 
@@ -211,6 +222,8 @@ export function toRemoteInteraction(value: PendingUIResponse): RemoteInteraction
     sessionId: value.sessionId,
     requestId: value.requestId,
     method: value.method,
+    ...(value.title ? { title: value.title } : {}),
+    ...(value.description ? { description: value.description } : {}),
     questions: value.questions || [],
   };
 }
@@ -236,15 +249,18 @@ export function shouldFlushPendingMessageUpdate(
 
 export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abortSession }: UseRemoteBridgeOptions) {
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
+  const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("auto");
   const pendingInteractionRef = useRef(pendingInteraction);
   const publishedInteractionSessionRef = useRef<string | null>(null);
   const planModeRef = useRef(false);
+  const permissionModeRef = useRef<AgentPermissionMode>("auto");
   const remoteAgentsRef = useRef<RemoteAgent[]>([]);
   const messageTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingMessageUpdatesRef = useRef(new Map<string, RemoteRendererPublish>());
 
   pendingInteractionRef.current = pendingInteraction;
   planModeRef.current = planModeEnabled;
+  permissionModeRef.current = permissionMode;
 
   const publish = useCallback((update: RemoteRendererPublish) => {
     window.electronAPI.remotePublish(update);
@@ -264,12 +280,12 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
         interactions[session.id] = pendingInteractionRef.current?.sessionId === session.id
           ? toRemoteInteraction(pendingInteractionRef.current)
           : null;
-        configs[session.id] = buildSessionConfig(session.id, planModeRef.current);
+        configs[session.id] = buildSessionConfig(session.id, planModeRef.current, permissionModeRef.current);
       }
     }
     publish({
       type: "snapshot",
-      catalog: buildCatalog(projectState.projects, planModeRef.current),
+      catalog: buildCatalog(projectState.projects, planModeRef.current, permissionModeRef.current),
       agents: remoteAgentsRef.current,
       messages,
       queues,
@@ -297,7 +313,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
       const projectState = useProjectStore.getState();
       publish({
         type: "catalog",
-        catalog: buildCatalog(projectState.projects, planModeRef.current),
+        catalog: buildCatalog(projectState.projects, planModeRef.current, permissionModeRef.current),
         agents: remoteAgentsRef.current,
       });
     };
@@ -331,19 +347,33 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
         : {};
       if (cancelled) return;
       const enabled = general.planModeEnabled === true;
+      const nextPermissionMode = normalizeAgentPermissionMode(general.permissionMode);
       setPlanModeEnabled(enabled);
+      setPermissionMode(nextPermissionMode);
       planModeRef.current = enabled;
+      permissionModeRef.current = nextPermissionMode;
       setTimeout(publishSnapshot, 0);
     });
     const onSettings = (event: Event) => {
-      const detail = (event as CustomEvent<{ planModeEnabled?: boolean }>).detail;
-      if (typeof detail?.planModeEnabled !== "boolean") return;
-      setPlanModeEnabled(detail.planModeEnabled);
-      planModeRef.current = detail.planModeEnabled;
+      const detail = (event as CustomEvent<{
+        planModeEnabled?: boolean;
+        permissionMode?: AgentPermissionMode;
+      }>).detail;
+      const hasPlanUpdate = typeof detail?.planModeEnabled === "boolean";
+      const hasPermissionUpdate = detail?.permissionMode !== undefined;
+      if (!hasPlanUpdate && !hasPermissionUpdate) return;
+      const nextPlanModeEnabled = hasPlanUpdate ? detail.planModeEnabled! : planModeRef.current;
+      const nextPermissionMode = hasPermissionUpdate
+        ? normalizeAgentPermissionMode(detail.permissionMode)
+        : permissionModeRef.current;
+      setPlanModeEnabled(nextPlanModeEnabled);
+      setPermissionMode(nextPermissionMode);
+      planModeRef.current = nextPlanModeEnabled;
+      permissionModeRef.current = nextPermissionMode;
       const projectState = useProjectStore.getState();
       publish({
         type: "catalog",
-        catalog: buildCatalog(projectState.projects, detail.planModeEnabled),
+        catalog: buildCatalog(projectState.projects, nextPlanModeEnabled, nextPermissionMode),
         agents: remoteAgentsRef.current,
       });
       for (const project of projectState.projects) {
@@ -351,7 +381,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
           publish({
             type: "session.config",
             sessionId: session.id,
-            config: buildSessionConfig(session.id, detail.planModeEnabled),
+            config: buildSessionConfig(session.id, nextPlanModeEnabled, nextPermissionMode),
           });
         }
       }
@@ -371,7 +401,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
       publish({
         type: "session.config",
         sessionId,
-        config: buildSessionConfig(sessionId, planModeRef.current),
+        config: buildSessionConfig(sessionId, planModeRef.current, permissionModeRef.current),
       });
     };
     window.addEventListener(SESSION_CONFIG_UPDATED_EVENT, onSessionConfigUpdated);
@@ -385,7 +415,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
       if (state.projects === previousProjects && state.agentStatuses === previousStatuses) return;
       previousProjects = state.projects;
       previousStatuses = state.agentStatuses;
-      publish({ type: "catalog", catalog: buildCatalog(state.projects, planModeRef.current), agents: remoteAgentsRef.current });
+      publish({ type: "catalog", catalog: buildCatalog(state.projects, planModeRef.current, permissionModeRef.current), agents: remoteAgentsRef.current });
     });
     return unsubscribe;
   }, [publish]);
@@ -438,7 +468,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
           }
         }
         if (catalogTitleChanged) {
-          publish({ type: "catalog", catalog: buildCatalog(projects, planModeRef.current), agents: remoteAgentsRef.current });
+          publish({ type: "catalog", catalog: buildCatalog(projects, planModeRef.current, permissionModeRef.current), agents: remoteAgentsRef.current });
         }
         previousMessages = state.sessionMessages;
       }
@@ -463,7 +493,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
           publish({
             type: "session.config",
             sessionId: state.activeSessionId,
-            config: buildSessionConfig(state.activeSessionId, planModeRef.current),
+            config: buildSessionConfig(state.activeSessionId, planModeRef.current, permissionModeRef.current),
           });
         }
       }

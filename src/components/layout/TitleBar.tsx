@@ -66,14 +66,14 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
     setMaximized((prev) => !prev)
   }, [])
 
-  // Handle double-click on title bar (works on Wayland/Niri)
-  const lastClickTime = useRef(0)
   const handleTitleBarDoubleClick = useCallback((e: React.MouseEvent) => {
+    // Niri owns column sizing; client-side maximize state is not reliable there.
+    if (isNiri) return
     // Ignore if clicking on buttons or interactive elements
     const target = e.target as HTMLElement
     if (target.closest('button') || target.closest('.titlebar-controls')) return
     handleToggleMaximize()
-  }, [handleToggleMaximize])
+  }, [handleToggleMaximize, isNiri])
 
   const handleClose = useCallback(() => {
     window.electronAPI?.close()
@@ -193,27 +193,29 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
 
       <div className="titlebar-controls">
         {!isNiri && (
-          <button
-            className="titlebar-btn titlebar-btn-minimize"
-            onClick={handleMinimize}
-            title="最小化"
-            aria-label="最小化窗口"
-          >
-            <Minus size={15} strokeWidth={1.5} />
-          </button>
+          <>
+            <button
+              className="titlebar-btn titlebar-btn-minimize"
+              onClick={handleMinimize}
+              title="最小化"
+              aria-label="最小化窗口"
+            >
+              <Minus size={15} strokeWidth={1.5} />
+            </button>
+            <button
+              className="titlebar-btn titlebar-btn-maximize"
+              onClick={handleToggleMaximize}
+              title={maximized ? '还原' : '最大化'}
+              aria-label={maximized ? '还原窗口' : '最大化窗口'}
+            >
+              {maximized ? (
+                <Copy size={13} strokeWidth={1.5} />
+              ) : (
+                <Square size={12} strokeWidth={1.5} />
+              )}
+            </button>
+          </>
         )}
-        <button
-          className="titlebar-btn titlebar-btn-maximize"
-          onClick={handleToggleMaximize}
-          title={maximized ? '还原' : '最大化'}
-          aria-label={maximized ? '还原窗口' : '最大化窗口'}
-        >
-          {maximized ? (
-            <Copy size={13} strokeWidth={1.5} />
-          ) : (
-            <Square size={12} strokeWidth={1.5} />
-          )}
-        </button>
         <button
           className="titlebar-btn titlebar-btn-close"
           onClick={handleClose}

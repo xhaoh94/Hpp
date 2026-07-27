@@ -553,8 +553,8 @@ export const normalizeToolEvent = (
   };
 };
 
-export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "patch" | "filePath" | "additions" | "deletions">): NormalizedFileDiff[] => {
-  if (!payload.patch || !payload.filePath) return [];
+export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "patch" | "filePath" | "additions" | "deletions" | "isError">): NormalizedFileDiff[] => {
+  if (payload.isError || !payload.patch || !payload.filePath) return [];
   return [{
     file: payload.filePath,
     patch: payload.patch,
@@ -622,6 +622,8 @@ export const normalizeQuestionProcessEvent = (data: unknown) => {
     detail,
     prompt: prompt || undefined,
     question: dataRecord.question || detailObject.question || argsObject.question || inputObject.question || undefined,
+    message: dataRecord.message || detailObject.message || argsObject.message || inputObject.message || undefined,
+    description: dataRecord.description || detailObject.description || undefined,
     questions,
     options,
     state: dataRecord.state || "running",

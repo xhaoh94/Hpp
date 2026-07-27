@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDiffsFromToolEvent,
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
   unwrapToolText,
@@ -83,6 +84,16 @@ describe("process event normalization", () => {
         status: "modified",
       }],
     });
+  });
+
+  it("does not expose diffs from failed tool results", () => {
+    expect(buildDiffsFromToolEvent({
+      filePath: "src/App.tsx",
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      additions: 1,
+      deletions: 1,
+      isError: true,
+    })).toEqual([]);
   });
 
   it("normalizes Claude Code gitDiff and structuredPatch outputs", () => {

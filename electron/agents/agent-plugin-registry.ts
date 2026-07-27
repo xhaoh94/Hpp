@@ -95,6 +95,7 @@ const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
+  permissions: false,
   guidance: false,
   fork: false,
   actions: false,
@@ -227,6 +228,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
   return {
     planMode: normalizePlanMode(input.planMode),
+    permissions: input.permissions === true,
     guidance: input.guidance === true,
     fork: input.fork === true,
     actions: input.actions === true,
@@ -887,6 +889,22 @@ export class AgentPluginRegistry {
     const record = this.pluginRecords.get(agentId);
     if (!record) throw new Error(`Agent 插件未安装：${agentId}`);
     return this.createPluginBackend(record, sessionId, options);
+  }
+
+  async inspectInstallCandidate(pluginPath: string): Promise<AgentDescriptor> {
+    const sourcePath = resolve(pluginPath);
+    const info = await stat(sourcePath);
+    let manifest: RawAgentPluginManifest;
+
+    if (info.isDirectory()) {
+      manifest = await this.readManifestFromDirectory(sourcePath);
+    } else if (info.isFile() && extname(sourcePath).toLowerCase() === ".zip") {
+      manifest = findZipManifest(new AdmZip(sourcePath)).manifest;
+    } else {
+      throw new Error("请选择插件目录或 .zip 文件。");
+    }
+
+    return descriptorFromManifest(manifest, "plugin");
   }
 
   async installFromPath(pluginPath: string, options: InstallOptions = {}): Promise<AgentPluginInstallResult> {

@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const testState = vi.hoisted(() => ({
   createBackend: vi.fn(),
+  downloadOfficialPluginZip: vi.fn(),
   getCapabilities: vi.fn(),
   getStatus: vi.fn(),
+  inspectInstallCandidate: vi.fn(),
   installFromPath: vi.fn(),
   listAgents: vi.fn(),
+  listOfficialAgentPlugins: vi.fn(),
   removePlugin: vi.fn(),
   reloadRegistry: vi.fn(),
   shutdownRegistry: vi.fn(),
@@ -32,6 +35,7 @@ vi.mock("./agent-plugin-registry", () => ({
     createBackend: testState.createBackend,
     getCapabilities: testState.getCapabilities,
     getStatus: testState.getStatus,
+    inspectInstallCandidate: testState.inspectInstallCandidate,
     installFromPath: testState.installFromPath,
     listAgents: testState.listAgents,
     removePlugin: testState.removePlugin,
@@ -42,8 +46,8 @@ vi.mock("./agent-plugin-registry", () => ({
 }));
 
 vi.mock("./official-agent-plugins", () => ({
-  downloadOfficialPluginZip: vi.fn(),
-  listOfficialAgentPlugins: vi.fn(),
+  downloadOfficialPluginZip: testState.downloadOfficialPluginZip,
+  listOfficialAgentPlugins: testState.listOfficialAgentPlugins,
 }));
 
 vi.mock("./agent-config", () => ({
@@ -106,11 +110,35 @@ function createBackend(idle = true) {
   };
 }
 
+function createOfficialPlugin(id = "pi") {
+  return {
+    id,
+    name: id === "pi" ? "Pi" : id,
+    version: "1.2.2",
+    minHppVersion: "0.0.2",
+    compatible: true,
+    runtime: "sdk" as const,
+    order: 20,
+    capabilities: {
+      planMode: "prompt" as const,
+      permissions: true,
+      guidance: true,
+      fork: true,
+      actions: true,
+      configuration: "none" as const,
+      providerActivation: "none" as const,
+    },
+    zipFile: `${id}.zip`,
+    downloadUrl: `https://example.test/${id}.zip`,
+  };
+}
+
 describe("AgentManager runtime updates", () => {
   beforeEach(() => {
     testState.createBackend.mockReset();
     testState.getCapabilities.mockReset().mockResolvedValue({
       planMode: "prompt",
+      permissions: true,
       guidance: false,
       fork: false,
       configuration: "none",
@@ -204,14 +232,21 @@ describe("AgentManager plugin removal", () => {
     testState.createBackend.mockReset();
     testState.getCapabilities.mockReset().mockResolvedValue({
       planMode: "prompt",
+      permissions: true,
       guidance: false,
       fork: false,
       configuration: "none",
       providerActivation: "none",
     });
     testState.getStatus.mockReset().mockResolvedValue({ installed: true });
+    testState.downloadOfficialPluginZip.mockReset().mockResolvedValue("C:\\temp\\pi.zip");
+    testState.inspectInstallCandidate.mockReset().mockResolvedValue({ id: "codex" });
     testState.installFromPath.mockReset();
     testState.listAgents.mockReset().mockResolvedValue([]);
+    testState.listOfficialAgentPlugins.mockReset().mockResolvedValue({
+      success: true,
+      plugins: [createOfficialPlugin()],
+    });
     testState.removePlugin.mockReset().mockResolvedValue({ success: true, agents: [] });
     testState.reloadRegistry.mockReset().mockResolvedValue([]);
     testState.shutdownRegistry.mockReset();
@@ -221,6 +256,72 @@ describe("AgentManager plugin removal", () => {
 
   afterEach(async () => {
     await shutdownAgentRuntime();
+  });
+
+  it("updates an official plugin by suspending and restoring idle sessions", async () => {
+    const idleBackend = createBackend(true);
+    const restoredBackend = createBackend(true);
+    testState.createBackend
+      .mockResolvedValueOnce(idleBackend)
+      .mockResolvedValueOnce(restoredBackend);
+    testState.installFromPath.mockResolvedValueOnce({ success: true, agents: [], replaced: true });
+
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "idle-pi-session", "pi-session.json");
+    await expect(getHandler("agentPlugin:installOfficial")({}, "pi")).resolves.toMatchObject({
+      success: true,
+      replaced: true,
+      detachedSessionIds: [],
+    });
+
+    expect(idleBackend.dispose).toHaveBeenCalledTimes(1);
+    expect(testState.installFromPath).toHaveBeenCalledWith("C:\\temp\\pi.zip", {
+      expectedAgentId: "pi",
+      canReplace: expect.any(Function),
+    });
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "pi-session.json");
+    expect(getHandler("agent:getSessionState")({}, "idle-pi-session")).toMatchObject({
+      success: true,
+      idle: true,
+    });
+  });
+
+  it("updates a local plugin by suspending and restoring an idle session", async () => {
+    const idleBackend = createBackend(true);
+    const restoredBackend = createBackend(true);
+    testState.createBackend
+      .mockResolvedValueOnce(idleBackend)
+      .mockResolvedValueOnce(restoredBackend);
+    testState.inspectInstallCandidate.mockResolvedValueOnce({ id: "pi" });
+    testState.installFromPath.mockResolvedValueOnce({ success: true, agents: [], replaced: true });
+
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "local-idle-pi", "pi-session.json");
+    await expect(getHandler("agentPlugin:installFromPath")({}, "C:\\plugin\\pi")).resolves.toMatchObject({
+      success: true,
+      replaced: true,
+      detachedSessionIds: [],
+    });
+
+    expect(idleBackend.dispose).toHaveBeenCalledTimes(1);
+    expect(testState.installFromPath).toHaveBeenCalledWith("C:\\plugin\\pi", {
+      expectedAgentId: "pi",
+      canReplace: expect.any(Function),
+    });
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "pi-session.json");
+  });
+
+  it("blocks an official plugin update only while a session is actually running", async () => {
+    const runningBackend = createBackend(false);
+    testState.createBackend.mockResolvedValueOnce(runningBackend);
+
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "running-pi-session");
+    await expect(getHandler("agentPlugin:installOfficial")({}, "pi")).resolves.toMatchObject({
+      success: false,
+      error: "该 Agent 仍有会话正在运行，请等待任务结束后再安装或更新插件。",
+    });
+
+    expect(runningBackend.dispose).not.toHaveBeenCalled();
+    expect(testState.downloadOfficialPluginZip).not.toHaveBeenCalled();
+    expect(testState.installFromPath).not.toHaveBeenCalled();
   });
 
   it("disposes an idle session and allows plugin removal", async () => {
@@ -245,6 +346,59 @@ describe("AgentManager plugin removal", () => {
       idle: true,
       error: "No active agent",
     });
+  });
+
+  it("keeps Plan mode independent from the selected permission mode", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+
+    await getHandler("agent:createSession")({}, "codex", "C:\\project", "permission-session");
+    await expect(getHandler("agent:sendMessage")(
+      {},
+      "inspect the project",
+      undefined,
+      "permission-session",
+      { planModeEnabled: true, permissionMode: "ask", clientMessageId: "client-1" },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(backend.sendMessage).toHaveBeenCalledWith(
+      expect.stringContaining("inspect the project"),
+      undefined,
+      expect.objectContaining({
+        planModeEnabled: false,
+        permissionMode: "ask",
+        clientMessageId: "client-1",
+      }),
+    );
+  });
+
+  it("does not claim to enforce permissions for plugins without an approval hook", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "third-party", "C:\\project", "unprotected-session");
+    testState.getCapabilities.mockResolvedValueOnce({
+      planMode: "prompt",
+      permissions: false,
+      guidance: false,
+      fork: false,
+      actions: false,
+      configuration: "none",
+      providerActivation: "none",
+    });
+
+    await getHandler("agent:sendMessage")(
+      {},
+      "run",
+      undefined,
+      "unprotected-session",
+      { permissionMode: "ask" },
+    );
+
+    expect(backend.sendMessage).toHaveBeenCalledWith(
+      "run",
+      undefined,
+      expect.objectContaining({ permissionMode: "full-access" }),
+    );
   });
 
   it("blocks plugin removal only while a session is truly running", async () => {

@@ -878,6 +878,13 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
 .questionnaire-actions button { min-height: 34px; padding: 0 12px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent-strong); color: #fff; }
 .questionnaire-actions button.secondary { border-color: var(--border); background: var(--bg); color: var(--muted); }
 
+.confirmation { padding: 12px; border-top: 1px solid rgba(245, 158, 11, 0.48); background: rgba(245, 158, 11, 0.08); }
+.confirmation-heading { display: flex; align-items: center; gap: 7px; color: var(--yellow); font-size: 12px; }
+.confirmation pre { max-height: 112px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.confirmation-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 10px; }
+.confirmation-actions button { min-height: 34px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent-strong); color: #fff; }
+.confirmation-actions button.secondary { border-color: var(--border); background: var(--bg); color: var(--muted); }
+
 .composer { padding: 7px 10px calc(env(safe-area-inset-bottom) + 8px); border-top: 1px solid var(--border); background: var(--bg); }
 .composer-preview-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; padding: 0 3px; overflow-x: auto; }
 .composer-preview-chip { display: inline-flex; max-width: min(72vw, 280px); min-width: 0; height: 27px; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 5px 0 7px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--bg); color: var(--text); font-size: 10px; }
@@ -902,6 +909,24 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
 .composer-input-shell textarea:focus-visible { outline: none; }
 .composer-input-shell textarea::placeholder { color: var(--faint); }
 .composer-settings { display: flex; min-width: 0; min-height: 28px; align-items: center; gap: 4px; margin-top: 6px; padding: 0 2px; }
+.permission-picker { position: relative; z-index: 13; flex: 0 0 auto; }
+.permission-picker-trigger { display: inline-flex; height: 28px; align-items: center; gap: 5px; padding: 0 7px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.permission-picker-trigger:hover,
+.permission-picker.open .permission-picker-trigger { background: var(--surface-hover); color: var(--text); }
+.permission-picker-trigger.danger { color: var(--yellow); }
+.permission-picker-trigger:disabled { opacity: 0.45; }
+.permission-picker-menu { position: absolute; bottom: calc(100% + 7px); left: 0; z-index: 50; width: min(292px, calc(100vw - 24px)); overflow: hidden; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.46); }
+.permission-picker-menu > strong { display: block; padding: 6px 8px 8px; color: #808080; font-size: 11px; font-weight: 650; }
+.permission-option { display: grid; width: 100%; min-height: 48px; grid-template-columns: 17px minmax(0, 1fr) 17px; align-items: start; gap: 8px; padding: 8px 7px; border: 0; border-radius: 7px; background: transparent; color: var(--text); text-align: left; }
+.permission-option:hover,
+.permission-option.active { background: var(--surface-hover); color: var(--text); }
+.permission-option > svg:first-child { margin-top: 1px; color: #808080; }
+.permission-option > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.permission-option b { font-size: 12px; font-weight: 650; }
+.permission-option small { color: #808080; font-size: 10px; line-height: 1.4; }
+.permission-option.danger > svg:first-child,
+.permission-option.danger b { color: var(--yellow); }
+.permission-check { align-self: center; color: var(--accent); }
 .model-picker { position: relative; z-index: 12; flex: 0 1 auto; min-width: 0; max-width: min(46vw, 240px); }
 .model-picker-trigger {
   display: grid;
@@ -1090,6 +1115,7 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
   .host-availability-label { display: none; }
   .composer-settings { gap: 2px; }
   .model-picker-trigger,
+  .permission-picker-trigger,
   .reference-toggle,
   .plan-toggle,
   .thinking-picker-trigger { padding-right: 5px; padding-left: 5px; }

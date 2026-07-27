@@ -4,6 +4,7 @@ import type { SharedModel } from "./models";
 import type { ProcessEntryView } from "./process-view";
 import type { QuestionnaireQuestion } from "./questionnaire";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-actions";
+import type { AgentPermissionMode } from "./agent-permissions";
 
 export const REMOTE_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_REMOTE_PORT = 47831;
@@ -32,6 +33,7 @@ export const REMOTE_REQUEST_NAMES = [
   "session.models.get",
   "session.actions.get",
   "settings.setPlanMode",
+  "settings.setPermissionMode",
   "interaction.respond",
 ] as const;
 
@@ -96,6 +98,7 @@ const sessionSendPayloadSchema = z.object({
   clientMessageId: z.string().trim().min(1).max(128),
   content: z.string().max(200_000).default(""),
   planModeEnabled: z.boolean().default(false),
+  permissionMode: z.enum(["ask", "auto", "full-access"]).default("auto"),
   images: z.array(remoteImageSchema).max(MAX_REMOTE_IMAGES).default([]),
   sessionReferences: z.array(remoteSessionReferenceSchema).max(MAX_REMOTE_SESSION_REFERENCES).default([]),
   action: remoteAgentActionSchema.optional(),
@@ -140,12 +143,14 @@ const sessionSetThinkingPayloadSchema = z.object({
 });
 
 const planModePayloadSchema = z.object({ enabled: z.boolean() });
+const permissionModePayloadSchema = z.object({ mode: z.enum(["ask", "auto", "full-access"]) });
 
 const interactionRespondPayloadSchema = z.object({
   sessionId: sessionIdSchema,
   requestId: z.string().trim().max(256).optional(),
   method: z.string().trim().max(256).optional(),
   cancelled: z.boolean().default(false),
+  confirmed: z.boolean().optional(),
   text: z.string().max(200_000).optional(),
   answers: z.array(z.unknown()).max(20).optional(),
 });
@@ -230,6 +235,9 @@ export function parseRemoteRequest(value: unknown): RemoteRequestEnvelope {
     case "settings.setPlanMode":
       payload = planModePayloadSchema.parse(envelope.payload);
       break;
+    case "settings.setPermissionMode":
+      payload = permissionModePayloadSchema.parse(envelope.payload);
+      break;
     case "interaction.respond":
       payload = interactionRespondPayloadSchema.parse(envelope.payload);
       break;
@@ -245,6 +253,7 @@ export interface RemoteSessionConfig {
   model: RemoteModel | null;
   thinkingLevel: string;
   planModeEnabled: boolean;
+  permissionMode: AgentPermissionMode;
   availableModels?: RemoteModel[];
 }
 
@@ -256,6 +265,7 @@ export interface RemoteAgent {
   requiresProviderActivation?: boolean;
   supportsGuidance?: boolean;
   supportsActions?: boolean;
+  supportsPermissions?: boolean;
 }
 
 export interface RemoteAgentAction extends AgentActionCatalogEntry {}
@@ -352,6 +362,8 @@ export interface RemoteInteraction {
   sessionId: string;
   requestId?: string;
   method?: string;
+  title?: string;
+  description?: string;
   questions: QuestionnaireQuestion[];
 }
 

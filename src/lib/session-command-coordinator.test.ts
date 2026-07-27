@@ -39,6 +39,7 @@ const message: PreparedSessionMessage = {
   displayContent: "hello",
   sendContent: "hello",
   planModeEnabled: true,
+  permissionMode: "ask",
 };
 
 describe("SessionCommandCoordinator", () => {
@@ -60,6 +61,7 @@ describe("SessionCommandCoordinator", () => {
       removable: false,
       capabilities: {
         planMode: "native",
+        permissions: true,
         guidance: true,
         fork: false,
         actions: true,
@@ -133,7 +135,7 @@ describe("SessionCommandCoordinator", () => {
       "hello",
       undefined,
       "session-one",
-      { planModeEnabled: true, clientMessageId: "client-message" },
+      { planModeEnabled: true, permissionMode: "ask", clientMessageId: "client-message" },
     );
   });
 
@@ -147,7 +149,13 @@ describe("SessionCommandCoordinator", () => {
 
     expect(useChatStore.getState().messages).toEqual([]);
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
-      expect.objectContaining({ id: "queued-message", editableContent: "hello", displayContent: "hello", status: "queued" }),
+      expect.objectContaining({
+        id: "queued-message",
+        editableContent: "hello",
+        displayContent: "hello",
+        permissionMode: "ask",
+        status: "queued",
+      }),
     ]);
     expect(electronAPI.agentGetModels).not.toHaveBeenCalled();
     expect(electronAPI.agentSetModel).not.toHaveBeenCalled();
@@ -217,6 +225,34 @@ describe("SessionCommandCoordinator", () => {
       sessionId: "session-one",
       cancelled: true,
       text: "",
+    }));
+    expect(clearPendingInteraction).toHaveBeenCalledWith("session-one");
+    expect(useChatStore.getState().messages).toEqual([]);
+  });
+
+  it("sends remote confirmations without adding a questionnaire answer bubble", async () => {
+    const clearPendingInteraction = vi.fn();
+
+    await expect(SessionCommandCoordinator.respondToInteraction({
+      sessionId: "session-one",
+      confirmed: true,
+    }, {
+      pendingInteraction: {
+        sessionId: "session-one",
+        requestId: "permission-one",
+        method: "confirm",
+        title: "Pi 请求权限",
+      },
+      clearPendingInteraction,
+    })).resolves.toEqual({ cancelled: false });
+
+    expect(electronAPI.agentSendUIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "session-one",
+      id: "permission-one",
+      method: "confirm",
+      cancelled: false,
+      confirmed: true,
+      text: "允许",
     }));
     expect(clearPendingInteraction).toHaveBeenCalledWith("session-one");
     expect(useChatStore.getState().messages).toEqual([]);

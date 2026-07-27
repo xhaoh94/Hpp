@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, FileDiff as FileDiffIcon, Loader2, Undo2, X } from "lucide-react";
 import { buildDiffSummary, type DiffFileSummary, type DiffLike } from "@shared/diff-summary";
 
@@ -164,7 +165,7 @@ export function DiffBlock({ diffs, projectPath }: DiffBlockProps) {
         })}
       </div>
 
-      {activeFile && (
+      {activeFile && createPortal(
         <div
           className="chat-diff-popover-backdrop"
           onMouseDown={() => setActiveFile(null)}
@@ -173,7 +174,7 @@ export function DiffBlock({ diffs, projectPath }: DiffBlockProps) {
             ref={popoverRef}
             className="chat-diff-popover"
             role="dialog"
-            aria-modal="false"
+            aria-modal="true"
             aria-label={`${activeFile.file} diff`}
             onMouseDown={(event) => event.stopPropagation()}
           >
@@ -197,7 +198,8 @@ export function DiffBlock({ diffs, projectPath }: DiffBlockProps) {
               {renderDiffLines(activeFile.file, activeFile.patches)}
             </pre>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {hiddenCount > 0 && (

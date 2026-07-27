@@ -41,6 +41,7 @@ import {
   normalizeFileFilters,
   type FileFilterConfig,
 } from "@shared/file-filters";
+import { getDefaultCloseToTray, resolveCloseToTraySetting } from "@shared/desktop-platform";
 
 type FilterConfig = FileFilterConfig;
 
@@ -66,6 +67,7 @@ const SHORTCUT_LABELS: Record<string, string> = {
 const DEFAULT_FILTERS = DEFAULT_FILE_FILTERS;
 
 const IMAGE_RETENTION_HOURS = 12;
+const DEFAULT_CLOSE_TO_TRAY = getDefaultCloseToTray(window.electronAPI?.platform || "");
 const THEME_OPTIONS: Array<{ value: AppTheme; label: string }> = [
   { value: "system", label: "系统" },
   { value: "light", label: "浅色" },
@@ -111,7 +113,11 @@ function normalizeGeneral(value: unknown): GeneralSettings {
     tempImagePath: typeof general.tempImagePath === "string" ? general.tempImagePath : "",
     imageRetentionHours: IMAGE_RETENTION_HOURS,
     planModeEnabled: general.planModeEnabled === true,
-    closeToTray: typeof general.closeToTray === "boolean" ? general.closeToTray : true,
+    closeToTray: resolveCloseToTraySetting(
+      window.electronAPI?.platform || "",
+      general.closeToTray,
+      general.closeToTrayExplicit === true,
+    ),
     theme: normalizeAppTheme(general.theme),
   };
 }
@@ -150,7 +156,7 @@ export function SettingsView() {
   const [tempImagePath, setTempImagePath] = useState("");
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [appVersion, setAppVersion] = useState("");
-  const [closeToTray, setCloseToTray] = useState(true);
+  const [closeToTray, setCloseToTray] = useState(DEFAULT_CLOSE_TO_TRAY);
   const [theme, setTheme] = useState<AppTheme>("dark");
   const [diskUsage, setDiskUsage] = useState<DiskUsageStats | null>(null);
   const [diskUsageLoading, setDiskUsageLoading] = useState(false);
@@ -301,7 +307,7 @@ export function SettingsView() {
   const saveSettings = useCallback(async (
     nextShortcuts = shortcuts,
     nextFilters = filters,
-    nextGeneral?: GeneralSettings,
+    nextGeneral?: GeneralSettings & { closeToTrayExplicit?: boolean },
   ) => {
     const data = await window.electronAPI.loadData("settings");
     const currentSettings = asRecord(data);
@@ -346,6 +352,7 @@ export function SettingsView() {
       imageRetentionHours: IMAGE_RETENTION_HOURS,
       planModeEnabled,
       closeToTray: enabled,
+      closeToTrayExplicit: true,
       theme,
     });
     void window.electronAPI.setCloseToTray(enabled);

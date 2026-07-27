@@ -25,6 +25,7 @@ import type {
   AgentActionInvocation,
   AgentActionListOptions,
 } from "../../../shared/agent-actions";
+import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
 
 interface AgentModel {
   id: string;
@@ -38,7 +39,7 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
   displayMessage?: string;
-  permissionMode?: "plan" | "full-access";
+  permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   action?: AgentActionInvocation;
 }
 
@@ -202,6 +203,7 @@ export class DroidAgent {
   private autonomyLevel: "low" | "medium" | "high" = "high";
   private interactionMode = "auto";
   private planModeEnabled = false;
+  private permissionMode: import("../../../shared/agent-permissions").AgentPermissionMode = "auto";
   private turnActive = false;
   private isAborting = false;
   private runningToolUses = new Map<string, RunningDroidTool>();
@@ -347,8 +349,7 @@ export class DroidAgent {
     this.completedToolUses.clear();
     this.emitEvent({ type: "stream_start", role: "assistant" });
     try {
-      const planModeEnabled = !!options?.planModeEnabled || options?.permissionMode === "plan";
-      await this.setPermissionMode(planModeEnabled ? "plan" : "full-access");
+      await this.configureInteractionMode(!!options?.planModeEnabled, options?.permissionMode || "auto");
 
       const action = options?.action ? await this.resolveAction(options.action) : null;
       const actionText = action ? `/${action.name}${message ? ` ${message}` : ""}` : message;
@@ -539,10 +540,16 @@ export class DroidAgent {
     this.emitEvent({ type: "thinking_level_changed", level });
   }
 
-  private async setPermissionMode(mode: "plan" | "full-access") {
-    const nextPlanModeEnabled = mode === "plan";
+  private async configureInteractionMode(
+    nextPlanModeEnabled: boolean,
+    permissionMode: import("../../../shared/agent-permissions").AgentPermissionMode,
+  ) {
     const nextInteractionMode = nextPlanModeEnabled ? "spec" : "auto";
-    const nextAutonomyLevel: "low" | "medium" | "high" = nextPlanModeEnabled ? "medium" : "high";
+    const nextAutonomyLevel: "low" | "medium" | "high" = permissionMode === "ask"
+      ? "low"
+      : permissionMode === "auto"
+        ? "medium"
+        : "high";
     const settings: Record<string, unknown> = {};
 
     if (this.interactionMode !== nextInteractionMode) {
@@ -555,12 +562,19 @@ export class DroidAgent {
       await this.sendRpcAsync("droid.update_session_settings", settings);
     }
     this.planModeEnabled = nextPlanModeEnabled;
+    this.permissionMode = permissionMode;
     this.interactionMode = nextInteractionMode;
     this.autonomyLevel = nextAutonomyLevel;
     this.emitEvent({
       type: "process_event",
       entryType: "status",
-      title: nextPlanModeEnabled ? "Droid 已进入 Spec 模式" : "Droid 已开启完全访问模式",
+      title: nextPlanModeEnabled
+        ? "Droid 已进入 Spec 模式"
+        : permissionMode === "full-access"
+          ? "Droid 已开启完全访问权限"
+          : permissionMode === "auto"
+            ? "Droid 已开启自动权限"
+            : "Droid 已开启请求权限",
       state: "completed",
     });
   }
@@ -574,7 +588,7 @@ export class DroidAgent {
         : "";
     if (this.pendingPermissionRequestId && (!responseRequestId || responseRequestId === this.pendingPermissionRequestId)) {
       const selectedValue = getUIResponseValue(response).toLowerCase();
-      const selectedOption = ["proceed_once", "allow", "yes", "允许"].includes(selectedValue)
+      const selectedOption = response.confirmed === true || ["proceed_once", "allow", "yes", "是", "允许"].includes(selectedValue)
         ? "proceed_once"
         : ["proceed_always", "always", "始终允许"].includes(selectedValue)
           ? "proceed_always"
@@ -757,19 +771,29 @@ export class DroidAgent {
     const paramsRecord = asRecord(params);
     switch (method) {
       case "droid.request_permission":
-        if (!this.planModeEnabled) {
+        if (this.permissionMode === "full-access" || (
+          this.permissionMode === "auto" &&
+          !isHighRiskAgentPermissionRequest(
+            paramsRecord.action || paramsRecord.title || paramsRecord.message,
+            Array.isArray(paramsRecord.resources)
+              ? paramsRecord.resources
+              : Array.isArray(paramsRecord.paths) ? paramsRecord.paths : [],
+          )
+        )) {
           this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
         } else {
           this.pendingPermissionRequestId = requestId;
+          const resources = Array.isArray(paramsRecord.resources)
+            ? paramsRecord.resources.map(String)
+            : Array.isArray(paramsRecord.paths) ? paramsRecord.paths.map(String) : [];
+          const action = String(paramsRecord.action || paramsRecord.title || paramsRecord.message || "请求执行操作");
           this.emitEvent(normalizeQuestionProcessEvent({
             type: method,
             requestId,
             detail: params,
-            title: paramsRecord.title || paramsRecord.message || "Droid 请求权限",
-            options: [
-              { label: "允许", value: "proceed_once" },
-              { label: "拒绝", value: "cancel" },
-            ],
+            method: "confirm",
+            title: "Droid 请求权限",
+            message: resources.length > 0 ? `${action}\n\n${resources.join("\n")}` : action,
           }));
         }
         break;

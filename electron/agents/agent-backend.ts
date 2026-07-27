@@ -18,7 +18,6 @@ export interface AgentModel {
 
 export interface AgentSendOptions extends BaseAgentSendOptions {
   displayMessage?: string;
-  permissionMode?: "plan" | "full-access";
 }
 
 export interface AgentForkTarget {

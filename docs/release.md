@@ -1,111 +1,135 @@
-# Hpp 发布手册
+# Hpp 发布构建手册
 
-本文是 Hpp 发布新版本的唯一操作说明。发布 Windows、Linux 和 Android 三个平台，并将全部产物上传到 GitHub Release。
+本文是 Hpp Windows、Linux AppImage、Android APK 和 Agent 插件的标准发布流程。发布目录按版本隔离，GitHub Release 资产统一由 Node 流脚本上传。
 
-## 发布前检查
+## 1. 发布前检查
 
-1. 确认当前分支包含要发布的代码，并且工作区没有未提交的发布相关改动。
-2. 修改根目录 `package.json` 中的 `version`，例如 `0.1.7`。版本号必须是新的 semver 版本。
-3. 确认 `mobile/android/app/build.gradle` 的 `versionName` 与 `package.json.version` 完全一致；如需发布 Android，还要递增 `versionCode`。
-4. 准备 GitHub Personal Access Token，并在当前 PowerShell 会话设置：
+在 `C:\Project\Hpp` 执行：
 
 ```powershell
-$env:GH_TOKEN = "<GitHub token>"
-```
-
-Token 至少需要目标仓库的 Release/Contents 写权限。不要把 Token 写入文件或提交到 Git。
-
-## 标准发布流程
-
-以下命令均在项目根目录 `C:\Project\Hpp` 执行。
-
-```powershell
+git status --short
 npm test
 npm run build
+```
+
+修改 `package.json` 的 `version`（例如 `0.1.8`）。Android 的 `mobile/android/app/build.gradle` 中 `versionName` 必须相同，`versionCode` 每个版本递增。确认签名目录 `%USERPROFILE%\.hpp\android-signing` 不要更换。
+
+## 2. Windows 和 Android 构建
+
+```powershell
 npm run dist
-npm run dist:linux
 npm run mobile:release
 ```
 
-`npm run build` 会构建 Electron、移动端 Web 资源和官方 Agent 插件；`npm run dist` 会生成 Windows NSIS 安装包；`npm run dist:linux` 会生成 Linux x64 AppImage；`npm run mobile:release` 会生成已签名 Android APK，并写入 Android 更新元数据。
-
-Linux 构建默认输出到 `release\` 根目录，需要在上传前归档到当前版本目录：
+构建完成后，将 Windows 安装包、更新清单、APK 和 Android 清单归档到版本目录：
 
 ```powershell
 $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
 $versionDir = "release\v$version"
 New-Item -ItemType Directory -Force $versionDir | Out-Null
-Copy-Item "release\Hpp-Linux-$version-x86_64.AppImage" $versionDir -Force
-Copy-Item "release\latest-linux.yml" $versionDir -Force
+Copy-Item "release\hpp-Setup-$version.exe", "release\hpp-Setup-$version.exe.blockmap", "release\latest.yml" $versionDir -Force
+Copy-Item "release\Hpp-Android.apk", "release\android-latest.json" $versionDir -Force
 ```
 
-检查版本目录：
+## 3. Linux AppImage（Windows 发布时的正确流程）
+
+不要在 Windows 发布流程中直接依赖 `npm run dist:linux`。Linux AppImage 应由 GitHub Actions 在 Ubuntu runner 上构建，否则可能因 Docker、Wine、FUSE 或原生依赖导致卡住。
+
+1. 先提交并推送当前代码，让 workflow 使用正确的提交：
+
+   ```powershell
+   git add -A
+   git commit -m "release: v<version>"
+   git push origin HEAD
+   ```
+
+2. 打开 GitHub 仓库的 **Actions → Build Linux AppImage**，等待刚才提交对应的 workflow 完成并显示绿色。不要在 workflow 运行中执行上传脚本。
+3. 下载该次运行的 artifact `hpp-linux-appimage`，解压得到 `Hpp-Linux-<version>-x86_64.AppImage` 和 `latest-linux.yml`。
+4. 将两个文件复制到版本目录：
+
+   ```powershell
+   $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+   $versionDir = "release\v$version"
+   New-Item -ItemType Directory -Force $versionDir | Out-Null
+   Copy-Item "<artifact解压目录>\Hpp-Linux-$version-x86_64.AppImage" $versionDir -Force
+   Copy-Item "<artifact解压目录>\latest-linux.yml" $versionDir -Force
+   ```
+
+5. 检查 AppImage 是 Linux ELF 文件，而不是下载错误页：
+
+   ```powershell
+   Format-Hex "$versionDir\Hpp-Linux-$version-x86_64.AppImage" -Count 4
+   Get-Item "$versionDir\Hpp-Linux-$version-x86_64.AppImage" | Select-Object Length
+   Get-Content "$versionDir\latest-linux.yml"
+   ```
+
+文件前 4 个字节必须是 `7F 45 4C 46`（`ELF`）。`latest-linux.yml` 的版本、文件名、size 和 sha512 必须与 AppImage 一致。
+
+只有在 Ubuntu/Linux 本机上，才可使用下面的本地构建替代 Actions：
+
+```bash
+npm ci
+npm test
+npm run dist:linux
+```
+
+## 4. 最终目录和资产
+
+`release\v<version>\` 至少应包含：
+
+```text
+hpp-Setup-<version>.exe
+hpp-Setup-<version>.exe.blockmap
+latest.yml
+Hpp-Linux-<version>-x86_64.AppImage
+latest-linux.yml
+Hpp-Android.apk
+android-latest.json
+agent-plugins/agent-plugins.json
+agent-plugins/<plugin-id>.zip   # 当前发布的 5 个插件
+```
+
+检查：
 
 ```powershell
 Get-ChildItem "release\v$version" -Recurse
 ```
 
-应至少包含以下产物：
+## 5. 上传 GitHub Release
 
-```text
-release/v<version>/
-  hpp-Setup-<version>.exe
-  hpp-Setup-<version>.exe.blockmap
-  latest.yml
-  Hpp-Linux-<version>-x86_64.AppImage
-  latest-linux.yml
-  Hpp-Android.apk
-  android-latest.json
-  agent-plugins/
-    agent-plugins.json
-    <plugin-id>.zip
-```
-
-## 上传 GitHub Release
-
-确认上面的文件全部存在后执行：
-
-```powershell
-npm run release:github
-```
-
-`scripts/reset-github-release.cjs` 会：
-
-- 从 `package.json` 读取版本号，并使用 `v<version>` 作为 tag；
-- 检查 Windows、Linux、Android 和 Agent 插件产物；
-- 如果同名 Release/tag 已存在，先删除后重新创建；
-- 创建正式的 GitHub Release；
-- 使用 Node.js `fs.createReadStream()` 配合 HTTPS 请求，以文件流方式逐个上传资产。
-
-上传脚本必须保持流式上传。不要把 APK、EXE 或 AppImage 通过 `readFileSync` 一次性读入内存，也不要改用手工网页上传替代脚本流程。
-
-## 发布完成检查
-
-1. 打开脚本输出的 GitHub Release 地址。
-2. 确认 Release tag 为 `v<version>`，且不是 draft/prerelease。
-3. 确认三个平台的安装包和各自更新清单都已上传。
-4. 确认 Windows/Linux 的更新清单引用的版本与当前版本一致。
-5. 确认 `updates/android-latest.json` 已随代码提交；其中 Android `sha256` 应与发布页上的 APK 校验值一致。
-
-## 常见问题
-
-### `GH_TOKEN is required`
-
-当前 PowerShell 没有设置 Token。重新执行：
+设置 token 后执行：
 
 ```powershell
 $env:GH_TOKEN = "<GitHub token>"
+npm run release:github
 ```
 
-### 找不到 Android 工具链
+`scripts/reset-github-release.cjs` 会读取 `package.json.version`，使用 `v<version>` tag，删除并重建同名 Release，然后使用 `fs.createReadStream(filePath).pipe(request)` 逐个以 Node 流上传资产。不要用浏览器手工上传，也不要把 APK、EXE 或 AppImage 用 `readFileSync` 一次性读入内存。
 
-安装 Android Studio，或设置 `JAVA_HOME` 和 `ANDROID_HOME` 后重试：
+重复发布同一版本前，必须重新构建并覆盖 `release\v<version>\` 中的全部资产，避免旧文件混入。
 
-```powershell
-$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-```
+## 6. 发布后检查
 
-### 重新发布同一版本
+- Release tag 为 `v<version>`，且不是 draft/prerelease。
+- Windows、Linux、Android 安装包和各自更新清单均已上传。
+- `latest.yml`、`latest-linux.yml` 和 `android-latest.json` 的版本与校验值正确。
+- Release 中包含 `agent-plugins` 清单及插件 zip。
+- 用实际客户端检查更新和下载链接。
 
-上传脚本会删除同 tag 的旧 Release 和 tag 后重建。仍应先重新执行全部构建步骤，确保 `release\v<version>` 中没有上一轮遗留或错误产物。
+## 常见问题
+
+### Linux 构建卡住或没有 AppImage
+
+确认使用的是 GitHub Actions 的 Ubuntu workflow，并等待 artifact 完成下载；Windows 本地不要把 `npm run dist:linux` 当作标准流程。
+
+### `GH_TOKEN is required`
+
+在当前 PowerShell 会话重新设置 `$env:GH_TOKEN`，不要将 token 写入仓库。
+
+### Android 构建失败或无法更新
+
+检查 `JAVA_HOME`、`ANDROID_HOME`、签名目录以及 `versionName/versionCode`。APK 更新必须使用同一签名密钥。
+
+### Actions 产物校验失败
+
+重新下载同一次成功运行的 artifact，确认 AppImage 前 4 字节为 ELF，并让 `latest-linux.yml` 与文件重新生成后再上传。

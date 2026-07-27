@@ -6,6 +6,9 @@ import chatPanelSource from "./ChatPanel.tsx?raw";
 import fileSearchSource from "../shared/FileSearch.tsx?raw";
 import fileMentionPickerSource from "./ComposerFileMentionPicker.tsx?raw";
 import questionnaireSource from "./QuestionnairePanel.tsx?raw";
+import confirmationSource from "./ConfirmationPanel.tsx?raw";
+import permissionChoiceSource from "./PermissionChoicePanel.tsx?raw";
+import pendingUIResponseSource from "./usePendingUIResponse.ts?raw";
 import agentEventsSource from "./useAgentEvents.ts?raw";
 
 const chatPanelStyles = readFileSync(
@@ -22,6 +25,21 @@ describe("chat interaction regression constraints", () => {
     expect(questionnaireSource).toContain('setCustomText((current) => ({ ...current, [questionIndex]: "" }))');
     expect(questionnaireSource).toContain('setSingleChoice((current) => ({ ...current, [questionIndex]: "" }))');
     expect(questionnaireSource).toContain('setMultiChoice((current) => ({ ...current, [questionIndex]: [] }))');
+  });
+
+  it("renders confirm interactions as explicit allow or reject actions", () => {
+    expect(confirmationSource).toContain(">拒绝</button>");
+    expect(confirmationSource).toContain(">允许</button>");
+    expect(pendingUIResponseSource).toContain('const isConfirmation = normalizedMethod === "confirm"');
+    expect(chatPanelSource).toContain("<ConfirmationPanel");
+  });
+
+  it("renders permission choices separately from questionnaires", () => {
+    expect(pendingUIResponseSource).toContain('normalizedMethod.includes("permission")');
+    expect(pendingUIResponseSource).toContain("activePermissionChoice");
+    expect(permissionChoiceSource).toContain("question?.options || []");
+    expect(permissionChoiceSource).toContain("onClick={() => onSelect(option)}");
+    expect(chatPanelSource).toContain("<PermissionChoicePanel");
   });
 
   it("settles renderer state when an abort request throws", () => {

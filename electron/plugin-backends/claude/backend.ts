@@ -37,7 +37,7 @@ interface AgentModel {
 
 interface AgentSendOptions {
   planModeEnabled?: boolean;
-  permissionMode?: "plan" | "full-access";
+  permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   displayMessage?: string;
   clientMessageId?: string;
   action?: AgentActionInvocation;
@@ -207,7 +207,8 @@ export class ClaudeSDKAgent {
       id: promptId,
       message,
       images,
-      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+      planModeEnabled: !!options?.planModeEnabled,
+      permissionMode: options?.permissionMode || "auto",
       action: options?.action,
     });
   }

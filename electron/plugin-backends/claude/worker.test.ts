@@ -257,7 +257,7 @@ describe("Claude Agent SDK worker", () => {
 
   it("routes Plan confirmation through the approval interaction", async () => {
     const worker = await initialize();
-    worker.send({ id: "prompt-approve", type: "prompt", message: "approve", permissionMode: "plan" });
+    worker.send({ id: "prompt-approve", type: "prompt", message: "approve", planModeEnabled: true, permissionMode: "auto" });
     const request = await worker.waitFor((message) => message.type === "ui_request" && message.method === "confirm");
     expect(request).toMatchObject({ toolName: "ExitPlanMode", title: "Execute plan?" });
     worker.send({ id: "ui-approve", type: "uiResponse", response: { id: request.requestId, confirmed: true } });

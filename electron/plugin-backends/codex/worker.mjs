@@ -70,7 +70,7 @@ let pendingRpc = new Map();
 let currentModelId = null;
 let thinkingLevel = getDefaultThinkingLevel();
 let activePlanModeEnabled = false;
-let activePermissionMode = "full-access";
+let activePermissionMode = "auto";
 let activePromptId = null;
 let activeTurnId = null;
 let activeThreadId = null;
@@ -737,12 +737,17 @@ const buildInput = (message, images, actionInput) => {
 };
 
 const buildThreadParams = () => {
-  const planAccessEnabled = activePermissionMode === "plan";
+  const askPermissionEnabled = activePermissionMode === "ask";
+  const automaticPermissionEnabled = activePermissionMode === "auto";
   const fullAccessEnabled = activePermissionMode === "full-access";
   const params = {
     cwd: projectPath,
-    sandbox: planAccessEnabled ? "read-only" : fullAccessEnabled ? "danger-full-access" : undefined,
-    approvalPolicy: planAccessEnabled || fullAccessEnabled ? "never" : undefined,
+    sandbox: askPermissionEnabled
+      ? "read-only"
+      : automaticPermissionEnabled
+        ? "workspace-write"
+        : "danger-full-access",
+    approvalPolicy: fullAccessEnabled ? "never" : "on-request",
     config: activePlanModeEnabled
       ? {
           collaboration_mode: "Plan",
@@ -886,10 +891,14 @@ const handleServerRequest = (message) => {
       handleApprovalRequest(message, "file", "approved", "denied");
       break;
     case "item/permissions/requestApproval":
-      rpcRespond(message.id, {
-        permissions: activePermissionMode === "full-access" ? message.params?.permissions || {} : {},
-        scope: "turn",
-      });
+      if (activePermissionMode === "full-access") {
+        rpcRespond(message.id, {
+          permissions: message.params?.permissions || {},
+          scope: "turn",
+        });
+      } else {
+        handlePermissionsApprovalRequest(message);
+      }
       break;
     case "currentTime/read":
       rpcRespond(message.id, { currentTimeAt: Math.floor(Date.now() / 1000) });
@@ -934,10 +943,44 @@ const handleApprovalRequest = (message, approvalKind, acceptDecision, declineDec
     entryType: "question",
     kind: "question",
     requestId,
-    method: message.method,
-    title: requestText,
-    questions: pendingUIRequest.questions,
-    prompt: requestText,
+    method: "confirm",
+    title: "Codex 请求权限",
+    message: requestText,
+    prompt: "Codex 请求权限",
+    state: "running",
+  });
+};
+
+const handlePermissionsApprovalRequest = (message) => {
+  const params = message.params || {};
+  const permissions = isRecord(params.permissions) ? params.permissions : {};
+  const permissionSummary = Object.keys(permissions).join("、") || "额外能力";
+  const requestText = `允许 Codex 使用${permissionSummary}`;
+  const requestId = `codex-request-${message.id}`;
+  pendingUIRequest = {
+    id: requestId,
+    rpcId: message.id,
+    params,
+    questions: [{
+      id: "approval",
+      question: requestText,
+      options: [
+        { label: "允许", value: "accept", description: params.reason || undefined },
+        { label: "拒绝", value: "decline" },
+      ],
+    }],
+    permissionsApproval: { permissions },
+  };
+  startStream();
+  send({
+    type: "process_event",
+    entryType: "question",
+    kind: "question",
+    requestId,
+    method: "confirm",
+    title: "Codex 请求权限",
+    message: requestText,
+    prompt: "Codex 请求权限",
     state: "running",
   });
 };
@@ -1074,7 +1117,7 @@ const responseAnswersToMcpElicitation = (response) => {
 
 const responseToApproval = (response) => {
   const answer = responseAnswersToCodex(response).answers?.approval?.answers?.[0] || "";
-  const decision = String(answer).toLowerCase() === "accept"
+  const decision = response?.confirmed === true || String(answer).toLowerCase() === "accept"
     ? pendingUIRequest?.approval?.acceptDecision
     : pendingUIRequest?.approval?.declineDecision;
   return { decision: decision || "decline" };
@@ -1091,6 +1134,8 @@ const runUIResponse = (response) => {
   if (response?.cancelled) {
     if (pendingUIRequest.approval) {
       result = { decision: pendingUIRequest.approval.declineDecision };
+    } else if (pendingUIRequest.permissionsApproval) {
+      result = { permissions: {}, scope: "turn" };
     } else if (pendingUIRequest.mcpElicitation) {
       result = { action: "cancel", content: null, _meta: null };
     } else {
@@ -1098,6 +1143,14 @@ const runUIResponse = (response) => {
     }
   } else if (pendingUIRequest.approval) {
     result = responseToApproval(response);
+  } else if (pendingUIRequest.permissionsApproval) {
+    const accepted = response?.confirmed === true || String(
+      responseAnswersToCodex(response).answers?.approval?.answers?.[0] || "",
+    ).toLowerCase() === "accept";
+    result = {
+      permissions: accepted ? pendingUIRequest.permissionsApproval.permissions : {},
+      scope: "turn",
+    };
   } else if (pendingUIRequest.mcpElicitation) {
     result = responseAnswersToMcpElicitation(response);
   } else {
@@ -1826,7 +1879,7 @@ const finishPrompt = () => {
   promptRunning = false;
   activePromptId = null;
   activePlanModeEnabled = false;
-  activePermissionMode = "full-access";
+  activePermissionMode = "auto";
   activeTurnId = null;
   void cleanupActiveImages();
 };
@@ -1840,7 +1893,9 @@ const runPrompt = async (command) => {
   abortedPromptId = null;
   activePromptId = command.id;
   activePlanModeEnabled = !!command.planModeEnabled;
-  activePermissionMode = command.permissionMode === "plan" ? "plan" : "full-access";
+  activePermissionMode = ["ask", "auto", "full-access"].includes(command.permissionMode)
+    ? command.permissionMode
+    : "auto";
   resetTurnState();
   send({ type: "accepted", id: command.id });
   startStream();
@@ -1857,12 +1912,16 @@ const runPrompt = async (command) => {
       clientUserMessageId: command.id,
       input: buildInput(command.message, imagePayload.entries, actionInput),
       cwd: projectPath,
-      approvalPolicy: "never",
-      sandboxPolicy: activePermissionMode === "plan"
+      approvalPolicy: activePermissionMode === "full-access" ? "never" : "on-request",
+      sandboxPolicy: activePermissionMode === "ask"
         ? { type: "readOnly", networkAccess: false }
         : activePermissionMode === "full-access"
           ? { type: "dangerFullAccess" }
-          : undefined,
+          : {
+              type: "workspaceWrite",
+              writableRoots: [projectPath],
+              networkAccess: false,
+            },
       model: getRequestModelId(),
       effort: normalizeReasoningEffort(thinkingLevel),
       collaborationMode: buildTurnCollaborationMode(),
@@ -1962,7 +2021,7 @@ const abortPrompt = async (command) => {
   promptRunning = false;
   activePromptId = null;
   activePlanModeEnabled = false;
-  activePermissionMode = "full-access";
+  activePermissionMode = "auto";
   activeTurnId = null;
   aborting = false;
   await cleanupActiveImages();
@@ -1984,7 +2043,7 @@ const disposeSession = async () => {
   activeTurnId = null;
   activeThreadId = null;
   activePlanModeEnabled = false;
-  activePermissionMode = "full-access";
+  activePermissionMode = "auto";
   pendingUIRequest = null;
   resetTurnState();
   await cleanupActiveImages();

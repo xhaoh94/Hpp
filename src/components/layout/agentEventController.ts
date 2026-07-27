@@ -39,6 +39,13 @@ type CreateAgentEventControllerOptions = {
   setStreamingState: AgentEventRuntimeController["setStreamingState"];
 };
 
+const firstNonEmptyString = (...values: unknown[]) => {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+};
+
 export function createAgentEventController({
   activeAgentIdRef,
   sessionRuntimeRef,
@@ -457,6 +464,7 @@ export function createAgentEventController({
       method === "custom" && detail.kind === "ask_user_question"
         ? "ask_user_question"
         : method;
+    const isConfirmation = normalizedMethod.toLowerCase() === "confirm";
     const questions = normalizeAskQuestionsFromCandidates(
       event.questions,
       detail.questions,
@@ -492,7 +500,20 @@ export function createAgentEventController({
             : undefined,
       method: normalizedMethod || undefined,
       entryId,
-      questions: fallbackQuestion.length > 0 ? fallbackQuestion : [{ question: "请回答 Agent 的问题", options: [] }],
+      title: firstNonEmptyString(event.prompt, detail.title, event.title)?.replace(/^正在询问用户\s*[:：]\s*/, ""),
+      description: firstNonEmptyString(
+        event.description,
+        event.message,
+        event.question,
+        detail.description,
+        detail.message,
+        detail.question,
+      ),
+      questions: isConfirmation
+        ? undefined
+        : fallbackQuestion.length > 0
+          ? fallbackQuestion
+          : [{ question: "请回答 Agent 的问题", options: [] }],
     };
   };
 

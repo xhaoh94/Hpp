@@ -63,4 +63,25 @@ describe("handleToolEndEvent", () => {
     expect(updateInferredPlanSteps).toHaveBeenCalledWith("session-1", "operate");
     expect(updateInferredPlanSteps).not.toHaveBeenCalledWith("session-1", "failed");
   });
+
+  it("does not present a rejected write as a completed file change", () => {
+    const { context, entries } = createContext();
+
+    handleToolEndEvent({
+      type: "tool_end",
+      toolKind: "write_file",
+      filePath: "permission-test.txt",
+      errorText: "用户拒绝了该操作",
+      isError: true,
+    } as AgentEvent, "session-1", createSessionRuntime(), context);
+
+    expect(entries[0]).toMatchObject({
+      type: "tool",
+      state: "warning",
+      title: "写入文件未成功",
+      detail: "用户拒绝了该操作",
+    });
+    expect(entries[0].files).toBeUndefined();
+    expect(context.recordProcessFiles).not.toHaveBeenCalled();
+  });
 });

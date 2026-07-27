@@ -5,6 +5,7 @@ import type { DiffLike } from "@shared/diff-summary";
 import type { SharedModel } from "@shared/models";
 import type { ProcessEntryView } from "@shared/process-view";
 import type { AgentActionInvocation } from "@shared/agent-actions";
+import type { AgentPermissionMode } from "@shared/agent-permissions";
 
 export interface FileDiff extends DiffLike {
   file: string;
@@ -182,6 +183,7 @@ export interface QueuedMessage {
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   agentImages?: AgentImagePayload;
   planModeEnabled?: boolean;
+  permissionMode?: AgentPermissionMode;
   createdAt: number;
   status: QueuedMessageStatus;
   error?: string;

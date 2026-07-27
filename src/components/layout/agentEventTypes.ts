@@ -8,6 +8,8 @@ export type PendingUIResponse = {
   requestId?: string;
   method?: string;
   entryId?: string;
+  title?: string;
+  description?: string;
   questions?: AskQuestionPayload[];
 } | null;
 

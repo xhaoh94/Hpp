@@ -27,6 +27,7 @@ import type { AgentForkResult, AgentImagePayload, AgentReloadConfigResult } from
 import { getQuestionnaireAnswerLabel } from "@shared/questionnaire";
 import { getModelThinkingLevels, normalizeModelThinkingLevel } from "@shared/models";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "@shared/agent-actions";
+import type { AgentPermissionMode } from "@shared/agent-permissions";
 import { createComposerDraftSnapshot } from "@/lib/composer-history";
 
 export type PreparedSessionMessage = {
@@ -37,6 +38,7 @@ export type PreparedSessionMessage = {
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   agentImages?: AgentImagePayload;
   planModeEnabled?: boolean;
+  permissionMode?: AgentPermissionMode;
   forkContextUsed?: boolean;
   action?: AgentActionInvocation;
   editableDraft?: QueuedMessageEditableDraft;
@@ -416,6 +418,7 @@ export async function sendMessage(input: {
       sessionReferences: message.sessionReferences,
       agentImages: message.agentImages,
       planModeEnabled: message.planModeEnabled,
+      permissionMode: message.permissionMode,
       action: message.action,
       editableDraft: message.editableDraft,
       createdAt: Date.now(),
@@ -493,6 +496,7 @@ export async function sendMessage(input: {
       input.sessionId,
       {
         planModeEnabled: !!message.planModeEnabled,
+        permissionMode: message.permissionMode,
         clientMessageId: input.clientMessageId,
         ...(message.action ? { action: message.action } : {}),
       },
@@ -663,7 +667,7 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
       item.sendContent,
       item.agentImages,
       sessionId,
-      { planModeEnabled: !!item.planModeEnabled },
+      { planModeEnabled: !!item.planModeEnabled, permissionMode: item.permissionMode },
     );
     if (!result.success) throw new Error(result.error || "GUIDANCE_FAILED");
     useChatStore.getState().removeQueuedMessage(sessionId, queueItemId);
@@ -695,6 +699,7 @@ export function editQueuedMessage(sessionId: string, queueItemId: string, messag
     sessionReferences: message.sessionReferences,
     agentImages: message.agentImages,
     planModeEnabled: item.planModeEnabled,
+    permissionMode: item.permissionMode,
     action: message.action,
     editableDraft: message.editableDraft,
     createdAt: item.createdAt,
@@ -753,22 +758,44 @@ export async function setPlanMode(enabled: boolean) {
   return { enabled };
 }
 
+export async function setPermissionMode(mode: AgentPermissionMode) {
+  const normalizedMode = normalizeAgentPermissionMode(mode);
+  const data = await window.electronAPI.loadData("settings").catch(() => null);
+  const settings = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+  const general = settings.general && typeof settings.general === "object" && !Array.isArray(settings.general)
+    ? settings.general as Record<string, unknown>
+    : {};
+  const result = await window.electronAPI.saveData("settings", {
+    ...settings,
+    general: { ...general, permissionMode: normalizedMode },
+  });
+  if (!result.success) throw new Error(result.error || "SETTINGS_SAVE_FAILED");
+  window.dispatchEvent(new CustomEvent("agent-settings-updated", { detail: { permissionMode: normalizedMode } }));
+  return { mode: normalizedMode };
+}
+
 export async function respondToInteraction(
-  input: { sessionId: string; cancelled?: boolean; answers?: unknown[]; text?: string },
+  input: { sessionId: string; cancelled?: boolean; confirmed?: boolean; answers?: unknown[]; text?: string },
   context: InteractionCommandContext,
 ) {
   const pending = context.pendingInteraction;
   if (!pending || pending.sessionId !== input.sessionId) throw new Error("INTERACTION_NOT_FOUND");
   const cancelled = input.cancelled === true;
+  const isConfirmation = pending.method?.toLowerCase() === "confirm";
+  const isPermissionChoice = !isConfirmation && pending.method?.toLowerCase().includes("permission") === true;
+  const confirmed = isConfirmation ? input.confirmed === true : undefined;
   const answers = input.answers;
-  const summary = input.text || answers?.map(getQuestionnaireAnswerLabel)
-    .filter(Boolean).join("\n") || (cancelled ? "" : "已提交问卷回答");
+  const summary = isConfirmation
+    ? (confirmed ? "允许" : "拒绝")
+    : input.text || answers?.map(getQuestionnaireAnswerLabel)
+      .filter(Boolean).join("\n") || (cancelled ? "" : "已提交问卷回答");
   const result = await window.electronAPI.agentSendUIResponse({
     sessionId: input.sessionId,
     type: "extension_ui_response",
     id: pending.requestId,
     method: pending.method,
     cancelled,
+    ...(isConfirmation ? { confirmed } : {}),
     result: { cancelled, answers: answers || [] },
     value: summary,
     text: summary,
@@ -791,7 +818,7 @@ export async function respondToInteraction(
   } else {
     chat.finishLastAssistantProcess(Date.now(), cancelled ? "interrupted" : "completed", input.sessionId);
   }
-  if (!cancelled) {
+  if (!cancelled && !isConfirmation && !isPermissionChoice) {
     chat.addMessage({ id: crypto.randomUUID(), role: "user", content: summary, timestamp: Date.now() }, input.sessionId);
   }
   return { cancelled };
@@ -808,6 +835,7 @@ export const SessionCommandCoordinator = {
   setModel,
   setThinking,
   setPlanMode,
+  setPermissionMode,
   reloadSession,
   getAvailableModels,
   getActions,

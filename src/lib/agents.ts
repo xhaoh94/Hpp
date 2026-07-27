@@ -22,6 +22,10 @@ export function supportsNativePlanMode(id: string): boolean {
   return getAgentById(id)?.capabilities.planMode === "native";
 }
 
+export function supportsPermissionModes(id: string): boolean {
+  return getAgentById(id)?.capabilities.permissions === true;
+}
+
 export function supportsGuidance(id: string): boolean {
   return getAgentById(id)?.capabilities.guidance === true;
 }

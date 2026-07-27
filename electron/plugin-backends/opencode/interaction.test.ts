@@ -6,6 +6,7 @@ interface OpenCodeInternals {
   sessionId: string | null;
   streamedContent: boolean;
   activeClientMessageId: string | null;
+  permissionMode: "ask" | "auto" | "full-access";
   handleSSEEvent: (eventType: string, data: unknown) => void;
   httpPost: (path: string, data: unknown) => Promise<unknown>;
 }
@@ -195,6 +196,42 @@ describe("OpenCode interaction bridge", () => {
     await vi.waitFor(() => {
       expect(httpPost).toHaveBeenCalledWith("/permission/per_1/reply", { reply: "always" });
     });
+  });
+
+  it("only auto-approves low-risk native permission requests", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const httpPost = vi.fn(async () => true);
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.permissionMode = "auto";
+    internals.httpPost = httpPost;
+
+    internals.handleSSEEvent("permission.asked", {
+      properties: {
+        id: "per_read",
+        sessionID: "ses_source",
+        action: "read",
+        resources: ["src/app.ts"],
+      },
+    });
+    await vi.waitFor(() => {
+      expect(httpPost).toHaveBeenCalledWith("/permission/per_read/reply", { reply: "once" });
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ requestId: "per_read" }));
+
+    internals.handleSSEEvent("permission.asked", {
+      properties: {
+        id: "per_write",
+        sessionID: "ses_source",
+        action: "write",
+        resources: ["src/app.ts"],
+      },
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      requestId: "per_write",
+      method: "opencode.permission",
+    }));
   });
 
   it("keeps the turn open while waiting for a UI response", async () => {

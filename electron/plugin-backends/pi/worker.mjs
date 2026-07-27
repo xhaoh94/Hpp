@@ -1,15 +1,22 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { getPiMessageText, resolvePiForkEntryId } from "./pi-fork-utils.mjs";
+import {
+  buildShellEnvironmentContract,
+  detectShellFamily,
+  validateShellCommand,
+} from "./shell-environment.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
-const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls", "ask_user_question", "questionnaire", "question"];
 const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const MUTATING_TOOLS = new Set(["edit", "write"]);
+const HIGH_RISK_COMMAND_PATTERN = /(?:\brm\s+(?:-[^\s]*r|--recursive)|\bsudo\b|\b(?:chmod|chown)\b|\bgit\s+(?:push|clean|reset\s+--hard)|\b(?:curl|wget|ssh|scp|rsync)\b|\b(?:npm|pnpm|yarn|pip|cargo)\s+(?:install|add|publish)|invoke-webrequest|start-process|\bshutdown\b|\breboot\b|\btaskkill\b)/i;
 const SHELL_PROBE_TOKEN = "hpp-shell-ready";
 const FILE_DISCOVERY_GUIDANCE = [
   "When a target file path is unknown, use ls, find, or grep to discover it before calling read.",
@@ -30,6 +37,7 @@ let fullAccessToolNames = [];
 let shellWarning = "";
 let shellNotice = "";
 let shellWarningEmitted = false;
+let shellEnvironment = { platform: process.platform, shellFamily: "unknown", shellPath: "" };
 let activeCompactionId = null;
 const completedPromptIds = new Set();
 const actionKeys = new Set();
@@ -519,17 +527,90 @@ const stripUtf8Bom = (filePath) => {
 
 const setPermissionMode = (permissionMode) => {
   if (!session?.setActiveToolsByName) return;
-  if (permissionMode === "plan") {
-    // Keep the complete set captured during initialization; a repeated plan
-    // prompt must not overwrite it with the already-restricted tool set.
-    if (activePermissionMode !== "plan" && fullAccessToolNames.length === 0) {
-      fullAccessToolNames = session.getActiveToolNames?.() || fullAccessToolNames;
-    }
-    session.setActiveToolsByName(PLAN_MODE_TOOLS);
-  } else {
-    session.setActiveToolsByName(fullAccessToolNames);
-  }
+  session.setActiveToolsByName(fullAccessToolNames);
   activePermissionMode = permissionMode;
+};
+
+const getToolPaths = (event) => {
+  const input = isRecord(event?.input) ? event.input : {};
+  return [input.path, input.filePath, input.file_path, input.cwd, input.directory]
+    .filter((value) => typeof value === "string" && value.trim())
+    .map(String);
+};
+
+const isOutsideProject = (filePath) => {
+  try {
+    const absolutePath = isAbsolute(filePath) ? resolve(filePath) : resolve(projectPath, filePath);
+    const projectRelativePath = relative(resolve(projectPath), absolutePath);
+    return projectRelativePath === ".." || projectRelativePath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(projectRelativePath);
+  } catch {
+    return true;
+  }
+};
+
+const shouldRequestPiToolPermission = (event) => {
+  if (activePermissionMode === "full-access") return false;
+  const toolName = normalizeToolName(event?.toolName);
+  if (QUESTIONNAIRE_TOOLS.has(toolName)) return false;
+  const outsideProject = getToolPaths(event).some(isOutsideProject);
+  if (activePermissionMode === "ask") {
+    return outsideProject || !READ_ONLY_TOOLS.has(toolName);
+  }
+  if (outsideProject) return true;
+  if (READ_ONLY_TOOLS.has(toolName) || MUTATING_TOOLS.has(toolName)) return false;
+  if (toolName === "bash") {
+    const command = String(isRecord(event?.input) ? event.input.command || "" : "");
+    return !command.trim() || HIGH_RISK_COMMAND_PATTERN.test(command);
+  }
+  return true;
+};
+
+const describePiToolPermission = (event) => {
+  const toolName = String(event?.toolName || "工具");
+  const input = isRecord(event?.input) ? event.input : {};
+  const detail = toolName === "bash"
+    ? String(input.command || "")
+    : getToolPaths(event).join("、") || JSON.stringify(input);
+  return detail ? `${toolName}: ${detail}` : toolName;
+};
+
+const hppPermissionExtension = (pi) => {
+  pi.on("tool_call", async (event, context) => {
+    if (normalizeToolName(event?.toolName) === "bash") {
+      const input = isRecord(event?.input) ? event.input : {};
+      const environmentError = validateShellCommand({
+        ...shellEnvironment,
+        command: input.command,
+      });
+      if (environmentError) return { block: true, reason: environmentError };
+    }
+    if (!shouldRequestPiToolPermission(event)) return undefined;
+    if (!context?.hasUI) {
+      return { block: true, reason: "Hpp permission approval is unavailable" };
+    }
+    const approved = await context.ui.confirm(
+      "Pi 请求权限",
+      `允许 Pi 执行以下操作？\n\n${describePiToolPermission(event)}`,
+    );
+    return approved ? undefined : { block: true, reason: "用户拒绝了该操作" };
+  });
+};
+
+const getShellEnvironment = (settingsManager) => {
+  const configuredPath = settingsManager?.getShellPath?.();
+  let shellPath = String(configuredPath || "");
+  if (typeof sdk?.getShellConfig === "function") {
+    try {
+      shellPath = String(sdk.getShellConfig(configuredPath)?.shell || shellPath);
+    } catch {
+      // The existing shell probe will report an unusable configuration.
+    }
+  }
+  return {
+    platform: process.platform,
+    shellPath,
+    shellFamily: detectShellFamily(shellPath),
+  };
 };
 
 const getAvailableToolNames = () => new Set(
@@ -667,14 +748,28 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   }
   const settingsManager = requireSDKFactory("SettingsManager").create(cwd, agentDir);
   const effectiveSettingsManager = resolveShellSettings(settingsManager);
+  shellEnvironment = getShellEnvironment(effectiveSettingsManager);
+  const shellEnvironmentContract = buildShellEnvironmentContract({
+    ...shellEnvironment,
+    cwd,
+  });
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager: effectiveSettingsManager,
     eventBus,
-    appendSystemPrompt: [FILE_DISCOVERY_GUIDANCE],
+    extensionFactories: [hppPermissionExtension],
+    appendSystemPrompt: [FILE_DISCOVERY_GUIDANCE, shellEnvironmentContract],
   });
   await resourceLoader.reload();
+  const loadedExtensions = resourceLoader.getExtensions?.()?.extensions || [];
+  const permissionExtensionLoaded = loadedExtensions.some((extension) =>
+    String(extension?.path || "") === "<inline:1>" &&
+    typeof extension?.handlers?.get === "function" &&
+    (extension.handlers.get("tool_call")?.length || 0) > 0);
+  if (!permissionExtensionLoaded) {
+    throw new Error("Pi SDK 不支持 Hpp 权限钩子，请在 Hpp Agent 设置中更新 Pi SDK");
+  }
   const sessionManager = sessionFilePath
     ? sdk.SessionManager.open(sessionFilePath, undefined, cwd)
     : requireSDKFactory("SessionManager").create(cwd);
@@ -890,7 +985,9 @@ const handleCommand = async (command) => {
         break;
       case "prompt":
         if (!session) throw new Error("Pi SDK session is not initialized");
-        setPermissionMode(command.permissionMode === "plan" || command.planModeEnabled ? "plan" : "full-access");
+        setPermissionMode(["ask", "auto", "full-access"].includes(command.permissionMode)
+          ? command.permissionMode
+          : "auto");
         activePromptId = command.id;
         completedPromptIds.delete(command.id);
         if (shellWarning && !shellWarningEmitted) {

@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   AgentImagePayload,
+  AgentPermissionMode,
   AgentSendOptions,
   AgentActionCatalogEntry,
   AgentActionListOptions,
@@ -53,6 +54,7 @@ export type {
   AgentDescriptor,
   AgentImagePayload,
   AgentImagePayloadItem,
+  AgentPermissionMode,
   AgentPackageStatus,
   AgentPackageVersions,
   AgentPlanModeSupport,

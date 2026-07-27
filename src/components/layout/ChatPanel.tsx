@@ -31,7 +31,7 @@ import {
 } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
-import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance } from "@/lib/agents";
+import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import {
   createSessionReferenceSnapshot,
@@ -47,7 +47,9 @@ import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ChatComposer } from "./ChatComposer";
 import { ChatToolbar } from "./ChatToolbar";
+import { ConfirmationPanel } from "./ConfirmationPanel";
 import { DiffBlock } from "./DiffBlock";
+import { PermissionChoicePanel } from "./PermissionChoicePanel";
 import { ProcessBlock } from "./ProcessBlock";
 import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
@@ -67,6 +69,10 @@ import { getModelThinkingLevels, getOrderedModelProviders, includeCurrentModel }
 import { collectProcessDiffs } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
 import type { AgentActionInvocation } from "@shared/agent-actions";
+import {
+  normalizeAgentPermissionMode,
+  type AgentPermissionMode,
+} from "@shared/agent-permissions";
 import {
   ComposerHistoryController,
   draftFromMessage,
@@ -96,6 +102,7 @@ type SendPayloadNow = (
   options?: {
     onSendFailure?: (error: string) => void;
     planModeEnabled?: boolean;
+    permissionMode?: AgentPermissionMode;
     queueIfRunning?: boolean;
     clientMessageId?: string;
   }
@@ -1188,6 +1195,7 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
       removeQueuedMessage(sessionId, nextItem.id);
       void sendPayloadNow(sessionId, nextItem, {
         planModeEnabled: !!nextItem.planModeEnabled,
+        permissionMode: nextItem.permissionMode,
         onSendFailure: (error) => {
           upsertQueuedMessage({
           ...nextItem,
@@ -1351,6 +1359,7 @@ export function ChatPanel({
   const [modelOpen, setModelOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [permissionOpen, setPermissionOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [imageContextMenu, setImageContextMenu] = useState<{ x: number; y: number; src: string } | null>(null);
@@ -1358,6 +1367,7 @@ export function ChatPanel({
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
+  const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("auto");
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
   const [agentReloadConfirmOpen, setAgentReloadConfirmOpen] = useState(false);
@@ -1370,6 +1380,7 @@ export function ChatPanel({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
   const thinkingRef = useRef<HTMLDivElement>(null);
+  const permissionRef = useRef<HTMLDivElement>(null);
   const sessionRuntimeRef = useRef<Record<string, SessionRuntime>>({});
   const forkingMessageIdRef = useRef<string | null>(null);
   const {
@@ -1430,9 +1441,16 @@ export function ChatPanel({
     pendingUIResponseRef,
     setPendingUIResponseState,
     isAwaitingUIResponse,
+    activeConfirmation,
+    activePermissionChoice,
     activeQuestionnaire,
   } = usePendingUIResponse(activeSessionId);
+  const activeInteraction = activeConfirmation || activePermissionChoice || activeQuestionnaire;
   const currentSessionRunning = activeSessionId ? activeSessionAgentStatus === "running" : isStreaming;
+  const permissionModeSupported = supportsPermissionModes(activeSession?.agentId || activeAgentId);
+  useEffect(() => {
+    if (!permissionModeSupported) setPermissionOpen(false);
+  }, [permissionModeSupported]);
   const isForkingSession = forkingMessageId !== null;
   const questionnaireResetKey = activeQuestionnaire
     ? `${activeQuestionnaire.sessionId}:${activeQuestionnaire.requestId || ""}:${activeQuestionnaire.entryId || ""}`
@@ -1552,14 +1570,21 @@ export function ChatPanel({
     window.electronAPI.loadData("settings").then((data) => {
       const settings = asRecord(data);
       const general = asRecord(settings.general);
-      if (!cancelled) setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
+      if (!cancelled) {
+        setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
+        setPermissionMode(normalizeAgentPermissionMode(general.permissionMode));
+      }
     });
 
     const handleAgentSettingsUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ planModeEnabled?: boolean }>).detail;
+      const detail = (event as CustomEvent<{
+        planModeEnabled?: boolean;
+        permissionMode?: AgentPermissionMode;
+      }>).detail;
       if (typeof detail?.planModeEnabled === "boolean") {
         setPlanModeEnabled(detail.planModeEnabled);
       }
+      if (detail?.permissionMode) setPermissionMode(normalizeAgentPermissionMode(detail.permissionMode));
     };
     window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
     return () => {
@@ -1572,6 +1597,7 @@ export function ChatPanel({
     setPlanModeEnabled(nextPlanModeEnabled);
     setModelOpen(false);
     setThinkingOpen(false);
+    setPermissionOpen(false);
     setExpandedProvider(null);
     const data = await window.electronAPI.loadData("settings");
     const currentSettings = asRecord(data);
@@ -1589,10 +1615,32 @@ export function ChatPanel({
     }));
   }, []);
 
+  const savePermissionMode = useCallback(async (nextPermissionMode: AgentPermissionMode) => {
+    const normalizedMode = normalizeAgentPermissionMode(nextPermissionMode);
+    setPermissionMode(normalizedMode);
+    setPermissionOpen(false);
+    setModelOpen(false);
+    setThinkingOpen(false);
+    setExpandedProvider(null);
+    const data = await window.electronAPI.loadData("settings");
+    const currentSettings = asRecord(data);
+    const currentGeneral = asRecord(currentSettings.general);
+    await window.electronAPI.saveData("settings", {
+      ...currentSettings,
+      general: {
+        ...currentGeneral,
+        permissionMode: normalizedMode,
+      },
+    });
+    window.dispatchEvent(new CustomEvent(AGENT_SETTINGS_UPDATED_EVENT, {
+      detail: { permissionMode: normalizedMode },
+    }));
+  }, []);
+
   // Auto-resize textarea after layout changes; typing resizes directly in onChange.
   useEffect(() => {
     resizeTextarea();
-  }, [resizeTextarea, activeQuestionnaire]);
+  }, [resizeTextarea, activeInteraction]);
 
   // Close user message history on outside click
   useEffect(() => {
@@ -1621,6 +1669,7 @@ export function ChatPanel({
     setReferenceOpen(false);
     setModelOpen(false);
     setThinkingOpen(false);
+    setPermissionOpen(false);
     setExpandedProvider(null);
     setUserMsgHistoryOpen(false);
     setQueueEditingId(null);
@@ -1855,6 +1904,7 @@ export function ChatPanel({
     const handler = (e: MouseEvent) => {
       if (modelRef.current && !modelRef.current.contains(e.target as Node)) setModelOpen(false);
       if (thinkingRef.current && !thinkingRef.current.contains(e.target as Node)) setThinkingOpen(false);
+      if (permissionRef.current && !permissionRef.current.contains(e.target as Node)) setPermissionOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -1864,6 +1914,7 @@ export function ChatPanel({
     if (!isForkingSession) return;
     setModelOpen(false);
     setThinkingOpen(false);
+    setPermissionOpen(false);
     setExpandedProvider(null);
     setReferenceOpen(false);
     setUserMsgHistoryOpen(false);
@@ -1903,10 +1954,14 @@ export function ChatPanel({
   });
 
   const {
+    handleConfirmUIResponse,
+    handlePermissionChoiceUIResponse,
     handleSendUIResponse,
     handleSubmitQuestionnaire,
     handleCancelQuestionnaire,
   } = usePendingUIResponseActions({
+    activeConfirmation,
+    activePermissionChoice,
     activeQuestionnaire,
     addMessage,
     enableAutoFollow,
@@ -1949,6 +2004,7 @@ export function ChatPanel({
     options?: {
       onSendFailure?: (error: string) => void;
       planModeEnabled?: boolean;
+      permissionMode?: AgentPermissionMode;
       queueIfRunning?: boolean;
       clientMessageId?: string;
     }
@@ -1972,6 +2028,7 @@ export function ChatPanel({
       message: {
         ...payload,
         planModeEnabled: !!options?.planModeEnabled,
+        permissionMode: normalizeAgentPermissionMode(options?.permissionMode),
       },
       hooks: {
         isProcessActive: (sessionId) => sessionRuntimeRef.current[sessionId]?.processActive === true,
@@ -2005,7 +2062,7 @@ export function ChatPanel({
 
   const handleSend = useCallback(async () => {
     if (forkingMessageIdRef.current) return;
-    if (activeQuestionnaire) return;
+    if (activeInteraction) return;
 
     if (isAwaitingUIResponse) {
       await handleSendUIResponse();
@@ -2044,10 +2101,11 @@ export function ChatPanel({
     clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
     await sendPayloadNow(targetSessionId, payload, {
       planModeEnabled,
+      permissionMode,
       queueIfRunning: true,
     });
   }, [
-    activeQuestionnaire,
+    activeInteraction,
     activeDraft.action,
     activeSessionReferences.length,
     addMessage,
@@ -2060,6 +2118,7 @@ export function ChatPanel({
     pendingImages,
     pendingPathAttachments,
     planModeEnabled,
+    permissionMode,
     sendPayloadNow,
     sessionRuntimeRef,
     setComposerInput,
@@ -2113,7 +2172,7 @@ export function ChatPanel({
         ? "next"
         : null;
     if (historyDirection) {
-      if (activeQuestionnaire || isForkingSession || e.currentTarget.disabled) return;
+      if (activeInteraction || isForkingSession || e.currentTarget.disabled) return;
       const sessionId = useProjectStore.getState().activeSessionId;
       if (!sessionId) return;
       e.preventDefault();
@@ -2151,7 +2210,7 @@ export function ChatPanel({
       }
     }
   }, [
-    activeQuestionnaire,
+    activeInteraction,
     getCurrentSessionDraft,
     handleSend,
     isForkingSession,
@@ -2411,9 +2470,27 @@ export function ChatPanel({
 
       {/* Input area */}
       <div
-        className={`chat-input-area${activeQuestionnaire ? " questionnaire-active" : ""}${activeQuestionnaire && questionnairePaneHeight !== null ? " questionnaire-resized" : ""}`}
+        className={`chat-input-area${activeInteraction ? " questionnaire-active" : ""}${activeQuestionnaire && questionnairePaneHeight !== null ? " questionnaire-resized" : ""}`}
         style={activeQuestionnaire && questionnairePaneHeight !== null ? { height: questionnairePaneHeight } : undefined}
       >
+        {activeConfirmation && (
+          <ConfirmationPanel
+            title={activeConfirmation.title}
+            description={activeConfirmation.description}
+            onConfirm={() => void handleConfirmUIResponse(true)}
+            onReject={() => void handleConfirmUIResponse(false)}
+          />
+        )}
+
+        {activePermissionChoice && (
+          <PermissionChoicePanel
+            title={activePermissionChoice.title}
+            description={activePermissionChoice.description}
+            question={activePermissionChoice.questions?.[0]}
+            onSelect={(option) => void handlePermissionChoiceUIResponse(option)}
+          />
+        )}
+
         {activeQuestionnaire && (
           <QuestionnairePanel
             questions={activeQuestionnaire.questions || []}
@@ -2435,7 +2512,7 @@ export function ChatPanel({
         />
 
         <ChatComposer
-          activeQuestionnaire={!!activeQuestionnaire}
+          activeQuestionnaire={!!activeInteraction}
           currentSessionRunning={currentSessionRunning}
           interactionDisabled={isForkingSession}
           attachmentError={attachmentError}
@@ -2500,11 +2577,15 @@ export function ChatPanel({
           modelOpen={modelOpen}
           modelProviders={modelProviders}
           planModeEnabled={planModeEnabled}
+          permissionMode={permissionMode}
+          permissionModeSupported={permissionModeSupported}
+          permissionOpen={permissionOpen}
           thinkingLevel={currentThinking.id}
           thinkingLevels={thinkingLevels}
           thinkingOpen={thinkingOpen}
           modelRef={modelRef}
           thinkingRef={thinkingRef}
+          permissionRef={permissionRef}
           leadingContent={
             activeProject && activeSession && (activeSessionReferences.length > 0 || referenceOpen) ? (
               <div ref={referenceRef} className="relative">
@@ -2528,11 +2609,14 @@ export function ChatPanel({
             if (open) void refreshModelProviderOrder(currentAgentId);
           }}
           onThinkingOpenChange={setThinkingOpen}
+          onPermissionOpenChange={setPermissionOpen}
           onPlanModeChange={savePlanModeEnabled}
+          onPermissionModeChange={savePermissionMode}
           onOpenModelConfig={() => {
             const agentId = activeSession?.agentId || activeAgentId;
             setModelOpen(false);
             setThinkingOpen(false);
+            setPermissionOpen(false);
             setModelConfigAgentId(agentId);
           }}
           onSelectModel={handleSelectModel}

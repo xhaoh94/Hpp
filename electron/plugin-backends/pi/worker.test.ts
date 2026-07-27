@@ -25,13 +25,25 @@ class FakeSession {
   uiContext = null;
   activeRun = null;
   activeTools = ["read", "bash", "edit", "write", "ask_user_question"];
+  extensionFactories = [];
+  toolCallHandlers = [];
 
-  constructor(sessionManager, modelRegistry) {
+  constructor(sessionManager, modelRegistry, extensionFactories = []) {
     this.sessionManager = sessionManager;
     this.modelRegistry = modelRegistry;
+    this.extensionFactories = extensionFactories;
   }
 
-  async bindExtensions({ uiContext }) { this.uiContext = uiContext; }
+  async bindExtensions({ uiContext }) {
+    this.uiContext = uiContext;
+    for (const factory of this.extensionFactories) {
+      factory({
+        on: (eventName, handler) => {
+          if (eventName === "tool_call") this.toolCallHandlers.push(handler);
+        },
+      });
+    }
+  }
   subscribe(listener) { this.listener = listener; return () => { this.listener = null; }; }
   getActiveToolNames() { return [...this.activeTools]; }
   setActiveToolsByName(names) { this.activeTools = [...names]; }
@@ -72,6 +84,21 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
+    if (message === "permission-edit") {
+      this.listener?.({ type: "agent_start" });
+      let result;
+      for (const handler of this.toolCallHandlers) {
+        result = await handler(
+          { type: "tool_call", toolCallId: "edit-1", toolName: "edit", input: { path: "src/a.ts" } },
+          { hasUI: true, ui: this.uiContext },
+        );
+        if (result?.block) break;
+      }
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result || {}) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
 
     this.listener?.({ type: "agent_start" });
     this.listener?.({
@@ -100,14 +127,22 @@ export const ModelRegistry = { create: () => ({
 }) };
 export const SettingsManager = { create: () => ({}) };
 export class DefaultResourceLoader {
+  constructor(options = {}) { this.extensionFactories = options.extensionFactories || []; }
   async reload() {}
   getSkills() { return { skills: [{ name: "review", description: "Review changes" }] }; }
   getPrompts() { return { prompts: [{ name: "release", description: "Prepare release", usage: "[version]" }] }; }
-  getExtensions() { return { extensions: [{ commands: [{ name: "inspect", description: "Inspect project" }] }] }; }
+  getExtensions() {
+    return {
+      extensions: [
+        { path: "<inline:1>", handlers: new Map([["tool_call", [() => undefined]]]) },
+        { commands: [{ name: "inspect", description: "Inspect project" }] },
+      ],
+    };
+  }
 }
 export const SessionManager = FakeSessionManager;
-export const createAgentSession = async ({ sessionManager, modelRegistry }) => ({
-  session: new FakeSession(sessionManager, modelRegistry),
+export const createAgentSession = async ({ sessionManager, modelRegistry, resourceLoader }) => ({
+  session: new FakeSession(sessionManager, modelRegistry, resourceLoader.extensionFactories),
 });
 export const getShellConfig = process.env.PI_TEST_BROKEN_SHELL === "1"
   ? () => ({ shell: "hpp-definitely-missing-shell", args: ["-c"] })
@@ -216,13 +251,13 @@ describe("Pi SDK worker protocol", () => {
     expect(types.lastIndexOf("prompt_done")).toBeGreaterThan(types.lastIndexOf("agent_end"));
   });
 
-  it("keeps directory and search tools enabled across permission modes", async () => {
+  it("keeps tools available while the permission hook guards execution", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
 
-    const readTools = async (id: string, permissionMode: "plan" | "full-access") => {
+    const readTools = async (id: string, permissionMode: "ask" | "auto" | "full-access") => {
       worker.send({ id, type: "prompt", message: `active-tools:${id}`, permissionMode });
       await worker.waitFor((message) => message.type === "prompt_done" && message.id === id);
       const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
@@ -232,9 +267,8 @@ describe("Pi SDK worker protocol", () => {
     const fullAccessTools = await readTools("full-1", "full-access");
     expect(fullAccessTools).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "grep", "find", "ls"]));
 
-    const planTools = await readTools("plan-1", "plan");
-    expect(planTools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls"]));
-    expect(planTools).not.toEqual(expect.arrayContaining(["bash", "edit", "write"]));
+    const automaticTools = await readTools("auto-1", "auto");
+    expect(automaticTools).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", "grep", "find", "ls"]));
 
     const restoredTools = await readTools("full-2", "full-access");
     expect(restoredTools).toEqual(expect.arrayContaining(["bash", "edit", "write", "grep", "find", "ls"]));
@@ -305,6 +339,36 @@ describe("Pi SDK worker protocol", () => {
     expect(completed.result).toMatchObject({
       cancelled: false,
       answers: [{ selected: ["Pi"], values: ["pi"] }],
+    });
+  });
+
+  it("uses Pi's tool_call hook for Hpp permission approval", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "auto-edit", type: "prompt", message: "permission-edit", permissionMode: "auto" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "auto-edit");
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({ type: "extension_ui_request" }));
+
+    worker.send({ id: "ask-edit", type: "prompt", message: "permission-edit", permissionMode: "ask" });
+    const request = await worker.waitFor((message) => message.type === "extension_ui_request");
+    expect(request.request).toMatchObject({ method: "confirm", title: "Pi 请求权限" });
+    worker.send({
+      id: "deny-edit",
+      type: "uiResponse",
+      response: {
+        id: String((request.request as { id?: unknown }).id || ""),
+        cancelled: false,
+        confirmed: false,
+      },
+    });
+    const resultMessage = await worker.waitFor((message) =>
+      message.type === "message_end" && String((message.message as { text?: unknown })?.text || "").includes("block"));
+    expect(JSON.parse(String((resultMessage.message as { text?: unknown }).text))).toMatchObject({
+      block: true,
+      reason: "用户拒绝了该操作",
     });
   });
 

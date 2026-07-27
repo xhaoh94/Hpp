@@ -1,6 +1,8 @@
 export type UnknownRecord = Record<string, unknown>;
 
 import type { AgentActionInvocation } from "@shared/agent-actions";
+import type { AgentPermissionMode } from "@shared/agent-permissions";
+export type { AgentPermissionMode } from "@shared/agent-permissions";
 export type {
   AgentActionCatalogEntry,
   AgentActionInvocation,
@@ -21,6 +23,7 @@ export type AgentImagePayload = AgentImagePayloadItem[];
 
 export interface AgentSendOptions {
   planModeEnabled?: boolean;
+  permissionMode?: AgentPermissionMode;
   clientMessageId?: string;
   action?: AgentActionInvocation;
 }
@@ -127,6 +130,7 @@ export type AgentConfigurationSupport = AgentProviderConfiguration | "none";
 
 export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
+  permissions: boolean;
   guidance: boolean;
   fork: boolean;
   actions: boolean;

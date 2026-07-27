@@ -25,7 +25,7 @@ interface AgentModel {
 interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
-  permissionMode?: "plan" | "full-access";
+  permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   clientMessageId?: string;
   action?: AgentActionInvocation;
 }
@@ -244,7 +244,7 @@ export class CodexAgent {
       message,
       images,
       planModeEnabled: !!options?.planModeEnabled,
-      permissionMode: options?.permissionMode || (options?.planModeEnabled ? "plan" : "full-access"),
+      permissionMode: options?.permissionMode || "auto",
       action: options?.action,
     });
   }

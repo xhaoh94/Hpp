@@ -10,6 +10,7 @@ interface DroidInternals {
   isReady: boolean;
   sessionId: string | null;
   planModeEnabled: boolean;
+  permissionMode: "ask" | "auto" | "full-access";
   turnActive: boolean;
   sendRpcAsync: (method: string, params: unknown, timeoutMs?: number, requestId?: string) => Promise<unknown>;
   handleServerRequest: (method: string, requestId: string, params: unknown) => void;
@@ -126,6 +127,7 @@ describe("Droid protocol adapter", () => {
     };
     internals.isReady = true;
     internals.planModeEnabled = true;
+    internals.permissionMode = "ask";
 
     internals.handleServerRequest("droid.ask_user", "ask-1", {
       toolCallId: "tool-1",
@@ -152,6 +154,31 @@ describe("Droid protocol adapter", () => {
       id: "permission-1",
       result: { selectedOption: "cancel" },
     });
+  });
+
+  it("auto-approves Droid permission requests only in full access mode", () => {
+    const events: AgentEvent[] = [];
+    const writes: Record<string, unknown>[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = {
+      stdin: {
+        writable: true,
+        write: (value) => writes.push(JSON.parse(value)),
+      },
+    };
+    internals.isReady = true;
+    internals.permissionMode = "full-access";
+
+    internals.handleServerRequest("droid.request_permission", "permission-full", {
+      action: "execute command",
+    });
+
+    expect(writes).toContainEqual(expect.objectContaining({
+      id: "permission-full",
+      result: { selectedOption: "proceed_once" },
+    }));
+    expect(events).not.toContainEqual(expect.objectContaining({ requestId: "permission-full" }));
   });
 
   it("acknowledges manual abort", async () => {

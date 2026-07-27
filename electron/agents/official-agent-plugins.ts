@@ -30,6 +30,7 @@ export type FetchLike = (
 
 const DEFAULT_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
+  permissions: false,
   guidance: false,
   fork: false,
   actions: false,
@@ -126,6 +127,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
   return {
     planMode: normalizePlanMode(input.planMode),
+    permissions: input.permissions === true,
     guidance: input.guidance === true,
     fork: input.fork === true,
     actions: input.actions === true,
