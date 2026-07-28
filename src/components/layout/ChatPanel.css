@@ -3852,7 +3852,7 @@ body.chat-questionnaire-resizing .chat-bubble {
 
 .chat-permission-dropdown {
   position: absolute;
-  right: 0;
+  left: 0;
   bottom: 100%;
   z-index: 55;
   width: min(292px, calc(100vw - 24px));
