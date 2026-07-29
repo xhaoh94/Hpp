@@ -9,9 +9,20 @@ interface Props {
 
 /** Renders the compact attachment tokens used in message/session previews. */
 export function AttachmentPreviewText({ content, maxLength, className = "" }: Props) {
-  const preview = maxLength && content.length > maxLength
-    ? `${content.substring(0, maxLength)}...`
-    : content;
+  let preview = content;
+  if (maxLength && content.length > maxLength) {
+    let cutoff = maxLength;
+    // Never cut through an attachment token. Extend the preview to its closing ]
+    // so it can still be rendered as a chip.
+    const token = /\[(?:file|folder):[^\]]+\]/g;
+    let match: RegExpExecArray | null;
+    while ((match = token.exec(content))) {
+      const end = match.index + match[0].length;
+      if (match.index < cutoff && end > cutoff) cutoff = end;
+      if (match.index >= cutoff) break;
+    }
+    preview = `${content.substring(0, cutoff)}...`;
+  }
   const parts = preview.split(/(\[(?:file|folder):[^\]]+\])/g);
 
   return (

@@ -1,6 +1,16 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Component, type ReactNode } from "react";
 import { useChatStore } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
+import {
+  buildDisplayTokens,
+  buildHighlightedLines,
+  findTextMatches,
+  getFilePreviewLanguage,
+  getNextSearchMatchIndex,
+  getRenderWindow,
+  parseGoToLine,
+  type IndexedSearchMatch,
+} from "@/lib/file-preview-code";
 import "./FilePreview.css";
 
 class ErrorBoundary extends Component<
@@ -83,6 +93,16 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   const [error, setError] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState<boolean | null>(null);
   const [previewHistory, setPreviewHistory] = useState<string[]>([]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMatchCase, setSearchMatchCase] = useState(false);
+  const [searchWholeWord, setSearchWholeWord] = useState(false);
+  const [activeMatchIndex, setActiveMatchIndex] = useState(-1);
+  const [goToLineOpen, setGoToLineOpen] = useState(false);
+  const [goToLineValue, setGoToLineValue] = useState("");
+  const [goToLineError, setGoToLineError] = useState(false);
+  const [windowAnchorLine, setWindowAnchorLine] = useState(1);
+  const [jumpTargetLine, setJumpTargetLine] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -91,6 +111,8 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     endLine: number;
   } | null>(null);
   const contentRef = useRef<HTMLPreElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const goToLineInputRef = useRef<HTMLInputElement>(null);
   const { addPendingFile } = useChatStore();
 
   const onCloseRef = useRef(onClose);
@@ -120,6 +142,19 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   useEffect(() => {
     setPreviewMode(isMarkdown ? true : null);
   }, [isMarkdown]);
+
+  useEffect(() => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchMatchCase(false);
+    setSearchWholeWord(false);
+    setActiveMatchIndex(-1);
+    setGoToLineOpen(false);
+    setGoToLineValue("");
+    setGoToLineError(false);
+    setWindowAnchorLine(1);
+    setJumpTargetLine(null);
+  }, [activeFilePath]);
 
   useEffect(() => {
     setPreviewHistory([]);
@@ -163,17 +198,6 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   }, [activeFilePath, isImage]);
 
   useEffect(() => {
-    if (!activeFilePath) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        handleClose();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [activeFilePath, handleClose]);
-
-  useEffect(() => {
     if (!contextMenu) return;
     const handleClick = (e: MouseEvent) => {
       if ((e.target as HTMLElement).closest(".fp-context-menu")) return;
@@ -191,12 +215,41 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
 
   const contentLines = useMemo(() => content.split("\n"), [content]);
   const totalLines = contentLines.length;
-  const shouldLimit = totalLines > MAX_RENDER_LINES && !showMarkdownPreview;
-  const displayContent = useMemo(() => {
-    if (loading) return "";
-    if (shouldLimit) return contentLines.slice(0, MAX_RENDER_LINES).join("\n");
-    return content;
-  }, [content, contentLines, shouldLimit, loading]);
+  const previewLanguage = useMemo(
+    () => activeFilePath ? getFilePreviewLanguage(activeFilePath) : null,
+    [activeFilePath],
+  );
+  const highlightedLines = useMemo(
+    () => buildHighlightedLines(content, previewLanguage),
+    [content, previewLanguage],
+  );
+  const searchMatches = useMemo(
+    () => findTextMatches(contentLines, searchQuery, {
+      matchCase: searchMatchCase,
+      wholeWord: searchWholeWord,
+    }),
+    [contentLines, searchMatchCase, searchQuery, searchWholeWord],
+  );
+  const searchMatchesByLine = useMemo(() => {
+    const matchesByLine = new Map<number, IndexedSearchMatch[]>();
+    searchMatches.forEach((match, matchIndex) => {
+      const lineMatches = matchesByLine.get(match.lineNumber) || [];
+      lineMatches.push({ ...match, matchIndex });
+      matchesByLine.set(match.lineNumber, lineMatches);
+    });
+    return matchesByLine;
+  }, [searchMatches]);
+  const renderWindow = useMemo(
+    () => getRenderWindow(totalLines, windowAnchorLine, MAX_RENDER_LINES),
+    [totalLines, windowAnchorLine],
+  );
+  const visibleLineIndexes = useMemo(
+    () => Array.from(
+      { length: Math.max(0, renderWindow.endIndex - renderWindow.startIndex) },
+      (_, index) => renderWindow.startIndex + index,
+    ),
+    [renderWindow.endIndex, renderWindow.startIndex],
+  );
 
   const markdownContent = useMemo(() => {
     if (!showMarkdownPreview) return content;
@@ -205,6 +258,139 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     }
     return content;
   }, [content, showMarkdownPreview]);
+
+  useEffect(() => {
+    const firstMatch = searchMatches[0];
+    setActiveMatchIndex(firstMatch ? 0 : -1);
+    if (firstMatch) {
+      setWindowAnchorLine(firstMatch.lineNumber);
+      setJumpTargetLine(null);
+    }
+  }, [searchMatches]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const frame = requestAnimationFrame(() => searchInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!goToLineOpen) return;
+    const frame = requestAnimationFrame(() => goToLineInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [goToLineOpen]);
+
+  useEffect(() => {
+    if (showMarkdownPreview || isImage || loading) return;
+    const frame = requestAnimationFrame(() => {
+      const currentMatch = searchOpen
+        ? contentRef.current?.querySelector(".fp-search-match-current")
+        : null;
+      const targetLine = searchOpen
+        ? searchMatches[activeMatchIndex]?.lineNumber
+        : jumpTargetLine;
+      const target = currentMatch
+        || (targetLine ? contentRef.current?.querySelector(`[data-line="${targetLine}"]`) : null);
+      target?.scrollIntoView({ block: "center", inline: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    activeMatchIndex,
+    isImage,
+    jumpTargetLine,
+    loading,
+    renderWindow.startIndex,
+    searchMatches,
+    searchOpen,
+    showMarkdownPreview,
+  ]);
+
+  const openSearch = useCallback(() => {
+    if (isImage) return;
+    if (isMarkdown) setPreviewMode(false);
+    setGoToLineOpen(false);
+    setGoToLineError(false);
+    setSearchOpen(true);
+  }, [isImage, isMarkdown]);
+
+  const openGoToLine = useCallback(() => {
+    if (isImage) return;
+    if (isMarkdown) setPreviewMode(false);
+    setSearchOpen(false);
+    setGoToLineValue("");
+    setGoToLineError(false);
+    setGoToLineOpen(true);
+  }, [isImage, isMarkdown]);
+
+  const navigateSearch = useCallback((direction: 1 | -1) => {
+    if (searchMatches.length === 0) return;
+    const nextIndex = getNextSearchMatchIndex(activeMatchIndex, searchMatches.length, direction);
+    setActiveMatchIndex(nextIndex);
+    setWindowAnchorLine(searchMatches[nextIndex].lineNumber);
+    setJumpTargetLine(null);
+  }, [activeMatchIndex, searchMatches]);
+
+  const submitGoToLine = useCallback(() => {
+    const lineNumber = parseGoToLine(goToLineValue, totalLines);
+    if (lineNumber === null) {
+      setGoToLineError(true);
+      return;
+    }
+    setWindowAnchorLine(lineNumber);
+    setJumpTargetLine(lineNumber);
+    setGoToLineError(false);
+    setGoToLineOpen(false);
+  }, [goToLineValue, totalLines]);
+
+  useEffect(() => {
+    if (!activeFilePath) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const modifierPressed = (event.ctrlKey || event.metaKey) && !event.altKey;
+      const key = event.key.toLowerCase();
+      if (searchOpen && event.altKey && !event.ctrlKey && !event.metaKey && key === "c") {
+        event.preventDefault();
+        setSearchMatchCase((current) => !current);
+        return;
+      }
+      if (searchOpen && event.altKey && !event.ctrlKey && !event.metaKey && key === "w") {
+        event.preventDefault();
+        setSearchWholeWord((current) => !current);
+        return;
+      }
+      if (!isImage && modifierPressed && key === "f") {
+        event.preventDefault();
+        openSearch();
+        return;
+      }
+      if (!isImage && modifierPressed && key === "g") {
+        event.preventDefault();
+        openGoToLine();
+        return;
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (searchOpen) {
+        setSearchOpen(false);
+        return;
+      }
+      if (goToLineOpen) {
+        setGoToLineOpen(false);
+        setGoToLineError(false);
+        return;
+      }
+      handleClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [
+    activeFilePath,
+    goToLineOpen,
+    handleClose,
+    isImage,
+    openGoToLine,
+    openSearch,
+    searchOpen,
+  ]);
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -275,7 +461,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
 
   return (
     <div className="fp-overlay" onClick={handleClose}>
-      <div className="fp-modal" onClick={(e) => e.stopPropagation()}>
+      <div className={`fp-modal ${isMarkdown ? "fp-has-toolbar" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="fp-header">
           <div className="fp-title">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
@@ -290,7 +476,11 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
           <div className="fp-toolbar">
             <button
               className={`fp-toolbar-btn ${previewMode === true ? 'active' : ''}`}
-              onClick={() => setPreviewMode(true)}
+              onClick={() => {
+                setPreviewMode(true);
+                setSearchOpen(false);
+                setGoToLineOpen(false);
+              }}
             >
               预览
             </button>
@@ -299,6 +489,115 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
               onClick={() => setPreviewMode(false)}
             >
               源码
+            </button>
+          </div>
+        )}
+        {searchOpen && (
+          <div className="fp-find-widget" role="search">
+            <input
+              ref={searchInputRef}
+              className={`fp-widget-input ${searchQuery && searchMatches.length === 0 ? "fp-widget-input-error" : ""}`}
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                navigateSearch(event.shiftKey ? -1 : 1);
+              }}
+              placeholder="搜索"
+              aria-label="搜索文件内容"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              className={`fp-search-option-btn ${searchMatchCase ? "active" : ""}`}
+              onClick={() => setSearchMatchCase((current) => !current)}
+              title="区分大小写 (Alt+C)"
+              aria-label="区分大小写"
+              aria-pressed={searchMatchCase}
+            >
+              Aa
+            </button>
+            <button
+              type="button"
+              className={`fp-search-option-btn fp-whole-word ${searchWholeWord ? "active" : ""}`}
+              onClick={() => setSearchWholeWord((current) => !current)}
+              title="全字匹配 (Alt+W)"
+              aria-label="全字匹配"
+              aria-pressed={searchWholeWord}
+            >
+              ab
+            </button>
+            <span className="fp-find-count">
+              {searchQuery && searchMatches.length === 0
+                ? "无结果"
+                : `${searchMatches.length > 0 ? activeMatchIndex + 1 : 0}/${searchMatches.length}`}
+            </span>
+            <button
+              type="button"
+              className="fp-widget-btn"
+              onClick={() => navigateSearch(-1)}
+              disabled={searchMatches.length === 0}
+              title="上一个匹配项 (Shift+Enter)"
+              aria-label="上一个匹配项"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              className="fp-widget-btn"
+              onClick={() => navigateSearch(1)}
+              disabled={searchMatches.length === 0}
+              title="下一个匹配项 (Enter)"
+              aria-label="下一个匹配项"
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              className="fp-widget-btn"
+              onClick={() => setSearchOpen(false)}
+              title="关闭 (Esc)"
+              aria-label="关闭搜索"
+            >
+              ×
+            </button>
+          </div>
+        )}
+        {goToLineOpen && (
+          <div className="fp-find-widget fp-go-to-line-widget">
+            <input
+              ref={goToLineInputRef}
+              className={`fp-widget-input ${goToLineError ? "fp-widget-input-error" : ""}`}
+              value={goToLineValue}
+              onChange={(event) => {
+                setGoToLineValue(event.target.value);
+                setGoToLineError(false);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                submitGoToLine();
+              }}
+              placeholder={`跳转到行 (1 - ${totalLines})`}
+              aria-label={`跳转到行，范围 1 到 ${totalLines}`}
+              inputMode="numeric"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {goToLineError && <span className="fp-go-to-line-error">请输入 1 - {totalLines}</span>}
+            <button
+              type="button"
+              className="fp-widget-btn"
+              onClick={() => {
+                setGoToLineOpen(false);
+                setGoToLineError(false);
+              }}
+              title="关闭 (Esc)"
+              aria-label="关闭跳行"
+            >
+              ×
             </button>
           </div>
         )}
@@ -323,17 +622,46 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
             </div>
           ) : (
             <pre ref={contentRef} className="fp-text" data-file-path={activeFilePath}>
-              {displayContent.split('\n').map((line, i) => (
-                <div key={i} className="fp-line" data-line={i + 1}>
-                  <span className="fp-line-number" data-line={i + 1}>{i + 1}</span>
-                  <span className="fp-line-content" data-line={i + 1}>{line}</span>
-                </div>
-              ))}
+              {visibleLineIndexes.map((lineIndex) => {
+                const lineNumber = lineIndex + 1;
+                const lineMatches = searchOpen ? searchMatchesByLine.get(lineNumber) || [] : [];
+                const displayTokens = buildDisplayTokens(highlightedLines[lineIndex] || [], lineMatches);
+                return (
+                  <div
+                    key={lineNumber}
+                    className={`fp-line ${jumpTargetLine === lineNumber ? "fp-line-jump-target" : ""}`}
+                    data-line={lineNumber}
+                  >
+                    <span className="fp-line-number" data-line={lineNumber}>{lineNumber}</span>
+                    <span className="fp-line-content" data-line={lineNumber}>
+                      {displayTokens.map((token, tokenIndex) => {
+                        const syntaxToken = (
+                          <span className={token.classNames.join(" ") || undefined}>{token.text}</span>
+                        );
+                        if (token.matchIndex === undefined) {
+                          return <span key={tokenIndex}>{syntaxToken}</span>;
+                        }
+                        return (
+                          <mark
+                            key={tokenIndex}
+                            className={`fp-search-match ${token.matchIndex === activeMatchIndex ? "fp-search-match-current" : ""}`}
+                          >
+                            {syntaxToken}
+                          </mark>
+                        );
+                      })}
+                    </span>
+                  </div>
+                );
+              })}
             </pre>
           )}
         </div>
         <div className="fp-footer">
           <span>{isImage ? "图片预览" : "选择内容后右键可发送到聊天"}</span>
+          {!isImage && totalLines > MAX_RENDER_LINES && (
+            <span>当前显示第 {renderWindow.startIndex + 1} - {renderWindow.endIndex} 行，共 {totalLines} 行</span>
+          )}
         </div>
       </div>
 

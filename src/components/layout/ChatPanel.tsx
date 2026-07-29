@@ -38,6 +38,7 @@ import {
   getSessionReferenceTitle,
 } from "@/lib/session-references";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
+import { extractUserMessageAttachments } from "@shared/user-message-attachments";
 import { getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersistence";
 import { SessionCommandCoordinator, type PreparedSessionMessage } from "@/lib/session-command-coordinator";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
@@ -848,29 +849,21 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const processDiffs = collectProcessDiffs(msg.process);
   const visibleDiffs = !processRunning ? [...(msg.diffs || []), ...processDiffs] : [];
   const hasDiffs = visibleDiffs.length > 0;
-  const hasContent = msg.content.trim().length > 0;
-  const userMessageLines = msg.role === "user" ? msg.content.split(/\r?\n/) : [];
+  const userMessagePresentation = msg.role === "user"
+    ? extractUserMessageAttachments(msg.content)
+    : { text: msg.content, attachments: [] };
+  const hasContent = userMessagePresentation.text.trim().length > 0;
+  const hasRawContent = msg.content.trim().length > 0;
+  const hasTextAttachments = userMessagePresentation.attachments.length > 0;
+  const userMessageLines = msg.role === "user" ? userMessagePresentation.text.split(/\r?\n/) : [];
   const userMessageIsLong = userMessageLines.length > 10;
   const displayedUserContent = userMessageIsLong && !userMessageExpanded
     ? userMessageLines.slice(0, 10).join("\n")
-    : msg.content;
-  const renderUserContent = (content: string) => {
-    const parts = content.split(/(\[(?:file|folder):[^\]]+\])/g);
-    return parts.map((part, index) => {
-      const match = part.match(/^\[(file|folder):\s*([^\]]+)\]$/);
-      if (!match) return <span key={index}>{part}</span>;
-      return (
-        <span className={`chat-attached-path-chip ${match[1]}`} key={index}>
-          {match[1] === "folder" ? <Folder size={13} /> : <FileText size={13} />}
-          <span>{match[2]}</span>
-        </span>
-      );
-    });
-  };
+    : userMessagePresentation.text;
   const hasVisibleBubble =
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction)
-      : hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction;
+      : hasContent || hasTextAttachments || hasImages || hasDiffs || hasSessionReferences || hasAction;
   const showAssistantActions = hasVisibleBubble && areAssistantMessageActionsVisible(msg);
   const isForkingThisMessage = forkingMessageId === msg.id;
   const renderSessionReferences = () => (
@@ -930,7 +923,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           {(hasContent || hasAction || msg.role === "user") && (
             <div className="chat-bubble-row">
               <div className="chat-bubble-stack">
-                {(hasContent || hasAction) && (
+                {(hasContent || hasAction || (msg.role === "user" && (hasTextAttachments || hasSessionReferences))) && (
                   <div className={`chat-bubble ${msg.role} ${msg.action ? "has-action" : ""}`}>
                     {msg.action && (
                       <div className={`chat-action-label ${hasContent ? "with-content" : ""}`}>
@@ -939,32 +932,44 @@ const ChatMessageItem = memo(function ChatMessageItem({
                         <strong>{msg.action.name}</strong>
                       </div>
                     )}
-                    {hasContent && (
-                      <div className="chat-bubble-content">
-                      {msg.role === "assistant" ? (
-                          <MarkdownRenderer content={msg.content} />
-                        ) : (
-                          <>
-                            <span className={`chat-user-content ${userMessageIsLong && !userMessageExpanded ? "collapsed" : ""}`}>
-                              {renderUserContent(displayedUserContent)}
-                            </span>
-                            {userMessageIsLong && (
-                              <button
-                                type="button"
-                                className="chat-user-expand-btn"
-                                onClick={() => setUserMessageExpanded((expanded) => !expanded)}
-                              >
-                                {userMessageExpanded ? "收起" : "显示更多"}
-                                <span className={`chat-user-expand-chevron ${userMessageExpanded ? "expanded" : ""}`}>⌄</span>
-                              </button>
-                            )}
-                          </>
+                    {msg.role === "user" && (hasTextAttachments || hasSessionReferences || hasContent) && (
+                      <div className="chat-user-message-flow">
+                        {userMessagePresentation.attachments.map((attachment, index) => (
+                          <span className={`chat-attached-path-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
+                            {attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
+                            <span>{attachment.label}</span>
+                          </span>
+                        ))}
+                        {msg.sessionReferences?.map((reference) => (
+                          <span key={reference.sourceSessionId} className="chat-message-reference-chip">
+                            <Link2 size={12} strokeWidth={2} />
+                            <span>引用会话: <AttachmentPreviewText content={reference.sourceTitle} /></span>
+                          </span>
+                        ))}
+                        {hasContent && (
+                          <span className={`chat-user-content ${userMessageIsLong && !userMessageExpanded ? "collapsed" : ""}`}>
+                            {displayedUserContent}
+                          </span>
                         )}
+                        {userMessageIsLong && (
+                          <button
+                            type="button"
+                            className="chat-user-expand-btn"
+                            onClick={() => setUserMessageExpanded((expanded) => !expanded)}
+                          >
+                            {userMessageExpanded ? "收起" : "显示更多"}
+                            <span className={`chat-user-expand-chevron ${userMessageExpanded ? "expanded" : ""}`}>⌄</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {msg.role !== "user" && hasContent && (
+                      <div className="chat-bubble-content">
+                        <MarkdownRenderer content={msg.content} />
                       </div>
                     )}
                   </div>
                 )}
-                {msg.role === "user" && renderSessionReferences()}
               </div>
               {msg.role === "user" && hasVisibleBubble && (
                 <div className="chat-msg-actions">
@@ -983,7 +988,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
                     className="chat-copy-btn"
                     onClick={() => void copyMessageText(msg.content)}
                     title="复制"
-                    disabled={!hasContent}
+                    disabled={!hasRawContent}
                   >
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <rect x="9" y="9" width="13" height="13" rx="2" />

@@ -8,6 +8,8 @@ import { getPiMessageText, resolvePiForkEntryId } from "./pi-fork-utils.mjs";
 import {
   buildShellEnvironmentContract,
   detectShellFamily,
+  POWERSHELL_UTF8_COMMAND_PREFIX,
+  rewritePowerShellPackageManagerCommand,
   validateShellCommand,
 } from "./shell-environment.mjs";
 
@@ -36,6 +38,7 @@ let activePermissionMode = "full-access";
 let fullAccessToolNames = [];
 let shellWarning = "";
 let shellNotice = "";
+let shellAvailable = false;
 let shellWarningEmitted = false;
 let shellEnvironment = { platform: process.platform, shellFamily: "unknown", shellPath: "" };
 let activeCompactionId = null;
@@ -574,7 +577,39 @@ const describePiToolPermission = (event) => {
   return detail ? `${toolName}: ${detail}` : toolName;
 };
 
+const registerHppShellTool = (pi) => {
+  if (!shellAvailable || typeof pi?.registerTool !== "function" || typeof sdk?.createBashToolDefinition !== "function") return;
+  const isPowerShell = shellEnvironment.platform === "win32" && shellEnvironment.shellFamily === "powershell";
+  const shellLabel = shellEnvironment.shellFamily === "powershell"
+    ? "PowerShell"
+    : shellEnvironment.shellFamily === "cmd"
+      ? "Command Prompt"
+      : shellEnvironment.shellFamily === "bash" || shellEnvironment.shellFamily === "posix"
+        ? "POSIX shell"
+        : "configured shell";
+  const definition = sdk.createBashToolDefinition(projectPath, {
+    shellPath: shellEnvironment.shellPath || undefined,
+    ...(isPowerShell ? {
+      commandPrefix: POWERSHELL_UTF8_COMMAND_PREFIX,
+      spawnHook: (context) => ({
+        ...context,
+        command: rewritePowerShellPackageManagerCommand(context.command),
+      }),
+    } : {}),
+  });
+  definition.label = shellLabel;
+  definition.description = `Execute a ${shellLabel} command in the current working directory. The registered schema/tool name remains bash. Returns stdout and stderr.`;
+  definition.promptSnippet = `Execute ${shellLabel} commands using the available bash tool`;
+  definition.promptGuidelines = [
+    ...(definition.promptGuidelines || []),
+    `The bash tool is registered and available; it executes ${shellLabel}, not necessarily GNU Bash.`,
+    ...(isPowerShell ? ["Use npm.cmd, npx.cmd, pnpm.cmd, and yarn.cmd for Node package-manager commands on Windows PowerShell."] : []),
+  ];
+  pi.registerTool(definition);
+};
+
 const hppPermissionExtension = (pi) => {
+  registerHppShellTool(pi);
   pi.on("tool_call", async (event, context) => {
     if (normalizeToolName(event?.toolName) === "bash") {
       const input = isRecord(event?.input) ? event.input : {};
@@ -626,7 +661,9 @@ const probeShell = (settingsManager) => {
     if (!config?.shell || !Array.isArray(config.args)) {
       return "Pi 返回了无效的 Shell 配置";
     }
-    const command = `printf ${SHELL_PROBE_TOKEN}`;
+    // `echo` is available in POSIX shells, PowerShell, and cmd. Using `printf`
+    // here incorrectly marked a healthy PowerShell as unavailable on Windows.
+    const command = `echo ${SHELL_PROBE_TOKEN}`;
     const usesStdin = config.commandTransport === "stdin";
     const result = spawnSync(
       config.shell,
@@ -651,31 +688,70 @@ const probeShell = (settingsManager) => {
   }
 };
 
-// Keep the user's configured shell untouched, but fall back to an installed
-// shell (for example Git Bash) when that configuration points at a dead path.
+const getWindowsShellCandidates = () => {
+  if (process.platform !== "win32") return [];
+  const candidates = [];
+  const add = (path) => {
+    const value = String(path || "").trim();
+    if (value && existsSync(value)) candidates.push(value);
+  };
+  add(process.env.ProgramFiles && join(process.env.ProgramFiles, "Git", "bin", "bash.exe"));
+  add(process.env.ProgramW6432 && join(process.env.ProgramW6432, "Git", "bin", "bash.exe"));
+  add(process.env["ProgramFiles(x86)"] && join(process.env["ProgramFiles(x86)"], "Git", "bin", "bash.exe"));
+  add(process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "Programs", "Git", "bin", "bash.exe"));
+  add(process.env.ProgramFiles && join(process.env.ProgramFiles, "PowerShell", "7", "pwsh.exe"));
+  add(process.env.SystemRoot && join(
+    process.env.SystemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  ));
+  return candidates;
+};
+
+const overrideShellPath = (settingsManager, shellPath) => new Proxy(settingsManager, {
+  get(target, property, receiver) {
+    if (property === "getShellPath") return () => shellPath;
+    return Reflect.get(target, property, receiver);
+  },
+});
+
+// Keep the user's configured shell untouched, but fall back to the first
+// healthy installed shell. This explicitly includes PowerShell because Pi's
+// Windows auto-detection can otherwise stop at the unusable WSL bash launcher.
 const resolveShellSettings = (settingsManager) => {
   shellNotice = "";
   const configuredPath = settingsManager?.getShellPath?.();
   const configuredError = probeShell(settingsManager);
   if (!configuredError) return settingsManager;
   if (typeof sdk?.getShellConfig !== "function") return settingsManager;
+
+  const candidates = [];
   try {
     const fallback = sdk.getShellConfig();
-    if (!fallback?.shell || !Array.isArray(fallback.args)) return settingsManager;
-    const fallbackError = probeShell({ getShellPath: () => fallback.shell });
-    if (fallbackError) return settingsManager;
-    shellNotice = configuredPath
-      ? `已将不可用的 Shell ${configuredPath} 自动切换为 ${fallback.shell}`
-      : `已自动使用可用的 Shell ${fallback.shell}`;
-    return new Proxy(settingsManager, {
-      get(target, property, receiver) {
-        if (property === "getShellPath") return () => fallback.shell;
-        return Reflect.get(target, property, receiver);
-      },
-    });
+    if (fallback?.shell && Array.isArray(fallback.args)) candidates.push(fallback.shell);
   } catch {
-    return settingsManager;
+    // An unavailable SDK default must not prevent explicit Windows fallbacks.
   }
+  candidates.push(...getWindowsShellCandidates());
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const normalized = process.platform === "win32"
+      ? String(candidate).replaceAll("/", "\\").toLowerCase()
+      : String(candidate);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    if (configuredPath && normalized === String(configuredPath).replaceAll("/", "\\").toLowerCase()) continue;
+    const fallbackError = probeShell({ getShellPath: () => candidate });
+    if (fallbackError) continue;
+    shellNotice = configuredPath
+      ? `已将不可用的 Shell ${configuredPath} 自动切换为 ${candidate}`
+      : `已自动使用可用的 Shell ${candidate}`;
+    return overrideShellPath(settingsManager, candidate);
+  }
+  return settingsManager;
 };
 
 const configureFullAccessTools = (settingsManager) => {
@@ -749,9 +825,11 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   const settingsManager = requireSDKFactory("SettingsManager").create(cwd, agentDir);
   const effectiveSettingsManager = resolveShellSettings(settingsManager);
   shellEnvironment = getShellEnvironment(effectiveSettingsManager);
+  shellAvailable = !probeShell(effectiveSettingsManager);
   const shellEnvironmentContract = buildShellEnvironmentContract({
     ...shellEnvironment,
     cwd,
+    shellAvailable,
   });
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,

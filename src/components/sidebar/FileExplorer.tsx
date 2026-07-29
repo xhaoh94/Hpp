@@ -22,9 +22,6 @@ import {
   ChevronDown,
   ChevronRight,
   CopyMinus,
-  Folder,
-  FolderOpen,
-  LoaderCircle,
   RefreshCw,
 } from "lucide-react";
 import "./FileTree.css";
@@ -135,7 +132,6 @@ const FileTreeItem = memo(function FileTreeItem({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[]>([]);
-  const [loadingFolder, setLoadingFolder] = useState(false);
   const childrenLoadedRef = useRef(false);
   const childrenLoadingRef = useRef(false);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -143,14 +139,12 @@ const FileTreeItem = memo(function FileTreeItem({
   const loadChildren = useCallback(async () => {
     if (entry.type !== "folder" || childrenLoadedRef.current || childrenLoadingRef.current) return;
     childrenLoadingRef.current = true;
-    setLoadingFolder(true);
     try {
       const loaded = await window.electronAPI.readDirectory(entry.path, filters);
       setChildren(loaded);
       childrenLoadedRef.current = true;
     } finally {
       childrenLoadingRef.current = false;
-      setLoadingFolder(false);
     }
   }, [entry.path, entry.type, filters]);
 
@@ -231,19 +225,15 @@ const FileTreeItem = memo(function FileTreeItem({
               : <ChevronRight size={14} strokeWidth={2.4} />
           )}
         </span>
-        <span
-          className={`file-icon ${entry.type === "folder" ? "file-icon-folder" : "file-icon-emoji"}`}
-          style={{ color: fileInfo?.color || '#DCAB5F' }}
-          aria-hidden="true"
-        >
-          {entry.type === "folder" ? (
-            loadingFolder
-              ? <LoaderCircle size={15} strokeWidth={2} className="file-tree-folder-loading" />
-              : expanded
-                ? <FolderOpen size={16} strokeWidth={1.9} fill="currentColor" fillOpacity={0.14} />
-                : <Folder size={16} strokeWidth={1.9} fill="currentColor" fillOpacity={0.1} />
-          ) : <span dangerouslySetInnerHTML={{ __html: replaceEmojiWithImages(fileInfo?.icon || '📄') }} />}
-        </span>
+        {entry.type === "file" && (
+          <span
+            className="file-icon file-icon-emoji"
+            style={{ color: fileInfo?.color }}
+            aria-hidden="true"
+          >
+            <span dangerouslySetInnerHTML={{ __html: replaceEmojiWithImages(fileInfo?.icon || '📄') }} />
+          </span>
+        )}
         <span className="file-name">{entry.name}</span>
       </div>
       {children.length > 0 && (

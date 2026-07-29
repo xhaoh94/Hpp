@@ -70,6 +70,78 @@ describe("Pi lifecycle", () => {
     agent.dispose();
   });
 
+  it("does not repeat narration when Pi emits multiple assistant messages around tools", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-multi" });
+
+    child.stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "first narration" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", text: "first narration", stopReason: "toolUse" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "tool_execution_start", toolName: "bash", toolCallId: "tool-1", args: {} })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "bash", toolCallId: "tool-1", result: "ok" })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "second narration" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", text: "second narration", stopReason: "stop" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "prompt_done", id: "client-multi" })}\n`);
+
+    expect(events.filter((event) => event.type === "stream_delta").map((event) => event.delta)).toEqual([
+      "first narration",
+      "second narration",
+    ]);
+    expect(events.some((event) => event.type === "stream_snapshot")).toBe(false);
+    agent.dispose();
+  });
+
+  it("emits a whole-turn snapshot when Pi corrects the current assistant message", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-snapshot" });
+
+    child.stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "first" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", text: "first", stopReason: "toolUse" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "sec" },
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", text: "second", stopReason: "stop" },
+    })}\n`);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "stream_snapshot",
+      content: "firstsecond",
+    }));
+    agent.dispose();
+  });
+
   it("forwards Pi runtime warnings without failing the turn", async () => {
     const child = new FakePiProcess();
     respondToInit(child);

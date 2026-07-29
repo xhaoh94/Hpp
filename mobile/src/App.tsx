@@ -61,7 +61,18 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
 function renderAttachmentPreview(content: string, maxLength?: number) {
-  const preview = maxLength && content.length > maxLength ? `${content.slice(0, maxLength)}...` : content;
+  let preview = content;
+  if (maxLength && content.length > maxLength) {
+    let cutoff = maxLength;
+    const token = /\[(?:file|folder):[^\]]+\]/g;
+    let match: RegExpExecArray | null;
+    while ((match = token.exec(content))) {
+      const end = match.index + match[0].length;
+      if (match.index < cutoff && end > cutoff) cutoff = end;
+      if (match.index >= cutoff) break;
+    }
+    preview = `${content.slice(0, cutoff)}...`;
+  }
   return preview.split(/(\[(?:file|folder):[^\]]+\])/g).map((part, index) => {
     const match = part.match(/^\[(file|folder):\s*([^\]]+)\]$/);
     if (!match) return <span key={index}>{part}</span>;
@@ -105,6 +116,7 @@ import {
 } from "@shared/process-view";
 import { buildDiffSummary, collectProcessDiffs, type ProcessDiffEntry } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
+import { extractUserMessageAttachments } from "@shared/user-message-attachments";
 import {
   chooseRemoteImage,
   getImageErrorMessage,
@@ -962,12 +974,21 @@ function MessageItem({
   onCopy: (content: string) => void;
   onFork: (message: RemoteChatMessage) => void;
 }) {
+  const messagePresentation = message.role === "user"
+    ? extractUserMessageAttachments(message.content)
+    : { text: message.content, attachments: [] };
   const assistantActionsReady = areAssistantMessageActionsVisible(message);
   const diffSummary = buildDiffSummary([
     ...(message.diffs || []),
     ...collectProcessDiffs(message.process as unknown as { entries?: ProcessDiffEntry[] }),
   ]);
   const showActions = message.role === "user" || assistantActionsReady;
+  const hasUserBubbleContent = message.role === "user" && (
+    !!messagePresentation.text
+    || messagePresentation.attachments.length > 0
+    || !!message.sessionReferences?.length
+    || !!message.action
+  );
   return (
     <article id={`message-${message.id}`} className={`message ${message.role}`}>
       {message.role === "system" && (
@@ -981,7 +1002,39 @@ function MessageItem({
           {message.images.map((image) => <img key={image.id} src={image.src} alt={image.name} />)}
         </div>
       )}
-      {message.sessionReferences && message.sessionReferences.length > 0 && (
+      {hasUserBubbleContent && (
+        <div className="message-user-bubble">
+          {message.action && (
+            <div className={`message-action-label${messagePresentation.text ? " with-content" : ""}`}>
+              <WandSparkles size={13} />
+              <span>{message.action.kind === "skill" ? "技能" : "命令"}</span>
+              <strong>{message.action.name}</strong>
+            </div>
+          )}
+          {(messagePresentation.attachments.length > 0 || !!message.sessionReferences?.length || !!messagePresentation.text) && (
+            <div className="message-user-flow">
+              {messagePresentation.attachments.map((attachment, index) => (
+                <span className={`message-text-attachment-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
+                  {attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
+                  <span>{attachment.label}</span>
+                </span>
+              ))}
+              {message.sessionReferences?.map((reference) => (
+                <span className="message-reference-chip" key={reference.sourceSessionId}>
+                  <Link2 size={11} />
+                  <span>引用会话: {renderAttachmentPreview(reference.sourceTitle)}</span>
+                </span>
+              ))}
+              {messagePresentation.text && (
+                <div className="message-content">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{messagePresentation.text}</ReactMarkdown>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {message.role !== "user" && message.sessionReferences && message.sessionReferences.length > 0 && (
         <div className={`message-reference-list ${message.role}`} aria-label="引用会话">
           {message.sessionReferences.map((reference) => (
             <span className="message-reference-chip" key={reference.sourceSessionId}>
@@ -992,16 +1045,16 @@ function MessageItem({
         </div>
       )}
       <MessageProcess message={message} />
-      {message.action && (
-        <div className={`message-action-label${message.content ? " with-content" : ""}`}>
+      {message.role !== "user" && message.action && (
+        <div className={`message-action-label${messagePresentation.text ? " with-content" : ""}`}>
           <WandSparkles size={13} />
           <span>{message.action.kind === "skill" ? "技能" : "命令"}</span>
           <strong>{message.action.name}</strong>
         </div>
       )}
-      {message.content && (
+      {message.role !== "user" && messagePresentation.text && (
         <div className="message-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{message.content}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{messagePresentation.text}</ReactMarkdown>
         </div>
       )}
       {diffSummary.files.map((diff) => (
@@ -3836,31 +3889,23 @@ export default function App() {
               <button className="icon-button" onClick={() => setReferenceSheetOpen(false)} title="关闭"><X size={19} /></button>
             </div>
             <div className="reference-session-list">
-              <div className="reference-session-section-title">已引用</div>
-              {false ? (
-                <div className="reference-session-empty">暂无引用</div>
-              ) : selectedReferenceSessions.map((session) => (
-                <div className="reference-session-row selected" key={session.id}>
-                  <Link2 size={14} />
-                  <span><strong>{renderAttachmentPreview(session.title)}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
-                  <button type="button" onClick={() => setPendingReferenceIds((current) => current.filter((id) => id !== session.id))} title="移除引用"><X size={15} /></button>
-                </div>
-              ))}
-              <div className="reference-session-section-title">可添加</div>
               {referenceCandidates.length === 0 ? (
                 <div className="reference-session-empty">没有其他可引用会话</div>
-              ) : referenceCandidates.map((session) => (
-                <button
-                  type="button"
-                  className="reference-session-row add"
-                  key={session.id}
-                  disabled={pendingReferenceIds.length >= MAX_REMOTE_SESSION_REFERENCES && !pendingReferenceIds.includes(session.id)}
-                  onClick={() => setPendingReferenceIds((current) => current.includes(session.id) ? current.filter((id) => id !== session.id) : [...current, session.id].slice(0, MAX_REMOTE_SESSION_REFERENCES))}
-                >
-                  {pendingReferenceIds.includes(session.id) ? <Check size={15} /> : <Plus size={15} />}
-                  <span><strong>{renderAttachmentPreview(session.title)}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
-                </button>
-              ))}
+              ) : referenceCandidates.map((session) => {
+                const selectedReference = pendingReferenceIds.includes(session.id);
+                return (
+                  <button
+                    type="button"
+                    className={`reference-session-row ${selectedReference ? "selected" : ""}`}
+                    key={session.id}
+                    disabled={pendingReferenceIds.length >= MAX_REMOTE_SESSION_REFERENCES && !selectedReference}
+                    onClick={() => setPendingReferenceIds((current) => current.includes(session.id) ? current.filter((id) => id !== session.id) : [...current, session.id].slice(0, MAX_REMOTE_SESSION_REFERENCES))}
+                  >
+                    {selectedReference ? <Check size={15} /> : <Plus size={15} />}
+                    <span><strong>{renderAttachmentPreview(session.title)}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
+                  </button>
+                );
+              })}
             </div>
           </section>
         </div>

@@ -27,6 +27,7 @@ class FakeSession {
   activeTools = ["read", "bash", "edit", "write", "ask_user_question"];
   extensionFactories = [];
   toolCallHandlers = [];
+  registeredTools = [];
 
   constructor(sessionManager, modelRegistry, extensionFactories = []) {
     this.sessionManager = sessionManager;
@@ -41,6 +42,7 @@ class FakeSession {
         on: (eventName, handler) => {
           if (eventName === "tool_call") this.toolCallHandlers.push(handler);
         },
+        registerTool: (tool) => this.registeredTools.push(tool),
       });
     }
   }
@@ -62,6 +64,14 @@ class FakeSession {
     if (message.startsWith("active-tools")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(this.activeTools) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "registered-shell-tool") {
+      const tool = this.registeredTools.find((candidate) => candidate.name === "bash");
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(tool || null) }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -144,9 +154,28 @@ export const SessionManager = FakeSessionManager;
 export const createAgentSession = async ({ sessionManager, modelRegistry, resourceLoader }) => ({
   session: new FakeSession(sessionManager, modelRegistry, resourceLoader.extensionFactories),
 });
+export const createBashToolDefinition = (_cwd, options = {}) => ({
+  name: "bash",
+  label: "bash",
+  description: "fake bash tool",
+  promptSnippet: "fake bash",
+  promptGuidelines: [],
+  parameters: {},
+  commandPrefix: options.commandPrefix,
+  rewrittenCommand: options.spawnHook?.({ command: "npm run build && npx tsc", cwd: _cwd, env: {} }).command,
+});
 export const getShellConfig = process.env.PI_TEST_BROKEN_SHELL === "1"
   ? () => ({ shell: "hpp-definitely-missing-shell", args: ["-c"] })
-  : undefined;
+  : process.env.PI_TEST_BROKEN_DEFAULT_SHELL === "1"
+    ? (customShellPath) => customShellPath
+      ? ({ shell: customShellPath, args: ["-c"] })
+      : ({ shell: "hpp-definitely-broken-wsl-bash", args: ["-s"], commandTransport: "stdin" })
+  : process.env.PI_TEST_SHELL_PATH
+    ? () => ({
+        shell: process.env.PI_TEST_SHELL_PATH,
+        args: JSON.parse(process.env.PI_TEST_SHELL_ARGS || "[]"),
+      })
+    : undefined;
 `;
 
 const writeFakeSDK = async (runtimeRoot: string) => {
@@ -288,6 +317,83 @@ describe("Pi SDK worker protocol", () => {
     const tools = JSON.parse(String((message?.message as { text?: unknown })?.text || "[]")) as string[];
     expect(tools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls"]));
     expect(tools).not.toContain("bash");
+  });
+
+  it.skipIf(process.platform !== "win32")("keeps the bash tool when Pi uses Windows PowerShell", async () => {
+    const powershellPath = join(
+      process.env.SystemRoot || "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    const worker = startWorker(runtimeRoot, agentDir, {
+      PI_TEST_SHELL_PATH: powershellPath,
+      PI_TEST_SHELL_ARGS: JSON.stringify(["-NoProfile", "-Command"]),
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tools", type: "prompt", message: "active-tools:powershell", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "tools");
+
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({
+      type: "status",
+      id: "pi-shell-unavailable",
+    }));
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const tools = JSON.parse(String((message?.message as { text?: unknown })?.text || "[]")) as string[];
+    expect(tools).toContain("bash");
+  });
+
+  it.skipIf(process.platform !== "win32")("registers a PowerShell-aware bash tool with command normalization", async () => {
+    const powershellPath = join(
+      process.env.SystemRoot || "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    const worker = startWorker(runtimeRoot, agentDir, {
+      PI_TEST_SHELL_PATH: powershellPath,
+      PI_TEST_SHELL_ARGS: JSON.stringify(["-NoProfile", "-Command"]),
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tool", type: "prompt", message: "registered-shell-tool", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "tool");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const tool = JSON.parse(String((message?.message as { text?: unknown })?.text || "null")) as Record<string, unknown>;
+    expect(tool).toMatchObject({
+      name: "bash",
+      label: "PowerShell",
+      rewrittenCommand: "npm.cmd run build && npx.cmd tsc",
+    });
+    expect(String(tool.description)).toContain("registered schema/tool name remains bash");
+    expect(String(tool.commandPrefix)).toContain("[Console]::OutputEncoding");
+    expect(tool.promptGuidelines).toEqual(expect.arrayContaining([
+      expect.stringContaining("bash tool is registered and available"),
+      expect.stringContaining("npm.cmd"),
+    ]));
+  });
+
+  it.skipIf(process.platform !== "win32")("falls back to an installed shell when Pi selects a broken WSL bash", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_BROKEN_DEFAULT_SHELL: "1" });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tools", type: "prompt", message: "active-tools:wsl-fallback", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "tools");
+
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({
+      type: "status",
+      id: "pi-shell-unavailable",
+    }));
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const tools = JSON.parse(String((message?.message as { text?: unknown })?.text || "[]")) as string[];
+    expect(tools).toContain("bash");
   });
 
   it("dismisses a pending questionnaire before waiting for abort", async () => {

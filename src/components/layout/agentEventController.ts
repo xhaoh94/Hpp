@@ -393,10 +393,34 @@ export function createAgentEventController({
 
   const replaceAssistantProcessText = (sessionId: string, content: string) => {
     const runtime = getRuntime(sessionId);
-    const delta = content.startsWith(runtime.streamBuffer)
-      ? content.slice(runtime.streamBuffer.length)
-      : content;
-    if (delta) appendAssistantProcessText(sessionId, delta);
+    if (content === runtime.streamBuffer) return;
+    if (content.startsWith(runtime.streamBuffer)) {
+      appendAssistantProcessText(sessionId, content.slice(runtime.streamBuffer.length));
+      return;
+    }
+
+    // A stream snapshot is authoritative for the whole turn. Reconcile only
+    // the currently open narration segment; treating an unmatched snapshot as
+    // a delta duplicates Pi text after a tool boundary.
+    const currentSegmentStart = Math.max(0, runtime.streamBuffer.length - runtime.processTextBuffer.length);
+    const completedPrefix = runtime.streamBuffer.slice(0, currentSegmentStart);
+    if (!content.startsWith(completedPrefix)) return;
+
+    runtime.streamBuffer = content;
+    runtime.processTextBuffer = content.slice(completedPrefix.length);
+    if (runtime.processTextEntryId) {
+      useChatStore.getState().updateLastAssistantProcessEntry(runtime.processTextEntryId, {
+        kind: ASSISTANT_NARRATION_PROCESS_KIND,
+        title: uiText.process.narration,
+        detail: runtime.processTextBuffer,
+        state: "running",
+      }, sessionId);
+    } else if (runtime.processTextBuffer) {
+      const currentText = runtime.processTextBuffer;
+      runtime.streamBuffer = completedPrefix;
+      runtime.processTextBuffer = "";
+      appendAssistantProcessText(sessionId, currentText);
+    }
   };
 
   const normalizeStreamText = (value: string) => value.replace(/\s+/g, " ").trim();

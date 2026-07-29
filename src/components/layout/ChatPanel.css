@@ -1091,6 +1091,24 @@
 .chat-attached-path-chip.folder svg { color: #dcab5f; }
 .chat-attached-path-chip span { overflow-wrap: anywhere; }
 
+.chat-message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.chat-user-message-flow {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-user-message-flow .chat-attached-path-chip,
+.chat-user-message-flow .chat-message-reference-chip {
+  margin: 2px 6px 2px 0;
+}
+
 .chat-assistant-actions {
   display: flex;
   align-self: flex-start;
@@ -1164,6 +1182,10 @@
   color: var(--text-primary);
   border-bottom-right-radius: 4px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.chat-bubble.user > :last-child {
+  margin-bottom: 0;
 }
 
 .chat-bubble.assistant {

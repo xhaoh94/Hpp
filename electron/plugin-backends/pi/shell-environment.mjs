@@ -24,7 +24,20 @@ const shellSyntaxName = (family) => {
   return "the configured shell";
 };
 
-export const buildShellEnvironmentContract = ({ platform, cwd, shellPath, shellFamily }) => {
+export const POWERSHELL_UTF8_COMMAND_PREFIX = [
+  "$__hppUtf8 = [System.Text.UTF8Encoding]::new($false)",
+  "[Console]::InputEncoding = $__hppUtf8",
+  "[Console]::OutputEncoding = $__hppUtf8",
+  "$OutputEncoding = $__hppUtf8",
+  "chcp.com 65001 > $null",
+].join("; ");
+
+export const rewritePowerShellPackageManagerCommand = (command) => String(command || "").replace(
+  /((?:^|\r?\n|[;&|{(])\s*)(npm|npx|pnpm|yarn)(?=\s|$)/gi,
+  (_match, prefix, executable) => `${prefix}${executable}.cmd`,
+);
+
+export const buildShellEnvironmentContract = ({ platform, cwd, shellPath, shellFamily, shellAvailable = true }) => {
   const facts = [
     "Hpp runtime environment contract (follow this instead of guessing or probing the shell):",
     `- Operating system: ${displayPlatform(platform)} (${platform || "unknown"}).`,
@@ -35,13 +48,24 @@ export const buildShellEnvironmentContract = ({ platform, cwd, shellPath, shellF
     "- Do not try equivalent commands from different shells to discover which one works.",
   ];
 
+  if (shellAvailable) {
+    facts.push(
+      "- The tool whose schema name is bash is registered and available in this request. Call that tool directly when command execution is needed; never claim that no shell/exec tool exists while bash appears in the provided tool schema.",
+    );
+  } else {
+    facts.push("- Command execution is unavailable because the configured shell failed Hpp's startup probe; use the dedicated discovery and file tools instead.");
+  }
+
   if (platform === "win32" && (shellFamily === "bash" || shellFamily === "posix")) {
     facts.push(
       "- This is a POSIX shell on Windows: use commands such as rm, cp, mv, ls, find, and grep; do not use cmd built-ins such as del, copy, move, or ren, and do not use PowerShell cmdlets directly.",
       "- Never pass a raw Windows path such as C:\\work\\file to the bash tool. Prefer a relative path; when an absolute path is unavoidable, convert it to POSIX form such as /c/work/file.",
     );
   } else if (shellFamily === "powershell") {
-    facts.push("- Use PowerShell syntax and quote Windows paths; do not assume Bash-only syntax is available.");
+    facts.push(
+      "- Use PowerShell syntax and quote Windows paths; do not assume Bash-only syntax is available.",
+      "- On Windows PowerShell, invoke Node package-manager shims as npm.cmd, npx.cmd, pnpm.cmd, and yarn.cmd so PowerShell execution policy cannot select and block the corresponding .ps1 shim. Hpp also normalizes bare package-manager commands at execution time.",
+    );
   } else if (shellFamily === "cmd") {
     facts.push("- Use cmd.exe syntax; do not assume Bash or PowerShell commands are available.");
   } else if (shellFamily === "bash" || shellFamily === "posix") {

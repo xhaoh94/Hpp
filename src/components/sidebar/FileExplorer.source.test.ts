@@ -37,16 +37,20 @@ describe("file explorer tree commands", () => {
     expect(styles).toContain("display: none");
   });
 
-  it("uses distinct disclosure and folder icons for collapsed and expanded states", () => {
+  it("uses only disclosure triangles for collapsed and expanded folders", () => {
     const source = readSource();
     const styles = readStyles();
 
     expect(source).toContain("<ChevronRight");
     expect(source).toContain("<ChevronDown");
-    expect(source).toContain("<FolderOpen");
-    expect(source).toContain("<Folder size=");
+    expect(source).not.toContain("<FolderOpen");
+    expect(source).not.toContain("<Folder size=");
+    expect(source).not.toContain("<LoaderCircle");
+    expect(source).toContain('{entry.type === "file" && (');
     expect(source).toContain('data-expanded={entry.type === "folder" ? String(expanded) : undefined}');
     expect(styles).toContain('.file-tree-item[data-expanded="true"] .file-tree-disclosure');
+    expect(styles).not.toContain(".file-icon-folder");
+    expect(styles).not.toContain(".file-tree-folder-loading");
   });
 
   it("centers revealed files and opens requested previews", () => {

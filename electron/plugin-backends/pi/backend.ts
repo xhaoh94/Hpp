@@ -90,7 +90,8 @@ export class PiSDKAgent {
   private pendingAssistantError = "";
   private streamedText = false;
   private streamedTextBuffer = "";
-  private emittedAssistantTextSnapshot = "";
+  private streamedMessageTextBuffer = "";
+  private pendingAssistantTextNeedsEmit = false;
   private pendingUIRequestIds = new Set<string>();
   private turnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private isAborting = false;
@@ -373,6 +374,9 @@ export class PiSDKAgent {
   async abort(): Promise<void> {
     this.pendingAssistantText = "";
     this.streamedText = false;
+    this.streamedTextBuffer = "";
+    this.streamedMessageTextBuffer = "";
+    this.pendingAssistantTextNeedsEmit = false;
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
@@ -596,6 +600,7 @@ export class PiSDKAgent {
           if (delta) {
             this.streamedText = true;
             this.streamedTextBuffer += delta;
+            this.streamedMessageTextBuffer += delta;
           }
           this.emitEventThrottled({ type: "stream_delta", delta });
         } else if (assistantEvent.type === "thinking_delta") {
@@ -617,14 +622,17 @@ export class PiSDKAgent {
             this.pendingAssistantText = "";
             this.streamedText = false;
             this.streamedTextBuffer = "";
-            this.emittedAssistantTextSnapshot = "";
+            this.streamedMessageTextBuffer = "";
+            this.pendingAssistantTextNeedsEmit = false;
             this.clearTurnFallback();
             break;
           }
           this.pendingAssistantError = "";
           if (typeof message.text === "string" && message.text) {
             this.pendingAssistantText = message.text;
+            this.pendingAssistantTextNeedsEmit = true;
             this.emitPendingAssistantText();
+            this.streamedMessageTextBuffer = "";
             if (this.pendingUIRequestIds.size === 0) {
               this.scheduleTurnFallback(4000, true);
             }
@@ -785,7 +793,8 @@ export class PiSDKAgent {
     this.turnActive = true;
     this.streamedText = false;
     this.streamedTextBuffer = "";
-    this.emittedAssistantTextSnapshot = "";
+    this.streamedMessageTextBuffer = "";
+    this.pendingAssistantTextNeedsEmit = false;
     this.pendingAssistantText = "";
     this.pendingAssistantError = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
@@ -808,24 +817,28 @@ export class PiSDKAgent {
     this.pendingAssistantError = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
-    this.emittedAssistantTextSnapshot = "";
+    this.streamedMessageTextBuffer = "";
+    this.pendingAssistantTextNeedsEmit = false;
     this.turnActive = false;
     this.turnToken += 1;
   }
 
   private emitPendingAssistantText() {
-    if (!this.pendingAssistantText || this.emittedAssistantTextSnapshot === this.pendingAssistantText) return;
+    if (!this.pendingAssistantText || !this.pendingAssistantTextNeedsEmit) return;
 
     if (!this.streamedText) {
       this.emitEvent({ type: "stream_delta", delta: this.pendingAssistantText });
       this.streamedTextBuffer = this.pendingAssistantText;
       this.streamedText = true;
-    } else if (this.streamedTextBuffer !== this.pendingAssistantText) {
-      this.emitEvent({ type: "stream_snapshot", content: this.pendingAssistantText });
-      this.streamedTextBuffer = this.pendingAssistantText;
+    } else if (this.streamedMessageTextBuffer !== this.pendingAssistantText) {
+      const messageStart = Math.max(0, this.streamedTextBuffer.length - this.streamedMessageTextBuffer.length);
+      const turnPrefix = this.streamedTextBuffer.slice(0, messageStart);
+      const reconciledTurnText = `${turnPrefix}${this.pendingAssistantText}`;
+      this.emitEvent({ type: "stream_snapshot", content: reconciledTurnText });
+      this.streamedTextBuffer = reconciledTurnText;
     }
 
-    this.emittedAssistantTextSnapshot = this.pendingAssistantText;
+    this.pendingAssistantTextNeedsEmit = false;
   }
 
   private prepareNewTurn() {
@@ -835,7 +848,8 @@ export class PiSDKAgent {
     this.pendingAssistantError = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
-    this.emittedAssistantTextSnapshot = "";
+    this.streamedMessageTextBuffer = "";
+    this.pendingAssistantTextNeedsEmit = false;
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
@@ -848,7 +862,8 @@ export class PiSDKAgent {
     this.pendingAssistantError = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
-    this.emittedAssistantTextSnapshot = "";
+    this.streamedMessageTextBuffer = "";
+    this.pendingAssistantTextNeedsEmit = false;
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
