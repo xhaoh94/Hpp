@@ -74,12 +74,14 @@ describe("Droid protocol adapter", () => {
       provider: "openai",
       reasoning: true,
       supportsImages: true,
+      supportedThinkingLevels: ["low", "medium", "high"],
     }, {
       id: "model",
       name: "Custom model",
       provider: "custom-provider",
       reasoning: false,
       supportsImages: false,
+      supportedThinkingLevels: ["off"],
     }]);
     expect(events).toContainEqual(expect.objectContaining({
       type: "history_snapshot",

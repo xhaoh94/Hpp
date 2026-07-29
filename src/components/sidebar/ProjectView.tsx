@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type DragEvent } from "react";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -6,7 +6,10 @@ import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
 
 export function ProjectView() {
-  const { projects, addProject } = useProjectStore();
+  const { projects, addProject, reorderProjects } = useProjectStore();
+  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [dropProjectId, setDropProjectId] = useState<string | null>(null);
+  const [dropPosition, setDropPosition] = useState<"before" | "after">("before");
   const agents = useAgentCatalogStore((state) => state.agents);
   const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
   const { showAddProject, clearAddProject } = useAppStore();
@@ -87,7 +90,52 @@ export function ProjectView() {
         )}
         <div className="project-list">
           {projects.map((project) => (
-            <ProjectCard key={project.id} project={project} />
+            <div
+              key={project.id}
+              className={`project-card-drag-wrapper ${draggedProjectId === project.id ? "dragging" : ""} ${dropProjectId === project.id ? `drop-target ${dropPosition}` : ""}`}
+              draggable={projects.length > 1}
+              onDragStart={(event: DragEvent<HTMLDivElement>) => {
+                setDraggedProjectId(project.id);
+                setDropPosition("before");
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", project.id);
+              }}
+              onDragOver={(event) => {
+                if (!draggedProjectId || draggedProjectId === project.id) return;
+                const rect = event.currentTarget.getBoundingClientRect();
+                const sourceIndex = projects.findIndex((item) => item.id === draggedProjectId);
+                const targetIndex = projects.findIndex((item) => item.id === project.id);
+                const movingDown = sourceIndex < targetIndex;
+                const edgeSize = Math.min(28, rect.height * 0.22);
+                const inInsertZone = movingDown
+                  ? event.clientY >= rect.bottom - edgeSize
+                  : event.clientY <= rect.top + edgeSize;
+                if (!inInsertZone) {
+                  setDropProjectId((current) => current === project.id ? null : current);
+                  return;
+                }
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDropProjectId(project.id);
+                setDropPosition(movingDown ? "after" : "before");
+              }}
+              onDragLeave={() => setDropProjectId((current) => current === project.id ? null : current)}
+              onDrop={(event) => {
+                event.preventDefault();
+                const sourceId = event.dataTransfer.getData("text/plain") || draggedProjectId;
+                if (sourceId) reorderProjects(sourceId, project.id, dropPosition === "after");
+                setDraggedProjectId(null);
+                setDropProjectId(null);
+                setDropPosition("before");
+              }}
+              onDragEnd={() => {
+                setDraggedProjectId(null);
+                setDropProjectId(null);
+                setDropPosition("before");
+              }}
+            >
+              <ProjectCard project={project} />
+            </div>
           ))}
         </div>
       </div>

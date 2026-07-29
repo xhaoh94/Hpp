@@ -20,6 +20,7 @@ interface AgentModel {
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }
 
 interface AgentSendOptions {
@@ -74,6 +75,9 @@ const normalizeModels = (value: unknown): AgentModel[] => {
       provider,
       reasoning: model.reasoning === true,
       supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
+      supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
+        ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
+        : undefined,
     }];
   });
 };

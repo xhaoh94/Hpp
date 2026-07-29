@@ -1235,8 +1235,8 @@ type ChatPanelProps = {
 
 export function ChatPanel({
   sendKey = "Enter",
-  previousMessageKey = "Ctrl+Up",
-  nextMessageKey = "Ctrl+Down",
+  previousMessageKey = "Up",
+  nextMessageKey = "Down",
 }: ChatPanelProps) {
   const isStreaming = useChatStore((state) => state.isStreaming);
   const activeAgentId = useChatStore((state) => state.activeAgentId);
@@ -2585,7 +2585,7 @@ export function ChatPanel({
           permissionMode={permissionMode}
           permissionModeSupported={permissionModeSupported}
           permissionOpen={permissionOpen}
-          thinkingLevel={currentThinking.id}
+          thinkingLevel={currentThinking?.id || thinkingLevel}
           thinkingLevels={thinkingLevels}
           thinkingOpen={thinkingOpen}
           modelRef={modelRef}

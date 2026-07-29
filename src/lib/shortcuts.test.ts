@@ -14,10 +14,21 @@ describe("desktop shortcuts", () => {
     });
   });
 
-  it("formats and matches arrow shortcuts without affecting plain arrows", () => {
-    const event = { key: "ArrowUp", ctrlKey: true, shiftKey: false, altKey: false, metaKey: false };
-    expect(formatShortcut(event)).toBe("Ctrl+Up");
-    expect(matchShortcut(event, "Ctrl+Up")).toBe(true);
-    expect(matchShortcut({ ...event, ctrlKey: false }, "Ctrl+Up")).toBe(false);
+  it("uses plain arrow keys for message navigation by default", () => {
+    const event = { key: "ArrowUp", ctrlKey: false, shiftKey: false, altKey: false, metaKey: false };
+    expect(formatShortcut(event)).toBe("Up");
+    expect(matchShortcut(event, DEFAULT_SHORTCUTS.previousMessage)).toBe(true);
+    expect(matchShortcut({ ...event, ctrlKey: true }, DEFAULT_SHORTCUTS.previousMessage)).toBe(false);
+  });
+
+  it("migrates the previous paired Ctrl+arrow defaults", () => {
+    expect(normalizeShortcuts({ previousMessage: "Ctrl+Up", nextMessage: "Ctrl+Down" })).toMatchObject({
+      previousMessage: "Up",
+      nextMessage: "Down",
+    });
+    expect(normalizeShortcuts({ previousMessage: "Alt+Up", nextMessage: "Alt+Down" })).toMatchObject({
+      previousMessage: "Alt+Up",
+      nextMessage: "Alt+Down",
+    });
   });
 });

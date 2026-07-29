@@ -154,19 +154,31 @@ async function runInitialization(
       }
     }
 
-    const selectedModel = selectSessionModel(sessionId, models);
+    let selectedModel = selectSessionModel(sessionId, models);
     if (needsRuntimeInitialization) {
       if (selectedModel) {
         saveSessionModel(sessionId, selectedModel);
         const modelResult = await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, sessionId);
         if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
+        const refreshedModels = await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
+        if (refreshedModels.length > 0) {
+          models = refreshedModels;
+          selectedModel = models.find((model) =>
+            model.provider === selectedModel?.provider && model.id === selectedModel?.id
+          ) || selectedModel;
+          saveSessionModel(sessionId, selectedModel);
+        }
       }
 
-      const thinking = await getSessionThinkingOrDefault(sessionId, session.agentId);
-      const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, sessionId);
-      if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
-      saveSessionThinking(sessionId, thinking);
-      if (useProjectStore.getState().activeSessionId === sessionId) useChatStore.getState().setThinkingLevel(thinking);
+      const thinkingLevels = getModelThinkingLevels(selectedModel);
+      if (thinkingLevels.length > 0) {
+        const requestedThinking = await getSessionThinkingOrDefault(sessionId, session.agentId);
+        const thinking = normalizeModelThinkingLevel(requestedThinking, selectedModel);
+        const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, sessionId);
+        if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
+        saveSessionThinking(sessionId, thinking);
+        if (useProjectStore.getState().activeSessionId === sessionId) useChatStore.getState().setThinkingLevel(thinking);
+      }
     }
     applyActiveModels(sessionId, models, selectedModel);
 
@@ -477,7 +489,9 @@ export async function sendMessage(input: {
       if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
     }
     const storedThinking = getSessionThinking(input.sessionId);
-    const thinking = storedThinking ? normalizeModelThinkingLevel(storedThinking, model) : undefined;
+    const thinking = storedThinking && getModelThinkingLevels(model).length > 0
+      ? normalizeModelThinkingLevel(storedThinking, model)
+      : undefined;
     if (thinking) {
       const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, input.sessionId);
       if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
@@ -547,9 +561,14 @@ export async function setModel(
   }
   const result = await window.electronAPI.agentSetModel(selected.provider, selected.id, sessionId);
   if (!result.success) throw new Error(result.error || "MODEL_SWITCH_FAILED");
-  saveSessionModel(sessionId, selected);
-  applyActiveModels(sessionId, availableModels, selected);
-  return { model: selected, models: availableModels, previous };
+  const refreshedModels = await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
+  if (refreshedModels.length > 0) availableModels = refreshedModels;
+  const effectiveModel = availableModels.find((candidate) =>
+    candidate.provider === selected.provider && candidate.id === selected.id
+  ) || selected;
+  saveSessionModel(sessionId, effectiveModel);
+  applyActiveModels(sessionId, availableModels, effectiveModel);
+  return { model: effectiveModel, models: availableModels, previous };
 }
 
 export async function setThinking(

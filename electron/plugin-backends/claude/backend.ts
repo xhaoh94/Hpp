@@ -62,7 +62,6 @@ interface AgentForkResult {
 type WorkerCommand = UnknownRecord & { type: string; id?: string };
 
 const CLAUDE_WORKER_INIT_TIMEOUT_MS = 120_000;
-const CLAUDE_THINKING_LEVELS = ["off", "low", "medium", "high", "xhigh"];
 const FORK_DESCRIPTOR_PREFIX = "hpp-claude-fork:v1:";
 
 const asRecord = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
@@ -86,7 +85,9 @@ function normalizeModels(value: unknown): AgentModel[] {
       provider,
       reasoning: model.reasoning !== false,
       supportsImages: model.supportsImages !== false,
-      supportedThinkingLevels: CLAUDE_THINKING_LEVELS,
+      supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
+        ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
+        : undefined,
     }];
   });
 }
@@ -263,12 +264,11 @@ export class ClaudeSDKAgent {
   }
 
   async setThinkingLevel(level: string) {
-    if (!CLAUDE_THINKING_LEVELS.includes(level)) throw new Error("UNSUPPORTED_THINKING_LEVEL");
     const data = await this.request({ type: "setThinkingLevel", level }, 12000);
     if (data.type !== "thinking_level_changed") {
       throw new Error(optionalString(data.error) || "Claude Code 切换思考等级失败");
     }
-    this.emitEvent({ type: "thinking_level_changed", level });
+    this.emitEvent({ type: "thinking_level_changed", level: optionalString(data.level) || level });
   }
 
   sendUIResponse(response: AgentUIResponse) {

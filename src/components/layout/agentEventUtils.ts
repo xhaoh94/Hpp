@@ -217,7 +217,7 @@ export const truncateProcessDetail = (value: string) => {
 };
 
 export const getThinkingPreview = (value?: string) => {
-  const preview = value?.replace(/\s+/g, " ").trim();
+  const preview = value?.replace(/\*{2,}/g, "").replace(/\s+/g, " ").trim();
   if (!preview) return uiText.process.thinking;
   return preview.length > THINKING_PREVIEW_CHAR_LIMIT
     ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`

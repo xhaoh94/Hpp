@@ -4,11 +4,12 @@ import { useProjectStore, type Project, type ProjectSession } from "@/stores/pro
 import { useChatStore } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
+import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
-import { FileText, Folder, GitBranch, Terminal } from "lucide-react";
+import { GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -25,20 +26,6 @@ function getStringArray(value: unknown): string[] | undefined {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : undefined;
-}
-
-function renderSessionPreview(content: string) {
-  const parts = content.split(/(\[(?:file|folder):[^\]]+\])/g);
-  return parts.map((part, index) => {
-    const match = part.match(/^\[(file|folder):\s*([^\]]+)\]$/);
-    if (!match) return <span key={index}>{part}</span>;
-    return (
-      <span className={`terminal-child-attachment ${match[1]}`} key={index}>
-        {match[1] === "folder" ? <Folder size={13} /> : <FileText size={13} />}
-        <span>{match[2]}</span>
-      </span>
-    );
-  });
 }
 
 function getErrorMessage(error: unknown): string {
@@ -72,6 +59,7 @@ export function ProjectCard({ project }: Props) {
     deleteSessionsMessages,
   } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
@@ -304,7 +292,7 @@ export function ProjectCard({ project }: Props) {
       window.removeEventListener("resize", scheduleMeasure);
       window.cancelAnimationFrame(animationFrame);
     };
-  }, [loading, orderedAgents]);
+  }, [loading, orderedAgents, sessionsCollapsed]);
 
   useEffect(() => {
     if (overflowAgents.length === 0) setShowAgentPicker(false);
@@ -323,7 +311,14 @@ export function ProjectCard({ project }: Props) {
   return (
     <>
       <div className={`project-item always-active ${project.id === activeProjectId ? "active" : ""}`}>
-        <div className="project-info">
+        <div
+          className={`project-info ${sessionsCollapsed ? "sessions-collapsed" : ""}`}
+          onClick={(event) => {
+            if ((event.target as HTMLElement).closest("button")) return;
+            setSessionsCollapsed((collapsed) => !collapsed);
+          }}
+          title={sessionsCollapsed ? "展开会话" : "收起会话"}
+        >
           <button
             className="project-close-btn"
             onClick={handleDeleteProject}
@@ -349,7 +344,7 @@ export function ProjectCard({ project }: Props) {
           )}
           <div className="project-name">{project.name}</div>
           <div className="project-path" title={project.path}>{project.path}</div>
-          <div className="project-terminals" ref={agentShortcutsRef}>
+          {!sessionsCollapsed && <div className="project-terminals" ref={agentShortcutsRef}>
             {loading ? (
               <div className="project-terminals-loading">
                 <BrailleSpinner />
@@ -444,12 +439,12 @@ export function ProjectCard({ project }: Props) {
                 </div>
               </>
             )}
-          </div>
+          </div>}
         </div>
       </div>
 
       {/* Session tabs - tree child nodes (newest at bottom), filtered to non-closed sessions */}
-      {openSessions.length > 0 && (
+      {!sessionsCollapsed && openSessions.length > 0 && (
         <div className="project-terminal-children">
           {openSessions.map((session) => {
             const status = agentStatuses[session.id];
@@ -472,9 +467,7 @@ export function ProjectCard({ project }: Props) {
                     const msgs = sessionMessages[session.id];
                     const firstUserMsg = msgs?.find((m) => m.role === "user");
                     return firstUserMsg
-                      ? renderSessionPreview(firstUserMsg.content.length > 30
-                        ? firstUserMsg.content.substring(0, 30) + "..."
-                        : firstUserMsg.content)
+                      ? <AttachmentPreviewText content={firstUserMsg.content} maxLength={30} />
                       : session.title;
                   })()}
                 </span>

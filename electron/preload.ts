@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // File system
   readDirectory: (dirPath: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:readDirectory", dirPath, filters),
+  showItemInFolder: (targetPath: string) => ipcRenderer.invoke("fs:showItemInFolder", targetPath),
   indexProjectFiles: (dirPath: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:indexProjectFiles", dirPath, filters),
   readFile: (filePath: string) => ipcRenderer.invoke("fs:readFile", filePath),

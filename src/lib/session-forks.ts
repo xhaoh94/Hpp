@@ -14,7 +14,15 @@ const createMessageId = () => {
 const truncate = (value: string, maxChars: number) => {
   const text = value.trim();
   if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+  let cutoff = Math.max(0, maxChars - 3);
+  const token = /\[(?:file|folder):[^\]]+\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = token.exec(text))) {
+    const end = match.index + match[0].length;
+    if (match.index < cutoff && end > cutoff) cutoff = end;
+    if (match.index >= cutoff) break;
+  }
+  return `${text.slice(0, cutoff).trimEnd()}...`;
 };
 
 const escapeXmlText = (value: string) =>

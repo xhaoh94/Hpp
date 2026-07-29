@@ -97,6 +97,17 @@ import type {
   RemoteSessionConfig,
   RemoteSessionCreateResult,
 } from "@shared/remote-protocol";
+
+const SESSION_RUNNING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+
+function SessionRunningIndicator() {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setFrame((current) => (current + 1) % SESSION_RUNNING_FRAMES.length), 80);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <span className="session-running-indicator" title="运行中" aria-label="运行中">{SESSION_RUNNING_FRAMES[frame]}</span>;
+}
 import { MAX_REMOTE_IMAGES, MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { formatModelSwitchToastText } from "@shared/model-switch";
 import {
@@ -3622,6 +3633,7 @@ export default function App() {
         <div className="toolbar-context">
           <div className="toolbar-title-row">
             <strong>{selected?.session.title || activeHost.alias || activeHost.hostName}</strong>
+            {selected?.session.status === "running" && <SessionRunningIndicator />}
             {selected && (
               <button type="button" className="toolbar-history-button" onClick={() => setHistoryOpen(true)} title="发言记录" aria-label="发言记录">
                 <MessageCircle size={15} />
@@ -3763,9 +3775,10 @@ export default function App() {
                 <div className="session-list">
                   {openSessions.map((session) => (
                     <div className={`session-row ${selectedSessionId === session.id ? "active" : ""}`} key={session.id}>
-                      <button className="session-main" onClick={() => selectSession(session.id)}>
+                      <button className={`session-main ${session.status === "running" ? "has-running" : ""}`} onClick={() => selectSession(session.id)}>
                         <span className={`session-state ${session.status}`} />
                         <span><strong>{session.title}</strong><small>{session.agentId} · {session.status}</small></span>
+                        {session.status === "running" && <SessionRunningIndicator />}
                       </button>
                       <button
                         type="button"
@@ -3868,10 +3881,13 @@ export default function App() {
               </button>
             )}
             <div className="history-list">
-              {selectedUserMessages.map((message) => (
+              {selectedUserMessages.map((message, index) => (
                 <button type="button" className="history-item" key={message.id} onClick={() => openHistoryMessage(message.id)}>
                   <span>{message.content ? renderAttachmentPreview(message.content) : "图片消息"}</span>
-                  <time>{formatHistoryMessageTime(message.timestamp)}</time>
+                  <div className="history-item-meta">
+                    <time>{formatHistoryMessageTime(message.timestamp)}</time>
+                    {index === 0 && selected.session.status === "running" && <SessionRunningIndicator />}
+                  </div>
                 </button>
               ))}
               {selectedUserMessages.length === 0 && <div className="history-empty">暂无发言</div>}

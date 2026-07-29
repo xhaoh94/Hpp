@@ -32,6 +32,8 @@ class FakeSession {
   constructor(sessionManager, modelRegistry, extensionFactories = []) {
     this.sessionManager = sessionManager;
     this.modelRegistry = modelRegistry;
+    this.model = modelRegistry.getAvailable()[0];
+    this.thinkingLevel = "minimal";
     this.extensionFactories = extensionFactories;
   }
 
@@ -50,8 +52,12 @@ class FakeSession {
   getActiveToolNames() { return [...this.activeTools]; }
   setActiveToolsByName(names) { this.activeTools = [...names]; }
   getAllTools() { return ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"].map((name) => ({ name })); }
-  setThinkingLevel() {}
-  async setModel() {}
+  getAvailableThinkingLevels() { return this.model?.thinkingLevels || ["off"]; }
+  setThinkingLevel(level) {
+    const levels = this.getAvailableThinkingLevels();
+    this.thinkingLevel = levels.includes(level) ? level : levels[0];
+  }
+  async setModel(model) { this.model = model; }
   async steer() {}
   dispose() {}
 
@@ -129,9 +135,17 @@ class FakeSession {
 export const createEventBus = () => ({ on: () => () => {} });
 export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;
 export const AuthStorage = { create: () => ({}) };
+const availableModels = [{
+  id: "pi-model",
+  name: "Pi Model",
+  provider: "test-provider",
+  reasoning: true,
+  input: ["text"],
+  thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+}];
 export const ModelRegistry = { create: () => ({
-  getAvailable: () => [],
-  find: () => undefined,
+  getAvailable: () => availableModels,
+  find: (provider, id) => availableModels.find((model) => model.provider === provider && model.id === id),
   getError: () => undefined,
   hasConfiguredAuth: () => true,
 }) };
@@ -265,6 +279,25 @@ describe("Pi SDK worker protocol", () => {
   afterEach(async () => {
     await Promise.all(children.splice(0).map(stopWorker));
     await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("reports the current model's native thinking levels and its effective selection", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "models", type: "getModels" });
+    await expect(worker.waitFor((message) => message.id === "models"))
+      .resolves.toMatchObject({
+        models: [{
+          id: "pi-model",
+          supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+        }],
+      });
+
+    worker.send({ id: "thinking", type: "setThinkingLevel", level: "xhigh" });
+    await expect(worker.waitFor((message) => message.id === "thinking"))
+      .resolves.toMatchObject({ type: "thinking_level_changed", level: "off" });
   });
 
   it("emits prompt_done only after the final settled retry", async () => {

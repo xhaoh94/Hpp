@@ -102,6 +102,11 @@
   user-select: none;
 }
 
+.file-tree-item:focus,
+.file-tree-item:focus-visible {
+  outline: none;
+}
+
 .file-tree-disclosure {
   display: inline-flex;
   width: 14px;
@@ -147,6 +152,15 @@
   background-color: var(--bg-hover);
 }
 
+.file-tree-item.selected {
+  background-color: rgba(0, 122, 204, 0.18);
+  box-shadow: inset 2px 0 0 var(--accent-color);
+}
+
+.file-tree-item.selected:hover {
+  background-color: rgba(0, 122, 204, 0.18);
+}
+
 .file-icon {
   display: inline-flex;
   width: 16px;
@@ -181,6 +195,42 @@
 
 .file-tree-children[hidden] {
   display: none;
+}
+
+.file-tree-context-menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  width: 200px;
+  padding: 4px;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.file-tree-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-tree-context-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.file-tree-context-menu svg {
+  color: var(--text-secondary);
 }
 
 .placeholder-text {

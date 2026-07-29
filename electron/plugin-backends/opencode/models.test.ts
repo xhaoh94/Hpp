@@ -40,6 +40,7 @@ describe("OpenCode models", () => {
       provider: "custom",
       reasoning: true,
       supportsImages: true,
+      supportedThinkingLevels: ["low", "medium", "high"],
     }]);
 
     const httpPost = vi.fn(async () => true);
@@ -59,7 +60,7 @@ describe("OpenCode models", () => {
     }));
   });
 
-  it("falls back to the closest available high-effort variant", async () => {
+  it("uses only an actual model variant and normalizes its protocol alias", async () => {
     const events: AgentEvent[] = [];
     const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
     const internals = agent as unknown as OpenCodeInternals;
@@ -69,7 +70,7 @@ describe("OpenCode models", () => {
         models: {
           model: {
             capabilities: { reasoning: true, attachment: true },
-            variants: { low: {}, high: {} },
+            variants: { low: {}, max: {} },
           },
         },
       }],
@@ -88,7 +89,7 @@ describe("OpenCode models", () => {
     await agent.sendMessage("hello");
 
     expect(httpPost).toHaveBeenCalledWith("/session/ses_source/prompt_async", expect.objectContaining({
-      variant: "high",
+      variant: "max",
     }));
     expect(events).toContainEqual(expect.objectContaining({
       type: "thinking_level_changed",

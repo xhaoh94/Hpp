@@ -1046,12 +1046,21 @@ const handleSessionEvent = (event) => {
 
 const getModels = () => {
   const models = modelRegistry?.getAvailable?.() || [];
+  const activeModel = session?.model;
+  const activeThinkingLevels = typeof session?.getAvailableThinkingLevels === "function"
+    ? session.getAvailableThinkingLevels()
+    : undefined;
   return models.map((model) => ({
     id: model.id || model.modelId,
     name: model.name || model.id || model.modelId,
     provider: model.provider,
     reasoning: !!model.reasoning,
     supportsImages: Array.isArray(model.input) ? model.input.includes("image") : false,
+    supportedThinkingLevels: activeModel &&
+      model.provider === activeModel.provider &&
+      (model.id || model.modelId) === (activeModel.id || activeModel.modelId)
+      ? activeThinkingLevels
+      : undefined,
   }));
 };
 
@@ -1132,7 +1141,7 @@ const handleCommand = async (command) => {
       }
       case "setThinkingLevel":
         session?.setThinkingLevel(command.level);
-        send({ type: "thinking_level_changed", id: command.id, level: command.level });
+        send({ type: "thinking_level_changed", id: command.id, level: session?.thinkingLevel || command.level });
         break;
       case "uiResponse":
         uiBridge?.handleResponse(command.response);

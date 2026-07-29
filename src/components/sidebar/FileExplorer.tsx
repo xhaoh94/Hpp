@@ -6,9 +6,11 @@ import {
   useRef,
   type DragEvent,
   type KeyboardEvent,
+  type MouseEvent,
 } from "react";
 import { useAppStore, type FileRevealRequest } from "@/stores/app-store";
 import { useProjectStore } from "@/stores/project-store";
+import { useChatStore } from "@/stores/chat-store";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { useFileFilters } from "@/hooks/useFileFilters";
 import { isFileTreePathWithin, isSameFileTreePath } from "@/lib/file-tree-paths";
@@ -16,12 +18,16 @@ import { writePathAttachmentDragData } from "@/lib/path-attachments";
 import { scheduleAbortableTask } from "@/lib/abortable-task-scheduler";
 import { invalidateProjectFileIndex, queryProjectFileIndex } from "@/lib/project-file-index";
 import { replaceEmojiWithImages } from "@/lib/emoji";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { getFileFilterKey, isFileEntryExcluded, type FileFilterConfig } from "@shared/file-filters";
 import type { FileEntry } from "@/types";
 import {
   ChevronDown,
   ChevronRight,
+  Clipboard,
   CopyMinus,
+  FolderOpen,
+  MessageCirclePlus,
   RefreshCw,
 } from "lucide-react";
 import "./FileTree.css";
@@ -33,6 +39,22 @@ interface FileTreeCommand {
   scopeKey: string;
   handledPaths: Set<string>;
 }
+
+interface FileExplorerContextMenu {
+  entries: FileEntry[];
+  x: number;
+  y: number;
+}
+
+const getRelativeFilePath = (path: string, projectPath: string) => {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedProjectPath = projectPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const comparePath = normalizedPath.toLowerCase();
+  const compareProjectPath = normalizedProjectPath.toLowerCase();
+  return comparePath.startsWith(`${compareProjectPath}/`)
+    ? normalizedPath.slice(normalizedProjectPath.length + 1)
+    : normalizedPath;
+};
 
 function getFileIcon(name: string): { icon: string; color: string } {
   const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -120,6 +142,10 @@ const FileTreeItem = memo(function FileTreeItem({
   treeCommand,
   onClaimRevealCenter,
   onFileClick,
+  onContextMenu,
+  selectedPaths,
+  onSelect,
+  siblingEntries,
 }: {
   entry: FileEntry;
   depth: number;
@@ -129,6 +155,10 @@ const FileTreeItem = memo(function FileTreeItem({
   treeCommand: FileTreeCommand | null;
   onClaimRevealCenter: (requestId: number) => boolean;
   onFileClick: (path: string) => void;
+  onContextMenu: (entry: FileEntry, event: MouseEvent<HTMLDivElement>) => void;
+  selectedPaths: Set<string>;
+  onSelect: (entry: FileEntry, event: MouseEvent<HTMLDivElement>, siblings: FileEntry[]) => void;
+  siblingEntries: FileEntry[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[]>([]);
@@ -164,6 +194,11 @@ const FileTreeItem = memo(function FileTreeItem({
     event.preventDefault();
     handleToggle();
   }, [handleToggle]);
+
+  const handleClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    onSelect(entry, event, siblingEntries);
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey) handleToggle();
+  }, [entry, handleToggle, onSelect, siblingEntries]);
 
   const revealPath = revealRequest?.path || "";
   const shouldRevealFolder = entry.type === "folder"
@@ -209,11 +244,12 @@ const FileTreeItem = memo(function FileTreeItem({
         ref={rowRef}
         draggable
         onDragStart={handleDragStart}
-        onClick={handleToggle}
+        onClick={handleClick}
+        onContextMenu={(event) => onContextMenu(entry, event)}
         onKeyDown={handleKeyDown}
         role="button"
         tabIndex={0}
-        className={`file-tree-item ${entry.type === 'file' ? 'is-file' : 'is-folder'} ${expanded ? 'expanded' : ''} ${isHighlighted ? 'highlighted' : ''}`}
+        className={`file-tree-item ${entry.type === 'file' ? 'is-file' : 'is-folder'} ${expanded ? 'expanded' : ''} ${isHighlighted ? 'highlighted' : ''} ${selectedPaths.has(entry.path) ? 'selected' : ''}`}
         data-expanded={entry.type === "folder" ? String(expanded) : undefined}
         aria-expanded={entry.type === "folder" ? expanded : undefined}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -249,6 +285,10 @@ const FileTreeItem = memo(function FileTreeItem({
               treeCommand={treeCommand}
               onClaimRevealCenter={onClaimRevealCenter}
               onFileClick={onFileClick}
+              onContextMenu={onContextMenu}
+              selectedPaths={selectedPaths}
+              onSelect={onSelect}
+              siblingEntries={children}
             />
           ))}
         </div>
@@ -263,6 +303,9 @@ export function FileExplorer() {
   const [searchResults, setSearchResults] = useState<FileEntry[]>([]);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [treeCommand, setTreeCommand] = useState<FileTreeCommand | null>(null);
+  const [contextMenu, setContextMenu] = useState<FileExplorerContextMenu | null>(null);
+  const [selectedEntries, setSelectedEntries] = useState<Map<string, FileEntry>>(() => new Map());
+  const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
   const rootRequestRef = useRef(0);
   const searchRequestRef = useRef(0);
   const centeredRevealRequestIdRef = useRef<number | null>(null);
@@ -277,6 +320,88 @@ export function FileExplorer() {
   const handleFileClick = useCallback((path: string) => {
     setPreviewFile(path);
   }, []);
+
+  const handleSelect = useCallback((entry: FileEntry, event: MouseEvent<HTMLDivElement>, siblings: FileEntry[]) => {
+    if (!event.shiftKey || !selectionAnchorPath) setSelectionAnchorPath(entry.path);
+    setSelectedEntries((current) => {
+      const isToggle = event.ctrlKey || event.metaKey;
+      if (event.shiftKey && selectionAnchorPath) {
+        const start = siblings.findIndex((item) => item.path === selectionAnchorPath);
+        const end = siblings.findIndex((item) => item.path === entry.path);
+        if (start >= 0 && end >= 0) {
+          const range = siblings.slice(Math.min(start, end), Math.max(start, end) + 1);
+          return new Map(range.map((item) => [item.path, item]));
+        }
+      }
+      if (!isToggle) {
+        return new Map([[entry.path, entry]]);
+      }
+      const next = new Map(current);
+      if (next.has(entry.path)) next.delete(entry.path);
+      else next.set(entry.path, entry);
+      return next;
+    });
+  }, [selectionAnchorPath]);
+
+  const handleContextMenu = useCallback((entry: FileEntry, event: MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const entries = selectedEntries.has(entry.path) ? [...selectedEntries.values()] : [entry];
+    if (!selectedEntries.has(entry.path)) setSelectedEntries(new Map([[entry.path, entry]]));
+    setContextMenu({ entries, x: event.clientX, y: event.clientY });
+  }, [selectedEntries]);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  const copyPath = useCallback(async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      showFloatingToastMessage(value.includes("\n") ? "已复制多个路径" : "已复制路径");
+    } catch {
+      window.alert("复制失败");
+    } finally {
+      closeContextMenu();
+    }
+  }, [closeContextMenu]);
+
+  const addToChat = useCallback(async (entries: FileEntry[]) => {
+    const sessionId = useProjectStore.getState().activeSessionId;
+    if (!sessionId) {
+      window.alert("请先选择一个会话再添加到聊天");
+      closeContextMenu();
+      return;
+    }
+    let addedCount = 0;
+    for (const entry of entries) {
+      const result = await window.electronAPI.statPath(entry.path);
+      if (!result.success || !result.attachment) {
+        window.alert(result.error || `无法添加资源：${entry.name}`);
+        continue;
+      }
+      useChatStore.getState().addPendingPathAttachment({ id: crypto.randomUUID(), ...result.attachment }, sessionId);
+      addedCount += 1;
+    }
+    if (addedCount > 0) showFloatingToastMessage(addedCount === 1 ? "已添加到聊天" : `已添加 ${addedCount} 个资源到聊天`);
+    closeContextMenu();
+  }, [closeContextMenu]);
+
+  const openInExplorer = useCallback(async (entries: FileEntry[]) => {
+    for (const entry of entries) {
+      const result = await window.electronAPI.showItemInFolder(entry.path);
+      if (!result.success) window.alert(result.error || `无法打开：${entry.name}`);
+    }
+    closeContextMenu();
+  }, [closeContextMenu]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => closeContextMenu();
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("resize", close);
+    };
+  }, [closeContextMenu, contextMenu]);
 
   const claimRevealCenter = useCallback((requestId: number) => {
     if (centeredRevealRequestIdRef.current === requestId) return false;
@@ -421,12 +546,28 @@ export function FileExplorer() {
               treeCommand={activeTreeCommand}
               onClaimRevealCenter={claimRevealCenter}
               onFileClick={handleFileClick}
+              onContextMenu={handleContextMenu}
+              selectedPaths={new Set(selectedEntries.keys())}
+              onSelect={handleSelect}
+              siblingEntries={displayEntries}
             />
           ))
         )}
       </div>
 
       <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />
+      {contextMenu && (
+        <div
+          className="file-tree-context-menu"
+          style={{ left: Math.min(contextMenu.x, window.innerWidth - 210), top: Math.min(contextMenu.y, window.innerHeight - 180) }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button type="button" onClick={() => void openInExplorer(contextMenu.entries)}><FolderOpen size={15} />在资源管理器打开</button>
+          <button type="button" onClick={() => void addToChat(contextMenu.entries)}><MessageCirclePlus size={15} />添加到聊天</button>
+          <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => entry.path).join("\n"))}><Clipboard size={15} />复制路径</button>
+          <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => activeProject ? getRelativeFilePath(entry.path, activeProject.path) : entry.path).join("\n"))}><Clipboard size={15} />复制相对路径</button>
+        </div>
+      )}
     </div>
   );
 }

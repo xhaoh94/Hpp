@@ -26,6 +26,7 @@ import type {
   AgentActionListOptions,
 } from "../../../shared/agent-actions";
 import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
+import { normalizeSupportedThinkingLevels } from "../../../shared/models";
 
 interface AgentModel {
   id: string;
@@ -33,6 +34,7 @@ interface AgentModel {
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }
 
 interface AgentSendOptions {
@@ -154,9 +156,7 @@ function getDroidHistoryMessages(value: unknown) {
 }
 
 function modelSupportsReasoning(model: UnknownRecord) {
-  const efforts = Array.isArray(model.supportedReasoningEfforts)
-    ? model.supportedReasoningEfforts.map((value) => String(value).toLowerCase())
-    : [];
+  const efforts = normalizeSupportedThinkingLevels(model.supportedReasoningEfforts);
   return efforts.some((effort) => !["off", "none"].includes(effort));
 }
 
@@ -1062,6 +1062,7 @@ export class DroidAgent {
         provider,
         reasoning: modelSupportsReasoning(model),
         supportsImages: model.noImageSupport !== true,
+        supportedThinkingLevels: normalizeSupportedThinkingLevels(model.supportedReasoningEfforts),
       });
     }
 

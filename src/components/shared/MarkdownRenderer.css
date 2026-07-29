@@ -71,8 +71,8 @@
   margin: 0.7em 0;
   border-radius: 8px;
   overflow: hidden;
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--user-bubble-bg);
+  border: 1px solid var(--user-bubble-border);
 }
 
 .md-content .md-code-block pre {
@@ -411,8 +411,8 @@
 }
 
 :root[data-theme="light"] .md-content .md-code-block {
-  border-color: var(--border-color);
-  background: var(--code-bg);
+  border-color: var(--user-bubble-border);
+  background: var(--user-bubble-bg);
 }
 
 :root[data-theme="light"] .md-content .md-code-lang,

@@ -18,6 +18,7 @@ interface AgentModel {
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }
 
 interface AgentSendOptions {
@@ -72,6 +73,9 @@ const normalizeModels = (value: unknown): AgentModel[] => {
       provider,
       reasoning: model.reasoning === true,
       supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
+      supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
+        ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
+        : undefined,
     }];
   });
 };
@@ -446,6 +450,7 @@ export class PiSDKAgent {
         requestId = this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
           clearTimeout(timeout);
           if (data.type === "model_changed") {
+            this.models = [];
             this.emitEvent({ type: "model_changed", model: data.model });
             resolve();
             return;

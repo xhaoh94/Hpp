@@ -14,6 +14,15 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
   const [showUpdatePrompt, setShowUpdatePrompt] = useState(false)
   const updatePromptRef = useRef<HTMLSpanElement | null>(null)
   const [isNiri, setIsNiri] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    window.electronAPI?.getAppVersion?.()
+      .then((version) => { if (!cancelled) setAppVersion(version) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -131,7 +140,7 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
     <div className="app-titlebar">
       <div className="titlebar-drag-region" onDoubleClick={handleTitleBarDoubleClick}>
         <span className="titlebar-title-group">
-          <span className="titlebar-title">{title}</span>
+          <span className="titlebar-title">{title}{appVersion ? ` v${appVersion}` : ''}</span>
           {updateButtonVisible && (
             <span className="titlebar-update-wrap" ref={updatePromptRef}>
               <button

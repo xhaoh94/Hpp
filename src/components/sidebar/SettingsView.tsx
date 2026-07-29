@@ -475,7 +475,6 @@ export function SettingsView() {
     <div className="settings">
       <div className="settings-header">
         <span>设置</span>
-        <span className="settings-header-version">Hpp v{appVersion || "0.0.1"}</span>
       </div>
 
       <div className="settings-content">

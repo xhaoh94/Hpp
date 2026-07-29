@@ -30,7 +30,7 @@ describe("shared model rules", () => {
     expect(THINKING_LEVELS.map((level) => level.id)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
   });
 
-  it("uses model-specific thinking levels without changing legacy defaults", () => {
+  it("uses only model-specific thinking levels and does not invent missing capabilities", () => {
     const claudeModel = {
       ...models[0],
       supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"],
@@ -38,7 +38,19 @@ describe("shared model rules", () => {
     expect(getModelThinkingLevels(claudeModel).map((level) => level.id))
       .toEqual(["off", "low", "medium", "high", "xhigh"]);
     expect(normalizeModelThinkingLevel("minimal", claudeModel)).toBe("medium");
-    expect(getModelThinkingLevels(models[0]).map((level) => level.id))
-      .toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+    expect(getModelThinkingLevels(models[0])).toEqual([]);
+  });
+
+  it("preserves native order, normalizes protocol aliases, and keeps future levels", () => {
+    const model = {
+      ...models[0],
+      supportedThinkingLevels: ["none", "low", "max", "ultra", "low"],
+    };
+    expect(getModelThinkingLevels(model)).toEqual([
+      { id: "off", label: THINKING_LEVELS[0].label },
+      { id: "low", label: THINKING_LEVELS[2].label },
+      { id: "xhigh", label: THINKING_LEVELS[5].label },
+      { id: "ultra", label: "ultra" },
+    ]);
   });
 });

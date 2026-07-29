@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow } from "electron";
+import { ipcMain, dialog, BrowserWindow, shell } from "electron";
 import { readdir, readFile, access, stat } from "fs/promises";
 import { basename, extname, join } from "path";
 import { homedir } from "os";
@@ -51,6 +51,21 @@ function getImageMimeType(filePath: string) {
 }
 
 export function registerFileHandlers() {
+  ipcMain.handle("fs:showItemInFolder", async (_event, targetPath: string) => {
+    if (typeof targetPath !== "string" || !targetPath.trim()) {
+      return { success: false, error: "Path is required" };
+    }
+    try {
+      await stat(targetPath);
+      // Electron delegates this to the native shell (SHOpenFolderAndSelectItems
+      // on Windows), which opens the file manager and selects the target atomically.
+      shell.showItemInFolder(targetPath);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   ipcMain.handle("fs:readDirectory", async (_event, dirPath: string, rawFilters?: unknown) => {
     if (typeof dirPath !== "string" || !dirPath.trim()) return [];
     try {

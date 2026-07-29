@@ -35,8 +35,7 @@
       "hint": "原生 Anthropic 渠道直接连接；OpenAI Chat Completions 渠道由 Hpp 在本机转换后转发。",
       "modelDefaults": {
         "reasoning": true,
-        "imageInput": true,
-        "supportedThinkingLevels": ["off", "low", "medium", "high", "xhigh"]
+        "imageInput": true
       },
       "fixedModelCapabilities": true,
       "modelListMode": "configured"

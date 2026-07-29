@@ -39,13 +39,17 @@ describe("file explorer tree commands", () => {
 
   it("uses only disclosure triangles for collapsed and expanded folders", () => {
     const source = readSource();
+    const treeItemSource = source.slice(
+      source.indexOf("const FileTreeItem"),
+      source.indexOf("export function FileExplorer"),
+    );
     const styles = readStyles();
 
-    expect(source).toContain("<ChevronRight");
-    expect(source).toContain("<ChevronDown");
-    expect(source).not.toContain("<FolderOpen");
-    expect(source).not.toContain("<Folder size=");
-    expect(source).not.toContain("<LoaderCircle");
+    expect(treeItemSource).toContain("<ChevronRight");
+    expect(treeItemSource).toContain("<ChevronDown");
+    expect(treeItemSource).not.toContain("<FolderOpen");
+    expect(treeItemSource).not.toContain("<Folder size=");
+    expect(treeItemSource).not.toContain("<LoaderCircle");
     expect(source).toContain('{entry.type === "file" && (');
     expect(source).toContain('data-expanded={entry.type === "folder" ? String(expanded) : undefined}');
     expect(styles).toContain('.file-tree-item[data-expanded="true"] .file-tree-disclosure');

@@ -24,6 +24,8 @@
   --yellow: #f59e0b;
   --warning-soft: rgba(245, 158, 11, 0.08);
   --code: #181818;
+  --user-bubble: #232323;
+  --user-bubble-border: #3a3a3a;
 }
 
 * { box-sizing: border-box; }
@@ -510,6 +512,7 @@ button:disabled { opacity: 0.48; }
 .history-item:active { background: var(--surface-hover); }
 .history-item > span { display: -webkit-box; min-width: 0; overflow: hidden; font-size: 12px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .history-item time { color: var(--faint); font-size: 10px; white-space: nowrap; }
+.history-item-meta { display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .attachment-preview-token { display: inline-flex; align-items: center; gap: 4px; margin: 0 2px; padding: 2px 5px; border: 1px solid rgba(140, 140, 140, .35); border-radius: 4px; vertical-align: middle; }
 .attachment-preview-token.file svg { color: var(--muted); }
 .attachment-preview-token.folder svg { color: #dcab5f; }
@@ -551,6 +554,7 @@ button:disabled { opacity: 0.48; }
 .toolbar-title-row strong,
 .toolbar-context small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar-title-row strong { min-width: 0; color: var(--text); font-size: 13px; font-weight: 680; }
+.session-running-indicator { display: inline-flex; width: 14px; flex: 0 0 14px; align-items: center; justify-content: center; color: var(--text); font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; line-height: 1; }
 .toolbar-history-button { display: grid; flex: 0 0 26px; width: 26px; height: 26px; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted); }
 .toolbar-history-button:active { background: var(--surface-hover); color: var(--text); }
 .toolbar-subtitle { display: flex; min-width: 0; width: fit-content; max-width: 100%; grid-column: 1; grid-row: 2; align-items: center; gap: 4px; }
@@ -631,6 +635,7 @@ button:disabled { opacity: 0.48; }
 
 .session-list { display: flex; flex-direction: column; gap: 2px; padding: 0 0 5px 14px; }
 .session-main { display: grid; min-width: 0; grid-template-columns: 10px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; padding: 5px 8px; border: 0; background: transparent; color: var(--text); text-align: left; }
+.session-main.has-running { grid-template-columns: 10px minmax(0, 1fr) 16px; }
 .session-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; border-radius: 5px; }
 .session-row.active { background: var(--surface-hover); }
 .session-row.closed { color: var(--muted); }
@@ -702,7 +707,7 @@ button:disabled { opacity: 0.48; }
 .message-meta { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; color: var(--faint); font-size: 10px; }
 .message-meta span { color: var(--muted); font-weight: 650; }
 .message.user .message-meta { justify-content: flex-end; }
-.message-user-bubble { width: fit-content; max-width: min(90%, 680px); margin-left: auto; padding: 9px 11px; border: 1px solid #3a3a3a; border-radius: 6px; background: #232323; color: #e2e2e2; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025); }
+.message-user-bubble { width: fit-content; max-width: min(90%, 680px); margin-left: auto; padding: 9px 11px; border: 1px solid var(--user-bubble-border); border-radius: 6px; background: var(--user-bubble); color: #e2e2e2; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025); }
 .message-user-bubble > :last-child { margin-bottom: 0; }
 .message-user-flow { min-width: 0; max-width: 100%; }
 .message-user-flow > .message-text-attachment-chip,
@@ -719,7 +724,7 @@ button:disabled { opacity: 0.48; }
 .message-content h3 { font-size: 14px; }
 .message-content a { color: var(--accent); }
 .message-content code { padding: 2px 4px; border-radius: 3px; background: var(--code); font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
-.message-content pre { overflow-x: auto; padding: 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--code); }
+.message-content pre { overflow-x: auto; padding: 10px; border: 1px solid var(--user-bubble-border); border-radius: 5px; background: var(--user-bubble); }
 .message-content pre code { padding: 0; background: transparent; }
 .message-content blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--border-strong); color: var(--muted); }
 .message-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }

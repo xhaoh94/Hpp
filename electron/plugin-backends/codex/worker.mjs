@@ -151,6 +151,20 @@ const normalizeReasoningEffort = (level) => {
   return VALID_REASONING_EFFORTS.has(normalized) ? normalized : undefined;
 };
 
+const getSupportedThinkingLevels = (reasoningEfforts) => {
+  const levels = [];
+  const seen = new Set();
+  for (const effort of reasoningEfforts) {
+    const value = isRecord(effort) ? effort.reasoningEffort : effort;
+    const normalized = normalizeReasoningEffort(value);
+    const level = normalized === "none" ? "off" : normalized;
+    if (!level || seen.has(level)) continue;
+    seen.add(level);
+    levels.push(level);
+  }
+  return levels;
+};
+
 const normalizeCodexModel = (model) => {
   if (!isRecord(model) || model.hidden === true) return null;
   const id = String(model.id || model.model || "").trim();
@@ -158,13 +172,15 @@ const normalizeCodexModel = (model) => {
   const reasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
     ? model.supportedReasoningEfforts
     : [];
+  const supportedThinkingLevels = getSupportedThinkingLevels(reasoningEfforts);
   const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : [];
   return {
     id,
     name: String(model.displayName || model.name || id),
     provider: CODEX_PROVIDER,
-    reasoning: reasoningEfforts.length > 0,
+    reasoning: supportedThinkingLevels.some((level) => level !== "off"),
     supportsImages: inputModalities.includes("image"),
+    supportedThinkingLevels,
     isDefault: model.isDefault === true,
   };
 };

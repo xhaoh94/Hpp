@@ -14,6 +14,7 @@ import {
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import type { AgentPermissionMode } from "../../../shared/agent-permissions";
 import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
+import { normalizeSupportedThinkingLevels, normalizeThinkingLevelId } from "../../../shared/models";
 import { isRecord } from "../../../src/types/ipc";
 import type {
   AgentActionCatalogEntry,
@@ -27,6 +28,7 @@ interface AgentModel {
   provider: string;
   reasoning: boolean;
   supportsImages?: boolean;
+  supportedThinkingLevels?: string[];
 }
 
 interface AgentSendOptions {
@@ -207,19 +209,9 @@ function getModelVariants(modelInfo: unknown): string[] {
 }
 
 function selectThinkingVariant(level: string, variants: string[]): string | undefined {
-  const normalized = level.trim().toLowerCase();
+  const normalized = normalizeThinkingLevelId(level);
   if (!normalized || variants.length === 0) return undefined;
-  const candidates: Record<string, string[]> = {
-    off: ["off", "none", "minimal"],
-    none: ["none", "off", "minimal"],
-    minimal: ["minimal", "low"],
-    low: ["low", "minimal"],
-    medium: ["medium", "default"],
-    high: ["high"],
-    xhigh: ["xhigh", "max", "high"],
-    max: ["max", "xhigh", "high"],
-  };
-  return (candidates[normalized] || [normalized]).find((candidate) => variants.includes(candidate));
+  return variants.find((variant) => normalizeThinkingLevelId(variant) === normalized);
 }
 
 function imageExtension(mimeType: string) {
@@ -1040,26 +1032,30 @@ export class OpenCodeAgent {
               const modelId = model.id || model.name;
               if (modelId === undefined || modelId === null) continue;
               const normalizedModelId = String(modelId);
-              this.modelVariants.set(`${providerId}:${normalizedModelId}`, getModelVariants(model));
+              const variants = getModelVariants(model);
+              this.modelVariants.set(`${providerId}:${normalizedModelId}`, variants);
               models.push({
                 id: normalizedModelId,
                 name: String(model.name || model.id || modelId),
                 provider: providerId,
                 reasoning: modelSupportsReasoning(model),
                 supportsImages: modelSupportsImages(model),
+                supportedThinkingLevels: normalizeSupportedThinkingLevels(variants),
               });
             }
           } else if (isRecord(provider.models)) {
             // models may be a record: { modelId: modelInfo }
             for (const [modelId, modelInfo] of Object.entries(provider.models)) {
               const model = asRecord(modelInfo);
-              this.modelVariants.set(`${providerId}:${modelId}`, getModelVariants(modelInfo));
+              const variants = getModelVariants(modelInfo);
+              this.modelVariants.set(`${providerId}:${modelId}`, variants);
               models.push({
                 id: modelId,
                 name: typeof model.name === "string" ? model.name : modelId,
                 provider: providerId,
                 reasoning: modelSupportsReasoning(modelInfo),
                 supportsImages: modelSupportsImages(modelInfo),
+                supportedThinkingLevels: normalizeSupportedThinkingLevels(variants),
               });
             }
           } else {
@@ -1096,8 +1092,12 @@ export class OpenCodeAgent {
 
   /** Set the OpenCode model variant used by subsequent prompts. */
   async setThinkingLevel(level: string) {
-    this.currentThinkingLevel = level;
-    this.emitEvent({ type: "thinking_level_changed", level });
+    const variants = this.modelVariants.get(`${this.currentProviderId}:${this.currentModelId}`) || [];
+    const variant = selectThinkingVariant(level, variants);
+    if (!variant) throw new Error("UNSUPPORTED_THINKING_LEVEL");
+    const effectiveLevel = normalizeThinkingLevelId(variant);
+    this.currentThinkingLevel = effectiveLevel;
+    this.emitEvent({ type: "thinking_level_changed", level: effectiveLevel });
   }
 
   sendUIResponse(response: AgentUIResponse) {

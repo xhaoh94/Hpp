@@ -58,6 +58,7 @@ interface ProjectState {
   initializedSessionIds: Set<string>; // session IDs with agent backend created
   addProject: (name: string, path: string, agentIds?: string[]) => void;
   removeProject: (id: string) => void;
+  reorderProjects: (sourceId: string, targetId: string, insertAfter?: boolean) => void;
   setActiveProject: (id: string | null) => void;
   addSession: (projectId: string, session: ProjectSession, activate?: boolean) => void;
   removeSession: (projectId: string, sessionId: string) => void;
@@ -118,6 +119,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         agentStatuses: nextAgentStatuses,
         initializedSessionIds: nextInitializedSessionIds,
       };
+    }),
+
+  reorderProjects: (sourceId, targetId, insertAfter = false) =>
+    set((s) => {
+      if (sourceId === targetId) return s;
+      const sourceIndex = s.projects.findIndex((project) => project.id === sourceId);
+      const targetIndex = s.projects.findIndex((project) => project.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return s;
+      const projects = [...s.projects];
+      const [moved] = projects.splice(sourceIndex, 1);
+      const insertionIndex = insertAfter && sourceIndex < targetIndex ? targetIndex : targetIndex + (insertAfter ? 1 : 0);
+      projects.splice(insertionIndex, 0, moved);
+      return { projects };
     }),
 
   setActiveProject: (id) => set({ activeProjectId: id }),

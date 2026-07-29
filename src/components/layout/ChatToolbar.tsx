@@ -15,7 +15,7 @@ type ChatToolbarProps = {
   activeSessionAgentId?: string;
   availableModels: ModelInfo[];
   currentModel: ModelInfo | null;
-  currentThinking: ThinkingLevelOption;
+  currentThinking?: ThinkingLevelOption;
   expandedProvider: string | null;
   favoriteModels: ModelInfo[];
   modelOpen: boolean;
@@ -275,7 +275,7 @@ export function ChatToolbar({
         )}
       </div>
 
-      <div ref={thinkingRef} className="relative">
+      {currentModel?.reasoning && currentThinking && thinkingLevels.length > 0 && <div ref={thinkingRef} className="relative">
         <button
           onClick={() => {
             onThinkingOpenChange(!thinkingOpen);
@@ -306,7 +306,7 @@ export function ChatToolbar({
             ))}
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }

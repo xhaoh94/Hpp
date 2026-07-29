@@ -37,7 +37,7 @@ input.on("line", async (line) => {
   }
   if (message.method === "model/list") {
     write({ id: message.id, result: { data: [
-      { id: "model-default", displayName: "Default Model", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "medium" }], inputModalities: ["text", "image"] },
+      { id: "model-default", displayName: "Default Model", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "none" }, { reasoningEffort: "medium" }], inputModalities: ["text", "image"] },
       { id: "model-hidden", displayName: "Hidden", hidden: true, supportedReasoningEfforts: [], inputModalities: ["text"] }
     ], nextCursor: null } });
     return;
@@ -279,7 +279,7 @@ describe("Codex worker protocol", () => {
 
     await expect(worker.waitFor((message) => message.id === "models" && message.type === "models"))
       .resolves.toMatchObject({
-        models: [{ id: "model-default", name: "Default Model", provider: "codex", reasoning: true, supportsImages: true }],
+        models: [{ id: "model-default", name: "Default Model", provider: "codex", reasoning: true, supportsImages: true, supportedThinkingLevels: ["off", "medium"] }],
       });
     await expect.poll(async () => readFile(logPath, "utf8")).toContain('"id":"server-time","result":{"currentTimeAt":');
   });
