@@ -24,7 +24,7 @@ export type ProcessEntryDraft =
   };
 
 export type AgentEventHandlerContext = {
-  pendingUIResponseRef: { current: PendingUIResponse };
+  getPendingUIResponse: (sessionId: string) => PendingUIResponse;
   setPendingUIResponse: (next: PendingUIResponseUpdate) => void;
   setStreamingState: (streaming: boolean) => void;
   getRuntime: (sessionId: string) => SessionRuntime;
@@ -42,7 +42,13 @@ export type AgentEventHandlerContext = {
   getPendingUIFromEvent: (event: AgentEvent, sessionId: string, entryId: string) => PendingUIResponse;
   clearStreamWatchdog: (sessionId?: string) => void;
   completeAssistantStream: (currentSessionId: string, content?: string, timedOut?: boolean) => void;
-  failAssistantStream: (currentSessionId: string, title: string, detail?: string) => void;
+  settleRuntimeTurnOnly: (
+    currentSessionId: string,
+    terminalReason: "completed" | "aborted" | "disconnected" | "error",
+  ) => void;
+  finishAbortedTurn: (currentSessionId: string) => void;
+  finishDisconnectedTurn: (currentSessionId: string) => void;
+  finishIdleBackendTurn: (currentSessionId: string) => void;
   refreshStreamWatchdog: (currentSessionId: string) => void;
   ensureAssistantContinuation: (currentSessionId: string) => SessionRuntime;
 };
@@ -50,8 +56,14 @@ export type AgentEventHandlerContext = {
 export type AgentEventRuntimeController = AgentEventHandlerContext & {
   getActiveAgentId: () => string;
   isOpenProjectSession: (sessionId: string) => boolean;
-  discardRuntime: (sessionId: string) => void;
+  discardRuntime: (sessionId: string, event?: AgentEvent) => void;
   finishManualAbort: (sessionId: string) => void;
-  appendContextCompactionDivider: (currentSessionId: string, eventId?: string) => void;
+  cancelAgentEndGrace: (sessionId: string) => void;
+  scheduleAgentEndGrace: (sessionId: string) => void;
+  appendContextCompactionDivider: (
+    currentSessionId: string,
+    eventId?: string,
+    phase?: "started" | "completed" | "interrupted",
+  ) => void;
   clearAllStreamWatchdogs: () => void;
 };

@@ -5,6 +5,7 @@ import type { ProcessEntryView } from "./process-view";
 import type { QuestionnaireQuestion } from "./questionnaire";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-actions";
 import type { AgentPermissionMode } from "./agent-permissions";
+import type { ComposerDocument, ComposerNode } from "./composer-document";
 
 export const REMOTE_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_REMOTE_PORT = 47831;
@@ -66,6 +67,38 @@ export const remoteImageSchema = z.object({
   }
 });
 
+const remoteComposerNodeSchema = z.discriminatedUnion("type", [
+  z.object({ id: z.string().min(1).max(128), type: z.literal("text"), text: z.string().max(200_000) }),
+  z.object({
+    id: z.string().min(1).max(128), type: z.literal("image"), name: z.string().max(256),
+    mimeType: z.string().max(128), src: z.string().optional(),
+  }),
+  z.object({
+    id: z.string().min(1).max(128), type: z.literal("path"), name: z.string().max(512),
+    path: z.string().max(4096), kind: z.enum(["file", "folder"]),
+  }),
+  z.object({
+    id: z.string().min(1).max(128), type: z.literal("snippet"), fileName: z.string().max(512),
+    filePath: z.string().max(4096), startLine: z.number().int().positive(), endLine: z.number().int().positive(),
+  }).refine((node) => node.endLine >= node.startLine, "Invalid line range"),
+  z.object({
+    id: z.string().min(1).max(128), type: z.literal("session"),
+    reference: z.object({
+      sourceSessionId: sessionIdSchema,
+      sourceTitle: z.string().max(512),
+      sourceAgentId: z.string().max(256).optional(),
+      sourceUpdatedAt: z.string().max(128).optional(),
+      addedAt: z.string().max(128).optional(),
+      summary: z.string().max(12_000).optional(),
+    }),
+  }),
+]);
+
+const remoteComposerDocumentSchema = z.object({
+  version: z.literal(1),
+  nodes: z.array(remoteComposerNodeSchema).max(512),
+});
+
 const sessionGetPayloadSchema = z.object({
   sessionId: sessionIdSchema,
   before: z.number().int().nonnegative().optional(),
@@ -102,8 +135,9 @@ const sessionSendPayloadSchema = z.object({
   images: z.array(remoteImageSchema).max(MAX_REMOTE_IMAGES).default([]),
   sessionReferences: z.array(remoteSessionReferenceSchema).max(MAX_REMOTE_SESSION_REFERENCES).default([]),
   action: remoteAgentActionSchema.optional(),
+  composerDocument: remoteComposerDocumentSchema.optional(),
 }).superRefine((value, context) => {
-  if (value.content.trim() || value.images.length > 0 || value.sessionReferences.length > 0 || value.action) return;
+  if (value.content.trim() || value.images.length > 0 || value.sessionReferences.length > 0 || value.action || value.composerDocument?.nodes.length) return;
   context.addIssue({ code: "custom", message: "A message, image, or session reference is required." });
 });
 
@@ -125,6 +159,7 @@ const sessionQueueEditPayloadSchema = sessionQueueItemPayloadSchema.extend({
   sessionReferences: z.array(remoteSessionReferenceSchema).max(MAX_REMOTE_SESSION_REFERENCES).default([]),
   retainedAttachmentIds: z.array(z.string().trim().min(1).max(128)).max(64).default([]),
   action: remoteAgentActionSchema.nullable().optional(),
+  composerDocument: remoteComposerDocumentSchema.optional(),
 });
 
 const sessionQueueReorderPayloadSchema = sessionQueueItemPayloadSchema.extend({
@@ -307,6 +342,8 @@ export interface RemoteProcessEntry extends ProcessEntryView {
   activityKind?: "started" | "interacted" | "interrupted";
   startedAt?: number;
   completedAt?: number;
+  guidanceDocument?: RemoteComposerDocument;
+  guidanceImages?: Array<{ id: string; src: string; name: string }>;
   subagents?: Array<{
     id: string;
     label: string;
@@ -324,6 +361,7 @@ export interface RemoteChatMessage {
   timestamp: number;
   isStreaming?: boolean;
   systemType?: string;
+  compactionState?: "running" | "completed" | "interrupted";
   images?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   diffs?: DiffLike[];
@@ -342,7 +380,12 @@ export interface RemoteChatMessage {
   }>;
   nativeTurnId?: string;
   action?: RemoteAgentActionInvocation;
+  composerDocument?: RemoteComposerDocument;
 }
+
+export type RemoteComposerNode = Exclude<ComposerNode, { type: "image" }> |
+  (Omit<Extract<ComposerNode, { type: "image" }>, "src"> & { src?: string });
+export type RemoteComposerDocument = Omit<ComposerDocument, "nodes"> & { nodes: RemoteComposerNode[] };
 
 export interface RemoteQueuedMessage {
   id: string;
@@ -356,6 +399,7 @@ export interface RemoteQueuedMessage {
   images?: Array<{ id: string; name: string; src: string; mimeType: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
   attachments?: Array<{ id: string; name: string; kind: "file" | "folder" | "snippet" }>;
+  composerDocument?: RemoteComposerDocument;
 }
 
 export interface RemoteInteraction {

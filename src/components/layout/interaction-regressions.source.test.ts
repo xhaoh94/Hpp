@@ -10,6 +10,9 @@ import confirmationSource from "./ConfirmationPanel.tsx?raw";
 import permissionChoiceSource from "./PermissionChoicePanel.tsx?raw";
 import pendingUIResponseSource from "./usePendingUIResponse.ts?raw";
 import agentEventsSource from "./useAgentEvents.ts?raw";
+import chatScrollSource from "./useChatScroll.ts?raw";
+import agentEventControllerSource from "./agentEventController.ts?raw";
+import processBlockSource from "./ProcessBlock.tsx?raw";
 
 const chatPanelStyles = readFileSync(
   resolve(process.cwd(), "src/components/layout/ChatPanel.css"),
@@ -52,6 +55,21 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("copyMessageText(msg.content)");
   });
 
+  it("opens explicit local Markdown links according to their real type", () => {
+    expect(chatPanelSource).toContain("getLocalMarkdownFilePath");
+    expect(chatPanelSource).toContain('target.closest<HTMLAnchorElement>("a.md-link")');
+    expect(chatPanelSource).toContain("window.electronAPI.statPath(resolvedPath)");
+    expect(chatPanelSource).toContain("onClick={handleMessageMarkdownLinkClick}");
+    expect(chatPanelSource).toContain('preview: result.attachment.kind === "file"');
+  });
+
+  it("keeps inline paths clickable without guessing paths from fenced code blocks", () => {
+    const markdownRendererSource = readFileSync(resolve(process.cwd(), "src/components/shared/MarkdownRenderer.tsx"), "utf8");
+    expect(markdownRendererSource).toContain('md-inline-code${localPath ? " md-path-reference" : ""}');
+    expect(markdownRendererSource).not.toContain('code className={`${className || ""}${localPath');
+    expect(chatPanelSource).toContain('code.md-inline-code.md-path-reference');
+  });
+
   it("allows @ mentions to attach files and folders", () => {
     expect(chatComposerSource).not.toContain("includeDirectories: false");
     expect(chatComposerSource).toContain('kind: item.isDirectory ? "folder" : "file"');
@@ -82,5 +100,103 @@ describe("chat interaction regression constraints", () => {
   it("does not subscribe the full chat panel to draft text keystrokes", () => {
     expect(chatPanelSource).toContain("pendingPathAttachments: draft.pendingPathAttachments");
     expect(chatPanelSource).toContain("useChatStore.getState().sessionDrafts[activeSessionId]?.text");
+  });
+
+  it("explains why sending is blocked while context compaction is running", () => {
+    expect(chatComposerSource).toContain("if (compactionInProgress && hasPendingContent)");
+    expect(chatComposerSource).toContain("Let ChatPanel verify whether compaction is still active in the backend.");
+    expect(chatComposerSource).toContain("sendDisabled && !(compactionInProgress && hasPendingContent)");
+    expect(chatComposerSource).toContain('aria-disabled={!showAbortButton && sendDisabled}');
+    expect(chatPanelSource).toContain("SessionCommandCoordinator.getBackendSessionActivity(targetSessionId)");
+    expect(chatPanelSource).toContain('backendActivity === "busy" || backendActivity === "unknown"');
+    expect(chatPanelSource).toContain('showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送")');
+  });
+
+  it("moves a still-running compaction below the final response body", () => {
+    expect(agentEventControllerSource).toContain("promoteContextCompactionToDivider(currentSessionId)");
+    expect(agentEventControllerSource).toContain("removeLastAssistantProcessEntries([compactionId], sessionId)");
+    expect(agentEventControllerSource).toContain('appendContextCompactionDivider(compactionId, sessionId, "running")');
+    expect(agentEventControllerSource).toContain("runtime.activeCompactionId || eventId");
+  });
+
+  it("rechecks compaction before dispatching an existing queued message", () => {
+    const dispatcherSource = chatPanelSource.slice(
+      chatPanelSource.indexOf("const MessageQueueDispatcher"),
+      chatPanelSource.indexOf("const ChatMessagesViewport"),
+    );
+    expect(dispatcherSource).toContain("compactingSessions[sessionId]");
+    expect(dispatcherSource).toContain("queueIfRunning: true");
+    expect(dispatcherSource).toContain("clientMessageId: nextItem.id");
+    expect(dispatcherSource).toContain("if (result.queued)");
+    expect(dispatcherSource).toContain("scheduleQueueRetry(sessionId)");
+    expect(dispatcherSource).toContain("Renderer lifecycle events can be delayed or lost");
+    expect(dispatcherSource).toContain("if (!isOpenQueueSession(sessionId))");
+    const beforeBackendAdmission = dispatcherSource.slice(0, dispatcherSource.indexOf("void sendPayloadNow"));
+    expect(beforeBackendAdmission).not.toContain("removeQueuedMessage(sessionId, nextItem.id)");
+  });
+
+  it("preserves the visible reading anchor when the process auto-collapses", () => {
+    expect(chatScrollSource).toContain("preserveScrollDuringAutoLayoutChange");
+    expect(chatScrollSource).toContain("document.elementFromPoint");
+    expect(chatScrollSource).toContain('candidate.closest<HTMLElement>(".chat-process-output")');
+    expect(chatScrollSource).toContain('querySelector<HTMLElement>(".chat-bubble-content")');
+    expect(chatScrollSource).toContain("targetY - responseAnchor.viewportY");
+    expect(chatScrollSource).toContain("anchor.getBoundingClientRect().top - anchorTop");
+    expect(chatPanelSource).toContain("preserveAssistantProcessCollapse");
+    expect(agentEventsSource).toContain("preserveAssistantProcessCollapse: (sessionId, action)");
+  });
+
+  it("keeps the final response on the same horizontal reading axis as process narration", () => {
+    expect(chatPanelStyles).toContain("--chat-assistant-body-inset: 2px");
+    expect(chatPanelStyles).toContain("padding: 6px 0 4px var(--chat-assistant-body-inset)");
+    expect(chatPanelStyles).toContain("padding-left: var(--chat-assistant-body-inset)");
+    expect(chatPanelStyles).toContain(".chat-commentary-item {");
+    expect(chatPanelStyles).toContain(".chat-process-toggle > span:first-child {");
+    expect(chatPanelStyles).toContain("padding-left: 2px;");
+  });
+
+  it("keeps thinking Markdown gray and regular-weight even when it contains emphasis", () => {
+    const thinkingStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-process-thinking-output {"),
+      chatPanelStyles.indexOf(".chat-process-entry.thinking .chat-process-entry-detail"),
+    );
+    expect(thinkingStyles).toContain("color: var(--text-secondary)");
+    expect(thinkingStyles).toContain("font-weight: 400");
+    expect(thinkingStyles).toContain(":is(strong, b)");
+    expect(thinkingStyles).toContain("color: inherit");
+    expect(thinkingStyles).toContain("font-weight: inherit");
+  });
+
+  it("vertically centers the guidance label beside its message bubble", () => {
+    const guidanceStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-process-guidance-content {"),
+      chatPanelStyles.indexOf(".chat-process-guidance-label {"),
+    );
+    expect(guidanceStyles).toContain("align-items: center");
+    expect(guidanceStyles).not.toContain("align-items: flex-end");
+  });
+
+  it("keeps pending interactions isolated by session across desktop and remote clients", () => {
+    expect(chatPanelSource).toContain("usePendingUIResponse(activeSessionId, openSessionIds)");
+    expect(chatPanelSource).toContain("pendingInteractions: pendingUIResponses");
+    expect(chatPanelSource).toContain("getPendingInteraction: getPendingUIResponse");
+    expect(chatPanelSource).toContain("clearPendingInteraction: clearPendingUIResponse");
+    expect(pendingUIResponseSource).toContain("retainPendingUIResponses(next, openSessionIds)");
+  });
+
+  it("uses the desktop lifecycle settlement for remote interaction responses", () => {
+    expect(chatPanelSource).toContain("preparePendingQuestionContinuation(sessionId, sessionRuntimeRef)");
+    expect(chatPanelSource).toContain("onInteractionResponseAccepted: refreshSessionWatchdog");
+    expect(chatPanelSource).toContain("settleFailedPendingQuestionTurn(");
+    expect(chatPanelSource).toContain("onInteractionResponseFailed: settleRemoteInteractionResponseFailure");
+  });
+
+  it("stops stale process timers and running decorations after the session settles", () => {
+    expect(chatPanelSource).toContain("getActiveAssistantTurnId(messages, currentSessionRunning)");
+    expect(chatPanelSource).toContain("turnRunning={msg.id === activeTurnId}");
+    expect(chatPanelSource).toContain("running={processRunning}");
+    expect(processBlockSource).toContain("normalizeProcessForView(process");
+    expect(processBlockSource).toContain("useProcessTicker(processRunning)");
+    expect(processBlockSource).toContain("visibleEntries.length > 0 || processRunning");
   });
 });

@@ -41,8 +41,13 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
   displayMessage?: string;
+  hostSystemPrompt?: string;
   permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   action?: AgentActionInvocation;
+}
+
+interface AgentInitOptions {
+  hostSystemPrompt?: string;
 }
 
 interface AgentForkTarget {
@@ -209,6 +214,7 @@ export class DroidAgent {
   private runningToolUses = new Map<string, RunningDroidTool>();
   private completedToolUses = new Set<string>();
   private actionKeys = new Set<string>();
+  private hostSystemPrompt = "";
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
@@ -216,11 +222,13 @@ export class DroidAgent {
   }
 
   /** Start droid exec in stream-jsonrpc mode */
-  async init(projectPath: string, existingSessionId?: string): Promise<void> {
+  async init(projectPath: string, existingSessionId?: string, options?: AgentInitOptions): Promise<void> {
+    const nextHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
     if (
       this.process &&
       this.isReady &&
       this.projectPath === projectPath &&
+      this.hostSystemPrompt === nextHostSystemPrompt &&
       (!existingSessionId || this.sessionId === existingSessionId)
     ) {
       return;
@@ -228,6 +236,7 @@ export class DroidAgent {
 
     this.projectPath = projectPath;
     await this.killProcess();
+    this.hostSystemPrompt = nextHostSystemPrompt;
     this.isReady = false;
     this.models = [];
     this.nativeModelIds.clear();
@@ -240,6 +249,12 @@ export class DroidAgent {
       "--auto", this.autonomyLevel,
       "--cwd", projectPath,
     ];
+    // Droid's JSON-RPC `systemPromptOverride` replaces its native prompt.
+    // The CLI append flag preserves that prompt and applies Hpp policy through
+    // Droid's native high-priority channel for both new and resumed sessions.
+    if (this.hostSystemPrompt) {
+      args.push("--append-system-prompt", this.hostSystemPrompt);
+    }
 
     const executable = getDroidExecutable(args);
     this.process = spawn(executable.command, executable.args, {
@@ -254,32 +269,20 @@ export class DroidAgent {
 
     const childProcess = this.process;
     childProcess.on("error", (error) => {
-      if (this.process !== childProcess) return;
-      this.process = null;
-      const wasReady = this.isReady;
-      this.isReady = false;
-      this.turnActive = false;
-      this.clientMessageIdsByRequestId.clear();
-      this.activeClientMessageId = null;
-      this.pendingAskUserRequest = null;
-      this.pendingPermissionRequestId = null;
-      this.failPendingResponses(error);
-      if (wasReady) this.emitEvent({ type: "agent_disconnected", detail: error.message });
+      this.handleProcessTermination(childProcess, "Droid process failed", error.message);
     });
 
     childProcess.on("exit", (code, signal) => {
-      if (this.process !== childProcess) return;
-      this.process = null;
-      const wasReady = this.isReady;
       const detail = `Droid exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
-      this.isReady = false;
-      this.turnActive = false;
-      this.clientMessageIdsByRequestId.clear();
-      this.activeClientMessageId = null;
-      this.pendingAskUserRequest = null;
-      this.pendingPermissionRequestId = null;
-      this.failPendingResponses(new Error(detail));
-      if (wasReady) this.emitEvent({ type: "agent_disconnected", detail });
+      this.handleProcessTermination(childProcess, "Droid disconnected", detail);
+    });
+
+    childProcess.stdin?.on("error", (error) => {
+      this.handleProcessTermination(
+        childProcess,
+        "Droid input failed",
+        `Droid input pipe closed: ${error.message}`,
+      );
     });
 
     const processBufferedLines = () => {
@@ -306,6 +309,11 @@ export class DroidAgent {
       buffer += decoder.end();
       if (buffer.trim()) buffer += "\n";
       processBufferedLines();
+      this.handleProcessTermination(
+        childProcess,
+        "Droid disconnected",
+        "Droid output pipe closed before the process exited.",
+      );
     });
 
     childProcess.stderr?.on("data", (chunk: Buffer) => {
@@ -424,10 +432,11 @@ export class DroidAgent {
   }
 
   isIdle(): boolean {
+    // pendingResponses also contains non-turn RPCs such as model/config reads;
+    // turnActive and pending UI requests are the authoritative busy state.
     return (
       !this.isAborting &&
       !this.turnActive &&
-      this.pendingResponses.size === 0 &&
       !this.pendingAskUserRequest &&
       !this.pendingPermissionRequestId
     );
@@ -436,20 +445,28 @@ export class DroidAgent {
   /** Abort current response */
   async abort() {
     this.isAborting = true;
+    let detail = "";
     if (this.pendingPermissionRequestId) {
-      this.sendRpcResponse(this.pendingPermissionRequestId, { selectedOption: "cancel" });
+      try {
+        this.sendRpcResponse(this.pendingPermissionRequestId, { selectedOption: "cancel" });
+      } catch (error) {
+        detail = getErrorMessage(error);
+      }
       this.pendingPermissionRequestId = null;
     }
     if (this.pendingAskUserRequest) {
-      this.sendRpcResponse(this.pendingAskUserRequest.requestId, { cancelled: true, answers: [] });
+      try {
+        this.sendRpcResponse(this.pendingAskUserRequest.requestId, { cancelled: true, answers: [] });
+      } catch (error) {
+        detail ||= getErrorMessage(error);
+      }
       this.pendingAskUserRequest = null;
     }
-    let detail = "";
     if (this.process) {
       try {
         await this.sendRpcAsync("droid.interrupt_session", {});
       } catch (error) {
-        detail = getErrorMessage(error);
+        detail ||= getErrorMessage(error);
       }
     }
     this.turnActive = false;
@@ -579,14 +596,15 @@ export class DroidAgent {
     });
   }
 
-  sendUIResponse(response: AgentUIResponse) {
-    if (!this.process || !this.isReady) return;
+  async sendUIResponse(response: AgentUIResponse): Promise<void> {
+    if (!this.process || !this.isReady) throw new Error("Droid is not ready");
     const responseRequestId = typeof response.id === "string"
       ? response.id
       : typeof response.requestId === "string"
         ? response.requestId
         : "";
-    if (this.pendingPermissionRequestId && (!responseRequestId || responseRequestId === this.pendingPermissionRequestId)) {
+    if (!responseRequestId) throw new Error("Droid UI response is missing request id");
+    if (this.pendingPermissionRequestId && responseRequestId === this.pendingPermissionRequestId) {
       const selectedValue = getUIResponseValue(response).toLowerCase();
       const selectedOption = response.confirmed === true || ["proceed_once", "allow", "yes", "是", "允许"].includes(selectedValue)
         ? "proceed_once"
@@ -599,7 +617,7 @@ export class DroidAgent {
       this.pendingPermissionRequestId = null;
       return;
     }
-    if (this.pendingAskUserRequest && (!responseRequestId || responseRequestId === this.pendingAskUserRequest.requestId)) {
+    if (this.pendingAskUserRequest && responseRequestId === this.pendingAskUserRequest.requestId) {
       const pending = this.pendingAskUserRequest;
       const result = asRecord(response.result);
       const rawAnswers = Array.isArray(response.answers)
@@ -624,6 +642,7 @@ export class DroidAgent {
       this.pendingAskUserRequest = null;
       return;
     }
+    throw new Error(`Unknown Droid UI request: ${responseRequestId}`);
   }
 
   get sessionFilePath(): string | null { return this.sessionId; }
@@ -635,8 +654,13 @@ export class DroidAgent {
 
   private async killProcess() {
     const childProcess = this.process;
+    const wasActive = this.turnActive;
     this.process = null;
-    childProcess?.stdin?.end();
+    try {
+      childProcess?.stdin?.end();
+    } catch {
+      // Continue with process-tree termination below.
+    }
     this.isReady = false;
     this.sessionId = null;
     this.failPendingResponses(new Error("Droid process stopped"));
@@ -649,7 +673,12 @@ export class DroidAgent {
     this.runningToolUses.clear();
     this.completedToolUses.clear();
     this.actionKeys.clear();
-    this.eventBuffer.flush();
+    if (wasActive) {
+      this.emitEvent({ type: "stream_end", force: true });
+      this.emitEvent({ type: "agent_end" });
+    } else {
+      this.eventBuffer.flush();
+    }
     if (!childProcess) return;
     if (await this.waitForExit(childProcess, 750)) return;
     await this.killProcessTree(childProcess);
@@ -780,7 +809,18 @@ export class DroidAgent {
               : Array.isArray(paramsRecord.paths) ? paramsRecord.paths : [],
           )
         )) {
-          this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+          try {
+            this.sendRpcResponse(requestId, { selectedOption: "proceed_once" });
+          } catch (error) {
+            const childProcess = this.process;
+            if (childProcess) {
+              this.handleProcessTermination(
+                childProcess,
+                "Droid permission response failed",
+                getErrorMessage(error),
+              );
+            }
+          }
         } else {
           this.pendingPermissionRequestId = requestId;
           const resources = Array.isArray(paramsRecord.resources)
@@ -950,6 +990,12 @@ export class DroidAgent {
           const isIdle = notifData.working === false || state === "idle";
           if (state && state !== "executing_tool") this.completeRunningToolUses();
           if (isIdle) {
+            if (this.pendingAskUserRequest || this.pendingPermissionRequestId) {
+              // Droid may report its process as idle while it is blocked on a
+              // host answer. This is not a terminal turn: answering the RPC
+              // resumes the same agent execution.
+              break;
+            }
             const shouldFinishTurn = this.turnActive;
             this.turnActive = false;
             if (shouldFinishTurn) {
@@ -1082,6 +1128,27 @@ export class DroidAgent {
     } catch {
       return [];
     }
+  }
+
+  private handleProcessTermination(childProcess: ChildProcess, title: string, detail: string) {
+    if (this.process !== childProcess) return;
+    this.process = null;
+    const wasReady = this.isReady;
+    this.isReady = false;
+    this.failPendingResponses(new Error(detail));
+    if (this.turnActive) {
+      this.failActiveTurn(title, detail);
+      return;
+    }
+    this.clientMessageIdsByRequestId.clear();
+    this.activeClientMessageId = null;
+    this.pendingAskUserRequest = null;
+    this.pendingPermissionRequestId = null;
+    this.isAborting = false;
+    this.runningToolUses.clear();
+    this.completedToolUses.clear();
+    this.actionKeys.clear();
+    if (wasReady) this.emitEvent({ type: "agent_disconnected", detail });
   }
 
   private failPendingResponses(error: Error) {

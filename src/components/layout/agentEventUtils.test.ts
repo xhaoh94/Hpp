@@ -1,16 +1,91 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "@/types";
+import { uiText } from "@/i18n/text";
 import {
+  activateSessionRuntimeTurn,
   buildInferredPlanSteps,
+  compareAgentTurnRevisions,
   createSessionRuntime,
+  getContextCompactionPresentation,
+  getThinkingPreviewMarkdown,
   getToolSummary,
   getUIResponsePayload,
+  markSessionRuntimeTurnSettled,
   mergeRuntimeChangeFile,
   normalizePlanStepsFromEvent,
+  resetSessionRuntimeAfterTurn,
   summarizeRuntimeChanges,
 } from "./agentEventUtils";
 
 describe("agentEventUtils", () => {
+  it("resets the stream idle baseline after a turn settles", () => {
+    const runtime = createSessionRuntime();
+    runtime.streamIdleSince = 45_000;
+    runtime.streamIdleNoticeEntryId = "idle-notice";
+
+    resetSessionRuntimeAfterTurn(runtime);
+
+    expect(runtime.streamIdleSince).toBeNull();
+    expect(runtime.streamIdleNoticeEntryId).toBeNull();
+  });
+
+  it("orders host lifecycle revisions and rejects older settled turns", () => {
+    expect(compareAgentTurnRevisions("plugin-backend-1:2", "plugin-backend-1:1")).toBe(1);
+    expect(compareAgentTurnRevisions("plugin-backend-1:1", "plugin-backend-1:2")).toBe(-1);
+    expect(compareAgentTurnRevisions("plugin-backend-2:1", "plugin-backend-1:2")).toBeNull();
+
+    const runtime = createSessionRuntime();
+    expect(activateSessionRuntimeTurn(runtime, { revision: "plugin-backend-1:2" })).toBe(true);
+    markSessionRuntimeTurnSettled(runtime, "completed");
+    expect(activateSessionRuntimeTurn(runtime, { revision: "plugin-backend-1:1" })).toBe(false);
+    expect(activateSessionRuntimeTurn(runtime, { revision: "plugin-backend-1:3" })).toBe(true);
+  });
+
+  it("treats a recreated backend instance as a new revision scope", () => {
+    const oldRevision = "plugin-backend-1:old-instance:5";
+    const recreatedRevision = "plugin-backend-1:new-instance:1";
+    expect(compareAgentTurnRevisions(recreatedRevision, oldRevision)).toBeNull();
+
+    const runtime = createSessionRuntime();
+    expect(activateSessionRuntimeTurn(runtime, { revision: oldRevision })).toBe(true);
+    markSessionRuntimeTurnSettled(runtime, "completed");
+    expect(activateSessionRuntimeTurn(runtime, { revision: recreatedRevision })).toBe(true);
+    expect(runtime.activeTurnRevision).toBe(recreatedRevision);
+  });
+
+  it("rejects conflicting user identities within the same lifecycle revision", () => {
+    const runtime = createSessionRuntime();
+    expect(activateSessionRuntimeTurn(runtime, {
+      revision: "plugin-backend-1:instance:1",
+      userMessageId: "current-user-message",
+    })).toBe(true);
+
+    expect(activateSessionRuntimeTurn(runtime, {
+      revision: "plugin-backend-1:instance:1",
+      userMessageId: "late-user-message",
+    })).toBe(false);
+    expect(runtime.activeTurnUserMessageId).toBe("current-user-message");
+  });
+
+  it("rejects a late host revision for a user message already settled by send failure", () => {
+    const runtime = createSessionRuntime();
+    expect(activateSessionRuntimeTurn(runtime, { userMessageId: "failed-user-message" })).toBe(true);
+    markSessionRuntimeTurnSettled(runtime, "error");
+
+    expect(activateSessionRuntimeTurn(runtime, {
+      revision: "plugin-backend-1:1",
+      userMessageId: "failed-user-message",
+    })).toBe(false);
+    expect(runtime.turnEventState).toBe("settled");
+  });
+
+  it("shows turn-start compaction inside the process and idle compaction as a divider", () => {
+    expect(getContextCompactionPresentation("started", true, null)).toBe("process");
+    expect(getContextCompactionPresentation("started", false, null)).toBe("divider");
+    expect(getContextCompactionPresentation("completed", false, "process")).toBe("process");
+    expect(getContextCompactionPresentation("completed", false, null)).toBe("divider");
+  });
+
   it("builds inferred steps without a modify step until files change", () => {
     const runtime = createSessionRuntime();
 
@@ -132,6 +207,29 @@ describe("agentEventUtils", () => {
       method: "confirm",
       confirmed: true,
     });
+  });
+
+  it("keeps inline Markdown in the single-line thinking preview", () => {
+    expect(getThinkingPreviewMarkdown(
+      "**Planning**\n\n- inspect files\n- compare settings\n\n`renderScale`",
+    )).toBe("**Planning** inspect files compare settings `renderScale`");
+  });
+
+  it("strips headings, lists, quotes, and horizontal rules from the thinking preview", () => {
+    expect(getThinkingPreviewMarkdown(
+      "# 标题\n\n> 引用内容\n\n1. 第一项\n2. 第二项\n\n---\n\n正文",
+    )).toBe("标题 引用内容 第一项 第二项 正文");
+  });
+
+  it("collapses fenced code blocks into inline code", () => {
+    expect(getThinkingPreviewMarkdown(
+      "思路：\n\n```js\nconst a = 1\n```\n\n完成",
+    )).toBe("思路： `const a = 1` 完成");
+  });
+
+  it("falls back to the thinking label and truncates long previews", () => {
+    expect(getThinkingPreviewMarkdown("   \n\n  ")).toBe(uiText.process.thinking);
+    expect(getThinkingPreviewMarkdown("x".repeat(500)).endsWith("...")).toBe(true);
   });
 
   it("summarizes tool events for files, commands, and failures", () => {

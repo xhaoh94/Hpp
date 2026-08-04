@@ -12,19 +12,35 @@ import {
   rewritePowerShellPackageManagerCommand,
   validateShellCommand,
 } from "./shell-environment.mjs";
+import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
+import {
+  normalizeImplicitOpenAIResponsesPayload,
+  withImplicitOpenAIResponsesThinkingLevels,
+} from "./thinking-level-compat.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
 const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const MUTATING_TOOLS = new Set(["edit", "write"]);
+const PLAN_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const PLAN_BLOCKED_TOOLS = new Set(["edit", "write", "update_plan"]);
 const HIGH_RISK_COMMAND_PATTERN = /(?:\brm\s+(?:-[^\s]*r|--recursive)|\bsudo\b|\b(?:chmod|chown)\b|\bgit\s+(?:push|clean|reset\s+--hard)|\b(?:curl|wget|ssh|scp|rsync)\b|\b(?:npm|pnpm|yarn|pip|cargo)\s+(?:install|add|publish)|invoke-webrequest|start-process|\bshutdown\b|\breboot\b|\btaskkill\b)/i;
 const SHELL_PROBE_TOKEN = "hpp-shell-ready";
 const FILE_DISCOVERY_GUIDANCE = [
-  "When a target file path is unknown, use ls, find, or grep to discover it before calling read.",
-  "Do not guess multiple filenames and probe them one by one.",
-  "If bash is unavailable, continue with ls, find, and grep instead of retrying shell-based discovery.",
+  "当目标文件路径未知时，先使用 ls、find 或 grep 发现文件，再调用 read。",
+  "不要猜测多个文件名并逐个试错。",
+  "如果 bash 不可用，继续使用 ls、find 和 grep，不要反复重试基于 Shell 的文件发现。",
 ].join(" ");
+const PLAN_MODE_SYSTEM_PROMPT = `[HPP 计划模式已启用]
+当前回合处于计划模式。请在不改变环境的前提下，输出完整、可执行的实施计划。
+
+- 当仓库中的事实可以消除不确定性时，先使用只读工具检查项目，再提问。
+- 不要编辑或创建文件、应用补丁、安装依赖、修改配置、提交代码，或执行任何会改变环境的命令。
+- 计划模式开启时，把“实施/修复/开发”请求视为“制定计划”请求。
+- 只有在无法通过检查项目安全确定的重要产品决策时，才提出简洁的问题。
+- 计划应覆盖行为变化、兼容性、测试和明确的假设，并使用简体中文。
+- 不要询问用户是否要继续实施；用户关闭计划模式并发送实施请求后，才会进入实施阶段。`;
 
 let sdk = null;
 let session = null;
@@ -35,7 +51,10 @@ let unsubscribe = null;
 let projectPath = "";
 let activePromptId = null;
 let activePermissionMode = "full-access";
+let activePlanMode = false;
+let activeHostSystemPrompt = "";
 let fullAccessToolNames = [];
+let planModeToolNames = [];
 let shellWarning = "";
 let shellNotice = "";
 let shellAvailable = false;
@@ -58,6 +77,22 @@ const finishPrompt = (id) => {
 };
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+const applyPiModelThinkingCompatibility = (model) => {
+  const compatibleModel = withImplicitOpenAIResponsesThinkingLevels(model);
+  if (compatibleModel === model || !isRecord(model)) return compatibleModel;
+  try {
+    // Pi model objects are mutable catalogue records. Preserve their identity
+    // so the active session and registry expose the same repaired capability
+    // map after a model switch.
+    model.thinkingLevelMap = compatibleModel.thinkingLevelMap;
+    return model;
+  } catch {
+    // A future SDK may freeze catalogue objects; setModel can still accept the
+    // compatible copy returned by the pure helper.
+    return compatibleModel;
+  }
+};
 
 const readPath = (value, path) => {
   if (!path?.startsWith("$.")) return undefined;
@@ -442,8 +477,9 @@ class DesktopUIBridge {
 
   handleResponse(response) {
     const pending = response?.id ? this.pending.get(response.id) : undefined;
-    if (!pending) return;
+    if (!pending) return false;
     pending.resolve(response);
+    return true;
   }
 
   dismissAll(reason = "dismissed") {
@@ -502,7 +538,10 @@ const buildCommandContextActions = (sess) => ({
 const disposeSession = () => {
   activePromptId = null;
   activePermissionMode = "full-access";
+  activePlanMode = false;
+  activeHostSystemPrompt = "";
   fullAccessToolNames = [];
+  planModeToolNames = [];
   activeCompactionId = null;
   completedPromptIds.clear();
   unsubscribe?.();
@@ -528,10 +567,19 @@ const stripUtf8Bom = (filePath) => {
   }
 };
 
-const setPermissionMode = (permissionMode) => {
+const applyActiveToolMode = () => {
   if (!session?.setActiveToolsByName) return;
-  session.setActiveToolsByName(fullAccessToolNames);
+  session.setActiveToolsByName(activePlanMode ? planModeToolNames : fullAccessToolNames);
+};
+
+const setPermissionMode = (permissionMode) => {
   activePermissionMode = permissionMode;
+  applyActiveToolMode();
+};
+
+const setPlanMode = (enabled) => {
+  activePlanMode = enabled === true;
+  applyActiveToolMode();
 };
 
 const getToolPaths = (event) => {
@@ -577,6 +625,25 @@ const describePiToolPermission = (event) => {
   return detail ? `${toolName}: ${detail}` : toolName;
 };
 
+const planModeToolBlockReason = (event) => {
+  if (!activePlanMode) return "";
+  const toolName = normalizeToolName(event?.toolName);
+  if (PLAN_BLOCKED_TOOLS.has(toolName)) {
+    return `Plan 模式为只读模式，不能使用 ${toolName} 修改项目。请关闭 Plan 模式后再实施。`;
+  }
+  if (toolName === "bash") {
+    const command = String(isRecord(event?.input) ? event.input.command || "" : "");
+    const blockedSegment = findBlockedPlanCommand(command, shellEnvironment.shellFamily);
+    return blockedSegment
+      ? `Plan 模式只允许只读 Shell 命令，已阻止：${blockedSegment}`
+      : "";
+  }
+  if (!PLAN_READ_ONLY_TOOLS.has(toolName)) {
+    return `Plan 模式未开放工具 ${toolName}，请使用只读检索工具完成规划。`;
+  }
+  return "";
+};
+
 const registerHppShellTool = (pi) => {
   if (!shellAvailable || typeof pi?.registerTool !== "function" || typeof sdk?.createBashToolDefinition !== "function") return;
   const isPowerShell = shellEnvironment.platform === "win32" && shellEnvironment.shellFamily === "powershell";
@@ -598,12 +665,12 @@ const registerHppShellTool = (pi) => {
     } : {}),
   });
   definition.label = shellLabel;
-  definition.description = `Execute a ${shellLabel} command in the current working directory. The registered schema/tool name remains bash. Returns stdout and stderr.`;
-  definition.promptSnippet = `Execute ${shellLabel} commands using the available bash tool`;
+  definition.description = `在当前工作目录执行 ${shellLabel} 命令。注册的工具名称仍为 bash，并返回标准输出和标准错误。`;
+  definition.promptSnippet = `使用可用的 bash 工具执行 ${shellLabel} 命令`;
   definition.promptGuidelines = [
     ...(definition.promptGuidelines || []),
-    `The bash tool is registered and available; it executes ${shellLabel}, not necessarily GNU Bash.`,
-    ...(isPowerShell ? ["Use npm.cmd, npx.cmd, pnpm.cmd, and yarn.cmd for Node package-manager commands on Windows PowerShell."] : []),
+    `bash 工具已注册并可用；它实际执行的是 ${shellLabel}，不一定是 GNU Bash。`,
+    ...(isPowerShell ? ["在 Windows PowerShell 中运行 Node 包管理器命令时，请使用 npm.cmd、npx.cmd、pnpm.cmd 和 yarn.cmd。"] : []),
   ];
   pi.registerTool(definition);
 };
@@ -619,6 +686,10 @@ const hppPermissionExtension = (pi) => {
       });
       if (environmentError) return { block: true, reason: environmentError };
     }
+    // Let the Plan hook reject mutating/unknown tools without first showing a
+    // permission dialog. Read-only tools still follow the selected permission
+    // mode, for example when a read targets a path outside the project.
+    if (activePlanMode && planModeToolBlockReason(event)) return undefined;
     if (!shouldRequestPiToolPermission(event)) return undefined;
     if (!context?.hasUI) {
       return { block: true, reason: "Hpp permission approval is unavailable" };
@@ -628,6 +699,47 @@ const hppPermissionExtension = (pi) => {
       `允许 Pi 执行以下操作？\n\n${describePiToolPermission(event)}`,
     );
     return approved ? undefined : { block: true, reason: "用户拒绝了该操作" };
+  });
+};
+
+const hppRuntimePolicyExtension = (pi) => {
+  // Pi's OpenAI Responses adapter builds the final provider payload before
+  // invoking Agent.onPayload. Normalize only compatibility models here; the
+  // helper preserves usable explicit maps while repairing Luna's null/
+  // identity entries that still leave unsupported values on the wire.
+  pi.on("before_provider_request", (event, context) =>
+    normalizeImplicitOpenAIResponsesPayload(
+      event?.payload,
+      context?.model || session?.model,
+      context?.thinkingLevel ?? session?.thinkingLevel,
+    ));
+  pi.on("before_agent_start", (event) => {
+    const additions = [];
+    if (activePlanMode) additions.push(PLAN_MODE_SYSTEM_PROMPT);
+    // Keep the language policy last. Pi's base prompt, project context and
+    // Plan policy contain substantial English text, so an earlier language
+    // hint is too easy for models to mirror over visible reasoning.
+    if (activeHostSystemPrompt) additions.push(activeHostSystemPrompt);
+    if (additions.length === 0) return undefined;
+    let systemPrompt = String(event?.systemPrompt || "").trim();
+    for (const addition of additions) {
+      // The host policy is also supplied through appendSystemPrompt so it is
+      // present even for SDK turns that skip this hook. Move an existing copy
+      // to the end instead of duplicating it; the language rule must remain
+      // after Pi's English base/Plan instructions.
+      if (!addition) continue;
+      if (systemPrompt.includes(addition)) {
+        systemPrompt = systemPrompt.split(addition).join("\n").trim();
+      }
+      systemPrompt = [systemPrompt, addition].filter(Boolean).join("\n\n").trim();
+    }
+    return {
+      systemPrompt,
+    };
+  });
+  pi.on("tool_call", (event) => {
+    const reason = planModeToolBlockReason(event);
+    return reason ? { block: true, reason } : undefined;
   });
 };
 
@@ -765,7 +877,10 @@ const configureFullAccessTools = (settingsManager) => {
     ...currentToolNames.filter((name) => name !== "bash" || !shellWarning),
     ...DISCOVERY_TOOL_NAMES.filter(supportsTool),
   ])];
-  session?.setActiveToolsByName?.(fullAccessToolNames);
+  planModeToolNames = fullAccessToolNames.filter((name) =>
+    PLAN_READ_ONLY_TOOLS.has(normalizeToolName(name)) ||
+    (normalizeToolName(name) === "bash" && !shellWarning));
+  applyActiveToolMode();
 };
 
 const loadPiSDK = async () => {
@@ -797,8 +912,9 @@ const requireSDKFactory = (name) => {
   return factory;
 };
 
-const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
+const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt }) => {
   disposeSession();
+  activeHostSystemPrompt = String(hostSystemPrompt || "").trim();
   projectPath = cwd;
   sdk = await loadPiSDK();
   const eventBus = sdk.createEventBus();
@@ -836,8 +952,15 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
     agentDir,
     settingsManager: effectiveSettingsManager,
     eventBus,
-    extensionFactories: [hppPermissionExtension],
-    appendSystemPrompt: [FILE_DISCOVERY_GUIDANCE, shellEnvironmentContract],
+    extensionFactories: [hppPermissionExtension, hppRuntimePolicyExtension],
+    appendSystemPrompt: [
+      FILE_DISCOVERY_GUIDANCE,
+      shellEnvironmentContract,
+      // Put the host policy in Pi's native base prompt as well as the
+      // per-turn hook. This mirrors a project SYSTEM.md without creating or
+      // mutating one, and covers autonomous/continuation turns.
+      activeHostSystemPrompt,
+    ].filter(Boolean),
   });
   await resourceLoader.reload();
   const loadedExtensions = resourceLoader.getExtensions?.()?.extensions || [];
@@ -860,6 +983,15 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
     sessionManager,
   });
   session = result.session;
+  const compatibleInitialModel = applyPiModelThinkingCompatibility(session?.model);
+  if (compatibleInitialModel && compatibleInitialModel !== session?.model && typeof session?.setModel === "function") {
+    await session.setModel(compatibleInitialModel);
+  }
+  // Re-evaluate a restored setting against the repaired map. This matters for
+  // sessions opened from disk before Hpp asks the worker for its model list.
+  if (typeof session?.thinkingLevel === "string") {
+    session?.setThinkingLevel?.(session.thinkingLevel);
+  }
   modelRegistry = createdModelRegistry || session.modelRegistry || null;
   uiBridge = new DesktopUIBridge(eventBus);
   await session.bindExtensions({
@@ -869,6 +1001,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath }) => {
   });
   configureFullAccessTools(effectiveSettingsManager);
   activePermissionMode = "full-access";
+  activePlanMode = false;
   unsubscribe = session.subscribe(handleSessionEvent);
   send({ type: "history_snapshot", messages: buildHistorySnapshot(session.sessionManager) });
   send({ type: "ready", id, sessionFilePath: session.sessionFile });
@@ -945,10 +1078,16 @@ const resolveActionPrompt = async (action, message) => {
 const handleSessionEvent = (event) => {
   if (event.type === "compaction_start") {
     activeCompactionId = randomUUID();
+    send({ type: "context_compaction", id: activeCompactionId, phase: "started" });
     return;
   }
   if (event.type === "compaction_end") {
-    if (!event.aborted) send({ type: "context_compaction", id: activeCompactionId || randomUUID() });
+    send({
+      type: "context_compaction",
+      id: activeCompactionId || randomUUID(),
+      phase: event.aborted ? "interrupted" : "completed",
+      error: event.errorMessage,
+    });
     activeCompactionId = null;
     return;
   }
@@ -1075,6 +1214,10 @@ const handleCommand = async (command) => {
         setPermissionMode(["ask", "auto", "full-access"].includes(command.permissionMode)
           ? command.permissionMode
           : "auto");
+        setPlanMode(command.planModeEnabled === true);
+        if (typeof command.hostSystemPrompt === "string") {
+          activeHostSystemPrompt = command.hostSystemPrompt.trim();
+        }
         activePromptId = command.id;
         completedPromptIds.delete(command.id);
         if (shellWarning && !shellWarningEmitted) {
@@ -1102,6 +1245,9 @@ const handleCommand = async (command) => {
         if (typeof session.steer !== "function") {
           throw new Error("Pi SDK session does not support guidance");
         }
+        if (typeof command.hostSystemPrompt === "string") {
+          activeHostSystemPrompt = command.hostSystemPrompt.trim();
+        }
         await session.steer(command.message, command.images);
         send({ type: "guidance_done", id: command.id });
         break;
@@ -1123,8 +1269,8 @@ const handleCommand = async (command) => {
         break;
       case "setModel": {
         if (!session) throw new Error("Pi SDK session is not initialized");
-        const model = modelRegistry?.find?.(command.provider, command.modelId);
-        if (!model) {
+        const registeredModel = modelRegistry?.find?.(command.provider, command.modelId);
+        if (!registeredModel) {
           const loadError = modelRegistry?.getError?.();
           throw new Error(
             loadError
@@ -1132,9 +1278,10 @@ const handleCommand = async (command) => {
               : `Pi model is not available: ${command.provider}/${command.modelId}`
           );
         }
-        if (!modelRegistry?.hasConfiguredAuth?.(model)) {
+        if (!modelRegistry?.hasConfiguredAuth?.(registeredModel)) {
           throw new Error(`No API key found for model: ${command.provider}/${command.modelId}`);
         }
+        const model = applyPiModelThinkingCompatibility(registeredModel);
         await session.setModel(model);
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
@@ -1144,7 +1291,13 @@ const handleCommand = async (command) => {
         send({ type: "thinking_level_changed", id: command.id, level: session?.thinkingLevel || command.level });
         break;
       case "uiResponse":
-        uiBridge?.handleResponse(command.response);
+        if (!uiBridge?.handleResponse(command.response)) {
+          const responseId = command.response?.id;
+          throw new Error(responseId
+            ? `Unknown Pi UI request: ${responseId}`
+            : "Pi UI response is missing request id");
+        }
+        send({ type: "ui_response_done", id: command.id });
         break;
       case "dispose":
         disposeSession();

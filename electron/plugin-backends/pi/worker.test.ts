@@ -7,6 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 type WorkerMessage = Record<string, unknown>;
 
+const TEST_HOST_SYSTEM_PROMPT = `[HPP 语言规则]
+你是一个编程助手。请始终使用简体中文进行交流和回复。
+所有面向用户的自然语言内容都必须使用简体中文，包括可见的思考或推理、计划、进度说明、提问和最终答复。
+代码、标识符、文件路径、命令、日志、API 名称和专有名词应保持原文，除非为了说明确有必要翻译。`;
+
 const fakeSDKSource = `
 class FakeSessionManager {
   static create() { return new FakeSessionManager(); }
@@ -27,14 +32,19 @@ class FakeSession {
   activeTools = ["read", "bash", "edit", "write", "ask_user_question"];
   extensionFactories = [];
   toolCallHandlers = [];
+  beforeAgentStartHandlers = [];
+  beforeProviderRequestHandlers = [];
   registeredTools = [];
+  lastSystemPrompt = "BASE_SYSTEM_PROMPT";
+  baseSystemPrompt = "BASE_SYSTEM_PROMPT";
 
-  constructor(sessionManager, modelRegistry, extensionFactories = []) {
+  constructor(sessionManager, modelRegistry, extensionFactories = [], appendSystemPrompt = []) {
     this.sessionManager = sessionManager;
     this.modelRegistry = modelRegistry;
     this.model = modelRegistry.getAvailable()[0];
     this.thinkingLevel = "minimal";
     this.extensionFactories = extensionFactories;
+    this.baseSystemPrompt = ["BASE_SYSTEM_PROMPT", ...appendSystemPrompt].filter(Boolean).join("\\n\\n");
   }
 
   async bindExtensions({ uiContext }) {
@@ -43,6 +53,8 @@ class FakeSession {
       factory({
         on: (eventName, handler) => {
           if (eventName === "tool_call") this.toolCallHandlers.push(handler);
+          if (eventName === "before_agent_start") this.beforeAgentStartHandlers.push(handler);
+          if (eventName === "before_provider_request") this.beforeProviderRequestHandlers.push(handler);
         },
         registerTool: (tool) => this.registeredTools.push(tool),
       });
@@ -52,7 +64,15 @@ class FakeSession {
   getActiveToolNames() { return [...this.activeTools]; }
   setActiveToolsByName(names) { this.activeTools = [...names]; }
   getAllTools() { return ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"].map((name) => ({ name })); }
-  getAvailableThinkingLevels() { return this.model?.thinkingLevels || ["off"]; }
+  getAvailableThinkingLevels() {
+    if (!this.model?.reasoning) return ["off"];
+    return ["off", "minimal", "low", "medium", "high", "xhigh", "max"].filter((level) => {
+      const mapped = this.model?.thinkingLevelMap?.[level];
+      if (mapped === null) return false;
+      if (level === "xhigh" || level === "max") return mapped !== undefined;
+      return true;
+    });
+  }
   setThinkingLevel(level) {
     const levels = this.getAvailableThinkingLevels();
     this.thinkingLevel = levels.includes(level) ? level : levels[0];
@@ -61,12 +81,46 @@ class FakeSession {
   async steer() {}
   dispose() {}
 
+  async emitBeforeProviderRequest(payload) {
+    let currentPayload = payload;
+    for (const handler of this.beforeProviderRequestHandlers) {
+      const result = await handler(
+        { type: "before_provider_request", payload: currentPayload },
+        { model: this.model, thinkingLevel: this.thinkingLevel, hasUI: true, ui: this.uiContext },
+      );
+      if (result !== undefined) currentPayload = result;
+    }
+    return currentPayload;
+  }
+
   prompt(message) {
     this.activeRun = this.runPrompt(message).finally(() => { this.activeRun = null; });
     return this.activeRun;
   }
 
   async runPrompt(message) {
+    let systemPrompt = this.baseSystemPrompt;
+    for (const handler of this.beforeAgentStartHandlers) {
+      const result = await handler({ systemPrompt }, { hasUI: true, ui: this.uiContext });
+      if (typeof result?.systemPrompt === "string") systemPrompt = result.systemPrompt;
+    }
+    this.lastSystemPrompt = systemPrompt;
+    if (message.startsWith("system-prompt")) {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: systemPrompt }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message.startsWith("provider-payload:")) {
+      const payload = JSON.parse(message.slice("provider-payload:".length));
+      const normalized = await this.emitBeforeProviderRequest(payload);
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(normalized) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message.startsWith("active-tools")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(this.activeTools) }], stopReason: "stop" } });
@@ -100,12 +154,38 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
+    if (message === "compact") {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "compaction_start", reason: "threshold" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      this.listener?.({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: true });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message === "permission-edit") {
       this.listener?.({ type: "agent_start" });
       let result;
       for (const handler of this.toolCallHandlers) {
         result = await handler(
           { type: "tool_call", toolCallId: "edit-1", toolName: "edit", input: { path: "src/a.ts" } },
+          { hasUI: true, ui: this.uiContext },
+        );
+        if (result?.block) break;
+      }
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result || {}) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message.startsWith("tool-call:")) {
+      const payload = JSON.parse(message.slice("tool-call:".length));
+      this.listener?.({ type: "agent_start" });
+      let result;
+      for (const handler of this.toolCallHandlers) {
+        result = await handler(
+          { type: "tool_call", toolCallId: "test-tool-1", ...payload },
           { hasUI: true, ui: this.uiContext },
         );
         if (result?.block) break;
@@ -143,15 +223,37 @@ const availableModels = [{
   input: ["text"],
   thinkingLevels: ["off", "minimal", "low", "medium", "high"],
 }];
+const proxyModel = {
+  id: "gpt-5.6-luna",
+  name: "GPT-5.6 Luna",
+  provider: "luna",
+  api: "openai-responses",
+  reasoning: true,
+  input: ["text"],
+  thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"],
+  thinkingLevelMap: {
+    off: null,
+    minimal: null,
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+  },
+};
 export const ModelRegistry = { create: () => ({
-  getAvailable: () => availableModels,
-  find: (provider, id) => availableModels.find((model) => model.provider === provider && model.id === id),
+  getAvailable: () => [...availableModels, proxyModel],
+  find: (provider, id) => availableModels.find((model) => model.provider === provider && model.id === id)
+    || (provider === proxyModel.provider && id === proxyModel.id ? proxyModel : undefined),
   getError: () => undefined,
   hasConfiguredAuth: () => true,
 }) };
 export const SettingsManager = { create: () => ({}) };
 export class DefaultResourceLoader {
-  constructor(options = {}) { this.extensionFactories = options.extensionFactories || []; }
+  constructor(options = {}) {
+    this.extensionFactories = options.extensionFactories || [];
+    this.appendSystemPrompt = options.appendSystemPrompt || [];
+  }
   async reload() {}
   getSkills() { return { skills: [{ name: "review", description: "Review changes" }] }; }
   getPrompts() { return { prompts: [{ name: "release", description: "Prepare release", usage: "[version]" }] }; }
@@ -166,7 +268,12 @@ export class DefaultResourceLoader {
 }
 export const SessionManager = FakeSessionManager;
 export const createAgentSession = async ({ sessionManager, modelRegistry, resourceLoader }) => ({
-  session: new FakeSession(sessionManager, modelRegistry, resourceLoader.extensionFactories),
+  session: new FakeSession(
+    sessionManager,
+    modelRegistry,
+    resourceLoader.extensionFactories,
+    resourceLoader.appendSystemPrompt,
+  ),
 });
 export const createBashToolDefinition = (_cwd, options = {}) => ({
   name: "bash",
@@ -287,17 +394,70 @@ describe("Pi SDK worker protocol", () => {
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
     worker.send({ id: "models", type: "getModels" });
-    await expect(worker.waitFor((message) => message.id === "models"))
-      .resolves.toMatchObject({
-        models: [{
-          id: "pi-model",
-          supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"],
-        }],
-      });
+    const modelsMessage = await worker.waitFor((message) => message.id === "models");
+    expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: "pi-model",
+      supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+    })]));
 
     worker.send({ id: "thinking", type: "setThinkingLevel", level: "xhigh" });
     await expect(worker.waitFor((message) => message.id === "thinking"))
       .resolves.toMatchObject({ type: "thinking_level_changed", level: "off" });
+  });
+
+  it("normalizes implicit OpenAI Responses thinking at the provider hook boundary", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({
+      id: "luna-model",
+      type: "setModel",
+      provider: "luna",
+      modelId: "gpt-5.6-luna",
+    });
+    await worker.waitFor((message) => message.type === "model_changed" && message.id === "luna-model");
+
+    worker.send({ id: "luna-models", type: "getModels" });
+    const lunaModelsMessage = await worker.waitFor((message) => message.id === "luna-models");
+    expect(lunaModelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: "gpt-5.6-luna",
+      supportedThinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    })]));
+
+    const runProviderPayload = async (id: string, payload: Record<string, unknown>) => {
+      worker.send({
+        id,
+        type: "prompt",
+        message: `provider-payload:${JSON.stringify(payload)}`,
+        permissionMode: "full-access",
+      });
+      await worker.waitFor((message) => message.type === "prompt_done" && message.id === id);
+      const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+      return JSON.parse(String((message?.message as { text?: unknown })?.text || "null")) as Record<string, unknown>;
+    };
+
+    worker.send({ id: "minimal-level", type: "setThinkingLevel", level: "minimal" });
+    await worker.waitFor((message) => message.id === "minimal-level");
+    await expect(runProviderPayload("minimal", {
+      model: "gpt-5.6-luna",
+      reasoning: { effort: "high", summary: "auto" },
+    })).resolves.toEqual({
+      model: "gpt-5.6-luna",
+      reasoning: { effort: "low", summary: "auto" },
+    });
+
+    worker.send({ id: "off-level", type: "setThinkingLevel", level: "off" });
+    await worker.waitFor((message) => message.id === "off-level");
+    await expect(runProviderPayload("off", {
+      model: "gpt-5.6-luna",
+      reasoning: { effort: "high" },
+      include: ["reasoning.encrypted_content", "output_text"],
+    })).resolves.toEqual({
+      model: "gpt-5.6-luna",
+      include: ["output_text"],
+    });
   });
 
   it("emits prompt_done only after the final settled retry", async () => {
@@ -311,6 +471,23 @@ describe("Pi SDK worker protocol", () => {
     const types = worker.messages.map((message) => message.type);
     expect(types.filter((type) => type === "agent_start")).toHaveLength(2);
     expect(types.lastIndexOf("prompt_done")).toBeGreaterThan(types.lastIndexOf("agent_end"));
+  });
+
+  it("reports context compaction start and completion with one stable id", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-1", type: "prompt", message: "compact", permissionMode: "full-access" });
+
+    const started = await worker.waitFor((message) => message.type === "context_compaction" && message.phase === "started");
+    const completed = await worker.waitFor((message) => message.type === "context_compaction" && message.phase === "completed");
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-1");
+
+    expect(completed.id).toBe(started.id);
+    expect(worker.messages.indexOf(completed)).toBeLessThan(
+      worker.messages.findIndex((message) => message.type === "prompt_done" && message.id === "compact-1"),
+    );
   });
 
   it("keeps tools available while the permission hook guards execution", async () => {
@@ -334,6 +511,106 @@ describe("Pi SDK worker protocol", () => {
 
     const restoredTools = await readTools("full-2", "full-access");
     expect(restoredTools).toEqual(expect.arrayContaining(["bash", "edit", "write", "grep", "find", "ls"]));
+  });
+
+  it("enforces native Plan mode per turn and restores implementation tools when disabled", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    const readLastText = () => String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "");
+
+    worker.send({
+      id: "plan-on",
+      type: "prompt",
+      message: "active-tools:plan-on",
+      permissionMode: "auto",
+      planModeEnabled: true,
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "plan-on");
+    const planTools = JSON.parse(readLastText()) as string[];
+    expect(planTools).toEqual(expect.arrayContaining(["read", "bash", "grep", "find", "ls"]));
+    expect(planTools).not.toEqual(expect.arrayContaining(["edit", "write"]));
+
+    worker.send({
+      id: "plan-off",
+      type: "prompt",
+      message: "active-tools:plan-off",
+      permissionMode: "auto",
+      planModeEnabled: false,
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "plan-off");
+    expect(JSON.parse(readLastText())).toEqual(expect.arrayContaining(["edit", "write"]));
+  });
+
+  it("injects the Plan prompt transiently without leaving it on the next implementation turn", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      hostSystemPrompt: TEST_HOST_SYSTEM_PROMPT,
+    });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "prompt-on", type: "prompt", message: "system-prompt:on", permissionMode: "auto", planModeEnabled: true });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-on");
+    const planPrompt = String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "");
+    expect(planPrompt).toContain("[HPP 计划模式已启用]");
+    expect(planPrompt).toContain("不要询问用户是否要继续实施");
+    expect(planPrompt).toContain("[HPP 语言规则]");
+    expect(planPrompt).toContain("请始终使用简体中文进行交流和回复");
+    expect(planPrompt).toContain("可见的思考或推理");
+    expect(planPrompt.indexOf("[HPP 语言规则]")).toBeGreaterThan(planPrompt.indexOf("[HPP 计划模式已启用]"));
+    expect(planPrompt.trim().endsWith("除非为了说明确有必要翻译。")).toBe(true);
+
+    worker.send({ id: "prompt-off", type: "prompt", message: "system-prompt:off", permissionMode: "auto", planModeEnabled: false });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-off");
+    const implementationPrompt = String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "");
+    expect(implementationPrompt).toContain("[HPP 语言规则]");
+    expect(implementationPrompt).toContain("请始终使用简体中文进行交流和回复");
+    expect(implementationPrompt).toContain("可见的思考或推理");
+    expect(implementationPrompt.trim().endsWith("除非为了说明确有必要翻译。")).toBe(true);
+    expect(implementationPrompt).not.toContain("[HPP 计划模式已启用]");
+  });
+
+  it("blocks Plan mutations before permission UI and permits safe inspection commands", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "plan-edit", type: "prompt", message: "permission-edit", permissionMode: "ask", planModeEnabled: true });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "plan-edit");
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({ type: "extension_ui_request" }));
+    let result = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "{}"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("Plan 模式为只读模式");
+
+    worker.send({
+      id: "safe-shell",
+      type: "prompt",
+      message: `tool-call:${JSON.stringify({ toolName: "bash", input: { command: "git status --short" } })}`,
+      permissionMode: "auto",
+      planModeEnabled: true,
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "safe-shell");
+    result = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "{}"));
+    expect(result).toEqual({});
+
+    worker.send({
+      id: "unsafe-shell",
+      type: "prompt",
+      message: `tool-call:${JSON.stringify({ toolName: "bash", input: { command: "git reset --hard" } })}`,
+      permissionMode: "full-access",
+      planModeEnabled: true,
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "unsafe-shell");
+    result = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "{}"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("git reset --hard");
   });
 
   it("disables an unhealthy shell while preserving file discovery tools", async () => {
@@ -404,10 +681,10 @@ describe("Pi SDK worker protocol", () => {
       label: "PowerShell",
       rewrittenCommand: "npm.cmd run build && npx.cmd tsc",
     });
-    expect(String(tool.description)).toContain("registered schema/tool name remains bash");
+    expect(String(tool.description)).toContain("注册的工具名称仍为 bash");
     expect(String(tool.commandPrefix)).toContain("[Console]::OutputEncoding");
     expect(tool.promptGuidelines).toEqual(expect.arrayContaining([
-      expect.stringContaining("bash tool is registered and available"),
+      expect.stringContaining("bash 工具已注册并可用"),
       expect.stringContaining("npm.cmd"),
     ]));
   });
@@ -474,11 +751,34 @@ describe("Pi SDK worker protocol", () => {
       },
     });
 
+    await expect(worker.waitFor((message) => message.type === "ui_response_done" && message.id === "ui-response-1"))
+      .resolves.toMatchObject({ type: "ui_response_done", id: "ui-response-1" });
+
     const completed = await worker.waitFor((message) => message.type === "tool_execution_end");
     expect(completed.result).toMatchObject({
       cancelled: false,
       answers: [{ selected: ["Pi"], values: ["pi"] }],
     });
+  });
+
+  it("returns an error for a UI response without a matching request", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({
+      id: "ui-missing",
+      type: "uiResponse",
+      response: { id: "missing-request", text: "answer" },
+    });
+
+    await expect(worker.waitFor((message) => message.type === "error" && message.id === "ui-missing"))
+      .resolves.toMatchObject({
+        type: "error",
+        id: "ui-missing",
+        error: "Unknown Pi UI request: missing-request",
+      });
   });
 
   it("uses Pi's tool_call hook for Hpp permission approval", async () => {

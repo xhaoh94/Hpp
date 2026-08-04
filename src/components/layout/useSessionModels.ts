@@ -3,7 +3,6 @@ import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import {
   getSessionModel,
-  getSessionThinkingOrDefault,
   saveSessionModel,
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
@@ -32,7 +31,6 @@ type UseSessionModelsOptions = {
   activeSessionInitialized: boolean;
   setAvailableModels: (models: ModelInfo[]) => void;
   setCurrentModel: (model: ModelInfo) => void;
-  setThinkingLevel: (level: string) => void;
 };
 
 export function useSessionModels({
@@ -41,7 +39,6 @@ export function useSessionModels({
   activeSessionInitialized,
   setAvailableModels,
   setCurrentModel,
-  setThinkingLevel,
 }: UseSessionModelsOptions) {
   const modelFetchRunIdRef = useRef(0);
 
@@ -104,22 +101,12 @@ export function useSessionModels({
 
     void fetchModels(activeSessionId, fetchRunId);
 
-    void getSessionThinkingOrDefault(activeSessionId, activeSessionAgentId).then((thinkingToSet) => {
-      if (
-        modelFetchRunIdRef.current !== fetchRunId ||
-        useProjectStore.getState().activeSessionId !== activeSessionId
-      ) {
-        return;
-      }
-      void SessionCommandCoordinator.setThinking(activeSessionId, thinkingToSet).catch(() => undefined);
-    });
   }, [
     activeSessionId,
     activeSessionAgentId,
     activeSessionInitialized,
     clearModels,
     fetchModels,
-    setThinkingLevel,
   ]);
 
   const switchToSession = useCallback((project: Project, session: ProjectSession) => {

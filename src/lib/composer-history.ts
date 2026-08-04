@@ -10,6 +10,13 @@ import {
 } from "@/stores/chat-store";
 import type { SessionReference } from "@/stores/project-store";
 import type { AgentActionInvocation } from "@shared/agent-actions";
+import {
+  cloneComposerDocument,
+  createComposerDocument,
+  parseComposerDocument,
+  type ComposerDocument,
+  type ComposerNode,
+} from "@shared/composer-document";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -77,6 +84,7 @@ export function parseComposerDraftSnapshot(value: unknown): ComposerDraftSnapsho
 
   const action = value.action === undefined ? undefined : parseAction(value.action);
   if (value.action !== undefined && !action) return undefined;
+  const document = parseComposerDocument(value.document);
   return {
     text: value.text,
     images: value.images.map(parseImage).filter((item): item is NonNullable<typeof item> => !!item),
@@ -87,6 +95,7 @@ export function parseComposerDraftSnapshot(value: unknown): ComposerDraftSnapsho
     sessionReferences: value.sessionReferences
       .map(parseSessionReference)
       .filter((item): item is SessionReference => !!item),
+    ...(document ? { document } : {}),
     action,
   };
 }
@@ -101,6 +110,7 @@ export function createComposerDraftSnapshot(
     pendingFiles: draft.pendingFiles.map((file) => ({ ...file })),
     pendingPathAttachments: draft.pendingPathAttachments.map((attachment) => ({ ...attachment })),
     sessionReferences: draft.sessionReferences.map((reference) => ({ ...reference })),
+    ...(draft.document ? { document: cloneComposerDocument(draft.document) } : {}),
     action: draft.action ? { ...draft.action } : undefined,
   };
 }
@@ -125,9 +135,42 @@ const restoreImages = (
   };
 });
 
+const legacyDocument = (value: {
+  text: string;
+  images: Array<{ id: string; src: string; name: string; mimeType?: string }>;
+  pendingFiles: ComposerDraftSnapshot["pendingFiles"];
+  pendingPathAttachments: ComposerDraftSnapshot["pendingPathAttachments"];
+  sessionReferences: ComposerDraftSnapshot["sessionReferences"];
+}): ComposerDocument => {
+  const nodes: ComposerNode[] = [];
+  if (value.text) nodes.push({ id: crypto.randomUUID(), type: "text", text: value.text });
+  const append = (node: ComposerNode) => {
+    if (nodes.length > 0) nodes.push({ id: crypto.randomUUID(), type: "text", text: "\n" });
+    nodes.push(node);
+  };
+  value.pendingFiles.forEach((file) => append({ ...file, type: "snippet" }));
+  value.pendingPathAttachments.forEach((attachment) => append({ ...attachment, type: "path" }));
+  value.sessionReferences.forEach((reference) => append({
+    id: crypto.randomUUID(),
+    type: "session",
+    reference: { ...reference },
+  }));
+  value.images.forEach((image) => append({
+    id: image.id,
+    type: "image",
+    name: image.name,
+    src: image.src,
+    mimeType: image.mimeType || inferImageMimeType(image.src),
+  }));
+  return createComposerDocument(nodes);
+};
+
 export function draftFromSnapshot(snapshot: ComposerDraftSnapshot): ChatDraft {
   return {
     text: snapshot.text,
+    document: snapshot.document
+      ? cloneComposerDocument(snapshot.document)
+      : legacyDocument(snapshot),
     pendingImages: restoreImages(snapshot.images),
     pendingFiles: snapshot.pendingFiles.map((file) => ({ ...file })),
     pendingPathAttachments: snapshot.pendingPathAttachments.map((attachment) => ({ ...attachment })),
@@ -152,6 +195,15 @@ export function draftFromMessage(
     .map((reference) => resolveLegacyReference?.(reference))
     .filter((reference): reference is SessionReference => !!reference);
   draft.action = message.action ? { ...message.action } : undefined;
+  draft.document = message.composerDocument
+    ? cloneComposerDocument(message.composerDocument)
+    : legacyDocument({
+        text: draft.text,
+        images: (message.images || []).map((image) => ({ ...image, mimeType: inferImageMimeType(image.src) })),
+        pendingFiles: [],
+        pendingPathAttachments: [],
+        sessionReferences: draft.sessionReferences,
+      });
   return draft;
 }
 

@@ -80,4 +80,15 @@ describe("file explorer tree commands", () => {
     expect(source).not.toContain("window.electronAPI.searchFiles");
     expect(source).toContain('type: item.isDirectory ? "folder" : "file"');
   });
+
+  it("refreshes the root, expanded descendants, and active search results", () => {
+    const source = readSource();
+
+    expect(source).toContain('mode: "collapse" | "refresh"');
+    expect(source).toContain('mode: "refresh"');
+    expect(source).toContain("loadChildren(true)");
+    expect(source).toContain("setRefreshVersion((current) => current + 1)");
+    expect(source).toContain("refreshVersion");
+    expect(source).toContain("invalidateProjectFileIndex(activeProject.path, filters)");
+  });
 });

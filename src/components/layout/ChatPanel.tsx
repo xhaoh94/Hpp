@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { Check, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, Trash2, WandSparkles, X } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -29,7 +29,7 @@ import {
   EMPTY_CHAT_DRAFT,
   cloneChatDraft,
 } from "@/stores/chat-store";
-import { useProjectStore, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
+import { useProjectStore, type AgentStatus, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
@@ -38,15 +38,23 @@ import {
   getSessionReferenceTitle,
 } from "@/lib/session-references";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
+import { getLocalMarkdownCodePath, getLocalMarkdownFilePath, resolveProjectFilePath } from "@/lib/project-file-path";
 import { extractUserMessageAttachments } from "@shared/user-message-attachments";
 import { getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersistence";
-import { SessionCommandCoordinator, type PreparedSessionMessage } from "@/lib/session-command-coordinator";
+import {
+  SessionCommandCoordinator,
+  type PreparedSessionMessage,
+  type SendMessageResult,
+} from "@/lib/session-command-coordinator";
+import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
+import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ChatComposer } from "./ChatComposer";
+import { InlineComposerEditor, type InlineComposerEditorHandle } from "@/components/shared/InlineComposerEditor";
 import { ChatToolbar } from "./ChatToolbar";
 import { ConfirmationPanel } from "./ConfirmationPanel";
 import { DiffBlock } from "./DiffBlock";
@@ -56,19 +64,39 @@ import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { useAgentEvents } from "./useAgentEvents";
 import { isSupportedImageAttachment, usePendingImages } from "./usePendingImages";
-import { usePendingUIResponse, usePendingUIResponseActions } from "./usePendingUIResponse";
+import {
+  preparePendingQuestionContinuation,
+  settleFailedPendingQuestionTurn,
+  usePendingUIResponse,
+  usePendingUIResponseActions,
+  type PendingUIResponseValue,
+} from "./usePendingUIResponse";
 import { useRemoteBridge } from "@/hooks/useRemoteBridge";
 import { useQuestionnaireResize } from "./useQuestionnaireResize";
 import { useSessionModels } from "./useSessionModels";
 import {
+  activateSessionRuntimeTurn,
   asRecord,
+  createSessionRuntime,
   getBooleanField,
+  markSessionRuntimeTurnSettled,
+  rememberSettledCompactionEvent,
   resetSessionRuntimeAfterTurn,
   type SessionRuntime,
 } from "./agentEventUtils";
-import { getModelThinkingLevels, getOrderedModelProviders, includeCurrentModel } from "@shared/models";
+import {
+  getModelThinkingLevels,
+  getOrderedModelProviders,
+  includeCurrentModel,
+  normalizeModelThinkingLevel,
+} from "@shared/models";
 import { collectProcessDiffs } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
+import {
+  getActiveAssistantTurnId,
+  isProcessViewRunning,
+  type ProcessTerminalViewState,
+} from "@shared/process-view";
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import {
   normalizeAgentPermissionMode,
@@ -80,6 +108,16 @@ import {
   type LegacyReferenceResolver,
 } from "@/lib/composer-history";
 import { matchShortcut } from "@/lib/shortcuts";
+import { COMPOSER_INSERT_EVENT, type ComposerInsertEventDetail } from "@/lib/composer-insert-event";
+import {
+  composerDocumentHasContent,
+  createComposerDocument,
+  getComposerImageNodes,
+  getComposerPlainText,
+  withoutComposerImages,
+  type ComposerDocument,
+  type ComposerNode,
+} from "@shared/composer-document";
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
@@ -87,6 +125,28 @@ type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: st
 type MessagePayload = PreparedSessionMessage;
 
 const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+
+const documentFromDraftParts = (draft: {
+  text: string;
+  pendingImages: PendingImage[];
+  pendingFiles: PendingFile[];
+  pendingPathAttachments: PendingPathAttachment[];
+  sessionReferences: SessionReference[];
+}): ComposerDocument => {
+  const nodes: ComposerNode[] = [];
+  const append = (node: ComposerNode) => {
+    if (nodes.length > 0) nodes.push({ id: crypto.randomUUID(), type: "text", text: "\n" });
+    nodes.push(node);
+  };
+  if (draft.text) nodes.push({ id: crypto.randomUUID(), type: "text", text: draft.text });
+  draft.pendingFiles.forEach((file) => append({ ...file, type: "snippet" }));
+  draft.pendingPathAttachments.forEach((attachment) => append({ ...attachment, type: "path" }));
+  draft.sessionReferences.forEach((reference) => append({ id: crypto.randomUUID(), type: "session", reference: { ...reference } }));
+  return createComposerDocument(nodes);
+};
+
+const isOpenQueueSession = (sessionId: string) => useProjectStore.getState().projects.some((project) =>
+  project.sessions.some((session) => session.id === sessionId && !session.closed));
 
 const copyMessageText = async (content: string) => {
   try {
@@ -107,7 +167,7 @@ type SendPayloadNow = (
     queueIfRunning?: boolean;
     clientMessageId?: string;
   }
-) => Promise<void>;
+) => Promise<SendMessageResult>;
 
 type MessageQueueDispatcherProps = {
   sessionRuntimeRef: { current: Record<string, SessionRuntime> };
@@ -143,37 +203,55 @@ function MessageQueuePanel({
   onRemove,
 }: QueuePanelProps) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
+  const [dropPosition, setDropPosition] = useState<"before" | "after">("before");
   const draggingIdRef = useRef<string | null>(null);
   const dropIndexRef = useRef<number | null>(null);
+  const queueScrollRef = useRef<HTMLDivElement>(null);
+  const { update: updateQueueAutoScroll, stop: stopQueueAutoScroll } = useDragAutoScroll(queueScrollRef);
   if (items.length === 0) return null;
 
   const finishDragging = () => {
+    stopQueueAutoScroll();
     draggingIdRef.current = null;
     dropIndexRef.current = null;
     setDraggingId(null);
-    setDropIndex(null);
+    setDropTargetIndex(null);
+    setDropPosition("before");
   };
 
-  const startDragging = (event: ReactPointerEvent<HTMLButtonElement>, item: QueuedMessage, index: number) => {
+  const startDragging = (event: ReactPointerEvent<HTMLButtonElement>, item: QueuedMessage) => {
     if (item.status === "sending") return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     draggingIdRef.current = item.id;
-    dropIndexRef.current = index;
+    dropIndexRef.current = null;
     setDraggingId(item.id);
-    setDropIndex(index);
+    setDropTargetIndex(null);
+    setDropPosition("before");
   };
 
   const moveDragging = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (!draggingIdRef.current) return;
     event.preventDefault();
+    updateQueueAutoScroll(event.clientY);
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-queue-id]");
     if (!target) return;
     const index = items.findIndex((item) => item.id === target.dataset.queueId);
-    if (index < 0 || dropIndexRef.current === index) return;
-    dropIndexRef.current = index;
-    setDropIndex(index);
+    const sourceIndex = items.findIndex((item) => item.id === draggingIdRef.current);
+    if (index < 0 || sourceIndex < 0) return;
+    const rect = target.getBoundingClientRect();
+    const insertAfter = event.clientY >= rect.top + rect.height / 2;
+    const rawInsertIndex = index + (insertAfter ? 1 : 0);
+    const nextIndex = sourceIndex < rawInsertIndex ? rawInsertIndex - 1 : rawInsertIndex;
+    if (nextIndex === sourceIndex) {
+      dropIndexRef.current = null;
+      setDropTargetIndex(null);
+      return;
+    }
+    dropIndexRef.current = nextIndex;
+    setDropTargetIndex(index);
+    setDropPosition(insertAfter ? "after" : "before");
   };
 
   const stopDragging = (event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) => {
@@ -192,12 +270,12 @@ function MessageQueuePanel({
         <span>发送队列</span>
         <span>{items.length}</span>
       </div>
-      <div className="chat-queue-list">
+      <div ref={queueScrollRef} className="chat-queue-list">
         {items.map((item, index) => (
           <div
             key={item.id}
             data-queue-id={item.id}
-            className={`chat-queue-item ${item.status} ${draggingId === item.id ? "dragging" : ""} ${dropIndex === index && draggingId !== item.id ? "drop-target" : ""}`}
+            className={`chat-queue-item ${item.status} ${draggingId === item.id ? "dragging" : ""} ${dropTargetIndex === index && draggingId !== item.id ? `drop-target ${dropPosition}` : ""}`}
           >
             <button
               type="button"
@@ -205,7 +283,7 @@ function MessageQueuePanel({
               disabled={item.status === "sending"}
               title="拖动调整顺序"
               aria-label={`拖动第 ${index + 1} 条队列消息`}
-              onPointerDown={(event) => startDragging(event, item, index)}
+              onPointerDown={(event) => startDragging(event, item)}
               onPointerMove={moveDragging}
               onPointerUp={(event) => stopDragging(event, true)}
               onPointerCancel={(event) => stopDragging(event, false)}
@@ -260,12 +338,44 @@ type QueueEditDialogProps = {
   session: ProjectSession;
   onClose: () => void;
   onSave: (draft: QueuedMessageEditableDraft) => Promise<boolean>;
+  onOpenImage: (src: string) => void;
 };
 
 const getQueuedImageMimeType = (src: string) =>
   /^data:([^;,]+)[;,]/.exec(src)?.[1] || "image/png";
 
-function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditDialogProps) {
+const documentFromQueuedDraft = (draft: QueuedMessageEditableDraft): ComposerDocument => withoutComposerImages(draft.document || createComposerDocument([
+  ...(draft.text ? [{ id: crypto.randomUUID(), type: "text" as const, text: draft.text }] : []),
+  ...draft.pendingFiles.map((file) => ({ ...file, type: "snippet" as const })),
+  ...draft.pendingPathAttachments.map((attachment) => ({ ...attachment, type: "path" as const })),
+  ...draft.sessionReferences.map((reference) => ({ id: crypto.randomUUID(), type: "session" as const, reference: { ...reference } })),
+ ]));
+
+const queuedDraftWithDocument = (draft: QueuedMessageEditableDraft, document: ComposerDocument): QueuedMessageEditableDraft => {
+  const images = [...draft.images];
+  for (const image of getComposerImageNodes(document)) {
+    if (!images.some((current) => current.id === image.id)) images.push(image);
+  }
+  const orderedDocument = withoutComposerImages(document);
+  return ({
+  ...draft,
+  document: orderedDocument,
+  text: getComposerPlainText(orderedDocument),
+  images,
+  pendingFiles: document.nodes.flatMap((node) => node.type === "snippet" ? [{
+    id: node.id, fileName: node.fileName, filePath: node.filePath, startLine: node.startLine, endLine: node.endLine,
+  }] : []),
+  pendingPathAttachments: document.nodes.flatMap((node) => node.type === "path" ? [{ id: node.id, name: node.name, path: node.path, kind: node.kind }] : []),
+  sessionReferences: document.nodes.flatMap((node): SessionReference[] => {
+    if (node.type !== "session") return [];
+    const reference = node.reference;
+    if (!reference.sourceAgentId || !reference.sourceUpdatedAt || !reference.addedAt || reference.summary === undefined) return [];
+    return [{ ...reference } as SessionReference];
+  }),
+  });
+};
+
+function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage }: QueueEditDialogProps) {
   const sessionMessages = useChatStore((state) => state.sessionMessages);
   const fallbackReferences = (item.sessionReferences || []).map((reference): SessionReference => {
     const source = project.sessions.find((candidate) => candidate.id === reference.sourceSessionId);
@@ -288,7 +398,10 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
     sessionReferences: fallbackReferences,
     action: item.action,
   };
-  const [draft, setDraft] = useState<QueuedMessageEditableDraft>(initialDraft);
+  const [draft, setDraft] = useState<QueuedMessageEditableDraft>(() => queuedDraftWithDocument(
+    initialDraft,
+    item.composerDocument || documentFromQueuedDraft(initialDraft),
+  ));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -297,6 +410,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const queueEditorRef = useRef<InlineComposerEditorHandle>(null);
   const referenceCandidates = project.sessions.filter((candidate) => candidate.id !== session.id);
 
   useEffect(() => {
@@ -349,15 +463,13 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
       }
       const reader = new FileReader();
       reader.onload = () => {
-        setDraft((current) => ({
-          ...current,
-          images: [...current.images, {
-            id: crypto.randomUUID(),
-            src: String(reader.result || ""),
-            name: file.name,
-            mimeType: file.type || "image/png",
-          }],
-        }));
+        const image = {
+          id: crypto.randomUUID(),
+          src: String(reader.result || ""),
+          name: file.name,
+          mimeType: file.type || "image/png",
+        };
+        setDraft((current) => ({ ...current, images: [...current.images, image] }));
         setError("");
       };
       reader.readAsDataURL(file);
@@ -377,15 +489,12 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
           setError(result.error || `无法添加文件：${file.name}`);
           continue;
         }
-        setDraft((current) => ({
-          ...current,
-          pendingPathAttachments: current.pendingPathAttachments.some((entry) => entry.path === result.attachment?.path)
-            ? current.pendingPathAttachments
-            : [...current.pendingPathAttachments, { id: crypto.randomUUID(), ...result.attachment! }],
-        }));
+        if (!draft.pendingPathAttachments.some((entry) => entry.path === result.attachment?.path)) {
+          queueEditorRef.current?.insertNode({ id: crypto.randomUUID(), type: "path", ...result.attachment });
+        }
       }
     })();
-  }, [addImages]);
+  }, [addImages, draft.pendingPathAttachments]);
 
   const addFolder = useCallback(() => {
     void (async () => {
@@ -395,26 +504,27 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
         setError(result.error || "无法添加文件夹");
         return;
       }
-      setDraft((current) => ({
-        ...current,
-        pendingPathAttachments: current.pendingPathAttachments.some((entry) => entry.path === result.attachment?.path)
-          ? current.pendingPathAttachments
-          : [...current.pendingPathAttachments, { id: crypto.randomUUID(), ...result.attachment! }],
-      }));
+      if (!draft.pendingPathAttachments.some((entry) => entry.path === result.attachment?.path)) {
+        queueEditorRef.current?.insertNode({ id: crypto.randomUUID(), type: "path", ...result.attachment });
+      }
     })();
-  }, []);
+  }, [draft.pendingPathAttachments]);
 
   const toggleReference = useCallback((source: ProjectSession) => {
-    setDraft((current) => {
-      const exists = current.sessionReferences.some((reference) => reference.sourceSessionId === source.id);
-      return {
-        ...current,
-        sessionReferences: exists
-          ? current.sessionReferences.filter((reference) => reference.sourceSessionId !== source.id)
-          : [...current.sessionReferences, createSessionReferenceSnapshot(source, sessionMessages[source.id] || [])],
-      };
+    const exists = draft.sessionReferences.some((reference) => reference.sourceSessionId === source.id);
+    if (exists) {
+      const document = createComposerDocument((draft.document || documentFromQueuedDraft(draft)).nodes.filter((node) =>
+        node.type !== "session" || node.reference.sourceSessionId !== source.id
+      ));
+      setDraft((current) => queuedDraftWithDocument(current, document));
+      return;
+    }
+    queueEditorRef.current?.insertNode({
+      id: crypto.randomUUID(),
+      type: "session",
+      reference: createSessionReferenceSnapshot(source, sessionMessages[source.id] || []),
     });
-  }, [sessionMessages]);
+  }, [draft, sessionMessages]);
 
   const hasContent = !!draft.text.trim() || draft.images.length > 0 || draft.pendingFiles.length > 0
     || draft.pendingPathAttachments.length > 0 || draft.sessionReferences.length > 0 || !!draft.action;
@@ -443,33 +553,32 @@ function QueueEditDialog({ item, project, session, onClose, onSave }: QueueEditD
           <button type="button" onClick={onClose} disabled={saving} title="关闭"><X size={16} /></button>
         </header>
         <div className="chat-queue-edit-body">
-          {(draft.action || draft.images.length > 0 || draft.pendingFiles.length > 0 || draft.pendingPathAttachments.length > 0 || draft.sessionReferences.length > 0) && (
+          {draft.action && (
             <div className="chat-queue-edit-contexts">
                 {draft.action && (
                   <div className="chat-queue-edit-chip action"><WandSparkles size={13} /><span>{draft.action.kind === "skill" ? "技能" : "命令"} · {draft.action.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, action: undefined }))}><X size={12} /></button></div>
                 )}
-                {draft.images.map((image) => (
-                  <div className="chat-queue-edit-chip image" key={image.id}><img src={image.src} alt="" /><span>{image.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, images: current.images.filter((entry) => entry.id !== image.id) }))}><X size={12} /></button></div>
-                ))}
-                {draft.pendingFiles.map((file) => (
-                  <div className="chat-queue-edit-chip" key={file.id}><FileText size={13} /><span>{file.fileName}:{file.startLine}-{file.endLine}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, pendingFiles: current.pendingFiles.filter((entry) => entry.id !== file.id) }))}><X size={12} /></button></div>
-                ))}
-                {draft.pendingPathAttachments.map((attachment) => (
-                  <div className="chat-queue-edit-chip" key={attachment.id}>{attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}<span>{attachment.name}</span><button type="button" onClick={() => setDraft((current) => ({ ...current, pendingPathAttachments: current.pendingPathAttachments.filter((entry) => entry.id !== attachment.id) }))}><X size={12} /></button></div>
-                ))}
-                {draft.sessionReferences.map((reference) => (
-                  <div className="chat-queue-edit-chip reference" key={reference.sourceSessionId}><Link2 size={13} /><span><AttachmentPreviewText content={reference.sourceTitle} /></span><button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))}><X size={12} /></button></div>
-                ))}
             </div>
           )}
 
+          {draft.images.length > 0 && (
+            <div className="chat-queue-edit-contexts">
+              {draft.images.map((image) => (
+                <div className="chat-queue-edit-chip" key={image.id}>
+                  <img src={image.src} alt={image.name} onClick={() => onOpenImage(image.src)} />
+                  <span>Image</span>
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== image.id) }))} title="移除图片"><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="chat-queue-edit-composer">
-            <textarea
-              value={draft.text}
-              autoFocus
-              rows={5}
+            <InlineComposerEditor
+              ref={queueEditorRef}
+              value={draft.document || documentFromQueuedDraft(draft)}
+              onChange={(document) => setDraft((current) => queuedDraftWithDocument(current, document))}
+              onOpenImage={onOpenImage}
               placeholder={draft.action ? "添加技能参数或说明" : "编辑消息内容"}
-              onChange={(event) => setDraft((current) => ({ ...current, text: event.target.value }))}
               onKeyDown={(event) => {
                 if (event.key === "Escape") onClose();
                 if (event.key === "Enter" && event.ctrlKey) { event.preventDefault(); void submit(); }
@@ -661,7 +770,14 @@ function SessionReferenceControl({
                     type="button"
                     className={`chat-reference-add-item ${selected ? "selected" : ""}`}
                     key={session.id}
-                    onClick={() => selected ? onRemove(session.id) : onAddOrRefresh(session)}
+                    onClick={() => {
+                      if (selected) {
+                        onRemove(session.id);
+                        return;
+                      }
+                      onAddOrRefresh(session);
+                      onOpenChange(false);
+                    }}
                   >
                     {selected ? <Check size={13} /> : <Plus size={13} />}
                     <span className="chat-reference-add-main">
@@ -781,6 +897,8 @@ type ChatMessagesViewProps = {
   activeSessionId: string | null;
   activeSessionInitialized: boolean;
   currentSessionRunning: boolean;
+  currentSessionStatus: AgentStatus;
+  currentSessionCompacting: boolean;
   projectPath?: string;
   scrollRef: RefObject<HTMLDivElement | null>;
   showScrollBottom: boolean;
@@ -790,7 +908,7 @@ type ChatMessagesViewProps = {
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
@@ -800,11 +918,15 @@ type ChatMessagesViewProps = {
 
 type ChatMessageItemProps = {
   msg: ChatMessage;
+  receivedUserMessage?: ChatMessage;
+  turnRunning: boolean;
+  compactionRunning: boolean;
+  processTerminalState: ProcessTerminalViewState;
   projectPath?: string;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
   onOpenImage: (src: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
@@ -814,6 +936,10 @@ type ChatMessageItemProps = {
 
 const ChatMessageItem = memo(function ChatMessageItem({
   msg,
+  receivedUserMessage,
+  turnRunning,
+  compactionRunning,
+  processTerminalState,
   projectPath,
   onEditMessage,
   onImageContextMenu,
@@ -826,21 +952,68 @@ const ChatMessageItem = memo(function ChatMessageItem({
   forkingMessageId,
 }: ChatMessageItemProps) {
   const [userMessageExpanded, setUserMessageExpanded] = useState(false);
+  const openMessageProjectPath = useCallback(async (path: string) => {
+    const resolvedPath = resolveProjectFilePath(path, projectPath || "");
+    const result = await window.electronAPI.statPath(resolvedPath);
+    if (!result.success || !result.attachment) return;
+    onOpenFile(resolvedPath, { preview: result.attachment.kind === "file" });
+  }, [onOpenFile, projectPath]);
+
+  const handleMessageMarkdownLinkClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const link = target.closest<HTMLAnchorElement>("a.md-link");
+    const inlineCode = target.closest<HTMLElement>("code.md-inline-code.md-path-reference");
+    if (link && event.currentTarget.contains(link)) {
+      const filePath = getLocalMarkdownFilePath(link.getAttribute("href") || "");
+      if (!filePath) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void openMessageProjectPath(filePath);
+      return;
+    }
+    if (!inlineCode || !event.currentTarget.contains(inlineCode)) return;
+    const codePath = getLocalMarkdownCodePath(inlineCode.textContent || "");
+    if (!codePath) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openMessageProjectPath(codePath);
+  }, [openMessageProjectPath]);
+
   if (msg.role === "system" && msg.systemType === "context_compaction") {
+    const compactionText = !compactionRunning && msg.compactionState === "running"
+      ? "上下文压缩已结束"
+      : msg.content || "上下文已自动压缩";
     return (
-      <div data-msg-id={msg.id} className="chat-context-divider">
+      <div data-msg-id={msg.id} className={`chat-context-divider${compactionRunning ? " running" : ""}`}>
         <span className="chat-context-divider-line" />
         <span className="chat-context-divider-label">
-          <ListCollapse size={15} strokeWidth={1.8} />
-          <span>{msg.content || "上下文已自动压缩"}</span>
+          {compactionRunning
+            ? <span className="chat-context-divider-spinner" />
+            : <ListCollapse size={15} strokeWidth={1.8} />}
+          <span>{compactionText}</span>
         </span>
         <span className="chat-context-divider-line" />
       </div>
     );
   }
 
-  const processRunning = msg.role === "assistant" && !!msg.process && !msg.process.endedAt;
-  const hasImages = !!msg.images?.length;
+  const processRunning = msg.role === "assistant" && !!msg.process && isProcessViewRunning(msg.process, turnRunning);
+  const fallbackProcessEndedAt = Math.max(
+    msg.timestamp,
+    ...(msg.commentary || []).map((item) => item.timestamp),
+  );
+  const sourceComposerDocument = msg.role === "user"
+    ? msg.composerDocument || msg.composerDraft?.document
+    : undefined;
+  const orderedComposerDocument = sourceComposerDocument
+    ? withoutComposerImages(sourceComposerDocument)
+    : undefined;
+  const displayedImages = msg.images?.length
+    ? msg.images
+    : sourceComposerDocument
+      ? getComposerImageNodes(sourceComposerDocument).map(({ id, src, name }) => ({ id, src, name }))
+      : [];
+  const hasImages = displayedImages.length > 0;
   const hasSessionReferences = !!msg.sessionReferences?.length;
   const hasAction = !!msg.action;
   const commentary = msg.role === "assistant"
@@ -852,7 +1025,10 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const userMessagePresentation = msg.role === "user"
     ? extractUserMessageAttachments(msg.content)
     : { text: msg.content, attachments: [] };
-  const hasContent = userMessagePresentation.text.trim().length > 0;
+  const hasContent = orderedComposerDocument
+    ? getComposerPlainText(orderedComposerDocument).trim().length > 0
+    : userMessagePresentation.text.trim().length > 0;
+  const hasOrderedContent = !!orderedComposerDocument && composerDocumentHasContent(orderedComposerDocument);
   const hasRawContent = msg.content.trim().length > 0;
   const hasTextAttachments = userMessagePresentation.attachments.length > 0;
   const userMessageLines = msg.role === "user" ? userMessagePresentation.text.split(/\r?\n/) : [];
@@ -863,8 +1039,15 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const hasVisibleBubble =
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction)
-      : hasContent || hasTextAttachments || hasImages || hasDiffs || hasSessionReferences || hasAction;
-  const showAssistantActions = hasVisibleBubble && areAssistantMessageActionsVisible(msg);
+      : hasContent || hasOrderedContent || hasTextAttachments || hasImages || hasDiffs || hasSessionReferences || hasAction;
+  const showAssistantActions = hasVisibleBubble && areAssistantMessageActionsVisible({
+    ...msg,
+    isStreaming: turnRunning && msg.isStreaming,
+    process: msg.process ? {
+      ...msg.process,
+      endedAt: processRunning ? msg.process.endedAt : msg.process.endedAt ?? fallbackProcessEndedAt,
+    } : undefined,
+  });
   const isForkingThisMessage = forkingMessageId === msg.id;
   const renderSessionReferences = () => (
     hasSessionReferences && msg.sessionReferences ? (
@@ -880,16 +1063,21 @@ const ChatMessageItem = memo(function ChatMessageItem({
   );
 
   return (
-    <div data-msg-id={msg.id} className="chat-msg-wrapper">
+    <div data-msg-id={msg.id} className="chat-msg-wrapper" onClick={handleMessageMarkdownLinkClick}>
       {msg.role === "assistant" && msg.process && (
         <ProcessBlock
           messageId={msg.id}
           process={msg.process}
           commentary={commentary}
+          running={processRunning}
+          terminalState={processTerminalState}
+          fallbackEndedAt={fallbackProcessEndedAt}
           onToggle={onToggleAssistantProcess}
           onToggleEntry={onToggleAssistantProcessEntry}
           onOpenFile={onOpenFile}
+          onOpenImage={onOpenImage}
           onPreserveScroll={onPreserveScroll}
+          receivedMessageDocument={receivedUserMessage?.composerDocument || receivedUserMessage?.composerDraft?.document}
         />
       )}
       {!msg.process && commentary.length > 0 && (
@@ -897,7 +1085,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           {commentary.map((item) => (
             <div
               key={item.id}
-              className={`chat-commentary-item ${item.isStreaming ? "streaming" : ""}`}
+              className={`chat-commentary-item ${turnRunning && item.isStreaming ? "streaming" : ""}`}
             >
               <MarkdownRenderer content={item.content} />
             </div>
@@ -906,9 +1094,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
       )}
       {hasVisibleBubble && (
         <div className={`chat-msg ${msg.role}`}>
-          {hasImages && msg.images && (
+          {hasImages && (
             <div className="chat-images">
-              {msg.images.map((img) => (
+              {displayedImages.map((img) => (
                 <img
                   key={img.id}
                   src={img.src}
@@ -923,7 +1111,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           {(hasContent || hasAction || msg.role === "user") && (
             <div className="chat-bubble-row">
               <div className="chat-bubble-stack">
-                {(hasContent || hasAction || (msg.role === "user" && (hasTextAttachments || hasSessionReferences))) && (
+                {(hasContent || hasAction || (msg.role === "user" && (hasOrderedContent || hasTextAttachments || hasSessionReferences))) && (
                   <div className={`chat-bubble ${msg.role} ${msg.action ? "has-action" : ""}`}>
                     {msg.action && (
                       <div className={`chat-action-label ${hasContent ? "with-content" : ""}`}>
@@ -932,8 +1120,12 @@ const ChatMessageItem = memo(function ChatMessageItem({
                         <strong>{msg.action.name}</strong>
                       </div>
                     )}
-                    {msg.role === "user" && (hasTextAttachments || hasSessionReferences || hasContent) && (
+                    {msg.role === "user" && (hasOrderedContent || hasTextAttachments || hasSessionReferences || hasContent) && (
                       <div className="chat-user-message-flow">
+                        {orderedComposerDocument ? (
+                          <ComposerMessageFlow document={orderedComposerDocument} onOpenImage={onOpenImage} />
+                        ) : (
+                          <>
                         {userMessagePresentation.attachments.map((attachment, index) => (
                           <span className={`chat-attached-path-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
                             {attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
@@ -951,6 +1143,8 @@ const ChatMessageItem = memo(function ChatMessageItem({
                             {displayedUserContent}
                           </span>
                         )}
+                          </>
+                        )}
                         {userMessageIsLong && (
                           <button
                             type="button"
@@ -958,7 +1152,11 @@ const ChatMessageItem = memo(function ChatMessageItem({
                             onClick={() => setUserMessageExpanded((expanded) => !expanded)}
                           >
                             {userMessageExpanded ? "收起" : "显示更多"}
-                            <span className={`chat-user-expand-chevron ${userMessageExpanded ? "expanded" : ""}`}>⌄</span>
+                            <ChevronDown
+                              className={`chat-user-expand-chevron ${userMessageExpanded ? "expanded" : ""}`}
+                              size={14}
+                              strokeWidth={2}
+                            />
                           </button>
                         )}
                       </div>
@@ -1082,6 +1280,8 @@ const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionId,
   activeSessionInitialized,
   currentSessionRunning,
+  currentSessionStatus,
+  currentSessionCompacting,
   projectPath,
   scrollRef,
   showScrollBottom,
@@ -1099,10 +1299,30 @@ const ChatMessagesView = memo(function ChatMessagesView({
   forkingMessageId,
 }: ChatMessagesViewProps) {
   const messages = useChatStore((state) => state.messages);
-  const activeProcessWithTodos = [...messages]
-    .reverse()
-    .find((msg) => msg.role === "assistant" && !!msg.process && !msg.process.endedAt && hasNativeTodoSteps(msg.process))
-    ?.process;
+  const activeTurnId = getActiveAssistantTurnId(messages, currentSessionRunning);
+  const activeCompactionMessageId = currentSessionRunning && currentSessionCompacting
+    ? [...messages].reverse().find((message) => (
+        message.systemType === "context_compaction" && message.compactionState === "running"
+      ))?.id || null
+    : null;
+  const processTerminalState: ProcessTerminalViewState = currentSessionStatus === "error"
+    ? "error"
+    : "completed";
+  const activeProcessWithTodos = messages.find((msg) => (
+    msg.id === activeTurnId && !!msg.process && hasNativeTodoSteps(msg.process)
+  ))?.process;
+  const receivedUserMessages = useMemo(() => {
+    const byAssistantId: Record<string, ChatMessage> = {};
+    let latestUserMessage: ChatMessage | undefined;
+    for (const message of messages) {
+      if (message.role === "user") {
+        latestUserMessage = message;
+      } else if (message.role === "assistant" && message.process && latestUserMessage) {
+        byAssistantId[message.id] = latestUserMessage;
+      }
+    }
+    return byAssistantId;
+  }, [messages]);
 
   useLayoutEffect(() => {
     onContentChange();
@@ -1125,6 +1345,10 @@ const ChatMessagesView = memo(function ChatMessagesView({
               <ChatMessageItem
                 key={msg.id}
                 msg={msg}
+                receivedUserMessage={receivedUserMessages[msg.id]}
+                turnRunning={msg.id === activeTurnId}
+                compactionRunning={msg.id === activeCompactionMessageId}
+                processTerminalState={processTerminalState}
                 projectPath={projectPath}
                 onEditMessage={onEditMessage}
                 onImageContextMenu={onImageContextMenu}
@@ -1170,6 +1394,7 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
   sendPayloadNow,
 }: MessageQueueDispatcherProps) {
   const messageQueues = useChatStore((state) => state.messageQueues);
+  const compactingSessions = useChatStore((state) => state.compactingSessions);
   const {
     clearQueuedMessageError,
     markQueuedMessageSending,
@@ -1184,41 +1409,127 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
   const agentStatuses = useProjectStore((state) => state.agentStatuses);
   const initializedSessionIds = useProjectStore((state) => state.initializedSessionIds);
   const queueDispatchingRef = useRef<Set<string>>(new Set());
+  const queueRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const queueRetryAttemptsRef = useRef<Map<string, number>>(new Map());
+  const queueRetryReadyRef = useRef<Set<string>>(new Set());
+  const [queueRetryVersion, setQueueRetryVersion] = useState(0);
+
+  const clearQueueRetry = useCallback((sessionId: string) => {
+    const timer = queueRetryTimersRef.current.get(sessionId);
+    if (timer) clearTimeout(timer);
+    queueRetryTimersRef.current.delete(sessionId);
+    queueRetryAttemptsRef.current.delete(sessionId);
+    queueRetryReadyRef.current.delete(sessionId);
+  }, []);
+
+  const scheduleQueueRetry = useCallback((sessionId: string) => {
+    if (queueRetryTimersRef.current.has(sessionId)) return;
+    const attempt = (queueRetryAttemptsRef.current.get(sessionId) || 0) + 1;
+    queueRetryAttemptsRef.current.set(sessionId, attempt);
+    const delay = Math.min(2_000, 100 * (2 ** Math.min(attempt - 1, 5)));
+    const timer = setTimeout(() => {
+      queueRetryTimersRef.current.delete(sessionId);
+      queueRetryReadyRef.current.add(sessionId);
+      setQueueRetryVersion((version) => version + 1);
+    }, delay);
+    queueRetryTimersRef.current.set(sessionId, timer);
+  }, []);
+
+  useEffect(() => () => {
+    for (const timer of queueRetryTimersRef.current.values()) clearTimeout(timer);
+    queueRetryTimersRef.current.clear();
+    queueRetryAttemptsRef.current.clear();
+    queueRetryReadyRef.current.clear();
+  }, []);
 
   useEffect(() => {
+    for (const sessionId of queueRetryTimersRef.current.keys()) {
+      if (!(messageQueues[sessionId] || []).some((item) => item.status === "queued")) {
+        clearQueueRetry(sessionId);
+      }
+    }
     for (const [sessionId, queue] of Object.entries(messageQueues)) {
+      if (queue.length === 0) {
+        clearQueueRetry(sessionId);
+        continue;
+      }
       if (queueDispatchingRef.current.has(sessionId)) continue;
       if (!initializedSessionIds.has(sessionId)) continue;
       const nextItem = queue.find((item) => item.status === "queued");
       if (!nextItem) continue;
       const runtime = sessionRuntimeRef.current[sessionId];
-      if (runtime?.processActive || agentStatuses[sessionId] === "running") continue;
+      const forceBackendRecheck = queueRetryReadyRef.current.has(sessionId);
+      if (
+        !forceBackendRecheck &&
+        (runtime?.processActive || agentStatuses[sessionId] === "running" || compactingSessions[sessionId])
+      ) {
+        // Renderer lifecycle events can be delayed or lost even after the
+        // backend has become idle. Keep a bounded backend probe alive for an
+        // existing queue instead of waiting indefinitely for another render
+        // state transition. sendPayloadNow rechecks authoritative backend
+        // activity and requeues the same item in place while it is still busy.
+        scheduleQueueRetry(sessionId);
+        continue;
+      }
 
+      queueRetryReadyRef.current.delete(sessionId);
       queueDispatchingRef.current.add(sessionId);
       clearQueuedMessageError(sessionId, nextItem.id);
       markQueuedMessageSending(sessionId, nextItem.id);
-      removeQueuedMessage(sessionId, nextItem.id);
       void sendPayloadNow(sessionId, nextItem, {
         planModeEnabled: !!nextItem.planModeEnabled,
         permissionMode: nextItem.permissionMode,
-        onSendFailure: (error) => {
+        queueIfRunning: true,
+        clientMessageId: nextItem.id,
+      }).then((result) => {
+        if (!isOpenQueueSession(sessionId)) {
+          clearQueueRetry(sessionId);
+          return;
+        }
+        if (result.queued) {
+          scheduleQueueRetry(sessionId);
+          return;
+        }
+        clearQueueRetry(sessionId);
+        if (result.abandoned) {
+          removeQueuedMessage(sessionId, nextItem.id);
+          return;
+        }
+        if (result.error) {
           upsertQueuedMessage({
+            ...nextItem,
+            status: "failed",
+            error: result.error,
+          });
+          return;
+        }
+        removeQueuedMessage(sessionId, nextItem.id);
+      }).catch((error) => {
+        clearQueueRetry(sessionId);
+        if (!isOpenQueueSession(sessionId)) return;
+        upsertQueuedMessage({
           ...nextItem,
           status: "failed",
-          error,
+          error: error instanceof Error ? error.message : String(error),
         });
-        },
       }).finally(() => {
         queueDispatchingRef.current.delete(sessionId);
+        if ((useChatStore.getState().messageQueues[sessionId] || []).some((item) => item.status === "queued")) {
+          setQueueRetryVersion((version) => version + 1);
+        }
       });
     }
   }, [
     agentStatuses,
+    clearQueueRetry,
     clearQueuedMessageError,
+    compactingSessions,
     initializedSessionIds,
     markQueuedMessageSending,
     messageQueues,
+    queueRetryVersion,
     removeQueuedMessage,
+    scheduleQueueRetry,
     sendPayloadNow,
     sessionRuntimeRef,
     upsertQueuedMessage,
@@ -1235,8 +1546,8 @@ type ChatPanelProps = {
 
 export function ChatPanel({
   sendKey = "Enter",
-  previousMessageKey = "Up",
-  nextMessageKey = "Down",
+  previousMessageKey = "Ctrl+Up",
+  nextMessageKey = "Ctrl+Down",
 }: ChatPanelProps) {
   const isStreaming = useChatStore((state) => state.isStreaming);
   const activeAgentId = useChatStore((state) => state.activeAgentId);
@@ -1252,6 +1563,7 @@ export function ChatPanel({
     toggleFavorite,
     setThinkingLevel,
     setDraftText,
+    setDraftDocument,
     replaceSessionDraft,
     addPendingImage: addPendingImageToDraft,
     removePendingImage,
@@ -1272,6 +1584,7 @@ export function ChatPanel({
     toggleFavorite: state.toggleFavorite,
     setThinkingLevel: state.setThinkingLevel,
     setDraftText: state.setDraftText,
+    setDraftDocument: state.setDraftDocument,
     replaceSessionDraft: state.replaceSessionDraft,
     addPendingImage: state.addPendingImage,
     removePendingImage: state.removePendingImage,
@@ -1309,6 +1622,8 @@ export function ChatPanel({
       ? state.sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT
       : EMPTY_CHAT_DRAFT;
     return {
+      text: draft.text,
+      document: draft.document,
       action: draft.action,
       pendingFiles: draft.pendingFiles,
       pendingImages: draft.pendingImages,
@@ -1319,6 +1634,10 @@ export function ChatPanel({
   const pendingImages = activeDraft.pendingImages;
   const pendingFiles = activeDraft.pendingFiles;
   const pendingPathAttachments = activeDraft.pendingPathAttachments;
+  const activeComposerDocument = useMemo(
+    () => withoutComposerImages(activeDraft.document || documentFromDraftParts(activeDraft)),
+    [activeDraft]
+  );
   const legacySessionReferences = activeSession?.references || [];
   const activeSessionReferences = useMemo(
     () => activeDraft.sessionReferences.length > 0 ? activeDraft.sessionReferences : legacySessionReferences,
@@ -1328,12 +1647,24 @@ export function ChatPanel({
   const activeQueuedMessages = useChatStore(useShallow((state) =>
     activeSessionId ? state.messageQueues[activeSessionId] || EMPTY_QUEUED_MESSAGES : EMPTY_QUEUED_MESSAGES
   ));
+  const activeSessionCompacting = useChatStore((state) =>
+    activeSessionId ? state.compactingSessions[activeSessionId] === true : false
+  );
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
   const activeSessionSupportsActions = supportsAgentActions(activeSession?.agentId || activeAgentId);
   const openSessions = useMemo(
     () => activeProject?.sessions.filter((session) => !session.closed) || [],
     [activeProject?.sessions]
   );
+  const openSessionIds = useMemo(() => {
+    const sessionIds = new Set<string>();
+    for (const project of projects) {
+      for (const session of project.sessions) {
+        if (!session.closed) sessionIds.add(session.id);
+      }
+    }
+    return sessionIds;
+  }, [projects]);
   const [modelProviderOrder, setModelProviderOrder] = useState<string[]>([]);
   const modelProviders = useMemo(
     () => getOrderedModelProviders(includeCurrentModel(availableModels, currentModel), modelProviderOrder),
@@ -1382,7 +1713,7 @@ export function ChatPanel({
   const userMsgHistoryRef = useRef<HTMLDivElement>(null);
   const referenceRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<InlineComposerEditorHandle>(null);
   const modelRef = useRef<HTMLDivElement>(null);
   const thinkingRef = useRef<HTMLDivElement>(null);
   const permissionRef = useRef<HTMLDivElement>(null);
@@ -1394,7 +1725,22 @@ export function ChatPanel({
     clearAttachmentError,
     showAttachmentError,
     handlePaste,
-  } = usePendingImages(addPendingImageToDraft);
+  } = usePendingImages((image) => {
+    addPendingImageToDraft(image);
+  });
+
+  useEffect(() => {
+    const handleComposerInsert = (event: Event) => {
+      const composerEvent = event as CustomEvent<ComposerInsertEventDetail>;
+      const targetSessionId = composerEvent.detail?.sessionId || useProjectStore.getState().activeSessionId;
+      if (!targetSessionId || targetSessionId !== useProjectStore.getState().activeSessionId) return;
+      composerEvent.preventDefault();
+      editorRef.current?.insertNode(composerEvent.detail.node);
+      requestAnimationFrame(() => editorRef.current?.focus());
+    };
+    window.addEventListener(COMPOSER_INSERT_EVENT, handleComposerInsert);
+    return () => window.removeEventListener(COMPOSER_INSERT_EVENT, handleComposerInsert);
+  }, []);
 
   useEffect(() => {
     const handleSessionDataPurged = (event: Event) => {
@@ -1406,23 +1752,35 @@ export function ChatPanel({
   }, []);
 
   useEffect(() => {
-    const openSessionIds = new Set<string>();
-    for (const project of projects) {
-      for (const session of project.sessions) {
-        if (!session.closed) openSessionIds.add(session.id);
-      }
-    }
-
     for (const [sessionId, runtime] of Object.entries(sessionRuntimeRef.current)) {
       if (openSessionIds.has(sessionId)) continue;
       if (runtime.streamWatchdog) {
         clearTimeout(runtime.streamWatchdog);
         runtime.streamWatchdog = null;
       }
+      if (runtime.activeCompactionId) {
+        rememberSettledCompactionEvent(runtime, runtime.activeCompactionId);
+        runtime.activeCompactionId = null;
+        runtime.activeCompactionPresentation = null;
+      }
       resetSessionRuntimeAfterTurn(runtime);
-      delete sessionRuntimeRef.current[sessionId];
+      const chatState = useChatStore.getState();
+      const sessionMessages = chatState.sessionMessages[sessionId] || (
+        chatState.activeSessionId === sessionId ? chatState.messages : []
+      );
+      const latestUserMessage = [...sessionMessages].reverse().find((message) => message.role === "user");
+      markSessionRuntimeTurnSettled(runtime, "aborted", {
+        userMessageId: latestUserMessage?.id,
+      });
+      const sessionStillExists = useProjectStore.getState().projects.some((project) =>
+        project.sessions.some((session) => session.id === sessionId)
+      );
+      // Keep only a lightweight terminal tombstone for closed sessions so a
+      // queued old event cannot revive them after reopen. Permanently deleted
+      // sessions can release the runtime immediately.
+      if (!sessionStillExists) delete sessionRuntimeRef.current[sessionId];
     }
-  }, [projects]);
+  }, [openSessionIds]);
 
   useEffect(() => {
     if (!activeProject || !activeSessionId || legacySessionReferences.length === 0) return;
@@ -1442,14 +1800,16 @@ export function ChatPanel({
   ]);
 
   const {
+    pendingUIResponses,
     pendingUIResponse,
-    pendingUIResponseRef,
+    getPendingUIResponse,
+    clearPendingUIResponse,
     setPendingUIResponseState,
     isAwaitingUIResponse,
     activeConfirmation,
     activePermissionChoice,
     activeQuestionnaire,
-  } = usePendingUIResponse(activeSessionId);
+  } = usePendingUIResponse(activeSessionId, openSessionIds);
   const activeInteraction = activeConfirmation || activePermissionChoice || activeQuestionnaire;
   const currentSessionRunning = activeSessionId ? activeSessionAgentStatus === "running" : isStreaming;
   const permissionModeSupported = supportsPermissionModes(activeSession?.agentId || activeAgentId);
@@ -1476,6 +1836,7 @@ export function ChatPanel({
     scrollToBottomNow,
     scrollToMessage: scrollToMessageElement,
     preserveScrollDuringLayoutChange,
+    preserveScrollDuringAutoLayoutChange,
     enableAutoFollow,
     handleContentChange,
   } = useChatScroll({
@@ -1484,31 +1845,34 @@ export function ChatPanel({
     questionnairePaneHeight,
   });
 
-  const resizeTextarea = useCallback((textarea = textareaRef.current) => {
-    if (!textarea) return;
-    textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 150)}px`;
-  }, []);
-
-  const syncInputValue = useCallback((value: string) => {
+  const syncInputState = useCallback((value: string) => {
     inputValueRef.current = value;
     const hasText = value.trim().length > 0;
     if (inputHasTextRef.current !== hasText) {
       inputHasTextRef.current = hasText;
       setInputHasText(hasText);
     }
+  }, []);
+
+  const syncInputValue = useCallback((value: string) => {
+    syncInputState(value);
     const sessionId = useProjectStore.getState().activeSessionId;
     if (sessionId) setDraftText(sessionId, value);
-  }, [setDraftText]);
+  }, [setDraftText, syncInputState]);
+
+  const syncComposerDocument = useCallback((document: ComposerDocument) => {
+    const sessionId = useProjectStore.getState().activeSessionId;
+    const text = getComposerPlainText(document);
+    syncInputState(text);
+    if (sessionId) setDraftDocument(sessionId, document);
+  }, [setDraftDocument, syncInputState]);
 
   const setComposerInput = useCallback((value: string) => {
-    syncInputValue(value);
-    const textarea = textareaRef.current;
-    if (textarea && textarea.value !== value) {
-      textarea.value = value;
-    }
-    resizeTextarea(textarea);
-  }, [resizeTextarea, syncInputValue]);
+    const document = createComposerDocument(value
+      ? [{ id: crypto.randomUUID(), type: "text", text: value }]
+      : []);
+    syncComposerDocument(document);
+  }, [syncComposerDocument]);
 
   const resolveLegacyReference = useCallback<LegacyReferenceResolver>((reference) => {
     const projectState = useProjectStore.getState();
@@ -1537,16 +1901,12 @@ export function ChatPanel({
   const restoreComposerDraft = useCallback((sessionId: string, draft: ChatDraft) => {
     if (useProjectStore.getState().activeSessionId !== sessionId) return;
     replaceSessionDraft(sessionId, draft);
-    setComposerInput(draft.text);
+    syncInputState(draft.text);
     clearAttachmentError();
     requestAnimationFrame(() => {
-      const textarea = textareaRef.current;
-      if (!textarea) return;
-      textarea.focus();
-      textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
-      resizeTextarea(textarea);
+      editorRef.current?.focus();
     });
-  }, [clearAttachmentError, replaceSessionDraft, resizeTextarea, setComposerInput]);
+  }, [clearAttachmentError, replaceSessionDraft, syncInputState]);
 
   const handleEditMessage = useCallback((message: ChatMessage) => {
     const sessionId = useProjectStore.getState().activeSessionId;
@@ -1563,12 +1923,10 @@ export function ChatPanel({
   }, [resolveLegacyReference, restoreComposerDraft]);
 
   useEffect(() => {
-    const draftText = activeSessionId
-      ? useChatStore.getState().sessionDrafts[activeSessionId]?.text || ""
-      : "";
-    setComposerInput(draftText);
+    const draftText = activeSessionId ? useChatStore.getState().sessionDrafts[activeSessionId]?.text || "" : "";
+    syncInputState(draftText);
     clearAttachmentError();
-  }, [activeSessionId, setComposerInput, clearAttachmentError]);
+  }, [activeSessionId, syncInputState, clearAttachmentError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1641,11 +1999,6 @@ export function ChatPanel({
       detail: { permissionMode: normalizedMode },
     }));
   }, []);
-
-  // Auto-resize textarea after layout changes; typing resizes directly in onChange.
-  useEffect(() => {
-    resizeTextarea();
-  }, [resizeTextarea, activeInteraction]);
 
   // Close user message history on outside click
   useEffect(() => {
@@ -1720,9 +2073,14 @@ export function ChatPanel({
     setZoomImage(src);
   }, []);
 
-  const handleOpenFile = useCallback((path: string) => {
-    setPreviewFile(path);
-  }, []);
+  const handleOpenFile = useCallback((path: string, options: { preview?: boolean } = {}) => {
+    const resolvedPath = resolveProjectFilePath(path, activeProject?.path || "");
+    if (options.preview === false) {
+      useAppStore.getState().revealFile(resolvedPath, { preview: false });
+      return;
+    }
+    setPreviewFile(resolvedPath);
+  }, [activeProject?.path]);
 
   const scrollToMessage = useCallback((msgId: string) => {
     scrollToMessageElement(msgId);
@@ -1733,14 +2091,33 @@ export function ChatPanel({
     if (!activeProject || !activeSessionId || sourceSession.id === activeSessionId) return;
     const sessionMessages = useChatStore.getState().sessionMessages;
     const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || []);
-    upsertDraftSessionReference(reference, activeSessionId);
-  }, [activeProject, activeSessionId, upsertDraftSessionReference]);
+    const existing = activeComposerDocument.nodes.find((node) =>
+      node.type === "session" && node.reference.sourceSessionId === sourceSession.id
+    );
+    if (existing) {
+      syncComposerDocument(createComposerDocument(activeComposerDocument.nodes.map((node) =>
+        node.type === "session" && node.reference.sourceSessionId === sourceSession.id
+          ? { ...node, reference: { ...reference } }
+          : node
+      )));
+    } else {
+      const node = { id: crypto.randomUUID(), type: "session" as const, reference: { ...reference } };
+      const inserted = editorRef.current?.insertNode(node) === true;
+      if (!inserted) {
+        syncComposerDocument(createComposerDocument([...activeComposerDocument.nodes, node]));
+      }
+    }
+  }, [activeComposerDocument, activeProject, activeSessionId, syncComposerDocument]);
 
   const handleRemoveReference = useCallback((sourceSessionId: string) => {
     if (!activeProject || !activeSessionId) return;
-    removeDraftSessionReference(sourceSessionId, activeSessionId);
+    const remainingNodes = activeComposerDocument.nodes.filter((node) =>
+      node.type !== "session" || node.reference.sourceSessionId !== sourceSessionId
+    );
+    const hasVisibleContent = remainingNodes.some((node) => node.type !== "text" || node.text.trim().length > 0);
+    syncComposerDocument(createComposerDocument(hasVisibleContent ? remainingNodes : []));
     removePersistedSessionReference(activeProject.id, activeSessionId, sourceSessionId);
-  }, [activeProject, activeSessionId, removeDraftSessionReference, removePersistedSessionReference]);
+  }, [activeComposerDocument, activeProject, activeSessionId, removePersistedSessionReference, syncComposerDocument]);
 
   const clearLegacySessionReferences = useCallback((sessionId: string, references: MessageSessionReferencePayload[]) => {
     if (!activeProject || references.length === 0) return;
@@ -1766,13 +2143,12 @@ export function ChatPanel({
       return false;
     }
 
-    addPendingPathAttachment({
-      id: crypto.randomUUID(),
-      ...result.attachment,
-    }, targetSessionId);
+    if (!activeComposerDocument.nodes.some((node) => node.type === "path" && node.path === result.attachment!.path)) {
+      editorRef.current?.insertNode({ id: crypto.randomUUID(), type: "path", ...result.attachment });
+    }
     clearAttachmentError();
     return true;
-  }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
+  }, [activeComposerDocument.nodes, clearAttachmentError, showAttachmentError]);
 
   const addIndexedFileAttachment = useCallback((attachment: Omit<PendingPathAttachment, "id">) => {
     const targetSessionId = useProjectStore.getState().activeSessionId;
@@ -1780,9 +2156,11 @@ export function ChatPanel({
       showAttachmentError("当前没有可添加附件的会话");
       return;
     }
-    addPendingPathAttachment({ id: crypto.randomUUID(), ...attachment }, targetSessionId);
+    if (!activeComposerDocument.nodes.some((node) => node.type === "path" && node.path === attachment.path)) {
+      editorRef.current?.insertNode({ id: crypto.randomUUID(), type: "path", ...attachment });
+    }
     clearAttachmentError();
-  }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
+  }, [activeComposerDocument.nodes, clearAttachmentError, showAttachmentError]);
 
   const getDroppedFilePath = useCallback((file: File) => {
     try {
@@ -1834,13 +2212,12 @@ export function ChatPanel({
         return;
       }
 
-      addPendingPathAttachment({
-        id: crypto.randomUUID(),
-        ...result.attachment,
-      });
+      if (!activeComposerDocument.nodes.some((node) => node.type === "path" && node.path === result.attachment!.path)) {
+        editorRef.current?.insertNode({ id: crypto.randomUUID(), type: "path", ...result.attachment });
+      }
       clearAttachmentError();
     })();
-  }, [addPendingPathAttachment, clearAttachmentError, showAttachmentError]);
+  }, [activeComposerDocument.nodes, clearAttachmentError, showAttachmentError]);
 
   const handleDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -1879,7 +2256,6 @@ export function ChatPanel({
     activeSessionInitialized,
     setAvailableModels,
     setCurrentModel,
-    setThinkingLevel,
   });
 
   const handleForkFromMessage = useCallback(async (msg: ChatMessage) => {
@@ -1907,6 +2283,7 @@ export function ChatPanel({
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
+      if ((e.target as Element | null)?.closest?.("[data-chat-toolbar-overlay]")) return;
       if (modelRef.current && !modelRef.current.contains(e.target as Node)) setModelOpen(false);
       if (thinkingRef.current && !thinkingRef.current.contains(e.target as Node)) setThinkingOpen(false);
       if (permissionRef.current && !permissionRef.current.contains(e.target as Node)) setPermissionOpen(false);
@@ -1944,18 +2321,46 @@ export function ChatPanel({
     return unsubscribe;
   }, []);
 
-  const { requestManualAbort } = useAgentEvents({
+  const { refreshSessionWatchdog, requestManualAbort } = useAgentEvents({
     activeAgentId,
     sessionRuntimeRef,
-    pendingUIResponseRef,
+    getPendingUIResponse,
     setPendingUIResponseState,
     setStreaming,
+    preserveAssistantProcessCollapse: (sessionId, action) => {
+      if (useProjectStore.getState().activeSessionId === sessionId) {
+        preserveScrollDuringAutoLayoutChange(action);
+      } else {
+        action();
+      }
+    },
   });
 
+  const prepareRemoteInteractionResponse = useCallback((sessionId: string) => {
+    preparePendingQuestionContinuation(sessionId, sessionRuntimeRef);
+  }, [sessionRuntimeRef]);
+
+  const settleRemoteInteractionResponseFailure = useCallback(async (
+    sessionId: string,
+    pendingResponse: PendingUIResponseValue,
+  ) => {
+    await settleFailedPendingQuestionTurn(
+      sessionId,
+      pendingResponse,
+      sessionRuntimeRef,
+      setStreaming,
+      (targetSessionId) => window.electronAPI.agentAbort(targetSessionId),
+    );
+  }, [sessionRuntimeRef, setStreaming]);
+
   useRemoteBridge({
-    pendingInteraction: pendingUIResponse,
-    setPendingInteraction: setPendingUIResponseState,
+    pendingInteractions: pendingUIResponses,
+    getPendingInteraction: getPendingUIResponse,
+    clearPendingInteraction: clearPendingUIResponse,
     abortSession: requestManualAbort,
+    onInteractionResponsePrepared: prepareRemoteInteractionResponse,
+    onInteractionResponseAccepted: refreshSessionWatchdog,
+    onInteractionResponseFailed: settleRemoteInteractionResponseFailure,
   });
 
   const {
@@ -1972,9 +2377,11 @@ export function ChatPanel({
     enableAutoFollow,
     inputValueRef,
     pendingUIResponse,
+    refreshSessionWatchdog,
     sessionRuntimeRef,
     setComposerInput,
     setPendingUIResponseState,
+    setStreaming,
   });
 
   const buildMessagePayload = useCallback(async (
@@ -1985,6 +2392,7 @@ export function ChatPanel({
     sessionReferences: SessionReference[] = activeSessionReferences,
     action: AgentActionInvocation | undefined = activeDraft.action,
     forkContext: string | undefined = activeSessionForkContext?.context,
+    document: ComposerDocument | undefined = activeComposerDocument,
   ): Promise<MessagePayload> => {
     return buildSessionMessagePayload({
       text,
@@ -1997,11 +2405,12 @@ export function ChatPanel({
       pendingFiles: files,
       pendingPathAttachments: pathAttachments,
       sessionReferences,
+      document,
       forkContext,
       action,
       readFile: (path) => window.electronAPI.readFile(path),
     });
-  }, [activeDraft.action, activeSessionForkContext?.context, activeSessionReferences]);
+  }, [activeComposerDocument, activeDraft.action, activeSessionForkContext?.context, activeSessionReferences]);
 
   const sendPayloadNow = useCallback(async (
     targetSessionId: string,
@@ -2015,20 +2424,30 @@ export function ChatPanel({
     }
   ) => {
     const cleanupRuntime = (sessionId: string) => {
-      const runtime = sessionRuntimeRef.current[sessionId];
+      const runtime = sessionRuntimeRef.current[sessionId] || createSessionRuntime();
+      sessionRuntimeRef.current[sessionId] = runtime;
       if (runtime?.streamWatchdog) {
         clearTimeout(runtime.streamWatchdog);
         runtime.streamWatchdog = null;
       }
-      if (runtime) resetSessionRuntimeAfterTurn(runtime);
+      resetSessionRuntimeAfterTurn(runtime);
+      const chatState = useChatStore.getState();
+      const sessionMessages = chatState.sessionMessages[sessionId] || (
+        chatState.activeSessionId === sessionId ? chatState.messages : []
+      );
+      const latestUserMessage = [...sessionMessages].reverse().find((message) => message.role === "user");
+      markSessionRuntimeTurnSettled(runtime, "error", {
+        userMessageId: latestUserMessage?.id,
+      });
       if (!useProjectStore.getState().projects.some((project) =>
         project.sessions.some((session) => session.id === sessionId))) {
         delete sessionRuntimeRef.current[sessionId];
       }
     };
+    const clientMessageId = options?.clientMessageId || crypto.randomUUID();
     const result = await SessionCommandCoordinator.sendMessage({
       sessionId: targetSessionId,
-      clientMessageId: options?.clientMessageId || crypto.randomUUID(),
+      clientMessageId,
       queueIfRunning: options?.queueIfRunning === true,
       message: {
         ...payload,
@@ -2039,8 +2458,9 @@ export function ChatPanel({
         isProcessActive: (sessionId) => sessionRuntimeRef.current[sessionId]?.processActive === true,
         commit: (action) => flushSync(action),
         onSendStarted: (sessionId) => {
-          const runtime = sessionRuntimeRef.current[sessionId];
-          if (!runtime) return;
+          const runtime = sessionRuntimeRef.current[sessionId] || createSessionRuntime();
+          sessionRuntimeRef.current[sessionId] = runtime;
+          activateSessionRuntimeTurn(runtime, { userMessageId: clientMessageId });
           if (runtime.streamWatchdog) {
             clearTimeout(runtime.streamWatchdog);
             runtime.streamWatchdog = null;
@@ -2055,10 +2475,12 @@ export function ChatPanel({
           enableAutoFollow();
           scrollToBottomNow();
         },
+        onReconcileCleanup: cleanupRuntime,
         onSendFailureCleanup: cleanupRuntime,
       },
     });
     if ("error" in result && result.error && options?.onSendFailure) options.onSendFailure(result.error);
+    return result;
   }, [
     enableAutoFollow,
     scrollToBottomNow,
@@ -2068,6 +2490,14 @@ export function ChatPanel({
   const handleSend = useCallback(async () => {
     if (forkingMessageIdRef.current) return;
     if (activeInteraction) return;
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (targetSessionId && useChatStore.getState().compactingSessions[targetSessionId]) {
+      const backendActivity = await SessionCommandCoordinator.getBackendSessionActivity(targetSessionId);
+      if (backendActivity === "busy" || backendActivity === "unknown") {
+        showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送");
+        return;
+      }
+    }
 
     if (isAwaitingUIResponse) {
       await handleSendUIResponse();
@@ -2076,10 +2506,9 @@ export function ChatPanel({
 
     const rawText = inputValueRef.current;
     const text = rawText.trim();
-    const targetSessionId = useProjectStore.getState().activeSessionId;
     if (
       !targetSessionId ||
-      (!text &&
+      (!composerDocumentHasContent(activeComposerDocument) &&
         pendingImages.length === 0 &&
         pendingFiles.length === 0 &&
         pendingPathAttachments.length === 0 &&
@@ -2112,6 +2541,7 @@ export function ChatPanel({
   }, [
     activeInteraction,
     activeDraft.action,
+    activeComposerDocument,
     activeSessionReferences.length,
     addMessage,
     buildMessagePayload,
@@ -2131,7 +2561,16 @@ export function ChatPanel({
 
   const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
     if (!activeSessionSupportsGuidance) return;
-    await SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id).catch(() => undefined);
+    try {
+      const result = await SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id);
+      if (result?.success) {
+        const preview = item.displayContent.replace(/\s+/g, " ").trim();
+        const shortPreview = preview.length > 24 ? `${preview.slice(0, 24)}...` : preview;
+        showFloatingToastMessage(shortPreview ? `引导已发送：${shortPreview}` : "引导已发送");
+      }
+    } catch (error) {
+      showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+    }
   }, [
     activeSessionSupportsGuidance,
   ]);
@@ -2144,6 +2583,7 @@ export function ChatPanel({
         pendingFiles: draft.pendingFiles,
         pendingPathAttachments: draft.pendingPathAttachments,
         sessionReferences: draft.sessionReferences,
+        document: draft.document,
         forkContext: draft.forkContext,
         action: draft.action,
         readFile: (path) => window.electronAPI.readFile(path),
@@ -2168,7 +2608,7 @@ export function ChatPanel({
     }
   }, [activeSessionId]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.nativeEvent.isComposing) return;
 
     const historyDirection = matchShortcut(e, previousMessageKey)
@@ -2177,7 +2617,7 @@ export function ChatPanel({
         ? "next"
         : null;
     if (historyDirection) {
-      if (activeInteraction || isForkingSession || e.currentTarget.disabled) return;
+      if (activeInteraction || isForkingSession) return;
       const sessionId = useProjectStore.getState().activeSessionId;
       if (!sessionId) return;
       e.preventDefault();
@@ -2202,17 +2642,7 @@ export function ChatPanel({
       handleSend();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const ta = textareaRef.current;
-      if (ta) {
-        const start = ta.selectionStart;
-        const end = ta.selectionEnd;
-        const currentValue = inputValueRef.current;
-        const newValue = currentValue.substring(0, start) + "\n" + currentValue.substring(end);
-        setComposerInput(newValue);
-        requestAnimationFrame(() => {
-          ta.selectionStart = ta.selectionEnd = start + 1;
-        });
-      }
+      editorRef.current?.insertLineBreak();
     }
   }, [
     activeInteraction,
@@ -2224,7 +2654,6 @@ export function ChatPanel({
     resolveLegacyReference,
     restoreComposerDraft,
     sendKey,
-    setComposerInput,
   ]);
 
   const handleAbort = useCallback(() => {
@@ -2349,8 +2778,8 @@ export function ChatPanel({
   };
 
   const thinkingLevels = getModelThinkingLevels(currentModel);
-  const currentThinking = thinkingLevels.find((l) => l.id === thinkingLevel)
-    || thinkingLevels.find((level) => level.id === "medium")
+  const normalizedThinkingLevel = normalizeModelThinkingLevel(thinkingLevel, currentModel);
+  const currentThinking = thinkingLevels.find((level) => level.id === normalizedThinkingLevel)
     || thinkingLevels[0];
 
   // No project open - show placeholder
@@ -2445,6 +2874,8 @@ export function ChatPanel({
         activeSessionId={activeSessionId}
         activeSessionInitialized={activeSessionInitialized}
         currentSessionRunning={currentSessionRunning}
+        currentSessionStatus={activeSessionAgentStatus || (currentSessionRunning ? "running" : "idle")}
+        currentSessionCompacting={activeSessionCompacting}
         projectPath={activeProject.path}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}
@@ -2519,6 +2950,7 @@ export function ChatPanel({
         <ChatComposer
           activeQuestionnaire={!!activeInteraction}
           currentSessionRunning={currentSessionRunning}
+          compactionInProgress={activeSessionCompacting}
           interactionDisabled={isForkingSession}
           attachmentError={attachmentError}
           isAwaitingUIResponse={isAwaitingUIResponse}
@@ -2533,7 +2965,9 @@ export function ChatPanel({
           actionContextKey={activeSessionId || ""}
           sendKey={sendKey}
           fileInputRef={fileInputRef}
-          textareaRef={textareaRef}
+          editorRef={editorRef}
+          composerDocument={activeComposerDocument}
+          onDocumentChange={syncComposerDocument}
           onAddInputFiles={handleAddInputFiles}
           onAddPathAttachment={addIndexedFileAttachment}
           onOpenAttachmentFolder={handleOpenAttachmentFolder}
@@ -2561,10 +2995,8 @@ export function ChatPanel({
           onRemoveSessionReference={handleRemoveReference}
           onOpenImage={handleOpenImage}
           onSyncInputValue={syncInputValue}
-          onSetInputValue={setComposerInput}
-          onResizeTextarea={resizeTextarea}
           onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
+          onPaste={(event) => handlePaste(event as unknown as React.ClipboardEvent<HTMLTextAreaElement>)}
           onDrop={handleDrop}
           onDragOver={handleDragOver}
           onSend={handleSend}
@@ -2685,6 +3117,7 @@ export function ChatPanel({
             session={activeSession}
             onClose={() => setQueueEditingId(null)}
             onSave={(draft) => handleEditQueuedMessage(item, draft)}
+            onOpenImage={handleOpenImage}
           />
         ) : null;
       })()}

@@ -309,7 +309,7 @@
 .project-card-drag-wrapper.drop-target::before {
   content: "";
   position: absolute;
-  top: -3px;
+  top: -5px;
   left: 0;
   right: 0;
   height: 3px;
@@ -319,21 +319,7 @@
   pointer-events: none;
   z-index: 2;
 }
-.project-card-drag-wrapper.drop-target.after::before { top: auto; bottom: -3px; }
-.project-card-drag-wrapper.drop-target::after {
-  content: "";
-  position: absolute;
-  top: -5px;
-  left: -4px;
-  width: 8px;
-  height: 8px;
-  border: 3px solid var(--accent-color);
-  border-radius: 50%;
-  background: var(--sidebar-bg, var(--background));
-  pointer-events: none;
-  z-index: 3;
-}
-.project-card-drag-wrapper.drop-target.after::after { top: auto; bottom: -5px; }
+.project-card-drag-wrapper.drop-target.after::before { top: auto; bottom: -5px; }
 
 .project-terminal-child:hover {
   background-color: var(--bg-primary);

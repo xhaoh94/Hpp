@@ -37,6 +37,7 @@ const FILE_EXPLORER_SEARCH_DEBOUNCE_MS = 100;
 interface FileTreeCommand {
   requestId: number;
   scopeKey: string;
+  mode: "collapse" | "refresh";
   handledPaths: Set<string>;
 }
 
@@ -166,8 +167,8 @@ const FileTreeItem = memo(function FileTreeItem({
   const childrenLoadingRef = useRef(false);
   const rowRef = useRef<HTMLDivElement>(null);
 
-  const loadChildren = useCallback(async () => {
-    if (entry.type !== "folder" || childrenLoadedRef.current || childrenLoadingRef.current) return;
+  const loadChildren = useCallback(async (force = false) => {
+    if (entry.type !== "folder" || (!force && childrenLoadedRef.current) || childrenLoadingRef.current) return;
     childrenLoadingRef.current = true;
     try {
       const loaded = await window.electronAPI.readDirectory(entry.path, filters);
@@ -214,8 +215,15 @@ const FileTreeItem = memo(function FileTreeItem({
   useEffect(() => {
     if (entry.type !== "folder" || !treeCommand || treeCommand.handledPaths.has(entry.path)) return;
     treeCommand.handledPaths.add(entry.path);
-    setExpanded(false);
-  }, [entry.path, entry.type, treeCommand]);
+    if (treeCommand.mode === "collapse") {
+      setExpanded(false);
+      return;
+    }
+    if (expanded) {
+      childrenLoadedRef.current = false;
+      void loadChildren(true);
+    }
+  }, [entry.path, entry.type, expanded, loadChildren, treeCommand]);
 
   const handleDragStart = useCallback((event: DragEvent<HTMLDivElement>) => {
     writePathAttachmentDragData(event.dataTransfer, {
@@ -303,6 +311,7 @@ export function FileExplorer() {
   const [searchResults, setSearchResults] = useState<FileEntry[]>([]);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [treeCommand, setTreeCommand] = useState<FileTreeCommand | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [contextMenu, setContextMenu] = useState<FileExplorerContextMenu | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Map<string, FileEntry>>(() => new Map());
   const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
@@ -414,6 +423,7 @@ export function FileExplorer() {
     setTreeCommand((current) => ({
       requestId: (current?.requestId || 0) + 1,
       scopeKey: treeScopeKey,
+      mode: "collapse",
       handledPaths: new Set<string>(),
     }));
   }, [treeScopeKey]);
@@ -438,10 +448,17 @@ export function FileExplorer() {
   }, [loadRootEntries]);
 
   const handleRefresh = useCallback(() => {
-    setTreeCommand(null);
-    if (activeProject?.path) invalidateProjectFileIndex(activeProject.path);
+    const nextRequestId = (treeCommand?.requestId || 0) + 1;
+    setTreeCommand({
+      requestId: nextRequestId,
+      scopeKey: treeScopeKey,
+      mode: "refresh",
+      handledPaths: new Set<string>(),
+    });
+    setRefreshVersion((current) => current + 1);
+    if (activeProject?.path) invalidateProjectFileIndex(activeProject.path, filters);
     void loadRootEntries();
-  }, [activeProject?.path, loadRootEntries]);
+  }, [activeProject?.path, filters, loadRootEntries, treeCommand?.requestId, treeScopeKey]);
 
   useEffect(() => {
     if (revealRequest) setSearch("");
@@ -479,7 +496,7 @@ export function FileExplorer() {
       });
     }, FILE_EXPLORER_SEARCH_DEBOUNCE_MS);
     return scheduledSearch.cancel;
-  }, [search, activeProject?.path, filterKey, filters]);
+  }, [search, activeProject?.path, filterKey, filters, refreshVersion]);
 
   const displayEntries = (search.trim() ? searchResults : rootEntries)
     .filter((entry) => !isFileEntryExcluded(entry, filters));

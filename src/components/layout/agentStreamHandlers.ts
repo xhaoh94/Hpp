@@ -1,15 +1,12 @@
 import { flushSync } from "react-dom";
-import { useChatStore } from "@/stores/chat-store";
+import { hasOpenAssistantProcessState, useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import type { AgentEvent } from "@/types";
-import {
-  truncateProcessDetail,
-  type SessionRuntime,
-} from "./agentEventUtils";
+import type { SessionRuntime } from "./agentEventUtils";
 import type { AgentEventHandlerContext } from "./agentEventTypes";
 
 export function handleMessageStartEvent(
-  event: AgentEvent,
+  _event: AgentEvent,
   currentSessionId: string,
   runtime: SessionRuntime,
   ctx: AgentEventHandlerContext
@@ -25,12 +22,16 @@ export function handleMessageStartEvent(
     ctx.finishThinkingEntry(currentSessionId);
     useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
   }
+  if (ctx.getPendingUIResponse(currentSessionId)) {
+    ctx.finishAbortedTurn(currentSessionId);
+  }
   runtime.streamBuffer = "";
   runtime.thinkingBuffer = "";
   runtime.thinkingEntryId = null;
   runtime.streamStarted = false;
   runtime.activeToolEntry = {};
   runtime.activeToolFile = {};
+  runtime.activeToolKind = {};
   runtime.nativePlanSteps = false;
   runtime.inferredPlanStepsActive = false;
   runtime.inferredStepSignal = {
@@ -51,16 +52,11 @@ export function handleMessageStartEvent(
   ctx.setPendingUIResponse((current) => current?.sessionId === currentSessionId ? null : current);
   useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
   runtime.processActive = true;
-  const messagePreview = event.content
-    ? (event.content.length > 50 ? event.content.substring(0, 50) + "..." : event.content)
-    : "用户消息";
-  ctx.appendProcessEntry(currentSessionId, {
-    type: "status",
-    title: `收到消息: "${messagePreview}"`,
-    detail: event.content ? truncateProcessDetail(String(event.content)) : undefined,
-    state: "completed",
-  });
   ctx.updateInferredPlanSteps(currentSessionId, "analyze");
+  // Some adapters can fail after acknowledging the prompt but before they
+  // emit stream_start. Start the same backend-state watchdog here so that
+  // this partial lifecycle cannot leave an open process ticking forever.
+  ctx.refreshStreamWatchdog(currentSessionId);
 }
 
 export function handleStreamStartEvent(
@@ -69,6 +65,13 @@ export function handleStreamStartEvent(
   ctx: AgentEventHandlerContext
 ) {
   const alreadyStarted = runtime.streamStarted;
+  if (
+    !alreadyStarted &&
+    !runtime.processActive &&
+    ctx.getPendingUIResponse(currentSessionId)
+  ) {
+    ctx.finishAbortedTurn(currentSessionId);
+  }
   ctx.completeIdleNotice(currentSessionId);
   flushSync(() => {
     if (!alreadyStarted) {
@@ -86,6 +89,7 @@ export function handleStreamStartEvent(
     runtime.autoAbortReason = null;
     runtime.activeToolEntry = {};
     runtime.activeToolFile = {};
+    runtime.activeToolKind = {};
     runtime.nativePlanSteps = false;
     runtime.inferredPlanStepsActive = false;
     runtime.inferredStepSignal = {
@@ -186,9 +190,10 @@ export function handleThinkingDeltaEvent(
   currentSessionId: string,
   ctx: AgentEventHandlerContext
 ) {
+  if (!event.delta) return;
   ctx.ensureAssistantContinuation(currentSessionId);
   ctx.finishAssistantProcessText(currentSessionId);
-  ctx.appendThinkingDelta(currentSessionId, String(event.delta || ""));
+  ctx.appendThinkingDelta(currentSessionId, String(event.delta));
 }
 
 export function handleStreamEndEvent(
@@ -200,10 +205,21 @@ export function handleStreamEndEvent(
   if (!runtime.processActive) {
     const eventContent = event.content ? String(event.content) : "";
     const sessionMarkedRunning = useProjectStore.getState().agentStatuses[currentSessionId] === "running";
-    if (!eventContent.trim() && (!event.force || !sessionMarkedRunning)) return;
-    ctx.ensureAssistantContinuation(currentSessionId);
+    const chatState = useChatStore.getState();
+    const sessionMessages = chatState.sessionMessages[currentSessionId] || (
+      chatState.activeSessionId === currentSessionId ? chatState.messages : []
+    );
+    const storeHasOpenProcess = sessionMessages.some(hasOpenAssistantProcessState);
+    if (!eventContent.trim() && !storeHasOpenProcess && !sessionMarkedRunning) {
+      // shouldAcceptTurnScopedAgentEvent has already attached this terminal
+      // revision to the runtime. Even without a visible process, preserve a
+      // terminal tombstone so a delayed event cannot reopen the same turn.
+      ctx.settleRuntimeTurnOnly(currentSessionId, "completed");
+      return;
+    }
+    if (!storeHasOpenProcess && eventContent.trim()) ctx.ensureAssistantContinuation(currentSessionId);
   }
-  if (ctx.pendingUIResponseRef.current?.sessionId === currentSessionId && !event.force) return;
+  if (ctx.getPendingUIResponse(currentSessionId) && !event.force) return;
   ctx.finishAssistantProcessText(currentSessionId);
   ctx.finishThinkingEntry(currentSessionId);
   const eventContent = event.content ? String(event.content) : "";
@@ -216,10 +232,8 @@ export function handleAgentDisconnectedEvent(
   runtime: SessionRuntime,
   ctx: AgentEventHandlerContext
 ) {
-  if (!runtime.processActive) return;
-  ctx.finishAssistantProcessText(currentSessionId);
-  ctx.finishThinkingEntry(currentSessionId);
-  ctx.completeAssistantStream(currentSessionId, undefined, true);
+  void runtime;
+  ctx.finishDisconnectedTurn(currentSessionId);
   ctx.setPendingUIResponse((current) => current?.sessionId === currentSessionId ? null : current);
 }
 

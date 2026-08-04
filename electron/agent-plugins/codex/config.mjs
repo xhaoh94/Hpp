@@ -4,7 +4,16 @@ import { homedir } from "node:os";
 
 const DEFAULT_MODEL_ID = "gpt-5.5";
 const DEFAULT_THINKING_LEVEL = "medium";
-const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const VALID_THINKING_LEVELS = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 
 const getCodexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const getConfigPath = () => join(getCodexHome(), "config.toml");

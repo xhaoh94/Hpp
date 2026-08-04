@@ -8,7 +8,10 @@ import {
   type SessionReference,
 } from "@/stores/project-store";
 import {
+  getAssistantProcessLastActivityAt,
+  hasOpenAssistantProcessState,
   isAgentStartupFailureMessage,
+  normalizeAssistantProcessTerminalState,
   useChatStore,
   type AgentCommentary,
   type ChatMessage,
@@ -16,6 +19,7 @@ import {
 } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
+import { parseComposerDocument } from "@shared/composer-document";
 
 interface PersistedData {
   projects: Project[];
@@ -180,29 +184,58 @@ const parsePersistedData = (value: unknown): PersistedData | null => {
   };
 };
 
+export const applyPersistedProjectSnapshot = (data: PersistedData) => {
+  useProjectStore.setState({
+    projects: data.projects,
+    activeProjectId: data.activeProjectId || (data.projects.length > 0 ? data.projects[0].id : null),
+    activeSessionId: data.activeSessionId,
+    projectDataHydrated: true,
+    // These describe renderer/main-process runtime ownership, not persisted
+    // project data. A renderer remount must re-probe surviving backends
+    // instead of inheriting stale running/initialized flags.
+    agentStatuses: {},
+    initializedSessionIds: new Set<string>(),
+  });
+};
+
 export const parsePersistedChatMessage = (value: unknown): ChatMessage | null => {
   if (!isRecord(value)) return null;
   const id = getString(value.id);
   const role = value.role;
   const content = getString(value.content);
-  const timestamp = typeof value.timestamp === "number" ? value.timestamp : undefined;
+  const timestamp = typeof value.timestamp === "number" && Number.isFinite(value.timestamp) && value.timestamp > 0
+    ? value.timestamp
+    : undefined;
   if (!id || (role !== "user" && role !== "assistant" && role !== "system") || content === undefined || timestamp === undefined) {
     return null;
   }
 
   const persistedMessage = value as Partial<ChatMessage>;
   const composerDraft = parseComposerDraftSnapshot(value.composerDraft);
-  return {
+  const composerDocument = parseComposerDocument(value.composerDocument) || composerDraft?.document;
+  const commentary = parsePersistedCommentary(value.commentary);
+  const staleCompaction = persistedMessage.systemType === "context_compaction"
+    && persistedMessage.compactionState === "running";
+  const recoveredProcessState = content.trim() ? "completed" as const : "interrupted" as const;
+  const parsedMessage: ChatMessage = {
     ...persistedMessage,
     id,
     role,
-    content,
+    content: staleCompaction ? "上下文压缩已中断" : content,
     timestamp,
     composerDraft,
-    commentary: parsePersistedCommentary(value.commentary),
+    composerDocument,
+    commentary,
+    compactionState: staleCompaction ? "interrupted" : persistedMessage.compactionState,
     // Never restore a stale streaming state after app restart.
     isStreaming: false,
   };
+  if (!hasOpenAssistantProcessState(parsedMessage)) return parsedMessage;
+  return normalizeAssistantProcessTerminalState(parsedMessage, {
+    endedAt: getAssistantProcessLastActivityAt(parsedMessage) ?? timestamp,
+    finalState: recoveredProcessState,
+    expanded: false,
+  });
 };
 
 const parsePersistedMessages = (value: unknown): PersistedMessages | null => {
@@ -215,6 +248,27 @@ const parsePersistedMessages = (value: unknown): PersistedMessages | null => {
       .filter((message): message is ChatMessage => !!message && !isAgentStartupFailureMessage(message));
   }
   return { sessionMessages };
+};
+
+/**
+ * Apply the persisted chat snapshot atomically. During a renderer remount the
+ * Zustand store can still contain the previously active `messages` array.
+ * Calling `switchSession()` after replacing `sessionMessages` would first
+ * write that old array back into the freshly parsed snapshot and could revive
+ * stale streaming/process state that hydration just terminalized.
+ */
+export const applyPersistedMessagesSnapshot = (
+  sessionMessages: Record<string, ChatMessage[]>,
+  activeSessionId: string | null,
+) => {
+  useChatStore.setState({
+    sessionMessages,
+    messages: activeSessionId ? sessionMessages[activeSessionId] || [] : [],
+    activeSessionId,
+    isStreaming: false,
+    // Compaction is renderer-runtime state and is never valid after hydration.
+    compactingSessions: {},
+  });
 };
 
 const stripTransientMessages = (sessionMessages: Record<string, ChatMessage[]>) => {
@@ -264,7 +318,7 @@ const parseStringRecord = (value: unknown): Record<string, string> => {
 
 const hasStreamingMessages = (sessionMessages: Record<string, ChatMessage[]>) =>
   Object.values(sessionMessages).some((messages) =>
-    messages.some((message) => message.isStreaming || (!!message.process && !message.process.endedAt))
+    messages.some(hasOpenAssistantProcessState)
   );
 
 const parsePersistedModel = (value: unknown): PersistedModel | null => {
@@ -502,6 +556,7 @@ export function useDataPersistence() {
       flushPendingDataToDisk();
     }
     const hydrationGeneration = persistenceHydration.begin();
+    useProjectStore.setState({ projectDataHydrated: false });
     let cancelled = false;
     _pendingProjectsData = null;
     _pendingMessagesData = null;
@@ -520,16 +575,13 @@ export function useDataPersistence() {
       let activeProject: Project | undefined;
       let activeSession: ProjectSession | undefined;
       let validSessionIds: Set<string> | null = null;
+      let hydratedMessagesLoaded = false;
 
       const d = parsePersistedData(projectData);
       if (d) {
         validSessionIds = new Set(d.projects.flatMap((project) => project.sessions.map((session) => session.id)));
         activeSessionId = d.activeSessionId || null;
-        useProjectStore.setState({
-          projects: d.projects,
-          activeProjectId: d.activeProjectId || (d.projects.length > 0 ? d.projects[0].id : null),
-          activeSessionId,
-        });
+        applyPersistedProjectSnapshot(d);
         if (activeSessionId) {
           activeProject = d.projects.find((p) => p.sessions.some((s) => s.id === activeSessionId));
           activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
@@ -538,20 +590,24 @@ export function useDataPersistence() {
             useChatStore.setState({ activeAgentId });
           }
         }
+      } else {
+        useProjectStore.setState({ projectDataHydrated: true });
       }
 
       // 2. Load session messages
       const md = parsePersistedMessages(msgData);
       if (md) {
+        hydratedMessagesLoaded = true;
         const sessionMessages = validSessionIds
           ? Object.fromEntries(Object.entries(md.sessionMessages).filter(([sessionId]) => validSessionIds!.has(sessionId)))
           : md.sessionMessages;
-        useChatStore.setState({ sessionMessages });
-        if (activeSessionId) {
-          useChatStore.getState().switchSession(activeSessionId);
-        }
-      } else if (activeSessionId) {
-        useChatStore.getState().switchSession(activeSessionId);
+        applyPersistedMessagesSnapshot(sessionMessages, activeSessionId);
+      } else {
+        // A failed or invalid disk snapshot must not inherit renderer memory
+        // left behind by a previous mount. In particular, switchSession()
+        // would persist that old active array under the restored session and
+        // could revive a completed process as "running" after HMR/reload.
+        applyPersistedMessagesSnapshot({}, activeSessionId);
       }
 
       // 3. Load per-session models and thinking levels into cache, restore active session
@@ -596,6 +652,16 @@ export function useDataPersistence() {
       }
 
       if (!persistenceHydration.complete(hydrationGeneration)) return;
+
+      // Store subscriptions intentionally ignore hydration writes. Persist the
+      // canonical restored snapshot once after opening the gate so lifecycle
+      // normalization (stale processes, commentary and compaction) is not
+      // revived again on the next launch when no later chat mutation occurs.
+      if (hydratedMessagesLoaded) {
+        scheduleMessagesSave({
+          sessionMessages: stripTransientMessages(useChatStore.getState().sessionMessages),
+        });
+      }
 
       if (validSessionIds) {
         void window.electronAPI.purgeSessionData({

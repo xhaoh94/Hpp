@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
@@ -25,9 +26,11 @@ import type {
 } from "../../src/types/ipc";
 import { isValidVersion, meetsMinimumVersion } from "../../src/lib/version";
 import { sanitizeAgentActionCatalog } from "../../shared/agent-actions";
+import { isAgentTurnContinuationEvidence } from "../../shared/agent-event-lifecycle";
 import type {
   AgentBackend,
   AgentForkResult,
+  AgentInitOptions,
   AgentModel,
   AgentSendOptions,
 } from "./agent-backend";
@@ -35,6 +38,7 @@ export type {
   AgentBackend,
   AgentForkResult,
   AgentForkTarget,
+  AgentInitOptions,
   AgentModel,
   AgentSendOptions,
 } from "./agent-backend";
@@ -92,7 +96,18 @@ type CommandError = Error & {
 const MANIFEST_FILE = "hpp-agent-plugin.json";
 const DEFAULT_THINKING_LEVEL = "medium";
 const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
-const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const IDLE_ACTIVITY_RECHECK_MS = 5_000;
+const IDLE_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000] as const;
+const VALID_THINKING_LEVELS = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
   permissions: false,
@@ -1150,42 +1165,245 @@ export class AgentPluginRegistry {
   ): Promise<AgentBackend> {
     let currentWindow = options.window || null;
     let idle = true;
-    let refreshIdleFromBackend: () => void = () => undefined;
+    let idleStateRevision = 0;
+    let idleRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let backendIdleSupported: boolean | null = null;
+    let disposed = false;
+    let turnSequence = 0;
+    let backendId = "";
+    const lifecycleInstanceScope = randomUUID();
+    let activeLifecycleRevision: string | null = null;
+    let activeClientMessageId: string | null = null;
+    let activeLifecycleTerminalSeen = true;
+    let independentCompactionActive = false;
+    let refreshIdleFromBackend: (initialDelayMs?: number) => Promise<boolean | undefined> = async () => undefined;
+    const beginLifecycleRevision = () => {
+      activeLifecycleRevision = `${backendId}:${lifecycleInstanceScope}:${++turnSequence}`;
+      activeClientMessageId = null;
+      independentCompactionActive = false;
+    };
+    const ensureActiveLifecycleRevision = () => {
+      if (!activeLifecycleRevision) beginLifecycleRevision();
+    };
+    const clearIdleRefreshTimer = () => {
+      if (!idleRefreshTimer) return;
+      clearTimeout(idleRefreshTimer);
+      idleRefreshTimer = null;
+    };
+    const setAuthoritativeIdle = (value: boolean) => {
+      clearIdleRefreshTimer();
+      idleStateRevision += 1;
+      idle = value;
+      return idleStateRevision;
+    };
+    const markBackendBusy = () => {
+      setAuthoritativeIdle(false);
+      // A plugin that omits its terminal event must still become observable as
+      // idle. Treat normal activity as a heartbeat and probe after it goes
+      // quiet; each subsequent event moves this probe back.
+      if (backendIdleSupported !== false) {
+        void refreshIdleFromBackend(IDLE_ACTIVITY_RECHECK_MS).catch(() => undefined);
+      }
+    };
     const sendEvent = (event: Record<string, unknown>) => {
       const normalizedEvent = normalizePluginEvent(event);
-      if (normalizedEvent.type === "message_start" || normalizedEvent.type === "stream_start") {
-        idle = false;
+      if (normalizedEvent.type === "agent_disconnected") {
+        ensureActiveLifecycleRevision();
+        independentCompactionActive = false;
+        activeLifecycleTerminalSeen = true;
+        setAuthoritativeIdle(true);
+      } else if (
+        normalizedEvent.type === "context_compaction"
+        && normalizedEvent.phase !== "started"
+      ) {
+        if (backendIdleSupported === false && independentCompactionActive) {
+          independentCompactionActive = false;
+          activeLifecycleTerminalSeen = true;
+          setAuthoritativeIdle(true);
+        } else {
+          void refreshIdleFromBackend().catch(() => undefined);
+        }
+      } else if (normalizedEvent.type === "agent_end") {
+        // agent_end is only a hint: some providers emit it between automatic
+        // retries while their backend is still busy. Keep the host lifecycle
+        // open so the eventual authoritative idle transition emits
+        // backend_idle instead of forcing the renderer to wait for its 45s
+        // watchdog.
+        const explicitTerminalAlreadySeen = activeLifecycleTerminalSeen;
+        ensureActiveLifecycleRevision();
+        // stream_end/aborted/turn_failed are authoritative for legacy plugins
+        // that omit isIdle(). Their customary trailing agent_end must not
+        // reopen an already-settled cache forever. Backends with isIdle remain
+        // authoritative and may still report post-response work here.
+        if (!(backendIdleSupported === false && explicitTerminalAlreadySeen)) {
+          activeLifecycleTerminalSeen = false;
+          setAuthoritativeIdle(false);
+          if (backendIdleSupported !== false) {
+            void refreshIdleFromBackend().catch(() => undefined);
+          }
+        }
       } else if (
         normalizedEvent.type === "stream_end" ||
         normalizedEvent.type === "aborted" ||
-        normalizedEvent.type === "agent_disconnected" ||
-        normalizedEvent.type === "agent_end"
+        normalizedEvent.type === "turn_failed"
       ) {
-        idle = true;
+        ensureActiveLifecycleRevision();
+        independentCompactionActive = false;
+        activeLifecycleTerminalSeen = true;
+        if (backendIdleSupported === false) setAuthoritativeIdle(true);
+        else void refreshIdleFromBackend().catch(() => undefined);
       } else if (
         normalizedEvent.type === "process_event"
         && normalizedEvent.state === "error"
       ) {
-        refreshIdleFromBackend();
+        // A failed tool/process entry is not necessarily the end of the
+        // agent turn. Probe the backend immediately: an authoritative idle
+        // transition will emit backend_idle, while a still-busy backend keeps
+        // the renderer turn open for retries or subsequent output.
+        // A terminal error record that trails an explicit turn terminal is UI
+        // detail, not evidence that the backend resumed. Only an error within
+        // an active lifecycle (or the first observable restored event) opens
+        // an idle reconciliation.
+        if (!activeLifecycleTerminalSeen || !activeLifecycleRevision) {
+          ensureActiveLifecycleRevision();
+          activeLifecycleTerminalSeen = false;
+          // This may be the first observable event of a restored turn, before a
+          // host sendMessage has marked the cache busy. Record the activity
+          // first so an already-settled backend produces a real busy -> idle
+          // transition and therefore an immediate backend_idle event.
+          setAuthoritativeIdle(false);
+          if (backendIdleSupported !== false) {
+            void refreshIdleFromBackend().catch(() => undefined);
+          }
+        }
+      } else if (
+        isAgentTurnContinuationEvidence(normalizedEvent)
+        || normalizedEvent.type === "context_compaction"
+      ) {
+        if (normalizedEvent.type === "context_compaction") {
+          // A post-turn compaction is its own host lifecycle. Reusing the
+          // terminal turn identity would make its later backend_idle look like
+          // a stale event in the renderer, leaving the compaction spinner open
+          // until the 45-second watchdog. Compaction that starts during an
+          // active turn keeps that turn's existing identity.
+          if (!activeLifecycleRevision || activeLifecycleTerminalSeen) {
+            beginLifecycleRevision();
+            independentCompactionActive = true;
+          } else {
+            independentCompactionActive = false;
+          }
+          activeLifecycleTerminalSeen = false;
+          markBackendBusy();
+        } else {
+          // Restored/running plugin sessions can emit activity without a
+          // host sendMessage call. Give that activity a host-owned identity so
+          // a later backend_idle can close exactly this renderer turn.
+          const isFirstRestoredActivity = !activeLifecycleRevision;
+          ensureActiveLifecycleRevision();
+          // Once an explicit terminal has closed a stamped lifecycle, later
+          // tail output with that same identity must not reopen the backend
+          // cache. A real host send pre-allocates a fresh revision before its
+          // first event; independent post-turn compaction does so above.
+          if (!activeLifecycleTerminalSeen || isFirstRestoredActivity) {
+            activeLifecycleTerminalSeen = false;
+            markBackendBusy();
+          }
+        }
       }
       currentWindow?.webContents.send("agent:event", {
         ...normalizedEvent,
+        // Lifecycle identity belongs to the host, not to plugin payloads. A
+        // conflicting plugin value would make the later host backend_idle use
+        // a different revision and strand the renderer turn forever.
+        ...(activeLifecycleRevision ? { lifecycleRevision: activeLifecycleRevision } : {}),
+        ...(activeClientMessageId ? { clientUserMessageId: activeClientMessageId } : {}),
         sessionId,
         agentId: record.descriptor.id,
       });
     };
     const pluginProcess = await this.getPluginProcess(record);
-    const { backendId, capabilities } = await pluginProcess.createBackend(
+    const pendingPluginEvents: unknown[] = [];
+    const createdBackend = await pluginProcess.createBackend(
       sessionId,
-      (event) => sendEvent(event as Record<string, unknown>),
+      (event) => {
+        // A plugin may emit from createAgentBackend() before createBackend()
+        // has returned its id. Buffer those events briefly so lifecycle
+        // stamping never observes an uninitialized backend identity.
+        if (!backendId) pendingPluginEvents.push(event);
+        else sendEvent(event as Record<string, unknown>);
+      },
       options.getConfigState,
     );
-    refreshIdleFromBackend = () => {
-      void pluginProcess.backendCall(backendId, "isIdle")
-        .then((value) => {
-          idle = typeof value === "boolean" ? value : true;
-        })
-        .catch(() => undefined);
+    backendId = createdBackend.backendId;
+    const { capabilities } = createdBackend;
+    for (const event of pendingPluginEvents) {
+      sendEvent(event as Record<string, unknown>);
+    }
+    const queryIdleFromBackend = async (expectedRevision: number) => {
+      const value = await pluginProcess.backendCall(backendId, "isIdle");
+      if (typeof value !== "boolean") {
+        backendIdleSupported = false;
+        // Missing optional isIdle() is not evidence that an asynchronous turn
+        // has finished. Keep the event-derived cache instead of turning every
+        // activity heartbeat into a premature backend_idle.
+        return idle;
+      }
+      backendIdleSupported = true;
+      const nextIdle = value;
+      if (!disposed && expectedRevision === idleStateRevision) {
+        const wasIdle = idle;
+        idle = nextIdle;
+        if (
+          nextIdle &&
+          !wasIdle &&
+          !activeLifecycleTerminalSeen
+        ) {
+          activeLifecycleTerminalSeen = true;
+          // The backend has authoritatively become idle without emitting any
+          // terminal event for this host-owned turn. Close the renderer turn
+          // immediately instead of waiting for its 45-second safety watchdog.
+          sendEvent({ type: "backend_idle" });
+        }
+      }
+      return nextIdle;
+    };
+    const scheduleIdleRefresh = (expectedRevision: number, attempt: number, delayMs: number) => {
+      if (disposed || expectedRevision !== idleStateRevision) return;
+      clearIdleRefreshTimer();
+      idleRefreshTimer = setTimeout(() => {
+        idleRefreshTimer = null;
+        void runIdleRefresh(expectedRevision, attempt).catch(() => undefined);
+      }, delayMs);
+    };
+    const runIdleRefresh = async (expectedRevision: number, attempt: number): Promise<boolean> => {
+      try {
+        const nextIdle = await queryIdleFromBackend(expectedRevision);
+        if (
+          !nextIdle &&
+          backendIdleSupported !== false &&
+          !disposed &&
+          expectedRevision === idleStateRevision
+        ) {
+          const retryDelay = IDLE_RECHECK_DELAYS_MS[Math.min(attempt, IDLE_RECHECK_DELAYS_MS.length - 1)];
+          scheduleIdleRefresh(expectedRevision, attempt + 1, retryDelay);
+        }
+        return nextIdle;
+      } catch (error) {
+        if (!disposed && expectedRevision === idleStateRevision) {
+          const retryDelay = IDLE_RECHECK_DELAYS_MS[Math.min(attempt, IDLE_RECHECK_DELAYS_MS.length - 1)];
+          scheduleIdleRefresh(expectedRevision, attempt + 1, retryDelay);
+        }
+        throw error;
+      }
+    };
+    refreshIdleFromBackend = async (initialDelayMs = 0) => {
+      clearIdleRefreshTimer();
+      const expectedRevision = ++idleStateRevision;
+      if (initialDelayMs > 0) {
+        scheduleIdleRefresh(expectedRevision, 0, initialDelayMs);
+        return undefined;
+      }
+      return runIdleRefresh(expectedRevision, 0);
     };
     let sessionFilePath: string | null = null;
 
@@ -1193,23 +1411,75 @@ export class AgentPluginRegistry {
       setWindow(win: BrowserWindow) {
         currentWindow = win;
       },
-      async init(projectPath, existingSessionFilePath) {
-        await pluginProcess.backendCall(backendId, "init", [projectPath, existingSessionFilePath]);
+      async init(projectPath, existingSessionFilePath, initOptions) {
+        await pluginProcess.backendCall(backendId, "init", [projectPath, existingSessionFilePath, initOptions]);
         sessionFilePath = await pluginProcess.backendCall(backendId, "sessionFilePath") as string | null;
-        idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true;
+        await refreshIdleFromBackend();
       },
       isIdle: () => idle,
+      async refreshIdle() {
+        await refreshIdleFromBackend();
+        if (backendIdleSupported === false && !activeLifecycleTerminalSeen) {
+          throw new Error("Plugin backend does not implement isIdle().");
+        }
+        // A newer activity event may have invalidated the query while it was
+        // in flight. Return the guarded cache, never the stale raw result.
+        return idle;
+      },
       async sendMessage(message, images, sendOptions) {
-        idle = false;
-        try { await pluginProcess.backendCall(backendId, "sendMessage", [message, images, sendOptions]); }
-        finally { idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true; }
+        activeLifecycleRevision = `${backendId}:${lifecycleInstanceScope}:${++turnSequence}`;
+        independentCompactionActive = false;
+        activeLifecycleTerminalSeen = false;
+        activeClientMessageId = typeof sendOptions?.clientMessageId === "string" && sendOptions.clientMessageId.trim()
+          ? sendOptions.clientMessageId.trim()
+          : null;
+        setAuthoritativeIdle(false);
+        // Publish the host-owned turn identity before invoking the plugin.
+        // This lets the renderer remember the revision even when sendMessage
+        // fails before the adapter can emit message_start/stream_start, so a
+        // delayed event from that failed attempt cannot reopen the turn.
+        sendEvent({ type: "turn_lifecycle" });
+        let sendError: unknown;
+        try {
+          await pluginProcess.backendCall(backendId, "sendMessage", [message, images, sendOptions]);
+        } catch (error) {
+          sendError = error;
+          // Terminalize the host-owned identity even when the plugin throws
+          // before it can emit stream_start/stream_end. The coordinator still
+          // owns the user-facing error message; this event only closes the
+          // renderer lifecycle barrier so delayed plugin output is ignored.
+          sendEvent({ type: "turn_failed" });
+        }
+        try {
+          // Use a fresh revision after sendMessage resolves. Start/activity
+          // events may have advanced the state while the call was in flight;
+          // querying with the pre-send token would discard this final result.
+          await refreshIdleFromBackend();
+        } catch (idleError) {
+          if (!sendError) throw idleError;
+        }
+        if (sendError) throw sendError;
       },
       async abort() {
+        independentCompactionActive = false;
+        setAuthoritativeIdle(false);
+        let abortError: unknown;
         try {
           await pluginProcess.backendCall(backendId, "abort");
-        } finally {
-          idle = await pluginProcess.backendCall(backendId, "isIdle") as boolean ?? true;
+        } catch (error) {
+          abortError = error;
         }
+        try {
+          await refreshIdleFromBackend();
+        } catch (idleError) {
+          if (!abortError) throw idleError;
+        }
+        if (!abortError && backendIdleSupported === false) {
+          independentCompactionActive = false;
+          activeLifecycleTerminalSeen = true;
+          setAuthoritativeIdle(true);
+        }
+        if (abortError) throw abortError;
       },
       getModels: () => pluginProcess.backendCall(backendId, "getModels") as Promise<AgentModel[]>,
       listActions: async (listOptions) => capabilities.listActions
@@ -1217,12 +1487,35 @@ export class AgentPluginRegistry {
         : [],
       setModel: (provider, modelId) => pluginProcess.backendCall(backendId, "setModel", [provider, modelId]) as Promise<void>,
       setThinkingLevel: (level) => pluginProcess.backendCall(backendId, "setThinkingLevel", [level]) as Promise<void>,
-      sendUIResponse: (response) => {
-        void pluginProcess.backendCall(backendId, "sendUIResponse", [response]).catch((error) => {
-          console.error(`[agent-plugin:${record.descriptor.id}] Failed to send UI response:`, error);
-        });
+      async sendUIResponse(response) {
+        // A stream_end can arrive while the renderer deliberately keeps a
+        // pending question open. Answering that question resumes the same
+        // logical turn, so clear the earlier terminal hint and perform a fresh
+        // authoritative idle transition after the plugin accepts the answer.
+        ensureActiveLifecycleRevision();
+        independentCompactionActive = false;
+        activeLifecycleTerminalSeen = false;
+        setAuthoritativeIdle(false);
+        let responseError: unknown;
+        try {
+          await pluginProcess.backendCall(backendId, "sendUIResponse", [response]);
+        } catch (error) {
+          responseError = error;
+        }
+        try {
+          // Use a fresh guarded revision because continuation events emitted
+          // during the response call may have invalidated the pre-call token.
+          await refreshIdleFromBackend();
+        } catch (idleError) {
+          if (!responseError) throw idleError;
+        }
+        if (responseError) throw responseError;
       },
-      dispose: () => pluginProcess.disposeBackend(backendId),
+      dispose: () => {
+        disposed = true;
+        clearIdleRefreshTimer();
+        return pluginProcess.disposeBackend(backendId);
+      },
       get sessionFilePath() {
         return sessionFilePath;
       },

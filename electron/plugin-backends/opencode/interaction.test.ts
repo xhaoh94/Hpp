@@ -5,6 +5,7 @@ import { OpenCodeAgent } from "./backend";
 interface OpenCodeInternals {
   sessionId: string | null;
   streamedContent: boolean;
+  turnActive: boolean;
   activeClientMessageId: string | null;
   permissionMode: "ask" | "auto" | "full-access";
   handleSSEEvent: (eventType: string, data: unknown) => void;
@@ -150,16 +151,14 @@ describe("OpenCode interaction bridge", () => {
       method: "opencode.question",
     }));
 
-    agent.sendUIResponse({
+    await agent.sendUIResponse({
       id: "que_1",
       method: "opencode.question",
       answers: [{ selected: ["A", "B"] }],
     });
 
-    await vi.waitFor(() => {
-      expect(httpPost).toHaveBeenCalledWith("/question/que_1/reply", {
-        answers: [["A", "B"]],
-      });
+    expect(httpPost).toHaveBeenCalledWith("/question/que_1/reply", {
+      answers: [["A", "B"]],
     });
   });
 
@@ -187,15 +186,57 @@ describe("OpenCode interaction bridge", () => {
       method: "opencode.permission",
     }));
 
-    agent.sendUIResponse({
+    await agent.sendUIResponse({
       id: "per_1",
       method: "opencode.permission",
       answers: [{ value: "always" }],
     });
 
-    await vi.waitFor(() => {
-      expect(httpPost).toHaveBeenCalledWith("/permission/per_1/reply", { reply: "always" });
+    expect(httpPost).toHaveBeenCalledWith("/permission/per_1/reply", { reply: "always" });
+  });
+
+  it("rejects an unknown UI response without posting it", async () => {
+    const agent = new OpenCodeAgent("hpp-session");
+    const httpPost = vi.fn(async () => true);
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.httpPost = httpPost;
+
+    await expect(agent.sendUIResponse({
+      id: "missing-question",
+      method: "opencode.question",
+      text: "answer",
+    })).rejects.toThrow("Unknown OpenCode UI request: missing-question");
+    expect(httpPost).not.toHaveBeenCalled();
+  });
+
+  it("propagates response transport failures and keeps the request retryable", async () => {
+    const agent = new OpenCodeAgent("hpp-session");
+    const httpPost = vi.fn().mockRejectedValueOnce(new Error("response transport failed"));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.httpPost = httpPost;
+    internals.handleSSEEvent("question.asked", {
+      properties: {
+        id: "que_retry",
+        sessionID: "ses_source",
+        questions: [{ question: "Continue?" }],
+      },
     });
+
+    await expect(agent.sendUIResponse({
+      id: "que_retry",
+      method: "opencode.question",
+      text: "yes",
+    })).rejects.toThrow("response transport failed");
+
+    httpPost.mockResolvedValueOnce(true);
+    await expect(agent.sendUIResponse({
+      id: "que_retry",
+      method: "opencode.question",
+      text: "yes",
+    })).resolves.toBeUndefined();
+    expect(httpPost).toHaveBeenCalledTimes(2);
   });
 
   it("only auto-approves low-risk native permission requests", async () => {
@@ -243,6 +284,7 @@ describe("OpenCode interaction bridge", () => {
       const internals = agent as unknown as OpenCodeInternals;
       internals.sessionId = "ses_source";
       internals.streamedContent = true;
+      internals.turnActive = true;
       internals.httpPost = httpPost;
 
       internals.handleSSEEvent("question.asked", {
@@ -252,19 +294,16 @@ describe("OpenCode interaction bridge", () => {
           questions: [{ question: "Continue?" }],
         },
       });
-      internals.handleSSEEvent("session.idle", {
-        properties: { sessionID: "ses_source" },
-      });
       await vi.advanceTimersByTimeAsync(1000);
 
       expect(events).not.toContainEqual(expect.objectContaining({ type: "agent_end" }));
 
-      agent.sendUIResponse({
+      await agent.sendUIResponse({
         id: "que_waiting",
         method: "opencode.question",
         answers: [{ value: "yes" }],
       });
-      await vi.waitFor(() => expect(httpPost).toHaveBeenCalled());
+      expect(httpPost).toHaveBeenCalled();
 
       internals.handleSSEEvent("session.idle", {
         properties: { sessionID: "ses_source" },

@@ -30,6 +30,10 @@ import {
 import { fetchProviderModels } from "./agent-model-fetch";
 import { combineAgentModels } from "./agent-model-list";
 import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
+import {
+  HPP_AGENT_SYSTEM_PROMPT,
+  withHppPlanModePrompt,
+} from "./agent-runtime-policy";
 import { normalizeAgentPermissionMode } from "../../shared/agent-permissions";
 import type {
   AgentBackend,
@@ -39,6 +43,14 @@ import type {
   AgentSendOptions,
 } from "./agent-backend";
 import { getErrorMessage } from "../utils/unknown-value";
+import {
+  clearAllPendingUIEvents,
+  clearPendingUIEvents,
+  clearPendingUIResponse,
+  getPendingUIEventSnapshot,
+  hasPendingUIEvents,
+  type PendingUIEventSnapshot,
+} from "./pending-ui-events";
 
 interface AgentReloadConfigResult {
   success: boolean;
@@ -59,6 +71,7 @@ interface SuspendedPluginSessions {
 }
 
 const AGENT_SESSION_INIT_TIMEOUT_MS = 90_000;
+const AGENT_SESSION_STATE_REFRESH_TIMEOUT_MS = 3_000;
 const agentRegistry = getAgentPluginRegistry();
 
 async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
@@ -88,15 +101,7 @@ async function usesSingleActiveProvider(agentId?: string): Promise<boolean> {
 }
 
 function withPromptPlanMode(message: string): string {
-  return [
-    "<plan_mode>",
-    "Plan mode is enabled for this turn.",
-    "Before changing files, running commands, or using tools that modify state, first respond with a concise implementation plan and wait for the user to explicitly confirm.",
-    "You may inspect context that is necessary to make the plan. If the user has already explicitly approved a previous plan in this conversation, proceed with the approved implementation.",
-    "</plan_mode>",
-    "",
-    message,
-  ].join("\n");
+  return withHppPlanModePrompt(message);
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -128,6 +133,14 @@ export class AgentManager {
 
   setWindow(win: BrowserWindow) { this.window = win; }
 
+  private publishPendingUIRevision(sessionId: string, revision: number) {
+    this.window?.webContents.send("agent:event", {
+      type: "pending_ui_cache_revision",
+      sessionId,
+      pendingUIRevision: revision,
+    });
+  }
+
   private async createAgentBackend(agentId: string, sessionId: string): Promise<AgentBackend> {
     return agentRegistry.createBackend(agentId, sessionId, {
       window: this.window,
@@ -141,7 +154,9 @@ export class AgentManager {
     existingSessionFilePath?: string
   ): Promise<void> {
     await withTimeout(
-      agent.init(projectPath, existingSessionFilePath),
+      agent.init(projectPath, existingSessionFilePath, {
+        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+      }),
       AGENT_SESSION_INIT_TIMEOUT_MS,
       "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
     );
@@ -185,12 +200,13 @@ export class AgentManager {
         await this.initAgentBackend(agent, projectPath, existingSessionFilePath);
       } catch (error) {
         if (this.sessionAgents.get(sessionId) === agent) {
-          await Promise.resolve(agent.dispose()).catch(() => undefined);
+          await Promise.resolve().then(() => agent.dispose()).catch(() => undefined);
           this.sessionAgents.delete(sessionId);
           this.sessionAgentTypes.delete(sessionId);
           this.sessionFilePaths.delete(sessionId);
           this.sessionProjectPaths.delete(sessionId);
         }
+        clearPendingUIEvents(sessionId);
         if (this.activeSessionId === sessionId) this.activeSessionId = null;
         const message = getErrorMessage(error);
         const status = await agentRegistry.getStatus(agentId).catch(() => undefined);
@@ -307,13 +323,36 @@ export class AgentManager {
       : mergeModelsWithConfiguredAgentModels(agentId, []);
   }
 
-  sendUIResponse(response: AgentUIResponse) {
+  async sendUIResponse(response: AgentUIResponse): Promise<number | undefined> {
     const sessionId = typeof response.sessionId === "string" ? response.sessionId : undefined;
-    const agent = sessionId
-      ? this.getAgentBySessionId(sessionId)
+    const targetSessionId = sessionId || this.activeSessionId || undefined;
+    const agent = targetSessionId
+      ? this.getAgentBySessionId(targetSessionId)
       : this.getActiveAgent();
-    if (!agent) return;
-    agent.sendUIResponse(response);
+    if (!agent) throw new Error("No active agent");
+    await agent.sendUIResponse(response);
+    if (!targetSessionId) return undefined;
+    const revision = clearPendingUIResponse(targetSessionId, response);
+    this.publishPendingUIRevision(targetSessionId, revision);
+    return revision;
+  }
+
+  getPendingUIRequests(sessionId: string): PendingUIEventSnapshot {
+    if (!this.getAgentBySessionId(sessionId)) return { revision: 0, requests: [] };
+    return getPendingUIEventSnapshot(sessionId);
+  }
+
+  async abort(sessionId?: string): Promise<void> {
+    const targetSessionId = sessionId || this.activeSessionId || undefined;
+    const agent = targetSessionId
+      ? this.getAgentBySessionId(targetSessionId)
+      : this.getActiveAgent();
+    if (!agent) throw new Error("No active agent");
+    await agent.abort();
+    if (targetSessionId) {
+      const revision = clearPendingUIEvents(targetSessionId);
+      this.publishPendingUIRevision(targetSessionId, revision);
+    }
   }
 
   async sendGuidance(sessionId: string | undefined, message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
@@ -323,7 +362,11 @@ export class AgentManager {
     if (!(await supportsGuidance(agentType)) || typeof agent.sendGuidance !== "function") {
       throw new Error("Guidance is not supported by this agent");
     }
-    await agent.sendGuidance(message, images, options);
+    await agent.sendGuidance(message, images, {
+      ...options,
+      displayMessage: options?.displayMessage || message,
+      hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+    });
   }
 
   async forkSession(sessionId: string, target: AgentForkTarget): Promise<AgentForkResult> {
@@ -400,17 +443,21 @@ export class AgentManager {
       for (const target of targets) {
         const nextAgent = await this.createAgentBackend(target.agentType, target.sessionId);
         if (this.window) nextAgent.setWindow(this.window);
-        await this.initAgentBackend(nextAgent, target.projectPath, target.sessionFilePath);
-        initializedTargets.push({
+        const initializedTarget = {
           target,
           nextAgent,
-          nextSessionFilePath: nextAgent.sessionFilePath || target.sessionFilePath,
-        });
+          nextSessionFilePath: target.sessionFilePath,
+        };
+        // Track the backend before init so a partially initialized instance is
+        // still disposed if init rejects after registering event listeners.
+        initializedTargets.push(initializedTarget);
+        await this.initAgentBackend(nextAgent, target.projectPath, target.sessionFilePath);
+        initializedTarget.nextSessionFilePath = nextAgent.sessionFilePath || target.sessionFilePath;
       }
     } catch (error) {
-      for (const initialized of initializedTargets) {
-        initialized.nextAgent.dispose();
-      }
+      await Promise.allSettled(initializedTargets.map(({ nextAgent }) => (
+        Promise.resolve().then(() => nextAgent.dispose())
+      )));
       throw error;
     }
 
@@ -422,8 +469,15 @@ export class AgentManager {
       } else {
         this.sessionFilePaths.delete(target.sessionId);
       }
-      target.agent.dispose();
     }
+
+    // The replacement is already initialized and authoritative. Quiesce all
+    // old listeners before returning, but do not roll back a healthy
+    // replacement merely because teardown of its predecessor reports an
+    // error. Promise.resolve().then also captures synchronous dispose throws.
+    await Promise.allSettled(initializedTargets.map(({ target }) => (
+      Promise.resolve().then(() => target.agent.dispose())
+    )));
 
     const reloadedSessionIds = targets.map((target) => target.sessionId);
     const modelSessionId =
@@ -590,7 +644,9 @@ export class AgentManager {
           await this.initAgentBackend(agent, target.projectPath, target.sessionFilePath);
         }
       } catch (error) {
-        await Promise.allSettled(restored.map(({ agent }) => Promise.resolve(agent.dispose())));
+        await Promise.allSettled(restored.map(({ agent }) => (
+          Promise.resolve().then(() => agent.dispose())
+        )));
         return {
           success: false,
           error: getErrorMessage(error),
@@ -654,7 +710,7 @@ export class AgentManager {
       return { success: true, sessionCount: 0 };
     }
     const results = await Promise.allSettled(
-      targets.map(([, agent]) => Promise.resolve(agent.dispose()))
+      targets.map(([, agent]) => Promise.resolve().then(() => agent.dispose()))
     );
     const failure = results.find((result) => result.status === "rejected");
     if (!failure || failure.status !== "rejected") {
@@ -700,14 +756,15 @@ export class AgentManager {
     this.disposingSessionIds.add(sessionId);
     try {
       if (agent) {
-        await Promise.resolve(agent.dispose());
+        await Promise.resolve().then(() => agent.dispose());
       }
+    } finally {
+      clearPendingUIEvents(sessionId);
       this.sessionAgents.delete(sessionId);
       this.sessionAgentTypes.delete(sessionId);
       this.sessionFilePaths.delete(sessionId);
       this.sessionProjectPaths.delete(sessionId);
       if (this.activeSessionId === sessionId) this.activeSessionId = null;
-    } finally {
       this.disposingSessionIds.delete(sessionId);
     }
   }
@@ -725,7 +782,8 @@ export class AgentManager {
     this.disposingSessionIds.clear();
     this.pluginCatalogMutating = false;
     this.activeSessionId = null;
-    await Promise.allSettled(agents.map((agent) => Promise.resolve(agent.dispose())));
+    clearAllPendingUIEvents();
+    await Promise.allSettled(agents.map((agent) => Promise.resolve().then(() => agent.dispose())));
   }
 }
 
@@ -1066,11 +1124,40 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     });
   });
 
-  ipcMain.handle("agent:getSessionState", (_event, sessionId: string) => {
+  ipcMain.handle("agent:getSessionState", async (_event, sessionId: string) => {
     const agent = agentManager.getAgentBySessionId(sessionId);
     if (!agent) return { success: false, idle: true, error: "No active agent" };
-    return { success: true, idle: agent.isIdle() };
+    const cachedIdle = agent.isIdle();
+    const pendingUI = hasPendingUIEvents(sessionId);
+    if (typeof agent.refreshIdle !== "function") return { success: true, idle: cachedIdle && !pendingUI };
+    try {
+      const refreshedIdle = await withTimeout(
+        agent.refreshIdle(),
+        AGENT_SESSION_STATE_REFRESH_TIMEOUT_MS,
+        "Agent idle refresh timed out",
+      );
+      return {
+        success: true,
+        // Waiting for a host-rendered answer is semantically busy even if a
+        // plugin's optional isIdle() implementation reports otherwise.
+        idle: refreshedIdle && !hasPendingUIEvents(sessionId),
+      };
+    } catch (error) {
+      // A transport failure must not turn an uncertain live session into an
+      // idle one. Return the last revision-guarded cache, but mark it stale so
+      // callers do not mistake an old `false` for authoritative busy state.
+      return {
+        success: true,
+        idle: agent.isIdle() && !hasPendingUIEvents(sessionId),
+        stale: true,
+        error: getErrorMessage(error),
+      };
+    }
   });
+
+  ipcMain.handle("agent:getPendingUIRequests", async (_event, sessionId: string) => (
+    agentManager.getPendingUIRequests(sessionId)
+  ));
 
   ipcMain.handle("agent:sendMessage", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
     try {
@@ -1088,7 +1175,12 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       const permissionMode = capabilities?.permissions === true
         ? normalizeAgentPermissionMode(options?.permissionMode)
         : "full-access";
-      const nativePlanMode = capabilities?.planMode === "native";
+      // Pi's Plan enforcement lives in Hpp's built-in worker. Treat older
+      // official Pi plugin manifests (which declared prompt mode) as native so
+      // an Hpp update fixes Plan mode without requiring a separate plugin
+      // reinstall first.
+      const nativePlanMode = capabilities?.planMode === "native" ||
+        (agentType === "pi" && capabilities?.planMode === "prompt");
       if (agentManager.isAgentRuntimeUpdating(agentType)) {
         return { success: false, error: "该 Agent CLI 正在更新，请等待更新完成。" };
       }
@@ -1101,13 +1193,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       if (currentAgent !== agent) {
         return { success: false, error: "No active agent" };
       }
-      const effectiveMessage = planModeEnabled && !nativePlanMode
+      const modeAwareMessage = planModeEnabled && !nativePlanMode
         ? withPromptPlanMode(message)
         : message;
-      await agent.sendMessage(effectiveMessage, images, {
+      await agent.sendMessage(modeAwareMessage, images, {
         planModeEnabled: planModeEnabled && nativePlanMode,
         permissionMode,
         displayMessage: message,
+        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
         clientMessageId: options?.clientMessageId,
         action: options?.action,
       });
@@ -1321,7 +1414,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agent:abort", async (_event, sessionId?: string) => {
     const agent = sessionId ? agentManager.getAgentBySessionId(sessionId) : agentManager.getActiveAgent();
     if (!agent) return { success: false };
-    await agent.abort();
+    await agentManager.abort(sessionId);
     return { success: true };
   });
 
@@ -1385,7 +1478,11 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agent:sendUIResponse", async (_event, response: AgentUIResponse) => {
-    agentManager.sendUIResponse(response);
-    return { success: true };
+    try {
+      const pendingUIRevision = await agentManager.sendUIResponse(response);
+      return { success: true, pendingUIRevision };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
   });
 }

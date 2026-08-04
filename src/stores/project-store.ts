@@ -54,6 +54,7 @@ interface ProjectState {
   projects: Project[];
   activeProjectId: string | null;
   activeSessionId: string | null;
+  projectDataHydrated: boolean;
   agentStatuses: Record<string, AgentStatus>; // sessionId -> status
   initializedSessionIds: Set<string>; // session IDs with agent backend created
   addProject: (name: string, path: string, agentIds?: string[]) => void;
@@ -78,6 +79,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   projects: [],
   activeProjectId: null,
   activeSessionId: null,
+  projectDataHydrated: false,
   agentStatuses: {},
   initializedSessionIds: new Set<string>(),
 
@@ -129,7 +131,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (sourceIndex < 0 || targetIndex < 0) return s;
       const projects = [...s.projects];
       const [moved] = projects.splice(sourceIndex, 1);
-      const insertionIndex = insertAfter && sourceIndex < targetIndex ? targetIndex : targetIndex + (insertAfter ? 1 : 0);
+      const rawInsertionIndex = targetIndex + (insertAfter ? 1 : 0);
+      const insertionIndex = sourceIndex < rawInsertionIndex ? rawInsertionIndex - 1 : rawInsertionIndex;
+      if (insertionIndex === sourceIndex) return s;
       projects.splice(insertionIndex, 0, moved);
       return { projects };
     }),

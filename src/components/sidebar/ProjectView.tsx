@@ -1,21 +1,34 @@
-import { useState, useEffect, type DragEvent } from "react";
+import { useState, useEffect, useRef, type DragEvent } from "react";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
+import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
 
 export function ProjectView() {
-  const { projects, addProject, reorderProjects } = useProjectStore();
+  const { projects, activeSessionId, projectDataHydrated, addProject, reorderProjects } = useProjectStore();
+  const startupCollapseStateRef = useRef<Map<string, boolean> | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [dropProjectId, setDropProjectId] = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<"before" | "after">("before");
+  const projectScrollRef = useRef<HTMLDivElement>(null);
+  const { update: updateProjectAutoScroll, stop: stopProjectAutoScroll } = useDragAutoScroll(projectScrollRef);
   const agents = useAgentCatalogStore((state) => state.agents);
   const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
   const { showAddProject, clearAddProject } = useAppStore();
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
+
+  if (projectDataHydrated && startupCollapseStateRef.current === null) {
+    const rememberedProjectId = projects.find((project) =>
+      project.sessions.some((session) => session.id === activeSessionId)
+    )?.id;
+    startupCollapseStateRef.current = new Map(
+      projects.map((project) => [project.id, project.id !== rememberedProjectId]),
+    );
+  }
 
   useEffect(() => {
     void loadAgents();
@@ -84,7 +97,14 @@ export function ProjectView() {
         </div>
       )}
 
-      <div className="sidebar-content">
+      <div
+        ref={projectScrollRef}
+        className="sidebar-content"
+        onDragOver={(event) => {
+          if (draggedProjectId) updateProjectAutoScroll(event.clientY);
+        }}
+        onDrop={stopProjectAutoScroll}
+      >
         {projects.length === 0 && !showAdd && (
           <div className="placeholder-text">暂无项目</div>
         )}
@@ -95,6 +115,7 @@ export function ProjectView() {
               className={`project-card-drag-wrapper ${draggedProjectId === project.id ? "dragging" : ""} ${dropProjectId === project.id ? `drop-target ${dropPosition}` : ""}`}
               draggable={projects.length > 1}
               onDragStart={(event: DragEvent<HTMLDivElement>) => {
+                stopProjectAutoScroll();
                 setDraggedProjectId(project.id);
                 setDropPosition("before");
                 event.dataTransfer.effectAllowed = "move";
@@ -105,36 +126,47 @@ export function ProjectView() {
                 const rect = event.currentTarget.getBoundingClientRect();
                 const sourceIndex = projects.findIndex((item) => item.id === draggedProjectId);
                 const targetIndex = projects.findIndex((item) => item.id === project.id);
-                const movingDown = sourceIndex < targetIndex;
-                const edgeSize = Math.min(28, rect.height * 0.22);
-                const inInsertZone = movingDown
-                  ? event.clientY >= rect.bottom - edgeSize
-                  : event.clientY <= rect.top + edgeSize;
-                if (!inInsertZone) {
+                const insertAfter = event.clientY >= rect.top + rect.height / 2;
+                const rawInsertIndex = targetIndex + (insertAfter ? 1 : 0);
+                const nextIndex = sourceIndex < rawInsertIndex ? rawInsertIndex - 1 : rawInsertIndex;
+                if (sourceIndex < 0 || targetIndex < 0 || nextIndex === sourceIndex) {
                   setDropProjectId((current) => current === project.id ? null : current);
                   return;
                 }
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
                 setDropProjectId(project.id);
-                setDropPosition(movingDown ? "after" : "before");
+                setDropPosition(insertAfter ? "after" : "before");
               }}
-              onDragLeave={() => setDropProjectId((current) => current === project.id ? null : current)}
+              onDragLeave={(event) => {
+                const relatedTarget = event.relatedTarget;
+                if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+                setDropProjectId((current) => current === project.id ? null : current);
+              }}
               onDrop={(event) => {
                 event.preventDefault();
+                stopProjectAutoScroll();
                 const sourceId = event.dataTransfer.getData("text/plain") || draggedProjectId;
-                if (sourceId) reorderProjects(sourceId, project.id, dropPosition === "after");
+                if (sourceId && dropProjectId === project.id) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const insertAfter = event.clientY >= rect.top + rect.height / 2;
+                  reorderProjects(sourceId, project.id, insertAfter);
+                }
                 setDraggedProjectId(null);
                 setDropProjectId(null);
                 setDropPosition("before");
               }}
               onDragEnd={() => {
+                stopProjectAutoScroll();
                 setDraggedProjectId(null);
                 setDropProjectId(null);
                 setDropPosition("before");
               }}
             >
-              <ProjectCard project={project} />
+              <ProjectCard
+                project={project}
+                initialSessionsCollapsed={startupCollapseStateRef.current?.get(project.id) ?? false}
+              />
             </div>
           ))}
         </div>

@@ -45,7 +45,10 @@ class FakeQuery {
       const content = Array.isArray(user.message.content) ? user.message.content : [];
       const text = content.filter((part) => part.type === "text").map((part) => part.text).join("");
       const imageCount = content.filter((part) => part.type === "image").length;
-      if (text === "ask") {
+      if (text === "disconnect") {
+        this.close();
+        continue;
+      } else if (text === "ask") {
         const input = { questions: [{ question: "Which agent?", header: "Agent", multiSelect: false, options: [{ label: "Pi", description: "Pi" }, { label: "Claude", description: "Claude" }] }] };
         const decision = await this.options.canUseTool("AskUserQuestion", input, { toolUseID: "ask-1", signal: new AbortController().signal });
         const answer = JSON.stringify(decision.updatedInput?.answers || {});
@@ -69,6 +72,11 @@ class FakeQuery {
       } else if (text === "session-mode") {
         const details = JSON.stringify({ resume: this.options.resume, sessionId: this.options.sessionId });
         this.enqueue({ type: "assistant", uuid: "assistant-session-mode", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: details }] } });
+      } else if (text === "system-prompt") {
+        this.enqueue({ type: "assistant", uuid: "assistant-system-prompt", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(this.options.systemPrompt) }] } });
+      } else if (text === "compact") {
+        this.enqueue({ type: "system", subtype: "compact_boundary", uuid: "compact-1", session_id: this.sessionId });
+        this.enqueue({ type: "assistant", uuid: "assistant-compact", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: "compacted" }] } });
       } else if (text.startsWith("/review")) {
         this.enqueue({ type: "assistant", uuid: "assistant-action", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text }] } });
       } else {
@@ -137,9 +145,9 @@ async function writeFakeSDK(runtimeRoot: string) {
   ]);
 }
 
-function startWorker(runtimeRoot: string) {
+function startWorker(runtimeRoot: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const child = spawn(process.execPath, [resolve("electron/plugin-backends/claude/worker.mjs")], {
-    env: { ...process.env, CLAUDE_AGENT_SDK_PACKAGE_ROOT: runtimeRoot },
+    env: { ...process.env, CLAUDE_AGENT_SDK_PACKAGE_ROOT: runtimeRoot, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const messages: WorkerMessage[] = [];
@@ -202,10 +210,24 @@ describe("Claude Agent SDK worker", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  async function initialize(sessionFilePath = "new-session", isNewSession = true, config = providerConfig) {
-    const worker = startWorker(runtimeRoot);
+  async function initialize(
+    sessionFilePath = "new-session",
+    isNewSession = true,
+    config = providerConfig,
+    extraEnv: NodeJS.ProcessEnv = {},
+    hostSystemPrompt?: string,
+  ) {
+    const worker = startWorker(runtimeRoot, extraEnv);
     children.push(worker.child);
-    worker.send({ id: "init", type: "init", projectPath: tempRoot, sessionFilePath, isNewSession, config });
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      sessionFilePath,
+      isNewSession,
+      config,
+      hostSystemPrompt,
+    });
     await worker.waitFor((message) => message.type === "ready");
     return worker;
   }
@@ -220,11 +242,67 @@ describe("Claude Agent SDK worker", () => {
     expect(JSON.stringify(worker.messages)).not.toContain("secret-key");
   });
 
+  it("reports Claude's compact boundary as completed before the prompt settles", async () => {
+    const worker = await initialize();
+    worker.send({ id: "prompt-compact", type: "prompt", message: "compact", permissionMode: "full-access" });
+
+    const compacted = await worker.waitFor((message) => message.type === "context_compaction");
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-compact");
+
+    expect(compacted).toMatchObject({ uuid: "compact-1", phase: "completed" });
+    expect(worker.messages.indexOf(compacted)).toBeLessThan(
+      worker.messages.findIndex((message) => message.type === "prompt_done" && message.id === "prompt-compact"),
+    );
+  });
+
+  it("fails the active prompt and exits when the SDK query transport ends", async () => {
+    const worker = await initialize();
+    const exited = new Promise<number | null>((resolvePromise) => {
+      worker.child.once("exit", (code) => resolvePromise(code));
+    });
+
+    worker.send({ id: "prompt-disconnect", type: "prompt", message: "disconnect", permissionMode: "full-access" });
+
+    await expect(worker.waitFor((message) => message.type === "error" && message.id === "prompt-disconnect"))
+      .resolves.toMatchObject({
+        type: "error",
+        error: "Claude Agent SDK query ended unexpectedly",
+      });
+    await expect(exited).resolves.toBe(1);
+  });
+
   it("marks the Hpp provider as host-managed with Claude's boolean flag", async () => {
     const worker = await initialize();
     worker.send({ id: "prompt-env", type: "prompt", message: "env", permissionMode: "full-access" });
     await expect(worker.waitFor((message) => message.type === "message_end" && message.nativeTurnId === "assistant-env"))
       .resolves.toMatchObject({ text: "1" });
+  });
+
+  it("appends Hpp host policy to Claude's native system preset in Plan mode", async () => {
+    const worker = await initialize(
+      "new-session",
+      true,
+      providerConfig,
+      {},
+      "  [HPP] 始终使用简体中文  ",
+    );
+    worker.send({
+      id: "prompt-system",
+      type: "prompt",
+      message: "system-prompt",
+      permissionMode: "auto",
+      planModeEnabled: true,
+    });
+
+    const message = await worker.waitFor((item) =>
+      item.type === "message_end" && item.nativeTurnId === "assistant-system-prompt");
+    expect(JSON.parse(String(message.text))).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: "[HPP] 始终使用简体中文",
+    });
+    await expect(worker.waitFor((item) => item.type === "prompt_done" && item.id === "prompt-system"))
+      .resolves.toMatchObject({ type: "prompt_done" });
   });
 
   it("isolates Chat Completions behind a local adapter", async () => {
@@ -251,8 +329,26 @@ describe("Claude Agent SDK worker", () => {
         result: { answers: [{ kind: "custom", answer: "Custom agent", label: "Custom agent", wasCustom: true }] },
       },
     });
+    await expect(worker.waitFor((message) => message.type === "ui_response_done" && message.id === "ui-1"))
+      .resolves.toMatchObject({ type: "ui_response_done", id: "ui-1" });
     const answer = await worker.waitFor((message) => message.type === "message_end" && message.nativeTurnId === "assistant-ask");
     expect(answer.text).toBe('{"Which agent?":"Custom agent"}');
+  });
+
+  it("returns an error for a UI response without a matching request", async () => {
+    const worker = await initialize();
+    worker.send({
+      id: "ui-missing",
+      type: "uiResponse",
+      response: { id: "missing-request", text: "answer" },
+    });
+
+    await expect(worker.waitFor((message) => message.type === "error" && message.id === "ui-missing"))
+      .resolves.toMatchObject({
+        type: "error",
+        id: "ui-missing",
+        error: "Unknown Claude UI request: missing-request",
+      });
   });
 
   it("routes Plan confirmation through the approval interaction", async () => {

@@ -151,18 +151,26 @@ type AgentCapabilities = {
 ```js
 export function createAgentBackend(context) {
   return {
-    async init(projectPath, existingSessionFilePath) {},
+    async init(projectPath, existingSessionFilePath, options) {},
     async sendMessage(message, images, options) {},
     async abort() {},
     async getModels() { return []; },
     async setModel(provider, modelId) {},
     async setThinkingLevel(level) {},
-    sendUIResponse(response) {},
+    async sendUIResponse(response) {},
     dispose() {},
     get sessionFilePath() { return null; }
   };
 }
 ```
+
+`init(projectPath, existingSessionFilePath, options)` 的 `options.hostSystemPrompt` 和 `sendMessage(message, images, options)` 的同名字段都由 Hpp 核心提供，包含宿主级通用约束。`init` 会在 Agent 原生运行时启动前收到该字段，适合使用 CLI 启动参数或会话级 system prompt 的适配器；每个新回合还会再次收到当前值，适合需要逐回合追加 system/developer instructions 的适配器。
+
+Agent 适配器必须通过其原生 system prompt、developer instructions 或等价的高优先级通道注入，并保证它在 Agent 自带提示与 Plan 提示之后仍然有效。不要把它拼进用户消息，也不要写入聊天历史。支持 `sendGuidance` 的适配器也会在其 `options` 中收到同一字段；若引导会触发独立请求，应同样通过原生高优先级通道应用。该字段是通用 backend 契约，不需要在 manifest 中按 Agent ID 声明；旧版 Hpp 不提供 `init` 第三个参数或该字段时，插件应安全忽略空值。
+
+这项规则由 Hpp 主进程统一负责：桌面端、移动端和远程会话最终都经过同一套 Agent backend 调用，因此不需要为每个 Agent 单独创建 `SYSTEM.md`。未来新增的 Agent 只要遵守上述 `AgentBackend` 契约，就会自动收到同一份中文规则；适配器不得丢弃 `hostSystemPrompt`，也不得用 Agent 自己的默认语言提示覆盖它。没有原生 system/developer 通道的 Agent，应在适配器内部实现等价的高优先级注入；不能安全实现时应明确说明该限制，而不是静默忽略规则。
+
+兼容边界：OpenCode 1.18.x 的普通与 Plan 请求支持原生 `PromptInput.system`，但原生 `/command` 的 `CommandInput` 没有 system 字段。Hpp 在命令/技能动作路径中保留 OpenCode 的原生命令展开，不会把宿主约束降级拼入用户参数；待 OpenCode 为 `CommandInput` 提供高优先级提示字段后再接入该路径。
 
 可选导出：
 

@@ -1,4 +1,9 @@
-import type { ChatMessage } from "@/stores/chat-store";
+import {
+  getAssistantProcessLastActivityAt,
+  hasOpenAssistantProcessState,
+  normalizeAssistantProcessTerminalState,
+  type ChatMessage,
+} from "@/stores/chat-store";
 import type { ProjectSession, SessionForkContext } from "@/stores/project-store";
 import { getAgentName } from "@/lib/agents";
 
@@ -56,15 +61,18 @@ const clonePlain = <T>(value: T): T => {
 };
 
 const normalizeForkedMessage = (message: ChatMessage): ChatMessage => {
-  const cloned = clonePlain(message);
+  let cloned = clonePlain(message);
   cloned.id = createMessageId();
   delete cloned.isStreaming;
 
-  if (cloned.process && !cloned.process.endedAt) {
-    cloned.process.endedAt = Date.now();
-    cloned.process.entries = cloned.process.entries.map((entry) =>
-      entry.state === "running" ? { ...entry, state: "interrupted" } : entry
-    );
+  if (hasOpenAssistantProcessState(cloned)) {
+    cloned = normalizeAssistantProcessTerminalState(cloned, {
+      endedAt: getAssistantProcessLastActivityAt(cloned),
+      finalState: "interrupted",
+    });
+    // Forked history is always static; preserve its previous serialized shape
+    // while still normalizing any nested streaming markers above.
+    delete cloned.isStreaming;
   }
 
   return cloned;

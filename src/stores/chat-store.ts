@@ -6,6 +6,12 @@ import type { SharedModel } from "@shared/models";
 import type { ProcessEntryView } from "@shared/process-view";
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
+import {
+  cloneComposerDocument,
+  createComposerDocument,
+  getComposerPlainText,
+  type ComposerDocument,
+} from "@shared/composer-document";
 
 export interface FileDiff extends DiffLike {
   file: string;
@@ -61,6 +67,8 @@ export interface AgentProcessEntry extends ProcessEntryView {
   activityKind?: AgentSubagentActivityKind;
   startedAt?: number;
   completedAt?: number;
+  guidanceDocument?: ComposerDocument;
+  guidanceImages?: Array<{ id: string; src: string; name: string }>;
 }
 
 export type AgentProcessStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -87,6 +95,8 @@ export interface AgentProcess {
   entries: AgentProcessEntry[];
 }
 
+export type AgentProcessFinalState = "completed" | "interrupted";
+
 export interface AgentCommentary {
   id: string;
   content: string;
@@ -101,6 +111,7 @@ export interface ChatMessage {
   timestamp: number;
   isStreaming?: boolean;
   systemType?: "context_compaction" | "agent_startup_error";
+  compactionState?: "running" | "completed" | "interrupted";
   eventId?: string;
   images?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
@@ -110,6 +121,7 @@ export interface ChatMessage {
   nativeTurnId?: string;
   action?: AgentActionInvocation;
   composerDraft?: ComposerDraftSnapshot;
+  composerDocument?: ComposerDocument;
 }
 
 export interface PendingFile {
@@ -147,6 +159,7 @@ export interface QueuedMessageEditableDraft {
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
+  document?: ComposerDocument;
   forkContext?: string;
   action?: AgentActionInvocation;
 }
@@ -157,11 +170,13 @@ export interface ComposerDraftSnapshot {
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
+  document?: ComposerDocument;
   action?: AgentActionInvocation;
 }
 
 export interface ChatDraft {
   text: string;
+  document?: ComposerDocument;
   pendingImages: PendingImage[];
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
@@ -189,6 +204,7 @@ export interface QueuedMessage {
   error?: string;
   action?: AgentActionInvocation;
   editableDraft?: QueuedMessageEditableDraft;
+  composerDocument?: ComposerDocument;
 }
 
 interface ChatState {
@@ -203,12 +219,18 @@ interface ChatState {
   activeAgentId: string;
   sessionDrafts: Record<string, ChatDraft>;
   messageQueues: Record<string, QueuedMessage[]>;
+  compactingSessions: Record<string, boolean>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
   setNativeTurnIdForTurn: (clientMessageId: string, nativeTurnId: string, sessionId?: string | null) => void;
   appendLastAssistantDiffs: (diffs: FileDiff[], sessionId?: string | null) => void;
-  appendContextCompactionDivider: (eventId?: string, sessionId?: string | null) => void;
+  appendContextCompactionDivider: (
+    eventId?: string,
+    sessionId?: string | null,
+    state?: "running" | "completed" | "interrupted",
+  ) => void;
+  setSessionCompacting: (sessionId: string, compacting: boolean) => void;
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
   appendLastAssistantCommentaryDelta: (itemId: string, delta: string, timestamp?: number, sessionId?: string | null) => void;
   finishLastAssistantCommentary: (itemId: string, content?: string, timestamp?: number, sessionId?: string | null) => void;
@@ -218,6 +240,8 @@ interface ChatState {
   updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   finishAssistantProcessContainingEntry: (entryId: string, endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
+  finishAllAssistantProcesses: (endedAt?: number, finalState?: AgentProcessFinalState, sessionId?: string | null) => void;
+  interruptSessionCompaction: (sessionId: string) => void;
   collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;
   toggleAssistantProcessEntry: (messageId: string, entryId: string) => void;
@@ -230,6 +254,7 @@ interface ChatState {
   clearMessages: () => void;
   clearAgentStartupErrors: (sessionId?: string | null) => void;
   setDraftText: (sessionId: string, text: string) => void;
+  setDraftDocument: (sessionId: string, document: ComposerDocument) => void;
   replaceSessionDraft: (sessionId: string, draft: ChatDraft) => void;
   setDraftAction: (sessionId: string, action?: AgentActionInvocation) => void;
   addPendingImage: (image: PendingImage, sessionId?: string | null) => void;
@@ -277,15 +302,42 @@ const ensureAssistantProcess = (messages: ChatMessage[], startedAt = Date.now())
   const last = msgs[msgs.length - 1];
 
   if (!last || last.role !== "assistant" || !last.isStreaming) {
-    msgs.push({
+    for (let messageIndex = 0; messageIndex < msgs.length; messageIndex += 1) {
+      const message = msgs[messageIndex];
+      if (!hasOpenAssistantProcessState(message)) continue;
+      const processIsOpen = !!message.process && !isFiniteTimestamp(message.process.endedAt);
+      const awaitingAnswer = processIsOpen && message.process!.entries.some((entry) => (
+        entry.type === "question" && entry.state === "running"
+      ));
+      if (awaitingAnswer) continue;
+      msgs[messageIndex] = normalizeAssistantProcessTerminalState(message, {
+        // This is an orphaned process from an earlier renderer turn. Using
+        // the new turn's wall-clock start can turn a lost terminal event into
+        // hours or days of fake elapsed time; settle it at its own last known
+        // activity instead.
+        endedAt: getAssistantProcessLastActivityAt(message) ?? startedAt,
+        finalState: "completed",
+        expanded: false,
+      });
+    }
+    const assistantMessage: ChatMessage = {
       id: createMessageId(),
       role: "assistant",
       content: "",
       timestamp: startedAt,
       isStreaming: true,
       process: { startedAt, expanded: true, entries: [] },
-    });
-    index = msgs.length - 1;
+    };
+    // A provider may resume the same turn after compacting its context. Keep
+    // that continuation before the trailing divider so the divider remains
+    // after all body output instead of splitting the response in two.
+    if (last?.systemType === "context_compaction") {
+      msgs.splice(msgs.length - 1, 0, assistantMessage);
+      index = msgs.length - 2;
+    } else {
+      msgs.push(assistantMessage);
+      index = msgs.length - 1;
+    }
   } else if (index >= 0) {
     const msg = msgs[index];
     msgs[index] = {
@@ -410,45 +462,140 @@ const enrichProcessSubagentIdentities = (entries: AgentProcessEntry[]) => {
   });
 };
 
-const finishSubagentState = (
-  subagents: AgentSubagent[] | undefined,
-  finalState: "completed" | "interrupted",
-) => subagents?.map((subagent) => (
-  subagent.status === "pending" || subagent.status === "running"
-    ? { ...subagent, status: finalState }
-    : subagent
-));
+const isFiniteTimestamp = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value > 0;
+
+export const getAssistantProcessLastActivityAt = (message: ChatMessage): number | undefined => {
+  const candidates: unknown[] = [
+    message.timestamp,
+    message.process?.startedAt,
+    message.process?.endedAt,
+    ...(message.commentary || []).map((item) => item.timestamp),
+    ...(message.process?.entries || []).flatMap((entry) => [
+      entry.timestamp,
+      entry.startedAt,
+      entry.completedAt,
+    ]),
+  ];
+  let latest: number | undefined;
+  for (const candidate of candidates) {
+    if (!isFiniteTimestamp(candidate)) continue;
+    latest = latest === undefined ? candidate : Math.max(latest, candidate);
+  }
+  return latest;
+};
+
+export const hasOpenAssistantProcessState = (message: ChatMessage) => {
+  if (message.role !== "assistant") return false;
+  if (message.isStreaming || message.commentary?.some((item) => item.isStreaming)) return true;
+  const process = message.process;
+  if (!process) return false;
+  return !isFiniteTimestamp(process.endedAt)
+    || process.entries.some((entry) => (
+      entry.state === "running"
+      || entry.phase === "started"
+      || entry.subagents?.some((subagent) => subagent.status === "pending" || subagent.status === "running")
+    ))
+    || process.planSteps?.some((step) => step.status === "pending" || step.status === "running")
+    || false;
+};
+
+interface NormalizeAssistantProcessOptions {
+  endedAt?: number;
+  finalState?: AgentProcessFinalState;
+  expanded?: boolean;
+}
+
+/**
+ * Collapses a process banner together with every thinking entry inside it, so
+ * the thinking trail folds away with the execution steps instead of remaining
+ * expanded in the collapsed view.
+ */
+const collapseProcessWithThinking = (process: AgentProcess): AgentProcess => ({
+  ...process,
+  expanded: false,
+  entries: process.entries.map((entry) =>
+    entry.type === "thinking" ? { ...entry, expanded: false } : entry
+  ),
+});
+
+/**
+ * Makes every nested lifecycle marker agree with an assistant message's
+ * terminal state. Callers provide the event time so persistence and forks do
+ * not accidentally use the current wall-clock time for an old process.
+ */
+export const normalizeAssistantProcessTerminalState = (
+  message: ChatMessage,
+  options: NormalizeAssistantProcessOptions = {},
+): ChatMessage => {
+  const finalState = options.finalState || "completed";
+  const terminalStepState: AgentProcessStepStatus = finalState === "completed" ? "completed" : "cancelled";
+  const commentary = message.commentary?.map((item) => (
+    item.isStreaming ? { ...item, isStreaming: false } : item
+  ));
+  const process = message.process;
+  if (!process) {
+    return {
+      ...message,
+      isStreaming: false,
+      commentary,
+    };
+  }
+
+  const terminalAt = isFiniteTimestamp(process.endedAt)
+    ? process.endedAt
+    : isFiniteTimestamp(options.endedAt)
+      ? options.endedAt
+      : getAssistantProcessLastActivityAt(message) ?? Date.now();
+  const endedAt = isFiniteTimestamp(process.startedAt)
+    ? Math.max(process.startedAt, terminalAt)
+    : terminalAt;
+  return {
+    ...message,
+    isStreaming: false,
+    commentary,
+    process: {
+      ...process,
+      endedAt,
+      ...(options.expanded === undefined ? {} : { expanded: options.expanded }),
+      entries: process.entries.map((entry) => {
+        const hadStartedPhase = entry.phase === "started";
+        const wasRunning = entry.state === "running" || hadStartedPhase;
+        return {
+          ...entry,
+          ...(wasRunning
+            ? {
+                state: entry.state === "running" || entry.state === undefined
+                  ? finalState
+                  : entry.state,
+                phase: hadStartedPhase ? "completed" as const : entry.phase,
+                completedAt: isFiniteTimestamp(entry.completedAt) ? entry.completedAt : endedAt,
+                expanded: entry.type === "thinking" ? entry.expanded : false,
+              }
+            : {}),
+          subagents: entry.subagents?.map((subagent) => (
+            subagent.status === "pending" || subagent.status === "running"
+              ? { ...subagent, status: finalState }
+              : subagent
+          )),
+        };
+      }),
+      planSteps: process.planSteps?.map((step) => (
+        step.status === "pending" || step.status === "running"
+          ? { ...step, status: terminalStepState }
+          : step
+      )),
+    },
+  };
+};
 
 const finishAssistantProcessMessage = (
   message: ChatMessage,
   endedAt: number | undefined,
-  finalState: "completed" | "interrupted",
-): ChatMessage => ({
-  ...message,
-  isStreaming: false,
-  commentary: message.commentary?.map((item) => (
-    item.isStreaming ? { ...item, isStreaming: false } : item
-  )),
-  process: message.process
-    ? {
-        ...message.process,
-        endedAt: message.process.endedAt || endedAt || Date.now(),
-        entries: message.process.entries.map((entry) => {
-          const subagents = finishSubagentState(entry.subagents, finalState);
-          if (entry.state !== "running" && subagents === entry.subagents) return entry;
-          return {
-            ...entry,
-            ...(entry.state === "running"
-              ? {
-                  state: finalState,
-                  expanded: entry.type === "thinking" ? entry.expanded : false,
-                }
-              : {}),
-            subagents,
-          };
-        }),
-      }
-    : message.process,
+  finalState: AgentProcessFinalState,
+): ChatMessage => normalizeAssistantProcessTerminalState(message, {
+  endedAt: isFiniteTimestamp(endedAt) ? endedAt : Date.now(),
+  finalState,
 });
 
 const setNativeTurnIdForMessages = (
@@ -496,6 +643,9 @@ export const createEmptyChatDraft = (): ChatDraft => ({
 
 export const cloneChatDraft = (draft: ChatDraft): ChatDraft => ({
   text: draft.text,
+  document: draft.document ? cloneComposerDocument(draft.document) : createComposerDocument(
+    draft.text ? [{ id: "legacy-text", type: "text", text: draft.text }] : [],
+  ),
   pendingImages: draft.pendingImages.map((image) => ({ ...image })),
   pendingFiles: draft.pendingFiles.map((file) => ({ ...file })),
   pendingPathAttachments: draft.pendingPathAttachments.map((attachment) => ({ ...attachment })),
@@ -538,6 +688,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeAgentId: "",
   sessionDrafts: {},
   messageQueues: {},
+  compactingSessions: {},
 
   addMessage: (msg, sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
@@ -546,9 +697,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
       const msgs = [...messages];
-      const last = msgs[msgs.length - 1];
-      if (last && last.role === "assistant") {
-        msgs[msgs.length - 1] = { ...last, content };
+      const index = findLastAssistantIndex(msgs);
+      if (index >= 0) {
+        msgs[index] = { ...msgs[index], content };
       }
       return msgs;
       });
@@ -573,15 +724,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }),
 
-  appendContextCompactionDivider: (eventId, sessionId) =>
+  appendContextCompactionDivider: (eventId, sessionId, compactionState = "completed") =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
         const normalizedEventId = eventId?.trim();
-        if (
-          normalizedEventId &&
-          messages.some((msg) => msg.systemType === "context_compaction" && msg.eventId === normalizedEventId)
-        ) {
-          return messages;
+        const content = compactionState === "running"
+          ? "上下文压缩中"
+          : compactionState === "interrupted"
+            ? "上下文压缩已中断"
+            : "上下文已自动压缩";
+        if (normalizedEventId) {
+          const existingIndex = messages.findIndex((msg) =>
+            msg.systemType === "context_compaction" && msg.eventId === normalizedEventId
+          );
+          if (existingIndex >= 0) {
+            const existing = messages[existingIndex];
+            if (existing.compactionState === compactionState && existing.content === content) return messages;
+            const nextMessages = [...messages];
+            nextMessages[existingIndex] = { ...existing, content, compactionState };
+            return nextMessages;
+          }
         }
 
         return [
@@ -589,13 +751,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
           {
             id: normalizedEventId ? `context-compaction-${normalizedEventId}` : createMessageId(),
             role: "system",
-            content: "上下文已自动压缩",
+            content,
             timestamp: Date.now(),
             systemType: "context_compaction",
+            compactionState,
             eventId: normalizedEventId,
           },
         ];
       });
+    }),
+
+  setSessionCompacting: (sessionId, compacting) =>
+    set((s) => {
+      if (!sessionId || s.compactingSessions[sessionId] === compacting) return {};
+      const next = { ...s.compactingSessions };
+      if (compacting) next[sessionId] = true;
+      else delete next[sessionId];
+      return { compactingSessions: next };
+    }),
+
+  interruptSessionCompaction: (sessionId) =>
+    set((s) => {
+      if (!sessionId) return {};
+      const messageState = updateSessionMessages(s, sessionId, (messages) => {
+        let changed = false;
+        const nextMessages = messages.map((message) => {
+          if (message.systemType !== "context_compaction" || message.compactionState !== "running") {
+            return message;
+          }
+          changed = true;
+          return {
+            ...message,
+            content: "上下文压缩已中断",
+            compactionState: "interrupted" as const,
+          };
+        });
+        return changed ? nextMessages : messages;
+      });
+      const compactingSessions = { ...s.compactingSessions };
+      delete compactingSessions[sessionId];
+      return { ...messageState, compactingSessions };
     }),
 
   startAssistantProcess: (startedAt, sessionId) =>
@@ -668,7 +863,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const process = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
       const normalizedEntry: AgentProcessEntry = {
         ...entry,
-        expanded: false,
+        expanded: entry.type === "thinking",
       };
       msgs[index] = {
         ...msg,
@@ -716,7 +911,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const entryIdSet = new Set(entryIds);
       return updateSessionMessages(s, sessionId, (messages) => {
       const msgs = [...messages];
-      const index = findLastAssistantIndex(msgs);
+      let index = -1;
+      for (let messageIndex = msgs.length - 1; messageIndex >= 0; messageIndex -= 1) {
+        const message = msgs[messageIndex];
+        if (message.role === "assistant" && message.process?.entries.some((entry) => entryIdSet.has(entry.id))) {
+          index = messageIndex;
+          break;
+        }
+      }
       if (index < 0) return msgs;
 
       const msg = msgs[index];
@@ -774,6 +976,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return msgs;
     })),
 
+  finishAllAssistantProcesses: (endedAt, finalState = "completed", sessionId) =>
+    set((s) => {
+      const terminalAt = isFiniteTimestamp(endedAt) ? endedAt : Date.now();
+      return updateSessionMessages(s, sessionId, (messages) => {
+        let lastUserIndex = -1;
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          if (messages[index].role !== "user") continue;
+          lastUserIndex = index;
+          break;
+        }
+        let currentAssistantIndex = -1;
+        for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
+          if (messages[index].role !== "assistant") continue;
+          currentAssistantIndex = index;
+          break;
+        }
+        let changed = false;
+        const nextMessages = messages.map((message, index) => {
+          if (!hasOpenAssistantProcessState(message)) return message;
+          changed = true;
+          return normalizeAssistantProcessTerminalState(message, {
+            // Only the assistant turn currently owned by the latest user
+            // receives the lifecycle terminal time. Older orphaned turns may
+            // be days old; extending all of them to `terminalAt` would leave
+            // permanently inflated elapsed durations in history.
+            endedAt: index === currentAssistantIndex
+              ? terminalAt
+              : getAssistantProcessLastActivityAt(message),
+            finalState,
+          });
+        });
+        return changed ? nextMessages : messages;
+      });
+    }),
+
   collapseLastAssistantProcess: (sessionId) =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
@@ -782,7 +1019,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (index >= 0) {
         const msg = msgs[index];
         if (msg.process) {
-          msgs[index] = { ...msg, process: { ...msg.process, expanded: false } };
+          msgs[index] = { ...msg, process: collapseProcessWithThinking(msg.process) };
         }
       }
       return msgs;
@@ -870,6 +1107,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => updateSessionDraft(s, sessionId, (draft) => (
       draft.text === text ? draft : { ...draft, text }
     ))),
+  setDraftDocument: (sessionId, document) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => {
+      const incomingDocument = cloneComposerDocument(document);
+      const migratedImages: PendingImage[] = incomingDocument.nodes.flatMap((node) => {
+        if (node.type !== "image") return [];
+        const file = typeof File === "function"
+          ? new File([], node.name, { type: node.mimeType })
+          : ({ name: node.name, type: node.mimeType, size: 0 } as File);
+        return [{ id: node.id, src: node.src, name: node.name, file }];
+      });
+      const pendingImages = [...draft.pendingImages];
+      for (const image of migratedImages) {
+        if (!pendingImages.some((current) => current.id === image.id)) pendingImages.push(image);
+      }
+      const nextDocument = createComposerDocument(incomingDocument.nodes.filter((node) => node.type !== "image"));
+      const pendingFiles = nextDocument.nodes.flatMap((node) => node.type === "snippet" ? [{
+        id: node.id,
+        fileName: node.fileName,
+        filePath: node.filePath,
+        startLine: node.startLine,
+        endLine: node.endLine,
+      }] : []);
+      const pendingPathAttachments = nextDocument.nodes.flatMap((node) => node.type === "path" ? [{
+        id: node.id,
+        name: node.name,
+        path: node.path,
+        kind: node.kind,
+      }] : []);
+      const sessionReferences = nextDocument.nodes.flatMap((node): SessionReference[] => {
+        if (node.type !== "session") return [];
+        const reference = node.reference;
+        if (!reference.sourceAgentId || !reference.sourceUpdatedAt || !reference.addedAt || reference.summary === undefined) return [];
+        return [{
+          sourceSessionId: reference.sourceSessionId,
+          sourceTitle: reference.sourceTitle,
+          sourceAgentId: reference.sourceAgentId,
+          sourceUpdatedAt: reference.sourceUpdatedAt,
+          addedAt: reference.addedAt,
+          summary: reference.summary,
+        }];
+      });
+      return {
+        ...draft,
+        document: nextDocument,
+        text: getComposerPlainText(nextDocument),
+        pendingImages,
+        pendingFiles,
+        pendingPathAttachments,
+        sessionReferences,
+      };
+    })),
   replaceSessionDraft: (sessionId, draft) =>
     set((s) => ({
       sessionDrafts: {
@@ -1031,10 +1319,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextMessageQueues[sessionId];
       const nextSessionDrafts = { ...s.sessionDrafts };
       delete nextSessionDrafts[sessionId];
+      const nextCompactingSessions = { ...s.compactingSessions };
+      delete nextCompactingSessions[sessionId];
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
         sessionDrafts: nextSessionDrafts,
+        compactingSessions: nextCompactingSessions,
         messages: s.activeSessionId === sessionId ? [] : s.messages,
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
       };
@@ -1046,16 +1337,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const nextSessionMessages = { ...s.sessionMessages };
       const nextMessageQueues = { ...s.messageQueues };
       const nextSessionDrafts = { ...s.sessionDrafts };
+      const nextCompactingSessions = { ...s.compactingSessions };
       for (const sessionId of sessionIdSet) {
         delete nextSessionMessages[sessionId];
         delete nextMessageQueues[sessionId];
         delete nextSessionDrafts[sessionId];
+        delete nextCompactingSessions[sessionId];
       }
       const deletingActiveSession = !!s.activeSessionId && sessionIdSet.has(s.activeSessionId);
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
         sessionDrafts: nextSessionDrafts,
+        compactingSessions: nextCompactingSessions,
         messages: deletingActiveSession ? [] : s.messages,
         activeSessionId: deletingActiveSession ? null : s.activeSessionId,
       };

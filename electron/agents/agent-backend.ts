@@ -18,6 +18,17 @@ export interface AgentModel {
 
 export interface AgentSendOptions extends BaseAgentSendOptions {
   displayMessage?: string;
+  /** Hpp-owned policy; adapters must use a native system/developer prompt. */
+  hostSystemPrompt?: string;
+}
+
+export interface AgentInitOptions {
+  /**
+   * Hpp-owned policy supplied before the adapter starts its native runtime.
+   * This lets CLI adapters use startup-only system-prompt channels without
+   * changing the visible user message or persisted conversation history.
+   */
+  hostSystemPrompt?: string;
 }
 
 export interface AgentForkTarget {
@@ -41,8 +52,9 @@ export interface AgentForkResult {
 
 export interface AgentBackend {
   setWindow(win: BrowserWindow): void;
-  init(projectPath: string, existingSessionFilePath?: string): Promise<void>;
+  init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void>;
   isIdle(): boolean;
+  refreshIdle?(): Promise<boolean>;
   sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
   sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
   forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
@@ -51,7 +63,7 @@ export interface AgentBackend {
   listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]>;
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
-  sendUIResponse(response: AgentUIResponse): void;
+  sendUIResponse(response: AgentUIResponse): Promise<void>;
   dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;
 }

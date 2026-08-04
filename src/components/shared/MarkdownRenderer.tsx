@@ -2,6 +2,7 @@ import { isValidElement, memo, useCallback, useState, type MouseEvent, type Reac
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { getLocalMarkdownCodePath } from "@/lib/project-file-path";
 import "./MarkdownRenderer.css";
 
 function CopyButton({ text }: { text: string }) {
@@ -78,8 +79,9 @@ function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
 
             // Inline code (no language = no newline = likely inline)
             if (!language && !text.includes("\n")) {
+              const localPath = getLocalMarkdownCodePath(text);
               return (
-                <code className="md-inline-code" {...props}>
+                <code className={`md-inline-code${localPath ? " md-path-reference" : ""}`} {...props}>
                   {children}
                 </code>
               );

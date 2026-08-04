@@ -12,6 +12,7 @@ import {
   type IndexedSearchMatch,
 } from "@/lib/file-preview-code";
 import "./FilePreview.css";
+import { requestComposerInsert } from "@/lib/composer-insert-event";
 
 class ErrorBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },
@@ -437,13 +438,15 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
 
   const handleSendToChat = useCallback(() => {
     if (!contextMenu || !activeFilePath) return;
-    addPendingFile({
+    const pendingFile = {
       id: crypto.randomUUID(),
       fileName,
       filePath: activeFilePath,
       startLine: contextMenu.startLine,
       endLine: contextMenu.endLine,
-    });
+    };
+    const inserted = requestComposerInsert({ node: { ...pendingFile, type: "snippet" } });
+    if (!inserted) addPendingFile(pendingFile);
     setContextMenu(null);
   }, [contextMenu, activeFilePath, fileName, addPendingFile]);
 

@@ -26,9 +26,14 @@ interface AgentModel {
 interface AgentSendOptions {
   planModeEnabled?: boolean;
   displayMessage?: string;
+  hostSystemPrompt?: string;
   permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   clientMessageId?: string;
   action?: AgentActionInvocation;
+}
+
+interface AgentInitOptions {
+  hostSystemPrompt?: string;
 }
 
 interface AgentForkTarget {
@@ -108,6 +113,7 @@ export class CodexAgent {
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
   private intentionalExits = new WeakSet<ChildProcess>();
+  private hostSystemPrompt = "";
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -117,14 +123,20 @@ export class CodexAgent {
     return this._sessionFilePath;
   }
 
-  async init(projectPath: string, existingSessionFilePath?: string): Promise<void> {
+  async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
     const requestedSessionFilePath = existingSessionFilePath || null;
-    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}`;
+    const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
+    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}`;
     if (this.initPromise && this.initKey === nextInitKey) {
       return this.initPromise;
     }
 
-    if (this.process && this.projectPath === projectPath && this._sessionFilePath === (existingSessionFilePath || this._sessionFilePath)) {
+    if (
+      this.process &&
+      this.projectPath === projectPath &&
+      this.hostSystemPrompt === requestedHostSystemPrompt &&
+      this._sessionFilePath === (existingSessionFilePath || this._sessionFilePath)
+    ) {
       await this.emitRecoveredHistory(existingSessionFilePath);
       return;
     }
@@ -134,6 +146,7 @@ export class CodexAgent {
     this.initKey = nextInitKey;
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
+    this.hostSystemPrompt = requestedHostSystemPrompt;
     this.emitEvent({ type: "agent_init", agentId: "codex" });
 
     const worker = getPluginWorkerInvocation("codex-worker.mjs", ["CODEX_NODE_PATH", "PI_NODE_PATH"]);
@@ -164,6 +177,13 @@ export class CodexAgent {
         }
       }
     });
+    child.stdout?.on("end", () => {
+      this.handleWorkerTermination(
+        child,
+        "Codex worker disconnected",
+        "Codex worker output pipe closed before the process exited.",
+      );
+    });
 
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
@@ -171,34 +191,29 @@ export class CodexAgent {
       console.log("[codex-worker]", text.trim());
     });
 
+    child.stdin?.on("error", (error) => {
+      this.handleWorkerTermination(
+        child,
+        "Codex worker input failed",
+        `Codex worker input pipe closed: ${error.message}`,
+      );
+    });
+
     child.on("error", (error) => {
-      this.emitEvent({
-        type: "process_event",
-        entryType: "error",
-        kind: "error",
-        title: "Codex 启动失败",
-        detail: `${error.message}\n请确认系统 PATH 中的 node 版本 >= 18，或设置 CODEX_NODE_PATH 指向 Node 18+。`,
-        state: "error",
-      });
-      for (const handler of this.pendingResponses.values()) handler({ type: "error", error: error.message });
-      this.pendingResponses.clear();
-      this.activePromptIds.clear();
+      this.handleWorkerTermination(
+        child,
+        "Codex worker failed",
+        `${error.message}\n请确认系统 PATH 中的 node 版本 >= 18，或设置 CODEX_NODE_PATH 指向 Node 18+。`,
+      );
     });
 
     child.on("exit", (code, signal) => {
-      if (this.process === child) this.process = null;
-      this.activePromptIds.clear();
       const exitReason = signal || (code ?? "unknown");
       const detail = getWorkerErrorDetail();
-      const error = [
+      this.handleWorkerTermination(child, "Codex worker disconnected", [
         `Codex worker exited before completing the request (${exitReason})`,
         detail,
-      ].filter(Boolean).join("\n");
-      for (const handler of this.pendingResponses.values()) handler({ type: "error", error });
-      this.pendingResponses.clear();
-      if (!this.intentionalExits.has(child) && !this.isAborting) {
-        this.emitEvent({ type: "agent_disconnected" });
-      }
+      ].filter(Boolean).join("\n"));
     });
 
     const initPromise = new Promise<void>((resolve, reject) => {
@@ -213,6 +228,7 @@ export class CodexAgent {
         type: "init",
         projectPath,
         sessionFilePath: existingSessionFilePath,
+        hostSystemPrompt: this.hostSystemPrompt,
       }, (data) => {
         clearTimeout(timeout);
         if (data.type === "ready") {
@@ -242,26 +258,38 @@ export class CodexAgent {
     const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
-    this.sendWorkerCommand({
-      id: promptId,
-      type: "prompt",
-      message,
-      images,
-      planModeEnabled: !!options?.planModeEnabled,
-      permissionMode: options?.permissionMode || "auto",
-      action: options?.action,
-    });
+    try {
+      this.sendWorkerCommand({
+        id: promptId,
+        type: "prompt",
+        message,
+        images,
+        planModeEnabled: !!options?.planModeEnabled,
+        permissionMode: options?.permissionMode || "auto",
+        hostSystemPrompt: options?.hostSystemPrompt,
+        action: options?.action,
+      });
+    } catch (error) {
+      this.activePromptIds.delete(promptId);
+      this.emitPromptFailure(
+        "Codex 请求发送失败",
+        error instanceof Error ? error.message : String(error),
+        this.activePromptIds.size === 0,
+      );
+      throw error;
+    }
   }
 
   isIdle(): boolean {
-    return !this.isAborting && this.activePromptIds.size === 0 && this.pendingResponses.size === 0;
+    // pendingResponses also contains short-lived model/action/config RPCs.
+    // Those requests are not an active conversation turn and must not keep
+    // agent:getSessionState reporting busy after the prompt has completed.
+    return !this.isAborting && this.activePromptIds.size === 0;
   }
 
   async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
     const guidanceId = this.createCommandId();
-    const displayMessage = options?.displayMessage || message;
-    const messagePreview = displayMessage.length > 50 ? `${displayMessage.slice(0, 50)}...` : displayMessage;
 
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -274,6 +302,7 @@ export class CodexAgent {
         message,
         images,
         planModeEnabled: !!options?.planModeEnabled,
+        hostSystemPrompt: options?.hostSystemPrompt,
       }, (data) => {
         clearTimeout(timeout);
         if (data.type === "accepted" || data.type === "guidance_done") {
@@ -282,15 +311,6 @@ export class CodexAgent {
           reject(new Error(optionalString(data.error) || "Codex guidance failed"));
         }
       });
-    });
-
-    this.emitEvent({
-      type: "process_event",
-      entryType: "status",
-      kind: "status",
-      title: `收到引导: "${messagePreview || "用户引导"}"`,
-      detail: displayMessage || undefined,
-      state: "completed",
     });
   }
 
@@ -338,26 +358,45 @@ export class CodexAgent {
       return;
     }
 
-    await new Promise<void>((resolve) => {
-      let acknowledged = false;
-      const timeout = setTimeout(() => {
-        if (!acknowledged) this.emitEvent({ type: "aborted" });
-        resolve();
-      }, 5000);
-      this.sendWorkerCommand({ type: "abort" }, () => {
-        acknowledged = true;
-        clearTimeout(timeout);
-        resolve();
+    try {
+      await new Promise<void>((resolve) => {
+        let acknowledged = false;
+        const timeout = setTimeout(() => {
+          if (!acknowledged) this.emitEvent({ type: "aborted" });
+          resolve();
+        }, 5000);
+        try {
+          this.sendWorkerCommand({ type: "abort" }, (data) => {
+            acknowledged = true;
+            clearTimeout(timeout);
+            if (data.type === "error") {
+              this.emitEvent({ type: "aborted", detail: optionalString(data.error) });
+            }
+            resolve();
+          });
+        } catch (error) {
+          clearTimeout(timeout);
+          this.emitEvent({
+            type: "aborted",
+            detail: error instanceof Error ? error.message : String(error),
+          });
+          resolve();
+        }
       });
-    });
-    this.isAborting = false;
+    } finally {
+      this.isAborting = false;
+    }
   }
 
   async getModels(): Promise<AgentModel[]> {
     if (!this.process) return [];
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve([]), 4000);
-      this.sendWorkerCommand({ type: "getModels" }, (data) => {
+      let requestId = "";
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        resolve([]);
+      }, 4000);
+      requestId = this.sendWorkerCommand({ type: "getModels" }, (data) => {
         clearTimeout(timeout);
         this.models = normalizeModels(data.models);
         resolve(this.models);
@@ -368,8 +407,12 @@ export class CodexAgent {
   async listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
     if (!this.process) return [];
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve([]), 15000);
-      this.sendWorkerCommand({ type: "listActions", reload: options?.reload === true }, (data) => {
+      let requestId = "";
+      const timeout = setTimeout(() => {
+        if (requestId) this.pendingResponses.delete(requestId);
+        resolve([]);
+      }, 15000);
+      requestId = this.sendWorkerCommand({ type: "listActions", reload: options?.reload === true }, (data) => {
         clearTimeout(timeout);
         resolve(Array.isArray(data.actions) ? data.actions as AgentActionCatalogEntry[] : []);
       });
@@ -388,34 +431,49 @@ export class CodexAgent {
     });
   }
 
-  sendUIResponse(response: AgentUIResponse): void {
-    this.sendWorkerCommand({
+  async sendUIResponse(response: AgentUIResponse): Promise<void> {
+    const id = optionalString(response.id) || optionalString(response.requestId);
+    const data = await this.requestWorkerCommand({
       type: "uiResponse",
       response: {
-        id: response.id,
+        id,
         value: response.value ?? response.text,
         confirmed: response.confirmed,
         cancelled: !!response.cancelled,
         result: response.result ?? (response.answers ? { cancelled: false, answers: response.answers } : undefined),
       },
-    });
+    }, 12_000);
+    if (data.type !== "ui_response_done") {
+      throw new Error(optionalString(data.error) || "Codex UI response failed");
+    }
   }
 
   async dispose(): Promise<void> {
     this.initPromise = null;
     this.initKey = null;
+    const wasActive = this.activePromptIds.size > 0;
     for (const [id, handler] of this.pendingResponses.entries()) {
       handler({ type: "error", id, error: "Codex backend disposed" });
     }
     this.pendingResponses.clear();
     this.activePromptIds.clear();
-    this.eventBuffer.flush();
+    this.isAborting = false;
+    if (wasActive) {
+      this.emitEvent({ type: "stream_end", content: "", force: true });
+      this.emitEvent({ type: "agent_end" });
+    } else {
+      this.eventBuffer.flush();
+    }
     const child = this.process;
     this.process = null;
     if (!child) return;
     this.intentionalExits.add(child);
     if (child.stdin?.writable) {
-      child.stdin.write(`${JSON.stringify({ type: "dispose" })}\n`);
+      try {
+        child.stdin.write(`${JSON.stringify({ type: "dispose" })}\n`);
+      } catch {
+        // Continue with process-tree termination below.
+      }
     }
     if (await this.waitForExit(child, 1500)) return;
     await this.killProcessTree(child);
@@ -514,7 +572,18 @@ export class CodexAgent {
         else this.activePromptIds.clear();
         this.emitEvent({ type: "aborted", promptId: record.promptId });
         break;
+      case "agent_disconnected":
+        this.activePromptIds.clear();
+        this.emitEvent({
+          type: "agent_disconnected",
+          detail: optionalString(record.detail) || optionalString(record.error),
+        });
+        break;
       case "error":
+        // Worker control RPCs share this channel with prompt failures. An
+        // error for a model/action/config request must not terminate a
+        // different active conversation turn.
+        if (messageId && !this.activePromptIds.has(messageId)) break;
         if (messageId) this.activePromptIds.delete(messageId);
         else this.activePromptIds.clear();
         if (/Codex is already running/i.test(String(record.error || ""))) {
@@ -537,6 +606,10 @@ export class CodexAgent {
           detail: record.error || "Unknown error",
           state: "error",
         });
+        if (this.activePromptIds.size === 0) {
+          this.emitEvent({ type: "stream_end", content: "", force: true });
+          this.emitEvent({ type: "agent_end" });
+        }
         break;
     }
   }
@@ -544,13 +617,71 @@ export class CodexAgent {
   private sendWorkerCommand(command: WorkerCommand, onResponse?: (data: UnknownRecord) => void): string {
     const id = command.id || this.createCommandId();
     const fullCommand = { ...command, id };
+    const child = this.process;
+    if (!child?.stdin?.writable) throw new Error("Codex worker is not writable");
     if (onResponse) this.pendingResponses.set(id, onResponse);
-    this.process?.stdin?.write(`${JSON.stringify(fullCommand)}\n`);
+    try {
+      child.stdin.write(`${JSON.stringify(fullCommand)}\n`);
+    } catch (error) {
+      this.pendingResponses.delete(id);
+      throw error;
+    }
     return id;
+  }
+
+  private requestWorkerCommand(command: WorkerCommand, timeoutMs: number): Promise<UnknownRecord> {
+    return new Promise((resolve, reject) => {
+      let id = "";
+      const timeout = setTimeout(() => {
+        if (id) this.pendingResponses.delete(id);
+        reject(new Error(`Codex ${command.type} timed out`));
+      }, timeoutMs);
+      try {
+        id = this.sendWorkerCommand(command, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "error") reject(new Error(optionalString(data.error) || `${command.type} failed`));
+          else resolve(data);
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
   }
 
   private createCommandId(): string {
     return `codex-${++this.requestId}`;
+  }
+
+  private handleWorkerTermination(child: ChildProcess, title: string, detail: string): void {
+    if (this.process !== child) return;
+    this.process = null;
+    const wasActive = this.activePromptIds.size > 0;
+    const intentional = this.intentionalExits.has(child);
+    const handlers = [...this.pendingResponses.values()];
+    this.pendingResponses.clear();
+    for (const handler of handlers) handler({ type: "error", error: detail });
+    this.activePromptIds.clear();
+    if (intentional || this.isAborting) return;
+    if (wasActive) {
+      this.emitPromptFailure(title, detail, true);
+    } else {
+      this.emitEvent({ type: "agent_disconnected", detail });
+    }
+  }
+
+  private emitPromptFailure(title: string, detail: string, finishTurn: boolean): void {
+    this.emitEvent({
+      type: "process_event",
+      entryType: "error",
+      kind: "error",
+      title,
+      detail,
+      state: "error",
+    });
+    if (!finishTurn) return;
+    this.emitEvent({ type: "stream_end", content: "", force: true });
+    this.emitEvent({ type: "agent_end" });
   }
 
   private waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {

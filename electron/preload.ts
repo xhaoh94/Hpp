@@ -79,6 +79,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentPlugin:remove", agentId, removeRuntime),
   agentPluginReload: () => ipcRenderer.invoke("agentPlugin:reload"),
   agentGetSessionState: (sessionId: string) => ipcRenderer.invoke("agent:getSessionState", sessionId),
+  agentGetPendingUIRequests: (sessionId: string) =>
+    ipcRenderer.invoke("agent:getPendingUIRequests", sessionId),
 
   // Data persistence
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),

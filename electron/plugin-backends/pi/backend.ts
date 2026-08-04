@@ -25,8 +25,13 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   displayMessage?: string;
+  hostSystemPrompt?: string;
   clientMessageId?: string;
   action?: AgentActionInvocation;
+}
+
+interface AgentInitOptions {
+  hostSystemPrompt?: string;
 }
 
 interface AgentForkTarget {
@@ -101,10 +106,13 @@ export class PiSDKAgent {
   private isAborting = false;
   private activePromptIds = new Set<string>();
   private turnActive = false;
+  private agentEndObserved = false;
+  private compactionActive = false;
   private turnToken = 0;
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
   private isReady = false;
+  private hostSystemPrompt = "";
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -114,9 +122,10 @@ export class PiSDKAgent {
     return this._sessionFilePath;
   }
 
-  async init(projectPath: string, existingSessionFilePath?: string): Promise<void> {
+  async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
     const requestedSessionFilePath = existingSessionFilePath || null;
-    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}`;
+    const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
+    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}`;
     if (this.initPromise && this.initKey === nextInitKey) {
       return this.initPromise;
     }
@@ -125,6 +134,7 @@ export class PiSDKAgent {
       this.process &&
       this.isReady &&
       this.projectPath === projectPath &&
+      this.hostSystemPrompt === requestedHostSystemPrompt &&
       (!requestedSessionFilePath || this._sessionFilePath === requestedSessionFilePath)
     ) {
       return;
@@ -135,6 +145,7 @@ export class PiSDKAgent {
     this.initKey = nextInitKey;
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
+    this.hostSystemPrompt = requestedHostSystemPrompt;
     this.models = [];
     this.isReady = false;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
@@ -144,7 +155,10 @@ export class PiSDKAgent {
     // Let Pi use its own default config directory (~/.pi/agent), where its
     // CLI and SDK share auth.json/models.json. Hpp only supplies the runtime
     // package location and must not redirect credentials to a separate folder.
-    const workerEnv = { ...worker.env, PI_SDK_PACKAGE_ROOT: userRuntimeRoot };
+    const workerEnv = {
+      ...worker.env,
+      PI_SDK_PACKAGE_ROOT: userRuntimeRoot,
+    };
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
@@ -172,11 +186,26 @@ export class PiSDKAgent {
         }
       }
     });
+    child.stdout?.on("end", () => {
+      this.handleWorkerTermination(
+        child,
+        "Pi SDK worker disconnected",
+        "Pi SDK worker output pipe closed before the process exited.",
+      );
+    });
 
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       stderrText = `${stderrText}${text}`.slice(-4000);
       console.log("[pi-sdk-worker]", text.trim());
+    });
+
+    child.stdin?.on("error", (error) => {
+      this.handleWorkerTermination(
+        child,
+        "Pi SDK worker input failed",
+        `Pi SDK worker input pipe closed: ${error.message}`,
+      );
     });
 
     child.on("error", (error) => {
@@ -207,6 +236,7 @@ export class PiSDKAgent {
           type: "init",
           projectPath,
           sessionFilePath: existingSessionFilePath,
+          hostSystemPrompt: this.hostSystemPrompt,
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "ready") {
@@ -244,6 +274,7 @@ export class PiSDKAgent {
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
+    if (this.compactionActive) throw new Error("SESSION_BUSY");
 
     if (this.turnActive) {
       this.completeTurn(true);
@@ -255,15 +286,30 @@ export class PiSDKAgent {
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.beginTurn();
-    this.sendWorkerCommand({
-      id: promptId,
-      type: "prompt",
-      message,
-      images,
-      planModeEnabled: !!options?.planModeEnabled,
-      permissionMode: options?.permissionMode || "auto",
-      action: options?.action,
-    });
+    try {
+      this.sendWorkerCommand({
+        id: promptId,
+        type: "prompt",
+        message,
+        images,
+        planModeEnabled: !!options?.planModeEnabled,
+        permissionMode: options?.permissionMode || "auto",
+        hostSystemPrompt: options?.hostSystemPrompt,
+        action: options?.action,
+      });
+    } catch (error) {
+      this.activePromptIds.delete(promptId);
+      this.emitEvent({
+        type: "process_event",
+        entryType: "error",
+        kind: "error",
+        title: "Pi request failed",
+        detail: error instanceof Error ? error.message : String(error),
+        state: "error",
+      });
+      this.completeTurn(true);
+      throw error;
+    }
   }
 
   async listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
@@ -291,12 +337,14 @@ export class PiSDKAgent {
   }
 
   isIdle(): boolean {
+    // Model/action/config callbacks in pendingResponses are control RPCs, not
+    // conversation activity. Turn and UI state are tracked explicitly below.
     return (
       !this.isAborting &&
       !this.turnActive &&
+      !this.compactionActive &&
       this.activePromptIds.size === 0 &&
-      this.pendingUIRequestIds.size === 0 &&
-      this.pendingResponses.size === 0
+      this.pendingUIRequestIds.size === 0
     );
   }
 
@@ -305,8 +353,6 @@ export class PiSDKAgent {
     if (this.isAborting) this.finishAbortState();
 
     const guidanceId = this.createCommandId();
-    const displayMessage = options?.displayMessage || message;
-    const messagePreview = displayMessage.length > 50 ? `${displayMessage.slice(0, 50)}...` : displayMessage;
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingResponses.delete(guidanceId);
@@ -318,6 +364,7 @@ export class PiSDKAgent {
           type: "guidance",
           message,
           images,
+          hostSystemPrompt: options?.hostSystemPrompt,
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "accepted" || data.type === "guidance_done") {
@@ -330,13 +377,6 @@ export class PiSDKAgent {
         clearTimeout(timeout);
         reject(error);
       }
-    });
-    this.emitEvent({
-      type: "process_event",
-      entryType: "status",
-      title: `收到引导: "${messagePreview || "用户引导"}"`,
-      detail: displayMessage || undefined,
-      state: "completed",
     });
   }
 
@@ -489,15 +529,9 @@ export class PiSDKAgent {
     });
   }
 
-  sendUIResponse(response: AgentUIResponse): void {
-    const id = response.id;
-    if (id) {
-      this.pendingUIRequestIds.delete(String(id));
-      if (this.pendingUIRequestIds.size === 0 && (this.pendingAssistantText || this.streamedText)) {
-        this.scheduleTurnFallback(4000);
-      }
-    }
-    this.sendWorkerCommand({
+  async sendUIResponse(response: AgentUIResponse): Promise<void> {
+    const id = optionalString(response.id) || optionalString(response.requestId);
+    const data = await this.requestWorkerCommand({
       type: "uiResponse",
       response: {
         id,
@@ -506,17 +540,29 @@ export class PiSDKAgent {
         cancelled: !!response.cancelled,
         result: response.result ?? (response.answers ? { cancelled: false, answers: response.answers } : undefined),
       },
-    });
+    }, 12_000);
+    if (data.type !== "ui_response_done") {
+      throw new Error(optionalString(data.error) || "Pi UI response failed");
+    }
+    if (id) this.pendingUIRequestIds.delete(id);
+    if (this.pendingUIRequestIds.size === 0 && this.agentEndObserved) {
+      this.scheduleTurnFallback(4000, true);
+    } else if (this.pendingUIRequestIds.size === 0 && (this.pendingAssistantText || this.streamedText)) {
+      this.scheduleTurnFallback(4000);
+    }
   }
 
   async dispose(): Promise<void> {
     this.initPromise = null;
     this.initKey = null;
     this.clearTurnFallback();
+    if (this.turnActive) this.completeTurn(true);
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
+    this.agentEndObserved = false;
+    this.compactionActive = false;
     this.isAborting = false;
     this.isReady = false;
     this.models = [];
@@ -525,7 +571,13 @@ export class PiSDKAgent {
     const child = this.process;
     this.process = null;
     if (!child) return;
-    child.stdin?.write(`${JSON.stringify({ type: "dispose" })}\n`);
+    if (child.stdin?.writable) {
+      try {
+        child.stdin.write(`${JSON.stringify({ type: "dispose" })}\n`);
+      } catch {
+        // Continue with forced termination below.
+      }
+    }
     if (await this.waitForExit(child, 1500)) return;
     child.kill("SIGKILL");
     await this.waitForExit(child, 500);
@@ -561,7 +613,22 @@ export class PiSDKAgent {
 
     switch (record.type) {
       case "context_compaction":
-        this.emitEvent({ type: "context_compaction", id: record.id });
+        if (record.phase === "started") {
+          this.compactionActive = true;
+          // Pi can begin a long compaction after emitting agent_end. That is
+          // continuation evidence, so the missing-prompt_done fallback must
+          // not settle the turn while compaction is still running.
+          this.clearTurnFallback();
+        } else {
+          this.compactionActive = false;
+        }
+        this.emitEvent({
+          type: "context_compaction",
+          id: record.id,
+          phase: record.phase,
+          detail: record.error,
+        });
+        if (record.phase !== "started") this.refreshAgentEndFallback();
         break;
       case "history_snapshot":
         this.emitEvent({ type: "history_snapshot", messages: record.messages });
@@ -580,7 +647,15 @@ export class PiSDKAgent {
             ? "warning"
             : record.status === "completed"
               ? "completed"
-              : "running";
+               : "running";
+        if (statusState === "running") {
+          // Automatic retry notifications may arrive between agent_end and
+          // the next agent_start. Keep the original prompt active throughout
+          // that retry delay instead of firing the terminal fallback.
+          this.clearTurnFallback();
+          if (record.status === "retrying") this.agentEndObserved = false;
+          else this.refreshAgentEndFallback();
+        }
         this.emitEvent({
           type: "process_event",
           id: record.id,
@@ -611,6 +686,7 @@ export class PiSDKAgent {
         } else if (assistantEvent.type === "thinking_delta") {
           this.emitEventThrottled({ type: "thinking_delta", delta: String(assistantEvent.delta || "") });
         }
+        this.refreshAgentEndFallback();
         break;
       }
       case "message_end":
@@ -638,17 +714,16 @@ export class PiSDKAgent {
             this.pendingAssistantTextNeedsEmit = true;
             this.emitPendingAssistantText();
             this.streamedMessageTextBuffer = "";
-            if (this.pendingUIRequestIds.size === 0) {
-              this.scheduleTurnFallback(4000, true);
-            }
           }
         }
+        this.refreshAgentEndFallback();
         break;
       case "tool_execution_start":
         this.clearTurnFallback();
         this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
         break;
       case "tool_execution_update": {
+        this.clearTurnFallback();
         const detail = unwrapToolText(record.partialResult);
         if (detail) {
           this.emitEvent(normalizeToolEvent("tool_start", {
@@ -662,6 +737,7 @@ export class PiSDKAgent {
         break;
       }
       case "tool_execution_end": {
+        this.clearTurnFallback();
         const toolEvent = normalizeToolEvent("tool_end", {
           ...record,
           args: record.args,
@@ -672,6 +748,7 @@ export class PiSDKAgent {
         this.emitEvent(toolEvent);
         const diffs = buildDiffsFromToolEvent(toolEvent);
         if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+        this.refreshAgentEndFallback();
         break;
       }
       case "extension_ui_request":
@@ -681,27 +758,25 @@ export class PiSDKAgent {
         if (messageId && !this.activePromptIds.delete(messageId)) break;
         if (!messageId) this.activePromptIds.clear();
         this.pendingUIRequestIds.clear();
-        if (this.pendingAssistantError) {
-          this.emitEvent({
-            type: "process_event",
-            entryType: "error",
-            kind: "error",
-            title: "模型请求失败",
-            detail: this.pendingAssistantError,
-            state: "error",
-          });
-        }
         this.completeTurn(true);
         break;
       case "agent_end":
-        if (this.activePromptIds.size === 0) this.scheduleTurnFallback(250, true);
+        this.agentEndObserved = true;
+        if (this.pendingUIRequestIds.size === 0) this.scheduleTurnFallback(4000, true);
         break;
       case "error":
-        if (messageId && !this.activePromptIds.delete(messageId)) break;
         if (isContextCompactionLike(record.error, record.title, record.message)) {
-          this.emitEvent({ type: "context_compaction", id: record.id });
+          this.compactionActive = false;
+          this.emitEvent({
+            type: "context_compaction",
+            id: record.id,
+            phase: "interrupted",
+            detail: record.error || record.message,
+          });
+          this.refreshAgentEndFallback();
           break;
         }
+        if (messageId && !this.activePromptIds.delete(messageId)) break;
         this.pendingUIRequestIds.clear();
         this.emitEvent({
           type: "process_event",
@@ -769,6 +844,26 @@ export class PiSDKAgent {
     return id;
   }
 
+  private requestWorkerCommand(command: WorkerCommand, timeoutMs: number): Promise<UnknownRecord> {
+    return new Promise((resolve, reject) => {
+      let id = "";
+      const timeout = setTimeout(() => {
+        if (id) this.pendingResponses.delete(id);
+        reject(new Error(`Pi SDK ${command.type} timed out`));
+      }, timeoutMs);
+      try {
+        id = this.sendWorkerCommand(command, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "error") reject(new Error(optionalString(data.error) || `${command.type} failed`));
+          else resolve(data);
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
+  }
+
   private createCommandId(): string {
     return `sdk-${++this.requestId}`;
   }
@@ -791,8 +886,14 @@ export class PiSDKAgent {
     }, delayMs);
   }
 
+  private refreshAgentEndFallback() {
+    if (!this.agentEndObserved || this.pendingUIRequestIds.size > 0) return;
+    this.scheduleTurnFallback(4000, true);
+  }
+
   private beginTurn() {
     this.clearTurnFallback();
+    this.agentEndObserved = false;
     if (this.turnActive) return;
     this.turnToken += 1;
     this.turnActive = true;
@@ -814,6 +915,17 @@ export class PiSDKAgent {
     if (this.pendingUIRequestIds.size > 0) return;
     if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
+    if (this.pendingAssistantError) {
+      this.emitEvent({
+        type: "process_event",
+        entryType: "error",
+        kind: "error",
+        title: "模型请求失败",
+        detail: this.pendingAssistantError,
+        state: "error",
+      });
+      this.pendingAssistantError = "";
+    }
     this.eventBuffer.flush();
     this.emitPendingAssistantText();
     this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
@@ -825,6 +937,7 @@ export class PiSDKAgent {
     this.streamedMessageTextBuffer = "";
     this.pendingAssistantTextNeedsEmit = false;
     this.turnActive = false;
+    this.agentEndObserved = false;
     this.turnToken += 1;
   }
 
@@ -858,6 +971,7 @@ export class PiSDKAgent {
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
+    this.agentEndObserved = false;
     this.turnToken += 1;
   }
 
@@ -872,6 +986,8 @@ export class PiSDKAgent {
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
     this.turnActive = false;
+    this.agentEndObserved = false;
+    this.compactionActive = false;
     this.turnToken += 1;
     this.eventBuffer.clear();
     this.clearTurnFallback();

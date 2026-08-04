@@ -11,6 +11,8 @@ export interface PendingRemoteImage {
   preview: string;
 }
 
+export const DEFAULT_REMOTE_IMAGE_NAME = "image.jpg";
+
 const estimateBase64Bytes = (value: string) => Math.floor(value.length * 0.75);
 
 const IMAGE_SELECTION_CANCELLED_CODES = new Set([
@@ -116,7 +118,7 @@ export async function chooseRemoteImage(): Promise<PendingRemoteImage> {
   const resized = await resizeDataUrl(dataUrl);
   return {
     id: createClientId(),
-    name: `mobile-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`,
+    name: DEFAULT_REMOTE_IMAGE_NAME,
     mimeType: resized.mimeType,
     data: resized.dataUrl.split(",")[1] || "",
     preview: resized.dataUrl,

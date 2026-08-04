@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "pi",
   "name": "Pi",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "minHppVersion": "0.1.8",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",
@@ -13,7 +13,7 @@
   "updateCommand": "npm install @earendil-works/pi-coding-agent@latest",
   "shortName": "PI",
   "capabilities": {
-    "planMode": "prompt",
+    "planMode": "native",
     "permissions": true,
     "guidance": true,
     "fork": true,

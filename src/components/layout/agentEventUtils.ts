@@ -38,6 +38,13 @@ export type NormalizedToolKind =
 
 export type UnknownRecord = Record<string, unknown>;
 
+export type AgentTurnTerminalReason = "completed" | "aborted" | "disconnected" | "error";
+
+export type AgentTurnIdentity = {
+  revision?: string | null;
+  userMessageId?: string | null;
+};
+
 export type SessionRuntime = {
   streamBuffer: string;
   thinkingBuffer: string;
@@ -46,10 +53,14 @@ export type SessionRuntime = {
   streamStarted: boolean;
   activeToolEntry: Record<string, string>;
   activeToolFile: Record<string, AgentProcessFile[]>;
+  activeToolKind: Record<string, NormalizedToolKind>;
   streamWatchdog: ReturnType<typeof setTimeout> | null;
   streamIdleNoticeEntryId: string | null;
+  streamIdleSince: number | null;
   autoAbortReason: string | null;
   manualAbortRequested: boolean;
+  activeCompactionId: string | null;
+  activeCompactionPresentation: "process" | "divider" | null;
   processTextEntryId: string | null;
   processTextEntryIds: string[];
   processTextHistory: string[];
@@ -71,6 +82,13 @@ export type SessionRuntime = {
   };
   changeSummaryFiles: Record<string, { file: string; additions: number; deletions: number }>;
   changeSummarySeenEvents: Record<string, true>;
+  turnEventState: "initial" | "active" | "settled";
+  activeTurnRevision: string | null;
+  activeTurnUserMessageId: string | null;
+  settledTurnRevisions: string[];
+  settledTurnUserMessageIds: string[];
+  turnTerminalReason: AgentTurnTerminalReason | null;
+  settledCompactionEventIds: string[];
 };
 
 export const createProcessEntryId = () => {
@@ -108,10 +126,14 @@ export const createSessionRuntime = (): SessionRuntime => ({
   streamStarted: false,
   activeToolEntry: {},
   activeToolFile: {},
+  activeToolKind: {},
   streamWatchdog: null,
   streamIdleNoticeEntryId: null,
+  streamIdleSince: null,
   autoAbortReason: null,
   manualAbortRequested: false,
+  activeCompactionId: null,
+  activeCompactionPresentation: null,
   processTextEntryId: null,
   processTextEntryIds: [],
   processTextHistory: [],
@@ -133,7 +155,136 @@ export const createSessionRuntime = (): SessionRuntime => ({
   },
   changeSummaryFiles: {},
   changeSummarySeenEvents: {},
+  turnEventState: "initial",
+  activeTurnRevision: null,
+  activeTurnUserMessageId: null,
+  settledTurnRevisions: [],
+  settledTurnUserMessageIds: [],
+  turnTerminalReason: null,
+  settledCompactionEventIds: [],
 });
+
+const MAX_SETTLED_TURN_IDENTITIES = 32;
+
+const ensureSessionRuntimeTurnTracking = (runtime: SessionRuntime) => {
+  runtime.turnEventState ||= "initial";
+  runtime.activeTurnRevision ??= null;
+  runtime.activeTurnUserMessageId ??= null;
+  runtime.settledTurnRevisions ||= [];
+  runtime.settledTurnUserMessageIds ||= [];
+  runtime.turnTerminalReason ??= null;
+  runtime.settledCompactionEventIds ||= [];
+};
+
+const pushBoundedUnique = (values: string[], value: string | null | undefined) => {
+  const normalized = value?.trim();
+  if (!normalized || values.includes(normalized)) return;
+  values.push(normalized);
+  if (values.length > MAX_SETTLED_TURN_IDENTITIES) {
+    values.splice(0, values.length - MAX_SETTLED_TURN_IDENTITIES);
+  }
+};
+
+export const normalizeAgentTurnRevision = (value: unknown): string | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized || null;
+};
+
+export const compareAgentTurnRevisions = (candidate: string, current: string): number | null => {
+  const candidateSeparator = candidate.lastIndexOf(":");
+  const currentSeparator = current.lastIndexOf(":");
+  if (candidateSeparator <= 0 || currentSeparator <= 0) return null;
+  if (candidate.slice(0, candidateSeparator) !== current.slice(0, currentSeparator)) return null;
+  const candidateSequence = Number(candidate.slice(candidateSeparator + 1));
+  const currentSequence = Number(current.slice(currentSeparator + 1));
+  if (!Number.isSafeInteger(candidateSequence) || !Number.isSafeInteger(currentSequence)) return null;
+  return Math.sign(candidateSequence - currentSequence);
+};
+
+const isSettledTurnRevision = (runtime: SessionRuntime, revision: string) =>
+  runtime.settledTurnRevisions.some((settledRevision) => (
+    settledRevision === revision || compareAgentTurnRevisions(revision, settledRevision) === -1
+  ));
+
+export const activateSessionRuntimeTurn = (
+  runtime: SessionRuntime,
+  identity: AgentTurnIdentity = {},
+) => {
+  ensureSessionRuntimeTurnTracking(runtime);
+  const revision = normalizeAgentTurnRevision(identity.revision);
+  const userMessageId = typeof identity.userMessageId === "string" && identity.userMessageId.trim()
+    ? identity.userMessageId.trim()
+    : null;
+
+  if (revision && isSettledTurnRevision(runtime, revision)) return false;
+  // IPC invoke replies and webContents events use different delivery paths.
+  // A failed send can therefore be reconciled by the renderer before the
+  // host-owned lifecycle revision for that same user message arrives.  The
+  // client message id is an equally authoritative turn identity: once it has
+  // been settled, a later revision must not be allowed to reopen it.
+  if (userMessageId && runtime.settledTurnUserMessageIds.includes(userMessageId)) return false;
+  if (
+    runtime.turnEventState === "settled" &&
+    !revision &&
+    (!userMessageId || runtime.settledTurnUserMessageIds.includes(userMessageId))
+  ) {
+    return false;
+  }
+  if (
+    runtime.turnEventState === "active" &&
+    revision &&
+    runtime.activeTurnRevision &&
+    runtime.activeTurnRevision !== revision
+  ) {
+    return false;
+  }
+  if (
+    runtime.turnEventState === "active" &&
+    revision &&
+    runtime.activeTurnRevision === revision &&
+    userMessageId &&
+    runtime.activeTurnUserMessageId &&
+    runtime.activeTurnUserMessageId !== userMessageId
+  ) {
+    // A lifecycle revision identifies one host-owned turn. Never let a late
+    // or malformed event reuse that revision to replace the active user
+    // message identity and contaminate the current turn's terminal barrier.
+    return false;
+  }
+
+  runtime.turnEventState = "active";
+  runtime.turnTerminalReason = null;
+  if (revision) runtime.activeTurnRevision = revision;
+  if (userMessageId) runtime.activeTurnUserMessageId = userMessageId;
+  return true;
+};
+
+export const markSessionRuntimeTurnSettled = (
+  runtime: SessionRuntime,
+  reason: AgentTurnTerminalReason,
+  identity: AgentTurnIdentity = {},
+) => {
+  ensureSessionRuntimeTurnTracking(runtime);
+  const revision = normalizeAgentTurnRevision(identity.revision) || runtime.activeTurnRevision;
+  const userMessageId = (
+    typeof identity.userMessageId === "string" && identity.userMessageId.trim()
+      ? identity.userMessageId.trim()
+      : runtime.activeTurnUserMessageId
+  );
+  pushBoundedUnique(runtime.settledTurnRevisions, revision);
+  pushBoundedUnique(runtime.settledTurnUserMessageIds, userMessageId);
+  runtime.activeTurnRevision = null;
+  runtime.activeTurnUserMessageId = null;
+  runtime.turnEventState = "settled";
+  runtime.turnTerminalReason = reason;
+};
+
+export const rememberSettledCompactionEvent = (runtime: SessionRuntime, eventId?: string | null) => {
+  ensureSessionRuntimeTurnTracking(runtime);
+  pushBoundedUnique(runtime.settledCompactionEventIds, eventId);
+};
 
 export const scheduleRuntimeRenderFlush = (
   runtime: SessionRuntime,
@@ -170,7 +321,9 @@ export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
   runtime.thinkingEntryId = null;
   runtime.activeToolEntry = {};
   runtime.activeToolFile = {};
+  runtime.activeToolKind = {};
   runtime.streamIdleNoticeEntryId = null;
+  runtime.streamIdleSince = null;
   runtime.processTextEntryId = null;
   runtime.processTextEntryIds = [];
   runtime.processTextHistory = [];
@@ -216,6 +369,16 @@ export const truncateProcessDetail = (value: string) => {
   return `${value.slice(0, maxLength)}...`;
 };
 
+/** Approximate character count that fits in a single line of thinking preview. */
+const THINKING_SINGLE_LINE_CHAR_LIMIT = 60;
+
+/** Check whether thinking text is short enough to fit in a single line. */
+export const isThinkingSingleLine = (value?: string): boolean => {
+  const text = value?.replace(/\s+/g, " ").trim();
+  if (!text) return true;
+  return text.length <= THINKING_SINGLE_LINE_CHAR_LIMIT;
+};
+
 export const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\*{2,}/g, "").replace(/\s+/g, " ").trim();
   if (!preview) return uiText.process.thinking;
@@ -223,6 +386,55 @@ export const getThinkingPreview = (value?: string) => {
     ? `${preview.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
     : preview;
 };
+
+/**
+ * Convert thinking detail into a single-line Markdown preview that keeps
+ * inline syntax (bold, italics, inline code, links) so the collapsed state
+ * still renders Markdown, while stripping block-level markers that cannot
+ * survive a single line (headings, lists, block quotes, thematic breaks)
+ * and collapsing fenced code blocks into inline code.
+ */
+export const getThinkingPreviewMarkdown = (value?: string) => {
+  const lines = value?.split("\n").map((line) => line.trim()) ?? [];
+  const cleaned: string[] = [];
+  let fence: string | null = null;
+
+  for (const line of lines) {
+    if (!line) continue;
+
+    // Fenced code block markers toggle the fence; inner lines become inline code.
+    const fenceMatch = line.match(/^(```+|~~~+)/);
+    if (fenceMatch) {
+      fence = fence ? null : fenceMatch[1];
+      continue;
+    }
+
+    if (fence) {
+      cleaned.push(`\`${line.replace(/`/g, "\\`")}\``);
+      continue;
+    }
+
+    // Strip block-level Markdown markers but keep inline syntax (**, *, `, [](), etc.).
+    cleaned.push(line.replace(
+      /^(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|-{3,}|={3,}|\+{3,})/,
+      "",
+    ));
+  }
+
+  const singleLine = cleaned.filter(Boolean).join(" ").trim();
+  if (!singleLine) return uiText.process.thinking;
+  return singleLine.length > THINKING_PREVIEW_CHAR_LIMIT
+    ? `${singleLine.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
+    : singleLine;
+};
+
+export const getContextCompactionPresentation = (
+  phase: "started" | "completed" | "interrupted",
+  processActive: boolean,
+  activePresentation: SessionRuntime["activeCompactionPresentation"],
+) => phase === "started"
+  ? processActive ? "process" as const : "divider" as const
+  : activePresentation || "divider";
 
 const normalizeThinkingRepeatUnit = (value: string) =>
   value

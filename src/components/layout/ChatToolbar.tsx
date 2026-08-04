@@ -1,9 +1,11 @@
-import { useMemo, type ReactNode, type RefObject } from "react";
+import { useMemo, useRef, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { Check, Settings, Shield, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
 import { groupModelsByProvider, includeCurrentModel } from "@shared/models";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
+import { useAnchoredOverlay } from "@shared/anchored-overlay";
 
 type ThinkingLevelOption = {
   id: string;
@@ -90,6 +92,12 @@ export function ChatToolbar({
     return groupModelsByProvider(selectableModels);
   }, [selectableModels]);
   const isFavoriteModel = (model: ModelInfo) => favoriteModelKeys.has(`${model.provider}:${model.id}`);
+  const permissionMenuRef = useRef<HTMLDivElement | null>(null);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const thinkingMenuRef = useRef<HTMLDivElement | null>(null);
+  const permissionMenuStyle = useAnchoredOverlay(permissionOpen, permissionRef, permissionMenuRef);
+  const modelMenuStyle = useAnchoredOverlay(modelOpen, modelRef, modelMenuRef);
+  const thinkingMenuStyle = useAnchoredOverlay(thinkingOpen, thinkingRef, thinkingMenuRef);
 
   return (
     <div className="chat-input-toolbar">
@@ -136,8 +144,8 @@ export function ChatToolbar({
             <path d="M6 9l6 6 6-6" />
           </svg>
         </button>
-        {permissionOpen && (
-          <div className="chat-permission-dropdown" role="menu" aria-label="Agent 权限模式">
+        {permissionOpen && createPortal(
+          <div ref={permissionMenuRef} style={permissionMenuStyle} className="chat-permission-dropdown" data-chat-toolbar-overlay role="menu" aria-label="Agent 权限模式">
             <div className="chat-permission-heading">Agent 权限</div>
             <button
               type="button"
@@ -172,7 +180,8 @@ export function ChatToolbar({
               <span><strong>完全访问权限</strong><small>不再询问，可访问系统并执行高风险操作</small></span>
               {permissionMode === "full-access" && <Check size={15} className="chat-permission-check" />}
             </button>
-          </div>
+          </div>,
+          document.body,
         )}
       </div>}
 
@@ -197,8 +206,8 @@ export function ChatToolbar({
             <path d="M6 9l6 6 6-6" />
           </svg>
         </button>
-        {modelOpen && (
-          <div className="chat-dropdown">
+        {modelOpen && createPortal(
+          <div ref={modelMenuRef} style={modelMenuStyle} className="chat-dropdown" data-chat-toolbar-overlay>
             <div className="chat-model-dropdown-header">
               <span className="chat-model-dropdown-title">{getAgentName(agentId)} 模型</span>
               <span className="chat-model-dropdown-meta">{selectableModels.length} 个可用</span>
@@ -271,7 +280,8 @@ export function ChatToolbar({
                 </div>
               );
             })}
-          </div>
+          </div>,
+          document.body,
         )}
       </div>
 
@@ -293,8 +303,8 @@ export function ChatToolbar({
             <path d="M6 9l6 6 6-6" />
           </svg>
         </button>
-        {thinkingOpen && (
-          <div className="chat-thinking-dropdown">
+        {thinkingOpen && createPortal(
+          <div ref={thinkingMenuRef} style={thinkingMenuStyle} className="chat-thinking-dropdown" data-chat-toolbar-overlay>
             {thinkingLevels.map((level) => (
               <button
                 key={level.id}
@@ -304,7 +314,8 @@ export function ChatToolbar({
                 {level.label}
               </button>
             ))}
-          </div>
+          </div>,
+          document.body,
         )}
       </div>}
     </div>

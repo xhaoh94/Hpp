@@ -51,6 +51,7 @@ export interface AgentEvent {
   title?: string;
   state?: string;
   status?: string;
+  phase?: string;
   expanded?: boolean;
   command?: string;
   filePath?: string;
@@ -74,6 +75,9 @@ export interface AgentEvent {
   sessionFilePath?: unknown;
   nativeTurnId?: unknown;
   turnId?: unknown;
+  turnRevision?: unknown;
+  lifecycleRevision?: unknown;
+  pendingUIRevision?: unknown;
   clientUserMessageId?: unknown;
   threadId?: unknown;
   [key: string]: unknown;
@@ -83,6 +87,11 @@ export const isAgentEvent = (value: unknown): value is AgentEvent =>
   isRecord(value) && typeof value.type === "string" && value.type.trim().length > 0;
 
 export type AgentUIResponse = UnknownRecord;
+
+export interface AgentPendingUIEventSnapshot {
+  revision: number;
+  requests: AgentEvent[];
+}
 
 export type AgentPlanModeSupport = "native" | "prompt" | "none";
 export type AgentProviderActivationSupport = "single-active" | "none";

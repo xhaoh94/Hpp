@@ -12,6 +12,15 @@ import {
 } from "@/i18n/text";
 
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
+/** Approximate character count that fits in a single line of thinking preview. */
+const THINKING_SINGLE_LINE_CHAR_LIMIT = 60;
+
+/** Check whether thinking text is short enough to fit in a single line. */
+export const isThinkingSingleLine = (value?: string): boolean => {
+  const text = value?.replace(/\s+/g, " ").trim();
+  if (!text) return true;
+  return text.length <= THINKING_SINGLE_LINE_CHAR_LIMIT;
+};
 
 export const getThinkingPreview = (value?: string) => {
   const preview = value?.replace(/\s+/g, " ").trim();

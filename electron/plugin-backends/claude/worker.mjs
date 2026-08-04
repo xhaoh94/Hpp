@@ -18,6 +18,7 @@ let currentModelId = "";
 let thinkingLevel = "medium";
 let permissionMode = "auto";
 let planModeEnabled = false;
+let hostSystemPrompt = "";
 let activeQuery = null;
 let activeQueryPermissionMode = null;
 let queryGeneration = 0;
@@ -345,7 +346,11 @@ const canUseTool = async (toolName, input, options) => {
 const resolveUIResponse = (response) => {
   const id = String(response?.id || "");
   const pending = pendingPermissions.get(id);
-  if (!pending) return;
+  if (!pending) {
+    throw new Error(id
+      ? `Unknown Claude UI request: ${id}`
+      : "Claude UI response is missing request id");
+  }
   pendingPermissions.delete(id);
   if (response.cancelled) {
     pending.resolve({ behavior: "deny", message: "用户取消了操作" });
@@ -481,7 +486,9 @@ const handleSDKMessage = (message) => {
   else if (message.type === "assistant") handleAssistant(message);
   else if (message.type === "user") handleUserToolResults(message);
   else if (message.type === "system" && message.subtype === "compact_boundary") {
-    send({ type: "context_compaction", uuid: message.uuid });
+    // Claude Agent SDK exposes the completed compact boundary, but no matching
+    // compaction-start notification. Mark it explicitly as a completed event.
+    send({ type: "context_compaction", uuid: message.uuid, phase: "completed" });
   } else if (message.type === "system" && message.subtype === "local_command_output") {
     send({ type: "text_delta", delta: String(message.content || "") });
   } else if (message.type === "result") {
@@ -495,7 +502,7 @@ const handleSDKMessage = (message) => {
   }
 };
 
-const createQueryOptions = (sdkProvider, queryPermissionMode, queryPlanModeEnabled) => {
+const createQueryOptions = (sdkProvider, queryPermissionMode, queryPlanModeEnabled, queryHostSystemPrompt) => {
   const sdkPermissionMode = queryPlanModeEnabled
     ? "plan"
     : queryPermissionMode === "full-access"
@@ -504,7 +511,11 @@ const createQueryOptions = (sdkProvider, queryPermissionMode, queryPlanModeEnabl
   const options = {
     cwd: projectPath,
     model: currentModelId,
-    systemPrompt: { type: "preset", preset: "claude_code" },
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      ...(queryHostSystemPrompt ? { append: queryHostSystemPrompt } : {}),
+    },
     tools: { type: "preset", preset: "claude_code" },
     settingSources: ["user", "project", "local"],
     includePartialMessages: true,
@@ -538,24 +549,59 @@ const startQuery = async () => {
   const generation = ++queryGeneration;
   const queryPermissionMode = permissionMode;
   const queryPlanModeEnabled = planModeEnabled;
-  const queryModeKey = `${queryPermissionMode}:${queryPlanModeEnabled ? "plan" : "default"}`;
+  const queryHostSystemPrompt = hostSystemPrompt;
+  const queryModeKey = JSON.stringify([
+    queryPermissionMode,
+    queryPlanModeEnabled ? "plan" : "default",
+    queryHostSystemPrompt,
+  ]);
   inputQueue = new PushableInput();
   const sdkProvider = await prepareSDKProvider(activeProvider);
-  const queryInstance = sdk.query({ prompt: inputQueue, options: createQueryOptions(sdkProvider, queryPermissionMode, queryPlanModeEnabled) });
+  const queryInstance = sdk.query({
+    prompt: inputQueue,
+    options: createQueryOptions(
+      sdkProvider,
+      queryPermissionMode,
+      queryPlanModeEnabled,
+      queryHostSystemPrompt,
+    ),
+  });
   activeQuery = queryInstance;
   activeQueryPermissionMode = queryModeKey;
   void (async () => {
+    let terminalError = "";
     try {
       for await (const message of queryInstance) {
         if (generation !== queryGeneration) break;
         handleSDKMessage(message);
       }
     } catch (error) {
-      if (generation === queryGeneration) {
-        send({ type: "error", id: activePromptId, error: redact(error?.message || String(error)) });
-        activePromptId = null;
-      }
+      terminalError = error?.message || String(error);
     }
+    if (generation !== queryGeneration) return;
+
+    // The SDK query is a long-lived transport. If its iterator completes
+    // without an intentional restart/abort, no future result can arrive for
+    // the active prompt. Fail the prompt and terminate the worker so the host
+    // emits a definitive disconnect instead of remaining permanently busy.
+    const promptId = activePromptId;
+    activePromptId = null;
+    queryGeneration += 1;
+    activeQuery = null;
+    activeQueryPermissionMode = null;
+    const queue = inputQueue;
+    inputQueue = null;
+    queue?.close();
+    dismissPermissions("Claude Agent SDK 连接已断开");
+    if (promptId) {
+      send({
+        type: "error",
+        id: promptId,
+        error: redact(terminalError || "Claude Agent SDK query ended unexpectedly"),
+      });
+    }
+    process.exitCode = 1;
+    setImmediate(() => process.exit(1));
   })();
 };
 
@@ -643,6 +689,7 @@ const init = async (command) => {
   isNewSession = !deferredFork && !canResume;
   activeProvider = normalizeConfig(command.config);
   currentModelId = activeProvider.modelId;
+  hostSystemPrompt = String(command.hostSystemPrompt || "").trim();
   const historySource = deferredFork?.sourceSessionId || (!isNewSession ? actualSessionId : "");
   const history = await buildHistory(historySource, deferredFork?.targetMessageId);
   if (history.length > 0) send({ type: "history_snapshot", messages: history });
@@ -663,7 +710,14 @@ const handleCommand = async (command) => {
           ? command.permissionMode
           : "auto";
         planModeEnabled = command.planModeEnabled === true;
-        const queryModeKey = `${permissionMode}:${planModeEnabled ? "plan" : "default"}`;
+        if (typeof command.hostSystemPrompt === "string") {
+          hostSystemPrompt = command.hostSystemPrompt.trim();
+        }
+        const queryModeKey = JSON.stringify([
+          permissionMode,
+          planModeEnabled ? "plan" : "default",
+          hostSystemPrompt,
+        ]);
         if (activeQueryPermissionMode !== queryModeKey) await restartQuery();
         command.message = await buildActionMessage(command.action, command.message);
         activePromptId = command.id;
@@ -708,8 +762,10 @@ const handleCommand = async (command) => {
         break;
       case "uiResponse":
         resolveUIResponse(command.response);
+        send({ type: "ui_response_done", id: command.id });
         break;
       case "dispose":
+        queryGeneration += 1;
         dismissPermissions("会话已关闭");
         inputQueue?.close();
         activeQuery?.close();

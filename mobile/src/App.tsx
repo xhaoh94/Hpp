@@ -9,6 +9,7 @@ import {
   type FormEvent as ReactFormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type TouchEvent as ReactTouchEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -82,6 +83,29 @@ function renderAttachmentPreview(content: string, maxLength?: number) {
     </span>;
   });
 }
+
+function hydrateRemoteComposerDocument(
+  document: RemoteComposerDocument | undefined,
+  images: Array<{ id: string; src: string; name: string }> = [],
+): ComposerDocument | undefined {
+  if (!document) return undefined;
+  const imageMap = new Map(images.map((image) => [image.id, image]));
+  return createComposerDocument(document.nodes.flatMap((node): ComposerNode[] => {
+    if (node.type !== "image") return [node];
+    const image = imageMap.get(node.id);
+    const src = node.src || image?.src;
+    return src ? [{ ...node, src }] : [{ id: node.id, type: "text", text: `[image: ${node.name}]` }];
+  }));
+}
+
+function remoteComposerDocument(document: ComposerDocument): RemoteComposerDocument {
+  return {
+    version: 1,
+    nodes: document.nodes.map((node) => node.type === "image"
+      ? { id: node.id, type: "image", name: node.name, mimeType: node.mimeType }
+      : node),
+  };
+}
 import type {
   RemoteCatalogSnapshot,
   RemoteAgent,
@@ -93,10 +117,22 @@ import type {
   RemoteProject,
   RemoteProcessEntry,
   RemoteQueuedMessage,
+  RemoteComposerDocument,
   RemoteSession,
   RemoteSessionConfig,
   RemoteSessionCreateResult,
 } from "@shared/remote-protocol";
+import {
+  composerDocumentHasContent,
+  createComposerDocument,
+  getComposerImageNodes,
+  getComposerPlainText,
+  withoutComposerImages,
+  type ComposerDocument,
+  type ComposerNode,
+} from "@shared/composer-document";
+import { InlineComposerEditor, type InlineComposerEditorHandle } from "../../src/components/shared/InlineComposerEditor";
+import { ComposerMessageFlow } from "../../src/components/shared/ComposerMessageFlow";
 
 const SESSION_RUNNING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
 
@@ -119,14 +155,21 @@ import {
 import { getAgentActionDisplayDescription } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
 import {
+  formatProcessDuration,
+  getActiveAssistantTurnId,
   getProcessGroupState,
+  getUserGuidanceText,
   getVisibleProcessEntries,
   groupProcessEntries,
   isAssistantNarrationProcessEntry,
+  isProcessViewRunning,
+  isUserGuidanceProcessEntry,
+  normalizeProcessForView,
   splitCommandDetail,
+  type ProcessTerminalViewState,
 } from "@shared/process-view";
-import { buildDiffSummary, collectProcessDiffs, type ProcessDiffEntry } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
+import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import { extractUserMessageAttachments } from "@shared/user-message-attachments";
 import {
   chooseRemoteImage,
@@ -158,6 +201,7 @@ import {
   type PairedHost,
 } from "./storage";
 import { copyText, createClientId } from "./web-platform";
+import { useDragAutoScroll } from "../../src/hooks/useDragAutoScroll";
 import { getComposerAction } from "./composer";
 import { HppUpdater, type AndroidUpdaterDownloadStatus } from "./android-updater";
 import {
@@ -182,8 +226,18 @@ type SessionPage = {
   config: RemoteSessionConfig | null;
 };
 
+export function isSessionPageResponseCurrent(
+  pageRevision: number,
+  requiredRevision: number,
+  requestUnrevisionedEventVersion: number,
+  currentUnrevisionedEventVersion: number,
+) {
+  return pageRevision >= requiredRevision &&
+    requestUnrevisionedEventVersion === currentUnrevisionedEventVersion;
+}
+
 type PairingMode = "closed" | "manual";
-type ComposerDraftValue = Pick<MobileSessionDraft, "text" | "referenceSessionIds" | "action">;
+type ComposerDraftValue = Pick<MobileSessionDraft, "text" | "document" | "referenceSessionIds" | "action">;
 type AndroidUpdateStage =
   | "idle"
   | "checking"
@@ -380,6 +434,7 @@ function MobileModelPicker({
   onSelect: (model: RemoteModel) => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(currentModel?.provider || null);
   const modelsByProvider = useMemo(() => {
@@ -389,13 +444,15 @@ function MobileModelPicker({
   useEffect(() => {
     if (!open) return;
     const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
     };
     document.addEventListener("pointerdown", closeOutside);
     return () => document.removeEventListener("pointerdown", closeOutside);
   }, [open]);
 
   const providers = Array.from(modelsByProvider.keys());
+  const menuStyle = useAnchoredOverlay(open, rootRef, menuRef);
   return (
     <div ref={rootRef} className={`model-picker ${open ? "open" : ""}`}>
       <button
@@ -415,8 +472,8 @@ function MobileModelPicker({
         <span>{currentModel?.name || "选择模型"}</span>
         <ChevronDown size={13} />
       </button>
-      {open && (
-        <div className="model-picker-menu" role="dialog" aria-label={`${agentName} 模型`}>
+      {open && createPortal(
+        <div ref={menuRef} style={menuStyle} className="model-picker-menu" role="dialog" aria-label={`${agentName} 模型`}>
           <div className="model-picker-header">
             <strong>{agentName} 模型</strong>
             <span>{models.length} 个可用</span>
@@ -457,7 +514,8 @@ function MobileModelPicker({
               </div>
             );
           })}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -475,6 +533,7 @@ function MobileThinkingPicker({
   onSelect: (level: string) => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const currentLevel = levels.find((level) => level.id === value)
     || levels.find((level) => level.id === "medium")
@@ -483,7 +542,8 @@ function MobileThinkingPicker({
   useEffect(() => {
     if (!open) return;
     const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
@@ -500,6 +560,7 @@ function MobileThinkingPicker({
     if (disabled) setOpen(false);
   }, [disabled]);
 
+  const menuStyle = useAnchoredOverlay(open, rootRef, menuRef);
   return (
     <div ref={rootRef} className={`thinking-picker ${open ? "open" : ""}`}>
       <button
@@ -514,8 +575,8 @@ function MobileThinkingPicker({
         <span>{currentLevel?.label || getThinkingLevelLabel(value)}</span>
         <ChevronDown size={10} />
       </button>
-      {open && (
-        <div className="thinking-picker-menu" role="listbox" aria-label="思考等级">
+      {open && createPortal(
+        <div ref={menuRef} style={menuStyle} className="thinking-picker-menu" role="listbox" aria-label="思考等级">
           {levels.map((level) => (
             <button
               type="button"
@@ -531,7 +592,8 @@ function MobileThinkingPicker({
               <span>{level.label}</span>
             </button>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -547,6 +609,7 @@ function MobilePermissionPicker({
   onSelect: (mode: AgentPermissionMode) => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const options: Array<{
     mode: AgentPermissionMode;
@@ -560,11 +623,13 @@ function MobilePermissionPicker({
   ];
   const selected = options.find((option) => option.mode === value) || options[1];
   const SelectedIcon = selected.icon;
+  const menuStyle = useAnchoredOverlay(open, rootRef, menuRef);
 
   useEffect(() => {
     if (!open) return;
     const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
     };
     document.addEventListener("pointerdown", closeOutside);
     return () => document.removeEventListener("pointerdown", closeOutside);
@@ -589,8 +654,8 @@ function MobilePermissionPicker({
         <span>{selected.label}</span>
         <ChevronDown size={10} />
       </button>
-      {open && (
-        <div className="permission-picker-menu" role="menu" aria-label="Agent 权限模式">
+      {open && createPortal(
+        <div ref={menuRef} style={menuStyle} className="permission-picker-menu" role="menu" aria-label="Agent 权限模式">
           <strong>Agent 权限</strong>
           {options.map((option) => {
             const Icon = option.icon;
@@ -612,7 +677,8 @@ function MobilePermissionPicker({
               </button>
             );
           })}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -715,7 +781,13 @@ function AgentActionSheet({
   );
 }
 
-function ProcessEntryRow({ entry }: { entry: RemoteProcessEntry }) {
+function ProcessEntryRow({
+  entry,
+  receivedMessageDocument,
+}: {
+  entry: RemoteProcessEntry;
+  receivedMessageDocument?: ComposerDocument;
+}) {
   if (entry.type === "subagent" && entry.subagents?.length) {
     return <SubagentProcessEntry entry={entry} />;
   }
@@ -725,6 +797,52 @@ function ProcessEntryRow({ entry }: { entry: RemoteProcessEntry }) {
         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
           {entry.detail || entry.title}
         </ReactMarkdown>
+      </div>
+    );
+  }
+  if (isUserGuidanceProcessEntry(entry)) {
+    const sourceDocument = hydrateRemoteComposerDocument(entry.guidanceDocument, entry.guidanceImages);
+    const guidanceDocument = sourceDocument ? withoutComposerImages(sourceDocument) : undefined;
+    const documentImages = sourceDocument ? getComposerImageNodes(sourceDocument) : [];
+    const guidanceImages = entry.guidanceImages?.length ? entry.guidanceImages : documentImages;
+    const hasDocumentContent = !!guidanceDocument && composerDocumentHasContent(guidanceDocument);
+    const fallbackText = !hasDocumentContent && (!sourceDocument || guidanceImages.length === 0)
+      ? getUserGuidanceText(entry)
+      : "";
+
+    return (
+      <div className="process-guidance-row">
+        <div className="process-guidance-stack">
+          {guidanceImages.length > 0 && (
+            <div className="process-guidance-images">
+              {guidanceImages.map((image) => <img key={image.id} src={image.src} alt={image.name} />)}
+            </div>
+          )}
+          <div className="process-guidance-content">
+            <span className="process-guidance-label">引导</span>
+            <div className="message-user-bubble process-guidance-bubble">
+              {hasDocumentContent && guidanceDocument ? (
+                <ComposerMessageFlow document={guidanceDocument} />
+              ) : fallbackText ? (
+                <span className="process-guidance-text">{fallbackText}</span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const isReceivedMessage = entry.toolKind === "message_received" || entry.title.startsWith("收到消息:");
+  if (isReceivedMessage && receivedMessageDocument) {
+    return (
+      <div className={`process-entry process-entry-static ${entry.type}`}>
+        <div className="process-entry-summary process-entry-received">
+          <span className={`entry-state ${entry.state || "completed"}`} />
+          <span className="process-entry-received-content">
+            <span className="process-entry-received-label">收到消息：</span>
+            <ComposerMessageFlow document={receivedMessageDocument} />
+          </span>
+        </div>
       </div>
     );
   }
@@ -779,12 +897,18 @@ function CommandGroup({ entries }: { entries: RemoteProcessEntry[] }) {
   );
 }
 
-function MessageCommentary({ items }: { items: NonNullable<RemoteChatMessage["commentary"]> }) {
+function MessageCommentary({
+  items,
+  running,
+}: {
+  items: NonNullable<RemoteChatMessage["commentary"]>;
+  running: boolean;
+}) {
   return (
     <div className="message-commentary message-content" aria-label="处理说明">
       {items.map((item) => (
         <div
-          className={`message-commentary-item${item.isStreaming ? " streaming" : ""}`}
+          className={`message-commentary-item${running && item.isStreaming ? " streaming" : ""}`}
           key={item.id}
         >
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
@@ -793,6 +917,42 @@ function MessageCommentary({ items }: { items: NonNullable<RemoteChatMessage["co
         </div>
       ))}
     </div>
+  );
+}
+
+function FileOperationGroup({ entries }: { entries: RemoteProcessEntry[] }) {
+  const files = new Map<string, Record<string, unknown>>();
+  for (const entry of entries) {
+    for (const file of entry.files || []) {
+      const filePath = typeof file.file === "string" ? file.file : "";
+      if (!filePath) continue;
+      files.set(filePath.replace(/\\/g, "/").toLowerCase(), file);
+    }
+  }
+  const mergedFiles = Array.from(files.values());
+  const state = getProcessGroupState(entries);
+  const running = state === "running";
+  const toolKind = entries[0]?.toolKind;
+  const action = toolKind === "read_file"
+    ? running ? "正在读取" : "已读取"
+    : toolKind === "list_dir"
+      ? running ? "正在查看" : "已查看"
+      : toolKind === "write_file"
+        ? running ? "正在写入" : "已写入"
+        : running ? "正在编辑" : "已编辑";
+  const unit = toolKind === "list_dir" ? "个目录" : "个文件";
+  const warningTitle = entries.find((entry) => entry.state === "warning" || entry.state === "error")?.title;
+  return (
+    <ProcessEntryRow
+      entry={{
+        ...entries[entries.length - 1],
+        id: `files-${entries[0].id}`,
+        title: warningTitle || `${action} ${mergedFiles.length} ${unit}`,
+        state,
+        files: mergedFiles,
+        detail: undefined,
+      }}
+    />
   );
 }
 
@@ -888,18 +1048,52 @@ function SubagentGlyph() {
   );
 }
 
-function MessageProcess({ message }: { message: RemoteChatMessage }) {
+function useProcessTicker(enabled: boolean) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+
+  return now;
+}
+
+function MessageProcess({
+  message,
+  receivedUserMessage,
+  running,
+  terminalState,
+}: {
+  message: RemoteChatMessage;
+  receivedUserMessage?: RemoteChatMessage;
+  running: boolean;
+  terminalState: ProcessTerminalViewState;
+}) {
+  const receivedMessageDocument = hydrateRemoteComposerDocument(
+    receivedUserMessage?.composerDocument,
+    receivedUserMessage?.images,
+  );
   const processStartedAt = message.process?.startedAt;
-  const [expanded, setExpanded] = useState(message.isStreaming === true);
+  const commentary = (message.commentary || []).filter((item) => item.content.trim());
+  const fallbackEndedAt = Math.max(message.timestamp, ...commentary.map((item) => item.timestamp));
+  const process = useMemo(() => message.process ? normalizeProcessForView(message.process, {
+    running,
+    terminalState,
+    fallbackEndedAt,
+  }) : undefined, [fallbackEndedAt, message.process, running, terminalState]);
+  const processRunning = !!process && isProcessViewRunning(process, running);
+  const nowTick = useProcessTicker(processRunning);
+  const [expanded, setExpanded] = useState(running && message.isStreaming === true);
   const processStartedAtRef = useRef(processStartedAt);
   useEffect(() => {
     if (processStartedAt && processStartedAt !== processStartedAtRef.current) {
       processStartedAtRef.current = processStartedAt;
-      setExpanded(message.isStreaming === true);
+      setExpanded(running && message.isStreaming === true);
     }
-  }, [message.isStreaming, processStartedAt]);
-  const commentary = (message.commentary || []).filter((item) => item.content.trim());
-  const visibleEntries = getVisibleProcessEntries(message.process?.entries || []);
+  }, [message.isStreaming, processStartedAt, running]);
+  const visibleEntries = getVisibleProcessEntries(process?.entries || []);
   const timelineItems = useMemo(() => [
     ...visibleEntries.map((entry, index) => ({
       kind: "entry" as const,
@@ -916,20 +1110,21 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
       commentary: item,
     })),
   ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, visibleEntries]);
-  if (!message.process) return commentary.length > 0 ? <MessageCommentary items={commentary} /> : null;
-  const hasPlan = !!message.process.planSteps?.length;
-  if (!hasPlan && visibleEntries.length === 0 && !message.process.changeSummary) {
-    return commentary.length > 0 ? <MessageCommentary items={commentary} /> : null;
+  if (!process) return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
+  const elapsed = formatProcessDuration((process.endedAt ?? nowTick) - process.startedAt);
+  const hasPlan = !!process.planSteps?.length;
+  if (!hasPlan && visibleEntries.length === 0 && !process.changeSummary) {
+    return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
   }
   return (
     <>
       <details className="process-block" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary>
-          <span>{message.process.endedAt ? "执行过程" : "正在执行"}</span>
+          <span>处理耗时 {elapsed}</span>
           <span className="process-summary-meta">
-            {message.process.changeSummary && (
+            {process.changeSummary && (
               <small>
-                {message.process.changeSummary.filesChanged} files · +{message.process.changeSummary.additions} -{message.process.changeSummary.deletions}
+                {process.changeSummary.filesChanged} files · +{process.changeSummary.additions} -{process.changeSummary.deletions}
               </small>
             )}
             <ChevronDown className="expand-indicator" size={14} />
@@ -937,16 +1132,18 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
         </summary>
         {hasPlan && (
           <div className="process-plan">
-            {message.process.planSteps!.map((step) => (
+            {process.planSteps!.map((step) => (
               <div key={step.id} data-status={step.status}><span /><span className="process-plan-title">{step.title}</span></div>
             ))}
           </div>
         )}
         {commentary.length === 0 && visibleEntries.length > 0 && (
           <div className="process-entries">
-            {groupProcessEntries(visibleEntries).map((group) => group.kind === "commands"
+            {groupProcessEntries(visibleEntries, { groupFileOperations: true }).map((group) => group.kind === "commands"
               ? <CommandGroup key={`commands-${group.entries[0].id}`} entries={group.entries} />
-              : <ProcessEntryRow key={group.entry.id} entry={group.entry} />)}
+              : group.kind === "files"
+                ? <FileOperationGroup key={`files-${group.entries[0].id}`} entries={group.entries} />
+                : <ProcessEntryRow key={group.entry.id} entry={group.entry} receivedMessageDocument={receivedMessageDocument} />)}
           </div>
         )}
       </details>
@@ -954,7 +1151,7 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
         <div className="message-turn-timeline">
           {timelineItems.map((item) => item.kind === "commentary" ? (
             <div
-              className={`message-commentary-item message-content${item.commentary.isStreaming ? " streaming" : ""}`}
+              className={`message-commentary-item message-content${processRunning && item.commentary.isStreaming ? " streaming" : ""}`}
               key={`commentary-${item.id}`}
             >
               <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
@@ -962,7 +1159,7 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
               </ReactMarkdown>
             </div>
           ) : (
-            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} />
+            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} />
           ))}
         </div>
       )}
@@ -972,6 +1169,9 @@ function MessageProcess({ message }: { message: RemoteChatMessage }) {
 
 function MessageItem({
   message,
+  receivedUserMessage,
+  turnRunning,
+  processTerminalState,
   actionsDisabled,
   forking,
   onEdit,
@@ -979,6 +1179,9 @@ function MessageItem({
   onFork,
 }: {
   message: RemoteChatMessage;
+  receivedUserMessage?: RemoteChatMessage;
+  turnRunning: boolean;
+  processTerminalState: ProcessTerminalViewState;
   actionsDisabled: boolean;
   forking: boolean;
   onEdit: (content: string) => void;
@@ -988,17 +1191,37 @@ function MessageItem({
   const messagePresentation = message.role === "user"
     ? extractUserMessageAttachments(message.content)
     : { text: message.content, attachments: [] };
-  const assistantActionsReady = areAssistantMessageActionsVisible(message);
-  const diffSummary = buildDiffSummary([
-    ...(message.diffs || []),
-    ...collectProcessDiffs(message.process as unknown as { entries?: ProcessDiffEntry[] }),
-  ]);
+  const fallbackProcessEndedAt = Math.max(
+    message.timestamp,
+    ...(message.commentary || []).map((item) => item.timestamp),
+  );
+  const processRunning = !!message.process && isProcessViewRunning(message.process, turnRunning);
+  const assistantActionsReady = areAssistantMessageActionsVisible({
+    ...message,
+    isStreaming: turnRunning && message.isStreaming,
+    process: message.process ? {
+      ...message.process,
+      endedAt: processRunning ? message.process.endedAt : message.process.endedAt ?? fallbackProcessEndedAt,
+    } : undefined,
+  });
   const showActions = message.role === "user" || assistantActionsReady;
+  const sourceComposerDocument = message.role === "user"
+    ? hydrateRemoteComposerDocument(message.composerDocument, message.images)
+    : undefined;
+  const orderedDocument = sourceComposerDocument ? withoutComposerImages(sourceComposerDocument) : undefined;
+  const displayedImages = message.images?.length
+    ? message.images
+    : sourceComposerDocument
+      ? getComposerImageNodes(sourceComposerDocument).map(({ id, src, name }) => ({ id, src, name }))
+      : [];
+  const hasOrderedContent = !!orderedDocument && composerDocumentHasContent(orderedDocument);
+  const hasLegacyTextContent = !orderedDocument && !!messagePresentation.text;
   const hasUserBubbleContent = message.role === "user" && (
-    !!messagePresentation.text
+    hasLegacyTextContent
     || messagePresentation.attachments.length > 0
     || !!message.sessionReferences?.length
     || !!message.action
+    || hasOrderedContent
   );
   return (
     <article id={`message-${message.id}`} className={`message ${message.role}`}>
@@ -1008,9 +1231,9 @@ function MessageItem({
           <time>{new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
         </div>
       )}
-      {message.images && message.images.length > 0 && (
+      {displayedImages.length > 0 && (
         <div className="message-images">
-          {message.images.map((image) => <img key={image.id} src={image.src} alt={image.name} />)}
+          {displayedImages.map((image) => <img key={image.id} src={image.src} alt={image.name} />)}
         </div>
       )}
       {hasUserBubbleContent && (
@@ -1022,8 +1245,12 @@ function MessageItem({
               <strong>{message.action.name}</strong>
             </div>
           )}
-          {(messagePresentation.attachments.length > 0 || !!message.sessionReferences?.length || !!messagePresentation.text) && (
+          {(hasOrderedContent || messagePresentation.attachments.length > 0 || !!message.sessionReferences?.length || hasLegacyTextContent) && (
             <div className="message-user-flow">
+              {orderedDocument ? (
+                <ComposerMessageFlow document={orderedDocument} />
+              ) : (
+                <>
               {messagePresentation.attachments.map((attachment, index) => (
                 <span className={`message-text-attachment-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
                   {attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
@@ -1041,6 +1268,8 @@ function MessageItem({
                   <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{messagePresentation.text}</ReactMarkdown>
                 </div>
               )}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -1055,7 +1284,7 @@ function MessageItem({
           ))}
         </div>
       )}
-      <MessageProcess message={message} />
+      <MessageProcess message={message} receivedUserMessage={receivedUserMessage} running={turnRunning} terminalState={processTerminalState} />
       {message.role !== "user" && message.action && (
         <div className={`message-action-label${messagePresentation.text ? " with-content" : ""}`}>
           <WandSparkles size={13} />
@@ -1068,18 +1297,6 @@ function MessageItem({
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{messagePresentation.text}</ReactMarkdown>
         </div>
       )}
-      {diffSummary.files.map((diff) => (
-        <details className="diff-block" key={`${message.id}-${diff.file}`}>
-          <summary>
-            <code>{diff.file}</code>
-            <span className="diff-summary-meta">
-              <span className="diff-stats">+{diff.additions} -{diff.deletions}</span>
-              <ChevronDown className="expand-indicator" size={14} />
-            </span>
-          </summary>
-          <pre>{diff.patches.join("\n")}</pre>
-        </details>
-      ))}
       {showActions && (
         <div className={`message-actions ${message.role}`}>
           {message.role === "user" && (
@@ -1424,10 +1641,43 @@ function PermissionChoice({
 
 type QueueEditDraft = {
   content: string;
+  composerDocument: ComposerDocument;
   images: NonNullable<RemoteQueuedMessage["images"]>;
   sessionReferences: NonNullable<RemoteQueuedMessage["sessionReferences"]>;
   attachments: NonNullable<RemoteQueuedMessage["attachments"]>;
   action: RemoteQueuedMessage["action"];
+};
+
+const queueEditDocument = (item: RemoteQueuedMessage): ComposerDocument => withoutComposerImages(hydrateRemoteComposerDocument(
+  item.composerDocument,
+  item.images,
+) || createComposerDocument([
+  ...((item.editableContent ?? item.displayContent) ? [{ id: createClientId(), type: "text" as const, text: item.editableContent ?? item.displayContent }] : []),
+  ...(item.attachments || []).map((attachment) => ({ id: createClientId(), type: "text" as const, text: `[${attachment.kind}: ${attachment.name}]` })),
+  ...(item.sessionReferences || []).map((reference) => ({ id: createClientId(), type: "session" as const, reference })),
+ ]));
+
+const queueEditDraftWithDocument = (draft: QueueEditDraft, document: ComposerDocument): QueueEditDraft => {
+  const images = [...draft.images];
+  for (const image of getComposerImageNodes(document)) {
+    if (!images.some((current) => current.id === image.id)) images.push(image);
+  }
+  const orderedDocument = withoutComposerImages(document);
+  return ({
+  ...draft,
+  composerDocument: orderedDocument,
+  content: getComposerPlainText(orderedDocument),
+  images,
+  sessionReferences: document.nodes.flatMap((node) => node.type === "session" ? [{
+    sourceSessionId: node.reference.sourceSessionId,
+    sourceTitle: node.reference.sourceTitle,
+  }] : []),
+  attachments: document.nodes.flatMap((node): NonNullable<RemoteQueuedMessage["attachments"]> => {
+    if (node.type === "path") return [{ id: node.id, name: node.name, kind: node.kind }];
+    if (node.type === "snippet") return [{ id: node.id, name: `${node.fileName}:${node.startLine}-${node.endLine}`, kind: "snippet" as const }];
+    return [];
+  }),
+  });
 };
 
 type QueueEditDialogProps = {
@@ -1438,13 +1688,14 @@ type QueueEditDialogProps = {
 };
 
 function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEditDialogProps) {
-  const [draft, setDraft] = useState<QueueEditDraft>({
+  const [draft, setDraft] = useState<QueueEditDraft>(() => ({
     content: item.editableContent ?? item.displayContent,
+    composerDocument: queueEditDocument(item),
     images: item.images || [],
     sessionReferences: item.sessionReferences || [],
     attachments: item.attachments || [],
     action: item.action,
-  });
+  }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -1456,6 +1707,7 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
     bottom?: number;
   } | null>(null);
   const addMenuRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<InlineComposerEditorHandle | null>(null);
 
   useEffect(() => {
     if (!addMenuOpen) return;
@@ -1508,12 +1760,7 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
       const image = await chooseRemoteImage();
       setDraft((current) => ({
         ...current,
-        images: [...current.images, {
-          id: image.id,
-          name: image.name,
-          mimeType: image.mimeType,
-          src: image.preview,
-        }].slice(0, MAX_REMOTE_IMAGES),
+        images: [...current.images, { id: image.id, name: image.name, mimeType: image.mimeType, src: image.preview }],
       }));
       setError("");
     } catch (imageError) {
@@ -1522,17 +1769,17 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
   }, [draft.images.length]);
 
   const toggleReference = useCallback((session: RemoteSession) => {
-    setDraft((current) => {
-      const exists = current.sessionReferences.some((reference) => reference.sourceSessionId === session.id);
-      if (!exists && current.sessionReferences.length >= MAX_REMOTE_SESSION_REFERENCES) return current;
-      return {
-        ...current,
-        sessionReferences: exists
-          ? current.sessionReferences.filter((reference) => reference.sourceSessionId !== session.id)
-          : [...current.sessionReferences, { sourceSessionId: session.id, sourceTitle: session.title }],
-      };
-    });
-  }, []);
+    const exists = draft.sessionReferences.some((reference) => reference.sourceSessionId === session.id);
+    if (exists) {
+      const document = createComposerDocument(draft.composerDocument.nodes.filter((node) =>
+        node.type !== "session" || node.reference.sourceSessionId !== session.id
+      ));
+      setDraft((current) => queueEditDraftWithDocument(current, document));
+      return;
+    }
+    if (draft.sessionReferences.length >= MAX_REMOTE_SESSION_REFERENCES) return;
+    editorRef.current?.insertNode({ id: createClientId(), type: "session", reference: { sourceSessionId: session.id, sourceTitle: session.title } });
+  }, [draft]);
 
   const hasContent = !!draft.content.trim() || draft.images.length > 0 || draft.sessionReferences.length > 0
     || draft.attachments.length > 0 || !!draft.action;
@@ -1564,7 +1811,7 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
           <button type="button" className="icon-button" onClick={onClose} disabled={saving} title="关闭"><X size={18} /></button>
         </header>
         <div className="queue-edit-body">
-          {(draft.action || draft.images.length > 0 || draft.sessionReferences.length > 0 || draft.attachments.length > 0) && (
+          {draft.action && (
             <div className="queue-edit-contexts">
               {draft.action && (
                 <div className="queue-edit-chip action">
@@ -1573,36 +1820,25 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
                   <button type="button" onClick={() => setDraft((current) => ({ ...current, action: undefined }))} title="移除"><X size={12} /></button>
                 </div>
               )}
+            </div>
+          )}
+          {draft.images.length > 0 && (
+            <div className="queue-edit-contexts">
               {draft.images.map((image) => (
-                <div className="queue-edit-chip image" key={image.id}>
-                  <img src={image.src} alt="" />
-                  <span>{image.name}</span>
-                  <button type="button" onClick={() => setDraft((current) => ({ ...current, images: current.images.filter((entry) => entry.id !== image.id) }))} title="移除图片"><X size={12} /></button>
-                </div>
-              ))}
-              {draft.attachments.map((attachment) => (
-                <div className="queue-edit-chip" key={attachment.id}>
-                  <FileText size={13} />
-                  <span>{attachment.name}</span>
-                  <button type="button" onClick={() => setDraft((current) => ({ ...current, attachments: current.attachments.filter((entry) => entry.id !== attachment.id) }))} title="移除文件"><X size={12} /></button>
-                </div>
-              ))}
-              {draft.sessionReferences.map((reference) => (
-                <div className="queue-edit-chip reference" key={reference.sourceSessionId}>
-                  <Link2 size={13} />
-                  <span>{renderAttachmentPreview(reference.sourceTitle)}</span>
-                  <button type="button" onClick={() => setDraft((current) => ({ ...current, sessionReferences: current.sessionReferences.filter((entry) => entry.sourceSessionId !== reference.sourceSessionId) }))} title="移除引用"><X size={12} /></button>
+                <div className="queue-edit-chip" key={image.id}>
+                  <img src={image.src} alt={image.name} />
+                  <span>Image</span>
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== image.id) }))} title="移除图片"><X size={12} /></button>
                 </div>
               ))}
             </div>
           )}
           <div className="queue-edit-composer">
-            <textarea
-              value={draft.content}
-              autoFocus
-              rows={5}
+            <InlineComposerEditor
+              ref={editorRef}
+              value={draft.composerDocument}
+              onChange={(document) => setDraft((current) => queueEditDraftWithDocument(current, document))}
               placeholder={draft.action ? "添加技能参数或说明" : "编辑消息内容"}
-              onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
               onKeyDown={(event) => {
                 if (event.key === "Escape") onClose();
                 if (event.key === "Enter" && event.ctrlKey) {
@@ -1703,34 +1939,52 @@ type QueuePanelProps = {
 
 function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, onGuide, onReorder, onRemove }: QueuePanelProps) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
+  const [dropPosition, setDropPosition] = useState<"before" | "after">("before");
   const draggingIdRef = useRef<string | null>(null);
   const dropIndexRef = useRef<number | null>(null);
+  const queueScrollRef = useRef<HTMLDivElement | null>(null);
+  const { update: updateQueueAutoScroll, stop: stopQueueAutoScroll } = useDragAutoScroll(queueScrollRef);
 
   const finishDragging = () => {
+    stopQueueAutoScroll();
     draggingIdRef.current = null;
     dropIndexRef.current = null;
     setDraggingId(null);
-    setDropIndex(null);
+    setDropTargetIndex(null);
+    setDropPosition("before");
   };
-  const startDragging = (event: ReactPointerEvent<HTMLButtonElement>, item: RemoteQueuedMessage, index: number) => {
+  const startDragging = (event: ReactPointerEvent<HTMLButtonElement>, item: RemoteQueuedMessage) => {
     if (disabled || item.status === "sending") return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     draggingIdRef.current = item.id;
-    dropIndexRef.current = index;
+    dropIndexRef.current = null;
     setDraggingId(item.id);
-    setDropIndex(index);
+    setDropTargetIndex(null);
+    setDropPosition("before");
   };
   const moveDragging = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (!draggingIdRef.current) return;
     event.preventDefault();
+    updateQueueAutoScroll(event.clientY);
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-queue-id]");
     if (!target) return;
     const index = items.findIndex((item) => item.id === target.dataset.queueId);
-    if (index < 0 || dropIndexRef.current === index) return;
-    dropIndexRef.current = index;
-    setDropIndex(index);
+    const sourceIndex = items.findIndex((item) => item.id === draggingIdRef.current);
+    if (index < 0 || sourceIndex < 0) return;
+    const rect = target.getBoundingClientRect();
+    const insertAfter = event.clientY >= rect.top + rect.height / 2;
+    const rawInsertIndex = index + (insertAfter ? 1 : 0);
+    const nextIndex = sourceIndex < rawInsertIndex ? rawInsertIndex - 1 : rawInsertIndex;
+    if (nextIndex === sourceIndex) {
+      dropIndexRef.current = null;
+      setDropTargetIndex(null);
+      return;
+    }
+    dropIndexRef.current = nextIndex;
+    setDropTargetIndex(index);
+    setDropPosition(insertAfter ? "after" : "before");
   };
   const stopDragging = (event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) => {
     const itemId = draggingIdRef.current;
@@ -1743,10 +1997,10 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
   return (
     <div className="queue-strip">
       <div className="queue-header"><span>发送队列</span><small>{items.length}</small></div>
-      <div className="queue-list">
+      <div ref={queueScrollRef} className="queue-list">
         {items.map((item, index) => (
           <div
-            className={`queue-item ${item.status} ${draggingId === item.id ? "dragging" : ""} ${dropIndex === index && draggingId !== item.id ? "drop-target" : ""}`}
+            className={`queue-item ${item.status} ${draggingId === item.id ? "dragging" : ""} ${dropTargetIndex === index && draggingId !== item.id ? `drop-target ${dropPosition}` : ""}`}
             data-queue-id={item.id}
             key={item.id}
           >
@@ -1756,7 +2010,7 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
               disabled={disabled || item.status === "sending"}
               title="拖动调整顺序"
               aria-label={`拖动第 ${index + 1} 条队列消息`}
-              onPointerDown={(event) => startDragging(event, item, index)}
+              onPointerDown={(event) => startDragging(event, item)}
               onPointerMove={moveDragging}
               onPointerUp={(event) => stopDragging(event, true)}
               onPointerCancel={(event) => stopDragging(event, false)}
@@ -1820,6 +2074,7 @@ export default function App() {
   const [loadingSession, setLoadingSession] = useState(false);
   const [commandBusy, setCommandBusy] = useState(false);
   const [composer, setComposer] = useState("");
+  const [composerDocument, setComposerDocument] = useState<ComposerDocument>(() => createComposerDocument());
   const [composerComposition, setComposerComposition] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingRemoteImage[]>([]);
   const [pendingReferenceIds, setPendingReferenceIds] = useState<string[]>([]);
@@ -1838,6 +2093,8 @@ export default function App() {
   const [editingHostNote, setEditingHostNote] = useState("");
   const [editingAddress, setEditingAddress] = useState("");
   const [savingHostId, setSavingHostId] = useState<string | null>(null);
+  const [hostPullDistance, setHostPullDistance] = useState(0);
+  const [refreshingHosts, setRefreshingHosts] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyProjectId, setHistoryProjectId] = useState<string | null>(null);
   const [createProject, setCreateProject] = useState<RemoteProject | null>(null);
@@ -1864,10 +2121,18 @@ export default function App() {
   const agentsRef = useRef<RemoteAgent[]>([]);
   const configsRef = useRef<Record<string, RemoteSessionConfig>>({});
   const revisionsRef = useRef<Record<string, number>>({});
+  const requiredSessionRevisionsRef = useRef<Record<string, number>>({});
+  const unrevisionedSessionEventVersionsRef = useRef<Record<string, number>>({});
+  const sessionLoadGenerationsRef = useRef<Record<string, number>>({});
   const staleSessionIdsRef = useRef(new Set<string>());
   const loadingSessionIdsRef = useRef(new Set<string>());
+  const reloadAfterSessionLoadRef = useRef(new Set<string>());
+  const loadSessionRef = useRef<(sessionId: string, replace?: boolean, before?: number | null) => Promise<void>>(
+    async () => undefined,
+  );
   const hostEpochRef = useRef<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const inlineComposerRef = useRef<InlineComposerEditorHandle | null>(null);
   const composerAddMenuRef = useRef<HTMLDivElement | null>(null);
   const messagesViewRef = useRef<HTMLDivElement | null>(null);
   const followMessageBottomRef = useRef(true);
@@ -1881,6 +2146,11 @@ export default function App() {
   const autoConnectAttemptedRef = useRef(false);
   const updateMetadataRef = useRef<AndroidUpdateMetadata | null>(null);
   const updateCheckInFlightRef = useRef(false);
+  const connectionsScreenRef = useRef<HTMLElement | null>(null);
+  const editingHostFormRef = useRef<HTMLFormElement | null>(null);
+  const editingHostTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const hostPullStartRef = useRef<number | null>(null);
+  const hostPullDistanceRef = useRef(0);
   const dismissedUpdateVersionRef = useRef<number | null>(null);
   const updateStageRef = useRef<AndroidUpdateStage>("idle");
   const updateInstallInFlightRef = useRef(false);
@@ -1895,7 +2165,7 @@ export default function App() {
   agentsRef.current = agents;
   configsRef.current = configs;
   updateStageRef.current = updateStage;
-  draftValueRef.current = { text: composer, referenceSessionIds: pendingReferenceIds, action: pendingAction };
+  draftValueRef.current = { text: composer, document: composerDocument, referenceSessionIds: pendingReferenceIds, action: pendingAction };
 
   const flushCurrentDraft = useCallback(() => {
     if (draftSaveTimerRef.current) {
@@ -1934,7 +2204,7 @@ export default function App() {
       setConnectionState("connected");
       setProjects(DEMO_PROJECTS);
       setAgents(DEMO_AGENTS);
-      setSelectedSessionId(DEMO_SESSION_ID);
+      setSelectedSessionId(demoVariant === "empty" ? null : DEMO_SESSION_ID);
       setMessages({
         [DEMO_SESSION_ID]: DEMO_MESSAGES,
         "demo-session-2": [],
@@ -2265,8 +2535,12 @@ export default function App() {
       return next;
     });
     revisionsRef.current = retainSessions(revisionsRef.current);
+    requiredSessionRevisionsRef.current = retainSessions(requiredSessionRevisionsRef.current);
+    unrevisionedSessionEventVersionsRef.current = retainSessions(unrevisionedSessionEventVersionsRef.current);
+    sessionLoadGenerationsRef.current = retainSessions(sessionLoadGenerationsRef.current);
     staleSessionIdsRef.current = new Set([...staleSessionIdsRef.current].filter((sessionId) => validSessionIds.has(sessionId)));
     loadingSessionIdsRef.current = new Set([...loadingSessionIdsRef.current].filter((sessionId) => validSessionIds.has(sessionId)));
+    reloadAfterSessionLoadRef.current = new Set([...reloadAfterSessionLoadRef.current].filter((sessionId) => validSessionIds.has(sessionId)));
     projectsRef.current = nextProjects;
     agentsRef.current = nextAgents;
     setProjects(nextProjects);
@@ -2285,11 +2559,48 @@ export default function App() {
     applyCatalog(snapshot.projects, snapshot.agents || []);
   }, [applyCatalog]);
 
+  const applySessionConfig = useCallback((sessionId: string, config: RemoteSessionConfig) => {
+    setConfigs((current) => {
+      const previous = current[sessionId];
+      const sameModel = previous?.model?.id === config.model?.id && previous?.model?.provider === config.model?.provider;
+      const sameAvailableModels = previous?.availableModels === config.availableModels || (
+        previous?.availableModels && config.availableModels &&
+        previous.availableModels.length === config.availableModels.length &&
+        previous.availableModels.every((model, index) => {
+          const next = config.availableModels![index];
+          return model.id === next.id && model.provider === next.provider;
+        })
+      );
+      if (
+        previous &&
+        sameModel &&
+        previous.thinkingLevel === config.thinkingLevel &&
+        previous.planModeEnabled === config.planModeEnabled &&
+        previous.permissionMode === config.permissionMode &&
+        sameAvailableModels
+      ) return current;
+      const next = { ...current, [sessionId]: config };
+      configsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const loadSession = useCallback(async (sessionId: string, replace = true, before?: number | null) => {
     const client = clientRef.current;
     if (!client) return;
-    if (replace && loadingSessionIdsRef.current.has(sessionId)) return;
-    if (replace) loadingSessionIdsRef.current.add(sessionId);
+    if (replace && loadingSessionIdsRef.current.has(sessionId)) {
+      if (staleSessionIdsRef.current.has(sessionId)) reloadAfterSessionLoadRef.current.add(sessionId);
+      return;
+    }
+    const loadGeneration = replace
+      ? (sessionLoadGenerationsRef.current[sessionId] || 0) + 1
+      : 0;
+    const requestUnrevisionedEventVersion = unrevisionedSessionEventVersionsRef.current[sessionId] || 0;
+    if (replace) {
+      sessionLoadGenerationsRef.current[sessionId] = loadGeneration;
+      loadingSessionIdsRef.current.add(sessionId);
+      reloadAfterSessionLoadRef.current.delete(sessionId);
+    }
     setLoadingSession(true);
     try {
       const page = await client.request<SessionPage>("session.get", {
@@ -2297,8 +2608,28 @@ export default function App() {
         ...(before !== undefined && before !== null ? { before } : {}),
         limit: 50,
       });
-      revisionsRef.current[sessionId] = page.revision;
-      staleSessionIdsRef.current.delete(sessionId);
+      if (clientRef.current !== client) return;
+      if (replace && sessionLoadGenerationsRef.current[sessionId] !== loadGeneration) return;
+      const requiredRevision = Math.max(
+        revisionsRef.current[sessionId] || 0,
+        requiredSessionRevisionsRef.current[sessionId] || 0,
+      );
+      const responseCurrent = isSessionPageResponseCurrent(
+        page.revision,
+        requiredRevision,
+        requestUnrevisionedEventVersion,
+        unrevisionedSessionEventVersionsRef.current[sessionId] || 0,
+      );
+      if (replace && (!responseCurrent || reloadAfterSessionLoadRef.current.has(sessionId))) {
+        staleSessionIdsRef.current.add(sessionId);
+        reloadAfterSessionLoadRef.current.add(sessionId);
+        return;
+      }
+      revisionsRef.current[sessionId] = Math.max(revisionsRef.current[sessionId] || 0, page.revision);
+      if (replace) {
+        staleSessionIdsRef.current.delete(sessionId);
+        reloadAfterSessionLoadRef.current.delete(sessionId);
+      }
       setMessages((current) => ({
         ...current,
         [sessionId]: replace ? page.messages : [...page.messages, ...(current[sessionId] || [])],
@@ -2306,19 +2637,35 @@ export default function App() {
       setNextBefore((current) => ({ ...current, [sessionId]: page.nextBefore }));
       setQueues((current) => ({ ...current, [sessionId]: page.queue || [] }));
       setInteractions((current) => ({ ...current, [sessionId]: page.interaction || null }));
-      if (page.config) setConfigs((current) => ({ ...current, [sessionId]: page.config! }));
+      if (page.config) applySessionConfig(sessionId, page.config);
       if (replace) {
         void client.request<RemoteSessionConfig>("session.models.get", { sessionId }).then((config) => {
-          setConfigs((current) => ({ ...current, [sessionId]: config }));
+          applySessionConfig(sessionId, config);
         }).catch(() => undefined);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (replace) loadingSessionIdsRef.current.delete(sessionId);
+      let reload = false;
+      if (
+        replace &&
+        clientRef.current === client &&
+        sessionLoadGenerationsRef.current[sessionId] === loadGeneration
+      ) {
+        loadingSessionIdsRef.current.delete(sessionId);
+        reload = reloadAfterSessionLoadRef.current.delete(sessionId);
+      }
       setLoadingSession(false);
+      if (
+        reload &&
+        clientRef.current === client &&
+        projectsRef.current.some((project) => project.sessions.some((session) => session.id === sessionId))
+      ) {
+        queueMicrotask(() => void loadSessionRef.current(sessionId));
+      }
     }
-  }, []);
+  }, [applySessionConfig]);
+  loadSessionRef.current = loadSession;
 
   const copyMessage = useCallback((content: string) => {
     void copyText(content).then(() => {
@@ -2331,11 +2678,15 @@ export default function App() {
   const handleRemoteEvent = useCallback((name: string, payload: unknown, revision?: number, hostEpoch?: string) => {
     if (hostEpochRef.current && hostEpoch && hostEpochRef.current !== hostEpoch) {
       hostEpochRef.current = hostEpoch;
+      for (const sessionId of loadingSessionIdsRef.current) {
+        reloadAfterSessionLoadRef.current.add(sessionId);
+      }
       staleSessionIdsRef.current = new Set([
         ...Object.keys(configsRef.current),
         ...Object.keys(revisionsRef.current),
       ]);
       revisionsRef.current = {};
+      requiredSessionRevisionsRef.current = {};
       setMessages({});
       setQueues({});
       setInteractions({});
@@ -2361,6 +2712,15 @@ export default function App() {
     }
     const sessionId = typeof data.sessionId === "string" ? data.sessionId : "";
     if (!sessionId) return;
+    if (revision) {
+      requiredSessionRevisionsRef.current[sessionId] = Math.max(
+        requiredSessionRevisionsRef.current[sessionId] || 0,
+        revision,
+      );
+    } else {
+      unrevisionedSessionEventVersionsRef.current[sessionId] =
+        (unrevisionedSessionEventVersionsRef.current[sessionId] || 0) + 1;
+    }
     if (staleSessionIdsRef.current.has(sessionId)) {
       if (selectedSessionRef.current === sessionId) void loadSession(sessionId);
       return;
@@ -2409,15 +2769,14 @@ export default function App() {
           nextModel.name || nextModel.id,
         ));
       }
-      configsRef.current = { ...configsRef.current, [sessionId]: config };
-      setConfigs((current) => ({ ...current, [sessionId]: config }));
+      applySessionConfig(sessionId, config);
       if (config.availableModels === undefined && selectedSessionRef.current === sessionId) {
         void clientRef.current?.request<RemoteSessionConfig>("session.models.get", { sessionId }).then((nextConfig) => {
-          setConfigs((current) => ({ ...current, [sessionId]: nextConfig }));
+          applySessionConfig(sessionId, nextConfig);
         }).catch(() => undefined);
       }
     }
-  }, [applyCatalog, loadCatalog, loadSession, showFloatingToast]);
+  }, [applyCatalog, applySessionConfig, loadCatalog, loadSession, showFloatingToast]);
 
   const connectHost = useCallback((host: PairedHost) => {
     autoConnectAttemptedRef.current = true;
@@ -2439,8 +2798,12 @@ export default function App() {
     setInteractions({});
     setConfigs({});
     revisionsRef.current = {};
+    requiredSessionRevisionsRef.current = {};
+    unrevisionedSessionEventVersionsRef.current = {};
+    sessionLoadGenerationsRef.current = {};
     staleSessionIdsRef.current.clear();
     loadingSessionIdsRef.current.clear();
+    reloadAfterSessionLoadRef.current.clear();
     hostEpochRef.current = null;
     const client = new RemoteClient(host);
     clientRef.current = client;
@@ -2465,6 +2828,9 @@ export default function App() {
           ...Object.keys(revisionsRef.current),
           ...Object.keys(configsRef.current),
         ]);
+        for (const sessionId of loadingSessionIdsRef.current) {
+          reloadAfterSessionLoadRef.current.add(sessionId);
+        }
       }
       if (state === "connected") {
         void loadCatalog(client).then(() => {
@@ -2535,6 +2901,17 @@ export default function App() {
   }, [composerAddMenuOpen]);
 
   useEffect(() => {
+    if (!editingHostId) return;
+    const closeEditor = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (editingHostFormRef.current?.contains(target) || editingHostTriggerRef.current?.contains(target)) return;
+      if (!savingHostId) setEditingHostId(null);
+    };
+    document.addEventListener("pointerdown", closeEditor);
+    return () => document.removeEventListener("pointerdown", closeEditor);
+  }, [editingHostId, savingHostId]);
+
+  useEffect(() => {
     // Pause availability updates while editing a desktop. In mobile WebView,
     // the periodic state update can otherwise repaint the controlled form and
     // make an in-progress note appear to reset while typing.
@@ -2582,6 +2959,56 @@ export default function App() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [activeHost, demoMode, editingHostId, hosts, hostsLoaded]);
+
+  const refreshPairedHosts = useCallback(async () => {
+    if (refreshingHosts) return;
+    setRefreshingHosts(true);
+    try {
+      const refreshedHosts = demoMode ? hostsRef.current : await loadPairedHosts();
+      hostsRef.current = refreshedHosts;
+      setHosts(refreshedHosts);
+      setHostAvailability(Object.fromEntries(refreshedHosts.map((host) => [host.id, "checking" as const])));
+      const results = await Promise.all(refreshedHosts.map(async (host) => [
+        host.id,
+        await probeHostAvailability(host),
+      ] as const));
+      setHostAvailability(Object.fromEntries(results));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      hostPullStartRef.current = null;
+      hostPullDistanceRef.current = 0;
+      setHostPullDistance(0);
+      setRefreshingHosts(false);
+    }
+  }, [demoMode, refreshingHosts]);
+
+  const handleHostPullStart = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (refreshingHosts || editingHostId || pairingMode !== "closed" || event.currentTarget.scrollTop > 0) return;
+    hostPullStartRef.current = event.touches[0]?.clientY ?? null;
+    hostPullDistanceRef.current = 0;
+  }, [editingHostId, pairingMode, refreshingHosts]);
+
+  const handleHostPullMove = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    const start = hostPullStartRef.current;
+    const currentY = event.touches[0]?.clientY;
+    if (start === null || currentY === undefined || event.currentTarget.scrollTop > 0) return;
+    const distance = Math.min(84, Math.max(0, (currentY - start) * 0.45));
+    hostPullDistanceRef.current = distance;
+    setHostPullDistance(distance);
+  }, []);
+
+  const handleHostPullEnd = useCallback(() => {
+    if (hostPullStartRef.current === null) return;
+    const shouldRefresh = hostPullDistanceRef.current >= 52;
+    hostPullStartRef.current = null;
+    if (shouldRefresh) {
+      void refreshPairedHosts();
+      return;
+    }
+    hostPullDistanceRef.current = 0;
+    setHostPullDistance(0);
+  }, [refreshPairedHosts]);
 
   const pairFromLink = useCallback(async (link: string) => {
     setPairingBusy(true);
@@ -2645,10 +3072,14 @@ export default function App() {
     setSelectedSessionId(sessionId);
     setDrawerOpen(false);
     setHistoryOpen(false);
-    if (!messages[sessionId] || staleSessionIdsRef.current.has(sessionId)) void loadSession(sessionId);
-  }, [loadSession, messages]);
+    void loadSession(sessionId);
+  }, [loadSession]);
 
   const selected = useMemo(() => findSession(projects, selectedSessionId), [projects, selectedSessionId]);
+  const openSessionCount = useMemo(
+    () => projects.reduce((count, project) => count + project.sessions.filter((session) => !session.closed).length, 0),
+    [projects],
+  );
   const historyProject = useMemo(
     () => projects.find((project) => project.id === historyProjectId) || null,
     [historyProjectId, projects],
@@ -2668,6 +3099,25 @@ export default function App() {
     () => selectedSessionId ? messages[selectedSessionId] || [] : [],
     [messages, selectedSessionId],
   );
+  const receivedUserMessages = useMemo(() => {
+    const byAssistantId: Record<string, RemoteChatMessage> = {};
+    let latestUserMessage: RemoteChatMessage | undefined;
+    for (const message of selectedMessages) {
+      if (message.role === "user") {
+        latestUserMessage = message;
+      } else if (message.role === "assistant" && message.process && latestUserMessage) {
+        byAssistantId[message.id] = latestUserMessage;
+      }
+    }
+    return byAssistantId;
+  }, [selectedMessages]);
+  const activeTurnMessageId = useMemo(
+    () => getActiveAssistantTurnId(selectedMessages, selected?.session.status === "running"),
+    [selected?.session.status, selectedMessages],
+  );
+  const processTerminalState: ProcessTerminalViewState = selected?.session.status === "error"
+    ? "error"
+    : "completed";
   const selectedModels = useMemo(() => {
     return includeCurrentModel(selectedConfig?.availableModels || [], selectedConfig?.model);
   }, [selectedConfig]);
@@ -2707,6 +3157,26 @@ export default function App() {
     setComposer((current) => current === value ? current : value);
   }, []);
 
+  const updateComposerDocument = useCallback((document: ComposerDocument) => {
+    const migratedImages = getComposerImageNodes(document).flatMap((node): PendingRemoteImage[] => {
+      const match = /^data:([^;,]+);base64,(.+)$/i.exec(node.src);
+      if (!match) return [];
+      return [{ id: node.id, name: node.name, mimeType: node.mimeType as PendingRemoteImage["mimeType"], data: match[2], preview: node.src }];
+    });
+    const orderedDocument = withoutComposerImages(document);
+    const text = getComposerPlainText(orderedDocument);
+    setComposerDocument(orderedDocument);
+    updateComposer(text);
+    if (migratedImages.length > 0) {
+      setPendingImages((current) => {
+        const next = [...current];
+        for (const image of migratedImages) if (!next.some((item) => item.id === image.id)) next.push(image);
+        return next;
+      });
+    }
+    setPendingReferenceIds(orderedDocument.nodes.flatMap((node) => node.type === "session" ? [node.reference.sourceSessionId] : []));
+  }, [updateComposer]);
+
   const syncComposerFromElement = useCallback((textarea: HTMLTextAreaElement | null = composerRef.current) => {
     if (!textarea) return;
     updateComposer(textarea.value);
@@ -2742,8 +3212,10 @@ export default function App() {
     const textarea = composerRef.current;
     if (textarea && textarea.value !== value) textarea.value = value;
     setComposerComposition("");
-    updateComposer(value);
-  }, [updateComposer]);
+    updateComposerDocument(createComposerDocument(value
+      ? [{ id: createClientId(), type: "text", text: value }]
+      : []));
+  }, [updateComposerDocument]);
 
   useEffect(() => {
     const textarea = composerRef.current;
@@ -2863,17 +3335,24 @@ export default function App() {
       const referenceSessionIds = (draft?.referenceSessionIds || []).filter((id) => validReferenceIds.has(id));
       const nextDraft: ComposerDraftValue = {
         text: draft?.text || "",
+        document: draft?.document,
         referenceSessionIds,
         action: selectedAgent?.supportsActions === true ? draft?.action : undefined,
       };
       draftValueRef.current = nextDraft;
-      replaceComposer(nextDraft.text);
+      if (nextDraft.document) {
+        updateComposerDocument(createComposerDocument(nextDraft.document.nodes.filter((node) =>
+          node.type !== "session" || validReferenceIds.has(node.reference.sourceSessionId)
+        )));
+      } else {
+        replaceComposer(nextDraft.text);
+      }
       setPendingReferenceIds(nextDraft.referenceSessionIds);
       setPendingAction(nextDraft.action);
       loadedDraftKeyRef.current = identity.key;
     }).catch((error) => console.error("[mobile-draft] load failed", error));
     return () => { cancelled = true; };
-  }, [activeHost?.hostId, demoMode, flushCurrentDraft, replaceComposer, selectedAgent?.supportsActions, selectedSessionId]);
+  }, [activeHost?.hostId, demoMode, flushCurrentDraft, replaceComposer, selectedAgent?.supportsActions, selectedSessionId, updateComposerDocument]);
 
   useEffect(() => {
     const identity = draftIdentityRef.current;
@@ -2890,7 +3369,7 @@ export default function App() {
         draftSaveTimerRef.current = null;
       }
     };
-  }, [composer, pendingAction, pendingReferenceIds]);
+  }, [composer, composerDocument, pendingAction, pendingReferenceIds]);
 
   useEffect(() => {
     const handlePageHide = () => flushCurrentDraft();
@@ -2925,7 +3404,7 @@ export default function App() {
 
   const editMessage = useCallback((content: string) => {
     replaceComposer(content);
-    requestAnimationFrame(() => composerRef.current?.focus());
+    requestAnimationFrame(() => inlineComposerRef.current?.focus());
   }, [replaceComposer]);
 
   const runCommand = useCallback(async <T,>(name: Parameters<RemoteClient["request"]>[0], payload: Record<string, unknown>) => {
@@ -2986,7 +3465,7 @@ export default function App() {
     draftValueRef.current = { ...draftValueRef.current, action };
     setPendingAction(action);
     setActionSheetOpen(false);
-    requestAnimationFrame(() => composerRef.current?.focus());
+    requestAnimationFrame(() => inlineComposerRef.current?.focus());
   }, []);
 
   const clearAgentAction = useCallback(() => {
@@ -3039,12 +3518,12 @@ export default function App() {
         ][0];
         setSelectedSessionId(fallback?.id || null);
         setHistoryOpen(false);
-        if (fallback && !messages[fallback.id]) void loadSession(fallback.id);
+        if (fallback) void loadSession(fallback.id);
       }
     } catch {
       // runCommand keeps the error visible on mobile.
     }
-  }, [applySessionResult, commandBusy, demoMode, loadSession, messages, projects, runCommand, selectedSessionId, setDemoSessionClosed]);
+  }, [applySessionResult, commandBusy, demoMode, loadSession, projects, runCommand, selectedSessionId, setDemoSessionClosed]);
 
   const reopenRemoteSession = useCallback(async (project: RemoteProject, session: RemoteSession) => {
     if (commandBusy || !session.closed) return;
@@ -3229,6 +3708,7 @@ export default function App() {
         content: draft.content,
         images,
         sessionReferences,
+        composerDocument: remoteComposerDocument(draft.composerDocument),
         retainedAttachmentIds: draft.attachments.map((attachment) => attachment.id),
         action: draft.action || null,
       });
@@ -3249,6 +3729,7 @@ export default function App() {
             images: draft.images,
             sessionReferences: draft.sessionReferences,
             attachments: draft.attachments,
+            composerDocument: remoteComposerDocument(draft.composerDocument),
             action: draft.action,
             status: "queued",
             error: undefined,
@@ -3334,10 +3815,10 @@ export default function App() {
   }, [forkingMessageId, loadSession, runCommand, selected]);
 
   const sendMessage = useCallback(async () => {
-    const composerText = composerRef.current?.value || composer || composerComposition;
+    const composerText = composer || composerComposition;
     if (
       !selectedSessionId ||
-      (!composerText.trim() && pendingImages.length === 0 && selectedReferenceSessions.length === 0 && !pendingAction)
+      (!composerDocumentHasContent(composerDocument) && pendingImages.length === 0 && !pendingAction)
     ) return;
     const content = composerText.trim() || (pendingImages.length > 0 ? "请查看附件图片。" : "");
     const action = pendingAction;
@@ -3359,6 +3840,7 @@ export default function App() {
           permissionMode: config?.permissionMode || "auto",
           images: pendingImages.map(({ preview: _preview, ...image }) => image),
           sessionReferences: optimisticReferences.map(({ sourceSessionId }) => ({ sourceSessionId })),
+          composerDocument: remoteComposerDocument(composerDocument),
           action,
         });
         queued = result.queued === true;
@@ -3381,6 +3863,7 @@ export default function App() {
                 images: optimisticImages.length > 0 ? optimisticImages : undefined,
                 sessionReferences: optimisticReferences.length > 0 ? optimisticReferences : undefined,
                 action,
+                composerDocument: remoteComposerDocument(composerDocument),
               },
             ],
           };
@@ -3399,7 +3882,7 @@ export default function App() {
     } catch {
       // The command error remains visible; sends are never retried automatically.
     }
-  }, [activeHost, composer, composerComposition, configs, demoMode, pendingAction, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
+  }, [activeHost, composer, composerComposition, composerDocument, configs, demoMode, pendingAction, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
 
   const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false, confirmed?: boolean) => {
     if (!selectedSessionId || !selectedInteraction) return;
@@ -3447,11 +3930,31 @@ export default function App() {
     if (pendingImages.length >= MAX_REMOTE_IMAGES) return;
     try {
       const image = await chooseRemoteImage();
-      setPendingImages((current) => [...current, image].slice(0, MAX_REMOTE_IMAGES));
+      setPendingImages((current) => [...current, image]);
     } catch (err) {
       if (!isImageSelectionCancelled(err)) setError(getImageErrorMessage(err));
     }
   }, [pendingImages.length]);
+
+  const toggleComposerReference = useCallback((session: RemoteSession) => {
+    const selectedReference = pendingReferenceIds.includes(session.id);
+    if (selectedReference) {
+      updateComposerDocument(createComposerDocument(composerDocument.nodes.filter((node) =>
+        node.type !== "session" || node.reference.sourceSessionId !== session.id
+      )));
+      return;
+    }
+    if (pendingReferenceIds.length >= MAX_REMOTE_SESSION_REFERENCES) return;
+    inlineComposerRef.current?.insertNode({
+      id: createClientId(),
+      type: "session",
+      reference: {
+        sourceSessionId: session.id,
+        sourceTitle: session.title,
+        sourceAgentId: session.agentId,
+      },
+    });
+  }, [composerDocument, pendingReferenceIds, updateComposerDocument]);
 
   const updateHostDetails = async (host: PairedHost, form: HTMLFormElement) => {
     if (savingHostId === host.id) return;
@@ -3495,7 +3998,22 @@ export default function App() {
 
   if (!activeHost) {
     return (
-      <main className="connections-screen">
+      <main
+        ref={connectionsScreenRef}
+        className="connections-screen"
+        onTouchStart={handleHostPullStart}
+        onTouchMove={handleHostPullMove}
+        onTouchEnd={handleHostPullEnd}
+        onTouchCancel={handleHostPullEnd}
+      >
+        <div
+          className={`connections-pull-refresh ${hostPullDistance > 0 || refreshingHosts ? "visible" : ""}`}
+          style={{ height: refreshingHosts ? 36 : Math.min(36, hostPullDistance) }}
+          aria-live="polite"
+        >
+          <RefreshCw className={refreshingHosts ? "spin" : undefined} size={15} />
+          <span>{refreshingHosts ? "刷新中" : hostPullDistance >= 52 ? "松开刷新" : "下拉刷新"}</span>
+        </div>
         <header className="connections-header">
           <div className="brand-mark"><Smartphone size={22} /></div>
           <div><h1>Hpp</h1><p>选择一台已配对的桌面</p></div>
@@ -3530,6 +4048,7 @@ export default function App() {
                   <ArrowLeft className="host-arrow" size={18} />
                 </button>
                 <button
+                  ref={editingHostId === host.id ? editingHostTriggerRef : undefined}
                   type="button"
                   className="icon-button"
                   onClick={() => {
@@ -3544,6 +4063,7 @@ export default function App() {
                 </button>
                 {editingHostId === host.id && (
                   <form
+                    ref={editingHostFormRef}
                     className="host-edit"
                     onSubmit={(event) => {
                       event.preventDefault();
@@ -3634,11 +4154,6 @@ export default function App() {
           <div className="toolbar-title-row">
             <strong>{selected?.session.title || activeHost.alias || activeHost.hostName}</strong>
             {selected?.session.status === "running" && <SessionRunningIndicator />}
-            {selected && (
-              <button type="button" className="toolbar-history-button" onClick={() => setHistoryOpen(true)} title="发言记录" aria-label="发言记录">
-                <MessageCircle size={15} />
-              </button>
-            )}
           </div>
           <div className="toolbar-subtitle">
             <small>{selected ? `${selected.project.name} · ${selected.session.agentId}` : activeHost.baseUrl}</small>
@@ -3652,6 +4167,11 @@ export default function App() {
                 aria-label={`重载 ${selectedAgent?.name || selected.session.agentId}`}
               >
                 <RefreshCw className={reloadingSession ? "spin" : undefined} size={11} strokeWidth={2} />
+              </button>
+            )}
+            {selected && (
+              <button type="button" className="toolbar-history-button" onClick={() => setHistoryOpen(true)} title="发言记录" aria-label="发言记录">
+                <MessageCircle size={14} />
               </button>
             )}
           </div>
@@ -3875,11 +4395,6 @@ export default function App() {
               <div><h2>发言记录</h2><p>{selected.session.title}</p></div>
               <button className="icon-button" onClick={() => setHistoryOpen(false)}><X size={19} /></button>
             </div>
-            {nextBefore[selected.session.id] !== null && nextBefore[selected.session.id] !== undefined && (
-              <button className="history-load-older" disabled={loadingSession} onClick={() => void loadSession(selected.session.id, false, nextBefore[selected.session.id])}>
-                {loadingSession ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} 加载更早发言
-              </button>
-            )}
             <div className="history-list">
               {selectedUserMessages.map((message, index) => (
                 <button type="button" className="history-item" key={message.id} onClick={() => openHistoryMessage(message.id)}>
@@ -3891,6 +4406,11 @@ export default function App() {
                 </button>
               ))}
               {selectedUserMessages.length === 0 && <div className="history-empty">暂无发言</div>}
+              {nextBefore[selected.session.id] !== null && nextBefore[selected.session.id] !== undefined && (
+                <button className="history-load-older" disabled={loadingSession} onClick={() => void loadSession(selected.session.id, false, nextBefore[selected.session.id])}>
+                  {loadingSession ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} 加载更早发言
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -3915,7 +4435,7 @@ export default function App() {
                     className={`reference-session-row ${selectedReference ? "selected" : ""}`}
                     key={session.id}
                     disabled={pendingReferenceIds.length >= MAX_REMOTE_SESSION_REFERENCES && !selectedReference}
-                    onClick={() => setPendingReferenceIds((current) => current.includes(session.id) ? current.filter((id) => id !== session.id) : [...current, session.id].slice(0, MAX_REMOTE_SESSION_REFERENCES))}
+                    onClick={() => toggleComposerReference(session)}
                   >
                     {selectedReference ? <Check size={15} /> : <Plus size={15} />}
                     <span><strong>{renderAttachmentPreview(session.title)}</strong><small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}{session.closed ? " · 已关闭" : ""}</small></span>
@@ -3942,7 +4462,48 @@ export default function App() {
       )}
 
       {!selected ? (
-        <section className="empty-chat"><MessageSquare size={30} /><strong>选择一个会话</strong></section>
+        <section className="session-picker-view">
+          <header className="session-picker-header">
+            <div><MessageSquare size={20} /><strong>选择会话</strong></div>
+            <span>{openSessionCount}</span>
+          </header>
+          <div className="session-picker-projects">
+            {projects.map((project) => {
+              const openSessions = project.sessions.filter((session) => !session.closed);
+              if (openSessions.length === 0) return null;
+              return (
+                <section className="session-picker-project" key={project.id}>
+                  <div className="session-picker-project-title">
+                    <FolderGit2 size={15} />
+                    <strong>{project.name}</strong>
+                    <span>{openSessions.length}</span>
+                  </div>
+                  <div className="session-picker-list">
+                    {openSessions.map((session) => (
+                      <button
+                        type="button"
+                        className={`session-picker-row ${session.status === "running" ? "has-running" : ""}`}
+                        key={session.id}
+                        onClick={() => selectSession(session.id)}
+                      >
+                        <span className={`session-state ${session.status}`} />
+                        <span className="session-picker-copy">
+                          <strong>{session.title}</strong>
+                          <small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}</small>
+                        </span>
+                        {session.status === "running" && <SessionRunningIndicator />}
+                        <ChevronRight size={16} />
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
+            {openSessionCount === 0 && (
+              <div className="session-picker-empty"><MessageSquare size={28} /><strong>暂无打开的会话</strong></div>
+            )}
+          </div>
+        </section>
       ) : (
         <section className="chat-view">
           <div className="messages-shell">
@@ -3962,6 +4523,9 @@ export default function App() {
                 <MessageItem
                   key={message.id}
                   message={message}
+                  receivedUserMessage={receivedUserMessages[message.id]}
+                  turnRunning={message.id === activeTurnMessageId}
+                  processTerminalState={processTerminalState}
                   actionsDisabled={commandBusy || forkingMessageId !== null}
                   forking={forkingMessageId === message.id}
                   onEdit={editMessage}
@@ -4021,7 +4585,7 @@ export default function App() {
           )}
 
           <footer className="composer">
-            {(pendingAction || pendingImages.length > 0 || selectedReferenceSessions.length > 0) && (
+            {pendingAction && (
               <div className="composer-preview-bar">
                 {pendingAction && (
                   <div className="composer-preview-chip action">
@@ -4030,23 +4594,19 @@ export default function App() {
                     <button type="button" onClick={clearAgentAction} title="移除技能或命令" aria-label="移除技能或命令"><X size={12} /></button>
                   </div>
                 )}
-                {selectedReferenceSessions.map((session) => (
-                  <div className="composer-preview-chip reference" key={session.id}>
-                    <Link2 size={12} />
-                    <span>{renderAttachmentPreview(session.title)}</span>
-                    <button type="button" onClick={() => setPendingReferenceIds((current) => current.filter((id) => id !== session.id))} title="移除引用"><X size={12} /></button>
-                  </div>
-                ))}
-                {pendingImages.map((image) => (
-                  <div className="composer-preview-chip image" key={image.id}>
-                    <img src={image.preview} alt={image.name} />
-                    <span>{image.name}</span>
-                    <button type="button" onClick={() => setPendingImages((current) => current.filter((item) => item.id !== image.id))} title="移除图片"><X size={12} /></button>
-                  </div>
-                ))}
               </div>
             )}
             <div className="composer-input-shell">
+              {pendingImages.length > 0 && (
+                <div className="composer-image-previews">
+                  {pendingImages.map((image) => (
+                    <div className="composer-image-preview" key={image.id}>
+                      <img src={image.preview} alt={image.name} />
+                      <button type="button" onClick={() => setPendingImages((current) => current.filter((item) => item.id !== image.id))} title="移除图片" aria-label="移除图片"><X size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div ref={composerAddMenuRef} className="composer-add-control">
                 <button
                   type="button"
@@ -4075,16 +4635,12 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <textarea
-                ref={composerRef}
-                rows={1}
-                defaultValue=""
-                onBeforeInput={handleComposerBeforeInput}
-                onInput={(event) => scheduleComposerSync(event.currentTarget)}
-                onChange={(event) => scheduleComposerSync(event.currentTarget)}
-                onCompositionStart={handleComposerComposition}
-                onCompositionUpdate={handleComposerComposition}
-                onCompositionEnd={handleComposerCompositionEnd}
+              <InlineComposerEditor
+                ref={inlineComposerRef}
+                value={composerDocument}
+                onChange={updateComposerDocument}
+                onCompositionStart={() => setComposerComposition(" ")}
+                onCompositionEnd={() => setComposerComposition("")}
                 placeholder={isConnected ? "发送指令" : "桌面未连接"}
                 disabled={!isConnected}
               />
@@ -4093,7 +4649,7 @@ export default function App() {
                 disabled={!isConnected || commandBusy}
                 onClick={() => {
                   const action = getComposerAction({
-                    text: composerRef.current?.value ?? composer,
+                    text: composer,
                     composingText: composerComposition,
                     imageCount: pendingImages.length,
                     referenceCount: selectedReferenceSessions.length,
@@ -4148,13 +4704,13 @@ export default function App() {
                 agentName={selectedAgent?.name || selected.session.agentId}
                 currentModel={selectedConfig?.model || null}
                 models={selectedModels}
-                disabled={commandBusy || (!demoMode && selected.session.status === "running")}
+                disabled={commandBusy}
                 onSelect={(model) => void switchModel(model)}
               />
               <MobileThinkingPicker
                 value={selectedConfig?.thinkingLevel || "medium"}
                 levels={thinkingLevels}
-                disabled={commandBusy || selected.session.status === "running"}
+                disabled={commandBusy}
                 onSelect={(level) => void runCommand<RemoteSessionConfig>("session.setThinking", { sessionId: selected.session.id, level }).then((config) => setConfigs((current) => ({ ...current, [selected.session.id]: config })))}
               />
             </div>

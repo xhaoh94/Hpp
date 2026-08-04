@@ -14,8 +14,8 @@ export const DEFAULT_SHORTCUTS: ShortcutConfig = {
   switchToFiles: "Ctrl+Shift+F",
   prevModel: "Ctrl+[",
   nextModel: "Ctrl+]",
-  previousMessage: "Up",
-  nextMessage: "Down",
+  previousMessage: "Ctrl+Up",
+  nextMessage: "Ctrl+Down",
 };
 
 export const SHORTCUTS_UPDATED_EVENT = "hpp-shortcuts-updated";
@@ -31,10 +31,6 @@ export function normalizeShortcuts(value: unknown): ShortcutConfig {
   const result = { ...DEFAULT_SHORTCUTS };
   for (const key of Object.keys(DEFAULT_SHORTCUTS) as Array<keyof ShortcutConfig>) {
     if (typeof shortcuts[key] === "string" && shortcuts[key].trim()) result[key] = shortcuts[key].trim();
-  }
-  if (result.previousMessage === "Ctrl+Up" && result.nextMessage === "Ctrl+Down") {
-    result.previousMessage = DEFAULT_SHORTCUTS.previousMessage;
-    result.nextMessage = DEFAULT_SHORTCUTS.nextMessage;
   }
   return result;
 }

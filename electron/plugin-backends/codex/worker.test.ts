@@ -37,9 +37,26 @@ input.on("line", async (line) => {
   }
   if (message.method === "model/list") {
     write({ id: message.id, result: { data: [
-      { id: "model-default", displayName: "Default Model", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "none" }, { reasoningEffort: "medium" }], inputModalities: ["text", "image"] },
+      { id: "model-default", displayName: "Default Model", isDefault: true, hidden: false, supportedReasoningEfforts: [
+        { reasoningEffort: "low" },
+        { reasoningEffort: "medium" },
+        { reasoningEffort: "high" },
+        { reasoningEffort: "xhigh" },
+        { reasoningEffort: "max" },
+        { reasoningEffort: "ultra" }
+      ], inputModalities: ["text", "image"] },
       { id: "model-hidden", displayName: "Hidden", hidden: true, supportedReasoningEfforts: [], inputModalities: ["text"] }
     ], nextCursor: null } });
+    return;
+  }
+  if (message.method === "config/read") {
+    if (process.env.FAKE_CODEX_CONFIG_READ_ERROR === "1") {
+      write({ id: message.id, error: { code: -32601, message: "Method not found: config/read" } });
+      return;
+    }
+    write({ id: message.id, result: { config: {
+      developer_instructions: process.env.FAKE_CODEX_DEVELOPER_INSTRUCTIONS || null,
+    } } });
     return;
   }
   if (message.method === "skills/list") {
@@ -70,6 +87,14 @@ input.on("line", async (line) => {
     write({ id: message.id, result: { turn: { id: "turn-1" } } });
     write({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
     const promptText = message.params?.input?.find((item) => item.type === "text")?.text;
+    if (promptText === "disconnect") {
+      setImmediate(() => process.exit(7));
+      return;
+    }
+    if (promptText === "fatal") {
+      write({ method: "error", params: { message: "fatal turn failure", willRetry: false } });
+      return;
+    }
     if (promptText === "commentary") {
       write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "commentary-1", type: "agentMessage", phase: "commentary", text: "" } } });
       write({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "commentary-1", delta: "Working on it" } });
@@ -187,13 +212,14 @@ const writeFakeCodex = async (root: string) => {
   return commandPath;
 };
 
-const startWorker = (commandPath: string, root: string, logPath: string) => {
+const startWorker = (commandPath: string, root: string, logPath: string, extraEnv: NodeJS.ProcessEnv = {}) => {
   const child = spawn(process.execPath, [resolve("electron/plugin-backends/codex/worker.mjs")], {
     env: {
       ...process.env,
       CODEX_PATH: commandPath,
       CODEX_HOME: join(root, "codex-home"),
       FAKE_CODEX_LOG: logPath,
+      ...extraEnv,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -279,17 +305,75 @@ describe("Codex worker protocol", () => {
 
     await expect(worker.waitFor((message) => message.id === "models" && message.type === "models"))
       .resolves.toMatchObject({
-        models: [{ id: "model-default", name: "Default Model", provider: "codex", reasoning: true, supportsImages: true, supportedThinkingLevels: ["off", "medium"] }],
+        models: [{
+          id: "model-default",
+          name: "Default Model",
+          provider: "codex",
+          reasoning: true,
+          supportsImages: true,
+          supportedThinkingLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        }],
       });
     await expect.poll(async () => readFile(logPath, "utf8")).toContain('"id":"server-time","result":{"currentTimeAt":');
   });
 
-  it("streams plan deltas and context compaction notifications", async () => {
+  it.each(["max", "ultra"])("passes the native %s effort through to Codex", async (level) => {
     const worker = startWorker(commandPath, tempRoot, logPath);
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "prompt-1", type: "prompt", message: "plan", planModeEnabled: true, permissionMode: "ask" });
+
+    worker.send({ id: `thinking-${level}`, type: "setThinkingLevel", level });
+    await worker.waitFor((message) => (
+      message.type === "thinking_level_changed" && message.id === `thinking-${level}`
+    ));
+    worker.send({ id: `prompt-${level}`, type: "prompt", message: `reasoning-${level}` });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === `prompt-${level}`);
+
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.find((call) => call.method === "thread/start")?.params?.config)
+      .toMatchObject({ model_reasoning_effort: level });
+    expect(calls.find((call) => call.method === "turn/start")?.params)
+      .toMatchObject({
+        effort: level,
+        collaborationMode: { settings: { reasoning_effort: level } },
+      });
+  });
+
+  it("returns an error for a UI response without a matching request", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({
+      id: "ui-missing",
+      type: "uiResponse",
+      response: { id: "missing-request", text: "answer" },
+    });
+
+    await expect(worker.waitFor((message) => message.type === "error" && message.id === "ui-missing"))
+      .resolves.toMatchObject({
+        type: "error",
+        id: "ui-missing",
+        error: "Unknown Codex UI request: missing-request",
+      });
+  });
+
+  it("streams plan deltas and context compaction notifications", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath, {
+      FAKE_CODEX_DEVELOPER_INSTRUCTIONS: "Keep the user's configured guidance.",
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot, hostSystemPrompt: "[HPP 语言规则] 始终使用简体中文" });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({
+      id: "prompt-1",
+      type: "prompt",
+      message: "plan",
+      planModeEnabled: true,
+      permissionMode: "ask",
+    });
 
     await expect(worker.waitFor((message) => message.type === "stream_delta" && message.delta === "draft plan"))
       .resolves.toMatchObject({ type: "stream_delta", delta: "draft plan" });
@@ -297,12 +381,62 @@ describe("Codex worker protocol", () => {
       .resolves.toMatchObject({ type: "context_compaction" });
     await expect(worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-1"))
       .resolves.toMatchObject({ type: "prompt_done", id: "prompt-1" });
+    const compactionIndex = worker.messages.findIndex((message) => message.type === "context_compaction");
+    const agentEndIndex = worker.messages.findIndex((message) => message.type === "agent_end");
+    expect(compactionIndex).toBeGreaterThanOrEqual(0);
+    expect(agentEndIndex).toBeGreaterThan(compactionIndex);
     const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    expect(calls.find((call) => call.method === "turn/start")?.params).toMatchObject({
+    expect(calls.find((call) => call.method === "thread/start")?.params?.config).toMatchObject({
+      collaboration_mode: "Plan",
+      include_collaboration_mode_instructions: true,
+      developer_instructions: "Keep the user's configured guidance.\n\n[HPP 语言规则] 始终使用简体中文",
+    });
+    expect(calls.find((call) => call.method === "thread/start")?.params)
+      .toMatchObject({
+        developerInstructions: "Keep the user's configured guidance.\n\n[HPP 语言规则] 始终使用简体中文",
+      });
+    const turnStart = calls.find((call) => call.method === "turn/start");
+    expect(turnStart?.params).toMatchObject({
       approvalPolicy: "on-request",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
-      collaborationMode: { mode: "plan" },
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          developer_instructions: expect.stringContaining("[HPP 语言规则] 始终使用简体中文"),
+        },
+      },
     });
+    expect(turnStart?.params?.input?.find((item: { type?: string }) => item.type === "text")?.text)
+      .not.toContain("[HPP 语言规则]");
+  });
+
+  it("falls back to native host developer instructions when config/read is unavailable", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath, {
+      FAKE_CODEX_CONFIG_READ_ERROR: "1",
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({
+      id: "host-prompt",
+      type: "prompt",
+      message: "Keep this user message unchanged.",
+      hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    });
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "host-prompt");
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.find((call) => call.method === "thread/start")?.params?.config)
+      .toMatchObject({ developer_instructions: "HPP_HOST_GUIDANCE" });
+    expect(calls.find((call) => call.method === "thread/start")?.params)
+      .toMatchObject({ developerInstructions: "HPP_HOST_GUIDANCE" });
+    const turnStart = calls.find((call) => call.method === "turn/start");
+    expect(turnStart?.params?.input).toContainEqual({
+      type: "text",
+      text: "Keep this user message unchanged.",
+      text_elements: [],
+    });
+    expect(JSON.stringify(turnStart?.params?.input)).not.toContain("HPP_HOST_GUIDANCE");
   });
 
   it("resumes an existing thread without creating a replacement", async () => {
@@ -310,11 +444,20 @@ describe("Codex worker protocol", () => {
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot, sessionFilePath: "existing-thread" });
     await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "resume-prompt", type: "prompt", message: "plan" });
+    worker.send({
+      id: "resume-prompt",
+      type: "prompt",
+      message: "plan",
+      hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    });
 
     await worker.waitFor((message) => message.type === "prompt_done" && message.id === "resume-prompt");
     const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    expect(calls.find((call) => call.method === "thread/resume")?.params?.config)
+      .toMatchObject({ developer_instructions: "HPP_HOST_GUIDANCE" });
+    expect(calls.find((call) => call.method === "thread/resume")?.params)
+      .toMatchObject({ developerInstructions: "HPP_HOST_GUIDANCE" });
     expect(calls.filter((call) => call.method === "thread/start")).toHaveLength(0);
     expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
     expect(calls.find((call) => call.method === "turn/start")?.params?.threadId).toBe("existing-thread");
@@ -358,6 +501,40 @@ describe("Codex worker protocol", () => {
     expect(calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
     expect(calls.filter((call) => call.method === "thread/start")).toHaveLength(0);
     expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
+  });
+
+  it("terminalizes a prompt when the internal app-server exits", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "disconnect-prompt", type: "prompt", message: "disconnect" });
+
+    await expect(worker.waitFor((message) => (
+      message.type === "process_event" && message.title === "Codex app-server disconnected"
+    ))).resolves.toMatchObject({ state: "error" });
+    await expect(worker.waitFor((message) => (
+      message.type === "prompt_done" && message.id === "disconnect-prompt"
+    ))).resolves.toMatchObject({ type: "prompt_done" });
+    await expect(worker.waitFor((message) => message.type === "agent_disconnected"))
+      .resolves.toMatchObject({ detail: expect.stringContaining("output pipe closed") });
+  });
+
+  it("terminalizes a fatal server error without waiting for turn/completed", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "fatal-prompt", type: "prompt", message: "fatal" });
+
+    await expect(worker.waitFor((message) => (
+      message.type === "process_event" && message.title === "Codex error"
+    ))).resolves.toMatchObject({ state: "error" });
+    await expect(worker.waitFor((message) => (
+      message.type === "prompt_done" && message.id === "fatal-prompt"
+    ))).resolves.toMatchObject({ type: "prompt_done" });
+    expect(worker.messages).toContainEqual(expect.objectContaining({ type: "stream_end", force: true }));
+    expect(worker.messages).toContainEqual({ type: "agent_end" });
   });
 
   it("separates commentary from the final response", async () => {

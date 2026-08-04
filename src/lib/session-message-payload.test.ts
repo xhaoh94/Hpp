@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildSessionMessagePayload } from "./session-message-payload";
+import { createComposerDocument } from "@shared/composer-document";
 
 describe("session message payload", () => {
   it("rebuilds text, images, files, paths, references and actions from an editable draft", async () => {
@@ -34,5 +35,33 @@ describe("session message payload", () => {
       action: { kind: "skill", name: "review" },
       forkContext: "<fork_context>source</fork_context>",
     });
+  });
+
+  it("keeps ordered references inline while migrating images to independent attachments", async () => {
+    const payload = await buildSessionMessagePayload({
+      text: "ignored legacy text",
+      images: [],
+      pendingFiles: [],
+      pendingPathAttachments: [],
+      sessionReferences: [],
+      document: createComposerDocument([
+        { id: "t1", type: "text", text: "before" },
+        { id: "p1", type: "path", name: "src", path: "C:\\repo\\src", kind: "folder" },
+        { id: "t2", type: "text", text: "middle" },
+        { id: "i1", type: "image", name: "screen.png", src: "data:image/png;base64,YWJj", mimeType: "image/png" },
+        { id: "t3", type: "text", text: "after" },
+      ]),
+      readFile: async () => ({ success: true, content: "" }),
+    });
+    expect(payload.displayContent.indexOf("before")).toBeLessThan(payload.displayContent.indexOf("[folder: src]"));
+    expect(payload.displayContent.indexOf("[folder: src]")).toBeLessThan(payload.displayContent.indexOf("middle"));
+    expect(payload.displayContent).not.toContain("[image: screen.png]");
+    expect(payload.displayContent).toContain("middleafter");
+    expect(payload.sendContent.indexOf("before")).toBeLessThan(payload.sendContent.indexOf("<folder path="));
+    expect(payload.sendContent.indexOf("<folder path=")).toBeLessThan(payload.sendContent.indexOf("middle"));
+    expect(payload.sendContent.indexOf("after")).toBeLessThan(payload.sendContent.indexOf("<image_attachment"));
+    expect(payload.messageImages).toEqual([{ id: "i1", src: "data:image/png;base64,YWJj", name: "screen.png" }]);
+    expect(payload.editableDraft?.document?.nodes.map((node) => node.type)).toEqual(["text", "path", "text"]);
+    expect(payload.editableDraft?.images).toHaveLength(1);
   });
 });

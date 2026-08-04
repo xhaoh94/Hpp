@@ -7,34 +7,47 @@ import type {
   AgentSubagent,
 } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
+import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
+import {
+  composerDocumentHasContent,
+  getComposerImageNodes,
+  withoutComposerImages,
+  type ComposerDocument,
+} from "@shared/composer-document";
 import {
   formatCommandGroupTitle,
   getCommandStateLabel,
-  getProcessFileActionLabel,
-  getProcessStepStatusLabel,
   uiText,
 } from "@/i18n/text";
-import {
-  getStepProgressText,
-  normalizeInferredStepsForDisplay,
-  summarizeProcessEntries,
-} from "./processBlockUtils";
 import {
   canMergeAdjacentSubagentEntries,
   createProcessEntryMerger,
   getProcessFileName,
   mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
+import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
 import {
+  formatProcessDuration,
   getProcessGroupState,
   groupProcessEntries,
   getVisibleProcessEntries,
+  getUserGuidanceText,
   isAssistantNarrationProcessEntry,
   isProcessInterrupted,
+  isProcessViewRunning,
+  isUserGuidanceProcessEntry,
+  normalizeProcessForView,
   splitCommandDetail,
+  type ProcessTerminalViewState,
 } from "@shared/process-view";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
+
+export const formatIdleDuration = (ms: number) => {
+  const seconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+};
 
 type ProcessTimelineItem =
   | {
@@ -51,56 +64,6 @@ type ProcessTimelineItem =
       order: number;
       commentary: AgentCommentary;
     };
-
-const formatProcessDuration = (ms: number) => {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes > 0) return `${minutes}m ${rest}s`;
-  return `${rest}s`;
-};
-
-function ProcessProgressSummary({
-  process,
-  fallback,
-}: {
-  process: AgentProcess;
-  fallback: string;
-}) {
-  const steps = normalizeInferredStepsForDisplay(process, process.planSteps || []);
-  const hasProgress = steps.length > 0;
-
-  if (!hasProgress) {
-    return <span className="chat-process-summary">{fallback}</span>;
-  }
-
-  const stepText = getStepProgressText(steps);
-
-  return (
-    <span
-      className="chat-process-progress"
-      tabIndex={0}
-      onClick={(event) => event.stopPropagation()}
-      aria-label={stepText}
-    >
-      {stepText && <span className="chat-process-progress-step">{stepText}</span>}
-      {steps.length > 0 && (
-        <span className="chat-process-step-popover" role="tooltip">
-          <span className="chat-process-step-popover-title">{uiText.process.progressTitle}</span>
-          <span className="chat-process-step-list">
-            {steps.map((step, index) => (
-              <span className="chat-process-step-row" key={step.id || `${step.title}-${index}`}>
-                <span className={`chat-process-step-dot ${step.status}`} />
-                <span className="chat-process-step-title">{step.title}</span>
-                <span className="chat-process-step-status">{getProcessStepStatusLabel(step.status)}</span>
-              </span>
-            ))}
-          </span>
-        </span>
-      )}
-    </span>
-  );
-}
 
 function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; state?: AgentProcessEntry["state"] }) {
   if (state === "running") {
@@ -177,22 +140,19 @@ function ProcessEntryFiles({
   onOpenFile,
 }: {
   files: AgentProcessFile[];
-  onOpenFile: (filePath: string) => void;
+  onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
 }) {
   return (
     <div className="chat-process-files">
       {files.map((file, index) => {
-        const action = getProcessFileActionLabel(file.action);
         const label = file.label || getProcessFileName(file.file);
-        const canOpen = file.action !== "listed";
+        const preview = file.action !== "listed";
         return (
           <div className="chat-process-file" key={`${file.file}-${index}`}>
-            <span className="chat-process-file-action">{action}</span>
             <button
-              className={`chat-process-file-name ${canOpen ? "openable" : ""}`}
+              className="chat-process-file-name openable"
               title={file.file}
-              onClick={canOpen ? () => onOpenFile(file.file) : undefined}
-              disabled={!canOpen}
+              onClick={() => onOpenFile(file.file, { preview })}
             >
               {label}
             </button>
@@ -482,26 +442,54 @@ function SubagentEntryRow({
 function ProcessEntryRow({
   messageId,
   entry,
+  now,
   onToggleEntry,
   onOpenFile,
+  onOpenImage,
   onPreserveScroll,
+  receivedMessageDocument,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
+  now: number;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
-  onOpenFile: (filePath: string) => void;
+  onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
+  onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
+  receivedMessageDocument?: ComposerDocument;
 }) {
-  const hasDetail = !!entry.detail;
+  const isReceivedMessage = entry.toolKind === "message_received" || entry.title.startsWith("收到消息:");
+  const showReceivedMessage = isReceivedMessage && !!receivedMessageDocument;
+  const hasDetail = !!entry.detail && !showReceivedMessage;
   const files = entry.files || [];
   const isCommandEntry = entry.toolKind === "run_command";
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
   const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
+  const idleDuration = entry.toolKind === "stream_idle_notice" && entry.startedAt
+    ? formatIdleDuration((entry.completedAt ?? now) - entry.startedAt)
+    : null;
   const errorDetailMarkdown =
     detailVisible && (entry.type === "error" || entry.state === "error")
       ? formatErrorDetailAsMarkdown(entry.detail)
       : null;
+
+  // Thinking 展开内容即使处于 expanded 也限制最多显示 10 行：
+  // 内容超出时在底部提供"显示更多/收起"切换（纯 UI 状态，不写回 store）。
+  const thinkingOutputRef = useRef<HTMLDivElement | null>(null);
+  const [thinkingFullVisible, setThinkingFullVisible] = useState(false);
+  const [thinkingOverflowing, setThinkingOverflowing] = useState(false);
+
+  useEffect(() => {
+    const el = thinkingOutputRef.current;
+    if (!el || thinkingFullVisible) return;
+    const check = () => setThinkingOverflowing(el.scrollHeight > el.clientHeight + 2);
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(check);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [entry.detail, thinkingFullVisible]);
 
   if (entry.type === "subagent") {
     return (
@@ -510,6 +498,108 @@ function ProcessEntryRow({
         entry={entry}
         onToggleEntry={onToggleEntry}
       />
+    );
+  }
+
+  if (isUserGuidanceProcessEntry(entry)) {
+    const sourceDocument = entry.guidanceDocument;
+    const guidanceDocument = sourceDocument ? withoutComposerImages(sourceDocument) : undefined;
+    const documentImages = sourceDocument ? getComposerImageNodes(sourceDocument) : [];
+    const guidanceImages = entry.guidanceImages?.length ? entry.guidanceImages : documentImages;
+    const hasDocumentContent = !!guidanceDocument && composerDocumentHasContent(guidanceDocument);
+    const fallbackText = !hasDocumentContent && (!sourceDocument || guidanceImages.length === 0)
+      ? getUserGuidanceText(entry)
+      : "";
+
+    return (
+      <div className="chat-process-guidance-row">
+        <div className="chat-process-guidance-stack">
+          {guidanceImages.length > 0 && (
+            <div className="chat-process-guidance-images">
+              {guidanceImages.map((image) => (
+                <img
+                  key={image.id}
+                  src={image.src}
+                  alt={image.name}
+                  className="chat-process-guidance-image"
+                  onClick={() => onOpenImage(image.src)}
+                />
+              ))}
+            </div>
+          )}
+          <div className="chat-process-guidance-content">
+            <span className="chat-process-guidance-label">引导</span>
+            <div className="chat-bubble user chat-process-guidance-bubble">
+              {hasDocumentContent && guidanceDocument ? (
+                <ComposerMessageFlow document={guidanceDocument} onOpenImage={onOpenImage} />
+              ) : fallbackText ? (
+                <span className="chat-process-guidance-text">{fallbackText}</span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Thinking is conversational Markdown, not a tool/status record. Show it
+  // directly in the assistant body flow without a redundant title row or a
+  // second per-entry disclosure state.
+  if (entry.type === "thinking") {
+    if (!entry.detail?.trim()) return null;
+    const thinkingExpanded = entry.expanded !== false;
+    const isSingleLine = isThinkingSingleLine(entry.detail);
+
+    // Single-line thinking: show directly without expand/collapse toggle
+    if (isSingleLine) {
+      return (
+        <div className="chat-process-thinking-row expanded single-line">
+          <span className="chat-process-thinking-toggle static">
+            <ProcessEntryIcon type="thinking" />
+          </span>
+          <div className="chat-process-output chat-process-thinking-output">
+            <MarkdownRenderer content={entry.detail} />
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className={`chat-process-thinking-row ${thinkingExpanded ? "expanded" : "collapsed"}`}>
+        <button
+          type="button"
+          className="chat-process-thinking-toggle"
+          aria-label={thinkingExpanded ? "折叠思考" : "展开思考"}
+          aria-expanded={thinkingExpanded}
+          title={thinkingExpanded ? "折叠思考" : "展开思考"}
+          onClick={(event) => onToggleEntry(messageId, entry.id, event.currentTarget)}
+        >
+          <ProcessEntryIcon type="thinking" />
+        </button>
+        {thinkingExpanded ? (
+          <div className="chat-process-thinking-body">
+            <div
+              ref={thinkingOutputRef}
+              className={`chat-process-output chat-process-thinking-output${thinkingFullVisible ? "" : " limited"}`}
+            >
+              <MarkdownRenderer content={entry.detail} />
+            </div>
+            {thinkingOverflowing && (
+              <button
+                type="button"
+                className="chat-process-thinking-more"
+                onClick={() => setThinkingFullVisible((visible) => !visible)}
+              >
+                {thinkingFullVisible ? "收起" : "显示更多"}
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="chat-process-thinking-preview">
+            <MarkdownRenderer content={getThinkingPreviewMarkdown(entry.detail)} />
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -530,22 +620,32 @@ function ProcessEntryRow({
         <ProcessEntryIcon type={entry.type} state={entry.state} />
       </span>
       <div className="chat-process-entry-main">
-        <button
-          className={`chat-process-entry-header ${canExpand ? "expandable" : ""}`}
-          onClick={canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : undefined}
-          disabled={!canExpand}
-        >
-          <span className="chat-process-entry-title">{entry.title}</span>
-          {canExpand && (
-            <svg
-              className="chat-process-entry-chevron"
-              width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-              style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
-            >
-              <path d="M9 18l6-6-6-6" />
-            </svg>
-          )}
-        </button>
+        {showReceivedMessage ? (
+          <div className="chat-process-entry-header chat-process-received-message">
+            <span className="chat-process-received-label">收到消息：</span>
+            <ComposerMessageFlow document={receivedMessageDocument} onOpenImage={onOpenImage} />
+          </div>
+        ) : (
+          <button
+            className={`chat-process-entry-header ${canExpand ? "expandable" : ""}`}
+            onClick={canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : undefined}
+            disabled={!canExpand}
+          >
+            <span className="chat-process-entry-title">
+              {entry.title}
+              {idleDuration && <span className="chat-process-idle-duration"> · {idleDuration}</span>}
+            </span>
+            {canExpand && (
+              <svg
+                className="chat-process-entry-chevron"
+                width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
+              >
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            )}
+          </button>
+        )}
         {files.length > 0 && <ProcessEntryFiles files={files} onOpenFile={onOpenFile} />}
         {commandVisible && (
           <CommandDetail entry={entry} onPreserveScroll={onPreserveScroll} />
@@ -566,15 +666,21 @@ function ProcessEntryRow({
 function ProcessEntries({
   entries,
   messageId,
+  now,
   onToggleEntry,
   onOpenFile,
+  onOpenImage,
   onPreserveScroll,
+  receivedMessageDocument,
 }: {
   entries: AgentProcessEntry[];
   messageId: string;
+  now: number;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
-  onOpenFile: (filePath: string) => void;
+  onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
+  onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
+  receivedMessageDocument?: ComposerDocument;
 }) {
   return <>{groupProcessEntries(entries).map((group) => group.kind === "commands" ? (
     <CommandGroup
@@ -582,14 +688,31 @@ function ProcessEntries({
       entries={group.entries}
       onPreserveScroll={onPreserveScroll}
     />
+  ) : group.kind === "files" ? (
+    group.entries.map((entry) => (
+      <ProcessEntryRow
+        key={entry.id}
+        messageId={messageId}
+        entry={entry}
+        now={now}
+        onToggleEntry={onToggleEntry}
+        onOpenFile={onOpenFile}
+        onOpenImage={onOpenImage}
+        onPreserveScroll={onPreserveScroll}
+        receivedMessageDocument={receivedMessageDocument}
+      />
+    ))
   ) : (
     <ProcessEntryRow
       key={group.entry.id}
       messageId={messageId}
       entry={group.entry}
+      now={now}
       onToggleEntry={onToggleEntry}
       onOpenFile={onOpenFile}
+      onOpenImage={onOpenImage}
       onPreserveScroll={onPreserveScroll}
+      receivedMessageDocument={receivedMessageDocument}
     />
   ))}</>;
 }
@@ -610,34 +733,46 @@ export function ProcessBlock({
   messageId,
   process,
   commentary = [],
+  running = true,
+  terminalState = "completed",
+  fallbackEndedAt,
   onToggle,
   onToggleEntry,
   onOpenFile,
+  onOpenImage,
   onPreserveScroll,
+  receivedMessageDocument,
 }: {
   messageId: string;
   process: AgentProcess;
   commentary?: AgentCommentary[];
+  running?: boolean;
+  terminalState?: ProcessTerminalViewState;
+  fallbackEndedAt?: number;
   onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
-  onOpenFile: (filePath: string) => void;
+  onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
+  onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
+  receivedMessageDocument?: ComposerDocument;
 }) {
-  const nowTick = useProcessTicker(!process.endedAt);
-  const durationEnd = process.endedAt || nowTick;
-  const elapsed = formatProcessDuration(durationEnd - process.startedAt);
-  const expanded = !!process.expanded;
+  const viewProcess = useMemo(() => normalizeProcessForView(process, {
+    running,
+    terminalState,
+    fallbackEndedAt,
+  }), [fallbackEndedAt, process, running, terminalState]);
+  const processRunning = isProcessViewRunning(viewProcess, running);
+  const nowTick = useProcessTicker(processRunning);
+  const durationEnd = viewProcess.endedAt ?? nowTick;
+  const elapsed = formatProcessDuration(durationEnd - viewProcess.startedAt);
+  const expanded = !!viewProcess.expanded;
   const interrupted = useMemo(
-    () => isProcessInterrupted(process.entries),
-    [process.entries]
+    () => isProcessInterrupted(viewProcess.entries),
+    [viewProcess.entries]
   );
   const visibleEntries = useMemo(
-    () => getVisibleProcessEntries(process.entries),
-    [process.entries]
-  );
-  const summary = useMemo(
-    () => summarizeProcessEntries(visibleEntries),
-    [visibleEntries]
+    () => getVisibleProcessEntries(viewProcess.entries),
+    [viewProcess.entries]
   );
   const mergeProcessEntriesRef = useRef(createProcessEntryMerger());
   const mergedEntries = useMemo(
@@ -692,7 +827,6 @@ export function ProcessBlock({
       <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
         <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
           <span>{interrupted ? uiText.process.interrupted : uiText.process.elapsed} {elapsed}</span>
-          <ProcessProgressSummary process={process} fallback={summary} />
           <svg
             width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
             style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
@@ -700,7 +834,7 @@ export function ProcessBlock({
             <path d="M9 18l6-6-6-6" />
           </svg>
         </button>
-        {expanded && !hasCommentaryTimeline && (
+        {expanded && !hasCommentaryTimeline && (visibleEntries.length > 0 || processRunning) && (
           <div className="chat-process-content">
             {visibleEntries.length === 0 ? (
               <div className="chat-process-empty">{uiText.process.emptyEvents}</div>
@@ -708,9 +842,12 @@ export function ProcessBlock({
               <ProcessEntries
                 entries={mergedEntries}
                 messageId={messageId}
+                now={nowTick}
                 onToggleEntry={onToggleEntry}
                 onOpenFile={onOpenFile}
+                onOpenImage={onOpenImage}
                 onPreserveScroll={onPreserveScroll}
+                receivedMessageDocument={receivedMessageDocument}
               />
             )}
           </div>
@@ -721,7 +858,7 @@ export function ProcessBlock({
           {timelineItems.map((item) => item.kind === "commentary" ? (
             <div
               key={`commentary-${item.id}`}
-              className={`chat-commentary-item ${item.commentary.isStreaming ? "streaming" : ""}`}
+              className={`chat-commentary-item ${processRunning && item.commentary.isStreaming ? "streaming" : ""}`}
             >
               <MarkdownRenderer content={item.commentary.content} />
             </div>
@@ -730,9 +867,12 @@ export function ProcessBlock({
               key={`process-${item.id}`}
               entry={item.entry}
               messageId={messageId}
+              now={nowTick}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}
+              onOpenImage={onOpenImage}
               onPreserveScroll={onPreserveScroll}
+              receivedMessageDocument={receivedMessageDocument}
             />
           ) : null)}
         </div>

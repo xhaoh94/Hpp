@@ -12,8 +12,12 @@ interface DroidInternals {
   planModeEnabled: boolean;
   permissionMode: "ask" | "auto" | "full-access";
   turnActive: boolean;
+  pendingPermissionRequestId: string | null;
+  pendingResponses: Map<string, unknown>;
   sendRpcAsync: (method: string, params: unknown, timeoutMs?: number, requestId?: string) => Promise<unknown>;
+  handleProcessTermination: (childProcess: object, title: string, detail: string) => void;
   handleServerRequest: (method: string, requestId: string, params: unknown) => void;
+  handleNotification: (method: string, params: unknown) => void;
   applySessionResult: (result: Record<string, unknown>, restoreHistory: boolean) => Promise<void>;
 }
 
@@ -25,6 +29,14 @@ describe("Droid protocol adapter", () => {
     if (originalConfigPath === undefined) delete process.env.DROID_CONFIG_PATH;
     else process.env.DROID_CONFIG_PATH = originalConfigPath;
     await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it("does not report a control RPC as an active conversation turn", () => {
+    const agent = new DroidAgent("hpp-session");
+    const internals = agent as unknown as DroidInternals;
+    internals.pendingResponses.set("models-request", {});
+
+    expect(agent.isIdle()).toBe(true);
   });
 
   it("uses live model metadata and restores session history", async () => {
@@ -93,7 +105,7 @@ describe("Droid protocol adapter", () => {
     }));
   });
 
-  it("sends base64 images and finishes a failed send", async () => {
+  it("sends base64 images without copying the host system prompt into user text", async () => {
     const events: AgentEvent[] = [];
     const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
     const internals = agent as unknown as DroidInternals;
@@ -102,7 +114,11 @@ describe("Droid protocol adapter", () => {
     const sendRpcAsync = vi.fn(async () => ({ result: {} }));
     internals.sendRpcAsync = sendRpcAsync;
 
-    await agent.sendMessage("hello", [{ mimeType: "image/png", data: "base64-data" }]);
+    await agent.sendMessage(
+      "hello",
+      [{ mimeType: "image/png", data: "base64-data" }],
+      { hostSystemPrompt: "Always answer in Simplified Chinese." },
+    );
 
     expect(sendRpcAsync).toHaveBeenCalledWith("droid.add_user_message", {
       text: "hello",
@@ -116,7 +132,38 @@ describe("Droid protocol adapter", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "stream_end" }));
   });
 
-  it("converts ask-user and permission responses to Droid protocol", () => {
+  it("finishes an active turn when the Droid input process terminates", () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    const childProcess = { stdin: { writable: true, write: vi.fn() } };
+    internals.process = childProcess;
+    internals.isReady = true;
+    internals.turnActive = true;
+
+    internals.handleProcessTermination(childProcess, "Droid input failed", "broken pipe");
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "process_event",
+      "stream_end",
+      "agent_end",
+    ]);
+  });
+
+  it("emits a terminal lifecycle before disposing an active turn", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.turnActive = true;
+
+    await agent.dispose();
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events.map((event) => event.type)).toEqual(["stream_end", "agent_end"]);
+  });
+
+  it("converts ask-user and permission responses to Droid protocol", async () => {
     const events: AgentEvent[] = [];
     const writes: Record<string, unknown>[] = [];
     const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
@@ -135,7 +182,7 @@ describe("Droid protocol adapter", () => {
       toolCallId: "tool-1",
       questions: [{ index: 7, topic: "Choice", question: "Pick one", options: ["A", "B"] }],
     });
-    agent.sendUIResponse({ id: "ask-1", answers: [{ questionIndex: 0, value: "B" }] });
+    await agent.sendUIResponse({ id: "ask-1", answers: [{ questionIndex: 0, value: "B" }] });
 
     expect(writes[0]).toMatchObject({
       type: "response",
@@ -151,11 +198,88 @@ describe("Droid protocol adapter", () => {
     }));
 
     internals.handleServerRequest("droid.request_permission", "permission-1", { toolUses: [] });
-    agent.sendUIResponse({ id: "permission-1", value: "deny" });
+    await agent.sendUIResponse({ id: "permission-1", value: "deny" });
     expect(writes[1]).toMatchObject({
       id: "permission-1",
       result: { selectedOption: "cancel" },
     });
+  });
+
+  it("does not finish the turn when Droid reports idle while waiting for an answer", async () => {
+    const events: AgentEvent[] = [];
+    const writes: Record<string, unknown>[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = {
+      stdin: {
+        writable: true,
+        write: (line: string) => writes.push(JSON.parse(line)),
+      },
+    };
+    internals.isReady = true;
+    internals.turnActive = true;
+
+    internals.handleServerRequest("droid.ask_user", "ask-waiting", {
+      questions: [{ index: 0, question: "Continue?" }],
+    });
+    internals.handleNotification("droid_working_state_changed", {
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+    });
+
+    expect(agent.isIdle()).toBe(false);
+    expect(events.some((event) => event.type === "stream_end")).toBe(false);
+    expect(events.some((event) => event.type === "agent_end")).toBe(false);
+
+    await agent.sendUIResponse({ id: "ask-waiting", text: "yes" });
+    internals.handleNotification("droid_working_state_changed", {
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+    });
+
+    expect(writes).toContainEqual(expect.objectContaining({ id: "ask-waiting", type: "response" }));
+    expect(agent.isIdle()).toBe(true);
+    expect(events.filter((event) => event.type === "stream_end")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+  });
+
+  it("rejects UI responses when Droid is unavailable or the request is unknown", async () => {
+    const agent = new DroidAgent("hpp-session");
+    const internals = agent as unknown as DroidInternals;
+
+    await expect(agent.sendUIResponse({ id: "ask-1", text: "answer" }))
+      .rejects.toThrow("Droid is not ready");
+
+    const write = vi.fn();
+    internals.process = { stdin: { writable: true, write } };
+    internals.isReady = true;
+    internals.handleServerRequest("droid.ask_user", "ask-pending", {
+      questions: [{ index: 0, question: "Continue?" }],
+    });
+    await expect(agent.sendUIResponse({ text: "answer" }))
+      .rejects.toThrow("Droid UI response is missing request id");
+    await expect(agent.sendUIResponse({ id: "missing-request", text: "answer" }))
+      .rejects.toThrow("Unknown Droid UI request: missing-request");
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("propagates a Droid response write failure and keeps the request retryable", async () => {
+    const agent = new DroidAgent("hpp-session");
+    const internals = agent as unknown as DroidInternals;
+    const write = vi.fn(() => {
+      throw new Error("response pipe failed");
+    });
+    internals.process = { stdin: { writable: true, write } };
+    internals.isReady = true;
+    internals.handleServerRequest("droid.ask_user", "ask-retry", {
+      questions: [{ index: 0, question: "Continue?" }],
+    });
+
+    await expect(agent.sendUIResponse({ id: "ask-retry", text: "yes" }))
+      .rejects.toThrow("response pipe failed");
+
+    write.mockImplementation(() => undefined);
+    await expect(agent.sendUIResponse({ id: "ask-retry", text: "yes" }))
+      .resolves.toBeUndefined();
+    expect(write).toHaveBeenCalledTimes(2);
   });
 
   it("auto-approves Droid permission requests only in full access mode", () => {
@@ -183,6 +307,32 @@ describe("Droid protocol adapter", () => {
     expect(events).not.toContainEqual(expect.objectContaining({ requestId: "permission-full" }));
   });
 
+  it("terminalizes the turn when an automatic permission response cannot be written", () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = {
+      stdin: {
+        writable: true,
+        write: () => { throw new Error("permission pipe failed"); },
+      },
+    };
+    internals.isReady = true;
+    internals.turnActive = true;
+    internals.permissionMode = "full-access";
+
+    internals.handleServerRequest("droid.request_permission", "permission-auto-failure", {
+      action: "read file",
+    });
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "process_event",
+      "stream_end",
+      "agent_end",
+    ]);
+  });
+
   it("acknowledges manual abort", async () => {
     const events: AgentEvent[] = [];
     const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
@@ -196,6 +346,24 @@ describe("Droid protocol adapter", () => {
 
     expect(agent.isIdle()).toBe(true);
     expect(events).toContainEqual(expect.objectContaining({ type: "aborted" }));
+  });
+
+  it("returns to idle when abort responses cannot be written", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = { stdin: { writable: false, write: vi.fn() } };
+    internals.isReady = true;
+    internals.turnActive = true;
+    internals.pendingPermissionRequestId = "permission-abort";
+
+    await expect(agent.abort()).resolves.toBeUndefined();
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "aborted",
+      detail: expect.stringContaining("not writable"),
+    }));
   });
 
   it("lists user-invocable skills and commands without paths and sends native slash syntax", async () => {

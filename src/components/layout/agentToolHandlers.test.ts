@@ -1,14 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@/types";
 import { createSessionRuntime } from "./agentEventUtils";
-import { handleToolEndEvent } from "./agentToolHandlers";
+import { handleToolEndEvent, handleToolStartEvent, resolveActiveToolKey } from "./agentToolHandlers";
 import type { AgentEventHandlerContext, ProcessEntryDraft } from "./agentEventTypes";
 
 const createContext = () => {
   const entries: ProcessEntryDraft[] = [];
   const updateInferredPlanSteps = vi.fn();
   const context = {
-    pendingUIResponseRef: { current: null },
+    getPendingUIResponse: () => null,
+    getPendingUIFromEvent: vi.fn(() => ({
+      sessionId: "session-1",
+      requestId: "question-start-id",
+      entryId: "question-entry-id",
+    })),
+    setPendingUIResponse: vi.fn(),
+    ensureAssistantContinuation: vi.fn(),
     appendProcessEntry: (_sessionId: string, entry: ProcessEntryDraft) => entries.push(entry),
     updateInferredPlanSteps,
     recordProcessFiles: vi.fn(),
@@ -19,6 +26,115 @@ const createContext = () => {
 };
 
 describe("handleToolEndEvent", () => {
+  it("matches an end event back to its active entry when the provider changes the call id", () => {
+    const runtime = createSessionRuntime();
+    runtime.activeToolEntry["start-id"] = "entry-id";
+    runtime.activeToolFile["start-id"] = [
+      { file: "src/A.ts", action: "read" },
+      { file: "src/B.ts", action: "read" },
+    ];
+
+    runtime.activeToolKind["start-id"] = "read_file";
+
+    expect(resolveActiveToolKey("end-id", [
+      { file: "src\\A.ts" },
+      { file: "src/B.ts" },
+    ], "read_file", runtime)).toBe("start-id");
+  });
+
+  it("correlates writes without matching a different operation on the same file", () => {
+    const runtime = createSessionRuntime();
+    runtime.activeToolEntry.read = "read-entry";
+    runtime.activeToolFile.read = [{ file: "src/A.ts", action: "read" }];
+    runtime.activeToolKind.read = "read_file";
+    runtime.activeToolEntry.write = "write-entry";
+    runtime.activeToolFile.write = [{ file: "src/A.ts", action: "written" }];
+    runtime.activeToolKind.write = "write_file";
+
+    expect(resolveActiveToolKey(
+      "changed-write-id",
+      [{ file: "src/A.ts" }],
+      "write_file",
+      runtime,
+    )).toBe("write");
+  });
+
+  it("correlates an id-only end event when its tool kind has one active entry", () => {
+    const runtime = createSessionRuntime();
+    runtime.activeToolEntry["provider-start-id"] = "entry-id";
+    runtime.activeToolKind["provider-start-id"] = "write_file";
+
+    expect(resolveActiveToolKey(
+      "provider-end-id",
+      [],
+      "write_file",
+      runtime,
+    )).toBe("provider-start-id");
+  });
+
+  it("correlates an id-drifted end with no tool kind when only one tool is active", () => {
+    const runtime = createSessionRuntime();
+    runtime.activeToolEntry["provider-start-id"] = "entry-id";
+    runtime.activeToolKind["provider-start-id"] = "write_file";
+
+    expect(resolveActiveToolKey(
+      "provider-end-id",
+      [],
+      "unknown",
+      runtime,
+    )).toBe("provider-start-id");
+  });
+
+  it("does not guess an omitted tool kind when multiple tools are active", () => {
+    const runtime = createSessionRuntime();
+    runtime.activeToolEntry.read = "read-entry";
+    runtime.activeToolKind.read = "read_file";
+    runtime.activeToolEntry.write = "write-entry";
+    runtime.activeToolKind.write = "write_file";
+
+    expect(resolveActiveToolKey(
+      "provider-end-id",
+      [],
+      "unknown",
+      runtime,
+    )).toBe("provider-end-id");
+  });
+
+  it("registers questions for id-drift correlation", () => {
+    const runtime = createSessionRuntime();
+    const { context } = createContext();
+
+    handleToolStartEvent({
+      type: "tool_start",
+      toolKind: "question",
+      toolCallId: "question-start-id",
+      requestId: "question-start-id",
+    } as AgentEvent, "session-1", runtime, context);
+
+    expect(runtime.activeToolKind["question-start-id"]).toBe("question");
+    expect(resolveActiveToolKey(
+      "question-end-id",
+      [],
+      "question",
+      runtime,
+    )).toBe("question-start-id");
+  });
+
+  it("does not guess between concurrent tools of the same kind", () => {
+    const runtime = createSessionRuntime();
+    runtime.activeToolEntry.first = "first-entry";
+    runtime.activeToolEntry.second = "second-entry";
+    runtime.activeToolKind.first = "read_file";
+    runtime.activeToolKind.second = "read_file";
+
+    expect(resolveActiveToolKey(
+      "provider-end-id",
+      [],
+      "read_file",
+      runtime,
+    )).toBe("provider-end-id");
+  });
+
   it("renders a non-zero command exit as a warning without failing the inferred plan", () => {
     const { context, entries, updateInferredPlanSteps } = createContext();
 

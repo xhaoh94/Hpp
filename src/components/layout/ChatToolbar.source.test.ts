@@ -7,6 +7,10 @@ const panelStyles = readFileSync(
   resolve(process.cwd(), "src/components/layout/ChatPanel.css"),
   "utf8",
 );
+const panelSource = readFileSync(
+  resolve(process.cwd(), "src/components/layout/ChatPanel.tsx"),
+  "utf8",
+);
 
 describe("chat toolbar permission selector", () => {
   it("renders the permission control immediately before the model selector", () => {
@@ -28,9 +32,11 @@ describe("chat toolbar permission selector", () => {
     expect(toolbarSource).toContain('chat-permission-option danger');
   });
 
-  it("opens the permission menu rightward from the trigger's left edge", () => {
-    const rule = panelStyles.match(/\.chat-permission-dropdown\s*\{([^}]*)\}/)?.[1] || "";
-    expect(rule).toMatch(/\bleft:\s*0\s*;/);
-    expect(rule).not.toMatch(/\bright:\s*0\s*;/);
+  it("centers all selector menus on their triggers without clipping at viewport edges", () => {
+    expect(toolbarSource.match(/useAnchoredOverlay\(/g)).toHaveLength(3);
+    expect(toolbarSource.match(/createPortal\(/g)).toHaveLength(3);
+    expect(toolbarSource).toContain("data-chat-toolbar-overlay");
+    expect(panelSource).toContain('closest?.("[data-chat-toolbar-overlay]")');
+    expect(panelStyles).toContain(".chat-permission-dropdown");
   });
 });

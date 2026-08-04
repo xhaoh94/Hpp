@@ -164,6 +164,79 @@ export function useChatScroll({
     });
   }, [updateScrollBottomState]);
 
+  const preserveScrollDuringAutoLayoutChange = useCallback((action: () => void) => {
+    const el = scrollRef.current;
+    if (!el) {
+      action();
+      return;
+    }
+
+    if (autoFollowBottomRef.current) {
+      action();
+      requestAnimationFrame(() => {
+        const current = scrollRef.current;
+        if (!current) return;
+        current.scrollTop = current.scrollHeight;
+        updateScrollBottomState(current);
+      });
+      return;
+    }
+
+    const bounds = el.getBoundingClientRect();
+    const sampleX = Math.min(bounds.right - 8, Math.max(bounds.left + 8, bounds.left + bounds.width / 2));
+    const sampleOffsets = [24, bounds.height * 0.25, bounds.height * 0.5, bounds.height * 0.75, bounds.height - 24];
+    let anchor: HTMLElement | null = null;
+    let responseAnchor: {
+      messageId: string;
+      viewportY: number;
+      contentOffset: number;
+    } | null = null;
+    for (const offset of sampleOffsets) {
+      const viewportY = Math.min(bounds.bottom - 8, bounds.top + offset);
+      const candidate = document.elementFromPoint(sampleX, viewportY);
+      if (candidate instanceof HTMLElement && el.contains(candidate)) {
+        if (!anchor) anchor = candidate;
+        const processOutput = candidate.closest<HTMLElement>(".chat-process-output");
+        const messageWrapper = processOutput?.closest<HTMLElement>("[data-msg-id]");
+        const messageId = messageWrapper?.dataset.msgId;
+        if (processOutput && messageId) {
+          responseAnchor = {
+            messageId,
+            viewportY,
+            contentOffset: viewportY - processOutput.getBoundingClientRect().top,
+          };
+          break;
+        }
+      }
+    }
+
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const previousScrollTop = el.scrollTop;
+    autoFollowBottomRef.current = false;
+    suppressAutoScrollUntilRef.current = Date.now() + 300;
+    action();
+
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (!current) return;
+      const transitionedMessage = responseAnchor
+        ? Array.from(current.querySelectorAll<HTMLElement>("[data-msg-id]"))
+          .find((element) => element.dataset.msgId === responseAnchor.messageId)
+        : null;
+      const transitionedBody = transitionedMessage?.querySelector<HTMLElement>(".chat-bubble-content");
+      if (responseAnchor && transitionedBody) {
+        const targetY = transitionedBody.getBoundingClientRect().top + responseAnchor.contentOffset;
+        current.scrollTop += targetY - responseAnchor.viewportY;
+      } else if (anchor?.isConnected && typeof anchorTop === "number") {
+        current.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+      } else {
+        current.scrollTop = previousScrollTop;
+      }
+      updateScrollBottomState(current);
+      autoFollowBottomRef.current = false;
+    });
+  }, [updateScrollBottomState]);
+
   return {
     scrollRef,
     showScrollBottom,
@@ -172,6 +245,7 @@ export function useChatScroll({
     scrollToBottomNow,
     scrollToMessage,
     preserveScrollDuringLayoutChange,
+    preserveScrollDuringAutoLayoutChange,
     enableAutoFollow,
     handleContentChange,
   };

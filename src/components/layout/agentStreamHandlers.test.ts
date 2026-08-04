@@ -7,14 +7,40 @@ import type { AgentEventHandlerContext } from "./agentEventTypes";
 import {
   handleCommentaryDeltaEvent,
   handleCommentaryEndEvent,
+  handleMessageStartEvent,
   handleStreamDeltaEvent,
   handleStreamEndEvent,
+  handleThinkingDeltaEvent,
 } from "./agentStreamHandlers";
 
 describe("handleStreamEndEvent", () => {
   beforeEach(() => {
     useProjectStore.setState({ agentStatuses: {} });
     useChatStore.setState({ messages: [], sessionMessages: {}, activeSessionId: null });
+  });
+
+  it("starts terminal-state reconciliation as soon as a message is acknowledged", () => {
+    const runtime = createSessionRuntime();
+    const context = {
+      getPendingUIResponse: () => null,
+      setPendingUIResponse: vi.fn(),
+      clearStreamWatchdog: vi.fn(),
+      completeIdleNotice: vi.fn(),
+      finishThinkingEntry: vi.fn(),
+      appendProcessEntry: vi.fn(),
+      updateInferredPlanSteps: vi.fn(),
+      refreshStreamWatchdog: vi.fn(),
+    } as unknown as AgentEventHandlerContext;
+
+    handleMessageStartEvent(
+      { type: "message_start", content: "hello" } as AgentEvent,
+      "session-one",
+      runtime,
+      context,
+    );
+
+    expect(runtime.processActive).toBe(true);
+    expect(context.refreshStreamWatchdog).toHaveBeenCalledWith("session-one");
   });
 
   it("routes generic agent text through the collapsible process narration", () => {
@@ -37,6 +63,24 @@ describe("handleStreamEndEvent", () => {
       "我先检查项目配置。",
     );
     expect(context.refreshStreamWatchdog).toHaveBeenCalledWith("other-agent-session");
+  });
+
+  it("ignores an empty thinking delta instead of reopening a turn", () => {
+    const context = {
+      ensureAssistantContinuation: vi.fn(),
+      finishAssistantProcessText: vi.fn(),
+      appendThinkingDelta: vi.fn(),
+    } as unknown as AgentEventHandlerContext;
+
+    handleThinkingDeltaEvent(
+      { type: "thinking_delta", delta: "" },
+      "session-one",
+      context,
+    );
+
+    expect(context.ensureAssistantContinuation).not.toHaveBeenCalled();
+    expect(context.finishAssistantProcessText).not.toHaveBeenCalled();
+    expect(context.appendThinkingDelta).not.toHaveBeenCalled();
   });
 
   it("shows commentary while it streams and finalizes it without using assistant body output", () => {
@@ -85,7 +129,7 @@ describe("handleStreamEndEvent", () => {
     });
     const completeAssistantStream = vi.fn();
     const context = {
-      pendingUIResponseRef: { current: null },
+      getPendingUIResponse: () => null,
       setPendingUIResponse: vi.fn(),
       finishAssistantProcessText: vi.fn(),
       finishThinkingEntry: vi.fn(),
@@ -100,17 +144,20 @@ describe("handleStreamEndEvent", () => {
       context,
     );
 
-    expect(ensureAssistantContinuation).toHaveBeenCalledWith("session-one");
+    expect(ensureAssistantContinuation).not.toHaveBeenCalled();
     expect(completeAssistantStream).toHaveBeenCalledWith("session-one", "", false);
   });
 
-  it("ignores an empty non-forced end without an active renderer process", () => {
+  it("settles an empty non-forced end when only the project status is still running", () => {
     const runtime = createSessionRuntime();
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     const ensureAssistantContinuation = vi.fn(() => runtime);
     const completeAssistantStream = vi.fn();
     const context = {
-      pendingUIResponseRef: { current: null },
+      getPendingUIResponse: () => null,
+      setPendingUIResponse: vi.fn(),
+      finishAssistantProcessText: vi.fn(),
+      finishThinkingEntry: vi.fn(),
       ensureAssistantContinuation,
       completeAssistantStream,
     } as unknown as AgentEventHandlerContext;
@@ -123,6 +170,60 @@ describe("handleStreamEndEvent", () => {
     );
 
     expect(ensureAssistantContinuation).not.toHaveBeenCalled();
+    expect(completeAssistantStream).toHaveBeenCalledWith("session-one", "", false);
+  });
+
+  it("terminalizes runtime identity for an empty end without visible state", () => {
+    const runtime = createSessionRuntime();
+    const completeAssistantStream = vi.fn();
+    const settleRuntimeTurnOnly = vi.fn();
+    const context = {
+      getPendingUIResponse: () => null,
+      completeAssistantStream,
+      settleRuntimeTurnOnly,
+    } as unknown as AgentEventHandlerContext;
+
+    handleStreamEndEvent(
+      { type: "stream_end", content: "" } as AgentEvent,
+      "session-one",
+      runtime,
+      context,
+    );
+
     expect(completeAssistantStream).not.toHaveBeenCalled();
+    expect(settleRuntimeTurnOnly).toHaveBeenCalledWith("session-one", "completed");
+  });
+
+  it("finishes an empty end when the runtime and project status were lost but the store process is open", () => {
+    const runtime = createSessionRuntime();
+    const chat = useChatStore.getState();
+    chat.startAssistantProcess(1, "session-one");
+    chat.appendLastAssistantProcessEntry({
+      id: "store-open",
+      timestamp: 2,
+      type: "status",
+      title: "still open",
+      state: "running",
+    }, "session-one");
+    const ensureAssistantContinuation = vi.fn(() => runtime);
+    const completeAssistantStream = vi.fn();
+    const context = {
+      getPendingUIResponse: () => null,
+      setPendingUIResponse: vi.fn(),
+      finishAssistantProcessText: vi.fn(),
+      finishThinkingEntry: vi.fn(),
+      ensureAssistantContinuation,
+      completeAssistantStream,
+    } as unknown as AgentEventHandlerContext;
+
+    handleStreamEndEvent(
+      { type: "stream_end", content: "" } as AgentEvent,
+      "session-one",
+      runtime,
+      context,
+    );
+
+    expect(ensureAssistantContinuation).not.toHaveBeenCalled();
+    expect(completeAssistantStream).toHaveBeenCalledWith("session-one", "", false);
   });
 });

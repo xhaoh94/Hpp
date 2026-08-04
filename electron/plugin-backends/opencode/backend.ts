@@ -35,8 +35,13 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   clientMessageId?: string;
   displayMessage?: string;
+  hostSystemPrompt?: string;
   permissionMode?: AgentPermissionMode;
   action?: AgentActionInvocation;
+}
+
+interface AgentInitOptions {
+  hostSystemPrompt?: string;
 }
 
 interface AgentForkTarget {
@@ -74,6 +79,7 @@ type OpenCodePromptPart =
 
 interface OpenCodePromptBody {
   parts: OpenCodePromptPart[];
+  system?: string;
   agent?: "plan" | "build";
   model?: { providerID: string; modelID: string };
   variant?: string;
@@ -208,10 +214,22 @@ function getModelVariants(modelInfo: unknown): string[] {
   });
 }
 
-function selectThinkingVariant(level: string, variants: string[]): string | undefined {
+// OpenCode historically exposes `max` as the wire-level name for Hpp's
+// `xhigh` option. Keep that backend-specific alias here instead of collapsing
+// the native Codex `max` level in the shared model layer.
+function normalizeOpenCodeThinkingLevel(level: string): string {
   const normalized = normalizeThinkingLevelId(level);
+  return normalized === "max" ? "xhigh" : normalized;
+}
+
+function normalizeOpenCodeThinkingLevels(levels: string[]): string[] {
+  return normalizeSupportedThinkingLevels(levels.map(normalizeOpenCodeThinkingLevel));
+}
+
+function selectThinkingVariant(level: string, variants: string[]): string | undefined {
+  const normalized = normalizeOpenCodeThinkingLevel(level);
   if (!normalized || variants.length === 0) return undefined;
-  return variants.find((variant) => normalizeThinkingLevelId(variant) === normalized);
+  return variants.find((variant) => normalizeOpenCodeThinkingLevel(variant) === normalized);
 }
 
 function imageExtension(mimeType: string) {
@@ -303,10 +321,13 @@ export class OpenCodeAgent {
   private pendingQuestionToolParts = new Set<string>();
   private partTypes = new Map<string, string>();
   private turnActive = false;
+  private turnRevision = 0;
+  private idleObservedWhileWaitingForUI = false;
   private activeClientMessageId: string | null = null;
   private activeAssistantMessageId: string | null = null;
   private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
   private permissionMode: AgentPermissionMode = "auto";
+  private hostSystemPrompt = "";
   private actionKeys = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
@@ -315,7 +336,8 @@ export class OpenCodeAgent {
   }
 
   /** Start opencode serve and wait for it to be ready */
-  async init(projectPath: string, existingSessionId?: string): Promise<void> {
+  async init(projectPath: string, existingSessionId?: string, options?: AgentInitOptions): Promise<void> {
+    this.hostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
     // If already running for same project, just restore session ID and return
     if (this.process && this.projectPath === projectPath) {
       if (existingSessionId) this.sessionId = existingSessionId;
@@ -437,22 +459,40 @@ export class OpenCodeAgent {
 
   /** Send a message to the opencode session */
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
+    const turnRevision = ++this.turnRevision;
+    this.turnActive = true;
+    this.permissionMode = options?.permissionMode || "auto";
+    this.idleObservedWhileWaitingForUI = false;
+    this.clearActiveTurn();
+    this.activeClientMessageId = options?.clientMessageId?.trim() || null;
     if (!this.sessionId) {
       await this.createSession();
     }
+    if (!this.isCurrentTurn(turnRevision)) return;
     if (!this.sessionId) {
       this.emitEvent({ type: "stream_start", role: "assistant" });
       this.emitEvent({ type: "stream_delta", delta: "无法创建会话，请检查 opencode 是否已安装。" });
-      this.emitEvent({ type: "stream_end" });
-      this.emitEvent({ type: "agent_end" });
+      this.finishTurn(turnRevision);
       return;
     }
 
-    const selectedAction = options?.action ? await this.resolveAction(options.action) : null;
-    this.emitEvent({ type: "stream_start", role: "assistant" });
-
+    let selectedAction: AgentActionInvocation | null;
     try {
+      selectedAction = options?.action ? await this.resolveAction(options.action) : null;
+    } catch (error) {
+      if (this.isCurrentTurn(turnRevision)) {
+        this.turnRevision += 1;
+        this.clearTurnRuntime();
+      }
+      throw error;
+    }
+    if (!this.isCurrentTurn(turnRevision)) return;
+
+    this.emitEvent({ type: "stream_start", role: "assistant" });
+    try {
+      if (!this.isCurrentTurn(turnRevision)) return;
       await this.startSSEListener();
+      if (!this.isCurrentTurn(turnRevision)) return;
       if (!this.eventSource) throw new Error("OpenCode event stream closed before the prompt was sent");
       const parts: OpenCodePromptPart[] = [{ type: "text", text: message }];
       if (images?.length) {
@@ -466,11 +506,13 @@ export class OpenCodeAgent {
           });
         });
       }
-      const body: OpenCodePromptBody = { parts };
-      this.activeClientMessageId = options?.clientMessageId?.trim() || null;
+      const body: OpenCodePromptBody = {
+        parts,
+      };
+      const hostSystemPrompt = String(options?.hostSystemPrompt ?? this.hostSystemPrompt).trim();
+      this.hostSystemPrompt = hostSystemPrompt;
+      if (hostSystemPrompt) body.system = hostSystemPrompt;
       this.activeAssistantMessageId = null;
-      this.turnActive = true;
-      this.permissionMode = options?.permissionMode || "auto";
       if (options?.planModeEnabled) {
         body.agent = "plan";
       } else {
@@ -483,6 +525,9 @@ export class OpenCodeAgent {
         if (variant) body.variant = variant;
       }
       if (selectedAction) {
+        // OpenCode's native /command payload has no system field. Keep native
+        // command/skill expansion intact instead of lowering host policy into
+        // user arguments; ordinary and Plan prompts use PromptInput.system.
         const commandParts = parts.filter((part) => part.type === "file");
         const commandBody: OpenCodeCommandBody = {
           command: selectedAction.name,
@@ -497,14 +542,10 @@ export class OpenCodeAgent {
         await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
       }
     } catch (e) {
+      if (!this.isCurrentTurn(turnRevision)) return;
       console.error("[opencode] sendMessage failed:", e);
       this.emitEvent({ type: "stream_delta", delta: `\n\n发送失败: ${e}` });
-      this.emitEvent({ type: "stream_end" });
-      this.emitEvent({ type: "agent_end" });
-      this.turnActive = false;
-      this.stopSSEListener();
-      this.pendingUIRequests.clear();
-      this.clearActiveTurn();
+      this.finishTurn(turnRevision);
     }
   }
 
@@ -550,9 +591,9 @@ export class OpenCodeAgent {
   /** Listen to SSE events for streaming responses */
   private startSSEListener(): Promise<void> {
     this.stopSSEListener();
-    this.clearActiveTurn();
     this.sseBuffer = "";
     this.streamedContent = false;
+    this.idleObservedWhileWaitingForUI = false;
     this.runningToolParts.clear();
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
@@ -575,6 +616,7 @@ export class OpenCodeAgent {
           req.setTimeout(0);
           res.setEncoding("utf-8");
           res.on("data", (chunk: string) => {
+            if (this.eventSource !== req) return;
             this.sseBuffer += chunk;
             this.processSSEBuffer();
           });
@@ -654,7 +696,7 @@ export class OpenCodeAgent {
       case "question.asked":
       case "question.v2.asked":
         if (typeof props.id === "string") {
-          this.cancelIdleTimer();
+          if (this.cancelIdleTimer()) this.idleObservedWhileWaitingForUI = true;
           this.pendingUIRequests.set(props.id, { kind: "question" });
           this.emitEvent(normalizeQuestionProcessEvent({
             type: eventType,
@@ -668,7 +710,7 @@ export class OpenCodeAgent {
       case "permission.asked":
       case "permission.v2.asked":
         if (typeof props.id === "string") {
-          this.cancelIdleTimer();
+          if (this.cancelIdleTimer()) this.idleObservedWhileWaitingForUI = true;
           const action = String(props.action || props.permission || "requested action");
           const resources = Array.isArray(props.resources)
             ? props.resources.map(String)
@@ -678,14 +720,18 @@ export class OpenCodeAgent {
           const shouldApproveAutomatically = this.permissionMode === "full-access"
             || (this.permissionMode === "auto" && !isHighRiskAgentPermissionRequest(action, resources));
           if (shouldApproveAutomatically) {
+            const requestId = props.id;
+            const turnRevision = this.turnRevision;
+            this.pendingUIRequests.set(requestId, { kind: "permission" });
             void this.httpPost(`/permission/${encodeURIComponent(props.id)}/reply`, { reply: "once" })
-              .catch((error) => this.emitEvent({
-                type: "process_event",
-                entryType: "error",
-                title: "OpenCode permission response failed",
-                detail: error instanceof Error ? error.message : String(error),
-                state: "error",
-              }));
+              .then(() => this.completePendingUIRequest(requestId, turnRevision))
+              .catch((error) => {
+                if (this.turnRevision !== turnRevision || !this.pendingUIRequests.has(requestId)) return;
+                this.failActiveTurn(
+                  "OpenCode permission response failed",
+                  error instanceof Error ? error.message : String(error)
+                );
+              });
             break;
           }
           this.pendingUIRequests.set(props.id, { kind: "permission" });
@@ -716,7 +762,7 @@ export class OpenCodeAgent {
       case "permission.v2.replied":
         {
           const requestId = typeof props.id === "string" ? props.id : typeof props.requestID === "string" ? props.requestID : "";
-          if (requestId) this.pendingUIRequests.delete(requestId);
+          if (requestId) this.completePendingUIRequest(requestId);
         }
         break;
       case "message.updated":
@@ -793,13 +839,16 @@ export class OpenCodeAgent {
         break;
       }
       case "message.part.delta": {
-        // Cancel pending idle handling - main agent may still be processing
-        this.cancelIdleTimer();
+        // session.idle can be followed by one or more trailing deltas. Treat
+        // the timer as a debounce: restart it after the delta instead of
+        // cancelling the only terminal signal and leaving the turn busy.
+        const idleEndWasPending = this.cancelIdleTimer();
         const partId = String(props.partID || props.partId || part.id || "");
         const partType = props.field === "thinking"
           ? "thinking"
           : part.type || this.partTypes.get(partId);
         this.emitPartDelta(partType, props.delta);
+        if (idleEndWasPending) this.scheduleIdleEnd();
         break;
       }
       case "session.status": {
@@ -808,6 +857,7 @@ export class OpenCodeAgent {
         if (statusType === "busy") {
           // Session is busy - cancel pending idle timer (sub-agent done but main agent continues)
           this.cancelIdleTimer();
+          this.idleObservedWhileWaitingForUI = false;
         } else if (statusType === "idle") {
           // Session is truly idle - schedule stream end with a small delay
           // to catch trailing message.part.delta events
@@ -831,12 +881,7 @@ export class OpenCodeAgent {
           state: "error",
         });
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${message || "未知错误"}` });
-        this.turnActive = false;
-        this.emitEvent({ type: "stream_end" });
-        this.emitEvent({ type: "agent_end" });
-        this.stopSSEListener();
-        this.pendingUIRequests.clear();
-        this.clearActiveTurn();
+        this.finishTurn();
         break;
       }
       case "session.diff": {
@@ -855,46 +900,81 @@ export class OpenCodeAgent {
     }
   }
 
+  private isCurrentTurn(revision: number) {
+    return this.turnActive && this.turnRevision === revision;
+  }
+
+  private clearTurnRuntime() {
+    this.turnActive = false;
+    this.stopSSEListener();
+    this.sseBuffer = "";
+    this.streamedContent = false;
+    this.runningToolParts.clear();
+    this.completedToolParts.clear();
+    this.pendingQuestionToolParts.clear();
+    this.pendingUIRequests.clear();
+    this.idleObservedWhileWaitingForUI = false;
+    this.clearActiveTurn();
+  }
+
+  private finishTurn(revision = this.turnRevision) {
+    if (!this.isCurrentTurn(revision)) return false;
+    this.turnRevision += 1;
+    this.clearTurnRuntime();
+    this.emitEvent({ type: "stream_end" });
+    this.emitEvent({ type: "agent_end" });
+    return true;
+  }
+
+  private completePendingUIRequest(requestId: string, turnRevision = this.turnRevision) {
+    if (this.turnRevision !== turnRevision) return;
+    this.pendingUIRequests.delete(requestId);
+    if (this.pendingUIRequests.size === 0 && this.idleObservedWhileWaitingForUI) {
+      this.scheduleIdleEnd();
+    }
+  }
+
   private cancelIdleTimer() {
+    const hadTimer = this.idleTimer !== null;
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
     }
+    return hadTimer;
   }
 
   private scheduleIdleEnd() {
     this.cancelIdleTimer();
-    if (this.pendingUIRequests.size > 0) return;
+    if (!this.turnActive) return;
+    if (this.pendingUIRequests.size > 0) {
+      this.idleObservedWhileWaitingForUI = true;
+      return;
+    }
+    this.idleObservedWhileWaitingForUI = false;
+    const turnRevision = this.turnRevision;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
+      if (!this.isCurrentTurn(turnRevision)) return;
       if (this.streamedContent) {
-        this.turnActive = false;
-        this.emitEvent({ type: "stream_end" });
-        this.emitEvent({ type: "agent_end" });
-        this.stopSSEListener();
-        this.pendingUIRequests.clear();
-        this.clearActiveTurn();
+        this.finishTurn(turnRevision);
       } else {
         // Fallback: fetch final message via REST (for older opencode versions)
-        this.fetchAssistantMessage();
+        void this.fetchAssistantMessage(turnRevision);
       }
     }, 800);
   }
 
   /** Fetch the latest assistant message content via REST after session.idle */
-  private async fetchAssistantMessage() {
+  private async fetchAssistantMessage(turnRevision = this.turnRevision) {
+    if (!this.isCurrentTurn(turnRevision)) return;
     if (!this.sessionId) {
-      this.turnActive = false;
-      this.emitEvent({ type: "stream_end" });
-      this.emitEvent({ type: "agent_end" });
-      this.stopSSEListener();
-      this.pendingUIRequests.clear();
-      this.clearActiveTurn();
+      this.finishTurn(turnRevision);
       return;
     }
 
     try {
       const messages = await this.httpGet(`/session/${this.sessionId}/message`);
+      if (!this.isCurrentTurn(turnRevision)) return;
       if (Array.isArray(messages)) {
         // Find the last assistant message
         const assistantMsg = [...messages]
@@ -927,15 +1007,11 @@ export class OpenCodeAgent {
         }
       }
     } catch (e) {
+      if (!this.isCurrentTurn(turnRevision)) return;
       this.emitEvent({ type: "stream_delta", delta: `\n\n获取响应失败: ${e}` });
     }
 
-    this.turnActive = false;
-    this.emitEvent({ type: "stream_end" });
-    this.emitEvent({ type: "agent_end" });
-    this.stopSSEListener();
-    this.pendingUIRequests.clear();
-    this.clearActiveTurn();
+    this.finishTurn(turnRevision);
   }
 
   private stopSSEListener() {
@@ -947,6 +1023,7 @@ export class OpenCodeAgent {
 
   /** Abort the current response */
   async abort() {
+    const turnRevision = this.turnRevision;
     let errorMessage = "";
     if (this.sessionId) {
       try {
@@ -955,13 +1032,11 @@ export class OpenCodeAgent {
         errorMessage = error instanceof Error ? error.message : String(error);
       }
     }
-    this.turnActive = false;
-    this.stopSSEListener();
-    this.runningToolParts.clear();
-    this.pendingQuestionToolParts.clear();
-    this.partTypes.clear();
-    this.pendingUIRequests.clear();
-    this.clearActiveTurn();
+    // A slow abort reply must never settle a newer turn that started after an
+    // independent disconnect/error already completed this one.
+    if (turnRevision !== this.turnRevision) return;
+    this.turnRevision += 1;
+    this.clearTurnRuntime();
     this.emitEvent({ type: "aborted", detail: errorMessage || undefined });
   }
 
@@ -1040,7 +1115,7 @@ export class OpenCodeAgent {
                 provider: providerId,
                 reasoning: modelSupportsReasoning(model),
                 supportsImages: modelSupportsImages(model),
-                supportedThinkingLevels: normalizeSupportedThinkingLevels(variants),
+                supportedThinkingLevels: normalizeOpenCodeThinkingLevels(variants),
               });
             }
           } else if (isRecord(provider.models)) {
@@ -1055,7 +1130,7 @@ export class OpenCodeAgent {
                 provider: providerId,
                 reasoning: modelSupportsReasoning(modelInfo),
                 supportsImages: modelSupportsImages(modelInfo),
-                supportedThinkingLevels: normalizeSupportedThinkingLevels(variants),
+                supportedThinkingLevels: normalizeOpenCodeThinkingLevels(variants),
               });
             }
           } else {
@@ -1095,21 +1170,13 @@ export class OpenCodeAgent {
     const variants = this.modelVariants.get(`${this.currentProviderId}:${this.currentModelId}`) || [];
     const variant = selectThinkingVariant(level, variants);
     if (!variant) throw new Error("UNSUPPORTED_THINKING_LEVEL");
-    const effectiveLevel = normalizeThinkingLevelId(variant);
+    const effectiveLevel = normalizeOpenCodeThinkingLevel(variant);
     this.currentThinkingLevel = effectiveLevel;
     this.emitEvent({ type: "thinking_level_changed", level: effectiveLevel });
   }
 
-  sendUIResponse(response: AgentUIResponse) {
-    void this.respondToUIRequest(response).catch((error) => {
-      this.emitEvent({
-        type: "process_event",
-        entryType: "error",
-        title: "OpenCode response failed",
-        detail: error instanceof Error ? error.message : String(error),
-        state: "error",
-      });
-    });
+  async sendUIResponse(response: AgentUIResponse): Promise<void> {
+    await this.respondToUIRequest(response);
   }
 
   /** For OpenCode, the session ID serves as the session file path equivalent */
@@ -1127,15 +1194,13 @@ export class OpenCodeAgent {
     const childProcess = this.process;
     this.process = null;
     childProcess?.stdin?.end();
-    this.turnActive = false;
+    if (!this.finishTurn()) {
+      this.turnRevision += 1;
+      this.clearTurnRuntime();
+    }
     this.sessionId = null;
-    this.runningToolParts.clear();
-    this.pendingQuestionToolParts.clear();
-    this.partTypes.clear();
-    this.pendingUIRequests.clear();
     this.models = [];
     this.modelVariants.clear();
-    this.clearActiveTurn();
     if (childProcess) await this.killProcessTree(childProcess);
   }
 
@@ -1209,8 +1274,7 @@ export class OpenCodeAgent {
   }
 
   private failActiveTurn(title: string, detail: string) {
-    const shouldFinish = this.turnActive || !!this.eventSource;
-    this.turnActive = false;
+    const turnRevision = this.turnRevision;
     this.emitEvent({
       type: "process_event",
       entryType: "error",
@@ -1218,13 +1282,7 @@ export class OpenCodeAgent {
       detail,
       state: "error",
     });
-    if (shouldFinish) {
-      this.emitEvent({ type: "stream_end" });
-      this.emitEvent({ type: "agent_end" });
-    }
-    this.stopSSEListener();
-    this.pendingUIRequests.clear();
-    this.clearActiveTurn();
+    if (!this.finishTurn(turnRevision)) this.clearTurnRuntime();
   }
 
   private async respondToUIRequest(response: AgentUIResponse) {
@@ -1235,9 +1293,9 @@ export class OpenCodeAgent {
         : "";
     if (!requestId) throw new Error("OpenCode UI response is missing request id");
     const pending = this.pendingUIRequests.get(requestId);
-    const method = typeof response.method === "string" ? response.method : "";
-    const kind = pending?.kind || (method.includes("permission") ? "permission" : method.includes("question") ? "question" : undefined);
-    if (!kind) throw new Error(`Unknown OpenCode UI request: ${requestId}`);
+    if (!pending) throw new Error(`Unknown OpenCode UI request: ${requestId}`);
+    const kind = pending.kind;
+    const turnRevision = this.turnRevision;
 
     if (kind === "permission") {
       await this.httpPost(`/permission/${encodeURIComponent(requestId)}/reply`, {
@@ -1252,7 +1310,7 @@ export class OpenCodeAgent {
         : [[String(response.text || response.value || "")].filter(Boolean)];
       await this.httpPost(`/question/${encodeURIComponent(requestId)}/reply`, { answers });
     }
-    this.pendingUIRequests.delete(requestId);
+    this.completePendingUIRequest(requestId, turnRevision);
   }
 
   private recordAssistantMessageId(value: unknown) {

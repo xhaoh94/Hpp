@@ -5,6 +5,7 @@ import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
+import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import "./Settings.css";
 
 type AgentConfigModalProps = {
@@ -39,6 +40,20 @@ function cloneProvider(provider: AgentProviderConfig): AgentProviderConfig {
     ...provider,
     models: provider.models.map((model) => ({ ...model })),
   };
+}
+
+function getProviderMoveTargetIndex(
+  providers: AgentProviderConfig[],
+  sourceProviderId: string,
+  targetProviderId: string,
+  position: "before" | "after",
+) {
+  const fromIndex = providers.findIndex((provider) => provider.providerId === sourceProviderId);
+  const targetIndex = providers.findIndex((provider) => provider.providerId === targetProviderId);
+  if (fromIndex < 0 || targetIndex < 0) return null;
+  const rawInsertIndex = targetIndex + (position === "after" ? 1 : 0);
+  const nextIndex = fromIndex < rawInsertIndex ? rawInsertIndex - 1 : rawInsertIndex;
+  return nextIndex === fromIndex ? null : nextIndex;
 }
 
 export function resolvePreferredProviderId(state: AgentConfigState, currentProviderId = ""): string {
@@ -88,6 +103,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [reorderingProviderId, setReorderingProviderId] = useState<string>("");
   const [dragProviderId, setDragProviderId] = useState<string>("");
   const [dragOverProviderId, setDragOverProviderId] = useState<string>("");
+  const [dragOverProviderPosition, setDragOverProviderPosition] = useState<"before" | "after">("before");
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
@@ -103,6 +119,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelFetchRequest = useRef(0);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const providerScrollRef = useRef<HTMLDivElement>(null);
+  const { update: updateProviderAutoScroll, stop: stopProviderAutoScroll } = useDragAutoScroll(providerScrollRef);
 
   useEffect(() => {
     void loadAgents();
@@ -623,15 +641,24 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", providerId);
     setDragProviderId(providerId);
+    stopProviderAutoScroll();
     setDragOverProviderId("");
-  }, [config.providers.length, reorderingProviderId]);
+    setDragOverProviderPosition("before");
+  }, [config.providers.length, reorderingProviderId, stopProviderAutoScroll]);
 
   const handleProviderDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
     if (!dragProviderId || dragProviderId === providerId || reorderingProviderId) return;
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY >= targetRect.top + targetRect.height / 2 ? "after" : "before";
+    if (getProviderMoveTargetIndex(config.providers, dragProviderId, providerId, position) === null) {
+      setDragOverProviderId((current) => current === providerId ? "" : current);
+      return;
+    }
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     setDragOverProviderId(providerId);
-  }, [dragProviderId, reorderingProviderId]);
+    setDragOverProviderPosition(position);
+  }, [config.providers, dragProviderId, reorderingProviderId]);
 
   const handleProviderDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
     const relatedTarget = event.relatedTarget;
@@ -640,29 +667,33 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, []);
 
   const handleProviderDragEnd = useCallback(() => {
+    stopProviderAutoScroll();
     setDragProviderId("");
     setDragOverProviderId("");
-  }, []);
+    setDragOverProviderPosition("before");
+  }, [stopProviderAutoScroll]);
 
   const handleProviderDrop = useCallback(async (event: ReactDragEvent<HTMLDivElement>, targetProviderId: string) => {
     event.preventDefault();
+    stopProviderAutoScroll();
     const sourceProviderId = event.dataTransfer.getData("text/plain") || dragProviderId;
     setDragProviderId("");
     setDragOverProviderId("");
+    setDragOverProviderPosition("before");
     if (!sourceProviderId || sourceProviderId === targetProviderId || reorderingProviderId) return;
 
-    const fromIndex = config.providers.findIndex((provider) => provider.providerId === sourceProviderId);
-    const rawTargetIndex = config.providers.findIndex((provider) => provider.providerId === targetProviderId);
-    if (fromIndex < 0 || rawTargetIndex < 0) return;
+    if (!config.providers.some((provider) => provider.providerId === sourceProviderId)
+      || !config.providers.some((provider) => provider.providerId === targetProviderId)) return;
 
     const targetRect = event.currentTarget.getBoundingClientRect();
-    const dropAfterTarget = event.clientY > targetRect.top + targetRect.height / 2;
-    let targetIndex = rawTargetIndex + (dropAfterTarget ? 1 : 0);
-    if (fromIndex < targetIndex) targetIndex -= 1;
-    if (targetIndex === fromIndex) return;
+    const dropPosition = event.clientY >= targetRect.top + targetRect.height / 2 ? "after" : "before";
+    const targetIndex = getProviderMoveTargetIndex(config.providers, sourceProviderId, targetProviderId, dropPosition);
+    if (targetIndex === null) return;
 
     const previousConfig = config;
     const nextProviders = [...config.providers];
+    const fromIndex = nextProviders.findIndex((provider) => provider.providerId === sourceProviderId);
+    if (fromIndex < 0) return;
     const [movedProvider] = nextProviders.splice(fromIndex, 1);
     nextProviders.splice(targetIndex, 0, movedProvider);
     const nextConfig = { ...config, providers: nextProviders };
@@ -693,7 +724,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setReorderingProviderId("");
     }
-  }, [agentId, config, dragProviderId, onModelsUpdated, reorderingProviderId]);
+  }, [agentId, config, dragProviderId, onModelsUpdated, reorderingProviderId, stopProviderAutoScroll]);
 
   const handleCopyApiKey = useCallback(async () => {
     const apiKey = draft?.apiKey || "";
@@ -775,7 +806,14 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
             <div className="agent-config-grid">
               <aside className="agent-config-provider-list">
                 <div className="agent-config-section-title">渠道</div>
-                <div className="agent-config-provider-scroll">
+                <div
+                  ref={providerScrollRef}
+                  className="agent-config-provider-scroll"
+                  onDragOver={(event) => {
+                    if (dragProviderId) updateProviderAutoScroll(event.clientY);
+                  }}
+                  onDrop={stopProviderAutoScroll}
+                >
                   {config.providers.length === 0 && (
                     <div className="agent-config-empty compact">暂无渠道</div>
                   )}
@@ -794,7 +832,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         ref={(element) => {
                           providerItemRefs.current[provider.providerId] = element;
                         }}
-                        className={`agent-config-provider-item ${selected ? "selected" : ""} ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""} ${reordering ? "reordering" : ""}`}
+                        className={`agent-config-provider-item ${selected ? "selected" : ""} ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? `drop-target ${dragOverProviderPosition}` : ""} ${reordering ? "reordering" : ""}`}
                         draggable={config.providers.length > 1 && !reorderingProviderId}
                         onDragStart={(event) => handleProviderDragStart(event, provider.providerId)}
                         onDragOver={(event) => handleProviderDragOver(event, provider.providerId)}

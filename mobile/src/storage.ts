@@ -2,6 +2,7 @@ import { SecureStorage, type DataType } from "@aparajita/capacitor-secure-storag
 import { Capacitor } from "@capacitor/core";
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { isAgentActionInvocation, type AgentActionInvocation } from "@shared/agent-actions";
+import { parseComposerDocument, type ComposerDocument } from "@shared/composer-document";
 
 export interface PairedHost {
   id: string;
@@ -17,6 +18,7 @@ export interface PairedHost {
 
 export interface MobileSessionDraft {
   text: string;
+  document?: ComposerDocument;
   referenceSessionIds: string[];
   action?: AgentActionInvocation;
   updatedAt: number;
@@ -159,6 +161,7 @@ export function sanitizeSessionDraft(value: unknown): MobileSessionDraft | null 
     : [];
   return {
     text: draft.text,
+    ...(parseComposerDocument(draft.document) ? { document: parseComposerDocument(draft.document) } : {}),
     referenceSessionIds,
     ...(isAgentActionInvocation(draft.action)
       ? { action: { kind: draft.action.kind, name: draft.action.name.trim() } }
@@ -172,10 +175,10 @@ export async function loadSessionDraft(hostId: string, sessionId: string): Promi
   return sanitizeSessionDraft(await readValue(sessionDraftKey(hostId, sessionId)));
 }
 
-export async function saveSessionDraft(hostId: string, sessionId: string, draft: Pick<MobileSessionDraft, "text" | "referenceSessionIds" | "action">) {
+export async function saveSessionDraft(hostId: string, sessionId: string, draft: Pick<MobileSessionDraft, "text" | "document" | "referenceSessionIds" | "action">) {
   if (!hostId || !sessionId) return;
   const normalized = sanitizeSessionDraft({ ...draft, updatedAt: Date.now() });
-  if (!normalized || (!normalized.text && normalized.referenceSessionIds.length === 0 && !normalized.action)) {
+  if (!normalized || (!normalized.text && !normalized.document?.nodes.length && normalized.referenceSessionIds.length === 0 && !normalized.action)) {
     await clearSessionDraft(hostId, sessionId);
     return;
   }

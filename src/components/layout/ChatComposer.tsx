@@ -6,9 +6,9 @@ import type {
   RefObject,
 } from "react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Folder, Image as ImageIcon, Link2, RefreshCw, Search, Square, WandSparkles, X } from "lucide-react";
+import { FileText, Folder, Link2, RefreshCw, Search, Square, WandSparkles, X } from "lucide-react";
 import { useFileFilters } from "@/hooks/useFileFilters";
-import { parseActiveFileMention, replaceFileMentionToken, type ActiveFileMention } from "@/lib/file-mention";
+import { parseActiveFileMention, type ActiveFileMention } from "@/lib/file-mention";
 import { queryProjectFileIndex, type ProjectFileIndexItem } from "@/lib/project-file-index";
 import { scheduleAbortableTask } from "@/lib/abortable-task-scheduler";
 import type { PendingFile, PendingImage, PendingPathAttachment } from "@/stores/chat-store";
@@ -28,6 +28,11 @@ import {
 } from "@/i18n/text";
 import { ComposerFileMentionPicker } from "./ComposerFileMentionPicker";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
+import {
+  InlineComposerEditor,
+  type InlineComposerEditorHandle,
+} from "@/components/shared/InlineComposerEditor";
+import type { ComposerDocument } from "@shared/composer-document";
 
 const FILE_MENTION_LIST_ID = "chat-composer-file-mentions";
 const FILE_MENTION_RESULT_LIMIT = 12;
@@ -53,6 +58,7 @@ type ChatComposerProps = {
   activeQuestionnaire: boolean;
   attachmentError: string | null;
   currentSessionRunning: boolean;
+  compactionInProgress?: boolean;
   interactionDisabled?: boolean;
   isAwaitingUIResponse: boolean;
   inputHasText: boolean;
@@ -66,7 +72,9 @@ type ChatComposerProps = {
   actionContextKey: string;
   sendKey: string;
   fileInputRef: RefObject<HTMLInputElement | null>;
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  editorRef: RefObject<InlineComposerEditorHandle | null>;
+  composerDocument: ComposerDocument;
+  onDocumentChange: (document: ComposerDocument) => void;
   onAddInputFiles: (files: File[]) => void;
   onAddPathAttachment: (attachment: Omit<PendingPathAttachment, "id">) => void;
   onOpenAttachmentFolder: () => void;
@@ -81,10 +89,8 @@ type ChatComposerProps = {
   onRemoveSessionReference: (sourceSessionId: string) => void;
   onOpenImage: (src: string) => void;
   onSyncInputValue: (value: string) => void;
-  onSetInputValue: (value: string) => void;
-  onResizeTextarea: (textarea?: HTMLTextAreaElement | null) => void;
-  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
-  onPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
+  onPaste: (event: ClipboardEvent<HTMLDivElement>) => void;
   onDrop: (event: DragEvent<HTMLDivElement>) => void;
   onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   onSend: () => void;
@@ -95,6 +101,7 @@ export const ChatComposer = memo(function ChatComposer({
   activeQuestionnaire,
   attachmentError,
   currentSessionRunning,
+  compactionInProgress = false,
   interactionDisabled = false,
   isAwaitingUIResponse,
   inputHasText,
@@ -108,7 +115,9 @@ export const ChatComposer = memo(function ChatComposer({
   actionContextKey,
   sendKey,
   fileInputRef,
-  textareaRef,
+  editorRef,
+  composerDocument,
+  onDocumentChange,
   onAddInputFiles,
   onAddPathAttachment,
   onOpenAttachmentFolder,
@@ -123,8 +132,6 @@ export const ChatComposer = memo(function ChatComposer({
   onRemoveSessionReference,
   onOpenImage,
   onSyncInputValue,
-  onSetInputValue,
-  onResizeTextarea,
   onKeyDown,
   onPaste,
   onDrop,
@@ -141,21 +148,27 @@ export const ChatComposer = memo(function ChatComposer({
     !!selectedAction;
   const inputDisabled = activeQuestionnaire || interactionDisabled;
   const showAbortButton = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
-  const queueSend = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
-  const sendDisabled = interactionDisabled
+  const queueSend = !compactionInProgress && !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
+  const sendDisabled = compactionInProgress
+    ? true
+    : interactionDisabled
     ? true
     : activeQuestionnaire
       ? true
       : isAwaitingUIResponse
         ? !inputHasText
         : !hasPendingContent;
-  const placeholder = getChatComposerPlaceholder(interactionDisabled, activeQuestionnaire, sendKey);
-  const sendTitle = getChatComposerSendTitle(
-    interactionDisabled,
-    activeQuestionnaire,
-    isAwaitingUIResponse,
-    currentSessionRunning
-  );
+  const placeholder = compactionInProgress
+    ? "上下文压缩中，完成后可发送"
+    : getChatComposerPlaceholder(interactionDisabled, activeQuestionnaire, sendKey);
+  const sendTitle = compactionInProgress
+    ? "上下文压缩中"
+    : getChatComposerSendTitle(
+      interactionDisabled,
+      activeQuestionnaire,
+      isAwaitingUIResponse,
+      currentSessionRunning
+    );
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [actionPickerOpen, setActionPickerOpen] = useState(false);
   const [actionSearch, setActionSearch] = useState("");
@@ -185,7 +198,7 @@ export const ChatComposer = memo(function ChatComposer({
 
   const resolvePrimaryAction = () => {
     if (interactionDisabled || activeQuestionnaire) return "none" as const;
-    const text = textareaRef.current?.value || "";
+    const text = composerDocument.nodes.filter((node) => node.type === "text").map((node) => node.text).join("");
     if (isAwaitingUIResponse) return text.trim() ? "send" as const : "none" as const;
     return getComposerAction({
       text,
@@ -199,6 +212,14 @@ export const ChatComposer = memo(function ChatComposer({
   };
 
   const handlePrimaryAction = () => {
+    if (compactionInProgress && hasPendingContent) {
+      primaryActionIntentRef.current = null;
+      // Let ChatPanel verify whether compaction is still active in the backend.
+      // It preserves the toast for a real/unknown compaction and can recover a
+      // stale renderer-only flag before sending.
+      onSend();
+      return;
+    }
     const action = primaryActionIntentRef.current || resolvePrimaryAction();
     primaryActionIntentRef.current = null;
     setFileMention(null);
@@ -306,60 +327,70 @@ export const ChatComposer = memo(function ChatComposer({
     return scheduledSearch.cancel;
   }, [activeProjectPath, fileFilterKey, fileFilters, fileMention?.query]);
 
-  const updateFileMentionFromTextarea = useCallback((textarea: HTMLTextAreaElement) => {
+  const updateFileMentionFromEditor = useCallback(() => {
     if (inputDisabled || isAwaitingUIResponse || composingRef.current) {
       setFileMention(null);
       return;
     }
 
-    const mention = parseActiveFileMention(
-      textarea.value,
-      textarea.selectionStart,
-      textarea.selectionEnd,
-    );
+    const activeText = editorRef.current?.getActiveText();
+    const mention = activeText
+      ? parseActiveFileMention(activeText.text, activeText.start, activeText.end)
+      : null;
     setFileMention((current) => areFileMentionsEqual(current, mention) ? current : mention);
     if (mention) {
       setUploadMenuOpen(false);
       setActionPickerOpen(false);
     }
-  }, [inputDisabled, isAwaitingUIResponse]);
+  }, [editorRef, inputDisabled, isAwaitingUIResponse]);
 
-  const handleSelectFileMention = useCallback((item: ProjectFileIndexItem) => {
-    const textarea = textareaRef.current;
-    if (!textarea || !fileMention) return;
-    if (fileMentionResultState.query !== fileMention.query) return;
+  const handleSelectFileMention = useCallback((
+    item: ProjectFileIndexItem,
+    mentionOverride?: ActiveFileMention,
+  ) => {
+    const targetMention = mentionOverride || fileMention;
+    if (!editorRef.current || !targetMention) return;
+    if (!mentionOverride && fileMention && fileMentionResultState.query !== fileMention.query) return;
+    if (fileMentionResultState.query !== targetMention.query) return;
 
-    const currentMention = parseActiveFileMention(
-      textarea.value,
-      textarea.selectionStart,
-      textarea.selectionEnd,
-    );
-    if (!currentMention || currentMention.start !== fileMention.start) {
-      updateFileMentionFromTextarea(textarea);
+    const activeText = editorRef.current.getActiveText();
+    const currentMention = activeText
+      ? parseActiveFileMention(activeText.text, activeText.start, activeText.end)
+      : null;
+    if (!currentMention || currentMention.start !== targetMention.start) {
+      updateFileMentionFromEditor();
       return;
     }
 
-    const replacement = replaceFileMentionToken(textarea.value, currentMention);
     setFileMention(null);
-    onSetInputValue(replacement.value);
-    onAddPathAttachment({
+    editorRef.current.replaceActiveText(currentMention.start, currentMention.end, {
+      id: crypto.randomUUID(),
+      type: "path",
       name: item.name,
       path: item.path,
       kind: item.isDirectory ? "folder" : "file",
     });
     requestAnimationFrame(() => {
-      textarea.focus();
-      textarea.setSelectionRange(replacement.caret, replacement.caret);
-      onResizeTextarea(textarea);
+      editorRef.current?.focus();
     });
-  }, [fileMention, fileMentionResultState.query, onAddPathAttachment, onResizeTextarea, onSetInputValue, textareaRef, updateFileMentionFromTextarea]);
+  }, [editorRef, fileMention, fileMentionResultState.query, updateFileMentionFromEditor]);
 
-  const handleTextareaKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleEditorKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || composingRef.current) {
       return;
     }
 
-    if (fileMention) {
+    if (event.key === "Enter") {
+      event.stopPropagation();
+    }
+
+    const activeText = editorRef.current?.getActiveText();
+    const currentMention = activeText
+      ? parseActiveFileMention(activeText.text, activeText.start, activeText.end)
+      : null;
+    const activeMention = activeText ? currentMention : fileMention;
+
+    if (activeMention) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         event.stopPropagation();
@@ -380,7 +411,9 @@ export const ChatComposer = memo(function ChatComposer({
         }
         event.preventDefault();
         event.stopPropagation();
-        if (selected) handleSelectFileMention(selected);
+        if (selected && fileMentionResultState.query === activeMention.query) {
+          handleSelectFileMention(selected, activeMention);
+        }
         return;
       }
 
@@ -445,7 +478,7 @@ export const ChatComposer = memo(function ChatComposer({
     setActionPickerOpen(false);
     setUploadMenuOpen(false);
     setActionSearch("");
-    requestAnimationFrame(() => textareaRef.current?.focus());
+    requestAnimationFrame(() => editorRef.current?.focus());
   };
 
   const normalizedSearch = actionSearch.trim().toLowerCase();
@@ -458,7 +491,7 @@ export const ChatComposer = memo(function ChatComposer({
 
   return (
     <>
-      {(selectedAction || sessionReferences.length > 0 || pendingFiles.length > 0 || pendingImages.length > 0 || pendingPathAttachments.length > 0) && (
+      {selectedAction && (
         <div className="chat-preview-bar">
           {selectedAction && (
             <div className="chat-preview-chip chat-preview-chip-action">
@@ -478,78 +511,6 @@ export const ChatComposer = memo(function ChatComposer({
               </button>
             </div>
           )}
-          {sessionReferences.map((reference) => (
-            <div key={reference.sourceSessionId} className="chat-preview-chip chat-preview-chip-reference">
-              <Link2 size={12} strokeWidth={2} className="chat-preview-icon" />
-              <span className="chat-preview-label"><AttachmentPreviewText content={reference.sourceTitle} /> {uiText.chatComposer.session}</span>
-              <button
-                type="button"
-                className="chat-preview-remove"
-                onClick={() => onRemoveSessionReference(reference.sourceSessionId)}
-                disabled={interactionDisabled}
-                title={uiText.chatComposer.remove}
-                aria-label={uiText.chatComposer.removeReferenceSession}
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
-          {pendingFiles.map((file) => (
-            <div key={file.id} className="chat-preview-chip">
-              <FileText size={12} strokeWidth={2} className="chat-preview-icon" />
-              <span className="chat-preview-label">{file.fileName}:{file.startLine}-{file.endLine}</span>
-              <button
-                type="button"
-                className="chat-preview-remove"
-                onClick={() => onRemovePendingFile(file.id)}
-                disabled={interactionDisabled}
-                title={uiText.chatComposer.remove}
-                aria-label={uiText.chatComposer.removeFileSnippet}
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
-          {pendingPathAttachments.map((attachment) => (
-            <div key={attachment.id} className="chat-preview-chip" title={attachment.path}>
-              {attachment.kind === "folder" ? (
-                <Folder size={12} strokeWidth={2} className="chat-preview-icon" />
-              ) : (
-                <FileText size={12} strokeWidth={2} className="chat-preview-icon" />
-              )}
-              <span className="chat-preview-label">{attachment.name}</span>
-              <button
-                type="button"
-                className="chat-preview-remove"
-                onClick={() => onRemovePathAttachment(attachment.id)}
-                disabled={interactionDisabled}
-                title={uiText.chatComposer.remove}
-                aria-label={getRemovePathAttachmentLabel(attachment.kind)}
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
-          {pendingImages.map((image) => (
-            <div key={image.id} className="chat-preview-chip">
-              {image.src.startsWith("data:image/") || image.file.type.startsWith("image/") ? (
-                <img src={image.src} alt={image.name} className="chat-preview-thumb" onClick={() => onOpenImage(image.src)} />
-              ) : (
-                <ImageIcon size={12} strokeWidth={2} className="chat-preview-icon" />
-              )}
-              <span className="chat-preview-label">{image.name}</span>
-              <button
-                type="button"
-                className="chat-preview-remove"
-                onClick={() => onRemovePendingImage(image.id)}
-                disabled={interactionDisabled}
-                title={uiText.chatComposer.remove}
-                aria-label={uiText.chatComposer.removeImage}
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
         </div>
       )}
 
@@ -584,6 +545,24 @@ export const ChatComposer = memo(function ChatComposer({
           onChange={handleFileInputChange}
           disabled={interactionDisabled}
         />
+        {pendingImages.length > 0 && (
+          <div className="chat-input-image-previews">
+            {pendingImages.map((image) => (
+              <div className="chat-input-image-preview" key={image.id}>
+                <img src={image.src} alt={image.name} onClick={() => onOpenImage(image.src)} />
+                <button
+                  type="button"
+                  onClick={() => onRemovePendingImage(image.id)}
+                  disabled={interactionDisabled}
+                  title="移除图片"
+                  aria-label="移除图片"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {fileMention && (
           <ComposerFileMentionPicker
             id={FILE_MENTION_LIST_ID}
@@ -710,45 +689,35 @@ export const ChatComposer = memo(function ChatComposer({
             )}
           </div>
         </div>
-        <textarea
-          ref={textareaRef}
-          defaultValue=""
-          onChange={(event) => {
-            onSyncInputValue(event.currentTarget.value);
-            onResizeTextarea(event.currentTarget);
-            updateFileMentionFromTextarea(event.currentTarget);
+        <InlineComposerEditor
+          ref={editorRef}
+          value={composerDocument}
+          onChange={(nextDocument) => {
+            onDocumentChange(nextDocument);
+            updateFileMentionFromEditor();
           }}
-          onKeyDown={handleTextareaKeyDown}
+          onKeyDown={handleEditorKeyDown}
           onKeyUp={(event) => {
-            if (event.key !== "Escape") updateFileMentionFromTextarea(event.currentTarget);
+            if (event.key !== "Escape") updateFileMentionFromEditor();
           }}
-          onClick={(event) => updateFileMentionFromTextarea(event.currentTarget)}
+          onClick={updateFileMentionFromEditor}
           onCompositionStart={() => {
             composingRef.current = true;
             setFileMention(null);
           }}
-          onCompositionEnd={(event) => {
+          onCompositionEnd={() => {
             composingRef.current = false;
-            const textarea = event.currentTarget;
-            requestAnimationFrame(() => updateFileMentionFromTextarea(textarea));
+            requestAnimationFrame(updateFileMentionFromEditor);
           }}
           onBlur={(event) => {
             const nextTarget = event.relatedTarget as Node | null;
             if (!nextTarget || !inputContainerRef.current?.contains(nextTarget)) setFileMention(null);
           }}
           onPaste={onPaste}
+          onOpenImage={onOpenImage}
           placeholder={placeholder}
-          rows={1}
           className="chat-textarea"
           disabled={inputDisabled}
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={!!fileMention}
-          aria-controls={fileMention ? FILE_MENTION_LIST_ID : undefined}
-          aria-activedescendant={fileMentionResults[fileMentionSelectedIndex]
-            ? `${FILE_MENTION_LIST_ID}-option-${fileMentionSelectedIndex}`
-            : undefined}
-          aria-haspopup="listbox"
         />
         <button
           type="button"
@@ -756,8 +725,9 @@ export const ChatComposer = memo(function ChatComposer({
           onPointerCancel={() => { primaryActionIntentRef.current = null; }}
           onPointerLeave={(event) => { if (event.buttons !== 0) primaryActionIntentRef.current = null; }}
           onClick={handlePrimaryAction}
-          disabled={showAbortButton ? false : sendDisabled}
-          className={`chat-send-btn ${showAbortButton ? "abort" : queueSend ? "queue" : ""}`}
+          disabled={showAbortButton ? false : sendDisabled && !(compactionInProgress && hasPendingContent)}
+          aria-disabled={!showAbortButton && sendDisabled}
+          className={`chat-send-btn ${showAbortButton ? "abort" : queueSend ? "queue" : ""} ${compactionInProgress && hasPendingContent ? "blocked" : ""}`}
           title={showAbortButton ? uiText.chatComposer.stop : sendTitle}
         >
           {showAbortButton

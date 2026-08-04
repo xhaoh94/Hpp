@@ -14,6 +14,8 @@ export const THINKING_LEVELS = [
   { id: "medium", label: "中" },
   { id: "high", label: "高" },
   { id: "xhigh", label: "极高" },
+  { id: "max", label: "最高" },
+  { id: "ultra", label: "超强" },
 ] as const;
 
 export const isSameModel = (
@@ -55,12 +57,11 @@ export function includeCurrentModel<T extends SharedModel>(models: T[], current?
 }
 
 export const getThinkingLevelLabel = (levelId: string) =>
-  THINKING_LEVELS.find((level) => level.id === levelId)?.label || levelId;
+  THINKING_LEVELS.find((level) => level.id === normalizeThinkingLevelId(levelId))?.label || levelId;
 
 export function normalizeThinkingLevelId(value: string) {
   const normalized = value.trim().toLowerCase();
   if (normalized === "none") return "off";
-  if (normalized === "max") return "xhigh";
   return normalized;
 }
 
@@ -91,8 +92,10 @@ export function normalizeModelThinkingLevel(
   fallback = "medium",
 ) {
   const supported = getModelThinkingLevels(model);
-  if (supported.length === 0) return fallback;
-  if (supported.some((candidate) => candidate.id === level)) return level;
-  if (supported.some((candidate) => candidate.id === fallback)) return fallback;
-  return supported[0]?.id || fallback;
+  const normalizedLevel = normalizeThinkingLevelId(level);
+  const normalizedFallback = normalizeThinkingLevelId(fallback);
+  if (supported.length === 0) return normalizedFallback;
+  if (supported.some((candidate) => candidate.id === normalizedLevel)) return normalizedLevel;
+  if (supported.some((candidate) => candidate.id === normalizedFallback)) return normalizedFallback;
+  return supported[0]?.id || normalizedFallback;
 }

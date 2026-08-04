@@ -50,16 +50,17 @@ function BrailleSpinner() {
 
 interface Props {
   project: Project;
+  initialSessionsCollapsed?: boolean;
 }
 
-export function ProjectCard({ project }: Props) {
+export function ProjectCard({ project, initialSessionsCollapsed = false }: Props) {
   const { removeProject, removeSession, activeProjectId, activeSessionId, agentStatuses } = useProjectStore();
   const {
     sessionMessages,
     deleteSessionsMessages,
   } = useChatStore();
   const [showHistory, setShowHistory] = useState(false);
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(initialSessionsCollapsed);
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
@@ -209,8 +210,21 @@ export function ProjectCard({ project }: Props) {
 
   const handleDeleteProject = () => {
     const sessionIds = project.sessions.map((session) => session.id);
-    void Promise.all(sessionIds.map((sessionId) => SessionCommandCoordinator.closeSession(sessionId)))
-      .finally(() => {
+    void Promise.allSettled(sessionIds.map((sessionId) => SessionCommandCoordinator.closeSession(sessionId)))
+      .then((results) => {
+        const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+        if (failures.length > 0) {
+          alert(
+            `项目未删除，${failures.length} 个会话关闭失败：\n\n${failures.map(getErrorMessage).join("\n")}`,
+          );
+          return;
+        }
+
+        const warnings = results.flatMap((result) => (
+          result.status === "fulfilled" && result.value.warning ? [result.value.warning] : []
+        ));
+        if (warnings.length > 0) console.warn("[agent] project sessions closed with cleanup warnings:", warnings);
+
         deleteSessionsMessages(sessionIds);
         removeProject(project.id);
         void purgeDeletedSessionData(sessionIds, [project.id]).catch((error) => {

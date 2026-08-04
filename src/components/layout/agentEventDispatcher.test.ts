@@ -137,6 +137,7 @@ describe("dispatchAgentEvent subagent lifecycle", () => {
     const controller = {
       isOpenProjectSession: () => true,
       getRuntime: () => ({ manualAbortRequested: false }),
+      cancelAgentEndGrace: vi.fn(),
       completeIdleNotice: vi.fn(),
       refreshStreamWatchdog: vi.fn(),
       ensureAssistantContinuation: vi.fn(),

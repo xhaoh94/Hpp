@@ -22,4 +22,10 @@ describe("shared diff summary", () => {
     }] });
     expect(result).toEqual([{ file: "src/a.ts", patch: "", additions: 2, deletions: 0, status: "modified" }]);
   });
+
+  it("does not render empty file-change cards", () => {
+    expect(buildDiffSummary([
+      { file: "src/unchanged.ts", additions: 0, deletions: 0, status: "modified" },
+    ]).files).toEqual([]);
+  });
 });

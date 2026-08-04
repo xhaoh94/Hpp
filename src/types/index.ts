@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentPendingUIEventSnapshot,
   AgentImagePayload,
   AgentPermissionMode,
   AgentSendOptions,
@@ -48,6 +49,7 @@ export type {
 
 export type {
   AgentEvent,
+  AgentPendingUIEventSnapshot,
   AgentCapabilities,
   AgentBackendModelVisibility,
   AgentConfigurationSupport,
@@ -252,7 +254,14 @@ export interface ElectronAPI {
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
-  agentGetSessionState: (sessionId: string) => Promise<{ success: boolean; idle: boolean; error?: string }>;
+  agentGetSessionState: (sessionId: string) => Promise<{
+    success: boolean;
+    idle: boolean;
+    error?: string;
+    /** The backend exists, but its live idle query failed and `idle` is cached. */
+    stale?: boolean;
+  }>;
+  agentGetPendingUIRequests: (sessionId: string) => Promise<AgentPendingUIEventSnapshot>;
   agentSendMessage: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
@@ -271,7 +280,11 @@ export interface ElectronAPI {
   agentListActions: (sessionId?: string, options?: AgentActionListOptions) => Promise<AgentActionCatalogEntry[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;
   agentSetThinkingLevel: (level: string, sessionId?: string) => Promise<{ success: boolean }>;
-  agentSendUIResponse: (response: AgentUIResponse) => Promise<{ success: boolean }>;
+  agentSendUIResponse: (response: AgentUIResponse) => Promise<{
+    success: boolean;
+    error?: string;
+    pendingUIRevision?: number;
+  }>;
 
   // Agent events
   onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;

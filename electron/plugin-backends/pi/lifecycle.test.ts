@@ -19,13 +19,22 @@ class FakePiProcess extends EventEmitter {
   kill = vi.fn(() => true);
 }
 
-const respondToInit = (child: FakePiProcess, sessionFilePath = "C:\\sessions\\pi.jsonl") => {
+const respondToInit = (
+  child: FakePiProcess,
+  sessionFilePath = "C:\\sessions\\pi.jsonl",
+  onCommand?: (command: Record<string, unknown>) => void,
+) => {
   child.stdin.on("data", (chunk) => {
     for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
       const command = JSON.parse(line) as Record<string, unknown>;
-      if (command.type !== "init") continue;
-      child.stdout.write(`${JSON.stringify({ type: "history_snapshot", messages: [] })}\n`);
-      child.stdout.write(`${JSON.stringify({ type: "ready", id: command.id, sessionFilePath })}\n`);
+      onCommand?.(command);
+      if (command.type === "init") {
+        child.stdout.write(`${JSON.stringify({ type: "history_snapshot", messages: [] })}\n`);
+        child.stdout.write(`${JSON.stringify({ type: "ready", id: command.id, sessionFilePath })}\n`);
+      }
+      if (command.type === "guidance") {
+        child.stdout.write(`${JSON.stringify({ type: "guidance_done", id: command.id })}\n`);
+      }
     }
   });
 };
@@ -33,6 +42,165 @@ const respondToInit = (child: FakePiProcess, sessionFilePath = "C:\\sessions\\pi
 describe("Pi lifecycle", () => {
   beforeEach(() => {
     spawnMock.mockReset();
+  });
+
+  it("does not report a control RPC as an active conversation turn", () => {
+    const agent = new PiSDKAgent("hpp-session");
+    const internals = agent as unknown as {
+      pendingResponses: Map<string, (data: Record<string, unknown>) => void>;
+    };
+    internals.pendingResponses.set("models-request", vi.fn());
+
+    expect(agent.isIdle()).toBe(true);
+  });
+
+  it("forwards the host policy during init, prompt, and guidance", async () => {
+    const child = new FakePiProcess();
+    const commands: Record<string, unknown>[] = [];
+    respondToInit(child, "C:\\sessions\\pi.jsonl", (command) => commands.push(command));
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+
+    await agent.init("C:\\project", undefined, { hostSystemPrompt: "HPP_HOST_GUIDANCE" });
+    await agent.sendMessage("work", undefined, { hostSystemPrompt: "HPP_HOST_GUIDANCE" });
+    await agent.sendGuidance("steer this turn", undefined, {
+      hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    });
+
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "init",
+      hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    }));
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "prompt",
+      message: "work",
+      hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    }));
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "guidance",
+      message: "steer this turn",
+      hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    }));
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
+  it("reports a standalone Pi compaction as busy until its terminal phase", () => {
+    const agent = new PiSDKAgent("hpp-session");
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+
+    internals.handleWorkerMessage({
+      type: "context_compaction",
+      id: "compact-background",
+      phase: "started",
+    });
+    expect(agent.isIdle()).toBe(false);
+
+    internals.handleWorkerMessage({
+      type: "context_compaction",
+      id: "compact-background",
+      phase: "completed",
+    });
+    expect(agent.isIdle()).toBe(true);
+  });
+
+  it("stays busy when prompt_done arrives before background compaction completes", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+    await agent.init("C:\\project");
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-background-compact" });
+
+    child.stdout.write(`${JSON.stringify({
+      type: "context_compaction",
+      id: "compact-background",
+      phase: "started",
+    })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "prompt_done", id: "client-background-compact" })}\n`);
+
+    expect(agent.isIdle()).toBe(false);
+    await expect(agent.sendMessage("too early")).rejects.toThrow("SESSION_BUSY");
+
+    child.stdout.write(`${JSON.stringify({
+      type: "context_compaction",
+      id: "compact-background",
+      phase: "completed",
+    })}\n`);
+    expect(agent.isIdle()).toBe(true);
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
+  it("rejects a UI response when the worker reports an error", async () => {
+    const agent = new PiSDKAgent("hpp-session");
+    const write = vi.fn();
+    const internals = agent as unknown as {
+      process: { stdin: { writable: boolean; write: (value: string) => void } };
+      pendingUIRequestIds: Set<string>;
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.process = { stdin: { writable: true, write } };
+    internals.pendingUIRequestIds.add("question-1");
+
+    const sending = agent.sendUIResponse({ requestId: "question-1", text: "answer" });
+    const rejection = expect(sending).rejects.toThrow("worker response failed");
+    const command = JSON.parse(String(write.mock.calls[0][0])) as {
+      id: string;
+      response: { id?: string };
+    };
+    expect(command.response.id).toBe("question-1");
+
+    internals.handleWorkerMessage({
+      type: "error",
+      id: command.id,
+      error: "worker response failed",
+    });
+
+    await rejection;
+    expect(internals.pendingUIRequestIds.has("question-1")).toBe(true);
+  });
+
+  it("returns to idle when a prompt cannot be written", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      process: { stdin: { writable: boolean; write: ReturnType<typeof vi.fn> } };
+    };
+    internals.process = { stdin: { writable: false, write: vi.fn() } };
+
+    await expect(agent.sendMessage("hello", undefined, { clientMessageId: "client-write-failure" }))
+      .rejects.toThrow("not writable");
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "message_start",
+      "stream_start",
+      "process_event",
+      "stream_end",
+      "agent_end",
+    ]);
+  });
+
+  it("emits a terminal lifecycle before disposing an active turn", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      process: { stdin: { writable: boolean; write: ReturnType<typeof vi.fn> } } | null;
+    };
+    internals.process = { stdin: { writable: true, write: vi.fn() } };
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-dispose" });
+    internals.process = null;
+
+    await agent.dispose();
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "message_start",
+      "stream_start",
+      "stream_end",
+      "agent_end",
+    ]);
   });
 
   it("keeps one Hpp turn open across Pi automatic retries", async () => {
@@ -68,6 +236,208 @@ describe("Pi lifecycle", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "stream_end", content: "recovered" }));
     expect(events.some((event) => event.type === "process_event" && event.state === "error")).toBe(false);
     agent.dispose();
+  });
+
+  it("falls back to idle when agent_end is not followed by prompt_done", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakePiProcess();
+      respondToInit(child);
+      spawnMock.mockReturnValue(child);
+      const events: AgentEvent[] = [];
+      const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+      await agent.init("C:\\project");
+      events.length = 0;
+      await agent.sendMessage("hello", undefined, { clientMessageId: "client-missing-settle" });
+
+      child.stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      expect(agent.isIdle()).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(4000);
+
+      expect(agent.isIdle()).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ type: "stream_end", force: true }));
+      expect(events).toContainEqual(expect.objectContaining({ type: "agent_end" }));
+      (agent as unknown as { process: unknown }).process = null;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not settle from final text before Pi reports agent_end", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakePiProcess();
+      respondToInit(child);
+      spawnMock.mockReturnValue(child);
+      const events: AgentEvent[] = [];
+      const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+      await agent.init("C:\\project");
+      events.length = 0;
+      await agent.sendMessage("hello", undefined, { clientMessageId: "client-final-text" });
+
+      child.stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", text: "final answer", stopReason: "stop" },
+      })}\n`);
+      await vi.advanceTimersByTimeAsync(4000);
+
+      expect(agent.isIdle()).toBe(false);
+      expect(events.some((event) => event.type === "stream_end")).toBe(false);
+
+      child.stdout.write(`${JSON.stringify({ type: "prompt_done", id: "client-final-text" })}\n`);
+      expect(agent.isIdle()).toBe(true);
+      (agent as unknown as { process: unknown }).process = null;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["context compaction", { type: "context_compaction", id: "compact-1", phase: "started" }],
+    ["automatic retry", { type: "status", id: "retry-1", status: "retrying", title: "retrying" }],
+  ])("keeps the turn active when %s follows agent_end", async (_label, continuationEvent) => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakePiProcess();
+      respondToInit(child);
+      spawnMock.mockReturnValue(child);
+      const events: AgentEvent[] = [];
+      const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+      await agent.init("C:\\project");
+      events.length = 0;
+      await agent.sendMessage("hello", undefined, { clientMessageId: "client-continuation" });
+
+      child.stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      child.stdout.write(`${JSON.stringify(continuationEvent)}\n`);
+      await vi.advanceTimersByTimeAsync(4000);
+
+      expect(agent.isIdle()).toBe(false);
+      expect(events.some((event) => event.type === "stream_end")).toBe(false);
+
+      child.stdout.write(`${JSON.stringify({ type: "prompt_done", id: "client-continuation" })}\n`);
+      if (continuationEvent.type === "context_compaction") {
+        expect(agent.isIdle()).toBe(false);
+        child.stdout.write(`${JSON.stringify({
+          type: "context_compaction",
+          id: continuationEvent.id,
+          phase: "completed",
+        })}\n`);
+      }
+      expect(agent.isIdle()).toBe(true);
+      (agent as unknown as { process: unknown }).process = null;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores the missing-prompt fallback after compaction completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakePiProcess();
+      respondToInit(child);
+      spawnMock.mockReturnValue(child);
+      const events: AgentEvent[] = [];
+      const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+      await agent.init("C:\\project");
+      events.length = 0;
+      await agent.sendMessage("hello", undefined, { clientMessageId: "client-compaction-tail" });
+
+      child.stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      child.stdout.write(`${JSON.stringify({
+        type: "context_compaction",
+        id: "compact-tail",
+        phase: "started",
+      })}\n`);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(agent.isIdle()).toBe(false);
+
+      child.stdout.write(`${JSON.stringify({
+        type: "context_compaction",
+        id: "compact-tail",
+        phase: "completed",
+      })}\n`);
+      await vi.advanceTimersByTimeAsync(4000);
+
+      expect(agent.isIdle()).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ type: "stream_end", force: true }));
+      (agent as unknown as { process: unknown }).process = null;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores the missing-prompt fallback when compaction fails with its own event id", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakePiProcess();
+      respondToInit(child);
+      spawnMock.mockReturnValue(child);
+      const events: AgentEvent[] = [];
+      const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+      await agent.init("C:\\project");
+      events.length = 0;
+      await agent.sendMessage("hello", undefined, { clientMessageId: "client-compaction-error" });
+
+      child.stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      child.stdout.write(`${JSON.stringify({
+        type: "context_compaction",
+        id: "compact-error",
+        phase: "started",
+      })}\n`);
+      child.stdout.write(`${JSON.stringify({
+        type: "error",
+        id: "compact-error",
+        error: "context compaction failed",
+      })}\n`);
+      await vi.advanceTimersByTimeAsync(4000);
+
+      expect(agent.isIdle()).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "context_compaction",
+        id: "compact-error",
+        phase: "interrupted",
+      }));
+      expect(events.some((event) => event.type === "process_event" && event.state === "error")).toBe(false);
+      (agent as unknown as { process: unknown }).process = null;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["message update", {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "tail" },
+    }],
+    ["tool completion", {
+      type: "tool_execution_end",
+      toolName: "read",
+      toolCallId: "tool-tail",
+      result: "ok",
+    }],
+  ])("re-arms the missing-prompt fallback after a late %s", async (_label, trailingEvent) => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakePiProcess();
+      respondToInit(child);
+      spawnMock.mockReturnValue(child);
+      const events: AgentEvent[] = [];
+      const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+      await agent.init("C:\\project");
+      events.length = 0;
+      await agent.sendMessage("hello", undefined, { clientMessageId: "client-trailing-event" });
+
+      child.stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      child.stdout.write(`${JSON.stringify(trailingEvent)}\n`);
+      await vi.advanceTimersByTimeAsync(4000);
+
+      expect(agent.isIdle()).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ type: "stream_end", force: true }));
+      (agent as unknown as { process: unknown }).process = null;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not repeat narration when Pi emits multiple assistant messages around tools", async () => {
@@ -185,6 +555,24 @@ describe("Pi lifecycle", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "process_event", state: "error" }));
     await expect(agent.sendMessage("again")).rejects.toThrow("not running");
     expect(agent.isIdle()).toBe(true);
+  });
+
+  it("finishes an active turn when the Pi input pipe fails asynchronously", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    events.length = 0;
+    await agent.sendMessage("hello", undefined, { clientMessageId: "client-pipe-error" });
+
+    child.stdin.emit("error", new Error("broken pipe"));
+
+    expect(agent.isIdle()).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ type: "process_event", state: "error" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "stream_end", force: true }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent_end" }));
   });
 
   it("emits aborted and returns to idle after a manual abort", async () => {

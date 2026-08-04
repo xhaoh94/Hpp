@@ -79,7 +79,7 @@ describe("official agent plugins", () => {
             modelDefaults: {
               reasoning: true,
               imageInput: true,
-              supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"],
+              supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
             },
           },
         },
@@ -89,7 +89,9 @@ describe("official agent plugins", () => {
     expect(plugins[0].capabilities.configuration).toMatchObject({
       defaultAuthMode: "x-api-key",
       authModes: [{ id: "bearer" }, { id: "x-api-key" }],
-      modelDefaults: { supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"] },
+      modelDefaults: {
+        supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
+      },
     });
   });
 

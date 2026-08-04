@@ -4,6 +4,10 @@ import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { app } from "electron";
 import { getBundledWorkerPath, getWorkerInvocation } from "../utils/worker-process";
+import {
+  clearPendingUIEvents,
+  observePendingUIEvent,
+} from "./pending-ui-events";
 
 interface RpcRequest {
   kind: "request";
@@ -41,6 +45,7 @@ export class AgentPluginProcess {
   private child: ChildProcessWithoutNullStreams | null = null;
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private eventHandlers = new Map<string, (event: unknown) => void>();
+  private backendSessionIds = new Map<string, string>();
   private configHandlers = new Map<string, () => Promise<unknown>>();
   private nextId = 0;
   private nextBackendId = 0;
@@ -74,7 +79,15 @@ export class AgentPluginProcess {
   ): Promise<{ backendId: string; capabilities: { sendGuidance: boolean; forkSession: boolean; listActions: boolean } }> {
     await this.ensureLoaded();
     const backendId = `plugin-backend-${++this.nextBackendId}`;
-    this.eventHandlers.set(backendId, onEvent);
+    this.backendSessionIds.set(backendId, sessionId);
+    this.eventHandlers.set(backendId, (event) => {
+      const pendingUIRevision = observePendingUIEvent(sessionId, event, backendId);
+      onEvent(
+        typeof event === "object" && event !== null && !Array.isArray(event)
+          ? { ...event, pendingUIRevision }
+          : event,
+      );
+    });
     if (getConfigState) this.configHandlers.set(backendId, getConfigState);
     try {
       const capabilities = await this.request("createBackend", { backendId, sessionId }) as {
@@ -86,6 +99,8 @@ export class AgentPluginProcess {
     } catch (error) {
       this.eventHandlers.delete(backendId);
       this.configHandlers.delete(backendId);
+      this.backendSessionIds.delete(backendId);
+      clearPendingUIEvents(sessionId, backendId);
       throw error;
     }
   }
@@ -95,8 +110,11 @@ export class AgentPluginProcess {
   }
 
   async disposeBackend(backendId: string): Promise<void> {
+    const sessionId = this.backendSessionIds.get(backendId);
     this.eventHandlers.delete(backendId);
     this.configHandlers.delete(backendId);
+    this.backendSessionIds.delete(backendId);
+    if (sessionId) clearPendingUIEvents(sessionId, backendId);
     if (!this.child?.stdin.writable) return;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
@@ -121,6 +139,10 @@ export class AgentPluginProcess {
     this.loadPromise = null;
     this.eventHandlers.clear();
     this.configHandlers.clear();
+    for (const [backendId, sessionId] of this.backendSessionIds) {
+      clearPendingUIEvents(sessionId, backendId);
+    }
+    this.backendSessionIds.clear();
     if (!child) {
       this.rejectPending(new Error("Plugin host stopped."));
       return;
@@ -186,10 +208,25 @@ export class AgentPluginProcess {
       }
       this.eventHandlers.clear();
       this.configHandlers.clear();
+      for (const [backendId, sessionId] of this.backendSessionIds) {
+        clearPendingUIEvents(sessionId, backendId);
+      }
+      this.backendSessionIds.clear();
     });
     child.on("error", (error) => {
-      if (!this.stopping) this.terminalError = error;
-      this.rejectPending(error);
+      this.handleTransportError(child, error, "plugin-host-error");
+    });
+    // EPIPE and similar failures are emitted by the writable stream and are
+    // not guaranteed to reach the ChildProcess `error` or `exit` handlers.
+    child.stdin.on("error", (error) => {
+      this.handleTransportError(child, error, "plugin-host-stdin-error");
+    });
+    child.stdout.on("end", () => {
+      this.handleTransportError(
+        child,
+        new Error("Plugin host output pipe closed before the process exited."),
+        "plugin-host-stdout-end",
+      );
     });
     return this.request("load", { entryPath: this.entryPath, meta: this.meta }) as Promise<PluginHostCapabilities>;
   }
@@ -200,7 +237,14 @@ export class AgentPluginProcess {
     const id = `main-${++this.nextId}`;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      child.stdin.write(`${JSON.stringify({ kind: "request", id, method, params })}\n`);
+      try {
+        child.stdin.write(`${JSON.stringify({ kind: "request", id, method, params })}\n`);
+      } catch (error) {
+        const transportError = error instanceof Error ? error : new Error(String(error));
+        this.pending.delete(id);
+        this.handleTransportError(child, transportError, "plugin-host-stdin-error");
+        reject(transportError);
+      }
     });
   }
 
@@ -243,7 +287,41 @@ export class AgentPluginProcess {
   }
 
   private sendResponse(id: string, result?: unknown, error?: string): void {
-    this.child?.stdin.write(`${JSON.stringify({ kind: "response", id, result, error })}\n`);
+    const child = this.child;
+    if (!child?.stdin.writable) return;
+    try {
+      child.stdin.write(`${JSON.stringify({ kind: "response", id, result, error })}\n`);
+    } catch (writeError) {
+      this.handleTransportError(
+        child,
+        writeError instanceof Error ? writeError : new Error(String(writeError)),
+        "plugin-host-stdin-error",
+      );
+    }
+  }
+
+  private handleTransportError(
+    child: ChildProcessWithoutNullStreams,
+    error: Error,
+    reason: "plugin-host-error" | "plugin-host-stdin-error" | "plugin-host-stdout-end",
+  ): void {
+    if (this.child !== child) return;
+    if (!this.stopping) {
+      this.terminalError = error;
+      // A process/pipe error is not guaranteed to be followed by an `exit`
+      // event. Terminalize every live backend here so cached busy state and
+      // renderer process blocks cannot remain open.
+      for (const handler of this.eventHandlers.values()) {
+        handler({
+          type: "agent_disconnected",
+          reason,
+          detail: error.message,
+        });
+      }
+      this.eventHandlers.clear();
+      this.configHandlers.clear();
+    }
+    this.rejectPending(error);
   }
 
   private rejectPending(error: Error): void {

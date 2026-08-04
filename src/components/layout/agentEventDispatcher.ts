@@ -7,20 +7,30 @@ import {
   type ChatMessage,
 } from "@/stores/chat-store";
 import type { AgentEvent } from "@/types";
+import { isAgentTurnContinuationEvidence } from "@shared/agent-event-lifecycle";
 import {
+  activateSessionRuntimeTurn,
+  compareAgentTurnRevisions,
   createProcessEntryId,
   getToolProcessFiles,
   isPlanLikeProcessEvent,
   normalizePlanStepsFromEvent,
+  normalizeAgentTurnRevision,
   normalizeProcessEntryState,
   normalizeProcessEntryType,
   normalizeToolKind,
   stringifyProcessValue,
   truncateProcessDetail,
+  type SessionRuntime,
 } from "./agentEventUtils";
 import {
+  clearResolvedPendingQuestion,
+  getQuestionEventId,
   handleDefaultQuestionEvent,
   handleDirectQuestionEvent,
+  isPendingQuestionEvent,
+  normalizeQuestionEventState,
+  resolveTerminalQuestionEvent,
 } from "./agentQuestionHandlers";
 import {
   handleAgentDisconnectedEvent,
@@ -40,6 +50,100 @@ import {
 } from "./agentToolHandlers";
 import type { AgentEventRuntimeController } from "./agentEventTypes";
 import { getSubagentProcessEntry } from "./subagentEvents";
+
+const TURN_START_EVENT_TYPES = new Set(["turn_lifecycle", "message_start", "stream_start", "agent_start"]);
+const TURN_TERMINAL_EVENT_TYPES = new Set([
+  "stream_end",
+  "agent_end",
+  "agent_disconnected",
+  "aborted",
+  "turn_failed",
+  "backend_idle",
+]);
+const TURN_ACTIVITY_EVENT_TYPES = new Set([
+  "stream_delta",
+  "stream_snapshot",
+  "commentary_delta",
+  "commentary_end",
+  "thinking_delta",
+  "thinking_end",
+  "subagent_event",
+  "user_ask_question",
+  "ask_user_question",
+  "ask_user",
+  "tool_start",
+  "tool_end",
+  "diff_update",
+  "plan_update",
+  "process_event",
+]);
+
+const getLatestUserMessageId = (sessionId: string) => {
+  const chatState = useChatStore.getState();
+  const messages = chatState.sessionMessages[sessionId] || (
+    chatState.activeSessionId === sessionId ? chatState.messages : []
+  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") return messages[index].id;
+  }
+  return null;
+};
+
+const getEventTurnRevision = (event: AgentEvent) => normalizeAgentTurnRevision(
+  event.lifecycleRevision ?? event.turnRevision,
+);
+
+const isQuestionLikeEvent = (event: AgentEvent) =>
+  normalizeToolKind(event.mode || event.entryType || event.kind || event.toolKind) === "question";
+
+const isTurnScopedEvent = (event: AgentEvent) =>
+  TURN_START_EVENT_TYPES.has(event.type) ||
+  TURN_TERMINAL_EVENT_TYPES.has(event.type) ||
+  TURN_ACTIVITY_EVENT_TYPES.has(event.type) ||
+  isQuestionLikeEvent(event);
+
+export function shouldAcceptTurnScopedAgentEvent(
+  event: AgentEvent,
+  sessionId: string,
+  runtime: SessionRuntime,
+) {
+  const revision = getEventTurnRevision(event);
+  if (TURN_START_EVENT_TYPES.has(event.type)) {
+    return activateSessionRuntimeTurn(runtime, {
+      revision,
+      userMessageId: typeof event.clientUserMessageId === "string"
+        ? event.clientUserMessageId
+        : getLatestUserMessageId(sessionId),
+    });
+  }
+
+  const isTerminal = TURN_TERMINAL_EVENT_TYPES.has(event.type);
+  const isActivity = TURN_ACTIVITY_EVENT_TYPES.has(event.type) || isQuestionLikeEvent(event);
+  if (!isTerminal && !isActivity) return true;
+
+  // Once a turn has reached a terminal state, unscoped events are ambiguous
+  // and must not reopen it. A host-stamped new revision is authoritative and
+  // still lets adapters that omit stream_start recover on their next turn.
+  if (runtime.turnEventState === "settled" && !revision) return false;
+  return activateSessionRuntimeTurn(runtime, {
+    revision,
+    userMessageId: typeof event.clientUserMessageId === "string" ? event.clientUserMessageId : null,
+  });
+}
+
+export function shouldAcceptContextCompactionEvent(event: AgentEvent, runtime: SessionRuntime) {
+  const eventId = typeof event.id === "string" && event.id.trim() ? event.id.trim() : null;
+  const phase = event.phase === "started" || event.phase === "interrupted"
+    ? event.phase
+    : "completed";
+  if (phase === "started") {
+    if (eventId && (runtime.settledCompactionEventIds || []).includes(eventId)) return false;
+    return runtime.turnEventState !== "settled" || runtime.turnTerminalReason === "completed";
+  }
+  if (runtime.activeCompactionId) return true;
+  if (eventId && (runtime.settledCompactionEventIds || []).includes(eventId)) return false;
+  return runtime.turnEventState !== "settled" || runtime.turnTerminalReason === "completed";
+}
 
 const parseHistoryCommentary = (value: unknown, fallbackTimestamp: number): AgentCommentary[] => {
   if (!Array.isArray(value)) return [];
@@ -209,10 +313,11 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     appendContextCompactionDivider,
     appendOrRefreshAlreadyRunningNotice,
     appendProcessEntry,
+    cancelAgentEndGrace,
     completeIdleNotice,
     discardRuntime,
     ensureAssistantContinuation,
-    failAssistantStream,
+    finishAbortedTurn,
     finishAssistantProcessText,
     finishManualAbort,
     finishThinkingEntry,
@@ -221,6 +326,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     isOpenProjectSession,
     recordProcessFiles,
     refreshStreamWatchdog,
+    scheduleAgentEndGrace,
     setPendingUIResponse,
     updateInferredPlanSteps,
     updateProcessPlanSteps,
@@ -231,23 +337,63 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     : useProjectStore.getState().activeSessionId;
   if (!currentSessionId) return;
   if (!isOpenProjectSession(currentSessionId)) {
-    discardRuntime(currentSessionId);
+    discardRuntime(currentSessionId, event);
     return;
   }
   const runtime = getRuntime(currentSessionId);
-  if (runtime.manualAbortRequested && event.type !== "aborted" && event.type !== "agent_disconnected") {
+  const eventRevision = getEventTurnRevision(event);
+  const eventUserMessageId = typeof event.clientUserMessageId === "string" && event.clientUserMessageId.trim()
+    ? event.clientUserMessageId.trim()
+    : null;
+  if (
+    event.type !== "context_compaction" &&
+    isTurnScopedEvent(event) &&
+    runtime.turnEventState === "active" &&
+    eventRevision &&
+    runtime.activeTurnRevision &&
+    eventRevision !== runtime.activeTurnRevision &&
+    compareAgentTurnRevisions(eventRevision, runtime.activeTurnRevision) !== -1 &&
+    eventUserMessageId &&
+    eventUserMessageId === getLatestUserMessageId(currentSessionId) &&
+    runtime.activeTurnUserMessageId &&
+    eventUserMessageId !== runtime.activeTurnUserMessageId
+  ) {
+    // A new host-stamped send is authoritative. If store reconciliation has
+    // already closed a stale renderer turn (for example a send initiated by
+    // the mobile client), close its in-memory runtime before accepting the new
+    // revision instead of treating the new start as an "already running" retry.
+    finishAbortedTurn(currentSessionId);
+  }
+  if (event.type === "context_compaction") {
+    if (!shouldAcceptContextCompactionEvent(event, runtime)) return;
+  } else if (!shouldAcceptTurnScopedAgentEvent(event, currentSessionId, runtime)) {
     return;
   }
   if (
+    runtime.manualAbortRequested &&
+    event.type !== "aborted" &&
+    event.type !== "agent_disconnected" &&
+    event.type !== "agent_end"
+  ) {
+    return;
+  }
+  const turnContinuationEvidence = isAgentTurnContinuationEvidence(event);
+  const authoritativeTerminal = TURN_TERMINAL_EVENT_TYPES.has(event.type)
+    && event.type !== "agent_end";
+  const compactionStarted = event.type === "context_compaction" && event.phase === "started";
+  if (turnContinuationEvidence || authoritativeTerminal || compactionStarted) {
+    // Only real turn activity can invalidate an agent_end reconciliation.
+    // Model/config/metadata notifications may arrive concurrently but do not
+    // mean the Agent resumed; cancelling here would postpone settlement until
+    // the 45-second watchdog.
+    cancelAgentEndGrace(currentSessionId);
+  }
+  if (
+    turnContinuationEvidence &&
     event.type !== "message_start" &&
     event.type !== "stream_start" &&
     event.type !== "stream_snapshot" &&
-    event.type !== "stream_end" &&
-    event.type !== "agent_end" &&
-    event.type !== "agent_disconnected" &&
-    event.type !== "context_compaction" &&
-    event.type !== "turn_metadata" &&
-    event.type !== "history_snapshot"
+    event.type !== "stream_end"
   ) {
     completeIdleNotice(currentSessionId);
     refreshStreamWatchdog(currentSessionId);
@@ -293,8 +439,10 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       handleStreamEndEvent(event, currentSessionId, runtime, handlerContext);
       break;
     case "agent_end":
-      // Some backends can emit agent_end before the assistant stream is
-      // actually complete. stream_end is the UI completion signal.
+      // Some backends emit agent_end between automatic retries. Reconcile the
+      // backend's generic idle state after a short grace period so a real final
+      // end cannot leave the renderer process open when stream_end is missing.
+      scheduleAgentEndGrace(currentSessionId);
       break;
     case "agent_disconnected":
       if (runtime.manualAbortRequested) {
@@ -304,7 +452,13 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       handleAgentDisconnectedEvent(currentSessionId, runtime, handlerContext);
       break;
     case "aborted":
-      finishManualAbort(currentSessionId);
+      finishAbortedTurn(currentSessionId);
+      break;
+    case "turn_failed":
+      finishAbortedTurn(currentSessionId);
+      break;
+    case "backend_idle":
+      controller.finishIdleBackendTurn(currentSessionId);
       break;
     case "tool_start":
       handleToolStartEvent(event, currentSessionId, runtime, handlerContext);
@@ -316,7 +470,11 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       handleDiffUpdateEvent(event, currentSessionId, handlerContext);
       break;
     case "context_compaction":
-      appendContextCompactionDivider(currentSessionId, typeof event.id === "string" ? event.id : undefined);
+      appendContextCompactionDivider(
+        currentSessionId,
+        typeof event.id === "string" ? event.id : undefined,
+        event.phase === "started" || event.phase === "interrupted" ? event.phase : "completed",
+      );
       break;
     case "turn_metadata":
       {
@@ -344,10 +502,18 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     case "process_event":
       const eventType = normalizeProcessEntryType(event.entryType || event.kind || event.mode || event.toolName || event.name);
       const eventTitle = String(event.title || "Agent 事件");
-      const eventDetail = event.detail ? truncateProcessDetail(stringifyProcessValue(event.detail)) : undefined;
-      const eventState = normalizeProcessEntryState(event.state);
+      const rawProcessToolKind = typeof event.toolKind === "string" ? event.toolKind.trim() : "";
+      const isGuidanceEvent = rawProcessToolKind === "guidance_message" || rawProcessToolKind === "guidance";
+      const eventDetail = event.detail
+        ? (isGuidanceEvent ? stringifyProcessValue(event.detail) : truncateProcessDetail(stringifyProcessValue(event.detail)))
+        : undefined;
+      const eventState = eventType === "question"
+        ? normalizeQuestionEventState(event)
+        : normalizeProcessEntryState(event.state);
       const eventCommand = typeof event.command === "string" ? event.command : undefined;
-      const processToolKind = eventType === "tool"
+      const processToolKind = isGuidanceEvent
+        ? rawProcessToolKind
+        : eventType === "tool"
         ? (normalizeToolKind(event.toolKind) === "unknown" && eventCommand
             ? "run_command"
             : normalizeToolKind(event.toolKind))
@@ -382,17 +548,42 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       ensureAssistantContinuation(currentSessionId);
       finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
-      if (eventType === "error" || eventState === "error") {
-        failAssistantStream(currentSessionId, eventTitle, eventDetail);
-        setPendingUIResponse((current) => current?.sessionId === currentSessionId ? null : current);
+      if (eventType !== "question" && (eventType === "error" || eventState === "error")) {
+        // A process/tool error is an entry-level failure, not an authoritative
+        // turn terminal. Several agents can recover from a failed tool and
+        // continue with more thinking, tools, or a final answer. The plugin
+        // host will emit backend_idle when the backend really becomes idle;
+        // explicit stream/abort/disconnect events remain terminal as well.
+        appendProcessEntry(currentSessionId, {
+          id: typeof event.id === "string" ? event.id : undefined,
+          type: "error",
+          title: eventTitle,
+          detail: eventDetail,
+          state: "error",
+          expanded: false,
+        });
         break;
       }
       let questionEntryId: string | undefined;
-      if (eventType === "question") {
-        questionEntryId = createProcessEntryId();
+      const questionIsPending = eventType === "question" && isPendingQuestionEvent(event);
+      if (questionIsPending) {
+        const eventQuestionId = getQuestionEventId(event);
+        const pending = handlerContext.getPendingUIResponse(currentSessionId);
+        const pendingMatches = !!pending && (
+          !eventQuestionId || pending.requestId === eventQuestionId || pending.entryId === eventQuestionId
+        );
+        questionEntryId = (pendingMatches ? pending.entryId : undefined)
+          || eventQuestionId
+          || createProcessEntryId();
         setPendingUIResponse(getPendingUIFromEvent(event, currentSessionId, questionEntryId));
+      } else if (eventType === "question") {
+        const resolution = resolveTerminalQuestionEvent(event, currentSessionId, handlerContext);
+        questionEntryId = resolution.entryId;
+        if (resolution.pendingToClear) {
+          clearResolvedPendingQuestion(currentSessionId, resolution.pendingToClear, handlerContext);
+        }
       }
-      const processEntryId = questionEntryId || (typeof event.id === "string" ? event.id : undefined);
+      const processEntryId = questionEntryId || getQuestionEventId(event);
       const processFiles = Array.isArray(event.files) ? getToolProcessFiles(event) : undefined;
       const changedProcessFiles = (processFiles || []).filter((file) =>
         file.action === "edited" ||
@@ -421,6 +612,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       appendProcessEntry(currentSessionId, {
         id: processEntryId,
         type: eventType,
+        kind: isGuidanceEvent ? "user_guidance" : undefined,
         title: processedTitle,
         detail: eventType === "question" ? undefined : eventDetail,
         files: processFiles,
@@ -470,7 +662,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       }
       break;
     default:
-      handleDefaultQuestionEvent(event, currentSessionId, handlerContext);
+      if (handleDefaultQuestionEvent(event, currentSessionId, handlerContext)) break;
       break;
   }
 }

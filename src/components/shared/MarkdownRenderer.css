@@ -65,6 +65,12 @@
   color: #61afef;
 }
 
+.md-content .md-inline-code.md-path-reference { cursor: pointer; }
+.md-content .md-inline-code.md-path-reference:hover {
+  border-color: rgba(91, 156, 246, 0.55);
+  background: rgba(91, 156, 246, 0.13);
+}
+
 /* --- Code blocks --- */
 .md-content .md-code-block {
   position: relative;

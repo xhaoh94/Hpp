@@ -20,13 +20,21 @@ const DEFAULT_CODEX_MODEL = {
   reasoning: true,
   supportsImages: true,
 };
-const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const VALID_REASONING_EFFORTS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 const PLAN_MODE_INSTRUCTIONS = [
   "<plan_mode>",
-  "Plan mode is enabled for this turn.",
-  "Do not modify files, apply patches, run write commands, or otherwise change workspace state.",
-  "You may inspect context that is necessary to make the plan.",
-  "Respond with a concise implementation plan and wait for the user to explicitly confirm before implementation.",
+  "当前回合已启用计划模式。",
+  "不要修改文件、应用补丁、运行写入命令，或以其他方式改变工作区状态。",
+  "可以检查制定计划所需的上下文。",
+  "请用简体中文输出简洁的实施计划，并等待用户明确确认后再实施。",
   "</plan_mode>",
 ].join("\n");
 
@@ -70,6 +78,9 @@ let pendingRpc = new Map();
 let currentModelId = null;
 let thinkingLevel = getDefaultThinkingLevel();
 let activePlanModeEnabled = false;
+let activeHostSystemPrompt = "";
+let configuredDeveloperInstructions = "";
+let configuredDeveloperInstructionsLoaded = false;
 let activePermissionMode = "auto";
 let activePromptId = null;
 let activeTurnId = null;
@@ -326,6 +337,9 @@ const resolveCodexExecutable = () => {
 const startAppServer = async () => {
   if (appServerReady) return appServerReady;
 
+  configuredDeveloperInstructions = "";
+  configuredDeveloperInstructionsLoaded = false;
+
   appServerReady = new Promise((resolve, reject) => {
     let settled = false;
     const executablePath = resolveCodexExecutable();
@@ -380,24 +394,49 @@ const startAppServer = async () => {
       if (text) process.stderr.write(`[codex-app-server] ${text}`);
     });
 
-    child.on("error", (error) => {
+    let transportTerminated = false;
+    const handleTransportTermination = (error) => {
+      if (transportTerminated) return;
+      transportTerminated = true;
+      if (appServer === child) {
+        appServer = null;
+        appServerReady = null;
+      }
+      failPendingRpc(error);
       if (!settled) {
         settled = true;
         reject(error);
       }
-      failPendingRpc(error);
+      if (aborting) return;
+      if (promptRunning) {
+        pendingUIRequest = null;
+        abortRequested = false;
+        send({
+          type: "process_event",
+          entryType: "error",
+          title: "Codex app-server disconnected",
+          detail: error?.message || String(error),
+          state: "error",
+        });
+        finishPrompt();
+      }
+      send({ type: "agent_disconnected", detail: error?.message || String(error) });
+    };
+
+    child.stdout?.on("end", () => {
+      handleTransportTermination(new Error("Codex app-server output pipe closed before the process exited"));
+    });
+
+    child.stdin?.on("error", (error) => {
+      handleTransportTermination(new Error(`Codex app-server input pipe closed: ${error.message}`));
+    });
+
+    child.on("error", (error) => {
+      handleTransportTermination(error);
     });
 
     child.on("exit", (code, signal) => {
-      appServer = null;
-      appServerReady = null;
-      const error = new Error(`Codex app-server exited with ${signal || code}`);
-      failPendingRpc(error);
-      if (!settled) {
-        settled = true;
-        reject(error);
-      }
-      if (!aborting) send({ type: "agent_disconnected" });
+      handleTransportTermination(new Error(`Codex app-server exited with ${signal || code}`));
     });
 
     setTimeout(() => void finishInit(), 0);
@@ -752,10 +791,68 @@ const buildInput = (message, images, actionInput) => {
   return [...input, ...images];
 };
 
+const combineDeveloperInstructions = (configuredInstructions, hostSystemPrompt) => {
+  const configured = String(configuredInstructions || "").trim();
+  const host = String(hostSystemPrompt || "").trim();
+  if (!host) return "";
+  if (!configured || configured === host || configured.endsWith(`\n\n${host}`)) return configured || host;
+  return `${configured}\n\n${host}`;
+};
+
+const getHostDeveloperInstructions = () => combineDeveloperInstructions(
+  configuredDeveloperInstructions,
+  activeHostSystemPrompt,
+);
+
+// Codex's collaboration mode takes precedence over thread-level developer
+// instructions. Include the host policy in the mode payload as well, so Plan
+// mode cannot silently drop the language rule. The legacy config key remains
+// in buildThreadParams for older app-server versions, while current versions
+// consume the native camelCase field.
+const getTurnDeveloperInstructions = () => {
+  const hostInstructions = getHostDeveloperInstructions();
+  if (!activePlanModeEnabled) return hostInstructions;
+  return [PLAN_MODE_INSTRUCTIONS, hostInstructions].filter(Boolean).join("\n\n");
+};
+
+const refreshConfiguredDeveloperInstructions = async () => {
+  if (configuredDeveloperInstructionsLoaded) return;
+  configuredDeveloperInstructionsLoaded = true;
+  configuredDeveloperInstructions = "";
+  try {
+    const result = await rpcRequest("config/read", {
+      cwd: projectPath,
+      includeLayers: false,
+    }, 5000);
+    if (typeof result?.config?.developer_instructions === "string") {
+      configuredDeveloperInstructions = result.config.developer_instructions.trim();
+    }
+  } catch {
+    // Older app-server versions may not implement config/read. Host guidance
+    // must still work, even when existing developer instructions cannot be
+    // discovered and merged.
+  }
+};
+
 const buildThreadParams = () => {
   const askPermissionEnabled = activePermissionMode === "ask";
   const automaticPermissionEnabled = activePermissionMode === "auto";
   const fullAccessEnabled = activePermissionMode === "full-access";
+  const developerInstructions = getHostDeveloperInstructions();
+  const config = {
+    ...(activePlanModeEnabled
+      ? {
+          collaboration_mode: "Plan",
+          include_collaboration_mode_instructions: true,
+        }
+      : {}),
+    ...(activeHostSystemPrompt
+      ? {
+          // Kept as a compatibility fallback for older app-server builds.
+          developer_instructions: developerInstructions,
+        }
+      : {}),
+  };
   const params = {
     cwd: projectPath,
     sandbox: askPermissionEnabled
@@ -764,12 +861,10 @@ const buildThreadParams = () => {
         ? "workspace-write"
         : "danger-full-access",
     approvalPolicy: fullAccessEnabled ? "never" : "on-request",
-    config: activePlanModeEnabled
-      ? {
-          collaboration_mode: "Plan",
-          include_collaboration_mode_instructions: true,
-        }
-      : undefined,
+    // This is the native app-server field. `config.developer_instructions`
+    // above is not sufficient on current Codex releases.
+    developerInstructions: developerInstructions || undefined,
+    config: Object.keys(config).length > 0 ? config : undefined,
     serviceName: "HPP",
     threadSource: "hpp",
   };
@@ -788,7 +883,7 @@ const buildTurnCollaborationMode = () => ({
   settings: {
     model: getRequestModelId() || "",
     reasoning_effort: normalizeReasoningEffort(thinkingLevel) || null,
-    developer_instructions: null,
+    developer_instructions: getTurnDeveloperInstructions() || null,
   },
 });
 
@@ -1141,8 +1236,9 @@ const responseToApproval = (response) => {
 
 const runUIResponse = (response) => {
   if (!pendingUIRequest || response?.id !== pendingUIRequest.id) {
-    send({ type: "ui_response_ignored", id: response?.id });
-    return;
+    throw new Error(response?.id
+      ? `Unknown Codex UI request: ${response.id}`
+      : "Codex UI response is missing request id");
   }
 
   const rpcId = pendingUIRequest.rpcId;
@@ -1882,6 +1978,9 @@ const handleServerNotification = (method, params) => {
         detail: getCodexFinalErrorDetail(params),
         state: "error",
       });
+      pendingUIRequest = null;
+      abortRequested = false;
+      finishPrompt();
       break;
   }
 };
@@ -1909,6 +2008,9 @@ const runPrompt = async (command) => {
   abortedPromptId = null;
   activePromptId = command.id;
   activePlanModeEnabled = !!command.planModeEnabled;
+  if (typeof command.hostSystemPrompt === "string") {
+    activeHostSystemPrompt = command.hostSystemPrompt.trim();
+  }
   activePermissionMode = ["ask", "auto", "full-access"].includes(command.permissionMode)
     ? command.permissionMode
     : "auto";
@@ -1921,6 +2023,8 @@ const runPrompt = async (command) => {
     const imagePayload = await materializeImages(command.images);
     registerActiveImageCleanup(imagePayload.cleanup);
     const actionInput = await resolveActionInput(command.action);
+    await startAppServer();
+    if (activeHostSystemPrompt) await refreshConfiguredDeveloperInstructions();
     const nextThreadId = await ensureThread();
     if (!promptRunning || activePromptId !== command.id) return;
     const result = await rpcRequest("turn/start", {
@@ -1978,6 +2082,10 @@ const waitForActiveTurn = async (timeoutMs = 10000) => {
 const runGuidance = async (command) => {
   if (!promptRunning || abortRequested) {
     throw new Error("Codex has no active turn to guide");
+  }
+
+  if (typeof command.hostSystemPrompt === "string") {
+    activeHostSystemPrompt = command.hostSystemPrompt.trim();
   }
 
   const turnId = await waitForActiveTurn();
@@ -2043,8 +2151,9 @@ const abortPrompt = async (command) => {
   await cleanupActiveImages();
 };
 
-const init = async ({ projectPath: cwd, sessionFilePath }) => {
+const init = async ({ projectPath: cwd, sessionFilePath, hostSystemPrompt }) => {
   await disposeSession();
+  activeHostSystemPrompt = String(hostSystemPrompt || "").trim();
   projectPath = cwd;
   threadId = sessionFilePath || null;
   activeThreadId = threadId;
@@ -2059,6 +2168,9 @@ const disposeSession = async () => {
   activeTurnId = null;
   activeThreadId = null;
   activePlanModeEnabled = false;
+  activeHostSystemPrompt = "";
+  configuredDeveloperInstructions = "";
+  configuredDeveloperInstructionsLoaded = false;
   activePermissionMode = "auto";
   pendingUIRequest = null;
   resetTurnState();
@@ -2128,6 +2240,7 @@ const handleCommand = async (command) => {
         break;
       case "uiResponse":
         runUIResponse(command.response);
+        send({ type: "ui_response_done", id: command.id });
         break;
       case "dispose":
         await shutdownWorker();
@@ -2162,8 +2275,12 @@ process.on("SIGTERM", () => {
 
 process.on("uncaughtException", (error) => {
   send({ type: "error", error: error?.message || String(error) });
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
 });
 
 process.on("unhandledRejection", (error) => {
   send({ type: "error", error: error?.message || String(error) });
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
 });

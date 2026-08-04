@@ -126,7 +126,7 @@ const methods = {
     }
     const fn = backend[method];
     if (typeof fn !== "function") {
-      if (["isIdle", "sendGuidance", "forkSession", "listActions", "sendUIResponse"].includes(method)) return undefined;
+      if (["isIdle", "sendGuidance", "forkSession", "listActions"].includes(method)) return undefined;
       throw new Error(`Plugin backend is missing ${method}().`);
     }
     return fn.apply(backend, args);

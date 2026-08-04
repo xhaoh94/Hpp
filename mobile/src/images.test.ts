@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { getImageErrorMessage, isImageSelectionCancelled } from "./images";
+import { DEFAULT_REMOTE_IMAGE_NAME, getImageErrorMessage, isImageSelectionCancelled } from "./images";
 
 describe("mobile image errors", () => {
+  it("uses a short neutral image name", () => {
+    expect(DEFAULT_REMOTE_IMAGE_NAME).toBe("image.jpg");
+    expect(DEFAULT_REMOTE_IMAGE_NAME).not.toMatch(/mobile|\d{4}-\d{2}-\d{2}/i);
+  });
+
   it("treats photo picker cancellation as a silent action", () => {
     const error = Object.assign(new Error("User cancelled photos app"), { code: "OS-PLUG-CAMR-0020" });
 

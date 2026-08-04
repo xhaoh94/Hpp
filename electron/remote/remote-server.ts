@@ -156,6 +156,7 @@ class RemoteAccessServer {
   private rendererReady = false;
   private pendingRendererCommands = new Map<string, PendingRendererCommand>();
   private commandResults = new Map<string, Map<string, unknown>>();
+  private inFlightCommandResults = new Map<string, Map<string, Promise<unknown>>>();
   private webRoot: string | null = null;
 
   private get configPath() {
@@ -541,9 +542,29 @@ class RemoteAccessServer {
       const clientMessageId = String(payload.clientMessageId);
       const cached = this.commandResults.get(deviceId)?.get(clientMessageId);
       if (cached !== undefined) return cached;
-      const result = await this.sendRendererCommand(name, payload);
-      this.rememberCommandResult(deviceId, clientMessageId, result);
-      return result;
+      const existing = this.inFlightCommandResults.get(deviceId)?.get(clientMessageId);
+      if (existing) return existing;
+      let deviceCommands = this.inFlightCommandResults.get(deviceId);
+      if (!deviceCommands) {
+        deviceCommands = new Map();
+        this.inFlightCommandResults.set(deviceId, deviceCommands);
+      }
+      let command: Promise<unknown>;
+      command = this.sendRendererCommand(name, payload)
+        .then((result) => {
+          if (this.inFlightCommandResults.get(deviceId)?.get(clientMessageId) === command) {
+            this.rememberCommandResult(deviceId, clientMessageId, result);
+          }
+          return result;
+        })
+        .finally(() => {
+          const currentDeviceCommands = this.inFlightCommandResults.get(deviceId);
+          if (currentDeviceCommands?.get(clientMessageId) !== command) return;
+          currentDeviceCommands.delete(clientMessageId);
+          if (currentDeviceCommands.size === 0) this.inFlightCommandResults.delete(deviceId);
+        });
+      deviceCommands.set(clientMessageId, command);
+      return command;
     }
 
     return this.sendRendererCommand(
@@ -585,19 +606,70 @@ class RemoteAccessServer {
     if (update.type === "snapshot") {
       this.catalog = update.catalog;
       this.agents = update.agents;
-      this.messages = new Map(Object.entries(update.messages));
-      this.queues = new Map(Object.entries(update.queues));
-      this.interactions = new Map(Object.entries(update.interactions));
-      this.configs = new Map(Object.entries(update.configs));
+      const sessionIds = update.catalog.flatMap((project) => project.sessions.map((session) => session.id));
+      this.messages = new Map(sessionIds.map((sessionId) => [sessionId, update.messages[sessionId] || []]));
+      this.queues = new Map(sessionIds.map((sessionId) => [sessionId, update.queues[sessionId] || []]));
+      this.interactions = new Map(sessionIds.map((sessionId) => [sessionId, update.interactions[sessionId] || null]));
+      this.configs = new Map(sessionIds.flatMap((sessionId) => {
+        const config = update.configs[sessionId];
+        return config ? [[sessionId, config] as const] : [];
+      }));
+      this.pruneDeletedSessionState(new Set(sessionIds));
       this.broadcast("catalog.updated", { projects: this.catalog, agents: this.agents });
+
+      // A renderer reload replaces its whole in-memory view. Existing remote
+      // clients must receive the same authoritative state; a catalog-only
+      // event would leave their previous running messages and controls alive.
+      // Do not advance revisions when nobody can observe the events, so an
+      // initial renderer snapshot remains revision-neutral.
+      const hasConnectedClient = [...this.sockets].some((socket) => (
+        socket.authenticated && socket.readyState === WebSocket.OPEN
+      ));
+      if (!hasConnectedClient) return;
+      for (const sessionId of sessionIds) {
+        this.broadcast(
+          "session.messages.replace",
+          { sessionId, messages: this.messages.get(sessionId) || [] },
+          this.nextRevision(sessionId),
+        );
+        this.broadcast(
+          "session.queue.updated",
+          { sessionId, queue: this.queues.get(sessionId) || [] },
+          this.nextRevision(sessionId),
+        );
+        this.broadcast(
+          "session.interaction.updated",
+          { sessionId, interaction: this.interactions.get(sessionId) || null },
+          this.nextRevision(sessionId),
+        );
+        const config = this.configs.get(sessionId);
+        if (config) {
+          this.broadcast(
+            "session.config.updated",
+            { sessionId, config },
+            this.nextRevision(sessionId),
+          );
+        }
+      }
       return;
     }
     if (update.type === "catalog") {
       this.catalog = update.catalog;
       this.agents = update.agents;
+      const sessionIds = new Set(update.catalog.flatMap((project) => (
+        project.sessions.map((session) => session.id)
+      )));
+      this.pruneDeletedSessionState(sessionIds);
       this.broadcast("catalog.updated", { projects: this.catalog, agents: this.agents });
       return;
     }
+    // A delayed renderer timer can outlive project/session deletion. Ignore
+    // those publishes so a removed session cannot repopulate stale running
+    // messages after the authoritative catalog has already pruned it.
+    const sessionExists = this.catalog.some((project) => (
+      project.sessions.some((session) => session.id === update.sessionId)
+    ));
+    if (!sessionExists) return;
     const revision = this.nextRevision(update.sessionId);
     if (update.type === "session.message.upsert") {
       const messages = [...(this.messages.get(update.sessionId) || [])];
@@ -619,6 +691,19 @@ class RemoteAccessServer {
       this.configs.set(update.sessionId, update.config);
       this.broadcast("session.config.updated", { sessionId: update.sessionId, config: update.config }, revision);
     }
+  }
+
+  private pruneDeletedSessionState(validSessionIds: ReadonlySet<string>) {
+    const prune = <T>(cache: Map<string, T>) => {
+      for (const sessionId of cache.keys()) {
+        if (!validSessionIds.has(sessionId)) cache.delete(sessionId);
+      }
+    };
+    prune(this.messages);
+    prune(this.queues);
+    prune(this.interactions);
+    prune(this.configs);
+    prune(this.revisions);
   }
 
   private nextRevision(sessionId: string) {
@@ -697,6 +782,7 @@ class RemoteAccessServer {
     if (!this.config) throw new Error("Remote access is not initialized.");
     this.config.devices = this.config.devices.filter((device) => device.id !== deviceId);
     this.commandResults.delete(deviceId);
+    this.inFlightCommandResults.delete(deviceId);
     for (const socket of this.sockets) {
       if (socket.deviceId === deviceId) socket.close(4403, "Device revoked");
     }

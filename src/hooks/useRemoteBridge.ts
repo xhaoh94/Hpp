@@ -3,8 +3,9 @@ import { getSessionModel, getSessionThinking, SESSION_CONFIG_UPDATED_EVENT } fro
 import { executeRemoteSessionCommand } from "@/lib/remote-session-commands";
 import { useChatStore, type ChatMessage, type QueuedMessage } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
-import { useProjectStore, type Project } from "@/stores/project-store";
-import type { PendingUIResponse, PendingUIResponseUpdate } from "@/components/layout/agentEventTypes";
+import { useProjectStore, type AgentStatus, type Project } from "@/stores/project-store";
+import type { PendingUIResponse } from "@/components/layout/agentEventTypes";
+import type { PendingUIResponses } from "@/components/layout/usePendingUIResponse";
 import type {
   RemoteChatMessage,
   RemoteAgent,
@@ -15,11 +16,23 @@ import type {
   RemoteSessionConfig,
 } from "@/types";
 import { normalizeAgentPermissionMode, type AgentPermissionMode } from "@shared/agent-permissions";
+import {
+  getActiveAssistantTurnId,
+  normalizeProcessForView,
+  type ProcessTerminalViewState,
+} from "@shared/process-view";
 
 type UseRemoteBridgeOptions = {
-  pendingInteraction: PendingUIResponse;
-  setPendingInteraction: (next: PendingUIResponseUpdate) => void;
+  pendingInteractions: PendingUIResponses;
+  getPendingInteraction: (sessionId: string) => PendingUIResponse;
+  clearPendingInteraction: (sessionId: string) => void;
   abortSession: (sessionId: string) => Promise<boolean>;
+  onInteractionResponsePrepared?: (sessionId: string) => void;
+  onInteractionResponseAccepted?: (sessionId: string) => void;
+  onInteractionResponseFailed?: (
+    sessionId: string,
+    pendingInteraction: Exclude<PendingUIResponse, null>,
+  ) => void | Promise<void>;
 };
 
 const normalizeSlashes = (value: string) => value.replace(/\\/g, "/");
@@ -32,22 +45,46 @@ export function relativeRemotePath(value: string, projectPath: string) {
   return path;
 }
 
-export function sanitizeRemoteMessage(message: ChatMessage, projectPath: string): RemoteChatMessage {
+export function sanitizeRemoteMessage(
+  message: ChatMessage,
+  projectPath: string,
+  options: {
+    turnRunning?: boolean;
+    terminalState?: ProcessTerminalViewState;
+  } = {},
+): RemoteChatMessage {
+  const turnRunning = options.turnRunning !== false;
+  const fallbackProcessEndedAt = Math.max(
+    message.timestamp,
+    ...(message.commentary || []).map((item) => item.timestamp),
+  );
+  const process = message.process ? normalizeProcessForView(message.process, {
+    running: turnRunning,
+    terminalState: options.terminalState,
+    fallbackEndedAt: fallbackProcessEndedAt,
+  }) : undefined;
   return {
     id: message.id,
     role: message.role,
     content: message.content,
     timestamp: message.timestamp,
-    isStreaming: message.isStreaming,
+    isStreaming: message.isStreaming === true ? turnRunning : message.isStreaming,
     systemType: message.systemType,
+    compactionState: message.compactionState,
     nativeTurnId: message.nativeTurnId,
     commentary: message.commentary?.map((item) => ({
       id: item.id,
       content: item.content,
       timestamp: item.timestamp,
-      isStreaming: item.isStreaming,
+      isStreaming: item.isStreaming === true ? turnRunning : item.isStreaming,
     })),
     action: message.action ? { kind: message.action.kind, name: message.action.name } : undefined,
+    composerDocument: message.composerDocument ? {
+      version: message.composerDocument.version,
+      nodes: message.composerDocument.nodes.map((node) => node.type === "image"
+        ? { id: node.id, type: node.type, name: node.name, mimeType: node.mimeType }
+        : node),
+    } : undefined,
     sessionReferences: message.sessionReferences?.map((reference) => ({
       sourceSessionId: reference.sourceSessionId,
       sourceTitle: reference.sourceTitle,
@@ -59,12 +96,12 @@ export function sanitizeRemoteMessage(message: ChatMessage, projectPath: string)
       ...diff,
       file: relativeRemotePath(diff.file, projectPath),
     })),
-    process: message.process ? {
-      startedAt: message.process.startedAt,
-      endedAt: message.process.endedAt,
-      planSteps: message.process.planSteps,
-      changeSummary: message.process.changeSummary,
-      entries: message.process.entries.map((entry) => ({
+    process: process ? {
+      startedAt: process.startedAt,
+      endedAt: process.endedAt,
+      planSteps: process.planSteps,
+      changeSummary: process.changeSummary,
+      entries: process.entries.map((entry) => ({
         id: entry.id,
         type: entry.type,
         kind: entry.kind,
@@ -81,6 +118,19 @@ export function sanitizeRemoteMessage(message: ChatMessage, projectPath: string)
         activityKind: entry.activityKind,
         startedAt: entry.startedAt,
         completedAt: entry.completedAt,
+        ...(entry.guidanceDocument ? {
+          guidanceDocument: {
+            version: entry.guidanceDocument.version,
+            nodes: entry.guidanceDocument.nodes.map((node) => node.type === "image"
+              ? { id: node.id, type: node.type, name: node.name, mimeType: node.mimeType }
+              : node),
+          },
+        } : {}),
+        ...(entry.guidanceImages?.length ? {
+          guidanceImages: entry.guidanceImages
+            .filter((image) => image.src.startsWith("data:image/"))
+            .map(({ id, src, name }) => ({ id, src, name })),
+        } : {}),
         files: entry.files?.map((file) => ({
           ...file,
           file: relativeRemotePath(file.file, projectPath),
@@ -96,6 +146,58 @@ export function sanitizeRemoteMessage(message: ChatMessage, projectPath: string)
       })),
     } : undefined,
   };
+}
+
+export function sanitizeRemoteMessages(
+  messages: ChatMessage[],
+  projectPath: string,
+  sessionStatus: AgentStatus,
+) {
+  const activeTurnId = getActiveAssistantTurnId(messages, sessionStatus === "running");
+  const terminalState: ProcessTerminalViewState = sessionStatus === "error" ? "error" : "completed";
+  return messages.map((message) => sanitizeRemoteMessage(message, projectPath, {
+    turnRunning: message.id === activeTurnId,
+    terminalState,
+  }));
+}
+
+export function shouldPublishRemoteMessagesReplace(
+  previous: ChatMessage[],
+  next: ChatMessage[],
+  sessionStatus: AgentStatus,
+) {
+  if (!canPublishMessageUpsert(previous, next)) return true;
+  const sessionRunning = sessionStatus === "running";
+  const previousActiveTurnId = getActiveAssistantTurnId(previous, sessionRunning);
+  return previousActiveTurnId !== null &&
+    previousActiveTurnId !== getActiveAssistantTurnId(next, sessionRunning);
+}
+
+export function getRemoteStatusSettlementUpdates(
+  previousStatuses: Record<string, AgentStatus>,
+  nextStatuses: Record<string, AgentStatus>,
+  projects: Project[],
+  sessionMessages: Record<string, ChatMessage[]>,
+): RemoteMessagePublish[] {
+  const updates: RemoteMessagePublish[] = [];
+  for (const [sessionId, previousStatus] of Object.entries(previousStatuses)) {
+    const project = getProjectForSession(projects, sessionId);
+    if (previousStatus !== "running" || !project) continue;
+    // Closing a session removes its explicit status while retaining it in the
+    // catalog. Treat that missing value exactly like buildCatalog does: idle.
+    const nextStatus = nextStatuses[sessionId] || "idle";
+    if (nextStatus === "running") continue;
+    updates.push({
+      type: "session.messages.replace",
+      sessionId,
+      messages: sanitizeRemoteMessages(
+        sessionMessages[sessionId] || [],
+        project.path,
+        nextStatus,
+      ),
+    });
+  }
+  return updates;
 }
 
 export function sanitizeQueue(queue: QueuedMessage[]): RemoteQueuedMessage[] {
@@ -133,6 +235,12 @@ export function sanitizeQueue(queue: QueuedMessage[]): RemoteQueuedMessage[] {
         kind: attachment.kind,
       })),
     ] : undefined,
+    composerDocument: item.composerDocument ? {
+      version: item.composerDocument.version,
+      nodes: item.composerDocument.nodes.map((node) => node.type === "image"
+        ? { id: node.id, type: node.type, name: node.name, mimeType: node.mimeType }
+        : node),
+    } : undefined,
   }));
 }
 
@@ -228,6 +336,38 @@ export function toRemoteInteraction(value: PendingUIResponse): RemoteInteraction
   };
 }
 
+type RemoteInteractionPublish = Extract<RemoteRendererPublish, { type: "session.interaction" }>;
+
+export function buildRemoteInteractionSnapshot(
+  sessions: ReadonlyArray<{ id: string; closed?: boolean }>,
+  getPendingInteraction: (sessionId: string) => PendingUIResponse,
+): Record<string, RemoteInteraction | null> {
+  const interactions: Record<string, RemoteInteraction | null> = {};
+  for (const session of sessions) {
+    interactions[session.id] = session.closed
+      ? null
+      : toRemoteInteraction(getPendingInteraction(session.id));
+  }
+  return interactions;
+}
+
+export function getRemoteInteractionUpdates(
+  previous: PendingUIResponses,
+  current: PendingUIResponses,
+): RemoteInteractionPublish[] {
+  const updates: RemoteInteractionPublish[] = [];
+  const sessionIds = new Set([...Object.keys(previous), ...Object.keys(current)]);
+  for (const sessionId of sessionIds) {
+    if (previous[sessionId] === current[sessionId]) continue;
+    updates.push({
+      type: "session.interaction",
+      sessionId,
+      interaction: toRemoteInteraction(current[sessionId] || null),
+    });
+  }
+  return updates;
+}
+
 export function canPublishMessageUpsert(previous: ChatMessage[], next: ChatMessage[]) {
   if (next.length === 0) return false;
   if (next.length !== previous.length && next.length !== previous.length + 1) return false;
@@ -247,18 +387,62 @@ export function shouldFlushPendingMessageUpdate(
     pending.message.id !== update.message.id;
 }
 
-export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abortSession }: UseRemoteBridgeOptions) {
+export type RemoteMessagePublish = Extract<
+  RemoteRendererPublish,
+  { type: "session.message.upsert" | "session.messages.replace" }
+>;
+
+export function coalescePendingMessageUpdate(
+  pending: RemoteMessagePublish | undefined,
+  update: RemoteMessagePublish,
+): { pending: RemoteMessagePublish; flush?: RemoteMessagePublish } {
+  if (!pending) return { pending: update };
+  if (pending.sessionId !== update.sessionId) return { pending: update, flush: pending };
+
+  // A replace is an authoritative repair of the whole message list. Never
+  // downgrade it to a later single-message upsert while it is still queued;
+  // fold that upsert into the replace instead so both updates reach clients.
+  if (pending.type === "session.messages.replace" && update.type === "session.message.upsert") {
+    const messages = [...pending.messages];
+    const index = messages.findIndex((message) => message.id === update.message.id);
+    if (index >= 0) messages[index] = update.message;
+    else messages.push(update.message);
+    return { pending: { ...pending, messages } };
+  }
+
+  // A newer full replacement already contains any preceding upsert and can
+  // supersede it without an intermediate publish.
+  if (update.type === "session.messages.replace") return { pending: update };
+  if (shouldFlushPendingMessageUpdate(pending, update)) return { pending: update, flush: pending };
+  return { pending: update };
+}
+
+export function flushPendingMessageUpdates(
+  pendingUpdates: Map<string, RemoteMessagePublish>,
+  publish: (update: RemoteMessagePublish) => void,
+) {
+  for (const update of pendingUpdates.values()) publish(update);
+  pendingUpdates.clear();
+}
+
+export function useRemoteBridge({
+  pendingInteractions,
+  getPendingInteraction,
+  clearPendingInteraction,
+  abortSession,
+  onInteractionResponsePrepared,
+  onInteractionResponseAccepted,
+  onInteractionResponseFailed,
+}: UseRemoteBridgeOptions) {
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("auto");
-  const pendingInteractionRef = useRef(pendingInteraction);
-  const publishedInteractionSessionRef = useRef<string | null>(null);
+  const publishedInteractionsRef = useRef<PendingUIResponses>({});
   const planModeRef = useRef(false);
   const permissionModeRef = useRef<AgentPermissionMode>("auto");
   const remoteAgentsRef = useRef<RemoteAgent[]>([]);
   const messageTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const pendingMessageUpdatesRef = useRef(new Map<string, RemoteRendererPublish>());
+  const pendingMessageUpdatesRef = useRef(new Map<string, RemoteMessagePublish>());
 
-  pendingInteractionRef.current = pendingInteraction;
   planModeRef.current = planModeEnabled;
   permissionModeRef.current = permissionMode;
 
@@ -266,20 +450,32 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
     window.electronAPI.remotePublish(update);
   }, []);
 
+  const clearRemotePendingInteraction = useCallback((sessionId: string) => {
+    clearPendingInteraction(sessionId);
+    publish({ type: "session.interaction", sessionId, interaction: null });
+    const current = publishedInteractionsRef.current;
+    if (!current[sessionId]) return;
+    const next = { ...current };
+    delete next[sessionId];
+    publishedInteractionsRef.current = next;
+  }, [clearPendingInteraction, publish]);
+
   const publishSnapshot = useCallback(() => {
     const projectState = useProjectStore.getState();
     const chatState = useChatStore.getState();
     const messages: Record<string, RemoteChatMessage[]> = {};
     const queues: Record<string, RemoteQueuedMessage[]> = {};
-    const interactions: Record<string, RemoteInteraction | null> = {};
     const configs: Record<string, RemoteSessionConfig> = {};
+    const sessions = projectState.projects.flatMap((project) => project.sessions);
+    const interactions = buildRemoteInteractionSnapshot(sessions, getPendingInteraction);
     for (const project of projectState.projects) {
       for (const session of project.sessions) {
-        messages[session.id] = (chatState.sessionMessages[session.id] || []).map((message) => sanitizeRemoteMessage(message, project.path));
+        messages[session.id] = sanitizeRemoteMessages(
+          chatState.sessionMessages[session.id] || [],
+          project.path,
+          projectState.agentStatuses[session.id] || "idle",
+        );
         queues[session.id] = sanitizeQueue(chatState.messageQueues[session.id] || []);
-        interactions[session.id] = pendingInteractionRef.current?.sessionId === session.id
-          ? toRemoteInteraction(pendingInteractionRef.current)
-          : null;
         configs[session.id] = buildSessionConfig(session.id, planModeRef.current, permissionModeRef.current);
       }
     }
@@ -292,7 +488,7 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
       interactions,
       configs,
     });
-  }, [publish]);
+  }, [getPendingInteraction, publish]);
 
   useEffect(() => {
     let cancelled = false;
@@ -413,9 +609,27 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
     let previousStatuses = useProjectStore.getState().agentStatuses;
     const unsubscribe = useProjectStore.subscribe((state) => {
       if (state.projects === previousProjects && state.agentStatuses === previousStatuses) return;
+      const settlementUpdates = state.agentStatuses === previousStatuses
+        ? []
+        : getRemoteStatusSettlementUpdates(
+            previousStatuses,
+            state.agentStatuses,
+            state.projects,
+            useChatStore.getState().sessionMessages,
+          );
       previousProjects = state.projects;
       previousStatuses = state.agentStatuses;
       publish({ type: "catalog", catalog: buildCatalog(state.projects, planModeRef.current, permissionModeRef.current), agents: remoteAgentsRef.current });
+      for (const update of settlementUpdates) {
+        const timer = messageTimersRef.current.get(update.sessionId);
+        if (timer) clearTimeout(timer);
+        messageTimersRef.current.delete(update.sessionId);
+        // A queued running upsert is older than this authoritative terminal
+        // replacement. Remove it so it cannot revive the remote cache after
+        // the catalog has already reported the session as idle/completed.
+        pendingMessageUpdatesRef.current.delete(update.sessionId);
+        publish(update);
+      }
     });
     return unsubscribe;
   }, [publish]);
@@ -426,10 +640,11 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
     let previousCurrentModel = useChatStore.getState().currentModel;
     let previousThinking = useChatStore.getState().thinkingLevel;
     let previousModels = useChatStore.getState().availableModels;
-    const scheduleMessagePublish = (sessionId: string, update: RemoteRendererPublish) => {
+    const scheduleMessagePublish = (sessionId: string, update: RemoteMessagePublish) => {
       const pending = pendingMessageUpdatesRef.current.get(sessionId);
-      if (shouldFlushPendingMessageUpdate(pending, update)) publish(pending!);
-      pendingMessageUpdatesRef.current.set(sessionId, update);
+      const coalesced = coalescePendingMessageUpdate(pending, update);
+      if (coalesced.flush) publish(coalesced.flush);
+      pendingMessageUpdatesRef.current.set(sessionId, coalesced.pending);
       if (messageTimersRef.current.has(sessionId)) return;
       const timer = setTimeout(() => {
         messageTimersRef.current.delete(sessionId);
@@ -453,17 +668,23 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
           }
           const project = getProjectForSession(projects, sessionId);
           if (!project) continue;
-          if (canPublishMessageUpsert(previous, next)) {
+          const sessionStatus = useProjectStore.getState().agentStatuses[sessionId] || "idle";
+          const activeTurnId = getActiveAssistantTurnId(next, sessionStatus === "running");
+          const terminalState: ProcessTerminalViewState = sessionStatus === "error" ? "error" : "completed";
+          if (!shouldPublishRemoteMessagesReplace(previous, next, sessionStatus)) {
             scheduleMessagePublish(sessionId, {
               type: "session.message.upsert",
               sessionId,
-              message: sanitizeRemoteMessage(next[next.length - 1], project.path),
+              message: sanitizeRemoteMessage(next[next.length - 1], project.path, {
+                turnRunning: next[next.length - 1].id === activeTurnId,
+                terminalState,
+              }),
             });
           } else {
             scheduleMessagePublish(sessionId, {
               type: "session.messages.replace",
               sessionId,
-              messages: next.map((message) => sanitizeRemoteMessage(message, project.path)),
+              messages: sanitizeRemoteMessages(next, project.path, sessionStatus),
             });
           }
         }
@@ -502,30 +723,24 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
       unsubscribe();
       for (const timer of messageTimersRef.current.values()) clearTimeout(timer);
       messageTimersRef.current.clear();
-      pendingMessageUpdatesRef.current.clear();
+      flushPendingMessageUpdates(pendingMessageUpdatesRef.current, publish);
     };
   }, [publish]);
 
   useEffect(() => {
-    const interaction = toRemoteInteraction(pendingInteraction);
-    const previousSessionId = publishedInteractionSessionRef.current;
-    if (previousSessionId && previousSessionId !== interaction?.sessionId) {
-      publish({ type: "session.interaction", sessionId: previousSessionId, interaction: null });
-    }
-    if (interaction) {
-      publish({ type: "session.interaction", sessionId: interaction.sessionId, interaction });
-    }
-    publishedInteractionSessionRef.current = interaction?.sessionId || null;
-  }, [pendingInteraction, publish]);
+    const previous = publishedInteractionsRef.current;
+    for (const update of getRemoteInteractionUpdates(previous, pendingInteractions)) publish(update);
+    publishedInteractionsRef.current = pendingInteractions;
+  }, [pendingInteractions, publish]);
 
   useEffect(() => window.electronAPI.onRemoteCommand((command) => {
     void executeRemoteSessionCommand(command, {
-      pendingInteraction: pendingInteractionRef.current,
+      getPendingInteraction,
       abortSession,
-      clearPendingInteraction: (sessionId) => {
-        setPendingInteraction((current) => current?.sessionId === sessionId ? null : current);
-        publish({ type: "session.interaction", sessionId, interaction: null });
-      },
+      clearPendingInteraction: clearRemotePendingInteraction,
+      onInteractionResponsePrepared,
+      onInteractionResponseAccepted,
+      onInteractionResponseFailed,
     }).then((payload) => {
       window.electronAPI.remoteCommandResult({ commandId: command.commandId, success: true, payload });
     }).catch((error: unknown) => {
@@ -535,7 +750,14 @@ export function useRemoteBridge({ pendingInteraction, setPendingInteraction, abo
         error: error instanceof Error ? error.message : String(error),
       });
     });
-  }), [abortSession, publish, setPendingInteraction]);
+  }), [
+    abortSession,
+    clearRemotePendingInteraction,
+    getPendingInteraction,
+    onInteractionResponseAccepted,
+    onInteractionResponseFailed,
+    onInteractionResponsePrepared,
+  ]);
 
   useEffect(() => {
     const timer = setTimeout(publishSnapshot, 750);

@@ -24,11 +24,11 @@ describe("Pi shell environment constraints", () => {
       shellPath: "C:\\Program Files\\Git\\bin\\bash.exe",
       shellFamily: "bash",
     });
-    expect(contract).toContain("Operating system: Windows (win32)");
-    expect(contract).toContain("Prefer project-relative paths");
-    expect(contract).toContain("do not use cmd built-ins such as del");
+    expect(contract).toContain("操作系统：Windows（win32）");
+    expect(contract).toContain("文件操作优先使用项目相对路径");
+    expect(contract).toContain("不要使用 del、copy、move、ren 等 cmd 内置命令");
     expect(contract).toContain("/c/work/file");
-    expect(contract).toContain("schema name is bash is registered and available");
+    expect(contract).toContain("名为 bash 的工具已注册并可在本回合使用");
   });
 
   it("describes an unavailable shell without claiming bash can execute commands", () => {
@@ -39,8 +39,8 @@ describe("Pi shell environment constraints", () => {
       shellFamily: "unknown",
       shellAvailable: false,
     });
-    expect(contract).toContain("Command execution is unavailable");
-    expect(contract).not.toContain("schema name is bash is registered and available");
+    expect(contract).toContain("当前无法执行命令");
+    expect(contract).not.toContain("名为 bash 的工具已注册并可在本回合使用");
   });
 
   it("normalizes package-manager command positions for Windows PowerShell", () => {

@@ -18,10 +18,10 @@ const displayPlatform = (platform) => {
 };
 
 const shellSyntaxName = (family) => {
-  if (family === "bash" || family === "posix") return "POSIX shell";
+  if (family === "bash" || family === "posix") return "POSIX Shell";
   if (family === "powershell") return "PowerShell";
-  if (family === "cmd") return "Command Prompt";
-  return "the configured shell";
+  if (family === "cmd") return "cmd.exe 命令提示符";
+  return "配置的 Shell";
 };
 
 export const POWERSHELL_UTF8_COMMAND_PREFIX = [
@@ -39,37 +39,37 @@ export const rewritePowerShellPackageManagerCommand = (command) => String(comman
 
 export const buildShellEnvironmentContract = ({ platform, cwd, shellPath, shellFamily, shellAvailable = true }) => {
   const facts = [
-    "Hpp runtime environment contract (follow this instead of guessing or probing the shell):",
-    `- Operating system: ${displayPlatform(platform)} (${platform || "unknown"}).`,
-    `- Working directory: ${cwd || "unknown"}.`,
-    `- The Pi tool named bash actually executes: ${shellPath || "the Pi-configured shell"}.`,
-    `- Required command syntax: ${shellSyntaxName(shellFamily)}.`,
-    "- Prefer project-relative paths and dedicated read/write/edit/discovery tools for file operations.",
-    "- Do not try equivalent commands from different shells to discover which one works.",
+    "Hpp 运行环境契约（请遵循以下事实，不要猜测或反复探测 Shell）：",
+    `- 操作系统：${displayPlatform(platform)}（${platform || "unknown"}）。`,
+    `- 工作目录：${cwd || "unknown"}。`,
+    `- 名为 bash 的 Pi 工具实际执行：${shellPath || "Pi 配置的 Shell"}。`,
+    `- 必须使用的命令语法：${shellSyntaxName(shellFamily)}。`,
+    "- 文件操作优先使用项目相对路径，以及专用的 read/write/edit/文件发现工具。",
+    "- 不要通过尝试不同 Shell 的等价命令来猜测哪个可用。",
   ];
 
   if (shellAvailable) {
     facts.push(
-      "- The tool whose schema name is bash is registered and available in this request. Call that tool directly when command execution is needed; never claim that no shell/exec tool exists while bash appears in the provided tool schema.",
+      "- 工具架构中名为 bash 的工具已注册并可在本回合使用。需要执行命令时请直接调用它；只要工具架构中存在 bash，就不要声称没有 Shell 或 exec 工具。",
     );
   } else {
-    facts.push("- Command execution is unavailable because the configured shell failed Hpp's startup probe; use the dedicated discovery and file tools instead.");
+    facts.push("- 由于配置的 Shell 未通过 Hpp 启动预检，当前无法执行命令；请改用专用的文件发现和文件操作工具。");
   }
 
   if (platform === "win32" && (shellFamily === "bash" || shellFamily === "posix")) {
     facts.push(
-      "- This is a POSIX shell on Windows: use commands such as rm, cp, mv, ls, find, and grep; do not use cmd built-ins such as del, copy, move, or ren, and do not use PowerShell cmdlets directly.",
-      "- Never pass a raw Windows path such as C:\\work\\file to the bash tool. Prefer a relative path; when an absolute path is unavoidable, convert it to POSIX form such as /c/work/file.",
+      "- 当前是 Windows 上的 POSIX Shell：使用 rm、cp、mv、ls、find 和 grep 等命令；不要使用 del、copy、move、ren 等 cmd 内置命令，也不要直接使用 PowerShell cmdlet。",
+      "- 不要将 C:\\work\\file 这样的原始 Windows 路径传给 bash 工具。优先使用相对路径；必须使用绝对路径时，转换为 /c/work/file 这样的 POSIX 格式。",
     );
   } else if (shellFamily === "powershell") {
     facts.push(
-      "- Use PowerShell syntax and quote Windows paths; do not assume Bash-only syntax is available.",
-      "- On Windows PowerShell, invoke Node package-manager shims as npm.cmd, npx.cmd, pnpm.cmd, and yarn.cmd so PowerShell execution policy cannot select and block the corresponding .ps1 shim. Hpp also normalizes bare package-manager commands at execution time.",
+      "- 使用 PowerShell 语法并为 Windows 路径加引号；不要假设 Bash 专属语法可用。",
+      "- 在 Windows PowerShell 中，请使用 npm.cmd、npx.cmd、pnpm.cmd 和 yarn.cmd 调用 Node 包管理器 shim，避免 PowerShell 执行策略选择并阻止对应的 .ps1 shim。Hpp 也会在执行时规范化未带扩展名的包管理器命令。",
     );
   } else if (shellFamily === "cmd") {
-    facts.push("- Use cmd.exe syntax; do not assume Bash or PowerShell commands are available.");
+    facts.push("- 使用 cmd.exe 语法；不要假设 Bash 或 PowerShell 命令可用。");
   } else if (shellFamily === "bash" || shellFamily === "posix") {
-    facts.push("- Use POSIX commands and POSIX path syntax; do not use Windows cmd or PowerShell commands.");
+    facts.push("- 使用 POSIX 命令和 POSIX 路径语法；不要使用 Windows cmd 或 PowerShell 命令。");
   }
 
   return facts.join("\n");

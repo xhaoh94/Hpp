@@ -27,7 +27,16 @@ describe("shared model rules", () => {
   });
 
   it("keeps one canonical thinking-level catalog", () => {
-    expect(THINKING_LEVELS.map((level) => level.id)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+    expect(THINKING_LEVELS.map((level) => level.id)).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
   });
 
   it("uses only model-specific thinking levels and does not invent missing capabilities", () => {
@@ -49,8 +58,10 @@ describe("shared model rules", () => {
     expect(getModelThinkingLevels(model)).toEqual([
       { id: "off", label: THINKING_LEVELS[0].label },
       { id: "low", label: THINKING_LEVELS[2].label },
-      { id: "xhigh", label: THINKING_LEVELS[5].label },
-      { id: "ultra", label: "ultra" },
+      { id: "max", label: THINKING_LEVELS[6].label },
+      { id: "ultra", label: THINKING_LEVELS[7].label },
     ]);
+    expect(normalizeModelThinkingLevel("none", model)).toBe("off");
+    expect(normalizeModelThinkingLevel("max", model)).toBe("max");
   });
 });

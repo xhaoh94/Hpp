@@ -10,6 +10,7 @@ import { compareVersions } from "@/lib/version";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
+import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import type { AgentDescriptor, AgentPackageStatus, AgentPackageVersions, AgentPluginInstallResult, OfficialAgentPluginDescriptor } from "@/types";
 import { AgentConfigModal } from "./AgentConfigModal";
 import "./Settings.css";
@@ -58,6 +59,15 @@ function defaultEnabledAgents(agents: AgentDescriptor[]) {
   return agents.map((agent) => agent.id);
 }
 
+function getAgentMoveTargetIndex(order: string[], sourceId: string, targetId: string, insertAfter: boolean) {
+  const sourceIndex = order.indexOf(sourceId);
+  const targetIndex = order.indexOf(targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return null;
+  const rawInsertIndex = targetIndex + (insertAfter ? 1 : 0);
+  const nextIndex = sourceIndex < rawInsertIndex ? rawInsertIndex - 1 : rawInsertIndex;
+  return nextIndex === sourceIndex ? null : nextIndex;
+}
+
 function syncActiveAgentModels(
   agentId: string,
   models?: Array<{ id: string; name: string; provider: string; reasoning: boolean; supportsImages?: boolean }>
@@ -83,6 +93,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [draggingAgentId, setDraggingAgentId] = useState<string | null>(null);
   const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
+  const [dragOverAgentPosition, setDragOverAgentPosition] = useState<"before" | "after">("before");
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentPackageStatus>>({});
   const [agentChecking, setAgentChecking] = useState<Record<string, boolean>>({});
   const [agentUpdating, setAgentUpdating] = useState<Record<string, boolean>>({});
@@ -104,6 +115,8 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const [versionSpec, setVersionSpec] = useState("latest");
   const officialInstallQueueRef = useRef<Promise<void>>(Promise.resolve());
   const installResultQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const agentSettingsScrollRef = useRef<HTMLElement | null>(null);
+  const { update: updateAgentAutoScroll, stop: stopAgentAutoScroll } = useDragAutoScroll(agentSettingsScrollRef);
 
   const agents = useAgentCatalogStore((state) => state.agents);
   const officialPlugins = useAgentCatalogStore((state) => state.officialPlugins);
@@ -232,15 +245,14 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   const activeAgentUpdateId = Object.entries(agentUpdating).find(([, updating]) => updating)?.[0] || null;
   const isAnyAgentUpdating = activeAgentUpdateId !== null;
 
-  const moveAgent = useCallback((sourceId: string, targetId: string) => {
-    if (sourceId === targetId) return;
+  const moveAgent = useCallback((sourceId: string, targetId: string, insertAfter = false) => {
     const currentOrder = normalizeAgentOrder(agentOrder, agents);
+    const nextIndex = getAgentMoveTargetIndex(currentOrder, sourceId, targetId, insertAfter);
+    if (nextIndex === null) return;
     const fromIndex = currentOrder.indexOf(sourceId);
-    const toIndex = currentOrder.indexOf(targetId);
-    if (fromIndex < 0 || toIndex < 0) return;
     const nextOrder = [...currentOrder];
     const [moved] = nextOrder.splice(fromIndex, 1);
-    nextOrder.splice(toIndex, 0, moved);
+    nextOrder.splice(nextIndex, 0, moved);
     setAgentOrder(nextOrder);
     void saveAgentSettings(enabledAgents, nextOrder);
   }, [agentOrder, agents, enabledAgents, saveAgentSettings]);
@@ -474,6 +486,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   }, [agentOrder, agents, enabledAgents, isAnyAgentUpdating, removeConfirmAgentId, removeLocalRuntime, removePlugin, saveAgentSettings]);
 
   const orderedAgents = useMemo(() => orderAgents(agents, agentOrder), [agentOrder, agents]);
+  const normalizedAgentOrder = useMemo(() => normalizeAgentOrder(agentOrder, agents), [agentOrder, agents]);
   const installedAgentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
 
   const content = (
@@ -548,17 +561,31 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
             return (
               <div
                 key={agent.id}
-                className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? "agent-settings-row-drop-target" : ""}`}
+                className={`filter-row agent-settings-row ${isUnavailable ? "agent-settings-row-disabled" : ""} ${draggingAgentId === agent.id ? "agent-settings-row-dragging" : ""} ${dragOverAgentId === agent.id && draggingAgentId !== agent.id ? `agent-settings-row-drop-target ${dragOverAgentPosition}` : ""}`}
                 onDragOver={(event) => {
+                  if (!draggingAgentId || draggingAgentId === agent.id) return;
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const insertAfter = event.clientY >= rect.top + rect.height / 2;
+                  if (getAgentMoveTargetIndex(normalizedAgentOrder, draggingAgentId, agent.id, insertAfter) === null) {
+                    setDragOverAgentId((current) => current === agent.id ? null : current);
+                    return;
+                  }
                   event.preventDefault();
-                  if (draggingAgentId && draggingAgentId !== agent.id) setDragOverAgentId(agent.id);
+                  event.dataTransfer.dropEffect = "move";
+                  setDragOverAgentId(agent.id);
+                  setDragOverAgentPosition(insertAfter ? "after" : "before");
                 }}
                 onDragLeave={() => setDragOverAgentId((current) => current === agent.id ? null : current)}
                 onDrop={(event) => {
                   event.preventDefault();
-                  if (draggingAgentId) moveAgent(draggingAgentId, agent.id);
+                  if (draggingAgentId) {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    moveAgent(draggingAgentId, agent.id, event.clientY >= rect.top + rect.height / 2);
+                  }
                   setDraggingAgentId(null);
                   setDragOverAgentId(null);
+                  setDragOverAgentPosition("before");
+                  stopAgentAutoScroll();
                 }}
               >
                 <button
@@ -569,10 +596,14 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                     event.dataTransfer.effectAllowed = "move";
                     event.dataTransfer.setData("text/plain", agent.id);
                     setDraggingAgentId(agent.id);
+                    setDragOverAgentPosition("before");
+                    stopAgentAutoScroll();
                   }}
                   onDragEnd={() => {
+                    stopAgentAutoScroll();
                     setDraggingAgentId(null);
                     setDragOverAgentId(null);
+                    setDragOverAgentPosition("before");
                   }}
                   title="拖动排序"
                 >
@@ -961,13 +992,37 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
   );
 
   if (embedded) {
-    return <div className="agent-settings-panel">{contentWithModal}</div>;
+    return (
+      <div
+        ref={(element) => {
+          agentSettingsScrollRef.current = element?.parentElement || null;
+        }}
+        className="agent-settings-panel"
+        onDragOver={(event) => {
+          if (draggingAgentId) updateAgentAutoScroll(event.clientY);
+        }}
+        onDrop={stopAgentAutoScroll}
+      >
+        {contentWithModal}
+      </div>
+    );
   }
 
   return (
     <div className="settings agent-settings-panel">
       <div className="settings-header">Agent</div>
-      <div className="settings-content">{contentWithModal}</div>
+      <div
+        ref={(element) => {
+          agentSettingsScrollRef.current = element;
+        }}
+        className="settings-content"
+        onDragOver={(event) => {
+          if (draggingAgentId) updateAgentAutoScroll(event.clientY);
+        }}
+        onDrop={stopAgentAutoScroll}
+      >
+        {contentWithModal}
+      </div>
     </div>
   );
 }

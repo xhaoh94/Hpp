@@ -1,4 +1,5 @@
 import {
+  getSessionCommandTarget,
   SessionCommandCoordinator,
 } from "@/lib/session-command-coordinator";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
@@ -14,14 +15,59 @@ import type {
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { isAgentActionInvocation } from "@shared/agent-actions";
 import { normalizeAgentPermissionMode } from "@shared/agent-permissions";
+import { createComposerDocument, type ComposerDocument, type ComposerNode } from "@shared/composer-document";
+import type { SessionReference } from "@/stores/project-store";
 
 export type RemoteCommandContext = {
-  pendingInteraction: PendingUIResponse;
+  getPendingInteraction: (sessionId: string) => PendingUIResponse;
   abortSession: (sessionId: string) => Promise<boolean>;
   clearPendingInteraction: (sessionId: string) => void;
+  onInteractionResponsePrepared?: (sessionId: string) => void;
+  onInteractionResponseAccepted?: (sessionId: string) => void;
+  onInteractionResponseFailed?: (
+    sessionId: string,
+    pendingInteraction: Exclude<PendingUIResponse, null>,
+  ) => void | Promise<void>;
 };
 
 const getString = (value: unknown) => typeof value === "string" ? value : "";
+
+const hydrateRemoteComposerDocument = (
+  value: unknown,
+  images: Array<{ id: string; name: string; mimeType: string; src: string }>,
+  references: SessionReference[],
+  allowedAttachments = new Map<string, Extract<ComposerNode, { type: "path" | "snippet" }>>(),
+): ComposerDocument | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as { version?: unknown; nodes?: unknown };
+  if (raw.version !== 1 || !Array.isArray(raw.nodes)) return undefined;
+  const imageMap = new Map(images.map((image) => [image.id, image]));
+  const referenceMap = new Map(references.map((reference) => [reference.sourceSessionId, reference]));
+  const nodes = raw.nodes.flatMap((entry): ComposerNode[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const node = entry as Record<string, unknown>;
+    const id = getString(node.id);
+    if (!id) return [];
+    if (node.type === "text") return [{ id, type: "text", text: getString(node.text) }];
+    if (node.type === "image") {
+      const image = imageMap.get(id);
+      return image ? [{ ...image, type: "image" }] : [{ id, type: "text", text: `[image: ${getString(node.name) || "图片"}]` }];
+    }
+    if (node.type === "path" || node.type === "snippet") {
+      const attachment = allowedAttachments.get(id);
+      return attachment ? [{ ...attachment }] : [];
+    }
+    if (node.type === "session") {
+      const rawReference = node.reference && typeof node.reference === "object" && !Array.isArray(node.reference)
+        ? node.reference as Record<string, unknown>
+        : {};
+      const reference = referenceMap.get(getString(rawReference.sourceSessionId));
+      return reference ? [{ id, type: "session", reference: { ...reference } }] : [];
+    }
+    return [];
+  });
+  return createComposerDocument(nodes);
+};
 
 async function getSessionConfig(sessionId: string, includeModels = false): Promise<RemoteSessionConfig> {
   const state = await SessionCommandCoordinator.getSessionCommandConfig(sessionId, includeModels);
@@ -143,6 +189,7 @@ async function sendRemoteMessage(payload: Record<string, unknown>) {
     pendingFiles: [],
     pendingPathAttachments: [],
     sessionReferences: referenceContext.references,
+    document: hydrateRemoteComposerDocument(payload.composerDocument, editableImages, referenceContext.references),
     forkContext: referenceContext.session.forkContext?.context,
     action,
     readFile: (path) => window.electronAPI.readFile(path),
@@ -204,6 +251,12 @@ async function editRemoteQueuedMessage(payload: Record<string, unknown>) {
   const action = payload.action === null
     ? undefined
     : isAgentActionInvocation(payload.action) ? payload.action : item.action;
+  const originalDocument = original?.document || item.composerDocument;
+  const allowedAttachments = new Map(
+    (originalDocument?.nodes || []).flatMap((node): Array<[string, Extract<ComposerNode, { type: "path" | "snippet" }>]> =>
+      (node.type === "path" || node.type === "snippet") && retainedAttachmentIds.has(node.id) ? [[node.id, node]] : []
+    ),
+  );
   const prepared = await buildSessionMessagePayload({
     text: getString(payload.content),
     images,
@@ -211,6 +264,7 @@ async function editRemoteQueuedMessage(payload: Record<string, unknown>) {
     pendingPathAttachments: (original?.pendingPathAttachments || [])
       .filter((attachment) => retainedAttachmentIds.has(attachment.id)),
     sessionReferences: referenceContext.references,
+    document: hydrateRemoteComposerDocument(payload.composerDocument, images, referenceContext.references, allowedAttachments),
     forkContext: original?.forkContext,
     action,
     readFile: (path) => window.electronAPI.readFile(path),
@@ -239,15 +293,19 @@ async function setRemotePermissionMode(payload: Record<string, unknown>) {
 }
 
 async function respondToRemoteInteraction(payload: Record<string, unknown>, context: RemoteCommandContext) {
+  const sessionId = getString(payload.sessionId);
   return SessionCommandCoordinator.respondToInteraction({
-    sessionId: getString(payload.sessionId),
+    sessionId,
     cancelled: payload.cancelled === true,
     confirmed: typeof payload.confirmed === "boolean" ? payload.confirmed : undefined,
     answers: Array.isArray(payload.answers) ? payload.answers : undefined,
     text: getString(payload.text),
   }, {
-    pendingInteraction: context.pendingInteraction,
+    getPendingInteraction: context.getPendingInteraction,
     clearPendingInteraction: context.clearPendingInteraction,
+    onResponsePrepared: context.onInteractionResponsePrepared,
+    onResponseAccepted: context.onInteractionResponseAccepted,
+    onResponseFailed: context.onInteractionResponseFailed,
   });
 }
 
@@ -271,7 +329,7 @@ export async function executeRemoteSessionCommand(
     case "session.send": return sendRemoteMessage(payload);
     case "session.abort": {
       const sessionId = getString(payload.sessionId);
-      SessionCommandCoordinator.getSessionCommandTarget(sessionId);
+      getSessionCommandTarget(sessionId);
       return abortRemoteSession(sessionId, context);
     }
     case "session.reload": {

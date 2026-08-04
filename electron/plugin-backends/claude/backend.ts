@@ -39,8 +39,13 @@ interface AgentSendOptions {
   planModeEnabled?: boolean;
   permissionMode?: import("../../../shared/agent-permissions").AgentPermissionMode;
   displayMessage?: string;
+  hostSystemPrompt?: string;
   clientMessageId?: string;
   action?: AgentActionInvocation;
+}
+
+interface AgentInitOptions {
+  hostSystemPrompt?: string;
 }
 
 interface AgentForkTarget {
@@ -117,7 +122,7 @@ export class ClaudeSDKAgent {
     return this._sessionFilePath;
   }
 
-  async init(projectPath: string, existingSessionFilePath?: string): Promise<void> {
+  async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
     const isNewSession = !existingSessionFilePath;
     await this.dispose();
     this.projectPath = projectPath;
@@ -133,7 +138,10 @@ export class ClaudeSDKAgent {
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...worker.env, CLAUDE_AGENT_SDK_PACKAGE_ROOT: runtimeRoot },
+      env: {
+        ...worker.env,
+        CLAUDE_AGENT_SDK_PACKAGE_ROOT: runtimeRoot,
+      },
     });
     this.process = child;
 
@@ -151,11 +159,19 @@ export class ClaudeSDKAgent {
         try { this.handleWorkerMessage(JSON.parse(line)); } catch { /* dependency output */ }
       }
     });
+    child.stdout?.on("end", () => this.handleWorkerTermination(
+      child,
+      "Claude Agent SDK worker output pipe closed before the process exited.",
+    ));
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = this.redact(chunk.toString());
       stderrText = `${stderrText}${text}`.slice(-4000);
       console.log("[claude-sdk-worker]", text.trim());
     });
+    child.stdin?.on("error", (error) => this.handleWorkerTermination(
+      child,
+      `Claude Agent SDK worker 输入通道已断开：${error.message}`,
+    ));
     child.on("error", (error) => this.handleWorkerTermination(child, `Claude Code 启动失败：${error.message}`));
     child.on("exit", (code, signal) => this.handleWorkerTermination(
       child,
@@ -174,6 +190,7 @@ export class ClaudeSDKAgent {
         sessionFilePath: this._sessionFilePath,
         isNewSession,
         config,
+        hostSystemPrompt: options?.hostSystemPrompt,
       }, (data) => {
         clearTimeout(timeout);
         if (data.type !== "ready") {
@@ -203,15 +220,30 @@ export class ClaudeSDKAgent {
     this.streamedText = false;
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
     this.emitEvent({ type: "stream_start", role: "assistant" });
-    this.sendWorkerCommand({
-      type: "prompt",
-      id: promptId,
-      message,
-      images,
-      planModeEnabled: !!options?.planModeEnabled,
-      permissionMode: options?.permissionMode || "auto",
-      action: options?.action,
-    });
+    try {
+      this.sendWorkerCommand({
+        type: "prompt",
+        id: promptId,
+        message,
+        images,
+        planModeEnabled: !!options?.planModeEnabled,
+        permissionMode: options?.permissionMode || "auto",
+        hostSystemPrompt: options?.hostSystemPrompt,
+        action: options?.action,
+      });
+    } catch (error) {
+      this.emitEvent({
+        type: "process_event",
+        entryType: "error",
+        kind: "error",
+        title: "Claude Code 请求发送失败",
+        detail: this.redact(error instanceof Error ? error.message : error),
+        state: "error",
+      });
+      this.activePromptId = null;
+      this.finishTurn(true);
+      throw error;
+    }
   }
 
   async forkSession(target: AgentForkTarget): Promise<AgentForkResult> {
@@ -228,9 +260,30 @@ export class ClaudeSDKAgent {
 
   async abort() {
     this.pendingUIRequestIds.clear();
-    if (this.process) {
-      const data = await this.request({ type: "abort" }, 10_000);
-      if (data.type !== "aborted") throw new Error(optionalString(data.error) || "Claude Code 中断失败");
+    try {
+      if (this.process) {
+        const data = await this.request({ type: "abort" }, 10_000);
+        if (data.type !== "aborted") throw new Error(optionalString(data.error) || "Claude Code 中断失败");
+      }
+    } catch (error) {
+      const child = this.process;
+      const detail = `Claude Code 中断失败：${error instanceof Error ? error.message : String(error)}`;
+      if (child) {
+        this.handleWorkerTermination(child, detail);
+        try { child.kill("SIGKILL"); } catch { /* already stopped */ }
+      } else if (this.turnActive) {
+        this.emitEvent({
+          type: "process_event",
+          entryType: "error",
+          kind: "error",
+          title: "Claude Code 中断失败",
+          detail: this.redact(detail),
+          state: "error",
+        });
+        this.activePromptId = null;
+        this.finishTurn(true);
+      }
+      throw error;
     }
     this.activePromptId = null;
     this.finishTurn(true);
@@ -271,15 +324,28 @@ export class ClaudeSDKAgent {
     this.emitEvent({ type: "thinking_level_changed", level: optionalString(data.level) || level });
   }
 
-  sendUIResponse(response: AgentUIResponse) {
-    const id = optionalString(response.id);
+  async sendUIResponse(response: AgentUIResponse): Promise<void> {
+    const id = optionalString(response.id) || optionalString(response.requestId);
+    const data = await this.request({
+      type: "uiResponse",
+      response: { ...response, id },
+    }, 12_000);
+    if (data.type !== "ui_response_done") {
+      throw new Error(optionalString(data.error) || "Claude UI response failed");
+    }
     if (id) this.pendingUIRequestIds.delete(id);
-    this.sendWorkerCommand({ type: "uiResponse", response });
   }
 
   async dispose() {
+    if (this.turnActive) {
+      this.activePromptId = null;
+      this.finishTurn(true);
+    }
     this.isReady = false;
     this.models = [];
+    for (const callback of this.pendingResponses.values()) {
+      callback({ type: "error", error: "Claude backend disposed" });
+    }
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
     this.activePromptId = null;
@@ -291,7 +357,13 @@ export class ClaudeSDKAgent {
       this.secretValues = [];
       return;
     }
-    child.stdin?.write(`${JSON.stringify({ type: "dispose" })}\n`);
+    if (child.stdin?.writable) {
+      try {
+        child.stdin.write(`${JSON.stringify({ type: "dispose" })}\n`);
+      } catch {
+        // Continue with forced termination below.
+      }
+    }
     if (!await this.waitForExit(child, 2000)) child.kill("SIGKILL");
     this.secretValues = [];
   }
@@ -316,7 +388,11 @@ export class ClaudeSDKAgent {
         this.emitEvent({ type: "session_file_path", sessionFilePath: this._sessionFilePath });
         break;
       case "context_compaction":
-        this.emitEvent({ type: "context_compaction", id: data.uuid || data.id });
+        this.emitEvent({
+          type: "context_compaction",
+          id: data.uuid || data.id,
+          phase: data.phase,
+        });
         break;
       case "text_delta": {
         const delta = optionalString(data.delta) || "";
@@ -384,7 +460,11 @@ export class ClaudeSDKAgent {
         break;
       }
       case "prompt_done":
-        if (!id || id === this.activePromptId) this.activePromptId = null;
+        // A late terminal record from an aborted/restarted SDK query must not
+        // settle the newer prompt. Doing so would leave its id behind while
+        // turnActive becomes false, making isIdle() stay false indefinitely.
+        if (id && id !== this.activePromptId) break;
+        this.activePromptId = null;
         this.finishTurn(true);
         break;
       case "error":
@@ -406,6 +486,7 @@ export class ClaudeSDKAgent {
     this.emitEvent({ type: "agent_end" });
     this.turnActive = false;
     this.streamedText = false;
+    this.pendingUIRequestIds.clear();
   }
 
   private request(command: WorkerCommand, timeoutMs: number) {
@@ -415,11 +496,16 @@ export class ClaudeSDKAgent {
         if (id) this.pendingResponses.delete(id);
         reject(new Error(`Claude SDK ${command.type} timed out`));
       }, timeoutMs);
-      id = this.sendWorkerCommand(command, (data) => {
+      try {
+        id = this.sendWorkerCommand(command, (data) => {
+          clearTimeout(timeout);
+          if (data.type === "error") reject(new Error(optionalString(data.error) || `${command.type} failed`));
+          else resolve(data);
+        });
+      } catch (error) {
         clearTimeout(timeout);
-        if (data.type === "error") reject(new Error(optionalString(data.error) || `${command.type} failed`));
-        else resolve(data);
-      });
+        reject(error);
+      }
     });
   }
 
@@ -428,7 +514,12 @@ export class ClaudeSDKAgent {
     const child = this.process;
     if (!child?.stdin?.writable) throw new Error("Claude Agent SDK worker is not writable");
     if (callback) this.pendingResponses.set(id, callback);
-    child.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
+    try {
+      child.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
+    } catch (error) {
+      this.pendingResponses.delete(id);
+      throw error;
+    }
     return id;
   }
 
@@ -468,10 +559,15 @@ export class ClaudeSDKAgent {
     const redactedDetail = this.redact(detail);
     for (const callback of this.pendingResponses.values()) callback({ type: "error", error: redactedDetail });
     this.pendingResponses.clear();
+    this.pendingUIRequestIds.clear();
     if (this.turnActive) {
       this.emitEvent({ type: "process_event", entryType: "error", kind: "error", title: "Claude Code 已断开", detail: redactedDetail, state: "error" });
       this.activePromptId = null;
       this.finishTurn(true);
+    } else {
+      this.activePromptId = null;
+      this.streamedText = false;
+      this.emitEvent({ type: "agent_disconnected", detail: redactedDetail });
     }
   }
 

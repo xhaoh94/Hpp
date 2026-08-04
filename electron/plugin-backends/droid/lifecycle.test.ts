@@ -51,14 +51,20 @@ describe("Droid lifecycle", () => {
     });
 
     const agent = new DroidAgent();
-    await agent.init("C:\\project", "existing-session");
+    await agent.init("C:\\project", "existing-session", {
+      hostSystemPrompt: "Always answer in Simplified Chinese.",
+    });
 
     expect(requests[0]).toMatchObject({
       method: "droid.load_session",
       params: { sessionId: "existing-session", loadAllMessages: true },
     });
+    const spawnArgs = spawnMock.mock.calls[0]?.[1] as string[];
+    const systemPromptFlagIndex = spawnArgs.indexOf("--append-system-prompt");
+    expect(systemPromptFlagIndex).toBeGreaterThan(-1);
+    expect(spawnArgs[systemPromptFlagIndex + 1]).toBe("Always answer in Simplified Chinese.");
     expect(agent.sessionFilePath).toBe("existing-session");
-    agent.dispose();
+    await agent.dispose();
   });
 
   it("rejects initialization when the Droid process cannot start", async () => {

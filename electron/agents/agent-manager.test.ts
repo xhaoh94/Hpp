@@ -74,6 +74,14 @@ vi.mock("./agent-model-list", () => ({
 }));
 
 import { AgentManager, registerAgentHandlers, shutdownAgentRuntime } from "./agent-manager";
+import { HPP_AGENT_SYSTEM_PROMPT } from "./agent-runtime-policy";
+import {
+  clearAllPendingUIEvents,
+  getPendingUIEvents,
+  observePendingUIEvent,
+} from "./pending-ui-events";
+
+afterEach(() => clearAllPendingUIEvents());
 
 function getHandler(channel: string) {
   const handler = testState.handlers.get(channel);
@@ -83,21 +91,28 @@ function getHandler(channel: string) {
 
 function createDeferred<T = void>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((complete) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((complete, fail) => {
     resolve = complete;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function createBackend(idle = true) {
   let sessionFilePath: string | null = null;
   return {
     setWindow: vi.fn(),
-    init: vi.fn(async (_projectPath: string, existingSessionFilePath?: string) => {
+    init: vi.fn(async (
+      _projectPath: string,
+      existingSessionFilePath?: string,
+      _options?: { hostSystemPrompt?: string },
+    ) => {
       sessionFilePath = existingSessionFilePath || "native-session";
     }),
     isIdle: vi.fn(() => idle),
     sendMessage: vi.fn(),
+    sendGuidance: vi.fn(),
     abort: vi.fn(),
     getModels: vi.fn(async () => []),
     setModel: vi.fn(),
@@ -165,8 +180,40 @@ describe("AgentManager runtime updates", () => {
 
     expect(resumed.success).toBe(true);
     expect(resumed.reloadedSessionIds).toEqual(["session-1"]);
-    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "native-session-1");
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "native-session-1", {
+      hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+    });
     expect(manager.getAgentBySessionId("session-1")).toBe(restoredBackend);
+    await manager.shutdown();
+  });
+
+  it("supplies the host policy to guidance without trusting renderer options", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    testState.getCapabilities.mockResolvedValueOnce({
+      planMode: "native",
+      permissions: true,
+      guidance: true,
+      fork: false,
+      configuration: "none",
+      providerActivation: "none",
+    });
+    const manager = new AgentManager();
+
+    await manager.createSession("guidance-session", "pi", "C:\\project");
+    await manager.sendGuidance("guidance-session", "继续检查", undefined, {
+      displayMessage: "显示用文本",
+      hostSystemPrompt: "untrusted renderer value",
+    });
+
+    expect(backend.sendGuidance).toHaveBeenCalledWith(
+      "继续检查",
+      undefined,
+      expect.objectContaining({
+        displayMessage: "显示用文本",
+        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+      }),
+    );
     await manager.shutdown();
   });
 
@@ -209,7 +256,7 @@ describe("AgentManager runtime updates", () => {
     await manager.shutdown();
   });
 
-  it("keeps a session registered when disposing it fails", async () => {
+  it("removes a session from the manager even when disposing it fails", async () => {
     const backend = createBackend(true);
     backend.dispose.mockRejectedValueOnce(new Error("dispose failed"));
     testState.createBackend.mockResolvedValueOnce(backend);
@@ -218,10 +265,58 @@ describe("AgentManager runtime updates", () => {
     await manager.createSession("session-4", "codex", "C:\\project", "native-session-4");
     await expect(manager.removeSession("session-4")).rejects.toThrow("dispose failed");
 
-    expect(manager.getAgentBySessionId("session-4")).toBe(backend);
-    expect(manager.getSessionAgentType("session-4")).toBe("codex");
-    expect(manager.getSessionFilePath("session-4")).toBe("native-session-4");
-    expect(manager.hasAgentSessions("codex")).toBe(true);
+    expect(manager.getAgentBySessionId("session-4")).toBeNull();
+    expect(manager.getSessionAgentType("session-4")).toBeUndefined();
+    expect(manager.getSessionFilePath("session-4")).toBeUndefined();
+    expect(manager.hasAgentSessions("codex")).toBe(false);
+    await manager.shutdown();
+  });
+
+  it("awaits old backend teardown without rolling back an initialized replacement", async () => {
+    const originalBackend = createBackend(true);
+    const replacementBackend = createBackend(true);
+    const disposal = createDeferred();
+    originalBackend.dispose.mockImplementationOnce(() => disposal.promise);
+    testState.createBackend
+      .mockResolvedValueOnce(originalBackend)
+      .mockResolvedValueOnce(replacementBackend);
+    const manager = new AgentManager();
+
+    await manager.createSession("reload-session", "codex", "C:\\project", "native-reload");
+    let settled = false;
+    const reload = manager.reloadConfig("codex", "reload-session").finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => expect(originalBackend.dispose).toHaveBeenCalledTimes(1));
+    expect(manager.getAgentBySessionId("reload-session")).toBe(replacementBackend);
+    expect(settled).toBe(false);
+
+    disposal.reject(new Error("old backend dispose failed"));
+    await expect(reload).resolves.toMatchObject({
+      success: true,
+      reloadedSessionIds: ["reload-session"],
+    });
+    expect(manager.getAgentBySessionId("reload-session")).toBe(replacementBackend);
+    await manager.shutdown();
+  });
+
+  it("disposes a replacement backend whose initialization fails", async () => {
+    const originalBackend = createBackend(true);
+    const failedReplacement = createBackend(true);
+    failedReplacement.init.mockRejectedValueOnce(new Error("replacement init failed"));
+    testState.createBackend
+      .mockResolvedValueOnce(originalBackend)
+      .mockResolvedValueOnce(failedReplacement);
+    const manager = new AgentManager();
+
+    await manager.createSession("failed-reload", "codex", "C:\\project", "native-reload");
+    await expect(manager.reloadConfig("codex", "failed-reload"))
+      .rejects.toThrow("replacement init failed");
+
+    expect(failedReplacement.dispose).toHaveBeenCalledTimes(1);
+    expect(originalBackend.dispose).not.toHaveBeenCalled();
+    expect(manager.getAgentBySessionId("failed-reload")).toBe(originalBackend);
     await manager.shutdown();
   });
 });
@@ -258,6 +353,183 @@ describe("AgentManager plugin removal", () => {
     await shutdownAgentRuntime();
   });
 
+  it("returns a UI response failure when the target session has no active agent", async () => {
+    await expect(getHandler("agent:sendUIResponse")({}, {
+      sessionId: "missing-session",
+      id: "question-1",
+      text: "answer",
+    })).resolves.toEqual({
+      success: false,
+      error: "No active agent",
+    });
+  });
+
+  it("awaits and propagates backend UI response failures", async () => {
+    const backend = createBackend(true);
+    backend.sendUIResponse.mockRejectedValueOnce(new Error("response transport failed"));
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "ui-session");
+    observePendingUIEvent("ui-session", {
+      type: "process_event",
+      entryType: "question",
+      requestId: "question-1",
+      state: "running",
+    });
+
+    await expect(getHandler("agent:sendUIResponse")({}, {
+      sessionId: "ui-session",
+      id: "question-1",
+      text: "answer",
+    })).resolves.toEqual({
+      success: false,
+      error: "response transport failed",
+    });
+    expect(backend.sendUIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "ui-session",
+      id: "question-1",
+    }));
+    expect(getPendingUIEvents("ui-session")).toHaveLength(1);
+  });
+
+  it("exposes pending UI snapshots, treats them as busy, and clears them after a successful answer", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "pending-ui-session");
+    observePendingUIEvent("pending-ui-session", {
+      type: "process_event",
+      entryType: "question",
+      requestId: "question-1",
+      method: "permission/request",
+      questions: [{ question: "Allow?" }],
+      state: "running",
+    });
+
+    await expect(getHandler("agent:getPendingUIRequests")({}, "pending-ui-session"))
+      .resolves.toEqual({
+        revision: 1,
+        requests: [expect.objectContaining({
+          sessionId: "pending-ui-session",
+          requestId: "question-1",
+          method: "permission/request",
+        })],
+      });
+    await expect(getHandler("agent:getSessionState")({}, "pending-ui-session"))
+      .resolves.toEqual({ success: true, idle: false });
+
+    await expect(getHandler("agent:sendUIResponse")({}, {
+      sessionId: "pending-ui-session",
+      id: "question-1",
+      text: "yes",
+    })).resolves.toEqual({ success: true, pendingUIRevision: 2 });
+
+    await expect(getHandler("agent:getPendingUIRequests")({}, "pending-ui-session"))
+      .resolves.toEqual({ revision: 2, requests: [] });
+    await expect(getHandler("agent:getSessionState")({}, "pending-ui-session"))
+      .resolves.toEqual({ success: true, idle: true });
+  });
+
+  it("publishes the cleared cache revision so an in-flight stale snapshot cannot revive an answer", async () => {
+    const manager = new AgentManager();
+    const backend = createBackend(false);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    const send = vi.fn();
+    manager.setWindow({ webContents: { send } } as never);
+    await manager.createSession("revision-session", "pi", "C:\\project");
+    observePendingUIEvent("revision-session", {
+      type: "ask_user_question",
+      id: "question-1",
+    });
+
+    await expect(manager.sendUIResponse({
+      sessionId: "revision-session",
+      id: "question-1",
+      text: "yes",
+    })).resolves.toBe(2);
+
+    expect(send).toHaveBeenCalledWith("agent:event", {
+      type: "pending_ui_cache_revision",
+      sessionId: "revision-session",
+      pendingUIRevision: 2,
+    });
+    await manager.shutdown();
+  });
+
+  it("clears pending UI snapshots after aborting or removing a session", async () => {
+    const abortedBackend = createBackend(false);
+    const removedBackend = createBackend(true);
+    testState.createBackend
+      .mockResolvedValueOnce(abortedBackend)
+      .mockResolvedValueOnce(removedBackend);
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "abort-pending-session");
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "remove-pending-session");
+    observePendingUIEvent("abort-pending-session", {
+      type: "ask_user_question", id: "abort-question",
+    });
+    observePendingUIEvent("remove-pending-session", {
+      type: "ask_user_question", id: "remove-question",
+    });
+
+    await expect(getHandler("agent:abort")({}, "abort-pending-session"))
+      .resolves.toEqual({ success: true });
+    await expect(getHandler("agent:removeSession")({}, "remove-pending-session"))
+      .resolves.toEqual({ success: true });
+
+    expect(getPendingUIEvents("abort-pending-session")).toEqual([]);
+    expect(getPendingUIEvents("remove-pending-session")).toEqual([]);
+  });
+
+  it("refreshes backend idle state for session-state reconciliation", async () => {
+    const refreshIdle = vi.fn(async () => true);
+    const backend = { ...createBackend(false), refreshIdle };
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "pi", "C:\project", "refresh-idle-session");
+
+    await expect(getHandler("agent:getSessionState")({}, "refresh-idle-session")).resolves.toEqual({
+      success: true,
+      idle: true,
+    });
+    expect(refreshIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks a cached session state stale when the live idle refresh fails", async () => {
+    const refreshIdle = vi.fn(async () => {
+      throw new Error("idle query failed");
+    });
+    const backend = { ...createBackend(false), refreshIdle };
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "stale-idle-session");
+
+    await expect(getHandler("agent:getSessionState")({}, "stale-idle-session")).resolves.toEqual({
+      success: true,
+      idle: false,
+      stale: true,
+      error: "idle query failed",
+    });
+  });
+
+  it("bounds a hanging idle refresh and returns the guarded cache as stale", async () => {
+    vi.useFakeTimers();
+    try {
+      const refreshIdle = vi.fn(() => new Promise<boolean>(() => undefined));
+      const backend = { ...createBackend(false), refreshIdle };
+      testState.createBackend.mockResolvedValueOnce(backend);
+      await getHandler("agent:createSession")({}, "pi", "C:\\project", "hanging-idle-session");
+
+      const statePromise = getHandler("agent:getSessionState")({}, "hanging-idle-session");
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      await expect(statePromise).resolves.toEqual({
+        success: true,
+        idle: false,
+        stale: true,
+        error: "Agent idle refresh timed out",
+      });
+      expect(refreshIdle).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("updates an official plugin by suspending and restoring idle sessions", async () => {
     const idleBackend = createBackend(true);
     const restoredBackend = createBackend(true);
@@ -278,8 +550,10 @@ describe("AgentManager plugin removal", () => {
       expectedAgentId: "pi",
       canReplace: expect.any(Function),
     });
-    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "pi-session.json");
-    expect(getHandler("agent:getSessionState")({}, "idle-pi-session")).toMatchObject({
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "pi-session.json", {
+      hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+    });
+    expect(await getHandler("agent:getSessionState")({}, "idle-pi-session")).toMatchObject({
       success: true,
       idle: true,
     });
@@ -306,7 +580,9 @@ describe("AgentManager plugin removal", () => {
       expectedAgentId: "pi",
       canReplace: expect.any(Function),
     });
-    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "pi-session.json");
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "pi-session.json", {
+      hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+    });
   });
 
   it("blocks an official plugin update only while a session is actually running", async () => {
@@ -341,7 +617,7 @@ describe("AgentManager plugin removal", () => {
     expect(testState.removePlugin).toHaveBeenCalledWith("codex", false);
     expect(idleBackend.dispose.mock.invocationCallOrder[0])
       .toBeLessThan(testState.removePlugin.mock.invocationCallOrder[0]);
-    expect(getHandler("agent:getSessionState")({}, "idle-session")).toEqual({
+    expect(await getHandler("agent:getSessionState")({}, "idle-session")).toEqual({
       success: false,
       idle: true,
       error: "No active agent",
@@ -362,14 +638,51 @@ describe("AgentManager plugin removal", () => {
     )).resolves.toMatchObject({ success: true });
 
     expect(backend.sendMessage).toHaveBeenCalledWith(
-      expect.stringContaining("inspect the project"),
+      expect.stringMatching(/当前回合已启用计划模式[\s\S]*inspect the project/),
       undefined,
       expect.objectContaining({
         planModeEnabled: false,
         permissionMode: "ask",
         clientMessageId: "client-1",
+        displayMessage: "inspect the project",
+        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
       }),
     );
+  });
+
+  it("uses Pi's built-in native Plan mode even with an older prompt-mode plugin manifest", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "pi-native-plan");
+    testState.getCapabilities.mockResolvedValueOnce({
+      planMode: "prompt",
+      permissions: true,
+      guidance: true,
+      fork: true,
+      actions: true,
+      configuration: "none",
+      providerActivation: "none",
+    });
+    await expect(getHandler("agent:sendMessage")(
+      {},
+      "inspect the project",
+      undefined,
+      "pi-native-plan",
+      { planModeEnabled: true, permissionMode: "auto" },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(backend.sendMessage).toHaveBeenCalledWith(
+      "inspect the project",
+      undefined,
+      expect.objectContaining({
+        planModeEnabled: true,
+        permissionMode: "auto",
+        displayMessage: "inspect the project",
+        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+      }),
+    );
+    expect(backend.sendMessage.mock.calls[0]?.[0]).not.toContain("<plan_mode>");
   });
 
   it("does not claim to enforce permissions for plugins without an approval hook", async () => {
@@ -395,9 +708,13 @@ describe("AgentManager plugin removal", () => {
     );
 
     expect(backend.sendMessage).toHaveBeenCalledWith(
-      "run",
+      expect.stringContaining("run"),
       undefined,
-      expect.objectContaining({ permissionMode: "full-access" }),
+      expect.objectContaining({
+        permissionMode: "full-access",
+        displayMessage: "run",
+        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+      }),
     );
   });
 
@@ -414,7 +731,7 @@ describe("AgentManager plugin removal", () => {
     });
     expect(runningBackend.dispose).not.toHaveBeenCalled();
     expect(testState.removePlugin).not.toHaveBeenCalled();
-    expect(getHandler("agent:getSessionState")({}, "running-session")).toEqual({
+    expect(await getHandler("agent:getSessionState")({}, "running-session")).toEqual({
       success: true,
       idle: false,
     });
@@ -439,8 +756,10 @@ describe("AgentManager plugin removal", () => {
 
     expect(result).toMatchObject({ success: false, error: "remove failed" });
     expect(interruptedBackend.dispose).toHaveBeenCalledTimes(1);
-    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "native-interrupted");
-    expect(getHandler("agent:getSessionState")({}, "interrupted-session")).toEqual({
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\project", "native-interrupted", {
+      hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+    });
+    expect(await getHandler("agent:getSessionState")({}, "interrupted-session")).toEqual({
       success: true,
       idle: true,
     });
@@ -465,12 +784,14 @@ describe("AgentManager plugin removal", () => {
       error: "无法关闭 Agent 空闲会话：dispose failed",
     });
     expect(testState.removePlugin).not.toHaveBeenCalled();
-    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\first", "native-first");
-    expect(getHandler("agent:getSessionState")({}, "first-session")).toEqual({
+    expect(restoredBackend.init).toHaveBeenCalledWith("C:\\first", "native-first", {
+      hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+    });
+    expect(await getHandler("agent:getSessionState")({}, "first-session")).toEqual({
       success: true,
       idle: true,
     });
-    expect(getHandler("agent:getSessionState")({}, "second-session")).toEqual({
+    expect(await getHandler("agent:getSessionState")({}, "second-session")).toEqual({
       success: true,
       idle: true,
     });
@@ -500,7 +821,7 @@ describe("AgentManager plugin removal", () => {
       detachedSessionIds: ["restore-failure"],
     });
     expect(failedReplacement.dispose).toHaveBeenCalledTimes(1);
-    expect(getHandler("agent:getSessionState")({}, "restore-failure")).toMatchObject({
+    expect(await getHandler("agent:getSessionState")({}, "restore-failure")).toMatchObject({
       success: false,
       error: "No active agent",
     });

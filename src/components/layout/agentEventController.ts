@@ -4,6 +4,7 @@ import {
   ASSISTANT_NARRATION_PROCESS_KIND,
 } from "@shared/process-view";
 import {
+  hasOpenAssistantProcessState,
   useChatStore,
   type AgentProcessEntry,
   type AgentProcessFile,
@@ -13,13 +14,18 @@ import { useProjectStore } from "@/stores/project-store";
 import type { AgentEvent } from "@/types";
 import { normalizeAskQuestionsFromCandidates } from "./QuestionnairePanel";
 import {
+  activateSessionRuntimeTurn,
   asRecord,
   buildInferredPlanSteps,
   createProcessEntryId,
   createSessionRuntime,
   getRepeatedThinkingPattern,
+  getContextCompactionPresentation,
   getThinkingPreview,
+  markSessionRuntimeTurnSettled,
   mergeRuntimeChangeFile,
+  normalizeAgentTurnRevision,
+  rememberSettledCompactionEvent,
   resetSessionRuntimeAfterTurn,
   scheduleRuntimeRenderFlush,
   summarizeRuntimeChanges,
@@ -34,10 +40,16 @@ import type {
 type CreateAgentEventControllerOptions = {
   activeAgentIdRef: { current: string };
   sessionRuntimeRef: { current: Record<string, SessionRuntime> };
-  pendingUIResponseRef: { current: PendingUIResponse };
+  getPendingUIResponse: (sessionId: string) => PendingUIResponse;
   setPendingUIResponse: AgentEventRuntimeController["setPendingUIResponse"];
   setStreamingState: AgentEventRuntimeController["setStreamingState"];
+  preserveAssistantProcessCollapse?: (sessionId: string, action: () => void) => void;
 };
+
+const AGENT_END_GRACE_MS = 750;
+const AGENT_END_QUERY_RETRY_MS = 1_000;
+const AGENT_END_QUERY_FAILURE_LIMIT = 3;
+const STREAM_WATCHDOG_MS = 45_000;
 
 const firstNonEmptyString = (...values: unknown[]) => {
   for (const value of values) {
@@ -49,10 +61,20 @@ const firstNonEmptyString = (...values: unknown[]) => {
 export function createAgentEventController({
   activeAgentIdRef,
   sessionRuntimeRef,
-  pendingUIResponseRef,
+  getPendingUIResponse,
   setPendingUIResponse,
   setStreamingState,
+  preserveAssistantProcessCollapse,
 }: CreateAgentEventControllerOptions): AgentEventRuntimeController {
+  const agentEndGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const agentEndGraceVersions = new Map<string, number>();
+  const agentEndAwaitingReconciliation = new Set<string>();
+  const agentEndStateQueryFailures = new Map<string, number>();
+  const streamWatchdogVersions = new Map<string, number>();
+  const discardedSessionTurns = new Map<string, {
+    revisions: string[];
+    userMessageIds: string[];
+  }>();
   const getActiveAgentId = () => activeAgentIdRef.current;
   const getSessionAgentName = (sessionId: string) => {
     const session = useProjectStore.getState().projects
@@ -64,8 +86,81 @@ export function createAgentEventController({
     const existing = sessionRuntimeRef.current[sessionId];
     if (existing) return existing;
     const runtime = createSessionRuntime();
+    const discardedTurn = discardedSessionTurns.get(sessionId);
+    if (discardedTurn) {
+      runtime.turnEventState = "settled";
+      runtime.turnTerminalReason = "aborted";
+      runtime.settledTurnRevisions = [...discardedTurn.revisions];
+      runtime.settledTurnUserMessageIds = [...discardedTurn.userMessageIds];
+    }
     sessionRuntimeRef.current[sessionId] = runtime;
     return runtime;
+  };
+
+  const getSessionMessages = (sessionId: string) => {
+    const state = useChatStore.getState();
+    return state.sessionMessages[sessionId] || (state.activeSessionId === sessionId ? state.messages : []);
+  };
+
+  const hasOpenAssistantProcess = (sessionId: string) =>
+    getSessionMessages(sessionId).some(hasOpenAssistantProcessState);
+
+  const getLatestUserMessageId = (sessionId: string) => {
+    const messages = getSessionMessages(sessionId);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "user") return messages[index].id;
+    }
+    return null;
+  };
+
+  const clearAgentEndGraceTimer = (sessionId: string) => {
+    agentEndGraceVersions.set(sessionId, (agentEndGraceVersions.get(sessionId) || 0) + 1);
+    const timer = agentEndGraceTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    agentEndGraceTimers.delete(sessionId);
+  };
+
+  const clearAgentEndObservation = (sessionId: string) => {
+    agentEndAwaitingReconciliation.delete(sessionId);
+    agentEndStateQueryFailures.delete(sessionId);
+  };
+
+  const cancelAgentEndGrace = (sessionId: string) => {
+    clearAgentEndGraceTimer(sessionId);
+    clearAgentEndObservation(sessionId);
+  };
+
+  const stopContextCompaction = (sessionId: string) => {
+    const runtime = getRuntime(sessionId);
+    if (runtime.activeCompactionId) {
+      rememberSettledCompactionEvent(runtime, runtime.activeCompactionId);
+      if (runtime.activeCompactionPresentation === "process") {
+        useChatStore.getState().updateLastAssistantProcessEntry(runtime.activeCompactionId, {
+          title: "上下文压缩已中断",
+          state: "interrupted",
+          expanded: false,
+        }, sessionId);
+      } else {
+        useChatStore.getState().appendContextCompactionDivider(
+          runtime.activeCompactionId,
+          sessionId,
+          "interrupted",
+        );
+      }
+      runtime.activeCompactionId = null;
+      runtime.activeCompactionPresentation = null;
+    }
+    useChatStore.getState().interruptSessionCompaction(sessionId);
+  };
+
+  const promoteContextCompactionToDivider = (sessionId: string) => {
+    const runtime = getRuntime(sessionId);
+    if (!runtime.activeCompactionId || runtime.activeCompactionPresentation !== "process") return;
+    const compactionId = runtime.activeCompactionId;
+    const chatStore = useChatStore.getState();
+    chatStore.removeLastAssistantProcessEntries([compactionId], sessionId);
+    chatStore.appendContextCompactionDivider(compactionId, sessionId, "running");
+    runtime.activeCompactionPresentation = "divider";
   };
 
   const isOpenProjectSession = (sessionId: string) =>
@@ -73,16 +168,39 @@ export function createAgentEventController({
       project.sessions.some((session) => session.id === sessionId && !session.closed)
     );
 
-  const discardRuntime = (sessionId: string) => {
+  const discardRuntime = (sessionId: string, event?: AgentEvent) => {
     const runtime = sessionRuntimeRef.current[sessionId];
+    const eventRevision = normalizeAgentTurnRevision(event?.lifecycleRevision ?? event?.turnRevision);
+    cancelAgentEndGrace(sessionId);
     if (runtime) {
+      stopContextCompaction(sessionId);
       if (runtime.streamWatchdog) {
         clearTimeout(runtime.streamWatchdog);
         runtime.streamWatchdog = null;
       }
       resetSessionRuntimeAfterTurn(runtime);
+      markSessionRuntimeTurnSettled(runtime, "aborted", {
+        revision: eventRevision,
+        userMessageId: runtime.activeTurnUserMessageId || getLatestUserMessageId(sessionId),
+      });
+      discardedSessionTurns.set(sessionId, {
+        revisions: [...runtime.settledTurnRevisions],
+        userMessageIds: [...runtime.settledTurnUserMessageIds],
+      });
       delete sessionRuntimeRef.current[sessionId];
+    } else {
+      const userMessageId = getLatestUserMessageId(sessionId);
+      const discardedTurn = discardedSessionTurns.get(sessionId) || { revisions: [], userMessageIds: [] };
+      if (eventRevision && !discardedTurn.revisions.includes(eventRevision)) {
+        discardedTurn.revisions.push(eventRevision);
+      }
+      if (userMessageId && !discardedTurn.userMessageIds.includes(userMessageId)) {
+        discardedTurn.userMessageIds.push(userMessageId);
+      }
+      discardedSessionTurns.set(sessionId, discardedTurn);
     }
+    useChatStore.getState().finishAllAssistantProcesses(Date.now(), "interrupted", sessionId);
+    useChatStore.getState().interruptSessionCompaction(sessionId);
     setPendingUIResponse((current) => current?.sessionId === sessionId ? null : current);
   };
 
@@ -132,6 +250,7 @@ export function createAgentEventController({
     if (entry.id && hasLastAssistantProcessEntry(sessionId, entry.id)) {
       useChatStore.getState().updateLastAssistantProcessEntry(entry.id, {
         type: entry.type,
+        ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
         title: entry.title,
         ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
         ...(entry.files !== undefined ? { files: entry.files } : {}),
@@ -145,6 +264,8 @@ export function createAgentEventController({
         ...(entry.activityKind !== undefined ? { activityKind: entry.activityKind } : {}),
         ...(entry.startedAt !== undefined ? { startedAt: entry.startedAt } : {}),
         ...(entry.completedAt !== undefined ? { completedAt: entry.completedAt } : {}),
+        ...(entry.guidanceDocument !== undefined ? { guidanceDocument: entry.guidanceDocument } : {}),
+        ...(entry.guidanceImages !== undefined ? { guidanceImages: entry.guidanceImages } : {}),
       }, sessionId);
       return;
     }
@@ -152,6 +273,7 @@ export function createAgentEventController({
       id: entry.id || createProcessEntryId(),
       timestamp: entry.timestamp || Date.now(),
       type: entry.type,
+      kind: entry.kind,
       title: entry.title,
       detail: entry.detail,
       files: entry.files,
@@ -166,6 +288,8 @@ export function createAgentEventController({
       activityKind: entry.activityKind,
       startedAt: entry.startedAt,
       completedAt: entry.completedAt,
+      guidanceDocument: entry.guidanceDocument,
+      guidanceImages: entry.guidanceImages,
     }, sessionId);
   };
 
@@ -206,12 +330,15 @@ export function createAgentEventController({
   const completeIdleNotice = (sessionId: string) => {
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
-    if (!runtime.streamIdleNoticeEntryId) return;
-    useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
-      state: "completed",
-      expanded: false,
-    }, sessionId);
+    if (runtime.streamIdleNoticeEntryId) {
+      useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
+        state: "completed",
+        completedAt: Date.now(),
+        expanded: false,
+      }, sessionId);
+    }
     runtime.streamIdleNoticeEntryId = null;
+    runtime.streamIdleSince = null;
   };
 
   const appendOrRefreshIdleNotice = (sessionId: string) => {
@@ -219,11 +346,16 @@ export function createAgentEventController({
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
     const agentName = getSessionAgentName(sessionId);
+    runtime.streamIdleSince ??= Date.now();
+    const idleSince = runtime.streamIdleSince;
 
     if (runtime.streamIdleNoticeEntryId) {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
         title: `${agentName} 仍在运行，暂时没有新输出`,
         detail: `${agentName} 任务还没有结束，正在等待后续事件或最终响应。`,
+        toolKind: "stream_idle_notice",
+        startedAt: idleSince,
+        completedAt: undefined,
         state: "running",
         expanded: false,
       }, sessionId);
@@ -235,6 +367,8 @@ export function createAgentEventController({
         type: "status",
         title: `${agentName} 仍在运行，暂时没有新输出`,
         detail: `${agentName} 任务还没有结束，正在等待后续事件或最终响应。`,
+        toolKind: "stream_idle_notice",
+        startedAt: idleSince,
         state: "running",
         expanded: false,
       });
@@ -254,6 +388,7 @@ export function createAgentEventController({
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
         title: `${agentName} 仍在执行上一条请求`,
         detail: `新的发送请求已忽略；当前 ${agentName} 任务还在运行，后续输出会继续追加到这里。`,
+        toolKind: "already_running_notice",
         state: "running",
         expanded: false,
       }, sessionId);
@@ -265,6 +400,7 @@ export function createAgentEventController({
         type: "status",
         title: `${agentName} 仍在执行上一条请求`,
         detail: `新的发送请求已忽略；当前 ${agentName} 任务还在运行，后续输出会继续追加到这里。`,
+        toolKind: "already_running_notice",
         state: "running",
         expanded: false,
       });
@@ -276,21 +412,9 @@ export function createAgentEventController({
   };
 
   const finishManualAbort = (sessionId: string) => {
-    flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
     if (!runtime.manualAbortRequested) return;
-    clearStreamWatchdog(sessionId);
-    completeIdleNotice(sessionId);
-    finishAssistantProcessText(sessionId);
-    finishThinkingEntry(sessionId);
-    updateInferredPlanSteps(sessionId, "cancelled");
-    useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
-    resetSessionRuntimeAfterTurn(runtime);
-    runtime.autoAbortReason = null;
-    runtime.manualAbortRequested = false;
-    setPendingUIResponse((current) => current?.sessionId === sessionId ? null : current);
-    if (sessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
-    useProjectStore.getState().setAgentStatus(sessionId, "idle");
+    finishAbortedTurn(sessionId);
   };
 
   const finishThinkingEntry = (sessionId: string) => {
@@ -311,10 +435,7 @@ export function createAgentEventController({
     if (runtime.autoAbortReason) return;
 
     runtime.autoAbortReason = "repeated-thinking";
-    if (runtime.streamWatchdog) {
-      clearTimeout(runtime.streamWatchdog);
-      runtime.streamWatchdog = null;
-    }
+    clearStreamWatchdog(sessionId);
 
     useChatStore.getState().appendLastAssistantProcessEntry({
       id: createProcessEntryId(),
@@ -325,13 +446,7 @@ export function createAgentEventController({
       state: "interrupted",
       expanded: false,
     }, sessionId);
-    useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", sessionId);
-
-    resetSessionRuntimeAfterTurn(runtime);
-
-    setPendingUIResponse((current) => current?.sessionId === sessionId ? null : current);
-    if (sessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
-    useProjectStore.getState().setAgentStatus(sessionId, "idle");
+    finishAbortedTurn(sessionId);
 
     void window.electronAPI.agentAbort(sessionId).catch((err) => {
       console.error("[agent] auto abort repeated thinking failed:", err);
@@ -469,7 +584,7 @@ export function createAgentEventController({
         title: `正在思考: ${thinkingPreview}`,
         detail: runtime.thinkingBuffer,
         state: "running",
-        expanded: false,
+        expanded: true,
       });
     }
 
@@ -545,6 +660,7 @@ export function createAgentEventController({
     if (!sessionId) {
       return;
     }
+    streamWatchdogVersions.set(sessionId, (streamWatchdogVersions.get(sessionId) || 0) + 1);
     const runtime = getRuntime(sessionId);
     if (runtime.streamWatchdog) {
       clearTimeout(runtime.streamWatchdog);
@@ -553,7 +669,7 @@ export function createAgentEventController({
   };
 
   const notifyAgentTaskCompleted = (sessionId: string, timedOut: boolean) => {
-    if (document.visibilityState === "visible" && document.hasFocus()) return;
+    if (typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus())) return;
 
     const projectState = useProjectStore.getState();
     const project = projectState.projects.find((candidate) =>
@@ -575,87 +691,298 @@ export function createAgentEventController({
     });
   };
 
+  type SettleAssistantTurnOptions = {
+    finalState: "completed" | "interrupted";
+    planSignal: InferredStepSignal;
+    status: "normal" | "idle" | "error";
+    content?: string;
+    finalizeContent?: boolean;
+    finishAllProcesses?: boolean;
+    stopCompaction?: boolean;
+    promoteCompaction?: boolean;
+    errorEntry?: { title: string; detail?: string; onlyWhenEmpty?: boolean };
+    notify?: "completed" | "stopped";
+    terminalReason: "completed" | "aborted" | "disconnected" | "error";
+  };
+
+  const settleAssistantTurn = (
+    currentSessionId: string,
+    options: SettleAssistantTurnOptions,
+  ) => {
+    const runtime = getRuntime(currentSessionId);
+    cancelAgentEndGrace(currentSessionId);
+    if (options.stopCompaction) stopContextCompaction(currentSessionId);
+    clearStreamWatchdog(currentSessionId);
+    completeIdleNotice(currentSessionId);
+    finishAssistantProcessText(currentSessionId);
+    finishThinkingEntry(currentSessionId);
+    updateInferredPlanSteps(currentSessionId, options.planSignal);
+
+    const finalContent = options.finalizeContent === false
+      ? ""
+      : stripProcessTextPrefixFromFinal(currentSessionId, options.content || runtime.streamBuffer);
+    if (finalContent.trim()) {
+      runtime.streamBuffer = finalContent;
+      const finalizeVisibleResponse = () => {
+        useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
+        moveFinalAssistantProcessTextToBubble(currentSessionId, finalContent);
+        useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
+      };
+      if (preserveAssistantProcessCollapse) {
+        preserveAssistantProcessCollapse(currentSessionId, finalizeVisibleResponse);
+      } else {
+        finalizeVisibleResponse();
+      }
+    }
+
+    if (options.errorEntry && (!options.errorEntry.onlyWhenEmpty || !finalContent.trim())) {
+      useChatStore.getState().appendLastAssistantProcessEntry({
+        id: createProcessEntryId(),
+        timestamp: Date.now(),
+        type: "error",
+        title: options.errorEntry.title,
+        detail: options.errorEntry.detail,
+        state: "error",
+        expanded: false,
+      }, currentSessionId);
+    }
+
+    if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
+    const chatStore = useChatStore.getState();
+    if (options.finishAllProcesses) {
+      chatStore.finishAllAssistantProcesses(Date.now(), options.finalState, currentSessionId);
+    } else {
+      chatStore.finishLastAssistantProcess(Date.now(), options.finalState, currentSessionId);
+    }
+    if (options.promoteCompaction) promoteContextCompactionToDivider(currentSessionId);
+    resetSessionRuntimeAfterTurn(runtime);
+    markSessionRuntimeTurnSettled(runtime, options.terminalReason, {
+      userMessageId: runtime.activeTurnUserMessageId || getLatestUserMessageId(currentSessionId),
+    });
+    runtime.autoAbortReason = null;
+    setPendingUIResponse((current) => current?.sessionId === currentSessionId ? null : current);
+
+    const activeId = useProjectStore.getState().activeSessionId;
+    const status = options.status === "normal"
+      ? currentSessionId === activeId ? "idle" : "completed"
+      : options.status;
+    useProjectStore.getState().setAgentStatus(currentSessionId, status);
+    if (options.notify) notifyAgentTaskCompleted(currentSessionId, options.notify === "stopped");
+  };
+
+  const settleRuntimeTurnOnly = (
+    currentSessionId: string,
+    terminalReason: "completed" | "aborted" | "disconnected" | "error",
+  ) => {
+    const runtime = getRuntime(currentSessionId);
+    const userMessageId = runtime.activeTurnUserMessageId || getLatestUserMessageId(currentSessionId);
+    cancelAgentEndGrace(currentSessionId);
+    clearStreamWatchdog(currentSessionId);
+    resetSessionRuntimeAfterTurn(runtime);
+    markSessionRuntimeTurnSettled(runtime, terminalReason, { userMessageId });
+    runtime.autoAbortReason = null;
+    if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
+  };
+
   const completeAssistantStream = (
     currentSessionId: string,
     content?: string,
     timedOut = false
   ) => {
-    const runtime = getRuntime(currentSessionId);
-    clearStreamWatchdog(currentSessionId);
-    completeIdleNotice(currentSessionId);
-    finishAssistantProcessText(currentSessionId);
-    updateInferredPlanSteps(currentSessionId, timedOut ? "failed" : "verify");
-    const finalContent = stripProcessTextPrefixFromFinal(currentSessionId, content || runtime.streamBuffer);
-    if (finalContent.trim().length > 0) {
-      runtime.streamBuffer = finalContent;
-      useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
-      moveFinalAssistantProcessTextToBubble(currentSessionId, finalContent);
-      useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
-    } else if (timedOut) {
-      useChatStore.getState().appendLastAssistantProcessEntry({
-        id: createProcessEntryId(),
-        timestamp: Date.now(),
-        type: "error",
+    settleAssistantTurn(currentSessionId, {
+      finalState: timedOut ? "interrupted" : "completed",
+      planSignal: timedOut ? "failed" : "verify",
+      status: timedOut ? "error" : "normal",
+      content,
+      finishAllProcesses: true,
+      stopCompaction: timedOut,
+      promoteCompaction: !timedOut,
+      errorEntry: timedOut ? {
         title: "未收到响应结束事件",
-        detail: "Agent 长时间没有返回新的输出，已停止等待。",
-        state: "error",
-        expanded: false,
-      }, currentSessionId);
-    }
-    finishThinkingEntry(currentSessionId);
-    if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
-    useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
-    resetSessionRuntimeAfterTurn(runtime);
-    if (currentSessionId) {
-      const activeId = useProjectStore.getState().activeSessionId;
-      // Only show "completed" notification if the user wasn't watching this session
-      useProjectStore.getState().setAgentStatus(
-        currentSessionId,
-        currentSessionId === activeId ? "idle" : timedOut ? "error" : "completed"
-      );
-    }
-    notifyAgentTaskCompleted(currentSessionId, timedOut);
+        detail: "Agent 连接已经结束，已停止等待后续事件。",
+        onlyWhenEmpty: true,
+      } : undefined,
+      notify: timedOut ? "stopped" : "completed",
+      terminalReason: timedOut ? "disconnected" : "completed",
+    });
   };
 
-  const failAssistantStream = (currentSessionId: string, title: string, detail?: string) => {
+  const finishAbortedTurn = (currentSessionId: string) => {
+    settleAssistantTurn(currentSessionId, {
+      finalState: "interrupted",
+      planSignal: "cancelled",
+      status: "idle",
+      finalizeContent: false,
+      finishAllProcesses: true,
+      stopCompaction: true,
+      terminalReason: "aborted",
+    });
+  };
+
+  const finishDisconnectedTurn = (currentSessionId: string) => {
+    completeAssistantStream(currentSessionId, undefined, true);
+  };
+
+  const finishIdleBackendTurn = (currentSessionId: string) => {
+    // Some adapters report idle while a host-rendered question is still
+    // awaiting its UI response. Never consume that question merely because
+    // the backend's generic idle implementation is coarse; the watchdog will
+    // reconcile the turn again after the pending interaction is answered.
+    if (getPendingUIResponse(currentSessionId)) {
+      refreshStreamWatchdog(currentSessionId);
+      return;
+    }
     const runtime = getRuntime(currentSessionId);
-    clearStreamWatchdog(currentSessionId);
-    completeIdleNotice(currentSessionId);
-    finishAssistantProcessText(currentSessionId);
-    finishThinkingEntry(currentSessionId);
-    updateInferredPlanSteps(currentSessionId, "failed");
+    if (runtime.activeCompactionId) {
+      // backend_idle is authoritative completion evidence when an adapter
+      // loses the explicit compaction-completed event. Finalize the visible
+      // compaction before settling the turn so it does not look interrupted.
+      appendContextCompactionDivider(
+        currentSessionId,
+        runtime.activeCompactionId,
+        "completed",
+      );
+    }
+    if (!hasVisibleSessionTurnState(currentSessionId)) {
+      settleRuntimeTurnOnly(currentSessionId, "completed");
+      return;
+    }
+    settleAssistantTurn(currentSessionId, {
+      finalState: "completed",
+      planSignal: "verify",
+      status: "normal",
+      finishAllProcesses: true,
+      stopCompaction: true,
+      notify: "completed",
+      terminalReason: "completed",
+    });
+  };
 
-    useChatStore.getState().appendLastAssistantProcessEntry({
-      id: createProcessEntryId(),
-      timestamp: Date.now(),
-      type: "error",
-      title,
-      detail,
-      state: "error",
-      expanded: false,
-    }, currentSessionId);
-    useChatStore.getState().finishLastAssistantProcess(Date.now(), "interrupted", currentSessionId);
+  const hasVisibleSessionTurnState = (sessionId: string) => {
+    const runtime = getRuntime(sessionId);
+    return runtime.processActive ||
+      hasOpenAssistantProcess(sessionId) ||
+      useChatStore.getState().compactingSessions[sessionId] === true ||
+      useProjectStore.getState().agentStatuses[sessionId] === "running";
+  };
 
-    resetSessionRuntimeAfterTurn(runtime);
-    runtime.autoAbortReason = null;
+  const isSessionTurnStillOpen = (sessionId: string) => {
+    const runtime = getRuntime(sessionId);
+    return runtime.turnEventState === "active" || hasVisibleSessionTurnState(sessionId);
+  };
 
-    if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
-    useProjectStore.getState().setAgentStatus(currentSessionId, "error");
+  const retryOrFinishUnavailableAgentEndState = (sessionId: string) => {
+    if (!agentEndAwaitingReconciliation.has(sessionId)) return false;
+    const failureCount = (agentEndStateQueryFailures.get(sessionId) || 0) + 1;
+    agentEndStateQueryFailures.set(sessionId, failureCount);
+    if (failureCount >= AGENT_END_QUERY_FAILURE_LIMIT) {
+      finishDisconnectedTurn(sessionId);
+      return true;
+    }
+    armAgentEndGrace(sessionId, AGENT_END_QUERY_RETRY_MS * failureCount);
+    return true;
   };
 
   const refreshStreamWatchdog = (currentSessionId: string) => {
     const runtime = getRuntime(currentSessionId);
     clearStreamWatchdog(currentSessionId);
-    if (!runtime.processActive || runtime.manualAbortRequested) return;
+    if (!isSessionTurnStillOpen(currentSessionId) || runtime.manualAbortRequested) return;
+    runtime.streamIdleSince ??= Date.now();
+    const version = streamWatchdogVersions.get(currentSessionId) || 0;
     runtime.streamWatchdog = setTimeout(() => {
-      appendOrRefreshIdleNotice(currentSessionId);
-      refreshStreamWatchdog(currentSessionId);
-    }, 45000);
+      runtime.streamWatchdog = null;
+      void window.electronAPI.agentGetSessionState(currentSessionId)
+        .catch(() => null)
+        .then((state) => {
+          if (streamWatchdogVersions.get(currentSessionId) !== version) return;
+          if (!isSessionTurnStillOpen(currentSessionId) || runtime.manualAbortRequested) return;
+          const awaitingUI = !!getPendingUIResponse(currentSessionId);
+          const stateIsFresh = state?.stale !== true;
+          if (stateIsFresh && state?.idle === true && !awaitingUI) {
+            if (!hasVisibleSessionTurnState(currentSessionId)) {
+              settleRuntimeTurnOnly(
+                currentSessionId,
+                state.success === true ? "completed" : "disconnected",
+              );
+            } else if (state.success === true) finishIdleBackendTurn(currentSessionId);
+            else finishDisconnectedTurn(currentSessionId);
+            return;
+          }
+          if (
+            !awaitingUI &&
+            (!stateIsFresh || state?.idle !== false) &&
+            retryOrFinishUnavailableAgentEndState(currentSessionId)
+          ) {
+            return;
+          }
+          if (stateIsFresh && state?.idle === false) clearAgentEndObservation(currentSessionId);
+          if (!awaitingUI) {
+            if (!hasVisibleSessionTurnState(currentSessionId)) ensureAssistantContinuation(currentSessionId);
+            appendOrRefreshIdleNotice(currentSessionId);
+          }
+          refreshStreamWatchdog(currentSessionId);
+        });
+    }, STREAM_WATCHDOG_MS);
+  };
+
+  function armAgentEndGrace(currentSessionId: string, delayMs = AGENT_END_GRACE_MS) {
+    clearAgentEndGraceTimer(currentSessionId);
+    if (!isSessionTurnStillOpen(currentSessionId)) return;
+    const version = agentEndGraceVersions.get(currentSessionId) || 0;
+    const timer = setTimeout(() => {
+      agentEndGraceTimers.delete(currentSessionId);
+      if (getRuntime(currentSessionId).manualAbortRequested) {
+        finishAbortedTurn(currentSessionId);
+        return;
+      }
+      void window.electronAPI.agentGetSessionState(currentSessionId)
+        .catch(() => null)
+        .then((state) => {
+          if (agentEndGraceVersions.get(currentSessionId) !== version) return;
+          if (!isSessionTurnStillOpen(currentSessionId)) return;
+          if (getPendingUIResponse(currentSessionId)) {
+            refreshStreamWatchdog(currentSessionId);
+            return;
+          }
+          const stateIsFresh = state?.stale !== true;
+          if (stateIsFresh && state?.idle === true) {
+            if (!hasVisibleSessionTurnState(currentSessionId)) {
+              settleRuntimeTurnOnly(
+                currentSessionId,
+                state.success === true ? "completed" : "disconnected",
+              );
+            } else if (state.success === true) finishIdleBackendTurn(currentSessionId);
+            else finishDisconnectedTurn(currentSessionId);
+            return;
+          }
+          if ((!stateIsFresh || state?.idle !== false) && retryOrFinishUnavailableAgentEndState(currentSessionId)) {
+            return;
+          }
+          clearAgentEndObservation(currentSessionId);
+          if (!hasVisibleSessionTurnState(currentSessionId)) ensureAssistantContinuation(currentSessionId);
+          appendOrRefreshIdleNotice(currentSessionId);
+          refreshStreamWatchdog(currentSessionId);
+        });
+    }, delayMs);
+    agentEndGraceTimers.set(currentSessionId, timer);
+  }
+
+  const scheduleAgentEndGrace = (currentSessionId: string) => {
+    const alreadyAwaitingReconciliation = agentEndAwaitingReconciliation.has(currentSessionId);
+    clearAgentEndGraceTimer(currentSessionId);
+    if (!isSessionTurnStillOpen(currentSessionId)) {
+      clearAgentEndObservation(currentSessionId);
+      return;
+    }
+    agentEndAwaitingReconciliation.add(currentSessionId);
+    if (!alreadyAwaitingReconciliation) agentEndStateQueryFailures.set(currentSessionId, 0);
+    armAgentEndGrace(currentSessionId);
   };
 
   const ensureAssistantContinuation = (currentSessionId: string) => {
     const runtime = getRuntime(currentSessionId);
     if (runtime.manualAbortRequested) return runtime;
+    if (!activateSessionRuntimeTurn(runtime)) return runtime;
     if (runtime.processActive) return runtime;
 
     runtime.processActive = true;
@@ -665,42 +992,102 @@ export function createAgentEventController({
     useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
     if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(true);
     useProjectStore.getState().setAgentStatus(currentSessionId, "running");
+    // Some plugins legitimately begin with a tool/thinking/process event and
+    // omit message_start/stream_start. The dispatcher cannot schedule a
+    // watchdog until this call opens the process, so arm it here as part of
+    // the inactive -> active transition.
+    refreshStreamWatchdog(currentSessionId);
     return runtime;
   };
 
-  const appendContextCompactionDivider = (currentSessionId: string, eventId?: string) => {
+  const appendContextCompactionDivider = (
+    currentSessionId: string,
+    eventId?: string,
+    phase: "started" | "completed" | "interrupted" = "completed",
+  ) => {
     const runtime = getRuntime(currentSessionId);
-    if (runtime.processActive) {
+    const normalizedEventId = phase === "started"
+      ? eventId || runtime.activeCompactionId || createProcessEntryId()
+      : runtime.activeCompactionId || eventId || createProcessEntryId();
+    const compactionState = phase === "started"
+      ? "running"
+      : phase === "interrupted"
+        ? "interrupted"
+        : "completed";
+
+    if (phase === "started") {
+      if (runtime.activeCompactionId && runtime.activeCompactionId !== normalizedEventId) {
+        stopContextCompaction(currentSessionId);
+      }
+      const presentation = getContextCompactionPresentation(
+        phase,
+        runtime.processActive,
+        runtime.activeCompactionPresentation,
+      );
+      runtime.activeCompactionId = normalizedEventId;
+      runtime.activeCompactionPresentation = presentation;
+      useChatStore.getState().setSessionCompacting(currentSessionId, true);
       completeIdleNotice(currentSessionId);
       finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
-      appendProcessEntry(currentSessionId, {
-        id: eventId ? `context-compaction-entry-${eventId}` : undefined,
-        type: "status",
-        title: "上下文已自动压缩",
-        state: "completed",
-        expanded: false,
-      });
+      if (presentation === "process") {
+        appendProcessEntry(currentSessionId, {
+          id: normalizedEventId,
+          type: "status",
+          title: "上下文压缩中",
+          state: "running",
+          expanded: false,
+        });
+      } else {
+        useChatStore.getState().appendContextCompactionDivider(
+          normalizedEventId,
+          currentSessionId,
+          compactionState,
+        );
+      }
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(true);
       useProjectStore.getState().setAgentStatus(currentSessionId, "running");
       refreshStreamWatchdog(currentSessionId);
       return;
     }
 
-    useChatStore.getState().appendContextCompactionDivider(eventId, currentSessionId);
+    if (runtime.activeCompactionPresentation === "process") {
+      useChatStore.getState().updateLastAssistantProcessEntry(normalizedEventId, {
+        title: phase === "interrupted" ? "上下文压缩已中断" : "上下文已自动压缩",
+        state: phase === "interrupted" ? "interrupted" : "completed",
+        expanded: false,
+      }, currentSessionId);
+    } else {
+      useChatStore.getState().appendContextCompactionDivider(
+        normalizedEventId,
+        currentSessionId,
+        compactionState,
+      );
+    }
+    rememberSettledCompactionEvent(runtime, normalizedEventId);
+    useChatStore.getState().setSessionCompacting(currentSessionId, false);
+    runtime.activeCompactionId = null;
+    runtime.activeCompactionPresentation = null;
+    if (!runtime.processActive && !hasOpenAssistantProcess(currentSessionId)) {
+      clearStreamWatchdog(currentSessionId);
+      if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(false);
+      useProjectStore.getState().setAgentStatus(currentSessionId, "idle");
+    }
   };
 
   const clearAllStreamWatchdogs = () => {
-    Object.values(sessionRuntimeRef.current).forEach((runtime) => {
+    Object.entries(sessionRuntimeRef.current).forEach(([sessionId, runtime]) => {
+      streamWatchdogVersions.set(sessionId, (streamWatchdogVersions.get(sessionId) || 0) + 1);
       if (runtime.streamWatchdog) {
         clearTimeout(runtime.streamWatchdog);
         runtime.streamWatchdog = null;
       }
     });
+    for (const sessionId of [...agentEndGraceTimers.keys()]) cancelAgentEndGrace(sessionId);
   };
 
   return {
-    pendingUIResponseRef,
+    getPendingUIResponse,
     setPendingUIResponse,
     setStreamingState,
     getRuntime,
@@ -718,13 +1105,18 @@ export function createAgentEventController({
     getPendingUIFromEvent,
     clearStreamWatchdog,
     completeAssistantStream,
-    failAssistantStream,
+    settleRuntimeTurnOnly,
+    finishAbortedTurn,
+    finishDisconnectedTurn,
+    finishIdleBackendTurn,
     refreshStreamWatchdog,
     ensureAssistantContinuation,
     getActiveAgentId,
     isOpenProjectSession,
     discardRuntime,
     finishManualAbort,
+    cancelAgentEndGrace,
+    scheduleAgentEndGrace,
     appendContextCompactionDivider,
     clearAllStreamWatchdogs,
   };

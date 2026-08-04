@@ -85,6 +85,7 @@ export function buildDiffSummary(diffs: DiffLike[], projectPath?: string) {
       additions: file.patches.length > 0 ? patchAdditions : metaAdditions,
       deletions: file.patches.length > 0 ? patchDeletions : metaDeletions,
     }))
+    .filter((file) => file.patches.length > 0 || file.additions > 0 || file.deletions > 0)
     .sort((left, right) => left.file.localeCompare(right.file));
   return {
     files,
