@@ -50,8 +50,10 @@ jobs:
           retention-days: 1
 
       - name: Upload AppImage to release
-        if: inputs.release_tag != ''
+        if: inputs.release_tag != '' || contains(github.event.head_commit.message, '[build-appimage]')
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" linux-release/Hpp-Linux-*-x86_64.AppImage --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then RELEASE_TAG="v$(node -p \"require('./package.json').version\")"; fi
+          gh release upload "$RELEASE_TAG" linux-release/Hpp-Linux-*-x86_64.AppImage --clobber --repo "$GITHUB_REPOSITORY"
