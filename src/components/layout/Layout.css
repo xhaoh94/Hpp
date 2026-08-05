@@ -105,6 +105,7 @@
 }
 
 .layout-content.collapsed.hover-expanded .sidebar-panel {
+  z-index: 200;
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);

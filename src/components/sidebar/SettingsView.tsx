@@ -51,6 +51,7 @@ interface GeneralSettings {
   planModeEnabled: boolean;
   closeToTray: boolean;
   theme: AppTheme;
+  expandThinkingWhileRunning: boolean;
 }
 
 type GeneralSectionId = "appearance" | "behavior" | "editing" | "images" | "storage";
@@ -100,6 +101,7 @@ const formatDiskSize = (bytes: number) => {
 };
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -119,6 +121,7 @@ function normalizeGeneral(value: unknown): GeneralSettings {
       general.closeToTrayExplicit === true,
     ),
     theme: normalizeAppTheme(general.theme),
+    expandThinkingWhileRunning: general.expandThinkingWhileRunning !== false,
   };
 }
 
@@ -158,6 +161,7 @@ export function SettingsView() {
   const [appVersion, setAppVersion] = useState("");
   const [closeToTray, setCloseToTray] = useState(DEFAULT_CLOSE_TO_TRAY);
   const [theme, setTheme] = useState<AppTheme>("dark");
+  const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(true);
   const [diskUsage, setDiskUsage] = useState<DiskUsageStats | null>(null);
   const [diskUsageLoading, setDiskUsageLoading] = useState(false);
   const [diskCleanupLoading, setDiskCleanupLoading] = useState(false);
@@ -192,6 +196,7 @@ export function SettingsView() {
         setPlanModeEnabled(general.planModeEnabled);
         setCloseToTray(general.closeToTray);
         setTheme(general.theme);
+        setExpandThinkingWhileRunning(general.expandThinkingWhileRunning);
         applyAppTheme(general.theme);
         if (originalGeneral.imageRetentionHours !== IMAGE_RETENTION_HOURS) {
           void window.electronAPI.saveData("settings", {
@@ -318,6 +323,7 @@ export function SettingsView() {
       planModeEnabled,
       closeToTray,
       theme,
+      expandThinkingWhileRunning,
     };
     const nextSettings = {
       ...currentSettings,
@@ -330,7 +336,7 @@ export function SettingsView() {
     };
 
     await window.electronAPI.saveData("settings", nextSettings);
-  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray, theme]);
+  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray, theme, expandThinkingWhileRunning]);
 
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
@@ -354,6 +360,7 @@ export function SettingsView() {
       closeToTray: enabled,
       closeToTrayExplicit: true,
       theme,
+      expandThinkingWhileRunning,
     });
     void window.electronAPI.setCloseToTray(enabled);
   };
@@ -368,7 +375,23 @@ export function SettingsView() {
       planModeEnabled,
       closeToTray,
       theme: nextTheme,
+      expandThinkingWhileRunning,
     });
+  };
+
+  const updateExpandThinkingWhileRunning = (enabled: boolean) => {
+    setExpandThinkingWhileRunning(enabled);
+    void saveSettings(shortcuts, filters, {
+      tempImagePath,
+      imageRetentionHours: IMAGE_RETENTION_HOURS,
+      planModeEnabled,
+      closeToTray,
+      theme,
+      expandThinkingWhileRunning: enabled,
+    });
+    window.dispatchEvent(new CustomEvent(GENERAL_SETTINGS_UPDATED_EVENT, {
+      detail: { expandThinkingWhileRunning: enabled },
+    }));
   };
 
   const updateTempImagePath = (nextPath: string) => {
@@ -379,6 +402,7 @@ export function SettingsView() {
       planModeEnabled,
       closeToTray,
       theme,
+      expandThinkingWhileRunning,
     });
   };
 
@@ -776,6 +800,18 @@ export function SettingsView() {
                         checked={closeToTray}
                         onChange={(event) => updateCloseToTray(event.target.checked)}
                         aria-label="关闭时最小化到托盘"
+                      />
+                    </label>
+                    <label className="settings-general-row settings-general-toggle">
+                      <span className="settings-general-row-main">
+                        <strong>处理中自动展开思考</strong>
+                        <span>思考过程在处理中时自动展开显示，结束后恢复折叠；关闭后处理中的思考默认收起</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={expandThinkingWhileRunning}
+                        onChange={(event) => updateExpandThinkingWhileRunning(event.target.checked)}
+                        aria-label="处理中自动展开思考"
                       />
                     </label>
                   </div>

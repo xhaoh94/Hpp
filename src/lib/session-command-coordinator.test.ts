@@ -120,6 +120,71 @@ describe("SessionCommandCoordinator", () => {
     expect(classifyBackendSessionState(undefined)).toBe("unknown");
   });
 
+  it("retains the active session model catalog across transient empty or failed backend reads", async () => {
+    const retainedSession = session("session-model-retention");
+    const retainedModel = {
+      id: "gpt-5.6",
+      name: "GPT-5.6",
+      provider: "openai",
+      reasoning: true,
+    };
+    useProjectStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        sessions: [...project.sessions, retainedSession],
+      })),
+      activeSessionId: retainedSession.id,
+      initializedSessionIds: new Set([...state.initializedSessionIds, retainedSession.id]),
+    }));
+    useChatStore.setState({
+      activeSessionId: retainedSession.id,
+      currentModel: retainedModel,
+      availableModels: [retainedModel],
+    });
+    saveSessionModel(retainedSession.id, retainedModel);
+
+    electronAPI.agentGetModels.mockResolvedValue([]);
+    await expect(SessionCommandCoordinator.getAvailableModels(retainedSession.id)).resolves.toEqual([retainedModel]);
+    expect(useChatStore.getState().availableModels).toEqual([retainedModel]);
+    expect(useChatStore.getState().currentModel).toEqual(retainedModel);
+
+    electronAPI.agentGetModels
+      .mockRejectedValueOnce(new Error("runtime temporarily unavailable"))
+      .mockRejectedValueOnce(new Error("runtime temporarily unavailable"));
+    await expect(SessionCommandCoordinator.getAvailableModels(retainedSession.id)).resolves.toEqual([retainedModel]);
+    expect(useChatStore.getState().availableModels).toEqual([retainedModel]);
+    expect(useChatStore.getState().currentModel).toEqual(retainedModel);
+  });
+
+  it("still clears models when an explicit agent reload confirms an empty catalog", async () => {
+    const reloadSession = session("session-explicit-empty-models");
+    const previousModel = {
+      id: "gpt-5.6",
+      name: "GPT-5.6",
+      provider: "openai",
+      reasoning: true,
+    };
+    useProjectStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        sessions: [...project.sessions, reloadSession],
+      })),
+      activeSessionId: reloadSession.id,
+      initializedSessionIds: new Set([...state.initializedSessionIds, reloadSession.id]),
+    }));
+    useChatStore.setState({
+      activeSessionId: reloadSession.id,
+      currentModel: previousModel,
+      availableModels: [previousModel],
+    });
+    saveSessionModel(reloadSession.id, previousModel);
+    electronAPI.agentReloadConfig.mockResolvedValueOnce({ success: true, models: [], reloadedSessionIds: [] });
+
+    await expect(SessionCommandCoordinator.reloadSession(reloadSession.id)).resolves.toMatchObject({ models: [] });
+    expect(useChatStore.getState().availableModels).toEqual([]);
+    expect(useChatStore.getState().currentModel).toBeNull();
+  });
+
   it("uses the same optimistic message and runtime state for an immediate send", async () => {
     await expect(SessionCommandCoordinator.sendMessage({
       sessionId: "session-one",

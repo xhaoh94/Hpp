@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentCommentary,
   AgentProcess,
@@ -443,19 +443,25 @@ function ProcessEntryRow({
   messageId,
   entry,
   now,
+  running = true,
+  expandThinkingWhileRunning = true,
   onToggleEntry,
   onOpenFile,
   onOpenImage,
   onPreserveScroll,
+  onThinkingRowRef,
   receivedMessageDocument,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
   now: number;
+  running?: boolean;
+  expandThinkingWhileRunning?: boolean;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
+  onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
 }) {
   const isReceivedMessage = entry.toolKind === "message_received" || entry.title.startsWith("收到消息:");
@@ -473,23 +479,12 @@ function ProcessEntryRow({
     detailVisible && (entry.type === "error" || entry.state === "error")
       ? formatErrorDetailAsMarkdown(entry.detail)
       : null;
+  const thinkingRowRef = useCallback((element: HTMLElement | null) => {
+    onThinkingRowRef?.(entry.id, element);
+  }, [entry.id, onThinkingRowRef]);
 
-  // Thinking 展开内容即使处于 expanded 也限制最多显示 10 行：
-  // 内容超出时在底部提供"显示更多/收起"切换（纯 UI 状态，不写回 store）。
-  const thinkingOutputRef = useRef<HTMLDivElement | null>(null);
-  const [thinkingFullVisible, setThinkingFullVisible] = useState(false);
-  const [thinkingOverflowing, setThinkingOverflowing] = useState(false);
-
-  useEffect(() => {
-    const el = thinkingOutputRef.current;
-    if (!el || thinkingFullVisible) return;
-    const check = () => setThinkingOverflowing(el.scrollHeight > el.clientHeight + 2);
-    check();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(check);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [entry.detail, thinkingFullVisible]);
+  // Thinking 正文不再截断显示：展开时完整渲染（设置“处理中是否展开”
+  // 只控制处理过程中的默认展开状态，见 thinkingExpanded）。
 
   if (entry.type === "subagent") {
     return (
@@ -547,7 +542,10 @@ function ProcessEntryRow({
   // second per-entry disclosure state.
   if (entry.type === "thinking") {
     if (!entry.detail?.trim()) return null;
-    const thinkingExpanded = entry.expanded !== false;
+    // 处理过程中：默认展开状态由设置 expandThinkingWhileRunning 决定
+    // （关闭时处理中的思考默认折叠，避免长思考刷屏）；处理结束后
+    // 恢复按条目自身状态展开。用户始终可手动切换单条思考的展开/折叠。
+    const thinkingExpanded = entry.expanded !== false && (!running || expandThinkingWhileRunning !== false);
     const isSingleLine = isThinkingSingleLine(entry.detail);
 
     // Single-line thinking: show directly without expand/collapse toggle
@@ -565,7 +563,10 @@ function ProcessEntryRow({
     }
 
     return (
-      <div className={`chat-process-thinking-row ${thinkingExpanded ? "expanded" : "collapsed"}`}>
+      <div
+        ref={thinkingRowRef}
+        className={`chat-process-thinking-row ${thinkingExpanded ? "expanded" : "collapsed"}`}
+      >
         <button
           type="button"
           className="chat-process-thinking-toggle"
@@ -578,21 +579,9 @@ function ProcessEntryRow({
         </button>
         {thinkingExpanded ? (
           <div className="chat-process-thinking-body">
-            <div
-              ref={thinkingOutputRef}
-              className={`chat-process-output chat-process-thinking-output${thinkingFullVisible ? "" : " limited"}`}
-            >
+            <div className="chat-process-output chat-process-thinking-output">
               <MarkdownRenderer content={entry.detail} />
             </div>
-            {thinkingOverflowing && (
-              <button
-                type="button"
-                className="chat-process-thinking-more"
-                onClick={() => setThinkingFullVisible((visible) => !visible)}
-              >
-                {thinkingFullVisible ? "收起" : "显示更多"}
-              </button>
-            )}
           </div>
         ) : (
           <div className="chat-process-thinking-preview">
@@ -667,19 +656,25 @@ function ProcessEntries({
   entries,
   messageId,
   now,
+  running = true,
+  expandThinkingWhileRunning = true,
   onToggleEntry,
   onOpenFile,
   onOpenImage,
   onPreserveScroll,
+  onThinkingRowRef,
   receivedMessageDocument,
 }: {
   entries: AgentProcessEntry[];
   messageId: string;
   now: number;
+  running?: boolean;
+  expandThinkingWhileRunning?: boolean;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
+  onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
 }) {
   return <>{groupProcessEntries(entries).map((group) => group.kind === "commands" ? (
@@ -695,10 +690,13 @@ function ProcessEntries({
         messageId={messageId}
         entry={entry}
         now={now}
+        running={running}
+        expandThinkingWhileRunning={expandThinkingWhileRunning}
         onToggleEntry={onToggleEntry}
         onOpenFile={onOpenFile}
         onOpenImage={onOpenImage}
         onPreserveScroll={onPreserveScroll}
+        onThinkingRowRef={onThinkingRowRef}
         receivedMessageDocument={receivedMessageDocument}
       />
     ))
@@ -708,14 +706,249 @@ function ProcessEntries({
       messageId={messageId}
       entry={group.entry}
       now={now}
+      running={running}
+      expandThinkingWhileRunning={expandThinkingWhileRunning}
       onToggleEntry={onToggleEntry}
       onOpenFile={onOpenFile}
       onOpenImage={onOpenImage}
       onPreserveScroll={onPreserveScroll}
+      onThinkingRowRef={onThinkingRowRef}
       receivedMessageDocument={receivedMessageDocument}
     />
   ))}</>;
 }
+
+function findScrollContainer(element: HTMLElement): HTMLElement | null {
+  let current = element.parentElement;
+  while (current) {
+    const style = window.getComputedStyle(current);
+    if (/(auto|scroll|overlay)/.test(style.overflowY)) return current;
+    current = current.parentElement;
+  }
+  return null;
+}
+
+const STICKY_CONTROL_GAP = 4;
+const STICKY_TARGET_GAP = 20;
+const STICKY_CONTENT_MIN_LINES = 10;
+
+export const isRenderedContentOverLineLimit = (
+  contentHeight: number,
+  lineHeight: number,
+  lineLimit = STICKY_CONTENT_MIN_LINES,
+) => contentHeight > lineHeight * lineLimit;
+
+const getRenderedContentMetrics = (element: HTMLElement | null) => {
+  if (!element) return { contentHeight: 0, lineHeight: 0 };
+  const style = window.getComputedStyle(element);
+  const fontSize = Number.parseFloat(style.fontSize || "0");
+  const lineHeight = Number.parseFloat(style.lineHeight || "0") || fontSize * 1.65;
+  const verticalPadding = Number.parseFloat(style.paddingTop || "0") +
+    Number.parseFloat(style.paddingBottom || "0");
+  return {
+    contentHeight: Math.max(0, element.scrollHeight - verticalPadding),
+    lineHeight,
+  };
+};
+
+export const isThinkingPastStickyBoundary = (
+  rowTop: number,
+  rowBottom: number,
+  boundary: number,
+  expanded: boolean,
+) => expanded && rowTop < boundary && rowBottom > boundary;
+
+export const getStickyButtonStackHeight = (
+  buttonHeights: number[],
+  gap = STICKY_CONTROL_GAP,
+) => buttonHeights.reduce((total, height) => total + Math.max(0, height), 0) +
+  Math.max(0, buttonHeights.length - 1) * gap;
+
+const getVisibleStickyElements = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll<HTMLElement>('.chat-process-sticky[data-visible="true"]'));
+
+const getProcessOwnerId = (element: HTMLElement | null) =>
+  element?.closest<HTMLElement>("[data-process-message-id]")?.dataset.processMessageId || null;
+
+const pendingStickyScrollCancels = new WeakMap<HTMLElement, () => void>();
+
+/** Keep every active locator in document order instead of letting sticky bars overlap. */
+const updateStickyStackLayout = (container: HTMLElement) => {
+  let offset = 0;
+  for (const sticky of Array.from(container.querySelectorAll<HTMLElement>(".chat-process-sticky"))) {
+    if (sticky.dataset.visible !== "true") {
+      sticky.style.removeProperty("--chat-process-sticky-top");
+      continue;
+    }
+    sticky.style.setProperty("--chat-process-sticky-top", `${offset}px`);
+    const inner = sticky.querySelector<HTMLElement>(".chat-process-sticky-inner");
+    const height = Math.ceil(inner?.getBoundingClientRect().height || 0);
+    if (height > 0) offset += height + STICKY_CONTROL_GAP;
+  }
+  container.style.setProperty("--chat-process-sticky-stack-height", `${offset}px`);
+};
+
+const getStickyOcclusionHeight = (container: HTMLElement, target: HTMLElement) => {
+  const targetProcessId = getProcessOwnerId(target);
+  let height = 0;
+  for (const sticky of getVisibleStickyElements(container)) {
+    const stickyProcessId = getProcessOwnerId(sticky);
+    if (stickyProcessId === targetProcessId) {
+      // Jumping to this process header makes its locator disappear. A target
+      // inside the process still needs room for the process-level locator, but
+      // not for its thinking locator because that disappears at the target.
+      if (target.classList.contains("chat-process-toggle")) continue;
+      const processControl = sticky.querySelector<HTMLElement>(".chat-process-sticky-toggle");
+      const controlHeight = Math.ceil(processControl?.getBoundingClientRect().height || 0);
+      if (controlHeight > 0) height += controlHeight;
+
+      const targetThinkingId = target.dataset.thinkingId;
+      if (!targetThinkingId) continue;
+      const thinkingControls = Array.from(
+        sticky.querySelectorAll<HTMLElement>(".chat-process-sticky-thinking"),
+      );
+      const targetIndex = thinkingControls.findIndex(
+        (control) => control.dataset.thinkingId === targetThinkingId,
+      );
+      // Thoughts before the target remain sticky after the jump. Include only
+      // those controls; the target and later controls will disappear once
+      // their rows move below the sticky boundary.
+      const remainingControls = targetIndex >= 0
+        ? thinkingControls.slice(0, targetIndex)
+        : thinkingControls;
+      if (remainingControls.length > 0) {
+        const remainingHeight = getStickyButtonStackHeight(remainingControls.map((control) => (
+          Math.ceil(control.getBoundingClientRect().height || 0)
+        )));
+        height += STICKY_CONTROL_GAP + remainingHeight;
+      }
+      continue;
+    }
+    const inner = sticky.querySelector<HTMLElement>(".chat-process-sticky-inner");
+    const innerHeight = Math.ceil(inner?.getBoundingClientRect().height || 0);
+    if (innerHeight > 0) height += innerHeight + STICKY_CONTROL_GAP;
+  }
+  return height;
+};
+
+/**
+ * Read the actual bottom edge of the visible sticky controls. This is used for
+ * the post-jump correction because React may still be committing the latest
+ * sticky-button set immediately after `scrollTop` changes.
+ */
+const getStickyVisualBottom = (container: HTMLElement, target: HTMLElement) => {
+  const containerTop = container.getBoundingClientRect().top;
+  const targetProcessId = getProcessOwnerId(target);
+  let bottom = containerTop;
+
+  for (const sticky of getVisibleStickyElements(container)) {
+    const stickyProcessId = getProcessOwnerId(sticky);
+    if (stickyProcessId !== targetProcessId || target.classList.contains("chat-process-toggle")) {
+      const innerBottom = sticky.querySelector<HTMLElement>(".chat-process-sticky-inner")
+        ?.getBoundingClientRect().bottom || 0;
+      bottom = Math.max(bottom, innerBottom);
+      continue;
+    }
+
+    const processBottom = sticky.querySelector<HTMLElement>(".chat-process-sticky-toggle")
+      ?.getBoundingClientRect().bottom || 0;
+    bottom = Math.max(bottom, processBottom);
+
+    const targetThinkingId = target.dataset.thinkingId;
+    if (!targetThinkingId) continue;
+    const thinkingControls = Array.from(
+      sticky.querySelectorAll<HTMLElement>(".chat-process-sticky-thinking"),
+    );
+    const targetIndex = thinkingControls.findIndex(
+      (control) => control.dataset.thinkingId === targetThinkingId,
+    );
+    for (const control of targetIndex >= 0 ? thinkingControls.slice(0, targetIndex) : thinkingControls) {
+      bottom = Math.max(bottom, control.getBoundingClientRect().bottom);
+    }
+  }
+
+  return bottom;
+};
+
+export const getStickyAdjustedScrollTop = (
+  containerScrollTop: number,
+  targetTop: number,
+  containerTop: number,
+  stickyHeight: number,
+  gap = STICKY_TARGET_GAP,
+) => Math.max(0, containerScrollTop + targetTop - containerTop - stickyHeight - gap);
+
+export const getStickyVisualCorrectionScrollTop = (
+  containerScrollTop: number,
+  targetTop: number,
+  stickyBottom: number,
+  gap = STICKY_TARGET_GAP,
+) => Math.max(0, containerScrollTop + targetTop - stickyBottom - gap);
+
+const scrollTargetBelowSticky = (
+  container: HTMLElement,
+  target: HTMLElement,
+  onSettled?: () => void,
+) => {
+  pendingStickyScrollCancels.get(container)?.();
+
+  const getTargetScrollTop = () => {
+    updateStickyStackLayout(container);
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    return getStickyAdjustedScrollTop(
+      container.scrollTop,
+      targetRect.top,
+      containerRect.top,
+      getStickyOcclusionHeight(container, target),
+    );
+  };
+
+  const correctTargetAgainstVisibleSticky = () => {
+    if (!target.isConnected) return;
+    const targetTop = target.getBoundingClientRect().top;
+    container.scrollTo({
+      top: getStickyVisualCorrectionScrollTop(
+        container.scrollTop,
+        targetTop,
+        getStickyVisualBottom(container, target),
+      ),
+      behavior: "auto",
+    });
+  };
+
+  let settled = false;
+  let correctionFrame: number | null = null;
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    if (correctionFrame !== null) cancelAnimationFrame(correctionFrame);
+    if (pendingStickyScrollCancels.get(container) === cancel) {
+      pendingStickyScrollCancels.delete(container);
+    }
+  };
+
+  pendingStickyScrollCancels.set(container, cancel);
+  container.scrollTo({
+    top: getTargetScrollTop(),
+    behavior: "auto",
+  });
+  correctTargetAgainstVisibleSticky();
+
+  // The direct jump changes which locators are sticky. Re-read the actual
+  // visible bottom after React has committed that state, without relying on a
+  // guessed distance threshold or browser-specific smooth-scroll timing.
+  correctionFrame = requestAnimationFrame(() => {
+    if (settled) return;
+    if (!target.isConnected) {
+      cancel();
+      return;
+    }
+    correctTargetAgainstVisibleSticky();
+    cancel();
+    onSettled?.();
+  });
+};
 
 function useProcessTicker(enabled: boolean) {
   const [now, setNow] = useState(Date.now());
@@ -736,6 +969,7 @@ export function ProcessBlock({
   running = true,
   terminalState = "completed",
   fallbackEndedAt,
+  expandThinkingWhileRunning = true,
   onToggle,
   onToggleEntry,
   onOpenFile,
@@ -749,6 +983,7 @@ export function ProcessBlock({
   running?: boolean;
   terminalState?: ProcessTerminalViewState;
   fallbackEndedAt?: number;
+  expandThinkingWhileRunning?: boolean;
   onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
@@ -766,6 +1001,8 @@ export function ProcessBlock({
   const durationEnd = viewProcess.endedAt ?? nowTick;
   const elapsed = formatProcessDuration(durationEnd - viewProcess.startedAt);
   const expanded = !!viewProcess.expanded;
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
   const interrupted = useMemo(
     () => isProcessInterrupted(viewProcess.entries),
     [viewProcess.entries]
@@ -822,10 +1059,238 @@ export function ProcessBlock({
   }, [visibleCommentary, visibleEntries]);
   const hasCommentaryTimeline = visibleCommentary.length > 0;
 
+  // --- 吸顶定位条：复用聊天滚动容器的 scroll 事件，避免 IntersectionObserver
+  // 以 viewport 为 root 导致聊天区域较矮时判断不准确。 ---
+  const [processStuck, setProcessStuck] = useState(false);
+  const [stuckThinkingIds, setStuckThinkingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const processToggleElementRef = useRef<HTMLElement | null>(null);
+  const stickyElementRef = useRef<HTMLDivElement | null>(null);
+  const thinkingRowsRef = useRef(new Map<string, HTMLElement>());
+  const stickyScrollContainerRef = useRef<HTMLElement | null>(null);
+  const highlightedThinkingRowRef = useRef<HTMLElement | null>(null);
+  const thinkingHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sortedStuckThinkingIds = useMemo(() => {
+    const entryOrder = new Map(mergedEntries.map((entry, index) => [entry.id, index]));
+    return [...stuckThinkingIds].sort((left, right) => (
+      (entryOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+      (entryOrder.get(right) ?? Number.MAX_SAFE_INTEGER)
+    ));
+  }, [mergedEntries, stuckThinkingIds]);
+
+  const refreshStickyState = useCallback(() => {
+    const container = stickyScrollContainerRef.current;
+    if (!container) {
+      setProcessStuck(false);
+      setStuckThinkingIds((prev) => prev.size === 0 ? prev : new Set());
+      return;
+    }
+
+    const containerTop = container.getBoundingClientRect().top;
+    const stickyTopOffset = Number.parseFloat(
+      stickyElementRef.current?.style.getPropertyValue("--chat-process-sticky-top") || "0",
+    ) || 0;
+    const processBoundary = containerTop + stickyTopOffset;
+    const toggle = processToggleElementRef.current;
+    const processWrap = toggle?.closest<HTMLElement>(".chat-process-wrap");
+    const messageWrap = processWrap?.closest<HTMLElement>(".chat-msg-wrapper") || null;
+    const processContent = processWrap?.querySelector<HTMLElement>(
+      ".chat-process-content, .chat-turn-timeline",
+    ) || null;
+    const processContentMetrics = getRenderedContentMetrics(processContent);
+    const assistantBodyMetrics = getRenderedContentMetrics(
+      messageWrap?.querySelector<HTMLElement>(".chat-bubble-content") || null,
+    );
+    const renderedProcessLines = processContentMetrics.lineHeight > 0
+      ? processContentMetrics.contentHeight / processContentMetrics.lineHeight
+      : 0;
+    const renderedAssistantBodyLines = assistantBodyMetrics.lineHeight > 0
+      ? assistantBodyMetrics.contentHeight / assistantBodyMetrics.lineHeight
+      : 0;
+    const totalContentLines = (expandedRef.current ? renderedProcessLines : 0) +
+      renderedAssistantBodyLines;
+    const messageContentOverTenLines = totalContentLines > STICKY_CONTENT_MIN_LINES;
+    const processStuckNow = messageContentOverTenLines && !!toggle &&
+      toggle.getBoundingClientRect().bottom <= processBoundary &&
+      (!messageWrap || messageWrap.getBoundingClientRect().bottom > processBoundary);
+    setProcessStuck(processStuckNow);
+
+    const stickyProcessControl = stickyElementRef.current
+      ?.querySelector<HTMLElement>(".chat-process-sticky-toggle");
+    const processControlHeight = processStuckNow
+      ? Math.ceil(stickyProcessControl?.getBoundingClientRect().height || 0) + STICKY_CONTROL_GAP
+      : 0;
+    const thinkingBoundary = processBoundary + processControlHeight;
+
+    const nextStuckThinkingIds = new Set<string>();
+    for (const [entryId, row] of thinkingRowsRef.current) {
+      const rect = row.getBoundingClientRect();
+      const output = row.querySelector<HTMLElement>(".chat-process-thinking-output");
+      const outputMetrics = getRenderedContentMetrics(output);
+      const contentOverTenLines = isRenderedContentOverLineLimit(
+        outputMetrics.contentHeight,
+        outputMetrics.lineHeight,
+      );
+      // Only keep the expanded thinking entry currently crossing the sticky
+      // boundary: its heading has left the viewport, while its body is still
+      // being read. Short entries never get a locator; once a long row scrolls
+      // past completely, remove it as well.
+      if (contentOverTenLines && isThinkingPastStickyBoundary(
+        rect.top,
+        rect.bottom,
+        thinkingBoundary,
+        row.classList.contains("expanded"),
+      )) {
+        nextStuckThinkingIds.add(entryId);
+      }
+    }
+
+    setStuckThinkingIds((prev) => {
+      if (prev.size === nextStuckThinkingIds.size && [...prev].every((id) => nextStuckThinkingIds.has(id))) {
+        return prev;
+      }
+      return nextStuckThinkingIds;
+    });
+  }, []);
+
+  const connectStickyScrollContainer = useCallback((element: HTMLElement | null) => {
+    const nextContainer = element ? findScrollContainer(element) : null;
+    const previousContainer = stickyScrollContainerRef.current;
+    if (previousContainer === nextContainer) return;
+
+    if (previousContainer) previousContainer.removeEventListener("scroll", refreshStickyState);
+    window.removeEventListener("resize", refreshStickyState);
+    stickyScrollContainerRef.current = nextContainer;
+
+    if (nextContainer) {
+      nextContainer.addEventListener("scroll", refreshStickyState, { passive: true });
+      window.addEventListener("resize", refreshStickyState);
+      refreshStickyState();
+    }
+  }, [refreshStickyState]);
+
+  const processToggleRef = useCallback((el: HTMLElement | null) => {
+    processToggleElementRef.current = el;
+    connectStickyScrollContainer(el);
+    refreshStickyState();
+  }, [connectStickyScrollContainer, refreshStickyState]);
+
+  const registerThinkingRow = useCallback((entryId: string, el: HTMLElement | null) => {
+    const rows = thinkingRowsRef.current;
+    if (!el) {
+      rows.delete(entryId);
+      refreshStickyState();
+      return;
+    }
+    el.dataset.thinkingId = entryId;
+    rows.set(entryId, el);
+    connectStickyScrollContainer(el);
+    refreshStickyState();
+  }, [connectStickyScrollContainer, refreshStickyState]);
+
+  useEffect(() => {
+    refreshStickyState();
+  }, [expandThinkingWhileRunning, mergedEntries, processRunning, refreshStickyState]);
+
+  useEffect(() => {
+    const container = stickyScrollContainerRef.current;
+    if (container) updateStickyStackLayout(container);
+  }, [processStuck, stuckThinkingIds]);
+
+  useEffect(() => () => {
+    const container = stickyScrollContainerRef.current;
+    if (container) container.removeEventListener("scroll", refreshStickyState);
+    window.removeEventListener("resize", refreshStickyState);
+  }, [refreshStickyState]);
+
+  useEffect(() => () => {
+    if (thinkingHighlightTimerRef.current) clearTimeout(thinkingHighlightTimerRef.current);
+    highlightedThinkingRowRef.current?.classList.remove("jump-highlight");
+  }, []);
+
+  const scrollToProcess = useCallback(() => {
+    const target = processToggleElementRef.current;
+    const container = stickyScrollContainerRef.current;
+    if (target && container) scrollTargetBelowSticky(container, target);
+  }, []);
+
+  const scrollToStuckThinking = useCallback((entryId: string) => {
+    const container = stickyScrollContainerRef.current;
+    if (!container) return;
+    const row = thinkingRowsRef.current.get(entryId);
+    if (!row) return;
+
+    scrollTargetBelowSticky(container, row, () => {
+      if (thinkingHighlightTimerRef.current) clearTimeout(thinkingHighlightTimerRef.current);
+      highlightedThinkingRowRef.current?.classList.remove("jump-highlight");
+      // Force a style flush so clicking the same locator repeatedly restarts the
+      // animation instead of leaving the previous animation at its final frame.
+      row.classList.remove("jump-highlight");
+      void row.offsetWidth;
+      row.classList.add("jump-highlight");
+      highlightedThinkingRowRef.current = row;
+      thinkingHighlightTimerRef.current = setTimeout(() => {
+        row.classList.remove("jump-highlight");
+        if (highlightedThinkingRowRef.current === row) highlightedThinkingRowRef.current = null;
+        thinkingHighlightTimerRef.current = null;
+      }, 2_300);
+    });
+  }, []);
+
   return (
     <>
+      <div
+        ref={stickyElementRef}
+        className="chat-process-sticky"
+        data-process-message-id={messageId}
+        data-visible={processStuck ? "true" : "false"}
+      >
+        <div className="chat-process-sticky-inner">
+          <button
+            type="button"
+            className="chat-process-sticky-toggle"
+            onClick={scrollToProcess}
+            title={`${interrupted ? uiText.process.interrupted : uiText.process.elapsed} ${elapsed}`}
+            aria-label={`${interrupted ? uiText.process.interrupted : uiText.process.elapsed} ${elapsed}，返回处理过程开头`}
+          >
+            <svg
+              aria-hidden="true"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 15 6-6 6 6" />
+            </svg>
+          </button>
+          {sortedStuckThinkingIds.length > 0 && (
+            <div className="chat-process-sticky-thinking-list" aria-label="当前吸顶思考">
+              {sortedStuckThinkingIds.map((entryId, index) => (
+                <button
+                  key={entryId}
+                  type="button"
+                  className="chat-process-sticky-thinking"
+                  data-thinking-id={entryId}
+                  title={`定位到第 ${index + 1} 条思考`}
+                  aria-label={`定位到第 ${index + 1} 条思考`}
+                  onClick={() => scrollToStuckThinking(entryId)}
+                >
+                  <ProcessEntryIcon type="thinking" />
+                  {sortedStuckThinkingIds.length > 1 && (
+                    <span className="chat-process-sticky-thinking-index">{index + 1}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="chat-process-wrap" data-process-message-id={messageId}>
       <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
-        <button className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
+        <button ref={processToggleRef} className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>
           <span>{interrupted ? uiText.process.interrupted : uiText.process.elapsed} {elapsed}</span>
           <svg
             width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
@@ -843,10 +1308,13 @@ export function ProcessBlock({
                 entries={mergedEntries}
                 messageId={messageId}
                 now={nowTick}
+                running={running}
+                expandThinkingWhileRunning={expandThinkingWhileRunning}
                 onToggleEntry={onToggleEntry}
                 onOpenFile={onOpenFile}
                 onOpenImage={onOpenImage}
                 onPreserveScroll={onPreserveScroll}
+                onThinkingRowRef={registerThinkingRow}
                 receivedMessageDocument={receivedMessageDocument}
               />
             )}
@@ -868,15 +1336,19 @@ export function ProcessBlock({
               entry={item.entry}
               messageId={messageId}
               now={nowTick}
+              running={running}
+              expandThinkingWhileRunning={expandThinkingWhileRunning}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}
               onOpenImage={onOpenImage}
               onPreserveScroll={onPreserveScroll}
+              onThinkingRowRef={registerThinkingRow}
               receivedMessageDocument={receivedMessageDocument}
             />
           ) : null)}
         </div>
       )}
+      </div>
     </>
   );
 }

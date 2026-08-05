@@ -3,3 +3,4 @@ release
 dist
 out
 mobile/android/.idea
+docs/release.md

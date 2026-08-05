@@ -209,27 +209,33 @@ describe("agentEventUtils", () => {
     });
   });
 
-  it("keeps inline Markdown in the single-line thinking preview", () => {
+  it("keeps line breaks and inline Markdown in the thinking preview", () => {
     expect(getThinkingPreviewMarkdown(
       "**Planning**\n\n- inspect files\n- compare settings\n\n`renderScale`",
-    )).toBe("**Planning** inspect files compare settings `renderScale`");
+    )).toBe("**Planning**\n\n- inspect files\n- compare settings");
   });
 
-  it("strips headings, lists, quotes, and horizontal rules from the thinking preview", () => {
+  it("keeps headings, lists, quotes, and code blocks so the preview matches the expanded body", () => {
     expect(getThinkingPreviewMarkdown(
       "# 标题\n\n> 引用内容\n\n1. 第一项\n2. 第二项\n\n---\n\n正文",
-    )).toBe("标题 引用内容 第一项 第二项 正文");
+    )).toBe("# 标题\n\n> 引用内容\n\n1. 第一项");
   });
 
-  it("collapses fenced code blocks into inline code", () => {
+  it("keeps fenced code blocks in the thinking preview", () => {
     expect(getThinkingPreviewMarkdown(
       "思路：\n\n```js\nconst a = 1\n```\n\n完成",
-    )).toBe("思路： `const a = 1` 完成");
+    )).toBe("思路：\n\n```js\nconst a = 1");
   });
 
-  it("falls back to the thinking label and truncates long previews", () => {
+  it("keeps blank lines between kept paragraphs so collapsed rendering matches expanded", () => {
+    expect(getThinkingPreviewMarkdown(
+      "第一段\n\n第二段\n\n第三段\n\n第四段",
+    )).toBe("第一段\n\n第二段\n\n第三段");
+  });
+
+  it("falls back to the thinking label and truncates long preview lines", () => {
     expect(getThinkingPreviewMarkdown("   \n\n  ")).toBe(uiText.process.thinking);
-    expect(getThinkingPreviewMarkdown("x".repeat(500)).endsWith("...")).toBe(true);
+    expect(getThinkingPreviewMarkdown("x".repeat(500))).toBe(`${"x".repeat(240)}...`);
   });
 
   it("summarizes tool events for files, commands, and failures", () => {

@@ -1,38 +1,38 @@
-# Hpp remote access
+# Hpp 远程访问
 
-The Hpp Android and Web clients connect directly to a running Hpp desktop application. Agent processes, projects, credentials, and files remain on the desktop computer.
+Hpp Android 与 Web 客户端直接连接正在运行的 Hpp 桌面应用。Agent 进程、项目、凭据和文件都保留在桌面电脑上。
 
-## Desktop setup
+## 桌面端设置
 
-1. Open Hpp settings and select **Remote access**.
-2. Set the advertised address to the desktop LAN, Tailscale, or WireGuard address.
-3. Remote access starts automatically with Hpp. The default TCP port is `47831`.
-4. Select **Pair**. Scan the one-time QR code with Hpp Android, or open it with a system camera to use the Web client.
-5. Keep Hpp running. Enabling close-to-tray is recommended.
+1. 打开 Hpp 设置并选择**远程访问**。
+2. 将广播地址设置为桌面所在局域网、Tailscale 或 WireGuard 地址。
+3. 远程访问随 Hpp 自动启动，默认 TCP 端口为 `47831`。
+4. 选择**配对**。使用 Hpp Android 扫描一次性二维码，或用系统相机打开二维码以使用 Web 客户端。
+5. 保持 Hpp 运行，建议启用"关闭到托盘"。
 
-Pairing offers expire after five minutes and can be used once. Each device receives a separate token and can be revoked from the desktop settings page.
+配对邀请五分钟后过期且只能使用一次。每台设备会获得独立的令牌，并可在桌面设置页面中吊销。
 
-## Network requirements
+## 网络要求
 
-- Plain `http://` and `ws://` connections are accepted only for localhost, private LAN ranges, link-local addresses, and the Tailscale CGNAT range.
-- Use Tailscale or WireGuard when connecting from another network.
-- A user-managed HTTPS reverse proxy can be entered as an `https://` address.
-- Do not expose port `47831` directly to the public internet. The Hpp Android app does not provide a hosted relay or application-layer encryption in this release.
-- Allow inbound TCP `47831` in the desktop firewall when LAN clients cannot reach the health endpoint.
+- 仅接受针对 localhost、私有局域网网段、链路本地地址以及 Tailscale CGNAT 网段的明文 `http://` 和 `ws://` 连接。
+- 从其他网络连接时请使用 Tailscale 或 WireGuard。
+- 可填写用户自管理的 HTTPS 反向代理地址（`https://`）。
+- 请勿将端口 `47831` 直接暴露到公网。本次发布中 Hpp Android 应用不提供托管中继或应用层加密。
+- 局域网客户端无法访问健康检查端点时，请在桌面防火墙中允许入站 TCP `47831`。
 
-The unauthenticated health endpoint is `GET /api/v1/health`. It returns host and protocol status only and never returns project or conversation data.
+未经认证的健康检查端点为 `GET /api/v1/health`。它仅返回主机与协议状态，绝不返回项目或会话数据。
 
-## Web client
+## Web 客户端
 
-With remote access running, open the advertised desktop address in a browser, for example:
+远程访问运行后，在浏览器中打开广播的桌面地址，例如：
 
 ```text
 http://192.168.1.20:47831/
 ```
 
-The Web client is served by Hpp itself, so LAN `http/ws` connections remain same-origin and are not blocked as mixed content. The pairing QR opens this page and completes pairing automatically. Use the same hostname or IP address on later visits because browser storage is isolated by origin.
+Web 客户端由 Hpp 自身提供，因此局域网 `http/ws` 连接保持同源，不会被当作混合内容拦截。配对二维码会打开此页面并自动完成配对。后续访问请使用相同的主机名或 IP，因为浏览器存储按源隔离。
 
-Development commands:
+开发命令：
 
 ```powershell
 npm run web:dev
@@ -40,15 +40,15 @@ npm run web:build
 npm run web:preview
 ```
 
-## Android development
+## Android 开发
 
-Prerequisites:
+前置要求：
 
-- Node.js 20 or newer
-- Android Studio with Android SDK 36
-- JDK 21, including the JBR bundled with current Android Studio
+- Node.js 20 或更高版本
+- 带 Android SDK 36 的 Android Studio
+- JDK 21，包括当前 Android Studio 自带的 JBR
 
-Commands:
+命令：
 
 ```powershell
 npm install
@@ -56,7 +56,7 @@ npm run mobile:sync
 npm run mobile:android
 ```
 
-Build a debug APK:
+构建调试版 APK：
 
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
@@ -64,42 +64,42 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 npm run mobile:apk
 ```
 
-The APK is written to:
+APK 输出到：
 
 ```text
 mobile/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Build the signed release APK:
+构建已签名的发布版 APK：
 
 ```powershell
 npm run mobile:release
 ```
 
-The release APK and update metadata are written to `release/v<version>/Hpp-Android.apk` and `release/v<version>/android-latest.json`. On the first release build, Hpp creates a persistent signing key under `%USERPROFILE%\.hpp\android-signing`. Back up that directory securely: every future Android update must be signed with the same key.
+发布版 APK 和更新元数据写入 `release/v<version>/Hpp-Android.apk` 与 `release/v<version>/android-latest.json`。首次发布构建时，Hpp 会在 `%USERPROFILE%\.hpp\android-signing` 下创建持久签名密钥。请安全备份该目录：今后每次 Android 更新都必须使用相同的密钥签名。
 
-## Android updates
+## Android 更新
 
-The Android app checks `android-latest.json` from the latest GitHub Release when it starts and whenever it returns to the foreground. It compares Android `versionCode`, not the display version string. When a newer build is available, Hpp downloads the APK, verifies its SHA-256 digest, and then opens the Android system installer. The version shown at the bottom of the desktop-host list can be tapped to check manually.
+Android 应用在启动时以及每次回到前台时，会检查最新 GitHub Release 中的 `android-latest.json`。它比较的是 Android `versionCode` 而非显示版本号。检测到更新的构建后，Hpp 会下载 APK、校验其 SHA-256 摘要，然后打开 Android 系统安装器。桌面端主机列表底部显示的版本号可以点按，用于手动检查。
 
-Android may ask for permission to install unknown apps the first time. Grant the permission for Hpp and return to the app; installation will continue with the already verified APK. All update releases must use the same signing key and a higher `versionCode`.
+首次更新时 Android 可能会请求安装未知应用的权限。请为 Hpp 授予该权限并返回应用，安装会使用已校验的 APK 继续。所有更新发布都必须使用相同的签名密钥和更高的 `versionCode`。
 
-Builds released before the updater was included cannot discover the updater by themselves. Install the first updater-enabled APK manually once; later versions can use the in-app update flow.
+在更新器功能加入之前发布的构建无法自行发现更新器。请手动安装一次首个包含更新器的 APK，之后的版本即可使用应用内更新流程。
 
-`mobile:sync` rebuilds the Web application and copies it into the native Android project. Run it after changing files under `mobile/src`.
+修改 `mobile/src` 下的文件后需要运行 `mobile:sync`，它会重新构建 Web 应用并复制到原生 Android 项目中。
 
-## Security and storage
+## 安全与存储
 
-- Android connection profiles and bearer tokens are stored by Android Keystore-backed secure storage.
-- Web connection profiles and bearer tokens are stored unencrypted in the browser's origin-scoped local storage. Use only a trusted browser profile and device.
-- Both clients remember the last connected desktop and reconnect automatically on the next launch.
-- Project and conversation snapshots remain in memory and disappear when the Android process is terminated.
-- The desktop persists only SHA-256 token hashes and device metadata in `hpp-data/remote-access.json`.
-- Remote payloads omit project roots, Agent session file paths, provider configuration, and credentials.
-- Sending a message requires a unique `clientMessageId`. An unacknowledged send is not retried automatically.
+- Android 连接配置与令牌由基于 Android Keystore 的安全存储保存。
+- Web 连接配置与令牌以明文保存在浏览器按源隔离的本地存储中。请仅使用可信的浏览器配置和设备。
+- 两个客户端都会记住上次连接的桌面并自动重新连接。
+- 项目与会话快照保存在内存中，Android 进程终止后即消失。
+- 桌面端仅在 `hpp-data/remote-access.json` 中持久保存令牌的 SHA-256 哈希和设备元数据。
+- 远程载荷不会包含项目根目录、Agent 会话文件路径、Provider 配置和凭据。
+- 发送消息需要唯一的 `clientMessageId`。未确认的发送不会自动重试。
 
-## Current boundaries
+## 当前边界
 
-Projects can only be created on the desktop. Remote clients can create, close, reopen, and fork sessions inside an existing project, but they cannot permanently delete them. They can also browse conversations, send text and images, queue follow-ups, answer Agent questions, stop a running task, and change the session model, thinking level, and global Plan mode.
+项目只能在桌面端创建。远程客户端可以在已有项目中创建、关闭、重新打开和分叉会话，但不能永久删除它们。它们还可以浏览会话、发送文本和图片、排队后续消息、回答 Agent 提问、停止运行中的任务，以及更改会话模型、思考级别和全局 Plan 模式。
 
-Reliable background notifications, offline conversation storage, iOS, a hosted relay, and Google Play publishing are not included. GitHub releases provide the signed APK and metadata for future direct APK updates.
+可靠的背景通知、离线会话存储、iOS、托管中继和 Google Play 发布暂不包含在内。GitHub Releases 提供签名 APK 和元数据，用于将来的直接 APK 更新。

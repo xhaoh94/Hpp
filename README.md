@@ -2,8 +2,6 @@
 
 Android 和 Web 远程访问说明见 [docs/android-remote.md](./docs/android-remote.md)。
 
-发布产物目录结构和 GitHub 上传要求见 [docs/release.md](./docs/release.md)。
-
 Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理器。它通过 Agent 插件统一管理不同编程 Agent，并按项目组织会话、模型、历史记录、分叉和运行状态。
 
 ## 功能

@@ -18,4 +18,20 @@ describe("content area tab lifetime", () => {
     expect(styles).toContain(".sidebar-tab-view[hidden]");
     expect(styles).toContain("display: none");
   });
+
+  it("keeps the collapsed hover panel above chat content without raising the regular sidebar", () => {
+    const styles = readWorkspaceFile("src/components/layout/Layout.css");
+    const collapsedPanel = Array.from(styles.matchAll(
+      /\.layout-content\.collapsed \.sidebar-panel\s*\{([\s\S]*?)\}/g,
+    )).at(-1)?.[1];
+    const hoverPanel = styles.match(
+      /\.layout-content\.collapsed\.hover-expanded \.sidebar-panel\s*\{([\s\S]*?)\}/g,
+    )?.at(-1);
+
+    expect(collapsedPanel).toContain("position: absolute");
+    expect(collapsedPanel).toContain("z-index: 15");
+    expect(hoverPanel).toContain("z-index: 200");
+    expect(Number(hoverPanel?.match(/z-index:\s*(\d+)/)?.[1])).toBeGreaterThan(25);
+    expect(styles).not.toMatch(/\.layout-content\s*\{[^}]*overflow:\s*hidden/s);
+  });
 });

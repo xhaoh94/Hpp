@@ -1,4 +1,5 @@
 .chat-panel {
+  --chat-content-horizontal-gutter: 104px;
   position: relative;
   flex: 1;
   display: flex;
@@ -638,7 +639,9 @@
   position: absolute;
   left: 50%;
   bottom: 20px;
-  z-index: 12;
+  /* Keep the return-to-bottom control clickable above process sticky
+     locators, whose stack intentionally sits at z-index: 25. */
+  z-index: 40;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -649,7 +652,7 @@
 
 /* Scroll-to-bottom button */
 .chat-scroll-bottom {
-  position: static;
+  position: relative;
   transform: none;
   z-index: 1;
   width: 36px;
@@ -846,12 +849,16 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: calc(100% - var(--chat-content-horizontal-gutter));
+  max-width: none;
+  margin-inline: auto;
   border-radius: 8px;
   content-visibility: auto;
   contain-intrinsic-size: auto 160px;
   transition: background-color 0.3s ease;
 }
 
+.chat-msg-wrapper:has(.chat-process-wrap),
 .chat-msg-wrapper:has(.chat-diff-popover),
 .chat-msg-wrapper:has(.chat-process-progress:hover),
 .chat-msg-wrapper:has(.chat-process-progress:focus),
@@ -876,7 +883,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
+  width: calc(100% - var(--chat-content-horizontal-gutter));
+  max-width: none;
+  margin-inline: auto;
   padding: 2px 0;
   color: var(--text-secondary);
   font-size: 13px;
@@ -916,6 +925,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  width: calc(100% - var(--chat-content-horizontal-gutter));
+  max-width: none;
+  margin-inline: auto;
   padding: 8px 0;
   color: var(--text-secondary);
   font-size: 12px;
@@ -961,18 +973,22 @@
 .chat-msg.user {
   align-self: flex-end;
   justify-content: flex-end;
+  width: 100%;
+  max-width: 100%;
 }
 
 .chat-msg.assistant {
-  align-self: flex-start;
+  align-self: stretch;
   justify-content: flex-start;
+  width: 100%;
+  max-width: 100%;
 }
 
 .chat-commentary,
 .chat-turn-timeline {
-  align-self: flex-start;
-  width: min(100%, 960px);
-  max-width: 96%;
+  align-self: stretch;
+  width: 100%;
+  max-width: 100%;
   color: var(--text-primary);
   user-select: text;
   -webkit-user-select: text;
@@ -1016,8 +1032,8 @@
 }
 
 .chat-msg.assistant:has(.chat-diff-card) {
-  width: 96%;
-  max-width: 96%;
+  width: 100%;
+  max-width: 100%;
 }
 
 .chat-msg-actions {
@@ -1176,7 +1192,8 @@
 .chat-msg.system {
   align-self: center;
   justify-content: center;
-  max-width: 90%;
+  width: 100%;
+  max-width: 100%;
 }
 
 .chat-bubble {
@@ -1391,10 +1408,112 @@
 }
 
 /* Agent process */
+
+/* Sticky locator bar: appears at the top-left once the process block has
+   scrolled out of view, so long output can be located without scrolling
+   back to the top. The bulb locates an expanded thinking row. */
+.chat-process-wrap {
+  width: 100%;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
+.chat-process-sticky {
+  --chat-process-thinking-button-width: 44px;
+  --chat-process-thinking-rail-gap: 8px;
+  --chat-process-thinking-rail-width: calc(
+    var(--chat-process-thinking-button-width) + var(--chat-process-thinking-rail-gap)
+  );
+  position: sticky;
+  top: var(--chat-process-sticky-top, 0px);
+  height: 0;
+  margin-bottom: -8px;
+  overflow: visible;
+  z-index: 25;
+}
+
+.chat-process-sticky-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.chat-process-sticky[data-visible="true"] .chat-process-sticky-inner {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.chat-process-sticky-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-process-thinking-button-width);
+  box-sizing: border-box;
+  margin-left: calc(0px - var(--chat-process-thinking-rail-width));
+  background: var(--floating-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px var(--shadow-color);
+}
+
+.chat-process-sticky-toggle:hover {
+  color: var(--text-primary);
+}
+
+.chat-process-sticky-thinking {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-process-thinking-button-width);
+  box-sizing: border-box;
+  background: var(--floating-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 5px;
+  box-shadow: 0 8px 24px var(--shadow-color);
+}
+
+.chat-process-sticky-thinking-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-left: calc(0px - var(--chat-process-thinking-rail-width));
+}
+
+.chat-process-sticky-thinking-index {
+  min-width: 11px;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
+}
+
+.chat-process-sticky-thinking:hover {
+  color: var(--text-primary);
+}
+
 .chat-process {
   display: flex;
   flex-direction: column;
-  align-self: flex-start;
+  align-self: stretch;
   width: 100%;
   max-width: 100%;
   border-bottom: 1px solid var(--surface-muted);
@@ -1725,6 +1844,41 @@
   gap: 8px;
   min-width: 0;
   max-width: 100%;
+  border-radius: 8px;
+}
+
+/* Highlight the target only after scrolling has settled. Keep the bulb at its
+   normal size so the feedback does not shift its alignment. */
+.chat-process-thinking-row.jump-highlight .chat-process-thinking-toggle {
+  animation: chat-thinking-bulb-breathe 2s ease-in-out both;
+}
+
+@keyframes chat-thinking-bulb-breathe {
+  0%, 100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 0 transparent;
+    color: var(--text-secondary);
+    opacity: 0.85;
+  }
+  28%, 72% {
+    background-color: color-mix(in srgb, var(--accent-color) 12%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-color) 10%, transparent);
+    color: var(--accent-color);
+    opacity: 1;
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--accent-color) 18%, transparent);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent-color) 12%, transparent);
+    color: var(--accent-color);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-process-thinking-row.jump-highlight .chat-process-thinking-toggle {
+    animation-duration: 1ms;
+    animation-delay: 0s;
+  }
 }
 
 .chat-process-thinking-toggle {
@@ -1778,34 +1932,6 @@
   min-width: 0;
 }
 
-/* Expanded thinking is still capped at ~10 lines; overflow reveals a
-   "显示更多" button below (state kept in the component, not the store). */
-.chat-process-thinking-output.limited {
-  max-height: calc(1.65em * 10);
-  overflow: hidden;
-}
-
-.chat-process-thinking-output.limited .md-content p {
-  margin: 0.25em 0;
-}
-
-.chat-process-thinking-more {
-  display: block;
-  margin: 0 0 4px var(--chat-assistant-body-inset);
-  padding: 2px 6px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.4;
-  cursor: pointer;
-}
-
-.chat-process-thinking-more:hover {
-  color: var(--text-primary);
-}
-
 .chat-process-thinking-preview {
   min-width: 0;
   overflow: hidden;
@@ -1813,24 +1939,22 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 1.65;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
-/* The collapsed thinking preview renders a single-line Markdown preview
-   through MarkdownRenderer; keep every block-level node inline so the
-   whole line ellipsizes as one row. */
+/* The collapsed thinking preview renders a multi-line Markdown preview
+   through MarkdownRenderer. The kept lines keep their original block
+   structure so the preview looks like a truncated version of the expanded
+   body: paragraph spacing, list/quote indentation, and code blocks all
+   match the expanded rendering. */
 .chat-process-thinking-preview .md-content {
   min-width: 0;
 }
 
-.chat-process-thinking-preview .md-content > * {
-  display: inline;
-  margin: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* 注意：这里不再覆盖子元素的 white-space，避免破坏代码块 pre 的换行
+   （white-space: pre），否则代码块在折叠预览中会拼接成一行。 */
 
 /* Thinking should stay visually secondary when the model wraps a line in
    Markdown emphasis. Keep heading hierarchy intact, but neutralize the
@@ -2743,11 +2867,24 @@ body.chat-questionnaire-resizing {
   border-top: 1px solid var(--border-color);
 }
 
+.chat-input-content {
+  display: flex;
+  width: calc(100% - var(--chat-content-horizontal-gutter));
+  max-width: none;
+  margin-inline: auto;
+  flex-direction: column;
+}
+
 .chat-input-area.questionnaire-active {
   display: flex;
   min-height: 180px;
   max-height: calc(100% - 176px);
   flex-direction: column;
+}
+
+.chat-input-area.questionnaire-active .chat-input-content {
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .chat-input-area.questionnaire-resized {

@@ -155,6 +155,15 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelStyles).toContain("padding-left: 2px;");
   });
 
+  it("aligns the composer and message stream to the same centered content column", () => {
+    expect(chatPanelSource).toContain('<div className="chat-input-content">');
+    expect(chatPanelStyles).toContain("--chat-content-horizontal-gutter: 104px");
+    expect(chatPanelStyles).toContain("width: calc(100% - var(--chat-content-horizontal-gutter))");
+    expect(chatPanelStyles).not.toContain("--chat-content-max-width");
+    expect(chatPanelStyles).toContain(".chat-input-content {");
+    expect(chatPanelStyles).toContain(".chat-msg-wrapper {");
+  });
+
   it("keeps thinking Markdown gray and regular-weight even when it contains emphasis", () => {
     const thinkingStyles = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-process-thinking-output {"),

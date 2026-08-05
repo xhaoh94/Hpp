@@ -1,4 +1,4 @@
-const { createReadStream, readFileSync, readdirSync, statSync } = require("fs");
+const { createReadStream, existsSync, readFileSync, readdirSync, statSync } = require("fs");
 const { basename, join, resolve } = require("path");
 const https = require("https");
 
@@ -81,8 +81,11 @@ function uploadFile(uploadUrl, filePath, contentType, label) {
 }
 
 async function main() {
-  const androidMetadata = JSON.parse(readFileSync(join(releaseDir, "android-latest.json"), "utf8"));
-  if (!Number.isSafeInteger(androidMetadata.versionCode) || androidMetadata.versionCode <= 0) {
+  const androidMetadataPath = join(releaseDir, "android-latest.json");
+  const androidMetadata = existsSync(androidMetadataPath)
+    ? JSON.parse(readFileSync(androidMetadataPath, "utf8"))
+    : null;
+  if (androidMetadata && (!Number.isSafeInteger(androidMetadata.versionCode) || androidMetadata.versionCode <= 0)) {
     throw new Error("android-latest.json contains an invalid versionCode");
   }
   const pluginDir = join(releaseDir, "agent-plugins");
@@ -97,17 +100,15 @@ async function main() {
     [join(releaseDir, `hpp-Setup-${version}.exe`), "application/vnd.microsoft.portable-executable"],
     [join(releaseDir, `hpp-Setup-${version}.exe.blockmap`), "application/octet-stream"],
     [join(releaseDir, "latest.yml"), "text/yaml"],
-    [join(releaseDir, `Hpp-Linux-${version}-x86_64.AppImage`), "application/octet-stream"],
-    [join(releaseDir, "latest-linux.yml"), "text/yaml"],
-    [
+    [join(releaseDir, `Hpp-Linux-${version}-x64.tar.gz`), "application/gzip"],
+    ...(androidMetadata ? [[
       join(releaseDir, "Hpp-Android.apk"),
       "application/vnd.android.package-archive",
       `hpp-version-code:${androidMetadata.versionCode}`,
-    ],
-    [join(releaseDir, "android-latest.json"), "application/json"],
+    ], [androidMetadataPath, "application/json"]] : []),
     ...pluginAssets,
   ];
-  const preparedAssets = assets.map(([relativePath, contentType, label]) => {
+  const preparedAssets = assets.filter(([relativePath]) => existsSync(resolve(relativePath))).map(([relativePath, contentType, label]) => {
     const filePath = resolve(relativePath);
     return { filePath, contentType, label, size: statSync(filePath).size };
   });
@@ -128,11 +129,24 @@ async function main() {
     await requestJson("DELETE", `/repos/${owner}/${repo}/git/refs/${refName}`);
   }
 
+  const releaseNotes = [
+    `Hpp ${version}`,
+    "",
+    "- 资源管理器支持状态保留、多选、右键操作、搜索定位预览、拖入聊天和文件夹引用。",
+    "- 优化聊天消息折叠、时间显示、附件卡片、中间过程归档、项目卡片排序与会话收起。",
+    "- 新增 Agent CLI/SDK 版本管理、历史版本安装和一键回退。",
+    "- 思考等级改为匹配当前 Agent 与模型的实际能力，不再固定显示六档。",
+    "- 改进 Pi、Codex 及其他 Agent 的过程输出、Shell 回退、失败恢复和子 Agent 状态展示。",
+    "- 完善 Web 与移动端运行状态、消息同步、上下文压缩和输入交互。",
+    "- 默认消息切换快捷键改为上、下方向键。",
+  ].join("\n");
+
   const release = await requestJson("POST", `/repos/${owner}/${repo}/releases`, {
     tag_name: tag,
     target_commitish: "main",
     name: `Hpp ${tag}`,
-    body: [
+    body: releaseNotes,
+    /* body: [
       `Hpp ${version}`,
       "",
       "- 增强资源管理器：状态保留、多选与右键操作、搜索定位预览、拖入聊天和文件夹引用。",
@@ -142,7 +156,7 @@ async function main() {
       "- 改进 Pi、Codex 及其他 Agent 的过程输出、Shell 回退、失败恢复与子 Agent 状态展示。",
       "- 完善 Web 与移动端运行状态、消息信息和输入交互。",
       "- 消息历史切换默认快捷键改为上、下方向键。",
-    ].join("\n"),
+    ].join("\n"), */
     draft: false,
     prerelease: false,
     make_latest: "true",

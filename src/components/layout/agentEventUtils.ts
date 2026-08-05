@@ -18,6 +18,7 @@ import {
 } from "@/i18n/text";
 
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
+const THINKING_PREVIEW_LINE_LIMIT = 3;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
 const STREAM_RENDER_FLUSH_INTERVAL_MS = 120;
@@ -388,44 +389,33 @@ export const getThinkingPreview = (value?: string) => {
 };
 
 /**
- * Convert thinking detail into a single-line Markdown preview that keeps
- * inline syntax (bold, italics, inline code, links) so the collapsed state
- * still renders Markdown, while stripping block-level markers that cannot
- * survive a single line (headings, lists, block quotes, thematic breaks)
- * and collapsing fenced code blocks into inline code.
+ * Convert thinking detail into a multi-line Markdown preview that keeps the
+ * original block structure (headings, lists, block quotes, fenced code blocks,
+ * indentation) so the collapsed state renders the same way as the expanded
+ * body. Only the first few lines are kept; lines longer than the character
+ * limit are truncated individually. The CSS line-clamp handles visual overflow.
  */
 export const getThinkingPreviewMarkdown = (value?: string) => {
-  const lines = value?.split("\n").map((line) => line.trim()) ?? [];
-  const cleaned: string[] = [];
-  let fence: string | null = null;
+  const lines = value?.split("\n") ?? [];
+  const kept: string[] = [];
+  let nonEmptyCount = 0;
 
   for (const line of lines) {
-    if (!line) continue;
-
-    // Fenced code block markers toggle the fence; inner lines become inline code.
-    const fenceMatch = line.match(/^(```+|~~~+)/);
-    if (fenceMatch) {
-      fence = fence ? null : fenceMatch[1];
+    if (!line.trim()) {
+      // 保留空行作为段落分隔（markdown 单换行会渲染成同一段落），
+      // 只在已保留内容之后才保留，避免预览以空行开头。
+      if (kept.length > 0) kept.push("");
       continue;
     }
-
-    if (fence) {
-      cleaned.push(`\`${line.replace(/`/g, "\\`")}\``);
-      continue;
-    }
-
-    // Strip block-level Markdown markers but keep inline syntax (**, *, `, [](), etc.).
-    cleaned.push(line.replace(
-      /^(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|-{3,}|={3,}|\+{3,})/,
-      "",
-    ));
+    nonEmptyCount += 1;
+    if (nonEmptyCount > THINKING_PREVIEW_LINE_LIMIT) break;
+    kept.push(line.length > THINKING_PREVIEW_CHAR_LIMIT
+      ? `${line.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
+      : line);
   }
 
-  const singleLine = cleaned.filter(Boolean).join(" ").trim();
-  if (!singleLine) return uiText.process.thinking;
-  return singleLine.length > THINKING_PREVIEW_CHAR_LIMIT
-    ? `${singleLine.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
-    : singleLine;
+  if (kept.length === 0) return uiText.process.thinking;
+  return kept.join("\n").replace(/\n+$/, "");
 };
 
 export const getContextCompactionPresentation = (

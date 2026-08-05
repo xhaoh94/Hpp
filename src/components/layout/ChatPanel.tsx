@@ -121,6 +121,7 @@ import {
 import "./ChatPanel.css";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
+const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
 type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: string };
 type MessagePayload = PreparedSessionMessage;
 
@@ -899,6 +900,7 @@ type ChatMessagesViewProps = {
   currentSessionRunning: boolean;
   currentSessionStatus: AgentStatus;
   currentSessionCompacting: boolean;
+  expandThinkingWhileRunning: boolean;
   projectPath?: string;
   scrollRef: RefObject<HTMLDivElement | null>;
   showScrollBottom: boolean;
@@ -922,6 +924,7 @@ type ChatMessageItemProps = {
   turnRunning: boolean;
   compactionRunning: boolean;
   processTerminalState: ProcessTerminalViewState;
+  expandThinkingWhileRunning: boolean;
   projectPath?: string;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
@@ -940,6 +943,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   turnRunning,
   compactionRunning,
   processTerminalState,
+  expandThinkingWhileRunning,
   projectPath,
   onEditMessage,
   onImageContextMenu,
@@ -1072,6 +1076,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           running={processRunning}
           terminalState={processTerminalState}
           fallbackEndedAt={fallbackProcessEndedAt}
+          expandThinkingWhileRunning={expandThinkingWhileRunning}
           onToggle={onToggleAssistantProcess}
           onToggleEntry={onToggleAssistantProcessEntry}
           onOpenFile={onOpenFile}
@@ -1297,6 +1302,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onPreserveScroll,
   onForkMessage,
   forkingMessageId,
+  expandThinkingWhileRunning,
 }: ChatMessagesViewProps) {
   const messages = useChatStore((state) => state.messages);
   const activeTurnId = getActiveAssistantTurnId(messages, currentSessionRunning);
@@ -1349,6 +1355,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
                 turnRunning={msg.id === activeTurnId}
                 compactionRunning={msg.id === activeCompactionMessageId}
                 processTerminalState={processTerminalState}
+                expandThinkingWhileRunning={expandThinkingWhileRunning}
                 projectPath={projectPath}
                 onEditMessage={onEditMessage}
                 onImageContextMenu={onImageContextMenu}
@@ -1703,6 +1710,7 @@ export function ChatPanel({
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
+  const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(true);
   const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("auto");
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
@@ -1935,9 +1943,18 @@ export function ChatPanel({
       const general = asRecord(settings.general);
       if (!cancelled) {
         setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
+        setExpandThinkingWhileRunning(getBooleanField(general, "expandThinkingWhileRunning") !== false);
         setPermissionMode(normalizeAgentPermissionMode(general.permissionMode));
       }
     });
+
+    const handleGeneralSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ expandThinkingWhileRunning?: boolean }>).detail;
+      if (typeof detail?.expandThinkingWhileRunning === "boolean") {
+        setExpandThinkingWhileRunning(detail.expandThinkingWhileRunning);
+      }
+    };
+    window.addEventListener(GENERAL_SETTINGS_UPDATED_EVENT, handleGeneralSettingsUpdated);
 
     const handleAgentSettingsUpdated = (event: Event) => {
       const detail = (event as CustomEvent<{
@@ -1953,6 +1970,7 @@ export function ChatPanel({
     return () => {
       cancelled = true;
       window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
+      window.removeEventListener(GENERAL_SETTINGS_UPDATED_EVENT, handleGeneralSettingsUpdated);
     };
   }, []);
 
@@ -2876,6 +2894,7 @@ export function ChatPanel({
         currentSessionRunning={currentSessionRunning}
         currentSessionStatus={activeSessionAgentStatus || (currentSessionRunning ? "running" : "idle")}
         currentSessionCompacting={activeSessionCompacting}
+        expandThinkingWhileRunning={expandThinkingWhileRunning}
         projectPath={activeProject.path}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}
@@ -2909,6 +2928,7 @@ export function ChatPanel({
         className={`chat-input-area${activeInteraction ? " questionnaire-active" : ""}${activeQuestionnaire && questionnairePaneHeight !== null ? " questionnaire-resized" : ""}`}
         style={activeQuestionnaire && questionnairePaneHeight !== null ? { height: questionnairePaneHeight } : undefined}
       >
+        <div className="chat-input-content">
         {activeConfirmation && (
           <ConfirmationPanel
             title={activeConfirmation.title}
@@ -3060,6 +3080,7 @@ export function ChatPanel({
           onSelectThinking={handleSelectThinking}
           onToggleFavorite={toggleFavorite}
         />
+        </div>
       </div>
 
       {isForkingSession && (

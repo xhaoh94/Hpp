@@ -74,6 +74,10 @@
 /* --- Code blocks --- */
 .md-content .md-code-block {
   position: relative;
+  width: fit-content;
+  min-width: min(240px, 100%);
+  max-width: 100%;
+  box-sizing: border-box;
   margin: 0.7em 0;
   border-radius: 8px;
   overflow: hidden;
@@ -83,9 +87,13 @@
 
 .md-content .md-code-block pre {
   margin: 0;
-  padding: 14px 16px;
+  padding: 14px 52px 14px 16px;
   overflow-x: auto;
   background: transparent !important;
+}
+
+.md-content .md-code-block:has(.md-code-lang) pre {
+  padding-right: 96px;
 }
 
 .md-content .md-code-block code {

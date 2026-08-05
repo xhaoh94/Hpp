@@ -173,10 +173,41 @@ const addStartupError = (sessionId: string, warning: string) => {
   }, sessionId);
 };
 
-const applyActiveModels = (sessionId: string, models: ModelInfo[], selected?: ModelInfo | null) => {
+const sameModelSelection = (
+  left: Pick<ModelInfo, "id" | "provider"> | null | undefined,
+  right: Pick<ModelInfo, "id" | "provider"> | null | undefined,
+) => !!left && !!right && left.id === right.id && left.provider === right.provider;
+
+const getRetainedActiveModels = (sessionId: string) => {
+  if (useProjectStore.getState().activeSessionId !== sessionId) return [];
+  const chat = useChatStore.getState();
+  const persisted = getSessionModel(sessionId);
+  if (!sameModelSelection(chat.currentModel, persisted)) return [];
+  if (chat.availableModels.length > 0) return chat.availableModels;
+  return chat.currentModel ? [chat.currentModel] : [];
+};
+
+const applyActiveModels = (
+  sessionId: string,
+  models: ModelInfo[],
+  selected?: ModelInfo | null,
+  options: { allowEmpty?: boolean } = {},
+) => {
   if (useProjectStore.getState().activeSessionId !== sessionId) return;
   const chat = useChatStore.getState();
-  chat.setAvailableModels(models);
+  const effectiveModels = models.length > 0
+    ? models
+    : options.allowEmpty
+      ? []
+      : selected
+      ? [selected]
+      : getRetainedActiveModels(sessionId);
+  if (effectiveModels.length > 0) {
+    chat.setAvailableModels(effectiveModels);
+  } else if (options.allowEmpty) {
+    chat.setAvailableModels([]);
+    useChatStore.setState({ currentModel: null });
+  }
   if (selected) chat.setCurrentModel(selected);
 };
 
@@ -897,14 +928,22 @@ export async function reloadSession(sessionId: string) {
     if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
     saveSessionModel(sessionId, selected);
   }
-  applyActiveModels(sessionId, models, selected);
+  applyActiveModels(sessionId, models, selected, { allowEmpty: true });
   if (selected) await reconcileThinkingForModel(sessionId, session.agentId, selected);
   return { ...result, models };
 }
 
 export async function getAvailableModels(sessionId: string) {
   await initializeSession(sessionId);
-  return window.electronAPI.agentGetModels(sessionId) as Promise<ModelInfo[]>;
+  try {
+    const models = await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
+    if (models.length > 0) return models;
+    return getRetainedActiveModels(sessionId);
+  } catch (error) {
+    const retainedModels = getRetainedActiveModels(sessionId);
+    if (retainedModels.length > 0) return retainedModels;
+    throw error;
+  }
 }
 
 export async function getActions(sessionId: string, reload = false): Promise<AgentActionCatalogEntry[]> {

@@ -75,7 +75,9 @@ function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
           code({ node, className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");
             const language = match ? match[1] : "";
-            const text = getTextContent(children);
+            // react-markdown 解析代码块时 children 末尾总会带一个 \n，
+            // 复制时去掉它，避免剪贴板内容尾部多一个换行。
+            const text = getTextContent(children).replace(/\r?\n$/, "");
 
             // Inline code (no language = no newline = likely inline)
             if (!language && !text.includes("\n")) {
