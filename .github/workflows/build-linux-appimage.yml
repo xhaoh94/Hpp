@@ -5,9 +5,14 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "已有 GitHub Release 标签（留空则仅上传构建产物）"
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -43,3 +48,10 @@ jobs:
             linux-release/latest-linux.yml
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload AppImage to release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" linux-release/Hpp-Linux-*-x86_64.AppImage --clobber --repo "$GITHUB_REPOSITORY"

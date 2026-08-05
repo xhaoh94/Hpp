@@ -100,7 +100,7 @@ async function main() {
     [join(releaseDir, `hpp-Setup-${version}.exe`), "application/vnd.microsoft.portable-executable"],
     [join(releaseDir, `hpp-Setup-${version}.exe.blockmap`), "application/octet-stream"],
     [join(releaseDir, "latest.yml"), "text/yaml"],
-    [join(releaseDir, `Hpp-Linux-${version}-x64.tar.gz`), "application/gzip"],
+    [join(releaseDir, `Hpp-Linux-${version}-x86_64.AppImage`), "application/vnd.appimage"],
     ...(androidMetadata ? [[
       join(releaseDir, "Hpp-Android.apk"),
       "application/vnd.android.package-archive",
