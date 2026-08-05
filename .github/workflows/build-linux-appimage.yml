@@ -57,5 +57,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [ -z "$RELEASE_TAG" ]; then RELEASE_TAG="v$(node -p 'require(\"./package.json\").version')"; fi
+          if [ -z "$RELEASE_TAG" ]; then RELEASE_TAG="v$(node -e 'process.stdout.write(require("./package.json").version)')"; fi
           gh release upload "$RELEASE_TAG" linux-release/Hpp-Linux-*-x86_64.AppImage --clobber --repo "$GITHUB_REPOSITORY"
