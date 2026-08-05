@@ -28,7 +28,9 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        # npm install tolerates the optional native dependency entries that are
+        # omitted from the lockfile on Windows but are resolved on Ubuntu.
+        run: npm install --ignore-scripts
 
       - name: Run tests
         run: npm test
