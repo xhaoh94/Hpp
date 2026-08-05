@@ -50,6 +50,7 @@ import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
@@ -417,6 +418,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage 
   useEffect(() => {
     if (!addMenuOpen) return;
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.isComposing) return;
       if (event.key !== "Escape") return;
       event.stopPropagation();
       setAddMenuOpen(false);
@@ -839,7 +841,7 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
                   className="chat-user-history-item"
                   onClick={() => onScrollToMessage(msg.id)}
                 >
-                  <AttachmentPreviewText content={msg.content} className="chat-user-history-text" />
+                  <AttachmentPreviewText content={getChatMessagePreviewText(msg)} className="chat-user-history-text" />
                   <span className="chat-user-history-time">
                     {formatHistoryMessageTime(msg.timestamp)}
                   </span>
@@ -873,6 +875,7 @@ const SessionStarterList = memo(function SessionStarterList({
       {openSessions.map((session) => {
         const messages = sessionMessages[session.id];
         const firstUserMsg = messages?.find((message) => message.role === "user");
+        const firstUserPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
         return (
           <button
             key={session.id}
@@ -884,8 +887,8 @@ const SessionStarterList = memo(function SessionStarterList({
               <path d="M7 8L10 11L7 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M12 14H17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-            {firstUserMsg
-              ? <AttachmentPreviewText content={firstUserMsg.content} maxLength={30} />
+            {firstUserPreview
+              ? <AttachmentPreviewText content={firstUserPreview} maxLength={30} />
               : <span>{session.title}</span>}
           </button>
         );
@@ -2268,7 +2271,7 @@ export function ChatPanel({
     preserveScrollDuringLayoutChange(() => toggleAssistantProcessEntry(messageId, entryId), anchor);
   }, [preserveScrollDuringLayoutChange, toggleAssistantProcessEntry]);
 
-  const { switchToSession } = useSessionModels({
+  const { switchToSession, refreshModels } = useSessionModels({
     activeSessionId,
     activeSessionAgentId: activeSession?.agentId,
     activeSessionInitialized,
@@ -2351,6 +2354,15 @@ export function ChatPanel({
       } else {
         action();
       }
+    },
+    onContextCompactionSettled: (sessionId) => {
+      // A compaction can keep the backend worker too busy for the initial
+      // model fetch, leaving the picker empty after it settles. Re-fetch
+      // models for the active session only when nothing is shown yet.
+      if (useProjectStore.getState().activeSessionId !== sessionId) return;
+      const chat = useChatStore.getState();
+      if (chat.availableModels.length > 0 || chat.currentModel) return;
+      refreshModels(sessionId);
     },
   });
 
@@ -2488,6 +2500,11 @@ export function ChatPanel({
           runtime.thinkingEntryId = null;
           runtime.streamIdleNoticeEntryId = null;
           runtime.autoAbortReason = null;
+          // The backend may accept the prompt but then emit nothing (stalled
+          // worker, dropped first event). Arm the backend-state watchdog right
+          // away so a silent turn cannot leave the session spinning as
+          // "running" forever; it will settle against the authoritative state.
+          refreshSessionWatchdog(sessionId);
         },
         onOptimisticMessage: () => {
           enableAutoFollow();
@@ -2501,6 +2518,7 @@ export function ChatPanel({
     return result;
   }, [
     enableAutoFollow,
+    refreshSessionWatchdog,
     scrollToBottomNow,
     sessionRuntimeRef,
   ]);

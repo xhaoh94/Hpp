@@ -80,9 +80,25 @@ export function useSessionModels({
       modelFetchRunIdRef.current === fetchRunId &&
       useProjectStore.getState().activeSessionId === sessionId
     ) {
-      clearModels();
+      // Only blank the picker when there is genuinely nothing usable left.
+      // A temporarily unreachable backend (for example a Pi worker busy with
+      // a context compaction) must not discard models that are already shown;
+      // the next explicit refresh or compaction-settled refresh restores them.
+      const chat = useChatStore.getState();
+      if (chat.availableModels.length === 0 && !chat.currentModel) clearModels();
     }
   }, [clearModels, setAvailableModels, setCurrentModel]);
+
+  /**
+   * Re-run the model fetch for a session. Used when a temporary backend
+   * condition (context compaction) may have prevented the initial fetch, so
+   * the picker can recover without a session switch or app restart.
+   */
+  const refreshModels = useCallback((sessionId: string) => {
+    if (!useProjectStore.getState().initializedSessionIds.has(sessionId)) return;
+    const fetchRunId = ++modelFetchRunIdRef.current;
+    void fetchModels(sessionId, fetchRunId);
+  }, [fetchModels]);
 
   useEffect(() => {
     const fetchRunId = ++modelFetchRunIdRef.current;
@@ -124,5 +140,5 @@ export function useSessionModels({
     }).catch((error: unknown) => addAgentStartupError(session.id, error));
   }, []);
 
-  return { switchToSession };
+  return { switchToSession, refreshModels };
 }

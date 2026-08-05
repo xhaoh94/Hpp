@@ -627,6 +627,9 @@
 .chat-messages {
   flex: 1;
   min-height: 0;
+  /* This is the vertical conversation scroller. Wide Markdown content owns
+     its own horizontal scrolling inside code/table containers. */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 16px;
 }
@@ -1707,6 +1710,10 @@
 
 .chat-process-content {
   display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   flex-direction: column;
   gap: 6px;
   margin-top: 6px;
@@ -1817,11 +1824,14 @@
 }
 
 .chat-process-output {
+  width: 100%;
+  min-width: 0;
   color: var(--text-primary);
   font-size: 14px;
   line-height: 1.65;
   padding: 6px 0 4px var(--chat-assistant-body-inset);
   max-width: 100%;
+  box-sizing: border-box;
 }
 
 .chat-process-output .md-content {
@@ -1930,6 +1940,8 @@
 .chat-process-thinking-body {
   flex: 1 1 auto;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .chat-process-thinking-preview {

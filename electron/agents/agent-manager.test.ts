@@ -428,6 +428,37 @@ describe("AgentManager plugin removal", () => {
       .resolves.toEqual({ success: true, idle: true });
   });
 
+  it("clears stale pending UI residue so a finished session becomes idle again", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "stale-ui-session");
+    observePendingUIEvent("stale-ui-session", {
+      type: "process_event",
+      entryType: "question",
+      requestId: "question-1",
+      method: "permission/request",
+      state: "running",
+    });
+
+    // A freshly recorded question still blocks the session while the user
+    // reads and answers it.
+    await expect(getHandler("agent:getSessionState")({}, "stale-ui-session"))
+      .resolves.toEqual({ success: true, idle: false });
+
+    // Once the record ages past the stale threshold while the backend itself
+    // is idle, a state query must drop the residue and report the session as
+    // sendable instead of leaving every later send queued forever.
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(60_001);
+      await expect(getHandler("agent:getSessionState")({}, "stale-ui-session"))
+        .resolves.toEqual({ success: true, idle: true });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(getPendingUIEvents("stale-ui-session")).toEqual([]);
+  });
+
   it("publishes the cleared cache revision so an in-flight stale snapshot cannot revive an answer", async () => {
     const manager = new AgentManager();
     const backend = createBackend(false);
@@ -489,6 +520,26 @@ describe("AgentManager plugin removal", () => {
       idle: true,
     });
     expect(refreshIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not keep an idle session busy after a forced stream terminal closes its pending UI", async () => {
+    testState.createBackend.mockResolvedValueOnce(createBackend(true));
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "forced-terminal-session");
+    observePendingUIEvent("forced-terminal-session", {
+      type: "ask_user_question",
+      id: "stale-question",
+    });
+
+    await expect(getHandler("agent:getSessionState")({}, "forced-terminal-session"))
+      .resolves.toEqual({ success: true, idle: false });
+
+    observePendingUIEvent("forced-terminal-session", {
+      type: "stream_end",
+      force: true,
+    });
+
+    await expect(getHandler("agent:getSessionState")({}, "forced-terminal-session"))
+      .resolves.toEqual({ success: true, idle: true });
   });
 
   it("marks a cached session state stale when the live idle refresh fails", async () => {

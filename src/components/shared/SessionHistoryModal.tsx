@@ -3,6 +3,7 @@ import { GitBranch } from "lucide-react";
 import type { ProjectSession } from "@/stores/project-store";
 import type { ChatMessage } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import "./SessionHistory.css";
 
@@ -52,11 +53,8 @@ const getSessionPreviewText = (
 
   const msgs = sessionMessages[session.id];
   const firstUserMsg = msgs?.find((m) => m.role === "user");
-  return firstUserMsg
-    ? firstUserMsg.content.length > 50
-      ? firstUserMsg.content.substring(0, 50) + "..."
-      : firstUserMsg.content
-    : session.title;
+  const preview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
+  return preview || session.title;
 };
 
 export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onResume, onDelete, onDeleteAll }: Props) {

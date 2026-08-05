@@ -10,6 +10,12 @@ type PendingUIEventRecord = {
   event: AgentEvent;
   requestId: string;
   sourceId: string;
+  // Wall-clock time of the last observation. A record that stays untouched for
+  // a long time is stale residue from a finished turn: the backend force-
+  // closed the request, the renderer switched sessions without answering, or
+  // the answer transport failed. Treating it as still-busy forever would make
+  // every later send queue indefinitely even though the conversation finished.
+  recordedAt: number;
 };
 
 export type PendingUIEventSnapshot = {
@@ -71,6 +77,15 @@ const SESSION_TERMINAL_EVENT_TYPES = new Set([
   "agent_disconnected",
 ]);
 
+const isAuthoritativeSessionTerminalEvent = (event: AgentEvent) => (
+  SESSION_TERMINAL_EVENT_TYPES.has(event.type)
+  // A normal stream_end can precede a host-rendered answer, so it must keep
+  // the pending request replayable. `force` is different: renderer lifecycle
+  // handling also closes the interaction immediately, and retaining it only
+  // in the main-process cache would make the next send look busy and queue.
+  || (event.type === "stream_end" && event.force === true)
+);
+
 const getRecordKey = (sourceId: string, requestId: string) => `${sourceId}\u0000${requestId}`;
 
 const removeRecord = (sessionId: string, sourceId: string, requestId?: string) => {
@@ -113,7 +128,7 @@ export function observePendingUIEvent(
   sourceId = DEFAULT_SOURCE_ID,
 ) {
   if (!sessionId || !isAgentEvent(value)) return getRevision(sessionId);
-  if (SESSION_TERMINAL_EVENT_TYPES.has(value.type)) {
+  if (isAuthoritativeSessionTerminalEvent(value)) {
     clearPendingUIEvents(sessionId, sourceId);
     return getRevision(sessionId);
   }
@@ -143,8 +158,47 @@ export function observePendingUIEvent(
     event: { ...value, sessionId },
     requestId,
     sourceId,
+    recordedAt: Date.now(),
   });
   return bumpRevision(sessionId);
+}
+
+/**
+ * Number of pending UI requests that have not been observed for at least
+ * `maxAgeMs`. Only these can be safely treated as expired: a freshly recorded
+ * request still legitimately blocks the session while the user reads and
+ * answers it.
+ */
+export function hasStalePendingUIEvents(sessionId: string, maxAgeMs: number): boolean {
+  const sessionEvents = pendingUIEvents.get(sessionId);
+  if (!sessionEvents || sessionEvents.size === 0) return false;
+  const now = Date.now();
+  for (const record of sessionEvents.values()) {
+    if (now - record.recordedAt > maxAgeMs) return true;
+  }
+  return false;
+}
+
+/**
+ * Drop pending UI requests that have been untouched for at least `maxAgeMs`.
+ * Returns the number of removed records so callers can tell whether the
+ * session's busy state came from stale residue.
+ */
+export function pruneStalePendingUIEvents(sessionId: string, maxAgeMs: number): number {
+  const sessionEvents = pendingUIEvents.get(sessionId);
+  if (!sessionEvents) return 0;
+  const now = Date.now();
+  let removed = 0;
+  for (const [key, record] of sessionEvents) {
+    if (now - record.recordedAt <= maxAgeMs) continue;
+    sessionEvents.delete(key);
+    removed += 1;
+  }
+  if (removed > 0) {
+    if (sessionEvents.size === 0) pendingUIEvents.delete(sessionId);
+    bumpRevision(sessionId);
+  }
+  return removed;
 }
 
 export function getPendingUIEvents(sessionId: string): AgentEvent[] {

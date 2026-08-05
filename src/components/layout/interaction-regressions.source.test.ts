@@ -24,6 +24,11 @@ const fileSearchStyles = readFileSync(
 );
 
 describe("chat interaction regression constraints", () => {
+  it("does not leave persisted-message debug payloads in the production render path", () => {
+    expect(chatPanelSource).not.toContain("title={JSON.stringify({");
+    expect(chatPanelSource).not.toContain("doc: sourceComposerDocument?.nodes.map");
+  });
+
   it("clears questionnaire options and custom text in both directions", () => {
     expect(questionnaireSource).toContain('setCustomText((current) => ({ ...current, [questionIndex]: "" }))');
     expect(questionnaireSource).toContain('setSingleChoice((current) => ({ ...current, [questionIndex]: "" }))');
@@ -174,6 +179,27 @@ describe("chat interaction regression constraints", () => {
     expect(thinkingStyles).toContain(":is(strong, b)");
     expect(thinkingStyles).toContain("color: inherit");
     expect(thinkingStyles).toContain("font-weight: inherit");
+  });
+
+  it("contains long thinking code lines without widening the conversation scroller", () => {
+    const messageScrollerStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-messages {"),
+      chatPanelStyles.indexOf(".chat-messages-area.has-todo-summary"),
+    );
+    const processContentStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-process-content {"),
+      chatPanelStyles.indexOf(".chat-process-guidance-row"),
+    );
+    const thinkingBodyStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-process-thinking-body {"),
+      chatPanelStyles.indexOf(".chat-process-thinking-preview"),
+    );
+    expect(messageScrollerStyles).toContain("overflow-x: hidden");
+    expect(processContentStyles).toContain("min-width: 0");
+    expect(processContentStyles).toContain("max-width: 100%");
+    expect(thinkingBodyStyles).toContain("min-width: 0");
+    expect(thinkingBodyStyles).toContain("max-width: 100%");
+    expect(thinkingBodyStyles).toContain("overflow: hidden");
   });
 
   it("vertically centers the guidance label beside its message bubble", () => {

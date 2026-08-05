@@ -5,6 +5,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
@@ -480,8 +481,9 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
                   {(() => {
                     const msgs = sessionMessages[session.id];
                     const firstUserMsg = msgs?.find((m) => m.role === "user");
-                    return firstUserMsg
-                      ? <AttachmentPreviewText content={firstUserMsg.content} maxLength={30} />
+                    const preview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
+                    return preview
+                      ? <AttachmentPreviewText content={preview} maxLength={30} />
                       : session.title;
                   })()}
                 </span>

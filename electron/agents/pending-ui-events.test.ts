@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearAllPendingUIEvents,
   clearPendingUIEvents,
@@ -6,7 +6,9 @@ import {
   getPendingUIEventSnapshot,
   getPendingUIEvents,
   hasPendingUIEvents,
+  hasStalePendingUIEvents,
   observePendingUIEvent,
+  pruneStalePendingUIEvents,
 } from "./pending-ui-events";
 
 afterEach(() => clearAllPendingUIEvents());
@@ -80,6 +82,24 @@ describe("pending UI event cache", () => {
     ]);
   });
 
+  it("clears pending requests when a forced stream terminal closes the renderer interaction", () => {
+    observePendingUIEvent("session-a", {
+      type: "process_event", entryType: "question", requestId: "question-1", state: "running",
+    }, "backend-a");
+    observePendingUIEvent("session-a", {
+      type: "process_event", entryType: "question", requestId: "question-2", state: "running",
+    }, "backend-b");
+
+    const terminalRevision = observePendingUIEvent("session-a", {
+      type: "stream_end", force: true,
+    }, "backend-a");
+
+    expect(getPendingUIEventSnapshot("session-a")).toEqual({
+      revision: terminalRevision,
+      requests: [expect.objectContaining({ requestId: "question-2" })],
+    });
+  });
+
   it("scopes authoritative terminal cleanup to the backend that emitted it", () => {
     observePendingUIEvent("session-a", {
       type: "process_event", entryType: "question", requestId: "old", state: "running",
@@ -123,5 +143,30 @@ describe("pending UI event cache", () => {
 
     clearPendingUIEvents("session-a");
     expect(getPendingUIEvents("session-a")).toEqual([]);
+  });
+
+  it("treats only long-unobserved requests as stale residue", () => {
+    vi.useFakeTimers();
+    try {
+      observePendingUIEvent("session-a", { type: "ask_user", id: "fresh" });
+      observePendingUIEvent("session-a", { type: "ask_user", id: "old" });
+      expect(getPendingUIEvents("session-a")).toHaveLength(2);
+
+      // Fresh records are never stale.
+      expect(hasStalePendingUIEvents("session-a", 60_000)).toBe(false);
+      expect(pruneStalePendingUIEvents("session-a", 60_000)).toBe(0);
+      expect(getPendingUIEvents("session-a")).toHaveLength(2);
+
+      // After the threshold passes without any new observation the whole
+      // residue is expired and can be dropped so the session stops reporting
+      // busy forever.
+      vi.advanceTimersByTime(60_001);
+      expect(hasStalePendingUIEvents("session-a", 60_000)).toBe(true);
+      expect(pruneStalePendingUIEvents("session-a", 60_000)).toBe(2);
+      expect(getPendingUIEvents("session-a")).toEqual([]);
+      expect(hasPendingUIEvents("session-a")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

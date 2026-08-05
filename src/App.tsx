@@ -129,6 +129,7 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
       // File search (Ctrl+P)
       if (matchShortcut(e, shortcuts.fileSearch)) {
         e.preventDefault();

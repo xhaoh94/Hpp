@@ -105,6 +105,87 @@ describe("Pi lifecycle", () => {
     expect(agent.isIdle()).toBe(true);
   });
 
+  it("waits out an active compaction before asking the worker for models", async () => {
+    const child = new FakePiProcess();
+    const getModelsCommands: string[] = [];
+    respondToInit(child, "C:\\sessions\\pi.jsonl", (command) => {
+      if (command.type !== "getModels") return;
+      getModelsCommands.push(String(command.id));
+      child.stdout.write(`${JSON.stringify({
+        type: "models",
+        id: command.id,
+        models: [
+          { id: "claude-opus", name: "Opus", provider: "anthropic" },
+        ],
+      })}\n`);
+    });
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+    await agent.init("C:\\project");
+
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.handleWorkerMessage({
+      type: "context_compaction",
+      id: "compact-models",
+      phase: "started",
+    });
+
+    // While compaction is active the probe must not hit the busy worker.
+    const pending = agent.getModels();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(getModelsCommands.length).toBe(0);
+
+    internals.handleWorkerMessage({
+      type: "context_compaction",
+      id: "compact-models",
+      phase: "completed",
+    });
+
+    const models = await pending;
+    expect(getModelsCommands.length).toBe(1);
+    expect(models).toEqual([
+      expect.objectContaining({ id: "claude-opus", provider: "anthropic" }),
+    ]);
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
+  it("returns the cached model list without probing the worker during compaction", async () => {
+    const child = new FakePiProcess();
+    const getModelsCommands: string[] = [];
+    respondToInit(child, "C:\\sessions\\pi.jsonl", (command) => {
+      if (command.type !== "getModels") return;
+      getModelsCommands.push(String(command.id));
+      child.stdout.write(`${JSON.stringify({
+        type: "models",
+        id: command.id,
+        models: [{ id: "claude-sonnet", name: "Sonnet", provider: "anthropic" }],
+      })}\n`);
+    });
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+    await agent.init("C:\\project");
+
+    // Prime the cache.
+    const first = await agent.getModels();
+    expect(first).toHaveLength(1);
+
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.handleWorkerMessage({
+      type: "context_compaction",
+      id: "compact-cached",
+      phase: "started",
+    });
+
+    const cached = await agent.getModels();
+    expect(cached).toHaveLength(1);
+    expect(getModelsCommands.length).toBe(1);
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
   it("stays busy when prompt_done arrives before background compaction completes", async () => {
     const child = new FakePiProcess();
     respondToInit(child);

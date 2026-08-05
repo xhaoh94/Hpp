@@ -86,6 +86,12 @@ const normalizeModels = (value: unknown): AgentModel[] => {
 };
 
 const PI_WORKER_INIT_TIMEOUT_MS = 120_000;
+// A context compaction keeps the worker busy for potentially tens of
+// seconds. Probing for models mid-compaction can time out and report an
+// empty list, which the renderer would treat as "no models available" and
+// clear its model picker. Wait (bounded) for the compaction to settle before
+// asking the worker for the model list.
+const PI_COMPACTION_MODEL_WAIT_MS = 30_000;
 
 export class PiSDKAgent {
   private process: ChildProcess | null = null;
@@ -459,6 +465,11 @@ export class PiSDKAgent {
   async getModels(): Promise<AgentModel[]> {
     if (this.models.length > 0) return this.models;
     if (!this.process) return [];
+    if (this.compactionActive) {
+      await this.waitForCompactionIdle(PI_COMPACTION_MODEL_WAIT_MS);
+      if (this.models.length > 0) return this.models;
+      if (!this.process) return [];
+    }
     return new Promise((resolve) => {
       let requestId = "";
       const timeout = setTimeout(() => {
@@ -475,6 +486,24 @@ export class PiSDKAgent {
         clearTimeout(timeout);
         resolve([]);
       }
+    });
+  }
+
+  /**
+   * Resolve once the running compaction (if any) settles, or after the
+   * bounded timeout — whichever comes first. A compaction that never settles
+   * must not block model/config RPCs forever.
+   */
+  private waitForCompactionIdle(timeoutMs: number): Promise<void> {
+    if (!this.compactionActive) return Promise.resolve();
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        if (!this.compactionActive || Date.now() - startedAt >= timeoutMs) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 200);
     });
   }
 

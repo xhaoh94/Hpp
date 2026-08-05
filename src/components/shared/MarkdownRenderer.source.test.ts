@@ -20,4 +20,20 @@ describe("MarkdownRenderer code block layout", () => {
     expect(styles).toContain(".md-content .md-code-block:has(.md-code-lang) pre");
     expect(styles).toContain("padding-right: 96px");
   });
+
+  it("keeps long code lines inside the code block scroll container", () => {
+    const contentStyles = styles.slice(
+      styles.indexOf(".md-content {"),
+      styles.indexOf("/* --- Headings --- */"),
+    );
+    const preStyles = styles.slice(
+      styles.indexOf(".md-content .md-code-block pre {"),
+      styles.indexOf(".md-content .md-code-block:has(.md-code-lang) pre"),
+    );
+    expect(contentStyles).toContain("min-width: 0");
+    expect(contentStyles).toContain("max-width: 100%");
+    expect(preStyles).toContain("min-width: 0");
+    expect(preStyles).toContain("max-width: 100%");
+    expect(preStyles).toContain("overflow-x: auto");
+  });
 });

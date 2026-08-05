@@ -49,6 +49,8 @@ import {
   clearPendingUIResponse,
   getPendingUIEventSnapshot,
   hasPendingUIEvents,
+  hasStalePendingUIEvents,
+  pruneStalePendingUIEvents,
   type PendingUIEventSnapshot,
 } from "./pending-ui-events";
 
@@ -72,6 +74,10 @@ interface SuspendedPluginSessions {
 
 const AGENT_SESSION_INIT_TIMEOUT_MS = 90_000;
 const AGENT_SESSION_STATE_REFRESH_TIMEOUT_MS = 3_000;
+// A host UI request that stays untouched for this long while the backend
+// itself reports idle is stale residue from a finished turn. Reuse the
+// session instead of reporting busy forever.
+const PENDING_UI_STALE_MS = 60_000;
 const agentRegistry = getAgentPluginRegistry();
 
 async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
@@ -139,6 +145,18 @@ export class AgentManager {
       sessionId,
       pendingUIRevision: revision,
     });
+  }
+
+  /**
+   * Drop host UI requests that have been untouched for `maxAgeMs` (stale
+   * residue from a finished turn) and publish the updated revision so the
+   * renderer never replays an expired question. Returns whether anything was
+   * removed.
+   */
+  pruneStalePendingUI(sessionId: string, maxAgeMs: number): boolean {
+    if (pruneStalePendingUIEvents(sessionId, maxAgeMs) === 0) return false;
+    this.publishPendingUIRevision(sessionId, getPendingUIEventSnapshot(sessionId).revision);
+    return true;
   }
 
   private async createAgentBackend(agentId: string, sessionId: string): Promise<AgentBackend> {
@@ -1129,13 +1147,27 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     if (!agent) return { success: false, idle: true, error: "No active agent" };
     const cachedIdle = agent.isIdle();
     const pendingUI = hasPendingUIEvents(sessionId);
-    if (typeof agent.refreshIdle !== "function") return { success: true, idle: cachedIdle && !pendingUI };
+    if (typeof agent.refreshIdle !== "function") {
+      // A backend that already reports idle cannot still be waiting for a
+      // host-rendered answer: UI requests are synchronous inside a turn, so a
+      // pending record here is either a live question the user is reading or
+      // stale residue from a finished turn (the request was force-closed, the
+      // renderer switched sessions without answering, or the answer transport
+      // failed). Fresh records still block the session; records untouched for
+      // a long time are expired and must not keep every later send queued
+      // forever after the conversation has clearly finished.
+      if (cachedIdle && pendingUI) {
+        agentManager.pruneStalePendingUI(sessionId, PENDING_UI_STALE_MS);
+      }
+      return { success: true, idle: cachedIdle && !hasPendingUIEvents(sessionId) };
+    }
     try {
       const refreshedIdle = await withTimeout(
         agent.refreshIdle(),
         AGENT_SESSION_STATE_REFRESH_TIMEOUT_MS,
         "Agent idle refresh timed out",
       );
+      if (refreshedIdle) agentManager.pruneStalePendingUI(sessionId, PENDING_UI_STALE_MS);
       return {
         success: true,
         // Waiting for a host-rendered answer is semantically busy even if a
@@ -1146,9 +1178,11 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       // A transport failure must not turn an uncertain live session into an
       // idle one. Return the last revision-guarded cache, but mark it stale so
       // callers do not mistake an old `false` for authoritative busy state.
+      const fallbackIdle = agent.isIdle();
+      if (fallbackIdle) agentManager.pruneStalePendingUI(sessionId, PENDING_UI_STALE_MS);
       return {
         success: true,
-        idle: agent.isIdle() && !hasPendingUIEvents(sessionId),
+        idle: fallbackIdle && !hasPendingUIEvents(sessionId),
         stale: true,
         error: getErrorMessage(error),
       };

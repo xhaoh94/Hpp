@@ -4,6 +4,8 @@
 
 /* --- Base container --- */
 .md-content {
+  min-width: 0;
+  max-width: 100%;
   word-break: break-word;
   overflow-wrap: break-word;
   line-height: 1.65;
@@ -86,6 +88,9 @@
 }
 
 .md-content .md-code-block pre {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   margin: 0;
   padding: 14px 52px 14px 16px;
   overflow-x: auto;

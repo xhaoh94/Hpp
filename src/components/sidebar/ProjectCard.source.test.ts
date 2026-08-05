@@ -41,6 +41,16 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(projectCardSource).not.toContain("setSessionsCollapsed(project.id");
   });
 
+  it("does not evaluate message-local debug variables while rendering the project list", () => {
+    expect(projectCardSource).not.toContain("JSON.stringify(firstUserMsg");
+    expect(projectCardSource).toContain('className="terminal-child-title"');
+  });
+
+  it("derives session tab titles from ordered composer messages", () => {
+    expect(projectCardSource).toContain("getChatMessagePreviewText(firstUserMsg)");
+    expect(projectCardSource).not.toContain("content={firstUserMsg.content}");
+  });
+
   it("uses one explicit title typography for command and file process summaries", () => {
     const titleRule = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-process-entry-title {"),

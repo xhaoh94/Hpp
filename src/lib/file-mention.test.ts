@@ -10,6 +10,37 @@ describe("parseActiveFileMention", () => {
     });
   });
 
+  it("does not swallow pre-existing text after an empty query (CJK)", () => {
+    // Caret right after "@" at the start of a sentence: selecting a file
+    // must replace only the "@" and keep the rest of the line.
+    const value = "@你好世界";
+    expect(parseActiveFileMention(value, 1)).toEqual({
+      query: "",
+      start: 0,
+      end: 1,
+    });
+  });
+
+  it("does not swallow pre-existing text after an empty query (latin)", () => {
+    const value = "@hello world";
+    expect(parseActiveFileMention(value, 1)).toEqual({
+      query: "",
+      start: 0,
+      end: 1,
+    });
+  });
+
+  it("still covers the typed query after the caret when the query is non-empty", () => {
+    // Caret inside the typed query: the token must still span the whole
+    // "@hello" so replacing it removes the query too.
+    const value = "@hello world";
+    expect(parseActiveFileMention(value, value.indexOf("o world"))).toEqual({
+      query: "hell",
+      start: 0,
+      end: 6,
+    });
+  });
+
   it("parses a query after Chinese text and a whitespace boundary", () => {
     const value = "请查看 @配置文件";
     expect(parseActiveFileMention(value, value.length)).toEqual({

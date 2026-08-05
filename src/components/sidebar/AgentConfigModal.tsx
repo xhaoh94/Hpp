@@ -118,6 +118,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [copyProviderError, setCopyProviderError] = useState("");
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelFetchRequest = useRef(0);
+  const pendingProviderEditor = useRef<{ agentId: string; providerId: string } | null>(null);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const providerScrollRef = useRef<HTMLDivElement>(null);
   const { update: updateProviderAutoScroll, stop: stopProviderAutoScroll } = useDragAutoScroll(providerScrollRef);
@@ -180,11 +181,24 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         return;
       }
       setConfig(result.config);
-      setSelectedProviderId(getPreferredProviderId(result.config));
-      setDraft(null);
-      setEditorBaseline(null);
-      setEditorOriginalProviderId("");
-      setEditorOpen(false);
+      const pendingEditor = pendingProviderEditor.current;
+      const pendingProvider = pendingEditor?.agentId === agentId
+        ? result.config.providers.find((provider) => provider.providerId === pendingEditor.providerId)
+        : undefined;
+      pendingProviderEditor.current = null;
+      setSelectedProviderId(pendingProvider?.providerId || getPreferredProviderId(result.config));
+      if (pendingProvider) {
+        const nextDraft = cloneProvider(pendingProvider);
+        setDraft(nextDraft);
+        setEditorBaseline(cloneProvider(nextDraft));
+        setEditorOriginalProviderId(pendingProvider.providerId);
+        setEditorOpen(true);
+      } else {
+        setDraft(null);
+        setEditorBaseline(null);
+        setEditorOriginalProviderId("");
+        setEditorOpen(false);
+      }
       if (backendModelVisibility?.userConfigurable) {
         const visibilityResult = await window.electronAPI.agentConfigGetModelVisibility(agentId);
         if (visibilityResult.success && typeof visibilityResult.backendModelsVisible === "boolean") {
@@ -362,9 +376,17 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       const targetName = targetAgent?.name || targetAgentId;
       const copiedProviderId = result.copiedProviderId || copySourceProvider.providerId;
       const needsActivation = targetAgent?.capabilities.providerActivation === "single-active";
+      const copiedProvider = result.config.providers.find((provider) => provider.providerId === copiedProviderId);
       if (targetAgentId === agentId) {
         setConfig(result.config);
-        setSelectedProviderId(copiedProviderId);
+        if (copiedProvider) {
+          handleEditProvider(copiedProvider);
+        } else {
+          setSelectedProviderId(copiedProviderId);
+        }
+      } else if (copiedProvider) {
+        pendingProviderEditor.current = { agentId: targetAgentId, providerId: copiedProviderId };
+        setAgentId(targetAgentId);
       }
       setCopySourceProvider(null);
       setStatus({
@@ -380,7 +402,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setCopyingTargetAgentId("");
     }
-  }, [agentId, configurableAgentList, copyingTargetAgentId, copySourceProvider, onModelsUpdated]);
+  }, [agentId, configurableAgentList, copyingTargetAgentId, copySourceProvider, handleEditProvider, onModelsUpdated]);
 
   const handleUndoDraft = useCallback(() => {
     if (!editorBaseline) return;

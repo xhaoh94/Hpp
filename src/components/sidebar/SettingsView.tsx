@@ -640,7 +640,7 @@ export function SettingsView() {
                     ))}
                   </div>
                   <div className="filter-custom-ext">
-                    <input value={newFolder} onChange={(e) => setNewFolder(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addFolder()} placeholder="添加文件夹" className="filter-custom-input" />
+                    <input value={newFolder} onChange={(e) => setNewFolder(e.target.value)} onKeyDown={(e) => { if (e.nativeEvent.isComposing) return; if (e.key === "Enter") addFolder(); }} placeholder="添加文件夹" className="filter-custom-input" />
                     <button onClick={addFolder} className="filter-add-btn">添加</button>
                   </div>
                 </div>
@@ -656,7 +656,7 @@ export function SettingsView() {
                     ))}
                   </div>
                   <div className="filter-custom-ext">
-                    <input value={newExt} onChange={(e) => setNewExt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addExt()} placeholder="如 .log" className="filter-custom-input" />
+                    <input value={newExt} onChange={(e) => setNewExt(e.target.value)} onKeyDown={(e) => { if (e.nativeEvent.isComposing) return; if (e.key === "Enter") addExt(); }} placeholder="如 .log" className="filter-custom-input" />
                     <button onClick={addExt} className="filter-add-btn">添加</button>
                   </div>
                 </div>
@@ -672,7 +672,7 @@ export function SettingsView() {
                     ))}
                   </div>
                   <div className="filter-custom-ext">
-                    <input value={newFile} onChange={(e) => setNewFile(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addFile()} placeholder="如 .env" className="filter-custom-input" />
+                    <input value={newFile} onChange={(e) => setNewFile(e.target.value)} onKeyDown={(e) => { if (e.nativeEvent.isComposing) return; if (e.key === "Enter") addFile(); }} placeholder="如 .env" className="filter-custom-input" />
                     <button onClick={addFile} className="filter-add-btn">添加</button>
                   </div>
                 </div>

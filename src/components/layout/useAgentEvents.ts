@@ -27,6 +27,7 @@ type UseAgentEventsOptions = {
   setPendingUIResponseState: (next: PendingUIResponseUpdate) => void;
   setStreaming: (streaming: boolean) => void;
   preserveAssistantProcessCollapse?: (sessionId: string, action: () => void) => void;
+  onContextCompactionSettled?: (sessionId: string) => void;
 };
 
 // React StrictMode immediately tears down and recreates effects once in
@@ -186,6 +187,7 @@ export function useAgentEvents({
   setPendingUIResponseState,
   setStreaming,
   preserveAssistantProcessCollapse,
+  onContextCompactionSettled,
 }: UseAgentEventsOptions) {
   const activeAgentIdRef = useRef(activeAgentId);
   const controllerRef = useRef<AgentEventRuntimeController | null>(null);
@@ -194,6 +196,7 @@ export function useAgentEvents({
     getPendingUIResponse,
     setStreaming,
     preserveAssistantProcessCollapse,
+    onContextCompactionSettled,
   });
 
   activeAgentIdRef.current = activeAgentId;
@@ -202,6 +205,7 @@ export function useAgentEvents({
     getPendingUIResponse,
     setStreaming,
     preserveAssistantProcessCollapse,
+    onContextCompactionSettled,
   };
 
   useEffect(() => {
@@ -241,6 +245,13 @@ export function useAgentEvents({
         );
       }
       if (event.type === "pending_ui_cache_revision") return;
+      if (
+        event.type === "context_compaction" &&
+        event.phase !== "started" &&
+        event.sessionId
+      ) {
+        latestSettersRef.current.onContextCompactionSettled?.(event.sessionId);
+      }
       dispatchAgentEvent(event, controller);
     });
     let reconcileChain = Promise.resolve();

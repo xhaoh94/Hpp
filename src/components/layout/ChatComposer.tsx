@@ -248,6 +248,7 @@ export const ChatComposer = memo(function ChatComposer({
       }
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.isComposing) return;
       if (event.key === "Escape") {
         setUploadMenuOpen(false);
         setActionPickerOpen(false);
@@ -405,13 +406,16 @@ export const ChatComposer = memo(function ChatComposer({
 
       if (event.key === "Enter" || event.key === "Tab") {
         const selected = fileMentionResults[fileMentionSelectedIndex];
-        if (event.key === "Tab" && !selected) {
+        if (!selected) {
+          // No match to pick (including an @ mention that found nothing):
+          // fall through to the default key handling so Enter still sends
+          // the message instead of being swallowed by the mention picker.
           onKeyDown(event);
           return;
         }
         event.preventDefault();
         event.stopPropagation();
-        if (selected && fileMentionResultState.query === activeMention.query) {
+        if (fileMentionResultState.query === activeMention.query) {
           handleSelectFileMention(selected, activeMention);
         }
         return;
@@ -563,7 +567,7 @@ export const ChatComposer = memo(function ChatComposer({
             ))}
           </div>
         )}
-        {fileMention && (
+        {fileMention && fileMentionResults.length > 0 && (
           <ComposerFileMentionPicker
             id={FILE_MENTION_LIST_ID}
             error={fileMentionError}

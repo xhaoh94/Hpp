@@ -30,6 +30,19 @@ export function parseActiveFileMention(
   if ([...query].some((character) => character === "@" || isWhitespace(character))) return null;
   if (start > 0 && isEmailOrIdentifierCharacter(value[start - 1])) return null;
 
+  // An empty query means the caret sits right after "@": whatever follows is
+  // pre-existing content, not a query continuation. Keep the token at the
+  // caret so selecting a file only replaces the "@" instead of swallowing
+  // the rest of the line (most visible with CJK text, which has no
+  // whitespace separators to stop the forward scan).
+  if (query === "") {
+    return {
+      query,
+      start,
+      end: caret,
+    };
+  }
+
   let end = caret;
   while (end < value.length && value[end] !== "@" && !isWhitespace(value[end])) end += 1;
 

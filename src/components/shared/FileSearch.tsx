@@ -151,6 +151,7 @@ export function FileSearch({ isOpen, onClose, onSelect }: FileSearchProps) {
   }, [onClose, onSelect, query, resultState.query]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
     switch (e.key) {
       case "ArrowDown":
         e.preventDefault();
