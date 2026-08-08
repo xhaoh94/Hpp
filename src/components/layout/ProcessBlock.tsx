@@ -8,6 +8,7 @@ import type {
 } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
+import { CornerDownRight } from "lucide-react";
 import {
   composerDocumentHasContent,
   getComposerImageNodes,
@@ -444,7 +445,7 @@ function ProcessEntryRow({
   entry,
   now,
   running = true,
-  expandThinkingWhileRunning = true,
+  expandThinkingWhileRunning = false,
   onToggleEntry,
   onOpenFile,
   onOpenImage,
@@ -457,7 +458,7 @@ function ProcessEntryRow({
   now: number;
   running?: boolean;
   expandThinkingWhileRunning?: boolean;
-  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
@@ -523,7 +524,9 @@ function ProcessEntryRow({
             </div>
           )}
           <div className="chat-process-guidance-content">
-            <span className="chat-process-guidance-label">引导</span>
+            <span className="chat-process-guidance-label" title="引导">
+              <CornerDownRight size={14} strokeWidth={2} />
+            </span>
             <div className="chat-bubble user chat-process-guidance-bubble">
               {hasDocumentContent && guidanceDocument ? (
                 <ComposerMessageFlow document={guidanceDocument} onOpenImage={onOpenImage} />
@@ -542,17 +545,25 @@ function ProcessEntryRow({
   // second per-entry disclosure state.
   if (entry.type === "thinking") {
     if (!entry.detail?.trim()) return null;
-    // 处理过程中：默认展开状态由设置 expandThinkingWhileRunning 决定
-    // （关闭时处理中的思考默认折叠，避免长思考刷屏）；处理结束后
-    // 恢复按条目自身状态展开。用户始终可手动切换单条思考的展开/折叠。
-    const thinkingExpanded = entry.expanded !== false && (!running || expandThinkingWhileRunning !== false);
+    // 默认展开状态由设置 expandThinkingWhileRunning 决定，贯穿处理中与
+    // 处理结束后：关闭时思考默认折叠（避免长思考刷屏，且插入新对话/新
+    // 处理过程后旧 turn 的思考也不会自动全部展开），开启时默认展开。
+    // 用户手动展开（expanded === true）或折叠（expanded === false）的
+    // 单条思考始终优先于设置。
+    const thinkingExpanded = entry.expanded === true || (entry.expanded !== false && expandThinkingWhileRunning !== false);
     const isSingleLine = isThinkingSingleLine(entry.detail);
+    // 正在思考时给灯泡加上运行标记，折叠预览据此触发扫光；结束后恢复静态图标。
+    const thinkingRunning = running && entry.state === "running";
+    // 折叠预览：代码块在边界时会被保留为完整代码块，预览因此可能超过 2 行，
+    // 此时需要解除 CSS line-clamp 才能完整显示（而不是渲染成空白代码块框）。
+    const thinkingPreviewMarkdown = getThinkingPreviewMarkdown(entry.detail);
+    const thinkingPreviewHasCodeBlock = /^\s*(`{3,}|~{3,})/m.test(thinkingPreviewMarkdown);
 
     // Single-line thinking: show directly without expand/collapse toggle
     if (isSingleLine) {
       return (
         <div className="chat-process-thinking-row expanded single-line">
-          <span className="chat-process-thinking-toggle static">
+          <span className={`chat-process-thinking-toggle static${thinkingRunning ? " running" : ""}`}>
             <ProcessEntryIcon type="thinking" />
           </span>
           <div className="chat-process-output chat-process-thinking-output">
@@ -569,11 +580,11 @@ function ProcessEntryRow({
       >
         <button
           type="button"
-          className="chat-process-thinking-toggle"
+          className={`chat-process-thinking-toggle${thinkingRunning ? " running" : ""}`}
           aria-label={thinkingExpanded ? "折叠思考" : "展开思考"}
           aria-expanded={thinkingExpanded}
           title={thinkingExpanded ? "折叠思考" : "展开思考"}
-          onClick={(event) => onToggleEntry(messageId, entry.id, event.currentTarget)}
+          onClick={(event) => onToggleEntry(messageId, entry.id, event.currentTarget, !thinkingExpanded)}
         >
           <ProcessEntryIcon type="thinking" />
         </button>
@@ -584,8 +595,8 @@ function ProcessEntryRow({
             </div>
           </div>
         ) : (
-          <div className="chat-process-thinking-preview">
-            <MarkdownRenderer content={getThinkingPreviewMarkdown(entry.detail)} />
+          <div className={`chat-process-thinking-preview${thinkingPreviewHasCodeBlock ? " has-code-block" : ""}`}>
+            <MarkdownRenderer content={thinkingPreviewMarkdown} />
           </div>
         )}
       </div>
@@ -657,7 +668,7 @@ function ProcessEntries({
   messageId,
   now,
   running = true,
-  expandThinkingWhileRunning = true,
+  expandThinkingWhileRunning = false,
   onToggleEntry,
   onOpenFile,
   onOpenImage,
@@ -670,7 +681,7 @@ function ProcessEntries({
   now: number;
   running?: boolean;
   expandThinkingWhileRunning?: boolean;
-  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
@@ -969,7 +980,7 @@ export function ProcessBlock({
   running = true,
   terminalState = "completed",
   fallbackEndedAt,
-  expandThinkingWhileRunning = true,
+  expandThinkingWhileRunning = false,
   onToggle,
   onToggleEntry,
   onOpenFile,
@@ -985,7 +996,7 @@ export function ProcessBlock({
   fallbackEndedAt?: number;
   expandThinkingWhileRunning?: boolean;
   onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
-  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;

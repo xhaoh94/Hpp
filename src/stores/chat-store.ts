@@ -223,6 +223,7 @@ interface ChatState {
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
+  appendLastAssistantContent: (content: string, sessionId?: string | null) => void;
   setNativeTurnIdForTurn: (clientMessageId: string, nativeTurnId: string, sessionId?: string | null) => void;
   appendLastAssistantDiffs: (diffs: FileDiff[], sessionId?: string | null) => void;
   appendContextCompactionDivider: (
@@ -244,7 +245,7 @@ interface ChatState {
   interruptSessionCompaction: (sessionId: string) => void;
   collapseLastAssistantProcess: (sessionId?: string | null) => void;
   toggleAssistantProcess: (messageId: string) => void;
-  toggleAssistantProcessEntry: (messageId: string, entryId: string) => void;
+  toggleAssistantProcessEntry: (messageId: string, entryId: string, expanded?: boolean) => void;
   setStreaming: (v: boolean) => void;
   setCurrentModel: (m: ModelInfo) => void;
   setThinkingLevel: (level: string) => void;
@@ -705,6 +706,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }),
 
+  appendLastAssistantContent: (content, sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      const normalizedContent = content.trim();
+      if (!normalizedContent) return messages;
+      const { msgs, index } = ensureAssistantProcess(messages);
+      const message = msgs[index];
+      const existingContent = message.content.trimEnd();
+      msgs[index] = {
+        ...message,
+        content: existingContent
+          ? `${existingContent}\n\n${normalizedContent}`
+          : normalizedContent,
+        isStreaming: true,
+      };
+      return msgs;
+    })),
+
   setNativeTurnIdForTurn: (clientMessageId, nativeTurnId, sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) =>
       setNativeTurnIdForMessages(messages, clientMessageId, nativeTurnId)
@@ -863,7 +881,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const process = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
       const normalizedEntry: AgentProcessEntry = {
         ...entry,
-        expanded: entry.type === "thinking",
+        // 思考条目保留调用方传入的 expanded：未设置（undefined）时由设置
+        // expandThinkingWhileRunning 决定默认展开状态（见 ProcessBlock），
+        // 用户手动展开/折叠后以条目自身状态为准；非思考条目默认折叠。
+        expanded: entry.type === "thinking" ? entry.expanded : false,
       };
       msgs[index] = {
         ...msg,
@@ -1035,7 +1056,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     })),
 
-  toggleAssistantProcessEntry: (messageId, entryId) =>
+  toggleAssistantProcessEntry: (messageId, entryId, expanded) =>
     set((s) => ({
       messages: s.messages.map((msg) =>
         msg.id === messageId && msg.process
@@ -1044,7 +1065,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               process: {
                 ...msg.process,
                 entries: msg.process.entries.map((entry) =>
-                  entry.id === entryId ? { ...entry, expanded: !entry.expanded } : entry
+                  // 思考条目可能由设置决定显示状态（expanded 未设置时），
+                  // 因此调用方会显式传入目标展开状态；未传时保持翻转语义。
+                  entry.id === entryId ? { ...entry, expanded: typeof expanded === "boolean" ? expanded : !entry.expanded } : entry
                 ),
               },
             }
@@ -1099,7 +1122,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     }),
 
-  setActiveAgent: (id) => set({ activeAgentId: id }),
+  setActiveAgent: (id) => set((s) => (
+    s.activeAgentId === id ? {} : { activeAgentId: id }
+  )),
   clearMessages: () => set({ messages: [] }),
   clearAgentStartupErrors: (sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => messages.filter((message) => !isAgentStartupFailureMessage(message)))),
@@ -1357,6 +1382,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: (sessionId) => {
     const state = get();
+    if (state.activeSessionId === sessionId) return;
     const nextSessionMessages = state.activeSessionId
       ? { ...state.sessionMessages, [state.activeSessionId]: state.messages }
       : state.sessionMessages;

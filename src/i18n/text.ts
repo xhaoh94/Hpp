@@ -51,6 +51,7 @@ export const uiText = {
     elapsed: "处理耗时",
     emptyEvents: "等待 agent 事件...",
     errorLabel: "错误",
+    modelRequestFailed: "模型请求失败",
     commandGroupUnit: "条命令",
     inferredSteps: {
       analyze: "分析请求",
@@ -113,6 +114,13 @@ export const getRemovePathAttachmentLabel = (kind: AttachmentKind) =>
 
 export const formatThinkingSummary = (preview: string) =>
   `${uiText.process.thinkingPrefix}: ${preview}`;
+
+export const formatModelRequestFailure = (detail?: string) => {
+  const normalizedDetail = detail?.trim();
+  return normalizedDetail
+    ? `${uiText.process.modelRequestFailed}：${normalizedDetail}`
+    : `${uiText.process.modelRequestFailed}，请检查模型配置或网络连接后重试。`;
+};
 
 export const formatProcessCountSummary = (
   toolCount: number,

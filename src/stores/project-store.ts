@@ -138,7 +138,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return { projects };
     }),
 
-  setActiveProject: (id) => set({ activeProjectId: id }),
+  setActiveProject: (id) => set((s) => (
+    s.activeProjectId === id ? {} : { activeProjectId: id }
+  )),
 
   addSession: (projectId, session, activate = true) =>
     set((s) => ({

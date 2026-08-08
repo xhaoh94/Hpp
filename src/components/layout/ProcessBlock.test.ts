@@ -157,8 +157,30 @@ describe("ProcessBlock", () => {
     expect(source).toContain('behavior: "auto"');
     expect(source).not.toContain("STICKY_NEAR_JUMP_DISTANCE");
     expect(styles).toContain(".chat-process-thinking-row.jump-highlight");
-    expect(styles).toContain("chat-thinking-bulb-breathe");
+    expect(styles).toContain("chat-thinking-bulb-pulse");
+    // 跳转高亮与思考中灯泡一致：亮度脉动，不产生矩形背景或直角扩散边框。
+    expect(styles).not.toContain("background-color: color-mix(in srgb, var(--accent-color) 18%");
+    expect(styles).not.toContain("box-shadow: 0 0 0 5px");
     expect(styles).not.toContain("transform: scale(1.2)");
+  });
+
+  it("sweeps a shimmer across the collapsed thinking preview while running", () => {
+    const styles = readFileSync(resolve("src/components/layout/ChatPanel.css"), "utf8");
+    // 折叠且思考运行时：预览两行文字上方有一道扫光反复扫过。
+    expect(styles).toContain(
+      ".chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview"
+    );
+    expect(styles).toContain("chat-thinking-text-shimmer");
+    expect(styles).toContain("@keyframes chat-thinking-text-shimmer");
+    expect(styles).toContain("4s ease-in-out infinite");
+    // 只高亮文字笔画本身：背景裁剪到文字，不出现矩形覆盖层或边框。
+    expect(styles).toContain("background-clip: text");
+    expect(styles).toContain("background-size: 300% 100%");
+    // T1：宽高亮带（38%-62%）柔和扫过。
+    expect(styles).toContain("var(--text-secondary) 38%");
+    expect(styles).toContain("var(--text-secondary) 62%");
+    expect(styles).not.toContain(".chat-process-thinking-preview::after");
+    // 扫光只作用于折叠态，不影响展开/单行思考。
   });
 
   it("formats idle durations as a stable mm:ss value", () => {
@@ -260,7 +282,12 @@ describe("ProcessBlock", () => {
     const guidanceBubbleIndex = expanded.indexOf('class="chat-bubble user chat-process-guidance-bubble"');
     expect(guidanceLabelIndex).toBeGreaterThan(-1);
     expect(guidanceBubbleIndex).toBeGreaterThan(guidanceLabelIndex);
-    expect(expanded).toContain("引导");
+    // 引导标签为纯图标（CornerDownRight），不带文字。
+    const guidanceLabelEnd = expanded.indexOf("</span>", guidanceLabelIndex);
+    const guidanceLabelMarkup = expanded.slice(guidanceLabelIndex, guidanceLabelEnd);
+    expect(guidanceLabelMarkup).toContain("<svg");
+    expect(guidanceLabelMarkup).not.toContain(">引导<");
+    expect(expanded).not.toContain(">引导<");
     expect(expanded).toContain("继续检查");
     expect(expanded).toContain("README.md");
     expect(expanded).not.toContain("收到引导");
@@ -293,6 +320,7 @@ describe("ProcessBlock", () => {
       messageId: "assistant-thinking",
       process,
       commentary: [],
+      expandThinkingWhileRunning: true,
       onToggle: vi.fn(),
       onToggleEntry: vi.fn(),
       onOpenFile: vi.fn(),
@@ -364,6 +392,7 @@ describe("ProcessBlock", () => {
       messageId: "assistant-thinking-long",
       process,
       commentary: [],
+      expandThinkingWhileRunning: true,
       onToggle: vi.fn(),
       onToggleEntry: vi.fn(),
       onOpenFile: vi.fn(),
@@ -472,26 +501,125 @@ describe("ProcessBlock", () => {
     expect(markup).not.toContain("chat-process-thinking-body");
   });
 
-  it("expands thinking while running by default", () => {
+  it("expands thinking while running when the setting is on", () => {
     const process: AgentProcess = {
       startedAt: 1,
       endedAt: 2,
       expanded: true,
       entries: [{
-        id: "thinking-running-default",
+        id: "thinking-running-enabled",
         type: "thinking",
         title: "正在思考",
-        detail: Array.from({ length: 4 }, (_, i) => `处理中自动展开思考的第 ${i + 1} 行，用于验证默认展开行为`).join("\n\n"),
+        detail: Array.from({ length: 4 }, (_, i) => `处理中自动展开思考的第 ${i + 1} 行，用于验证开启时展开行为`).join("\n\n"),
         state: "completed",
         timestamp: 10,
       }],
     };
 
     const markup = renderToStaticMarkup(createElement(ProcessBlock, {
-      messageId: "assistant-thinking-running-default",
+      messageId: "assistant-thinking-running-enabled",
       process,
       commentary: [],
       running: true,
+      expandThinkingWhileRunning: true,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action) => action(),
+    }));
+
+    expect(markup).toContain("chat-process-thinking-row expanded");
+    expect(markup).toContain("chat-process-thinking-body");
+  });
+
+  it("collapses thinking by default while running", () => {
+    const process: AgentProcess = {
+      startedAt: 1,
+      endedAt: 2,
+      expanded: true,
+      entries: [{
+        id: "thinking-running-default-collapsed",
+        type: "thinking",
+        title: "正在思考",
+        detail: Array.from({ length: 4 }, (_, i) => `处理中默认折叠思考的第 ${i + 1} 行，用于验证默认折叠行为`).join("\n\n"),
+        state: "running",
+        timestamp: 10,
+      }],
+    };
+
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-thinking-running-default-collapsed",
+      process,
+      commentary: [],
+      running: true,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action) => action(),
+    }));
+
+    expect(markup).toContain("chat-process-thinking-row collapsed");
+    expect(markup).toContain("chat-process-thinking-preview");
+    expect(markup).not.toContain("chat-process-thinking-body");
+  });
+
+  it("keeps thinking collapsed after the turn ends when the setting is off", () => {
+    // 用户场景：中间插入新对话/新处理过程后，旧 turn 不再是活跃 turn
+    // （running=false），此时思考不应自动全部展开。
+    const process: AgentProcess = {
+      startedAt: 1,
+      endedAt: 2,
+      expanded: true,
+      entries: [{
+        id: "thinking-old-turn",
+        type: "thinking",
+        title: "正在思考",
+        detail: Array.from({ length: 5 }, (_, i) => `旧 turn 的第 ${i + 1} 段思考内容，设置关闭时结束后也应默认折叠`).join("\n\n"),
+        state: "completed",
+        timestamp: 10,
+      }],
+    };
+
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-thinking-old-turn",
+      process,
+      commentary: [],
+      running: false,
+      expandThinkingWhileRunning: false,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action) => action(),
+    }));
+
+    expect(markup).toContain("chat-process-thinking-row collapsed");
+    expect(markup).toContain("chat-process-thinking-preview");
+    expect(markup).not.toContain("chat-process-thinking-body");
+  });
+
+  it("keeps manually expanded thinking open after the turn ends when the setting is off", () => {
+    // 用户手动展开过的思考（expanded === true）优先于设置，结束后仍保持展开。
+    const process: AgentProcess = {
+      startedAt: 1,
+      endedAt: 2,
+      expanded: true,
+      entries: [{
+        id: "thinking-manual-expanded",
+        type: "thinking",
+        title: "正在思考",
+        detail: Array.from({ length: 5 }, (_, i) => `用户手动展开的第 ${i + 1} 段思考内容`).join("\n\n"),
+        expanded: true,
+        state: "completed",
+        timestamp: 10,
+      }],
+    };
+
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-thinking-manual-expanded",
+      process,
+      commentary: [],
+      running: false,
+      expandThinkingWhileRunning: false,
       onToggle: vi.fn(),
       onToggleEntry: vi.fn(),
       onOpenFile: vi.fn(),

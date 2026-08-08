@@ -20,15 +20,6 @@ const DEFAULT_CODEX_MODEL = {
   reasoning: true,
   supportsImages: true,
 };
-const VALID_REASONING_EFFORTS = new Set([
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra",
-]);
 const PLAN_MODE_INSTRUCTIONS = [
   "<plan_mode>",
   "当前回合已启用计划模式。",
@@ -43,8 +34,7 @@ const DEFAULT_THINKING_LEVEL = "medium";
 const normalizeDefaultThinkingLevel = (level) => {
   const normalized = String(level || "").trim().toLowerCase();
   if (normalized === "none") return "off";
-  if (normalized === "off" || VALID_REASONING_EFFORTS.has(normalized)) return normalized;
-  return undefined;
+  return normalized || undefined;
 };
 
 const getTopLevelConfigValue = (content, key) => {
@@ -159,7 +149,9 @@ const truncate = (value, maxLength = 1200) => {
 const normalizeReasoningEffort = (level) => {
   const normalized = String(level || "").trim().toLowerCase();
   if (normalized === "off" || normalized === "none") return "none";
-  return VALID_REASONING_EFFORTS.has(normalized) ? normalized : undefined;
+  // Preserve unknown effort ids returned by the app-server model list so the
+  // UI can show exactly what the backend exposes; the server validates them.
+  return normalized || undefined;
 };
 
 const getSupportedThinkingLevels = (reasoningEfforts) => {

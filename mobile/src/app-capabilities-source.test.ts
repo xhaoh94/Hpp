@@ -16,7 +16,7 @@ describe("mobile capability source constraints", () => {
   });
 
   it("keeps the mobile process presentation as a bordered card", () => {
-    expect(stylesSource).toContain(".process-block { margin-top: 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }");
+    expect(stylesSource).toContain(".process-block { min-width: 0; max-width: 100%; margin-top: 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }");
     expect(stylesSource).toContain(".process-block > summary { display: flex; min-height: 36px;");
     expect(stylesSource).toContain(".process-block > summary::-webkit-details-marker { display: none; }");
     expect(stylesSource).toContain(".process-block[open] > summary .expand-indicator,");
@@ -29,6 +29,18 @@ describe("mobile capability source constraints", () => {
     expect(stylesSource).toContain(".message.assistant > .message-commentary,");
     expect(stylesSource).toContain(".message.assistant .message-commentary-item.message-content");
     expect(stylesSource).toContain(".message.assistant .process-block .message-commentary-item.message-content");
+  });
+
+  it("renders mobile thinking details as contained Markdown and keeps final text off the right edge", () => {
+    expect(appSource).toContain('entry.type === "thinking"');
+    expect(appSource).toContain('className="process-entry-detail message-content"');
+    expect(stylesSource).toContain(".process-entry-detail { box-sizing: border-box; width: calc(100% - 10px);");
+    expect(stylesSource).toContain("overflow-wrap: anywhere;");
+    expect(stylesSource).toContain(".message.assistant .message-commentary-item.message-content { padding-left: var(--message-assistant-body-inset); padding-right: 5px; }");
+    expect(stylesSource).toContain(".messages-view { width: 100%; height: 100%; min-height: 0; overflow-x: hidden;");
+    expect(stylesSource).toContain(".process-entry > pre,");
+    expect(stylesSource).toContain("white-space: pre-wrap;");
+    expect(stylesSource).toContain("overflow-x: hidden;");
   });
 
   it("vertically centers the guidance label beside its message bubble", () => {

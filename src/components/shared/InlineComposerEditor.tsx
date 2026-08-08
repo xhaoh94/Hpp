@@ -319,7 +319,27 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
     onError(error: Error) { throw error; },
   }), []);
 
-  useEffect(() => { editorRef.current?.setEditable(!disabled); }, [disabled]);
+  const previousDisabledRef = useRef(disabled);
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.setEditable(!disabled);
+    // Enforce the contenteditable attribute on the real DOM node. Under React 19
+    // the editor's internal editable flag and the DOM attribute can drift (see
+    // lexical#6040), leaving the composer permanently un-focusable after a
+    // read-only/disabled round-trip even though the editor *thinks* it is
+    // editable. Force the attribute to match so the composer stays focusable.
+    const root = editor.getRootElement();
+    if (root) root.contentEditable = disabled ? "false" : "true";
+    // When transitioning from read-only back to editable, Lexical's own focus()
+    // is unreliable if called synchronously — the browser's DOM selection may
+    // not be reconciled yet. Re-assert focus on the next frame.
+    if (previousDisabledRef.current && !disabled) {
+      const frame = requestAnimationFrame(() => editor.focus(() => {}));
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [disabled]);
+  useEffect(() => { previousDisabledRef.current = disabled; }, [disabled]);
 
   const captureSelection = useCallback(() => {
     editorRef.current?.getEditorState().read(() => {
@@ -435,10 +455,22 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
     },
   }), []);
 
+  // Click guard: after read-only/disabled toggles the browser's DOM selection
+  // can be left out of sync with Lexical, so plain clicks may not re-focus the
+  // contentEditable. Re-assert focus on any click while the editor is editable
+  // so the composer stays usable after an agent interaction ends.
+  const handleEditorContainerClick = () => {
+    const editor = editorRef.current;
+    if (!editor || disabled) return;
+    if (document.activeElement !== editor.getRootElement()) {
+      editor.focus();
+    }
+  };
+
   return (
     <EditorCallbacksContext.Provider value={{ disabled, onOpenImage }}>
       <LexicalComposer initialConfig={initialConfig}>
-        <div className={`inline-composer-editor ${className}`}>
+        <div className={`inline-composer-editor ${className}`} onClick={handleEditorContainerClick}>
           <RichTextPlugin
             contentEditable={<ContentEditable
               className="inline-composer-content"

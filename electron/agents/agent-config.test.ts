@@ -137,6 +137,42 @@ describe("agent provider config", () => {
     });
   });
 
+  it("derives reasoning exclusively from the selected thinking levels", async () => {
+    const result = await saveAgentProviderConfig("test-agent", {
+      ...provider("provider-a"),
+      models: [{
+        id: "enabled-model",
+        name: "Enabled",
+        reasoning: false,
+        imageInput: false,
+        supportedThinkingLevels: ["high", "future-tier"],
+      }, {
+        id: "disabled-model",
+        name: "Disabled",
+        reasoning: true,
+        imageInput: false,
+        supportedThinkingLevels: [],
+      }],
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      config: {
+        providers: expect.arrayContaining([expect.objectContaining({
+          providerId: "provider-a",
+          models: [expect.objectContaining({
+            id: "enabled-model",
+            reasoning: true,
+            supportedThinkingLevels: ["high", "future-tier"],
+          }), expect.objectContaining({
+            id: "disabled-model",
+            reasoning: false,
+          })],
+        })]),
+      },
+    });
+  });
+
   it("delegates plugin-owned configuration writes", async () => {
     testState.capabilities = {
       configuration: providerConfiguration("plugin"),
@@ -316,5 +352,43 @@ describe("agent provider config", () => {
 
     const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
     expect(settings.agentModelPreferences["test-agent"].backendModelsVisible).toBe(true);
+  });
+
+  it("keeps per-model thinking levels from the provider configuration", async () => {
+    // Model-declared levels win over the plugin default and unknown ids are
+    // preserved verbatim (empty/duplicate entries are normalized away).
+    const dataDir = join(tempRoot, "hpp-data");
+    await writeFile(join(dataDir, "settings.json"), JSON.stringify({
+      agentConfigs: {
+        "test-agent": {
+          activeProviderId: "provider-a",
+          providers: [{
+            providerId: "provider-a",
+            displayName: "provider-a",
+            baseUrl: "https://provider-a.example/v1",
+            apiKey: "key",
+            authMode: "bearer",
+            endpoint: "responses",
+            models: [{
+              id: "model-deep",
+              name: "Deep Model",
+              reasoning: true,
+              imageInput: false,
+              supportedThinkingLevels: ["off", "deep", "auto", "deep", ""],
+            }],
+          }],
+        },
+      },
+    }), "utf8");
+    await expect(getConfiguredAgentModels("test-agent")).resolves.toEqual([
+      {
+        id: "model-deep",
+        name: "Deep Model",
+        provider: "provider-a",
+        reasoning: true,
+        supportsImages: false,
+        supportedThinkingLevels: ["off", "deep", "auto"],
+      },
+    ]);
   });
 });

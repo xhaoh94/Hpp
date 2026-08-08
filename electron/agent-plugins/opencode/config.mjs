@@ -141,6 +141,30 @@ const modelSupportsImages = (value) => {
   return Array.isArray(modalities.input) && modalities.input.includes("image");
 };
 
+const normalizeThinkingLevels = (values) => {
+  if (!Array.isArray(values)) return [];
+  const levels = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim().toLowerCase() === "none" ? "off" : value.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    levels.push(normalized);
+  }
+  return levels;
+};
+
+const getModelThinkingLevels = (value) => {
+  if (Array.isArray(value.hppSupportedThinkingLevels)) {
+    return normalizeThinkingLevels(value.hppSupportedThinkingLevels);
+  }
+  if (!isRecord(value.variants)) return undefined;
+  return normalizeThinkingLevels(Object.entries(value.variants).flatMap(([level, options]) =>
+    !isRecord(options) || options.disabled !== true ? [level] : []
+  ));
+};
+
 const normalizeModel = (value, fallbackId) => {
   if (!isRecord(value)) {
     const id = asString(fallbackId) || asString(value);
@@ -148,11 +172,13 @@ const normalizeModel = (value, fallbackId) => {
   }
   const id = asString(value.id) || asString(value.model) || asString(value.name) || asString(fallbackId);
   if (!id) return null;
+  const supportedThinkingLevels = getModelThinkingLevels(value);
   return {
     id,
     name: asString(value.name) || asString(value.displayName) || id,
-    reasoning: value.reasoning === true,
+    reasoning: supportedThinkingLevels !== undefined ? supportedThinkingLevels.length > 0 : value.reasoning === true,
     imageInput: modelSupportsImages(value),
+    ...(supportedThinkingLevels?.length ? { supportedThinkingLevels } : {}),
   };
 };
 
@@ -182,10 +208,11 @@ export const toProviderConfig = (provider, existingValue = {}) => {
   for (const model of provider.models || []) {
     const existingModel = isRecord(existingModels[model.id]) ? existingModels[model.id] : {};
     const existingModalities = isRecord(existingModel.modalities) ? existingModel.modalities : {};
-    models[model.id] = {
+    const supportedThinkingLevels = normalizeThinkingLevels(model.supportedThinkingLevels);
+    const nextModel = {
       ...existingModel,
       name: model.name || model.id,
-      reasoning: model.reasoning === true,
+      reasoning: supportedThinkingLevels.length > 0,
       attachment: model.imageInput === true,
       modalities: {
         ...existingModalities,
@@ -193,6 +220,10 @@ export const toProviderConfig = (provider, existingValue = {}) => {
         output: Array.isArray(existingModalities.output) ? existingModalities.output : ["text"],
       },
     };
+    // Keep Hpp's explicit selection separate from native variant options so
+    // advanced OpenCode variant configuration remains lossless.
+    nextModel.hppSupportedThinkingLevels = supportedThinkingLevels;
+    models[model.id] = nextModel;
   }
   return {
     ...existing,

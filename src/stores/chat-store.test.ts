@@ -41,7 +41,7 @@ describe("chat process entry defaults", () => {
     expect(useChatStore.getState().messages[0].process?.entries[0].expanded).toBe(false);
   });
 
-  it("expands thinking entries by default", () => {
+  it("leaves thinking entries expanded unset by default", () => {
     useChatStore.getState().appendLastAssistantProcessEntry({
       id: "thinking",
       type: "thinking",
@@ -51,7 +51,9 @@ describe("chat process entry defaults", () => {
       state: "running",
     });
 
-    expect(useChatStore.getState().messages[0].process?.entries[0].expanded).toBe(true);
+    // 未手动操作时思考条目的 expanded 保持未设置，默认展开状态由设置
+    // expandThinkingWhileRunning 决定（见 ProcessBlock）。
+    expect(useChatStore.getState().messages[0].process?.entries[0].expanded).toBeUndefined();
   });
 
   it("collapses thinking entries when the last process is collapsed", () => {
@@ -97,18 +99,46 @@ describe("chat process entry defaults", () => {
     });
     const messageId = useChatStore.getState().messages[0].id;
 
-    // 手动折叠执行过程不影响思考过程的展开状态
+    // 手动折叠执行过程不影响思考过程的状态（思考的展开状态由设置
+    // expandThinkingWhileRunning 决定，未手动操作时 expanded 为 undefined）
     useChatStore.getState().toggleAssistantProcess(messageId);
 
     let process = useChatStore.getState().messages[0].process;
     expect(process?.expanded).toBe(false);
-    expect(process?.entries.find((entry) => entry.id === "thinking")?.expanded).toBe(true);
+    expect(process?.entries.find((entry) => entry.id === "thinking")?.expanded).toBeUndefined();
 
-    // 重新展开执行过程时思考过程仍保持展开
+    // 重新展开执行过程时思考过程仍保持原状态
     useChatStore.getState().toggleAssistantProcess(messageId);
     process = useChatStore.getState().messages[0].process;
     expect(process?.expanded).toBe(true);
-    expect(process?.entries.find((entry) => entry.id === "thinking")?.expanded).toBe(true);
+    expect(process?.entries.find((entry) => entry.id === "thinking")?.expanded).toBeUndefined();
+  });
+
+  it("toggles thinking entries toward an explicit target state", () => {
+    useChatStore.getState().appendLastAssistantProcessEntry({
+      id: "thinking",
+      type: "thinking",
+      title: "正在思考",
+      detail: "**Inspecting** the project",
+      timestamp: Date.now(),
+      state: "running",
+    });
+    const messageId = useChatStore.getState().messages[0].id;
+    const thinkingExpanded = () => (
+      useChatStore.getState().messages[0].process?.entries.find((entry) => entry.id === "thinking")?.expanded
+    );
+
+    // 思考条目的显示状态可能由设置决定（expanded 未设置），因此 UI 层会
+    // 显式传入目标状态：点击折叠中的思考应直接展开，而不是翻转 undefined。
+    useChatStore.getState().toggleAssistantProcessEntry(messageId, "thinking", true);
+    expect(thinkingExpanded()).toBe(true);
+
+    useChatStore.getState().toggleAssistantProcessEntry(messageId, "thinking", false);
+    expect(thinkingExpanded()).toBe(false);
+
+    // 未传目标状态时保持原有翻转语义。
+    useChatStore.getState().toggleAssistantProcessEntry(messageId, "thinking");
+    expect(thinkingExpanded()).toBe(true);
   });
 
   it("keeps error details collapsed by default", () => {

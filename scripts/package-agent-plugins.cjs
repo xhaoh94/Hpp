@@ -167,8 +167,10 @@ function normalizeProviderConfiguration(value) {
       reasoning: modelDefaults.reasoning === true,
       imageInput: modelDefaults.imageInput === true,
       supportedThinkingLevels: Array.isArray(modelDefaults.supportedThinkingLevels)
-        ? modelDefaults.supportedThinkingLevels.filter((level) =>
-            typeof level === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(level))
+        ? [...new Set(modelDefaults.supportedThinkingLevels
+            .filter((level) => typeof level === "string")
+            .map((level) => level.trim())
+            .filter(Boolean))]
         : undefined,
     },
     fixedModelCapabilities: input.fixedModelCapabilities === true,

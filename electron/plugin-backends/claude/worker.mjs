@@ -162,14 +162,25 @@ const normalizeConfig = (value, preferredProviderId, preferredModelId) => {
   };
 };
 
-const getModels = (provider) => provider.models.map((model) => ({
-  id: String(model.id || ""),
-  name: String(model.name || model.id || ""),
-  provider: provider.providerId,
-  reasoning: model.reasoning !== false,
-  supportsImages: model.imageInput !== false,
-  supportedThinkingLevels: ["off", "low", "medium", "high", "xhigh"],
-})).filter((model) => model.id);
+const getModels = (provider) => provider.models.map((model) => {
+  // Prefer per-model thinking levels declared in the provider configuration,
+  // intersected with the levels the Claude Agent SDK can actually handle so
+  // a declared level can never fail the SDK_THINKING_LEVELS validation.
+  const declaredLevels = Array.isArray(model.supportedThinkingLevels)
+    ? model.supportedThinkingLevels.filter((level) =>
+        typeof level === "string" && SDK_THINKING_LEVELS.has(level))
+    : [];
+  return {
+    id: String(model.id || ""),
+    name: String(model.name || model.id || ""),
+    provider: provider.providerId,
+    reasoning: model.reasoning !== false,
+    supportsImages: model.imageInput !== false,
+    supportedThinkingLevels: declaredLevels.length > 0
+      ? declaredLevels
+      : ["off", "low", "medium", "high", "xhigh"],
+  };
+}).filter((model) => model.id);
 
 const buildSDKEnv = (provider) => {
   const env = { ...process.env };

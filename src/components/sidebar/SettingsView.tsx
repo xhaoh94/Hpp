@@ -121,7 +121,7 @@ function normalizeGeneral(value: unknown): GeneralSettings {
       general.closeToTrayExplicit === true,
     ),
     theme: normalizeAppTheme(general.theme),
-    expandThinkingWhileRunning: general.expandThinkingWhileRunning !== false,
+    expandThinkingWhileRunning: general.expandThinkingWhileRunning === true,
   };
 }
 
@@ -161,7 +161,7 @@ export function SettingsView() {
   const [appVersion, setAppVersion] = useState("");
   const [closeToTray, setCloseToTray] = useState(DEFAULT_CLOSE_TO_TRAY);
   const [theme, setTheme] = useState<AppTheme>("dark");
-  const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(true);
+  const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(false);
   const [diskUsage, setDiskUsage] = useState<DiskUsageStats | null>(null);
   const [diskUsageLoading, setDiskUsageLoading] = useState(false);
   const [diskCleanupLoading, setDiskCleanupLoading] = useState(false);
@@ -805,7 +805,7 @@ export function SettingsView() {
                     <label className="settings-general-row settings-general-toggle">
                       <span className="settings-general-row-main">
                         <strong>处理中自动展开思考</strong>
-                        <span>思考过程在处理中时自动展开显示，结束后恢复折叠；关闭后处理中的思考默认收起</span>
+                        <span>思考过程在处理中时自动展开显示，结束后恢复折叠；关闭后思考默认收起（处理中与结束后均折叠，可手动展开单条）</span>
                       </span>
                       <input
                         type="checkbox"

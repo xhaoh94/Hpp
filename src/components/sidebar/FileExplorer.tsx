@@ -546,7 +546,7 @@ export function FileExplorer() {
         )}
       </div>
 
-      <div className="file-tree-content">
+      <div className="file-tree-content overlay-scroll">
         {!activeProject ? (
           <p className="placeholder-text">请先选择一个项目</p>
         ) : displayEntries.length === 0 ? (

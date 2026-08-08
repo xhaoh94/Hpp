@@ -105,3 +105,63 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
 }
+
+/* VSCode-style overlay scrollbar utility: Only the thumb (fingers) is drawn —
+   there is no persistent track/“base” underneath.
+   - .overlay-scroll: hidden by default, only shown while the mouse is over
+     the scrolling element.
+   - .persistent-scroll: the thumb is always visible.
+   Both keep layout stable via scrollbar-gutter. Add the class to any
+   scrollable container to get this look. */
+.overlay-scroll,
+.persistent-scroll {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+.overlay-scroll {
+  scrollbar-color: transparent transparent;
+}
+
+.persistent-scroll {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.overlay-scroll:hover,
+.persistent-scroll:hover {
+  scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+}
+
+.overlay-scroll::-webkit-scrollbar,
+.persistent-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.overlay-scroll::-webkit-scrollbar-track,
+.persistent-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Thumb shape is shared. Color differs: overlay hides it until hover;
+   persistent keeps it visible at all times. */
+.overlay-scroll::-webkit-scrollbar-thumb,
+.persistent-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 6px;
+  min-height: 32px;
+}
+
+.persistent-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+.overlay-scroll:hover::-webkit-scrollbar-thumb,
+.persistent-scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+.persistent-scroll::-webkit-scrollbar-thumb:hover,
+.overlay-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}

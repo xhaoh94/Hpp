@@ -18,7 +18,9 @@ import {
 } from "@/i18n/text";
 
 const THINKING_PREVIEW_CHAR_LIMIT = 240;
-const THINKING_PREVIEW_LINE_LIMIT = 3;
+const THINKING_PREVIEW_LINE_LIMIT = 2;
+/** 折叠预览中单个代码块最多保留的内容行数（不含 fence 行）。 */
+const THINKING_PREVIEW_CODE_LINE_LIMIT = 12;
 const THINKING_REPEAT_MIN_PATTERN_LENGTH = 60;
 const THINKING_REPEAT_MIN_COUNT = 3;
 const STREAM_RENDER_FLUSH_INTERVAL_MS = 120;
@@ -111,6 +113,20 @@ export const getStringField = (value: UnknownRecord, key: string): string | unde
 export const getBooleanField = (value: UnknownRecord, key: string): boolean | undefined => {
   const found = value[key];
   return typeof found === "boolean" ? found : undefined;
+};
+
+export const isModelRequestFailureTitle = (title: string) => {
+  const normalized = title.trim().toLowerCase();
+  return normalized.includes("模型请求") ||
+    normalized.includes("request failed") ||
+    normalized.includes("请求发送失败") ||
+    normalized.includes("运行失败") ||
+    normalized.includes("已断开") ||
+    (normalized.includes("opencode") && normalized.includes("错误")) ||
+    normalized.includes("disconnected") ||
+    normalized.includes("process failed") ||
+    normalized.includes("input failed") ||
+    normalized.includes("output pipe closed");
 };
 
 const normalizeEventToken = (value: unknown) =>
@@ -394,19 +410,61 @@ export const getThinkingPreview = (value?: string) => {
  * indentation) so the collapsed state renders the same way as the expanded
  * body. Only the first few lines are kept; lines longer than the character
  * limit are truncated individually. The CSS line-clamp handles visual overflow.
+ *
+ * Fenced code blocks are kept complete: if a code fence starts within the
+ * kept-line boundary, following lines are retained until the closing fence
+ * (or a hard cap), so the collapsed preview never renders an unterminated,
+ * empty code block box.
  */
 export const getThinkingPreviewMarkdown = (value?: string) => {
   const lines = value?.split("\n") ?? [];
   const kept: string[] = [];
   let nonEmptyCount = 0;
+  let fenceMarker: string | null = null;
+  let codeLines = 0;
 
   for (const line of lines) {
     if (!line.trim()) {
+      if (fenceMarker) {
+        // 代码块内部的空行必须保留，否则代码块结构会被破坏。
+        kept.push(line);
+        continue;
+      }
       // 保留空行作为段落分隔（markdown 单换行会渲染成同一段落），
       // 只在已保留内容之后才保留，避免预览以空行开头。
       if (kept.length > 0) kept.push("");
       continue;
     }
+
+    if (!fenceMarker) {
+      const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+      if (fenceMatch && nonEmptyCount < THINKING_PREVIEW_LINE_LIMIT) {
+        // 进入代码块：即使已到达 2 行预览边界，也继续保留直到闭合，
+        // 避免折叠预览中出现未闭合的空白代码块。
+        fenceMarker = fenceMatch[1].charAt(0);
+        kept.push(line);
+        nonEmptyCount += 1;
+        continue;
+      }
+    } else {
+      // 在代码块内：优先查找闭合 fence。
+      if (line.trim().startsWith(fenceMarker)) {
+        kept.push(line);
+        fenceMarker = null;
+        break;
+      }
+      codeLines += 1;
+      if (codeLines > THINKING_PREVIEW_CODE_LINE_LIMIT) {
+        // 超长代码块：截断并补上闭合 fence，保证渲染为完整代码块而非空白框。
+        kept.push(fenceMarker.repeat(3));
+        break;
+      }
+      kept.push(line.length > THINKING_PREVIEW_CHAR_LIMIT
+        ? `${line.slice(0, THINKING_PREVIEW_CHAR_LIMIT)}...`
+        : line);
+      continue;
+    }
+
     nonEmptyCount += 1;
     if (nonEmptyCount > THINKING_PREVIEW_LINE_LIMIT) break;
     kept.push(line.length > THINKING_PREVIEW_CHAR_LIMIT

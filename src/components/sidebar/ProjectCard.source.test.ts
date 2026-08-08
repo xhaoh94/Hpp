@@ -33,6 +33,16 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(deleteHandler).toContain("purgeDeletedSessionData(sessionIds, [project.id])");
   });
 
+  it("starts initialized-session activation without holding the tab click handler open", () => {
+    const activationHandler = projectCardSource.slice(
+      projectCardSource.indexOf("const handleSelectSession"),
+      projectCardSource.indexOf("const handleCloseSession"),
+    );
+
+    expect(activationHandler).not.toContain("async (session");
+    expect(activationHandler).toContain("void SessionCommandCoordinator.initializeSession");
+  });
+
   it("captures the remembered session project once and leaves later card state user-controlled", () => {
     expect(projectViewSource).toContain("projectDataHydrated && startupCollapseStateRef.current === null");
     expect(projectViewSource).toContain("project.id !== rememberedProjectId");

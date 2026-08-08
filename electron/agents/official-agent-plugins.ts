@@ -107,16 +107,7 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
       imageInput: modelDefaults.imageInput === true,
       supportedThinkingLevels: Array.isArray(modelDefaults.supportedThinkingLevels)
         ? modelDefaults.supportedThinkingLevels.filter((level): level is string =>
-            typeof level === "string" && [
-              "off",
-              "minimal",
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max",
-              "ultra",
-            ].includes(level))
+            typeof level === "string" && level.trim().length > 0)
         : undefined,
     },
     fixedModelCapabilities: value.fixedModelCapabilities === true,

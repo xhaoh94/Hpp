@@ -212,25 +212,52 @@ describe("agentEventUtils", () => {
   it("keeps line breaks and inline Markdown in the thinking preview", () => {
     expect(getThinkingPreviewMarkdown(
       "**Planning**\n\n- inspect files\n- compare settings\n\n`renderScale`",
-    )).toBe("**Planning**\n\n- inspect files\n- compare settings");
+    )).toBe("**Planning**\n\n- inspect files");
   });
 
   it("keeps headings, lists, quotes, and code blocks so the preview matches the expanded body", () => {
     expect(getThinkingPreviewMarkdown(
       "# 标题\n\n> 引用内容\n\n1. 第一项\n2. 第二项\n\n---\n\n正文",
-    )).toBe("# 标题\n\n> 引用内容\n\n1. 第一项");
+    )).toBe("# 标题\n\n> 引用内容");
   });
 
   it("keeps fenced code blocks in the thinking preview", () => {
     expect(getThinkingPreviewMarkdown(
       "思路：\n\n```js\nconst a = 1\n```\n\n完成",
-    )).toBe("思路：\n\n```js\nconst a = 1");
+    )).toBe("思路：\n\n```js\nconst a = 1\n```");
+  });
+
+  it("completes a code block that starts at the preview boundary", () => {
+    expect(getThinkingPreviewMarkdown(
+      "先看这里\n```js\nconst a = 1\nconst b = 2\n```\n后面的内容",
+    )).toBe("先看这里\n```js\nconst a = 1\nconst b = 2\n```");
+  });
+
+  it("keeps a code block that starts on the first preview line complete", () => {
+    expect(getThinkingPreviewMarkdown(
+      "```ts\nconst x: number = 1\n```\n\n结束语",
+    )).toBe("```ts\nconst x: number = 1\n```");
+  });
+
+  it("does not extend the preview for a code block beyond the two-line boundary", () => {
+    expect(getThinkingPreviewMarkdown(
+      "第一行\n第二行\n```js\nconst a = 1\n```",
+    )).toBe("第一行\n第二行");
+  });
+
+  it("truncates oversized code blocks but keeps them closed", () => {
+    const codeLines = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+    const result = getThinkingPreviewMarkdown(`开头\n\`\`\`js\n${codeLines.join("\n")}\n\`\`\``);
+    expect(result).toBe(
+      `开头\n\`\`\`js\n${codeLines.slice(0, 12).join("\n")}\n\`\`\``,
+    );
+    expect(result!.split("\n").length).toBeLessThan(20);
   });
 
   it("keeps blank lines between kept paragraphs so collapsed rendering matches expanded", () => {
     expect(getThinkingPreviewMarkdown(
       "第一段\n\n第二段\n\n第三段\n\n第四段",
-    )).toBe("第一段\n\n第二段\n\n第三段");
+    )).toBe("第一段\n\n第二段");
   });
 
   it("falls back to the thinking label and truncates long preview lines", () => {

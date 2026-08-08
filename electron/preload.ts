@@ -145,6 +145,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:delete", agentId, providerId),
   agentConfigReorder: (agentId: string, providerIds: string[]) =>
     ipcRenderer.invoke("agentConfig:reorder", agentId, providerIds),
+  agentConfigExport: (data: unknown) =>
+    ipcRenderer.invoke("agentConfig:export", data),
+  agentConfigImportRead: () =>
+    ipcRenderer.invoke("agentConfig:importRead"),
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) =>
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),

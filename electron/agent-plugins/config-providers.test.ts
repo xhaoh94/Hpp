@@ -71,6 +71,45 @@ describe("official plugin config providers", () => {
     expect(getProviderEndpoint("azure-openai-responses")).toBe("azure-openai-responses");
   });
 
+  it("maps Pi thinking-level declarations in both directions", async () => {
+    const pi = await import("./pi/config.mjs");
+    const configuredProvider = {
+      ...provider("chat-completions"),
+      models: [{
+        id: "deepseek-v4-flash-free",
+        name: "DeepSeek V4 Flash Free",
+        reasoning: true,
+        imageInput: false,
+        supportedThinkingLevels: ["high", "max", "future-tier"],
+      }],
+    };
+
+    expect(pi.toProviderConfig(configuredProvider).models[0]).toMatchObject({
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: null,
+        medium: null,
+        max: "max",
+        "future-tier": "future-tier",
+      },
+    });
+
+    await writeFile(process.env.PI_CONFIG_PATH!, JSON.stringify({
+      providers: {
+        custom: pi.toProviderConfig(configuredProvider),
+      },
+    }), "utf8");
+    await expect(pi.readProviderConfig()).resolves.toMatchObject({
+      providers: [{
+        models: [{
+          id: "deepseek-v4-flash-free",
+          supportedThinkingLevels: ["high", "max", "future-tier"],
+        }],
+      }],
+    });
+  });
+
   it("maps all Droid endpoint protocols through the plugin adapter", async () => {
     const { getProviderEndpoint, getProviderType } = await import("./droid/config.mjs");
     expect(getProviderType("chat-completions")).toBe("generic-chat-completion-api");
@@ -150,8 +189,9 @@ describe("official plugin config providers", () => {
       options: { baseURL: "https://api.example/v1", apiKey: "key", timeout: 1234 },
       models: {
         model: {
-          reasoning: true,
+          reasoning: false,
           attachment: true,
+          hppSupportedThinkingLevels: [],
           cost: { input: 1, output: 2 },
           variants: { high: { disabled: false } },
         },

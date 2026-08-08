@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import type { AgentProviderAuthMode, AgentProviderConfiguration } from "../../src/types/ipc";
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "../../shared/agent-provider-copy";
+import { normalizeSupportedThinkingLevels } from "../../shared/models";
 import { asString, isRecord } from "../utils/unknown-value";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
 
@@ -11,6 +12,12 @@ export interface AgentCustomModelConfig {
   name: string;
   reasoning: boolean;
   imageInput: boolean;
+  /**
+   * Per-model thinking levels declared in the provider configuration.
+   * Unknown ids are preserved as-is; the value is the canonical list of
+   * thinking levels this model exposes, regardless of the plugin default.
+   */
+  supportedThinkingLevels?: string[];
 }
 
 export type AgentProviderEndpoint = string;
@@ -89,11 +96,14 @@ function normalizeModel(value: unknown): AgentCustomModelConfig | null {
   if (!isRecord(value)) return null;
   const id = asString(value.id);
   if (!id) return null;
+  const hasThinkingLevelDeclaration = Array.isArray(value.supportedThinkingLevels);
+  const supportedThinkingLevels = normalizeSupportedThinkingLevels(value.supportedThinkingLevels);
   return {
     id,
     name: asString(value.name) || id,
-    reasoning: value.reasoning === true,
+    reasoning: hasThinkingLevelDeclaration ? supportedThinkingLevels.length > 0 : value.reasoning === true,
     imageInput: value.imageInput === true,
+    ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
   };
 }
 
@@ -508,6 +518,7 @@ export async function getConfiguredAgentModels(
     provider: provider.providerId,
     reasoning: model.reasoning === true,
     supportsImages: model.imageInput === true,
-    supportedThinkingLevels: configuration.modelDefaults.supportedThinkingLevels,
+    supportedThinkingLevels:
+      model.supportedThinkingLevels ?? configuration.modelDefaults.supportedThinkingLevels,
   })));
 }

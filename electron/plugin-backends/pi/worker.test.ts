@@ -223,6 +223,13 @@ const availableModels = [{
   input: ["text"],
   thinkingLevels: ["off", "minimal", "low", "medium", "high"],
 }];
+const configuredDeepSeekModel = {
+  id: "deepseek-v4-flash-free",
+  name: "DeepSeek V4 Flash Free",
+  provider: "opencode",
+  reasoning: true,
+  input: ["text"],
+};
 const proxyModel = {
   id: "gpt-5.6-luna",
   name: "GPT-5.6 Luna",
@@ -241,13 +248,45 @@ const proxyModel = {
     max: "max",
   },
 };
-export const ModelRegistry = { create: () => ({
-  getAvailable: () => [...availableModels, proxyModel],
-  find: (provider, id) => availableModels.find((model) => model.provider === provider && model.id === id)
-    || (provider === proxyModel.provider && id === proxyModel.id ? proxyModel : undefined),
-  getError: () => undefined,
-  hasConfiguredAuth: () => true,
-}) };
+export const ModelRuntime = process.env.PI_TEST_BUILTIN_FALLBACK === "1"
+  ? { create: async (options = {}) => ({ modelsPath: options.modelsPath }) }
+  : undefined;
+export class ModelRegistry {
+  constructor(runtime) { this.runtime = runtime; }
+  getAvailable() {
+    return [
+      ...availableModels,
+      ...(process.env.PI_TEST_BUILTIN_FALLBACK === "1" ? [configuredDeepSeekModel] : []),
+      proxyModel,
+    ];
+  }
+  getAll() {
+    if (this.runtime?.modelsPath === null) return [builtinDeepSeekModel];
+    return [...availableModels, proxyModel];
+  }
+  find(provider, id) { return availableModels.find((model) => model.provider === provider && model.id === id)
+    || (provider === configuredDeepSeekModel.provider && id === configuredDeepSeekModel.id ? configuredDeepSeekModel : undefined)
+    || (provider === proxyModel.provider && id === proxyModel.id ? proxyModel : undefined); }
+  getError() { return undefined; }
+  hasConfiguredAuth() { return true; }
+  static create() { return new ModelRegistry({}); }
+}
+const builtinDeepSeekModel = {
+  id: "deepseek-v4-flash-free",
+  name: "DeepSeek V4 Flash Free",
+  provider: "opencode",
+  reasoning: true,
+  input: ["text"],
+  thinkingLevelMap: {
+    off: null,
+    minimal: null,
+    low: null,
+    medium: null,
+    high: "high",
+    xhigh: null,
+    max: "max",
+  },
+};
 export const SettingsManager = { create: () => ({}) };
 export class DefaultResourceLoader {
   constructor(options = {}) {
@@ -267,10 +306,10 @@ export class DefaultResourceLoader {
   }
 }
 export const SessionManager = FakeSessionManager;
-export const createAgentSession = async ({ sessionManager, modelRegistry, resourceLoader }) => ({
+export const createAgentSession = async ({ sessionManager, modelRegistry, modelRuntime, resourceLoader }) => ({
   session: new FakeSession(
     sessionManager,
-    modelRegistry,
+    modelRegistry || new ModelRegistry(modelRuntime),
     resourceLoader.extensionFactories,
     resourceLoader.appendSystemPrompt,
   ),
@@ -399,10 +438,30 @@ describe("Pi SDK worker protocol", () => {
       id: "pi-model",
       supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"],
     })]));
+    // Every registry model (not just the active one) exposes its own levels.
+    expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: "gpt-5.6-luna",
+      supportedThinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    })]));
 
     worker.send({ id: "thinking", type: "setThinkingLevel", level: "xhigh" });
     await expect(worker.waitFor((message) => message.id === "thinking"))
       .resolves.toMatchObject({ type: "thinking_level_changed", level: "off" });
+  });
+
+  it("falls back to the SDK built-in catalogue when a configured model omits its capability map", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_BUILTIN_FALLBACK: "1" });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "models", type: "getModels" });
+    const modelsMessage = await worker.waitFor((message) => message.id === "models");
+
+    expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: "deepseek-v4-flash-free",
+      provider: "opencode",
+      supportedThinkingLevels: ["high", "max"],
+    })]));
   });
 
   it("normalizes implicit OpenAI Responses thinking at the provider hook boundary", async () => {

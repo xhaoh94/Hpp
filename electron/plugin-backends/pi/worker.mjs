@@ -553,6 +553,8 @@ const disposeSession = () => {
   modelRegistry = null;
   resourceLoader = null;
   actionKeys.clear();
+  builtinThinkingLevelMaps = null;
+  builtinThinkingLevelMapsFailed = false;
 };
 
 const stripUtf8Bom = (filePath) => {
@@ -1183,24 +1185,92 @@ const handleSessionEvent = (event) => {
   }
 };
 
-const getModels = () => {
+// Mirrors pi-ai's getSupportedThinkingLevels so every registry model (not just
+// the active session model) can expose its own thinking levels without
+// depending on pi-ai's internal compat entrypoint. Unknown level ids are
+// preserved as-is by Hpp's UI label helper.
+const PI_STANDARD_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+// Lazy index of the SDK's built-in catalogue capability maps. Hpp-synced
+// models.json entries for custom channels carry only id/name/reasoning/input,
+// so pi reports the default 5 levels for them. When a model omits its own
+// map, fall back to the built-in entry (provider+id first, then id) so
+// well-known models expose their real levels without manual configuration.
+let builtinThinkingLevelMaps = null;
+let builtinThinkingLevelMapsFailed = false;
+
+const getBuiltinThinkingLevelMaps = async () => {
+  if (builtinThinkingLevelMaps || builtinThinkingLevelMapsFailed) return builtinThinkingLevelMaps;
+  try {
+    if (typeof sdk?.ModelRuntime?.create !== "function" || typeof sdk?.ModelRegistry !== "function") {
+      builtinThinkingLevelMapsFailed = true;
+      return null;
+    }
+    // modelsPath: null keeps only the built-in catalogue (no custom models.json).
+    const runtime = await sdk.ModelRuntime.create({ modelsPath: null });
+    const registry = new sdk.ModelRegistry(runtime);
+    const maps = new Map();
+    for (const model of registry.getAll?.() || []) {
+      if (!isRecord(model) || !model.id) continue;
+      const map = isRecord(model.thinkingLevelMap) ? model.thinkingLevelMap : null;
+      if (!map || Object.keys(map).length === 0) continue;
+      const provider = String(model.provider || "");
+      if (!maps.has(`provider:${provider}:${model.id}`)) maps.set(`provider:${provider}:${model.id}`, map);
+      if (!maps.has(`id:${model.id}`)) maps.set(`id:${model.id}`, map);
+    }
+    builtinThinkingLevelMaps = maps;
+    return maps;
+  } catch {
+    builtinThinkingLevelMapsFailed = true;
+    return null;
+  }
+};
+
+const getModelSupportedThinkingLevels = async (model) => {
+  if (!isRecord(model)) return undefined;
+  if (model.reasoning !== true) return ["off"];
+  let map = isRecord(model.thinkingLevelMap) ? model.thinkingLevelMap : null;
+  if (!map) {
+    const builtinMaps = await getBuiltinThinkingLevelMaps();
+    if (builtinMaps) {
+      map = builtinMaps.get(`provider:${model.provider}:${model.id}`)
+        || builtinMaps.get(`id:${model.id}`)
+        || null;
+    }
+  }
+  const effectiveMap = map || {};
+  return PI_STANDARD_THINKING_LEVELS.filter((level) => {
+    const mapped = effectiveMap[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+};
+
+const getModels = async () => {
   const models = modelRegistry?.getAvailable?.() || [];
   const activeModel = session?.model;
+  // Fallback for SDKs whose catalogue records lack a thinkingLevelMap.
   const activeThinkingLevels = typeof session?.getAvailableThinkingLevels === "function"
     ? session.getAvailableThinkingLevels()
     : undefined;
-  return models.map((model) => ({
-    id: model.id || model.modelId,
-    name: model.name || model.id || model.modelId,
-    provider: model.provider,
-    reasoning: !!model.reasoning,
-    supportsImages: Array.isArray(model.input) ? model.input.includes("image") : false,
-    supportedThinkingLevels: activeModel &&
+  const results = [];
+  for (const model of models) {
+    const compatibleModel = applyPiModelThinkingCompatibility(model);
+    const computedLevels = await getModelSupportedThinkingLevels(compatibleModel);
+    const isActive = activeModel &&
       model.provider === activeModel.provider &&
-      (model.id || model.modelId) === (activeModel.id || activeModel.modelId)
-      ? activeThinkingLevels
-      : undefined,
-  }));
+      (model.id || model.modelId) === (activeModel.id || activeModel.modelId);
+    results.push({
+      id: model.id || model.modelId,
+      name: model.name || model.id || model.modelId,
+      provider: model.provider,
+      reasoning: !!model.reasoning,
+      supportsImages: Array.isArray(model.input) ? model.input.includes("image") : false,
+      supportedThinkingLevels: computedLevels || (isActive ? activeThinkingLevels : undefined),
+    });
+  }
+  return results;
 };
 
 const handleCommand = async (command) => {
@@ -1262,7 +1332,7 @@ const handleCommand = async (command) => {
         send({ type: "aborted", id: command.id });
         break;
       case "getModels":
-        send({ type: "models", id: command.id, models: getModels() });
+        send({ type: "models", id: command.id, models: await getModels() });
         break;
       case "listActions":
         send({ type: "actions", id: command.id, actions: await getActions(command.reload === true) });

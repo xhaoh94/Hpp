@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow, dialog, app } from "electron";
-import { rm } from "fs/promises";
+import { readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
 import {
@@ -28,6 +28,7 @@ import {
   shouldShowAgentBackendModels,
 } from "./agent-config";
 import { fetchProviderModels } from "./agent-model-fetch";
+import { isValidAgentConfigExport } from "../../shared/agent-config-io";
 import { combineAgentModels } from "./agent-model-list";
 import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
 import {
@@ -1429,6 +1430,50 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return { ...reloadResult, config: reorderResult.config };
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err), config: reorderResult.config, reloadedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agentConfig:export", async (_event, payload: unknown) => {
+    try {
+      if (!isValidAgentConfigExport(payload)) {
+        return { success: false, error: "导出数据格式无效。" };
+      }
+      const win = BrowserWindow.getFocusedWindow();
+      const { canceled, filePath } = await dialog.showSaveDialog(win || undefined, {
+        title: "导出渠道配置",
+        defaultPath: `hpp-agent-config-${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: "HPP 渠道配置", extensions: ["json"] }],
+      });
+      if (canceled || !filePath) return { success: false, canceled: true };
+      await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      return { success: true, filePath };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
+  });
+
+  ipcMain.handle("agentConfig:importRead", async () => {
+    try {
+      const win = BrowserWindow.getFocusedWindow();
+      const { canceled, filePaths } = await dialog.showOpenDialog(win || undefined, {
+        title: "导入渠道配置",
+        properties: ["openFile"],
+        filters: [{ name: "HPP 渠道配置", extensions: ["json"] }],
+      });
+      if (canceled || !filePaths?.length) return { success: false, canceled: true };
+      const raw = await readFile(filePaths[0], "utf8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+      } catch {
+        return { success: false, error: "导入文件不是有效的 JSON。" };
+      }
+      if (!isValidAgentConfigExport(parsed)) {
+        return { success: false, error: "导入文件不是有效的 HPP 渠道配置导出文件。" };
+      }
+      return { success: true, data: parsed };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
     }
   });
 

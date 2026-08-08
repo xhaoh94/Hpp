@@ -43,6 +43,7 @@ import type { AgentPermissionMode } from "@shared/agent-permissions";
 import { createComposerDraftSnapshot } from "@/lib/composer-history";
 import { cloneComposerDocument, type ComposerDocument } from "@shared/composer-document";
 import { USER_GUIDANCE_PROCESS_KIND } from "@shared/process-view";
+import { formatModelRequestFailure, uiText } from "@/i18n/text";
 
 export type PreparedSessionMessage = {
   editableContent?: string;
@@ -211,6 +212,19 @@ const applyActiveModels = (
   if (selected) chat.setCurrentModel(selected);
 };
 
+/** Restore the cheap, per-session toolbar state before an async model refresh. */
+const restoreActiveSessionSettings = (sessionId: string) => {
+  if (useProjectStore.getState().activeSessionId !== sessionId) return;
+  const chat = useChatStore.getState();
+  const model = getSessionModel(sessionId);
+  if (model) chat.setCurrentModel(model);
+
+  const thinking = getSessionThinking(sessionId);
+  if (thinking) {
+    chat.setThinkingLevel(normalizeModelThinkingLevel(thinking, model || chat.currentModel));
+  }
+};
+
 const reconcileThinkingForModel = async (
   sessionId: string,
   agentId: string,
@@ -246,6 +260,7 @@ async function runInitialization(
     chatStore.setActiveAgent(session.agentId);
     chatStore.switchSession(session.id);
     if (projectStore.agentStatuses[session.id] === "completed") projectStore.setAgentStatus(session.id, "idle");
+    if (projectStore.initializedSessionIds.has(sessionId)) restoreActiveSessionSettings(sessionId);
   }
 
   let models: ModelInfo[] = [];
@@ -253,6 +268,17 @@ async function runInitialization(
   let runtimeStateUnknown = false;
   try {
     const needsRuntimeInitialization = !useProjectStore.getState().initializedSessionIds.has(sessionId);
+
+    // Switching to an already initialized backend is a UI operation. Model
+    // discovery is repeated by useSessionModels after the new session is
+    // painted, so do not make the tab click wait for an IPC/backend roundtrip.
+    if (options.activate && !needsRuntimeInitialization) {
+      void window.electronAPI.agentSwitchSession(sessionId).catch((error) => {
+        console.warn("[agent] background session switch failed:", error);
+      });
+      return { ...getSessionCommandTarget(sessionId) };
+    }
+
     let createdRuntime = false;
     if (needsRuntimeInitialization) {
       const backendActivity = await getBackendSessionActivity(sessionId);
@@ -691,6 +717,25 @@ const settleFailedSend = (sessionId: string, hooks?: SendMessageHooks) => {
   hooks?.onSendFailureCleanup?.(sessionId);
 };
 
+const appendSendFailureNotice = (sessionId: string, detail: string) => {
+  const chat = useChatStore.getState();
+  const messages = chat.sessionMessages[sessionId] || (
+    chat.activeSessionId === sessionId ? chat.messages : []
+  );
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (messages.slice(latestUserIndex + 1).some((message) => (
+    message.role === "assistant" && message.content.includes(uiText.process.modelRequestFailed)
+  ))) return;
+
+  chat.appendLastAssistantContent(formatModelRequestFailure(detail), sessionId);
+};
+
 export async function sendMessage(input: {
   sessionId: string;
   clientMessageId: string;
@@ -836,13 +881,8 @@ export async function sendMessage(input: {
       }
       const detail = getErrorMessage(error);
       if (sessionIsOpen(input.sessionId)) {
+        appendSendFailureNotice(input.sessionId, detail);
         settleFailedSend(input.sessionId, input.hooks);
-        useChatStore.getState().addMessage({
-          id: crypto.randomUUID(),
-          role: "system",
-          content: `发送失败: ${detail}`,
-          timestamp: Date.now(),
-        }, input.sessionId);
       }
       if (input.throwOnFailure) throw error;
       return { queued: false, clientMessageId: input.clientMessageId, error: detail };

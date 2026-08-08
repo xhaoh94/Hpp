@@ -29,6 +29,14 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).not.toContain("doc: sourceComposerDocument?.nodes.map");
   });
 
+  it("defers expensive message subtrees until they approach the viewport", () => {
+    expect(chatPanelSource).toContain("CHAT_MESSAGE_INITIAL_RENDER_COUNT");
+    expect(chatPanelSource).toContain("IntersectionObserver");
+    expect(chatPanelSource).toContain("chat-message-lazy-placeholder");
+    expect(chatPanelSource).toContain("const ChatMessagesViewport");
+    expect(chatPanelSource).toContain("onContentChange();");
+  });
+
   it("clears questionnaire options and custom text in both directions", () => {
     expect(questionnaireSource).toContain('setCustomText((current) => ({ ...current, [questionIndex]: "" }))');
     expect(questionnaireSource).toContain('setSingleChoice((current) => ({ ...current, [questionIndex]: "" }))');
@@ -107,14 +115,14 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("useChatStore.getState().sessionDrafts[activeSessionId]?.text");
   });
 
-  it("explains why sending is blocked while context compaction is running", () => {
+  it("allows sending during context compaction and admits the message through the queue", () => {
     expect(chatComposerSource).toContain("if (compactionInProgress && hasPendingContent)");
-    expect(chatComposerSource).toContain("Let ChatPanel verify whether compaction is still active in the backend.");
-    expect(chatComposerSource).toContain("sendDisabled && !(compactionInProgress && hasPendingContent)");
-    expect(chatComposerSource).toContain('aria-disabled={!showAbortButton && sendDisabled}');
-    expect(chatPanelSource).toContain("SessionCommandCoordinator.getBackendSessionActivity(targetSessionId)");
-    expect(chatPanelSource).toContain('backendActivity === "busy" || backendActivity === "unknown"');
-    expect(chatPanelSource).toContain('showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送")');
+    expect(chatComposerSource).toContain("SessionCommandCoordinator perform authoritative admission");
+    expect(chatComposerSource).toContain("(currentSessionRunning || compactionInProgress)");
+    expect(chatComposerSource).toContain('placeholder={placeholder}');
+    expect(chatComposerSource).not.toContain("sendDisabled && !(compactionInProgress && hasPendingContent)");
+    expect(chatPanelSource).toContain("queueIfRunning: true");
+    expect(chatPanelSource).not.toContain('showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送")');
   });
 
   it("moves a still-running compaction below the final response body", () => {
@@ -192,7 +200,7 @@ describe("chat interaction regression constraints", () => {
     );
     const thinkingBodyStyles = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-process-thinking-body {"),
-      chatPanelStyles.indexOf(".chat-process-thinking-preview"),
+      chatPanelStyles.indexOf(".chat-process-thinking-preview {\n  min-width: 0"),
     );
     expect(messageScrollerStyles).toContain("overflow-x: hidden");
     expect(processContentStyles).toContain("min-width: 0");

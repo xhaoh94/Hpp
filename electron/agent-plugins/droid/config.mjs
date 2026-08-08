@@ -78,6 +78,21 @@ const providerIdFromUrl = (baseUrl, fallback, usedIds) => {
 
 const getManagedModelKey = (providerId, modelId) => `${providerId}\u0000${modelId}`;
 
+const normalizeThinkingLevels = (values) => {
+  if (!Array.isArray(values)) return [];
+  const levels = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const raw = value.trim().toLowerCase();
+    const normalized = raw === "none" ? "off" : raw;
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    levels.push(normalized);
+  }
+  return levels;
+};
+
 export const getProviderType = (endpoint) => {
   if (endpoint === "responses") return "openai";
   if (endpoint === "anthropic-messages") return "anthropic";
@@ -118,11 +133,16 @@ export const readProviderConfig = async () => {
     const group = groups.get(providerId);
     const modelId = asString(model.model) || asString(model.displayName);
     if (!group || !modelId || group.models.some((item) => item.id === modelId)) continue;
+    const supportedThinkingLevels = normalizeThinkingLevels(model.hppSupportedThinkingLevels);
+    const hasThinkingLevelDeclaration = Array.isArray(model.hppSupportedThinkingLevels);
     group.models.push({
       id: modelId,
       name: asString(model.displayName) || modelId,
-      reasoning: model.hppReasoning === true || model.reasoning === true || model.enableThinking === true,
+      reasoning: hasThinkingLevelDeclaration
+        ? supportedThinkingLevels.length > 0
+        : model.hppReasoning === true || model.reasoning === true || model.enableThinking === true,
       imageInput: model.noImageSupport !== true,
+      ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
     });
     const nativeModelId = asString(model.id);
     if (nativeModelId) group.nativeModelIds.add(nativeModelId);
@@ -156,12 +176,14 @@ export const writeProviderConfig = async (state) => {
     for (const model of provider.models || []) {
       const existing = existingManagedModels.get(getManagedModelKey(provider.providerId, model.id)) || {};
       const nativeModelId = asString(existing.id) || `custom:hpp:${sanitizeProviderId(provider.providerId, "provider")}:${sanitizeProviderId(model.id, "model")}`;
+      const supportedThinkingLevels = normalizeThinkingLevels(model.supportedThinkingLevels);
       managedModels.push({
         ...existing,
         hppManaged: true,
         hppProviderId: provider.providerId,
         hppProviderDisplayName: provider.displayName || provider.providerId,
-        hppReasoning: model.reasoning === true,
+        hppReasoning: supportedThinkingLevels.length > 0,
+        hppSupportedThinkingLevels: supportedThinkingLevels,
         provider: getProviderType(provider.endpoint),
         model: model.id,
         id: nativeModelId,

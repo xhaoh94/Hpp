@@ -48,6 +48,11 @@ export type {
 } from "../../shared/remote-protocol";
 
 export type {
+  AgentConfigExportData,
+  AgentConfigExportAgentEntry,
+} from "../../shared/agent-config-io";
+
+export type {
   AgentEvent,
   AgentPendingUIEventSnapshot,
   AgentCapabilities,
@@ -112,6 +117,8 @@ export interface AgentCustomModelConfig {
   name: string;
   reasoning: boolean;
   imageInput: boolean;
+  /** Per-model thinking levels declared in the provider configuration. */
+  supportedThinkingLevels?: string[];
 }
 
 export type AgentProviderEndpoint = string;
@@ -274,6 +281,8 @@ export interface ElectronAPI {
   agentConfigActivate: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigDelete: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigReorder: (agentId: string, providerIds: string[]) => Promise<AgentConfigResult>;
+  agentConfigExport: (data: unknown) => Promise<{ success: boolean; error?: string; canceled?: boolean; filePath?: string }>;
+  agentConfigImportRead: () => Promise<{ success: boolean; error?: string; canceled?: boolean; data?: AgentConfigExportData }>;
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;

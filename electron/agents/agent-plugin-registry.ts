@@ -98,16 +98,6 @@ const DEFAULT_THINKING_LEVEL = "medium";
 const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
 const IDLE_ACTIVITY_RECHECK_MS = 5_000;
 const IDLE_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000] as const;
-const VALID_THINKING_LEVELS = new Set([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra",
-]);
 const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
   permissions: false,
@@ -228,9 +218,12 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
     modelDefaults: {
       reasoning: modelDefaults.reasoning === true,
       imageInput: modelDefaults.imageInput === true,
+      // Thinking levels are model/plugin-defined ids: keep every non-empty
+      // string so plugins can expose levels outside the built-in catalogue.
+      // Unknown ids are displayed verbatim by the UI label helper.
       supportedThinkingLevels: Array.isArray(modelDefaults.supportedThinkingLevels)
         ? modelDefaults.supportedThinkingLevels.filter((level): level is string =>
-            typeof level === "string" && VALID_THINKING_LEVELS.has(level))
+            typeof level === "string" && level.trim().length > 0)
         : undefined,
     },
     fixedModelCapabilities: value.fixedModelCapabilities === true,
@@ -633,7 +626,7 @@ async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string)
 function normalizeThinkingLevel(value: unknown): string | undefined {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "none") return "off";
-  return VALID_THINKING_LEVELS.has(normalized) ? normalized : undefined;
+  return normalized || undefined;
 }
 
 function getZipSafeName(entryName: string) {

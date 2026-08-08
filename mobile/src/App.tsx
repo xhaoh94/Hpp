@@ -861,7 +861,13 @@ function ProcessEntryRow({
     <details className={`process-entry ${entry.type}`}>
       <summary className="process-entry-summary">{row}</summary>
       {entry.command && <pre><code>{entry.command}</code></pre>}
-      {entry.detail && <pre>{entry.detail}</pre>}
+      {entry.detail && (entry.type === "thinking" ? (
+        <div className="process-entry-detail message-content">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+            {entry.detail}
+          </ReactMarkdown>
+        </div>
+      ) : <pre>{entry.detail}</pre>)}
       {entry.files && entry.files.length > 0 && (
         <div className="process-files">
           {entry.files.map((file, index) => <code key={`${String(file.file)}-${index}`}>{String(file.file || "file")}</code>)}

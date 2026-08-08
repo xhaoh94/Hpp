@@ -3,9 +3,11 @@ import { useChatStore, type ModelInfo } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import {
   getSessionModel,
+  getSessionThinking,
   saveSessionModel,
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
+import { normalizeModelThinkingLevel } from "@shared/models";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
@@ -68,7 +70,28 @@ export function useSessionModels({
         if (models && models.length > 0) {
           setAvailableModels(models);
           const selectedModel = selectSessionModel(sessionId, models);
-          if (selectedModel) await SessionCommandCoordinator.setModel(sessionId, selectedModel, { models });
+          if (selectedModel) {
+            // The session coordinator already applied the persisted model when
+            // the runtime was created. Re-sending setModel on every tab switch
+            // needlessly performs another backend roundtrip (and can also
+            // trigger thinking-level reconciliation). Only configure when the
+            // catalog selection differs from the persisted session selection.
+            setCurrentModel(selectedModel);
+            const persistedThinking = getSessionThinking(sessionId);
+            if (persistedThinking) {
+              useChatStore.getState().setThinkingLevel(
+                normalizeModelThinkingLevel(persistedThinking, selectedModel),
+              );
+            }
+            const persistedModel = getSessionModel(sessionId);
+            if (
+              !persistedModel ||
+              persistedModel.id !== selectedModel.id ||
+              persistedModel.provider !== selectedModel.provider
+            ) {
+              await SessionCommandCoordinator.setModel(sessionId, selectedModel, { models });
+            }
+          }
           return;
         }
       } catch {

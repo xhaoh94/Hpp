@@ -148,10 +148,8 @@ export const ChatComposer = memo(function ChatComposer({
     !!selectedAction;
   const inputDisabled = activeQuestionnaire || interactionDisabled;
   const showAbortButton = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
-  const queueSend = !compactionInProgress && !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && hasPendingContent;
-  const sendDisabled = compactionInProgress
-    ? true
-    : interactionDisabled
+  const queueSend = !interactionDisabled && !isAwaitingUIResponse && hasPendingContent && (currentSessionRunning || compactionInProgress);
+  const sendDisabled = interactionDisabled
     ? true
     : activeQuestionnaire
       ? true
@@ -159,10 +157,10 @@ export const ChatComposer = memo(function ChatComposer({
         ? !inputHasText
         : !hasPendingContent;
   const placeholder = compactionInProgress
-    ? "上下文压缩中，完成后可发送"
+    ? "上下文压缩中，发送后将进入队列"
     : getChatComposerPlaceholder(interactionDisabled, activeQuestionnaire, sendKey);
   const sendTitle = compactionInProgress
-    ? "上下文压缩中"
+    ? "发送后加入队列"
     : getChatComposerSendTitle(
       interactionDisabled,
       activeQuestionnaire,
@@ -214,9 +212,8 @@ export const ChatComposer = memo(function ChatComposer({
   const handlePrimaryAction = () => {
     if (compactionInProgress && hasPendingContent) {
       primaryActionIntentRef.current = null;
-      // Let ChatPanel verify whether compaction is still active in the backend.
-      // It preserves the toast for a real/unknown compaction and can recover a
-      // stale renderer-only flag before sending.
+      // Let SessionCommandCoordinator perform authoritative admission and put
+      // the message into the existing queue while compaction is still active.
       onSend();
       return;
     }
@@ -729,9 +726,9 @@ export const ChatComposer = memo(function ChatComposer({
           onPointerCancel={() => { primaryActionIntentRef.current = null; }}
           onPointerLeave={(event) => { if (event.buttons !== 0) primaryActionIntentRef.current = null; }}
           onClick={handlePrimaryAction}
-          disabled={showAbortButton ? false : sendDisabled && !(compactionInProgress && hasPendingContent)}
+          disabled={showAbortButton ? false : sendDisabled}
           aria-disabled={!showAbortButton && sendDisabled}
-          className={`chat-send-btn ${showAbortButton ? "abort" : queueSend ? "queue" : ""} ${compactionInProgress && hasPendingContent ? "blocked" : ""}`}
+          className={`chat-send-btn ${showAbortButton ? "abort" : queueSend ? "queue" : ""}`}
           title={showAbortButton ? uiText.chatComposer.stop : sendTitle}
         >
           {showAbortButton

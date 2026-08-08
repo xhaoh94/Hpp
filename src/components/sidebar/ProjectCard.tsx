@@ -196,11 +196,13 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
     }
   };
 
-  const handleSelectSession = async (session: ProjectSession) => {
+  const handleSelectSession = (session: ProjectSession) => {
     setShowHistory(false);
-    await SessionCommandCoordinator.initializeSession(session.id, {
+    void SessionCommandCoordinator.initializeSession(session.id, {
       activate: true,
       recordFailure: true,
+    }).catch((error: unknown) => {
+      console.error("[agent] session activation failed:", getErrorMessage(error));
     });
   };
 

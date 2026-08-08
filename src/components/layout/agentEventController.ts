@@ -1,5 +1,5 @@
 import { getAgentName } from "@/lib/agents";
-import { uiText } from "@/i18n/text";
+import { formatModelRequestFailure, uiText } from "@/i18n/text";
 import {
   ASSISTANT_NARRATION_PROCESS_KIND,
 } from "@shared/process-view";
@@ -22,6 +22,7 @@ import {
   getRepeatedThinkingPattern,
   getContextCompactionPresentation,
   getThinkingPreview,
+  isModelRequestFailureTitle,
   markSessionRuntimeTurnSettled,
   mergeRuntimeChangeFile,
   normalizeAgentTurnRevision,
@@ -111,6 +112,47 @@ export function createAgentEventController({
       if (messages[index].role === "user") return messages[index].id;
     }
     return null;
+  };
+
+  const getLatestModelRequestFailureDetail = (sessionId: string): string | null => {
+    const messages = getSessionMessages(sessionId);
+    let latestUserIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "user") {
+        latestUserIndex = index;
+        break;
+      }
+    }
+
+    for (let index = messages.length - 1; index > latestUserIndex; index -= 1) {
+      const message = messages[index];
+      if (message.role !== "assistant" || !message.process) continue;
+      for (let entryIndex = message.process.entries.length - 1; entryIndex >= 0; entryIndex -= 1) {
+        const entry = message.process.entries[entryIndex];
+        if (
+          entry.type !== "error" ||
+          entry.state !== "error" ||
+          entry.title === "未收到响应结束事件" ||
+          !isModelRequestFailureTitle(entry.title)
+        ) continue;
+        return entry.detail?.trim() || "";
+      }
+    }
+    return null;
+  };
+
+  const mergeModelRequestFailureIntoContent = (
+    content: string,
+    detail: string,
+  ) => {
+    const failureContent = formatModelRequestFailure(detail);
+    const normalizedContent = content.trim();
+    if (!normalizedContent) return failureContent;
+    // Some backends already stream a provider-specific error body. Replace it
+    // with the common wording instead of displaying the same error twice.
+    if (detail && normalizedContent.includes(detail)) return failureContent;
+    if (normalizedContent.includes(failureContent)) return normalizedContent;
+    return `${normalizedContent}\n\n${failureContent}`;
   };
 
   const clearAgentEndGraceTimer = (sessionId: string) => {
@@ -584,7 +626,8 @@ export function createAgentEventController({
         title: `正在思考: ${thinkingPreview}`,
         detail: runtime.thinkingBuffer,
         state: "running",
-        expanded: true,
+        // 不预设 expanded：默认展开状态跟随设置 expandThinkingWhileRunning，
+        // 用户手动展开/折叠后再以条目自身状态为准（见 ProcessBlock）。
       });
     }
 
@@ -710,6 +753,7 @@ export function createAgentEventController({
     options: SettleAssistantTurnOptions,
   ) => {
     const runtime = getRuntime(currentSessionId);
+    const modelRequestFailureDetail = getLatestModelRequestFailureDetail(currentSessionId);
     cancelAgentEndGrace(currentSessionId);
     if (options.stopCompaction) stopContextCompaction(currentSessionId);
     clearStreamWatchdog(currentSessionId);
@@ -718,9 +762,12 @@ export function createAgentEventController({
     finishThinkingEntry(currentSessionId);
     updateInferredPlanSteps(currentSessionId, options.planSignal);
 
-    const finalContent = options.finalizeContent === false
+    const streamedContent = options.finalizeContent === false
       ? ""
       : stripProcessTextPrefixFromFinal(currentSessionId, options.content || runtime.streamBuffer);
+    const finalContent = modelRequestFailureDetail !== null
+      ? mergeModelRequestFailureIntoContent(streamedContent, modelRequestFailureDetail)
+      : streamedContent;
     if (finalContent.trim()) {
       runtime.streamBuffer = finalContent;
       const finalizeVisibleResponse = () => {

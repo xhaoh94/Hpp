@@ -265,6 +265,46 @@ describe("agent event terminal reconciliation", () => {
     expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("idle");
   });
 
+  it("writes a model request failure into the assistant response body", () => {
+    const harness = createHarness();
+    useChatStore.getState().addMessage({
+      id: "model-error-user",
+      role: "user",
+      content: "run",
+      timestamp: 90,
+    }, SESSION_ID);
+    dispatchAgentEvent({
+      type: "stream_start",
+      lifecycleRevision: "backend:model-error:1",
+      clientUserMessageId: "model-error-user",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+    dispatchAgentEvent({
+      type: "process_event",
+      entryType: "error",
+      title: "模型请求失败",
+      detail: "authentication failed",
+      state: "error",
+      lifecycleRevision: "backend:model-error:1",
+      clientUserMessageId: "model-error-user",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+    expect(getMessages().find((message) => message.role === "assistant")?.content)
+      .toBe("模型请求失败：authentication failed");
+    dispatchAgentEvent({
+      type: "stream_end",
+      content: "",
+      lifecycleRevision: "backend:model-error:1",
+      clientUserMessageId: "model-error-user",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+
+    expect(getMessages()).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      content: "模型请求失败：authentication failed",
+    }));
+  });
+
   it("settles a missing-terminal stream on backend_idle and rejects later output", () => {
     const harness = createHarness();
     useChatStore.getState().addMessage({

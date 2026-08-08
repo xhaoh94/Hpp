@@ -152,12 +152,48 @@ const normalizeModel = (value) => {
   if (!isRecord(value)) return null;
   const id = asString(value.id) || asString(value.model) || asString(value.name);
   if (!id) return null;
+  const supportedThinkingLevels = mapToSupportedThinkingLevels(value);
   return {
     id,
     name: asString(value.name) || id,
     reasoning: value.reasoning === true,
     imageInput: Array.isArray(value.input) && value.input.includes("image"),
+    ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
   };
+};
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Reconstruct the supported level list from a pi capability map. */
+const mapToSupportedThinkingLevels = (model) => {
+  const map = isRecord(model.thinkingLevelMap) ? model.thinkingLevelMap : null;
+  if (!map || Object.keys(map).length === 0) return [];
+  const standardLevels = THINKING_LEVELS.filter((level) => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+  const unknownLevels = Object.keys(map).filter((level) =>
+    !THINKING_LEVELS.includes(level) && map[level] !== null
+  );
+  return [...standardLevels, ...unknownLevels];
+};
+
+/** Build a pi capability map from a declared supported-level list. */
+const supportedThinkingLevelsToMap = (levels) => {
+  const supported = new Set(levels.map((level) => String(level || "").trim().toLowerCase()).filter(Boolean));
+  const map = {};
+  for (const level of ["off", "minimal", "low", "medium", "high"]) {
+    if (!supported.has(level)) map[level] = null;
+  }
+  for (const level of ["xhigh", "max"]) {
+    if (supported.has(level)) map[level] = level;
+  }
+  for (const level of supported) {
+    if (!THINKING_LEVELS.includes(level)) map[level] = level;
+  }
+  return map;
 };
 
 const isManagedProvider = (value) => isRecord(value) && !!getProviderEndpoint(value.api);
@@ -176,13 +212,27 @@ export const toProviderConfig = (provider, existingProvider = {}) => {
     name: provider.displayName || provider.providerId,
     baseUrl: provider.baseUrl,
     api,
-    models: (provider.models || []).map((model) => ({
-      ...(existingModelsById.get(model.id) || {}),
-      id: model.id,
-      name: model.name || model.id,
-      reasoning: model.reasoning === true,
-      input: model.imageInput ? ["text", "image"] : ["text"],
-    })),
+    models: (provider.models || []).map((model) => {
+      const existingModel = existingModelsById.get(model.id) || {};
+      const declaredLevels = Array.isArray(model.supportedThinkingLevels)
+        ? model.supportedThinkingLevels.map((level) => String(level || "").trim().toLowerCase()).filter(Boolean)
+        : [];
+      const entry = {
+        ...existingModel,
+        id: model.id,
+        name: model.name || model.id,
+        reasoning: model.reasoning === true,
+        input: model.imageInput ? ["text", "image"] : ["text"],
+      };
+      // A declared level list wins; otherwise keep any map already present in
+      // models.json so pi reports the exact levels the channel advertised.
+      if (declaredLevels.length > 0) {
+        entry.thinkingLevelMap = supportedThinkingLevelsToMap(declaredLevels);
+      } else if (model.reasoning !== true) {
+        delete entry.thinkingLevelMap;
+      }
+      return entry;
+    }),
   };
   if (asString(provider.apiKey)) nextProvider.apiKey = provider.apiKey;
   else delete nextProvider.apiKey;

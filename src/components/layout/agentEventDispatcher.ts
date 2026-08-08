@@ -1,4 +1,5 @@
 import { getAgentName } from "@/lib/agents";
+import { formatModelRequestFailure } from "@/i18n/text";
 import { useProjectStore } from "@/stores/project-store";
 import {
   useChatStore,
@@ -13,6 +14,7 @@ import {
   compareAgentTurnRevisions,
   createProcessEntryId,
   getToolProcessFiles,
+  isModelRequestFailureTitle,
   isPlanLikeProcessEvent,
   normalizePlanStepsFromEvent,
   normalizeAgentTurnRevision,
@@ -554,6 +556,12 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         // continue with more thinking, tools, or a final answer. The plugin
         // host will emit backend_idle when the backend really becomes idle;
         // explicit stream/abort/disconnect events remain terminal as well.
+        if (eventType === "error" && eventState === "error" && isModelRequestFailureTitle(eventTitle)) {
+          useChatStore.getState().appendLastAssistantContent(
+            formatModelRequestFailure(eventDetail),
+            currentSessionId,
+          );
+        }
         appendProcessEntry(currentSessionId, {
           id: typeof event.id === "string" ? event.id : undefined,
           type: "error",

@@ -245,6 +245,27 @@ describe("SessionCommandCoordinator", () => {
     expect(electronAPI.agentSendMessage).not.toHaveBeenCalled();
   });
 
+  it("queues a send while context compaction is active", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.setState({ compactingSessions: { "session-one": true } });
+    electronAPI.agentGetSessionState.mockResolvedValueOnce({ success: true, idle: false });
+
+    await expect(SessionCommandCoordinator.sendMessage({
+      sessionId: "session-one",
+      clientMessageId: "queued-during-compaction",
+      message,
+      queueIfRunning: true,
+    })).resolves.toMatchObject({ queued: true });
+
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({
+        id: "queued-during-compaction",
+        status: "queued",
+      }),
+    ]);
+    expect(electronAPI.agentSendMessage).not.toHaveBeenCalled();
+  });
+
   it("records a queued guidance message as a user-style process entry", async () => {
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     useChatStore.getState().addMessage({
@@ -1131,8 +1152,8 @@ describe("SessionCommandCoordinator", () => {
         }),
       ]));
     expect(useChatStore.getState().messages.at(-1)).toMatchObject({
-      role: "system",
-      content: "发送失败: offline",
+      role: "assistant",
+      content: "模型请求失败：offline",
     });
   });
 
@@ -1152,6 +1173,34 @@ describe("SessionCommandCoordinator", () => {
       "session-two",
       undefined,
     );
+  });
+
+  it("activates an initialized session before asynchronous model discovery", async () => {
+    const model = {
+      id: "session-two-model",
+      name: "Session Two Model",
+      provider: "test",
+      reasoning: true,
+      supportedThinkingLevels: ["off", "low", "medium", "high"],
+    };
+    saveSessionModel("session-two", model);
+    saveSessionThinking("session-two", "high");
+    useChatStore.setState({
+      activeSessionId: "session-one",
+      currentModel: null,
+      thinkingLevel: "medium",
+    });
+
+    const pending = SessionCommandCoordinator.initializeSession("session-two", { activate: true });
+
+    expect(useProjectStore.getState().activeSessionId).toBe("session-two");
+    expect(useChatStore.getState().activeSessionId).toBe("session-two");
+    expect(useChatStore.getState().currentModel).toEqual(model);
+    expect(useChatStore.getState().thinkingLevel).toBe("high");
+    await pending;
+
+    expect(electronAPI.agentGetModels).not.toHaveBeenCalled();
+    expect(electronAPI.agentSwitchSession).toHaveBeenCalledWith("session-two");
   });
 
   it("reuses and monitors a busy backend that survived a renderer reload", async () => {

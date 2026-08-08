@@ -180,6 +180,7 @@ type QueuePanelProps = {
   items: QueuedMessage[];
   canGuide: boolean;
   currentSessionRunning: boolean;
+  compactionInProgress: boolean;
   onGuide: (item: QueuedMessage) => void;
   onEdit: (item: QueuedMessage) => void;
   onReorder: (itemId: string, toIndex: number) => void;
@@ -199,6 +200,7 @@ function MessageQueuePanel({
   items,
   canGuide,
   currentSessionRunning,
+  compactionInProgress,
   onGuide,
   onEdit,
   onReorder,
@@ -316,8 +318,10 @@ function MessageQueuePanel({
                   type="button"
                   className="chat-queue-action"
                   onClick={() => onGuide(item)}
-                  disabled={!currentSessionRunning || item.status === "sending"}
-                  title={currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
+                  disabled={!currentSessionRunning || compactionInProgress || item.status === "sending"}
+                  title={compactionInProgress
+                    ? "会话压缩完成后才能引导"
+                    : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
                 >
                   <CornerDownRight size={14} />
                   <span>引导</span>
@@ -834,7 +838,7 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
           {userMessagesReversed.length === 0 ? (
             <div className="chat-user-history-empty">暂无发言</div>
           ) : (
-            <div className="chat-user-history-list">
+            <div className="chat-user-history-list persistent-scroll">
               {userMessagesReversed.map((msg) => (
                 <div
                   key={msg.id}
@@ -915,7 +919,7 @@ type ChatMessagesViewProps = {
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
-  onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
@@ -934,7 +938,7 @@ type ChatMessageItemProps = {
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
-  onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
@@ -1284,6 +1288,168 @@ function TodoSummaryPill({ process }: { process: AgentProcess }) {
   );
 }
 
+const CHAT_MESSAGE_INITIAL_RENDER_COUNT = 14;
+const CHAT_MESSAGE_RENDER_ROOT_MARGIN = "900px 0px";
+
+/**
+ * Estimate the space occupied by a message while its expensive subtree is
+ * deferred. The estimate only needs to be stable enough to keep the scroll
+ * thumb usable; the real height replaces it as soon as the row approaches the
+ * viewport.
+ */
+const estimateChatMessageHeight = (message: ChatMessage): number => {
+  if (message.role === "system") return 44;
+
+  if (message.role === "user") {
+    const lines = Math.max(1, (message.content || "").split(/\r?\n/).length);
+    const attachmentCount = (message.images?.length || 0) + (message.sessionReferences?.length || 0);
+    return Math.min(520, 64 + Math.min(lines, 10) * 20 + attachmentCount * 28);
+  }
+
+  const entryCount = message.process?.entries.length || 0;
+  const commentaryCount = message.commentary?.length || 0;
+  const textLines = Math.max(1, Math.ceil((message.content || "").length / 180));
+  return Math.min(1_200, 84 + Math.min(entryCount, 18) * 28 + Math.min(commentaryCount, 6) * 54 + textLines * 22);
+};
+
+type DeferredChatMessageItemProps = ChatMessageItemProps & {
+  index: number;
+  total: number;
+  rootRef: RefObject<HTMLDivElement | null>;
+  onContentChange: () => void;
+};
+
+/**
+ * Keep the message anchor in the DOM, but defer Markdown, process timelines,
+ * diffs and image nodes until the row is close to the viewport. Once a row has
+ * been materialized it stays mounted so expanding/collapsing it does not lose
+ * local UI state.
+ */
+const DeferredChatMessageItem = memo(function DeferredChatMessageItem({
+  index,
+  total,
+  rootRef,
+  onContentChange,
+  ...messageProps
+}: DeferredChatMessageItemProps) {
+  const initiallyVisible = index >= Math.max(0, total - CHAT_MESSAGE_INITIAL_RENDER_COUNT);
+  const [materialized, setMaterialized] = useState(initiallyVisible);
+  const placeholderRef = useRef<HTMLDivElement>(null);
+  const deferredRef = useRef(!initiallyVisible);
+
+  useEffect(() => {
+    if (materialized) return;
+    const placeholder = placeholderRef.current;
+    const root = rootRef.current;
+    if (!placeholder || !root || typeof IntersectionObserver === "undefined") {
+      setMaterialized(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0)) return;
+      observer.disconnect();
+      setMaterialized(true);
+    }, {
+      root,
+      rootMargin: CHAT_MESSAGE_RENDER_ROOT_MARGIN,
+      threshold: 0,
+    });
+    observer.observe(placeholder);
+    return () => observer.disconnect();
+  }, [materialized, rootRef]);
+
+  useLayoutEffect(() => {
+    if (!materialized || !deferredRef.current) return;
+    deferredRef.current = false;
+    onContentChange();
+  }, [materialized, onContentChange]);
+
+  if (materialized) return <ChatMessageItem {...messageProps} />;
+
+  return (
+    <div
+      ref={placeholderRef}
+      data-msg-id={messageProps.msg.id}
+      className="chat-msg-wrapper chat-message-lazy-placeholder"
+      style={{ minHeight: `${estimateChatMessageHeight(messageProps.msg)}px` }}
+      aria-hidden="true"
+    />
+  );
+});
+
+type ChatMessagesViewportProps = {
+  messages: ChatMessage[];
+  receivedUserMessages: Record<string, ChatMessage>;
+  activeTurnId: string | null;
+  activeCompactionMessageId: string | null;
+  processTerminalState: ProcessTerminalViewState;
+  expandThinkingWhileRunning: boolean;
+  projectPath?: string;
+  scrollRef: RefObject<HTMLDivElement | null>;
+  onContentChange: () => void;
+  onEditMessage: (message: ChatMessage) => void;
+  onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
+  onOpenImage: (src: string) => void;
+  onOpenFile: (path: string, options?: { preview?: boolean }) => void;
+  onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
+  onToggleAssistantProcessEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
+  onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
+  onForkMessage: (message: ChatMessage) => void;
+  forkingMessageId: string | null;
+};
+
+const DeferredMessagesViewport = memo(function ChatMessagesViewport({
+  messages,
+  receivedUserMessages,
+  activeTurnId,
+  activeCompactionMessageId,
+  processTerminalState,
+  expandThinkingWhileRunning,
+  projectPath,
+  scrollRef,
+  onContentChange,
+  onEditMessage,
+  onImageContextMenu,
+  onOpenImage,
+  onOpenFile,
+  onToggleAssistantProcess,
+  onToggleAssistantProcessEntry,
+  onPreserveScroll,
+  onForkMessage,
+  forkingMessageId,
+}: ChatMessagesViewportProps) {
+  return (
+    <>
+      {messages.map((msg, index) => (
+        <DeferredChatMessageItem
+          key={msg.id}
+          index={index}
+          total={messages.length}
+          rootRef={scrollRef}
+          msg={msg}
+          receivedUserMessage={receivedUserMessages[msg.id]}
+          turnRunning={msg.id === activeTurnId}
+          compactionRunning={msg.id === activeCompactionMessageId}
+          processTerminalState={processTerminalState}
+          expandThinkingWhileRunning={expandThinkingWhileRunning}
+          projectPath={projectPath}
+          onContentChange={onContentChange}
+          onEditMessage={onEditMessage}
+          onImageContextMenu={onImageContextMenu}
+          onOpenImage={onOpenImage}
+          onOpenFile={onOpenFile}
+          onToggleAssistantProcess={onToggleAssistantProcess}
+          onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
+          onPreserveScroll={onPreserveScroll}
+          onForkMessage={onForkMessage}
+          forkingMessageId={forkingMessageId}
+        />
+      ))}
+    </>
+  );
+});
+
 const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionId,
   activeSessionInitialized,
@@ -1350,27 +1516,26 @@ const ChatMessagesView = memo(function ChatMessagesView({
             {messages.length === 0 && (
               <div className="chat-empty">发送消息开始对话</div>
             )}
-            {messages.map((msg) => (
-              <ChatMessageItem
-                key={msg.id}
-                msg={msg}
-                receivedUserMessage={receivedUserMessages[msg.id]}
-                turnRunning={msg.id === activeTurnId}
-                compactionRunning={msg.id === activeCompactionMessageId}
-                processTerminalState={processTerminalState}
-                expandThinkingWhileRunning={expandThinkingWhileRunning}
-                projectPath={projectPath}
-                onEditMessage={onEditMessage}
-                onImageContextMenu={onImageContextMenu}
-                onOpenImage={onOpenImage}
-                onOpenFile={onOpenFile}
-                onToggleAssistantProcess={onToggleAssistantProcess}
-                onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
-                onPreserveScroll={onPreserveScroll}
-                onForkMessage={onForkMessage}
-                forkingMessageId={forkingMessageId}
-              />
-            ))}
+            <ChatMessagesViewport
+              messages={messages}
+              receivedUserMessages={receivedUserMessages}
+              activeTurnId={activeTurnId}
+              activeCompactionMessageId={activeCompactionMessageId}
+              processTerminalState={processTerminalState}
+              expandThinkingWhileRunning={expandThinkingWhileRunning}
+              projectPath={projectPath}
+              scrollRef={scrollRef}
+              onContentChange={onContentChange}
+              onEditMessage={onEditMessage}
+              onImageContextMenu={onImageContextMenu}
+              onOpenImage={onOpenImage}
+              onOpenFile={onOpenFile}
+              onToggleAssistantProcess={onToggleAssistantProcess}
+              onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
+              onPreserveScroll={onPreserveScroll}
+              onForkMessage={onForkMessage}
+              forkingMessageId={forkingMessageId}
+            />
 
             {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
               <div className="chat-working">
@@ -1548,6 +1713,25 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
   return null;
 });
 
+const ChatMessagesViewport = DeferredMessagesViewport;
+
+const IMAGE_UNSUPPORTED_HINT = "当前模型未标记支持图片输入，请切换支持图片的模型，或在 Agent 配置中启用该模型的图片能力。";
+
+/**
+ * Show one red hint bubble when the active model does not accept images.
+ * Each send attempt appends one hint; several images in a single send still
+ * count as one because they share a single send action. The unsent message is
+ * left untouched in the composer.
+ */
+function addImageUnsupportedHint(sessionId: string) {
+  useChatStore.getState().addMessage({
+    id: crypto.randomUUID(),
+    role: "system",
+    content: IMAGE_UNSUPPORTED_HINT,
+    timestamp: Date.now(),
+  }, sessionId);
+}
+
 type ChatPanelProps = {
   sendKey?: string;
   previousMessageKey?: string;
@@ -1713,7 +1897,7 @@ export function ChatPanel({
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
-  const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(true);
+  const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(false);
   const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("auto");
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
@@ -1946,7 +2130,7 @@ export function ChatPanel({
       const general = asRecord(settings.general);
       if (!cancelled) {
         setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
-        setExpandThinkingWhileRunning(getBooleanField(general, "expandThinkingWhileRunning") !== false);
+        setExpandThinkingWhileRunning(getBooleanField(general, "expandThinkingWhileRunning") === true);
         setPermissionMode(normalizeAgentPermissionMode(general.permissionMode));
       }
     });
@@ -2267,8 +2451,8 @@ export function ChatPanel({
     preserveScrollDuringLayoutChange(() => toggleAssistantProcess(messageId), anchor);
   }, [preserveScrollDuringLayoutChange, toggleAssistantProcess]);
 
-  const handleToggleAssistantProcessEntry = useCallback((messageId: string, entryId: string, anchor?: HTMLElement | null) => {
-    preserveScrollDuringLayoutChange(() => toggleAssistantProcessEntry(messageId, entryId), anchor);
+  const handleToggleAssistantProcessEntry = useCallback((messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => {
+    preserveScrollDuringLayoutChange(() => toggleAssistantProcessEntry(messageId, entryId, expanded), anchor);
   }, [preserveScrollDuringLayoutChange, toggleAssistantProcessEntry]);
 
   const { switchToSession, refreshModels } = useSessionModels({
@@ -2527,13 +2711,6 @@ export function ChatPanel({
     if (forkingMessageIdRef.current) return;
     if (activeInteraction) return;
     const targetSessionId = useProjectStore.getState().activeSessionId;
-    if (targetSessionId && useChatStore.getState().compactingSessions[targetSessionId]) {
-      const backendActivity = await SessionCommandCoordinator.getBackendSessionActivity(targetSessionId);
-      if (backendActivity === "busy" || backendActivity === "unknown") {
-        showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送");
-        return;
-      }
-    }
 
     if (isAwaitingUIResponse) {
       await handleSendUIResponse();
@@ -2555,12 +2732,16 @@ export function ChatPanel({
     }
     const modelForSend = getSessionModel(targetSessionId) || useChatStore.getState().currentModel;
     if (pendingImages.length > 0 && modelForSend?.supportsImages === false) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: "当前模型未标记支持图片输入，请切换支持图片的模型，或在 Agent 配置中启用该模型的图片能力。",
-        timestamp: Date.now(),
-      }, targetSessionId);
+      // This message would otherwise go straight to a queue while the agent is
+      // running. Instead of queueing or silently dropping it, show a toast and
+      // keep the (unsent) message in the composer.
+      if (currentSessionRunning) {
+        showFloatingToastMessage("当前模型不支持图片输入，无法发送该消息。");
+        return;
+      }
+      // Each send attempt shows one red hint bubble; multiple images in a
+      // single send still count as one. The message stays in the composer.
+      addImageUnsupportedHint(targetSessionId);
       return;
     }
 
@@ -2583,6 +2764,7 @@ export function ChatPanel({
     buildMessagePayload,
     clearLegacySessionReferences,
     clearSessionDraft,
+    currentSessionRunning,
     handleSendUIResponse,
     isAwaitingUIResponse,
     pendingFiles,
@@ -2977,6 +3159,7 @@ export function ChatPanel({
           items={activeQueuedMessages}
           canGuide={activeSessionSupportsGuidance}
           currentSessionRunning={currentSessionRunning}
+          compactionInProgress={activeSessionCompacting}
           onGuide={handleGuideQueuedMessage}
           onEdit={(item) => setQueueEditingId(item.id)}
           onReorder={handleReorderQueuedMessage}

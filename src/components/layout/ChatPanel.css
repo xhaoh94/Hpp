@@ -1199,6 +1199,15 @@
   max-width: 100%;
 }
 
+.chat-msg.system .chat-bubble-row {
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-msg.system .chat-bubble-stack {
+  align-items: center;
+}
+
 .chat-bubble {
   border-radius: 12px;
   padding: 10px 16px;
@@ -1472,13 +1481,20 @@
   padding: 4px;
   white-space: nowrap;
   box-shadow: 0 8px 24px var(--shadow-color);
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .chat-process-sticky-toggle:hover {
   color: var(--text-primary);
+  border-color: var(--accent-color);
+}
+
+.chat-process-sticky-toggle:active {
+  transform: translateY(1px);
 }
 
 .chat-process-sticky-thinking {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1491,6 +1507,7 @@
   cursor: pointer;
   padding: 5px;
   box-shadow: 0 8px 24px var(--shadow-color);
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .chat-process-sticky-thinking-list {
@@ -1502,15 +1519,33 @@
 }
 
 .chat-process-sticky-thinking-index {
-  min-width: 11px;
-  color: var(--text-tertiary, var(--text-secondary));
-  font-size: 10px;
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--accent-color);
+  color: #fff;
+  font-size: 9px;
   line-height: 1;
+  font-weight: 600;
   text-align: center;
+  pointer-events: none;
 }
 
 .chat-process-sticky-thinking:hover {
+  background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.chat-process-sticky-thinking:active {
+  transform: translateY(1px);
 }
 
 .chat-process {
@@ -1769,19 +1804,17 @@
 
 .chat-process-guidance-label {
   display: inline-flex;
+  width: 20px;
   height: 20px;
   flex: 0 0 auto;
   margin: 0;
-  padding: 0 6px;
+  padding: 0;
   align-items: center;
+  justify-content: center;
   border: 1px solid var(--border-color);
   border-radius: 5px;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 18px;
-  vertical-align: middle;
 }
 
 .chat-process-guidance-text {
@@ -1857,37 +1890,61 @@
   border-radius: 8px;
 }
 
-/* Highlight the target only after scrolling has settled. Keep the bulb at its
-   normal size so the feedback does not shift its alignment. */
+/* 思考运行中：灯泡亮度脉动（次级灰 ↔ 主题高亮色）；吸顶跳转高亮同款 */
+.chat-process-thinking-toggle.running,
 .chat-process-thinking-row.jump-highlight .chat-process-thinking-toggle {
-  animation: chat-thinking-bulb-breathe 2s ease-in-out both;
+  animation: chat-thinking-bulb-pulse 2.4s ease-in-out infinite;
 }
 
-@keyframes chat-thinking-bulb-breathe {
+@keyframes chat-thinking-bulb-pulse {
   0%, 100% {
-    background-color: transparent;
-    box-shadow: 0 0 0 0 transparent;
+    opacity: 0.55;
     color: var(--text-secondary);
-    opacity: 0.85;
-  }
-  28%, 72% {
-    background-color: color-mix(in srgb, var(--accent-color) 12%, transparent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-color) 10%, transparent);
-    color: var(--accent-color);
-    opacity: 1;
   }
   50% {
-    background-color: color-mix(in srgb, var(--accent-color) 18%, transparent);
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent-color) 12%, transparent);
-    color: var(--accent-color);
     opacity: 1;
+    color: var(--text-primary);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-process-thinking-row.jump-highlight .chat-process-thinking-toggle {
+  .chat-process-thinking-row.jump-highlight .chat-process-thinking-toggle,
+  .chat-process-thinking-toggle.running {
     animation-duration: 1ms;
     animation-delay: 0s;
+  }
+  .chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
+    animation-duration: 1ms;
+    animation-delay: 0s;
+  }
+}
+
+/* 思考运行且折叠时：只让两行预览文字本身被高亮扫过——把背景渐变裁剪到
+   文字笔画上（background-clip: text），不出现矩形覆盖层或边框；
+   展开态与单行思考不做扫光，避免干扰阅读。 */
+.chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  background-image: linear-gradient(
+    105deg,
+    var(--text-secondary) 0%,
+    var(--text-secondary) 38%,
+    var(--text-primary) 50%,
+    var(--text-secondary) 62%,
+    var(--text-secondary) 100%
+  );
+  background-size: 300% 100%;
+  background-position: 100% 0;
+  animation: chat-thinking-text-shimmer 4s ease-in-out infinite;
+}
+
+@keyframes chat-thinking-text-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  75%, 100% {
+    background-position: 0% 0;
   }
 }
 
@@ -1900,6 +1957,7 @@
   height: calc(14px * 1.65);
   padding: 0;
   border: 0;
+  border-radius: 999px;
   background: transparent;
   color: var(--text-secondary);
   opacity: 0.85;
@@ -1953,7 +2011,13 @@
   line-height: 1.65;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
+}
+
+/* 折叠预览包含完整代码块时：解除 2 行截断，让代码块完整显示，
+   避免未闭合的空白代码块框。 */
+.chat-process-thinking-preview.has-code-block {
+  -webkit-line-clamp: unset;
 }
 
 /* The collapsed thinking preview renders a multi-line Markdown preview

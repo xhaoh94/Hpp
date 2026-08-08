@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { CheckCircle2, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
-import { resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
+import { getThinkingLevelLabel, normalizeSupportedThinkingLevels, THINKING_LEVELS } from "@shared/models";
+import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
+import { AgentConfigIO } from "./AgentConfigIO";
 import "./Settings.css";
 
 type AgentConfigModalProps = {
@@ -15,12 +17,233 @@ type AgentConfigModalProps = {
   onModelsUpdated: (agentId: string, models?: AgentModel[], selectedProviderId?: string) => void;
 };
 
-const emptyModel = (configuration?: AgentProviderConfiguration): AgentCustomModelConfig => ({
-  id: "",
-  name: "",
-  reasoning: configuration?.modelDefaults.reasoning === true,
-  imageInput: configuration?.modelDefaults.imageInput === true,
-});
+const getConfiguredThinkingLevels = (levels?: string[]) =>
+  normalizeSupportedThinkingLevels(levels).filter((level) => level !== "off");
+
+const emptyModel = (configuration?: AgentProviderConfiguration): AgentCustomModelConfig => {
+  const supportedThinkingLevels = getConfiguredThinkingLevels(
+    configuration?.modelDefaults.supportedThinkingLevels,
+  );
+  return {
+    id: "",
+    name: "",
+    reasoning: supportedThinkingLevels.length > 0,
+    imageInput: configuration?.modelDefaults.imageInput === true,
+    supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
+  };
+};
+
+type ThinkingLevelsMultiSelectProps = {
+  levels?: string[];
+  onChange: (levels?: string[]) => void;
+};
+
+const THINKING_LEVEL_MENU_OPEN_EVENT = "hpp:thinking-level-menu-open";
+
+function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSelectProps) {
+  const menuId = useId();
+  const [open, setOpen] = useState(false);
+  const [customEditorOpen, setCustomEditorOpen] = useState(false);
+  const [customLevel, setCustomLevel] = useState("");
+  const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0, placement: "above" as "above" | "below" });
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const selectedLevels = getConfiguredThinkingLevels(levels);
+  const visibleThinkingLevels = useMemo(
+    () => THINKING_LEVELS.filter((level) => level.id !== "off"),
+    [],
+  );
+  const knownLevelIds = useMemo(() => new Set<string>(visibleThinkingLevels.map((level) => level.id)), [visibleThinkingLevels]);
+  const unknownLevels = selectedLevels.filter((level) => !knownLevelIds.has(level));
+
+  const updateMenuPosition = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    const menuWidth = Math.min(340, window.innerWidth - 32);
+    const menuHeight = menuRef.current?.offsetHeight || 220;
+    const spaceAbove = rect.top - 12;
+    const spaceBelow = window.innerHeight - rect.bottom - 12;
+    const opensAbove = spaceAbove >= spaceBelow;
+    setMenuPosition({
+      left: Math.max(16, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 16)),
+      top: opensAbove
+        ? Math.max(12, rect.top - menuHeight - 6)
+        : rect.bottom + 6,
+      placement: opensAbove ? "above" : "below",
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updateMenuPosition();
+    const handleViewportChange = () => updateMenuPosition();
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    return () => {
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+    };
+  }, [open, customEditorOpen, updateMenuPosition]);
+
+  useEffect(() => {
+    const handleOtherMenuOpen = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== menuId) {
+        setOpen(false);
+        setCustomEditorOpen(false);
+      }
+    };
+    document.addEventListener(THINKING_LEVEL_MENU_OPEN_EVENT, handleOtherMenuOpen);
+    return () => document.removeEventListener(THINKING_LEVEL_MENU_OPEN_EVENT, handleOtherMenuOpen);
+  }, [menuId]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setCustomEditorOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        setCustomEditorOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const commitLevels = (nextLevels: string[]) => {
+    const normalized = getConfiguredThinkingLevels(nextLevels);
+    onChange(normalized.length > 0 ? normalized : undefined);
+  };
+
+  const toggleLevel = (level: string) => {
+    commitLevels(selectedLevels.includes(level)
+      ? selectedLevels.filter((candidate) => candidate !== level)
+      : [...selectedLevels, level]);
+  };
+
+  const addCustomLevel = () => {
+    const [normalized] = getConfiguredThinkingLevels([customLevel]);
+    if (!normalized) return;
+    if (!selectedLevels.includes(normalized)) commitLevels([...selectedLevels, normalized]);
+    setCustomLevel("");
+    setCustomEditorOpen(false);
+  };
+
+  const summary = selectedLevels.length === 0
+    ? "未启用"
+    : selectedLevels.length <= 2
+      ? selectedLevels.map(getThinkingLevelLabel).join("、")
+      : `已选 ${selectedLevels.length} 档`;
+
+  return (
+    <div className={`agent-thinking-multiselect ${open ? "open" : ""}`} ref={rootRef}>
+      <button
+        type="button"
+        className="agent-thinking-multiselect-trigger"
+        onClick={() => {
+          if (!open) {
+            document.dispatchEvent(new CustomEvent(THINKING_LEVEL_MENU_OPEN_EVENT, { detail: menuId }));
+          }
+          setOpen((value) => !value);
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={summary}
+      >
+        <span>{summary}</span>
+        <ChevronDown size={13} />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          className={`agent-thinking-multiselect-menu ${menuPosition.placement}`}
+          style={{ left: `${menuPosition.left}px`, top: `${menuPosition.top}px` }}
+          role="listbox"
+          aria-multiselectable="true"
+        >
+          <div className="agent-thinking-multiselect-header">
+            <div>
+              <div className="agent-thinking-multiselect-title">选择思考档位</div>
+              <div className="agent-thinking-multiselect-subtitle">可多选，不选即关闭推理</div>
+            </div>
+            <div className="agent-thinking-multiselect-actions">
+              {selectedLevels.length > 0 && (
+                <button type="button" onClick={() => commitLevels([])}>清空</button>
+              )}
+              <button
+                type="button"
+                className={customEditorOpen ? "active" : ""}
+                onClick={() => setCustomEditorOpen((value) => !value)}
+              >
+                自定义
+              </button>
+            </div>
+          </div>
+          <div className="agent-thinking-multiselect-options">
+            {visibleThinkingLevels.map((level) => {
+              const selected = selectedLevels.includes(level.id);
+              return (
+                <button
+                  key={level.id}
+                  type="button"
+                  className={`agent-thinking-multiselect-option ${selected ? "selected" : ""}`}
+                  onClick={() => toggleLevel(level.id)}
+                  role="option"
+                  aria-selected={selected}
+                >
+                  <span>{level.label}</span>
+                  {selected && <CheckCircle2 size={13} />}
+                </button>
+              );
+            })}
+            {unknownLevels.map((level) => (
+              <button
+                key={level}
+                type="button"
+                className="agent-thinking-multiselect-option selected custom"
+                onClick={() => toggleLevel(level)}
+                role="option"
+                aria-selected={true}
+                title="自定义档位"
+              >
+                <span>{level}</span>
+                <X size={12} />
+              </button>
+            ))}
+          </div>
+          {customEditorOpen && (
+            <div className="agent-thinking-multiselect-custom">
+              <input
+                autoFocus
+                value={customLevel}
+                onChange={(event) => setCustomLevel(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  addCustomLevel();
+                }}
+                className="input-field"
+                placeholder="输入自定义档位"
+              />
+              <button type="button" className="btn-action agent-config-mini-btn" onClick={addCustomLevel} disabled={!customLevel.trim()}>
+                添加
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const createProvider = (index: number, configuration: AgentProviderConfiguration): AgentProviderConfig => ({
   providerId: `custom-${index}`,
@@ -495,11 +718,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     const additions = selectedModels.flatMap((model) => {
       if (existingIds.has(model.id)) return [];
       existingIds.add(model.id);
+      const supportedThinkingLevels = getConfiguredThinkingLevels(
+        providerConfiguration?.modelDefaults.supportedThinkingLevels,
+      );
       return [{
         id: model.id,
         name: model.name || model.id,
-        reasoning: providerConfiguration?.modelDefaults.reasoning === true,
+        reasoning: supportedThinkingLevels.length > 0,
         imageInput: providerConfiguration?.modelDefaults.imageInput === true,
+        supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
       }];
     });
     if (additions.length === 0) return;
@@ -528,17 +755,19 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         displayName: (draft.displayName || draft.providerId).trim(),
         baseUrl: draft.baseUrl.trim(),
         apiKey: draft.apiKey.trim(),
-        models: draft.models.map((model) => ({
-          ...model,
-          id: model.id.trim(),
-          name: (model.name || model.id).trim(),
-          reasoning: providerConfiguration?.fixedModelCapabilities
-            ? providerConfiguration.modelDefaults.reasoning
-            : model.reasoning,
-          imageInput: providerConfiguration?.fixedModelCapabilities
-            ? providerConfiguration.modelDefaults.imageInput
-            : model.imageInput,
-        })),
+        models: draft.models.map((model) => {
+          const supportedThinkingLevels = getConfiguredThinkingLevels(model.supportedThinkingLevels);
+          return {
+            ...model,
+            id: model.id.trim(),
+            name: (model.name || model.id).trim(),
+            reasoning: supportedThinkingLevels.length > 0,
+            imageInput: providerConfiguration?.fixedModelCapabilities
+              ? providerConfiguration.modelDefaults.imageInput
+              : model.imageInput,
+            supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
+          };
+        }),
       };
       const payload = editorOriginalProviderId
         ? { ...normalizedDraft, originalProviderId: editorOriginalProviderId }
@@ -770,22 +999,25 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
               <h3>{getAgentName(agentId)} 配置</h3>
             </div>
             <div className="agent-config-subtitle">{providerConfiguration?.pathLabel || "Agent provider config"}</div>
-            <div className="agent-config-tabs" role="tablist" aria-label="Agent 配置切换">
-              {configurableAgentList.map((agent) => {
-                const active = agent.id === agentId;
-                return (
-                  <button
-                    key={agent.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    className={`agent-config-tab ${active ? "active" : ""}`}
-                    onClick={() => setAgentId(agent.id)}
-                  >
-                    {agent.name}
-                  </button>
-                );
-              })}
+            <div className="agent-config-tabbar">
+              <div className="agent-config-tabs" role="tablist" aria-label="Agent 配置切换">
+                {configurableAgentList.map((agent) => {
+                  const active = agent.id === agentId;
+                  return (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      className={`agent-config-tab ${active ? "active" : ""}`}
+                      onClick={() => setAgentId(agent.id)}
+                    >
+                      {agent.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <AgentConfigIO />
             </div>
           </div>
           <button type="button" className="settings-modal-close" onClick={onClose} aria-label="关闭">
@@ -830,7 +1062,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 <div className="agent-config-section-title">渠道</div>
                 <div
                   ref={providerScrollRef}
-                  className="agent-config-provider-scroll"
+                  className="agent-config-provider-scroll persistent-scroll"
                   onDragOver={(event) => {
                     if (dragProviderId) updateProviderAutoScroll(event.clientY);
                   }}
@@ -1148,7 +1380,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 </label>
               </div>
 
-              <div className="agent-config-models-header">
+              <div className="agent-config-models-panel">
+                <div className="agent-config-models-header">
                 <div className="agent-config-section-title">模型</div>
                 <div className="agent-config-model-actions">
                   <button
@@ -1185,20 +1418,21 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     <label className="agent-config-check">
                       <input
                         type="checkbox"
-                        checked={model.reasoning}
-                        onChange={(event) => updateModel(index, { reasoning: event.target.checked })}
-                        disabled={providerConfiguration?.fixedModelCapabilities}
-                      />
-                      Reasoning
-                    </label>
-                    <label className="agent-config-check">
-                      <input
-                        type="checkbox"
                         checked={model.imageInput}
                         onChange={(event) => updateModel(index, { imageInput: event.target.checked })}
                         disabled={providerConfiguration?.fixedModelCapabilities}
                       />
                       图片
+                    </label>
+                    <label className="agent-config-thinking-levels">
+                      <span>思考档位</span>
+                      <ThinkingLevelsMultiSelect
+                        levels={model.supportedThinkingLevels}
+                        onChange={(supportedThinkingLevels) => updateModel(index, {
+                          supportedThinkingLevels,
+                          reasoning: !!supportedThinkingLevels?.length,
+                        })}
+                      />
                     </label>
                     <button
                       type="button"
@@ -1211,6 +1445,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     </button>
                   </div>
                 ))}
+              </div>
               </div>
             </div>
           </div>
@@ -1406,6 +1641,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           </div>
         </div>
       )}
+
     </div>
   );
 }
