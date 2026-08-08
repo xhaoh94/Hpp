@@ -58,6 +58,18 @@
   gap: 8px;
 }
 
+.chat-header-session-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+  max-width: 260px;
+}
+
 .chat-agent-dot {
   width: 8px;
   height: 8px;

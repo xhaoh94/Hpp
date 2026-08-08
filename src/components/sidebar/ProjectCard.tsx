@@ -5,6 +5,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
+import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
@@ -13,9 +14,6 @@ import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
 import { GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
-
-// Braille Spinner
-const BRAILLE_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -39,15 +37,6 @@ const getSessionSortTime = (session: ProjectSession) => {
   const timestamp = Date.parse(session.lastActiveAt || session.createdAt);
   return Number.isFinite(timestamp) ? timestamp : 0;
 };
-
-function BrailleSpinner() {
-  const [index, setIndex] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setIndex((p) => (p + 1) % BRAILLE_CHARS.length), 80);
-    return () => clearInterval(timer);
-  }, []);
-  return <span className="braille-spinner">{BRAILLE_CHARS[index]}</span>;
-}
 
 interface Props {
   project: Project;

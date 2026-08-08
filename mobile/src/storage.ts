@@ -184,6 +184,7 @@ export async function saveSessionDraft(hostId: string, sessionId: string, draft:
   }
   await writeValue(sessionDraftKey(hostId, sessionId), {
     text: normalized.text,
+    document: normalized.document,
     referenceSessionIds: normalized.referenceSessionIds,
     action: normalized.action,
     updatedAt: normalized.updatedAt,

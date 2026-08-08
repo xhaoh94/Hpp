@@ -220,11 +220,17 @@ class RemoteAccessServer {
   }
 
   private async findWebRoot() {
+    // Prefer the freshly built bundle (npm run mobile:build) over stale
+    // snapshots. The first candidate historically resolved to
+    // out/mobile (a leftover copy from an old build) when running from the
+    // electron-vite output directory, which served an outdated bundle without
+    // newer features (e.g. the guidance bubble). The source directory's
+    // index.html is the vite dev entry (it references /src/main.tsx) and is
+    // never servable as a static bundle, so it must not be picked.
     const candidates = [
-      join(__dirname, "../mobile"),
+      join(process.cwd(), "mobile", "dist"),
       join(app.getAppPath(), "out", "mobile"),
       join(process.cwd(), "out", "mobile"),
-      join(process.cwd(), "mobile", "dist"),
     ];
     for (const candidate of [...new Set(candidates.map((item) => resolve(item)))]) {
       try {

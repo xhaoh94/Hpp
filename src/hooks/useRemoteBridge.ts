@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSessionModel, getSessionThinking, SESSION_CONFIG_UPDATED_EVENT } from "@/hooks/useDataPersistence";
 import { executeRemoteSessionCommand } from "@/lib/remote-session-commands";
+import { relativeRemotePath } from "@/lib/project-file-path";
 import { useChatStore, type ChatMessage, type QueuedMessage } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useProjectStore, type AgentStatus, type Project } from "@/stores/project-store";
@@ -34,16 +35,6 @@ type UseRemoteBridgeOptions = {
     pendingInteraction: Exclude<PendingUIResponse, null>,
   ) => void | Promise<void>;
 };
-
-const normalizeSlashes = (value: string) => value.replace(/\\/g, "/");
-
-export function relativeRemotePath(value: string, projectPath: string) {
-  const path = normalizeSlashes(value);
-  const root = normalizeSlashes(projectPath).replace(/\/$/, "");
-  if (path.toLowerCase().startsWith(`${root.toLowerCase()}/`)) return path.slice(root.length + 1);
-  if (/^(?:[a-z]:\/|\/)/i.test(path)) return path.split("/").filter(Boolean).pop() || "file";
-  return path;
-}
 
 export function sanitizeRemoteMessage(
   message: ChatMessage,

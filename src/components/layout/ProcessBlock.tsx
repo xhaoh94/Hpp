@@ -23,10 +23,10 @@ import {
 import {
   canMergeAdjacentSubagentEntries,
   createProcessEntryMerger,
-  getProcessFileName,
   mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
 import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
+import { relativeRemotePath } from "@/lib/project-file-path";
 import {
   formatProcessDuration,
   getProcessGroupState,
@@ -139,23 +139,25 @@ function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; st
 function ProcessEntryFiles({
   files,
   onOpenFile,
+  projectPath,
 }: {
   files: AgentProcessFile[];
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
+  projectPath?: string;
 }) {
   return (
     <div className="chat-process-files">
       {files.map((file, index) => {
-        const label = file.label || getProcessFileName(file.file);
         const preview = file.action !== "listed";
+        const displayPath = relativeRemotePath(file.file, projectPath || "");
         return (
           <div className="chat-process-file" key={`${file.file}-${index}`}>
             <button
               className="chat-process-file-name openable"
-              title={file.file}
+              title={displayPath}
               onClick={() => onOpenFile(file.file, { preview })}
             >
-              {label}
+              {displayPath}
             </button>
             {typeof file.additions === "number" && file.additions > 0 && (
               <span className="chat-process-file-add">+{file.additions}</span>
@@ -452,6 +454,7 @@ function ProcessEntryRow({
   onPreserveScroll,
   onThinkingRowRef,
   receivedMessageDocument,
+  projectPath,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
@@ -464,6 +467,7 @@ function ProcessEntryRow({
   onPreserveScroll: PreserveScroll;
   onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
+  projectPath?: string;
 }) {
   const isReceivedMessage = entry.toolKind === "message_received" || entry.title.startsWith("收到消息:");
   const showReceivedMessage = isReceivedMessage && !!receivedMessageDocument;
@@ -646,7 +650,7 @@ function ProcessEntryRow({
             )}
           </button>
         )}
-        {files.length > 0 && <ProcessEntryFiles files={files} onOpenFile={onOpenFile} />}
+        {files.length > 0 && <ProcessEntryFiles files={files} onOpenFile={onOpenFile} projectPath={projectPath} />}
         {commandVisible && (
           <CommandDetail entry={entry} onPreserveScroll={onPreserveScroll} />
         )}
@@ -675,6 +679,7 @@ function ProcessEntries({
   onPreserveScroll,
   onThinkingRowRef,
   receivedMessageDocument,
+  projectPath,
 }: {
   entries: AgentProcessEntry[];
   messageId: string;
@@ -687,6 +692,7 @@ function ProcessEntries({
   onPreserveScroll: PreserveScroll;
   onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
+  projectPath?: string;
 }) {
   return <>{groupProcessEntries(entries).map((group) => group.kind === "commands" ? (
     <CommandGroup
@@ -709,6 +715,7 @@ function ProcessEntries({
         onPreserveScroll={onPreserveScroll}
         onThinkingRowRef={onThinkingRowRef}
         receivedMessageDocument={receivedMessageDocument}
+        projectPath={projectPath}
       />
     ))
   ) : (
@@ -725,6 +732,7 @@ function ProcessEntries({
       onPreserveScroll={onPreserveScroll}
       onThinkingRowRef={onThinkingRowRef}
       receivedMessageDocument={receivedMessageDocument}
+      projectPath={projectPath}
     />
   ))}</>;
 }
@@ -987,6 +995,7 @@ export function ProcessBlock({
   onOpenImage,
   onPreserveScroll,
   receivedMessageDocument,
+  projectPath,
 }: {
   messageId: string;
   process: AgentProcess;
@@ -1001,6 +1010,7 @@ export function ProcessBlock({
   onOpenImage: (src: string) => void;
   onPreserveScroll: PreserveScroll;
   receivedMessageDocument?: ComposerDocument;
+  projectPath?: string;
 }) {
   const viewProcess = useMemo(() => normalizeProcessForView(process, {
     running,
@@ -1327,6 +1337,7 @@ export function ProcessBlock({
                 onPreserveScroll={onPreserveScroll}
                 onThinkingRowRef={registerThinkingRow}
                 receivedMessageDocument={receivedMessageDocument}
+                projectPath={projectPath}
               />
             )}
           </div>

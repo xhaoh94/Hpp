@@ -129,7 +129,7 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.isComposing) return;
+      if (e.isComposing || e.keyCode === 229) return;
       // File search (Ctrl+P)
       if (matchShortcut(e, shortcuts.fileSearch)) {
         e.preventDefault();

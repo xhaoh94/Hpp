@@ -893,7 +893,7 @@ button:disabled { opacity: 0.48; }
 .process-guidance-images img { width: 64px; height: 64px; border: 1px solid var(--border); border-radius: 5px; object-fit: cover; }
 .process-guidance-content { display: flex; min-width: 0; max-width: 100%; align-items: center; justify-content: flex-end; gap: 7px; }
 .process-guidance-bubble { max-width: 100%; margin-left: 0; font-size: 13px; line-height: 1.62; }
-.process-guidance-label { display: inline-flex; height: 20px; flex: 0 0 auto; margin: 0; padding: 0 6px; align-items: center; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-raised); color: var(--muted); font-size: 10px; font-weight: 600; line-height: 18px; }
+.process-guidance-label { display: inline-flex; width: 20px; height: 20px; flex: 0 0 auto; margin: 0; padding: 0; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-raised); color: var(--muted); }
 .process-guidance-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .process-entry { border-bottom: 1px solid var(--border); }
 .process-entry:last-child { border-bottom: 0; }
@@ -908,6 +908,7 @@ button:disabled { opacity: 0.48; }
 .process-entry-received-content .composer-message-image img { width: 11px; height: 11px; }
 .process-entry-received-content .composer-message-text { font-size: inherit; line-height: inherit; }
 .process-entry-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.process-idle-duration { color: var(--muted); font: inherit; white-space: nowrap; }
 .process-entry-detail { box-sizing: border-box; width: calc(100% - 10px); min-width: 0; max-width: calc(100% - 10px); margin: 3px 5px 6px; padding: 8px; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--code); color: var(--muted); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .process-entry-detail pre { box-sizing: border-box; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; overflow-x: hidden; }
 .subagent-entry-summary { grid-template-columns: minmax(0, 1fr) 14px; min-height: 38px; padding-top: 5px; padding-bottom: 5px; }

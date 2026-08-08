@@ -45,6 +45,21 @@ export function isAbsoluteProjectFilePath(filePath: string): boolean {
     || path.startsWith("\\");
 }
 
+/**
+ * Convert an absolute file path to a project-relative path for display
+ * purposes (e.g. remote / process file lists). Paths inside the project root
+ * are relativized; absolute paths outside the project fall back to their
+ * basename; already-relative paths are returned unchanged. This is the same
+ * logic used when publishing process/diff data to the mobile client.
+ */
+export function relativeRemotePath(value: string, projectPath: string): string {
+  const path = value.replace(/\\/g, "/");
+  const root = projectPath.replace(/\\/g, "/").replace(/\/$/, "");
+  if (path.toLowerCase().startsWith(`${root.toLowerCase()}/`)) return path.slice(root.length + 1);
+  if (/^(?:[a-z]:\/|\/)/i.test(path)) return path.split("/").filter(Boolean).pop() || "file";
+  return path;
+}
+
 export function resolveProjectFilePath(filePath: string, projectPath: string): string {
   const path = filePath.trim();
   if (!path || isAbsoluteProjectFilePath(path)) return path;

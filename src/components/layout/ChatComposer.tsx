@@ -245,7 +245,7 @@ export const ChatComposer = memo(function ChatComposer({
       }
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.isComposing) return;
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
         setUploadMenuOpen(false);
         setActionPickerOpen(false);
@@ -374,7 +374,15 @@ export const ChatComposer = memo(function ChatComposer({
   }, [editorRef, fileMention, fileMentionResultState.query, updateFileMentionFromEditor]);
 
   const handleEditorKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.nativeEvent.isComposing || composingRef.current) {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || composingRef.current) {
+      // IME owns the keystroke. Swallow it entirely — and crucially prevent the
+      // browser's default text insertion so a racing keystroke cannot leak into
+      // the composer as a plain letter. This never affects the composition
+      // commit itself (that arrives via input events, not keydown defaults).
+      if (composingRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       return;
     }
 

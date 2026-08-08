@@ -12,9 +12,12 @@ import {
   $isRangeSelection,
   $isTextNode,
   COMMAND_PRIORITY_LOW,
+  COMPOSITION_END_COMMAND,
   DecoratorNode,
   KEY_BACKSPACE_COMMAND,
   KEY_DELETE_COMMAND,
+  KEY_DOWN_COMMAND,
+  COMMAND_PRIORITY_CRITICAL,
   SELECTION_CHANGE_COMMAND,
   type LexicalEditor,
   type LexicalNode,
@@ -43,6 +46,7 @@ import { ComposerEntityIcon } from "./ComposerEntityIcon";
 import {
   createContext,
   forwardRef,
+  memo,
   useCallback,
   useContext,
   useEffect,
@@ -188,13 +192,31 @@ function appendDocumentToRoot(documentValue: ComposerDocument) {
   }
 }
 
+/**
+ * UUID fallback for insecure origins: crypto.randomUUID is only available in
+ * secure contexts (https / localhost). The mobile web client is often served
+ * over plain http://<LAN-IP>:port by the desktop's remote server, where
+ * crypto.randomUUID is undefined and calling it throws, which would break the
+ * composer's onChange round-trip (send button never lights up).
+ */
+function createNodeId(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 function documentFromEditor(): ComposerDocument {
   const nodes: ComposerNode[] = [];
   const appendText = (text: string) => {
     if (!text) return;
     const previous = nodes.at(-1);
     if (previous?.type === "text") previous.text += text;
-    else nodes.push({ id: crypto.randomUUID(), type: "text", text });
+    else nodes.push({ id: createNodeId(), type: "text", text });
   };
   const visit = (node: LexicalNode) => {
     if ($isTextNode(node)) appendText(node.getTextContent());
@@ -213,13 +235,58 @@ function documentFromEditor(): ComposerDocument {
 function SyncDocumentPlugin({ value, onChange }: { value: ComposerDocument; onChange: (value: ComposerDocument) => void }) {
   const [editor] = useLexicalComposerContext();
   const appliedRef = useRef("");
+  const valueRef = useRef(value);
+  valueRef.current = value;
   const signature = JSON.stringify(value);
+  // Signature of the latest external update that was skipped while a
+  // composition was in flight. It is applied once the composition settles.
+  const pendingRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (signature === appliedRef.current) return;
-    editor.update(() => appendDocumentToRoot(value));
+    if (signature === appliedRef.current) {
+      // Editor and external value are in sync again; nothing is pending.
+      pendingRef.current = null;
+      return;
+    }
+    // Never rebuild the document while an IME composition is in flight:
+    // replacing the root nodes cancels the browser's composition session and
+    // the remaining keystrokes leak into the composer as plain letters.
+    // Remember the update so it can be applied once the composition settles.
+    if (editor.isComposing()) {
+      pendingRef.current = signature;
+      return;
+    }
+    editor.update(() => appendDocumentToRoot(valueRef.current));
     appliedRef.current = signature;
-  }, [editor, signature, value]);
+    pendingRef.current = null;
+  }, [editor, signature]);
+
+  // Apply an external update that arrived mid-composition after the
+  // composition settles. Only runs when something was actually skipped — a
+  // normal keystroke/commit round-trip keeps valueRef and appliedRef in sync
+  // and must never rebuild the document (that would lag the commit visibly).
+  useEffect(() => {
+    let frame = 0;
+    const unregister = editor.registerCommand(COMPOSITION_END_COMMAND, () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (editor.isComposing()) return;
+        const pending = pendingRef.current;
+        if (pending === null || pending === appliedRef.current) return;
+        // valueRef holds the latest value seen by the effect, which is exactly
+        // the skipped update (or a newer one that superseded it).
+        editor.update(() => appendDocumentToRoot(valueRef.current));
+        appliedRef.current = pending;
+        pendingRef.current = null;
+      });
+      return false;
+    }, COMMAND_PRIORITY_LOW);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      unregister();
+    };
+  }, [editor]);
 
   return <OnChangePlugin ignoreSelectionChange onChange={(state) => {
     state.read(() => {
@@ -251,6 +318,23 @@ function CaptureEditorPlugin({
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
     editorRef.current = editor;
+    // IME guard: while a composition is in flight the browser (and on Wayland
+    // especially the compositor) owns the keystrokes. Chromium still dispatches
+    // these keydown events with isComposing=true / keyCode=229, and when Lexical's
+    // internal isComposing() flag drifts (lost or out-of-order compositionstart
+    // events under Wayland IMEs) it would process the key as a regular one,
+    // cancelling the composition and leaking the remaining pinyin letters into
+    // the composer. Swallow every IME keystroke at the highest command priority.
+    //
+    // Only the browser's authoritative isComposing flag is trusted here: the
+    // editor's internal composition state can get stuck at true when a
+    // compositionend is lost (common on mobile browsers and soft keyboards),
+    // and using it as a fallback would then swallow every later keystroke,
+    // making the composer unable to receive text at all.
+    const unregisterImeGuard = editor.registerCommand(KEY_DOWN_COMMAND, (event) => {
+      if (event.isComposing) return true;
+      return false;
+    }, COMMAND_PRIORITY_CRITICAL);
     const unregister = editor.registerCommand(SELECTION_CHANGE_COMMAND, () => {
       editor.getEditorState().read(() => {
         const selection = $getSelection();
@@ -267,7 +351,11 @@ function CaptureEditorPlugin({
       });
       return false;
     }, COMMAND_PRIORITY_LOW);
-    return () => { unregister(); editorRef.current = null; };
+    return () => {
+      unregisterImeGuard();
+      unregister();
+      editorRef.current = null;
+    };
   }, [editor, editorRef, selectionRef]);
   return null;
 }
@@ -293,12 +381,13 @@ export type InlineComposerEditorProps = {
   onPaste?: (event: ClipboardEvent<HTMLDivElement>) => void;
   onDrop?: (event: DragEvent<HTMLDivElement>) => void;
   onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
-  onCompositionStart?: () => void;
-  onCompositionEnd?: () => void;
+  onCompositionStart?: (event: React.CompositionEvent<HTMLDivElement>) => void;
+  onCompositionEnd?: (event: React.CompositionEvent<HTMLDivElement>) => void;
+  onBeforeInput?: (event: React.FormEvent<HTMLDivElement>) => void;
   onBlur?: (event: React.FocusEvent<HTMLDivElement>) => void;
 };
 
-export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, InlineComposerEditorProps>(function InlineComposerEditor({
+export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, InlineComposerEditorProps>(function InlineComposerEditor({
   value,
   onChange,
   placeholder,
@@ -478,6 +567,22 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
               placeholder={<span />}
               {...events}
               onKeyDownCapture={onKeyDown}
+              onBeforeInput={(event) => {
+                // Do not swallow any text input here: a component-level
+                // composition ref (or even the browser's isComposing flag) can
+                // cause real keystrokes to be dropped on mobile soft keyboards
+                // that commit via insertText, which would make the composer
+                // unable to receive text (send button never lights up).
+                // The KEY_DOWN_COMMAND guard above only intercepts composition
+                // navigation keys and never blocks text insertion.
+                events.onBeforeInput?.(event);
+              }}
+              onCompositionStart={(event) => {
+                events.onCompositionStart?.(event);
+              }}
+              onCompositionEnd={(event) => {
+                events.onCompositionEnd?.(event);
+              }}
               onBlur={(event) => { captureSelection(); events.onBlur?.(event); }}
             />}
             placeholder={<div className="inline-composer-placeholder">{placeholder}</div>}
@@ -490,4 +595,4 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
       </LexicalComposer>
     </EditorCallbacksContext.Provider>
   );
-});
+}));

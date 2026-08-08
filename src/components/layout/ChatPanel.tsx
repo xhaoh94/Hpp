@@ -30,6 +30,7 @@ import {
   cloneChatDraft,
 } from "@/stores/chat-store";
 import { useProjectStore, type AgentStatus, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
+import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
@@ -422,7 +423,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage 
   useEffect(() => {
     if (!addMenuOpen) return;
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.isComposing) return;
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key !== "Escape") return;
       event.stopPropagation();
       setAddMenuOpen(false);
@@ -1090,6 +1091,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           onOpenImage={onOpenImage}
           onPreserveScroll={onPreserveScroll}
           receivedMessageDocument={receivedUserMessage?.composerDocument || receivedUserMessage?.composerDraft?.document}
+          projectPath={projectPath}
         />
       )}
       {!msg.process && commentary.length > 0 && (
@@ -1796,6 +1798,7 @@ export function ChatPanel({
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const projects = useProjectStore((state) => state.projects);
   const activeSessionId = useProjectStore((state) => state.activeSessionId);
+  const sessionMessages = useChatStore((state) => state.sessionMessages);
   const activeSessionAgentStatus = useProjectStore((state) =>
     activeSessionId ? state.agentStatuses[activeSessionId] : undefined
   );
@@ -1810,6 +1813,9 @@ export function ChatPanel({
   const triggerAddProject = useAppStore((state) => state.triggerAddProject);
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+  const activeSessionTitle = activeSession
+    ? getSessionReferenceTitle(activeSession, activeSessionId ? sessionMessages[activeSessionId] || [] : [])
+    : "";
   const currentAgentId = activeSession?.agentId || activeAgentId;
   const activeDraft = useChatStore(useShallow((state) => {
     const draft = activeSessionId
@@ -2827,7 +2833,7 @@ export function ChatPanel({
   }, [activeSessionId]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.nativeEvent.isComposing) return;
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
 
     const historyDirection = matchShortcut(e, previousMessageKey)
       ? "previous"
@@ -3066,8 +3072,6 @@ export function ChatPanel({
       >
       {/* Header */}
       <div className="chat-header">
-        <div className="chat-agent-dot" />
-        <span className="chat-agent-name">{activeProject.name}</span>
         <button
           type="button"
           className="chat-agent-tag chat-agent-reload-trigger"
@@ -3084,6 +3088,10 @@ export function ChatPanel({
           onOpenChange={setUserMsgHistoryOpen}
           onScrollToMessage={scrollToMessage}
         />
+        <span className="chat-header-session-title" title={activeSessionTitle}>
+          {activeSessionTitle}
+        </span>
+        {currentSessionRunning && <BrailleSpinner />}
         <div style={{ flex: 1 }} />
       </div>
 

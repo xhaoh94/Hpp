@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -781,7 +782,22 @@ function AgentActionSheet({
   );
 }
 
-function ProcessEntryRow({
+function IdleDurationLabel({ entry }: { entry: RemoteProcessEntry }) {
+  // Only a running stream_idle_notice entry needs the ticking clock; a
+  // completed one renders a static duration. Keeping the ticker inside this
+  // tiny leaf means the per-second nowTick no longer invalidates every
+  // ProcessEntryRow (previously it re-rendered all process entries each
+  // second while an agent turn was running).
+  const ticking = entry.toolKind === "stream_idle_notice" && !!entry.startedAt && !entry.completedAt;
+  const nowTick = useProcessTicker(ticking);
+  const idleDuration = entry.toolKind === "stream_idle_notice" && entry.startedAt
+    ? formatIdleDuration((entry.completedAt ?? nowTick) - entry.startedAt)
+    : null;
+  if (!idleDuration) return null;
+  return <span className="process-idle-duration"> · {idleDuration}</span>;
+}
+
+const ProcessEntryRow = memo(function ProcessEntryRow({
   entry,
   receivedMessageDocument,
 }: {
@@ -793,11 +809,7 @@ function ProcessEntryRow({
   }
   if (isAssistantNarrationProcessEntry(entry)) {
     return (
-      <div className="message-commentary-item message-content">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-          {entry.detail || entry.title}
-        </ReactMarkdown>
-      </div>
+      <MarkdownContent className="message-commentary-item message-content" text={entry.detail || entry.title} />
     );
   }
   if (isUserGuidanceProcessEntry(entry)) {
@@ -819,7 +831,9 @@ function ProcessEntryRow({
             </div>
           )}
           <div className="process-guidance-content">
-            <span className="process-guidance-label">引导</span>
+            <span className="process-guidance-label" title="引导">
+              <CornerDownRight size={14} strokeWidth={2} />
+            </span>
             <div className="message-user-bubble process-guidance-bubble">
               {hasDocumentContent && guidanceDocument ? (
                 <ComposerMessageFlow document={guidanceDocument} />
@@ -850,7 +864,10 @@ function ProcessEntryRow({
   const row = (
     <>
       <span className={`entry-state ${entry.state || "completed"}`} />
-      <span className="process-entry-title" title={entry.title}>{entry.title}</span>
+      <span className="process-entry-title" title={entry.title}>
+        {entry.title}
+        <IdleDurationLabel entry={entry} />
+      </span>
       {hasDetails && <ChevronDown className="expand-indicator" size={13} />}
     </>
   );
@@ -862,11 +879,7 @@ function ProcessEntryRow({
       <summary className="process-entry-summary">{row}</summary>
       {entry.command && <pre><code>{entry.command}</code></pre>}
       {entry.detail && (entry.type === "thinking" ? (
-        <div className="process-entry-detail message-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-            {entry.detail}
-          </ReactMarkdown>
-        </div>
+        <MarkdownContent className="process-entry-detail message-content" text={entry.detail} />
       ) : <pre>{entry.detail}</pre>)}
       {entry.files && entry.files.length > 0 && (
         <div className="process-files">
@@ -875,7 +888,7 @@ function ProcessEntryRow({
       )}
     </details>
   );
-}
+});
 
 function CommandGroup({ entries }: { entries: RemoteProcessEntry[] }) {
   const groupState = getProcessGroupState(entries);
@@ -913,14 +926,11 @@ function MessageCommentary({
   return (
     <div className="message-commentary message-content" aria-label="处理说明">
       {items.map((item) => (
-        <div
+        <MarkdownContent
           className={`message-commentary-item${running && item.isStreaming ? " streaming" : ""}`}
+          text={item.content}
           key={item.id}
-        >
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-            {item.content}
-          </ReactMarkdown>
-        </div>
+        />
       ))}
     </div>
   );
@@ -1006,9 +1016,7 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
     <details className="process-entry subagent-entry">
       <summary className="process-entry-summary subagent-entry-summary">{summary}</summary>
       {detail && (
-        <div className="subagent-entry-detail message-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{detail}</ReactMarkdown>
-        </div>
+        <MarkdownContent className="subagent-entry-detail message-content" text={detail} />
       )}
       {entry.files && entry.files.length > 0 && (
         <div className="process-files">
@@ -1038,6 +1046,12 @@ function getSubagentStatusLabel(status?: NonNullable<RemoteProcessEntry["subagen
   }
 }
 
+export const formatIdleDuration = (ms: number) => {
+  const seconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+};
+
 function SubagentGlyph() {
   return (
     <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -1065,6 +1079,14 @@ function useProcessTicker(enabled: boolean) {
 
   return now;
 }
+
+const MarkdownContent = memo(function MarkdownContent({ text, className }: { text: string; className?: string }) {
+  return (
+    <div className={className || "message-content"}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{text}</ReactMarkdown>
+    </div>
+  );
+});
 
 function MessageProcess({
   message,
@@ -1099,7 +1121,7 @@ function MessageProcess({
       setExpanded(running && message.isStreaming === true);
     }
   }, [message.isStreaming, processStartedAt, running]);
-  const visibleEntries = getVisibleProcessEntries(process?.entries || []);
+  const visibleEntries = useMemo(() => getVisibleProcessEntries(process?.entries || []), [process?.entries]);
   const timelineItems = useMemo(() => [
     ...visibleEntries.map((entry, index) => ({
       kind: "entry" as const,
@@ -1156,14 +1178,11 @@ function MessageProcess({
       {commentary.length > 0 && expanded && (
         <div className="message-turn-timeline">
           {timelineItems.map((item) => item.kind === "commentary" ? (
-            <div
+            <MarkdownContent
               className={`message-commentary-item message-content${processRunning && item.commentary.isStreaming ? " streaming" : ""}`}
+              text={item.commentary.content}
               key={`commentary-${item.id}`}
-            >
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                {item.commentary.content}
-              </ReactMarkdown>
-            </div>
+            />
           ) : (
             <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} />
           ))}
@@ -1173,7 +1192,7 @@ function MessageProcess({
   );
 }
 
-function MessageItem({
+const MessageItem = memo(function MessageItem({
   message,
   receivedUserMessage,
   turnRunning,
@@ -1299,9 +1318,7 @@ function MessageItem({
         </div>
       )}
       {message.role !== "user" && messagePresentation.text && (
-        <div className="message-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{messagePresentation.text}</ReactMarkdown>
-        </div>
+        <MarkdownContent text={messagePresentation.text} />
       )}
       {showActions && (
         <div className={`message-actions ${message.role}`}>
@@ -1326,7 +1343,48 @@ function MessageItem({
       )}
     </article>
   );
-}
+});
+
+const MessageListView = memo(function MessageListView({
+  messages,
+  receivedUserMessages,
+  activeTurnMessageId,
+  processTerminalState,
+  actionsDisabled,
+  forkingMessageId,
+  onEdit,
+  onCopy,
+  onFork,
+}: {
+  messages: RemoteChatMessage[];
+  receivedUserMessages: Record<string, RemoteChatMessage | undefined>;
+  activeTurnMessageId: string | null | undefined;
+  processTerminalState: ProcessTerminalViewState;
+  actionsDisabled: boolean;
+  forkingMessageId: string | null;
+  onEdit: (content: string) => void;
+  onCopy: (content: string) => void;
+  onFork: (message: RemoteChatMessage) => void;
+}) {
+  return (
+    <>
+      {messages.map((message) => (
+        <MessageItem
+          key={message.id}
+          message={message}
+          receivedUserMessage={receivedUserMessages[message.id]}
+          turnRunning={message.id === activeTurnMessageId}
+          processTerminalState={processTerminalState}
+          actionsDisabled={actionsDisabled}
+          forking={forkingMessageId === message.id}
+          onEdit={onEdit}
+          onCopy={onCopy}
+          onFork={onFork}
+        />
+      ))}
+    </>
+  );
+});
 
 function Questionnaire({
   interaction,
@@ -1846,6 +1904,7 @@ function QueueEditDialog({ item, referenceCandidates, onClose, onSave }: QueueEd
               onChange={(document) => setDraft((current) => queueEditDraftWithDocument(current, document))}
               placeholder={draft.action ? "添加技能参数或说明" : "编辑消息内容"}
               onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
                 if (event.key === "Escape") onClose();
                 if (event.key === "Enter" && event.ctrlKey) {
                   event.preventDefault();
@@ -2148,6 +2207,8 @@ export default function App() {
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftIdentityRef = useRef<{ hostId: string; sessionId: string; key: string } | null>(null);
   const loadedDraftKeyRef = useRef<string | null>(null);
+  /** 用户是否已在草稿加载完成前主动输入（用于避免加载结果覆盖正在输入的内容，并确保输入内容能被保存）。 */
+  const draftUserEditedRef = useRef(false);
   const draftValueRef = useRef<ComposerDraftValue>({ text: "", referenceSessionIds: [] });
   const autoConnectAttemptedRef = useRef(false);
   const updateMetadataRef = useRef<AndroidUpdateMetadata | null>(null);
@@ -2179,7 +2240,9 @@ export default function App() {
       draftSaveTimerRef.current = null;
     }
     const identity = draftIdentityRef.current;
-    if (!identity || loadedDraftKeyRef.current !== identity.key) return;
+    if (!identity) return;
+    // 草稿尚未加载完成时，仅当用户已经主动输入过才保存，避免空草稿覆盖已存内容。
+    if (loadedDraftKeyRef.current !== identity.key && !draftUserEditedRef.current) return;
     void saveSessionDraft(identity.hostId, identity.sessionId, draftValueRef.current)
       .catch((error) => console.error("[mobile-draft] save failed", error));
   }, []);
@@ -2526,6 +2589,7 @@ export default function App() {
       }
       draftIdentityRef.current = null;
       loadedDraftKeyRef.current = null;
+      draftUserEditedRef.current = false;
       draftValueRef.current = { text: "", referenceSessionIds: [] };
       selectedSessionRef.current = null;
       setSelectedSessionId(null);
@@ -3183,12 +3247,23 @@ export default function App() {
     setPendingReferenceIds(orderedDocument.nodes.flatMap((node) => node.type === "session" ? [node.reference.sourceSessionId] : []));
   }, [updateComposer]);
 
+  const handleComposerChange = useCallback((document: ComposerDocument) => {
+    // Lexical 编辑器不经过 scheduleComposerSync（composerRef 仅用于
+    // 普通 textarea 路径），必须在用户输入路径上标记已编辑，
+    // 否则草稿异步加载完成时会把正在输入的内容覆盖/清空。
+    draftUserEditedRef.current = true;
+    updateComposerDocument(document);
+  }, [updateComposerDocument]);
+  const handleComposerCompositionStartInline = useCallback(() => setComposerComposition(" "), []);
+  const handleComposerCompositionEndInline = useCallback(() => setComposerComposition(""), []);
+
   const syncComposerFromElement = useCallback((textarea: HTMLTextAreaElement | null = composerRef.current) => {
     if (!textarea) return;
     updateComposer(textarea.value);
   }, [updateComposer]);
 
   const scheduleComposerSync = useCallback((textarea: HTMLTextAreaElement) => {
+    draftUserEditedRef.current = true;
     syncComposerFromElement(textarea);
     queueMicrotask(() => {
       if (composerRef.current === textarea) syncComposerFromElement(textarea);
@@ -3322,6 +3397,7 @@ export default function App() {
     setPendingAction(undefined);
     draftValueRef.current = { text: "", referenceSessionIds: [] };
     loadedDraftKeyRef.current = null;
+    draftUserEditedRef.current = false;
 
     const hostId = activeHost?.hostId;
     if (demoMode || !hostId || !selectedSessionId) {
@@ -3345,16 +3421,19 @@ export default function App() {
         referenceSessionIds,
         action: selectedAgent?.supportsActions === true ? draft?.action : undefined,
       };
-      draftValueRef.current = nextDraft;
-      if (nextDraft.document) {
-        updateComposerDocument(createComposerDocument(nextDraft.document.nodes.filter((node) =>
-          node.type !== "session" || validReferenceIds.has(node.reference.sourceSessionId)
-        )));
-      } else {
-        replaceComposer(nextDraft.text);
+      // 用户在草稿加载完成前已经开始输入：保留当前输入，不再用旧草稿覆盖。
+      if (!draftUserEditedRef.current) {
+        draftValueRef.current = nextDraft;
+        if (nextDraft.document) {
+          updateComposerDocument(createComposerDocument(nextDraft.document.nodes.filter((node) =>
+            node.type !== "session" || validReferenceIds.has(node.reference.sourceSessionId)
+          )));
+        } else {
+          replaceComposer(nextDraft.text);
+        }
+        setPendingReferenceIds(nextDraft.referenceSessionIds);
+        setPendingAction(nextDraft.action);
       }
-      setPendingReferenceIds(nextDraft.referenceSessionIds);
-      setPendingAction(nextDraft.action);
       loadedDraftKeyRef.current = identity.key;
     }).catch((error) => console.error("[mobile-draft] load failed", error));
     return () => { cancelled = true; };
@@ -3362,7 +3441,8 @@ export default function App() {
 
   useEffect(() => {
     const identity = draftIdentityRef.current;
-    if (!identity || loadedDraftKeyRef.current !== identity.key) return;
+    if (!identity) return;
+    if (loadedDraftKeyRef.current !== identity.key && !draftUserEditedRef.current) return;
     if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
     draftSaveTimerRef.current = setTimeout(() => {
       draftSaveTimerRef.current = null;
@@ -3379,9 +3459,17 @@ export default function App() {
 
   useEffect(() => {
     const handlePageHide = () => flushCurrentDraft();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushCurrentDraft();
+    };
+    const handleBeforeUnload = () => flushCurrentDraft();
     window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       flushCurrentDraft();
     };
   }, [flushCurrentDraft]);
@@ -3880,6 +3968,7 @@ export default function App() {
       setPendingReferenceIds([]);
       setPendingAction(undefined);
       draftValueRef.current = { text: "", referenceSessionIds: [] };
+      draftUserEditedRef.current = false;
       if (!demoMode && activeHost) {
         void clearSessionDraft(activeHost.hostId, selectedSessionId)
           .catch((error) => console.error("[mobile-draft] clear failed", error));
@@ -4525,20 +4614,17 @@ export default function App() {
                   {loadingSession ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} 更早消息
                 </button>
               )}
-              {selectedMessages.map((message) => (
-                <MessageItem
-                  key={message.id}
-                  message={message}
-                  receivedUserMessage={receivedUserMessages[message.id]}
-                  turnRunning={message.id === activeTurnMessageId}
-                  processTerminalState={processTerminalState}
-                  actionsDisabled={commandBusy || forkingMessageId !== null}
-                  forking={forkingMessageId === message.id}
-                  onEdit={editMessage}
-                  onCopy={copyMessage}
-                  onFork={(target) => void forkMessage(target)}
-                />
-              ))}
+              <MessageListView
+                messages={selectedMessages}
+                receivedUserMessages={receivedUserMessages}
+                activeTurnMessageId={activeTurnMessageId}
+                processTerminalState={processTerminalState}
+                actionsDisabled={commandBusy || forkingMessageId !== null}
+                forkingMessageId={forkingMessageId}
+                onEdit={editMessage}
+                onCopy={copyMessage}
+                onFork={forkMessage}
+              />
               {loadingSession && selectedMessages.length === 0 && <div className="loading-chat"><LoaderCircle className="spin" size={22} /></div>}
             </div>
             {showReturnToBottom && (
@@ -4644,9 +4730,9 @@ export default function App() {
               <InlineComposerEditor
                 ref={inlineComposerRef}
                 value={composerDocument}
-                onChange={updateComposerDocument}
-                onCompositionStart={() => setComposerComposition(" ")}
-                onCompositionEnd={() => setComposerComposition("")}
+                onChange={handleComposerChange}
+                onCompositionStart={handleComposerCompositionStartInline}
+                onCompositionEnd={handleComposerCompositionEndInline}
                 placeholder={isConnected ? "发送指令" : "桌面未连接"}
                 disabled={!isConnected}
               />
