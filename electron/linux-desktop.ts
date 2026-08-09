@@ -48,6 +48,7 @@ export function detectDesktopEnvironment(
 export function getLinuxChromiumSwitches(
   platform = process.platform,
   variables: EnvironmentVariables = process.env,
+  desktop: DesktopEnvironment = detectDesktopEnvironment(platform, variables),
 ): ChromiumSwitch[] {
   if (platform !== "linux") return [];
 
@@ -59,10 +60,20 @@ export function getLinuxChromiumSwitches(
     switches.push({ name: "ozone-platform-hint", value: "auto" });
   }
 
-  // Compatibility workarounds are opt-in: forcing them globally breaks common
-  // Wayland IME, fractional scaling, and GPU configurations.
+  // Use the maintained text-input-v3 protocol for Wayland IME. Chromium's
+  // legacy text-input-v1 implementation races on fast typing and drops keys
+  // with fcitx5: letters bypass the composition and leak as plain text.
+  // HPP_DISABLE_WAYLAND_IME opts out entirely; HPP_WAYLAND_TEXT_INPUT_VERSION
+  // overrides the protocol version for compositors with incompatible v3 support.
   if (enabled(variables.HPP_DISABLE_WAYLAND_IME)) {
     switches.push({ name: "disable-features", value: "WaylandIme" });
+  } else if (desktop.isWayland) {
+    switches.push({ name: "enable-wayland-ime" });
+    const requestedVersion = variables.HPP_WAYLAND_TEXT_INPUT_VERSION?.trim();
+    const textInputVersion = requestedVersion === "1" || requestedVersion === "2"
+      ? requestedVersion
+      : "3";
+    switches.push({ name: "wayland-text-input-version", value: textInputVersion });
   }
   if (enabled(variables.HPP_ENABLE_VAAPI)) {
     switches.push({

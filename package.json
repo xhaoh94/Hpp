@@ -42,7 +42,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^33.4.11",
+    "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
@@ -111,7 +111,7 @@
     }
   },
   "allowScripts": {
-    "electron@33.4.11": true,
+    "electron@43.3.0": true,
     "esbuild@0.25.12": true
   }
 }

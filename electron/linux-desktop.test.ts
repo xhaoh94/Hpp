@@ -64,6 +64,40 @@ describe("Linux Chromium switches", () => {
     ]);
   });
 
+  it("enables text-input-v3 Wayland IME in a Wayland session", () => {
+    expect(getLinuxChromiumSwitches("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      WAYLAND_DISPLAY: "wayland-1",
+    })).toEqual([
+      { name: "ozone-platform-hint", value: "auto" },
+      { name: "enable-wayland-ime" },
+      { name: "wayland-text-input-version", value: "3" },
+    ]);
+  });
+
+  it("respects an explicit Wayland text input version override", () => {
+    expect(getLinuxChromiumSwitches("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      WAYLAND_DISPLAY: "wayland-1",
+      HPP_WAYLAND_TEXT_INPUT_VERSION: "1",
+    })).toEqual([
+      { name: "ozone-platform-hint", value: "auto" },
+      { name: "enable-wayland-ime" },
+      { name: "wayland-text-input-version", value: "1" },
+    ]);
+  });
+
+  it("lets HPP_DISABLE_WAYLAND_IME win over Wayland detection", () => {
+    expect(getLinuxChromiumSwitches("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      WAYLAND_DISPLAY: "wayland-1",
+      HPP_DISABLE_WAYLAND_IME: "1",
+    })).toEqual([
+      { name: "ozone-platform-hint", value: "auto" },
+      { name: "disable-features", value: "WaylandIme" },
+    ]);
+  });
+
   it("ignores invalid scale overrides and all switches outside Linux", () => {
     expect(getLinuxChromiumSwitches("linux", {
       HPP_FORCE_DEVICE_SCALE_FACTOR: "0",

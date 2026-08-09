@@ -27,7 +27,7 @@ if (is.dev) {
   console.log("[Hpp] Wayland:", env.isWayland, "| Niri:", env.isNiri);
 }
 
-for (const chromiumSwitch of getLinuxChromiumSwitches()) {
+for (const chromiumSwitch of getLinuxChromiumSwitches(process.platform, process.env, env)) {
   if (chromiumSwitch.value === undefined) {
     app.commandLine.appendSwitch(chromiumSwitch.name);
   } else {
