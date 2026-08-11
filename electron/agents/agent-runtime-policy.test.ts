@@ -80,6 +80,8 @@ vi.mock("./agent-model-list", () => ({
 import { HPP_AGENT_SYSTEM_PROMPT } from "./agent-runtime-policy";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agent-manager";
 
+const originalHppDataDir = process.env.HPP_DATA_DIR;
+
 function getHandler<T extends (...args: any[]) => any>(channel: string): T {
   const handler = testState.handlers.get(channel);
   if (!handler) throw new Error(`Missing IPC handler: ${channel}`);
@@ -122,6 +124,7 @@ const capabilities = (planMode: "native" | "prompt") => ({
 
 describe("Hpp host runtime language policy", () => {
   beforeEach(() => {
+    process.env.HPP_DATA_DIR = `C:\\temp\\hpp-policy-tests-${process.pid}-missing`;
     testState.handlers.clear();
     testState.createBackend.mockReset();
     testState.getCapabilities.mockReset();
@@ -132,6 +135,8 @@ describe("Hpp host runtime language policy", () => {
 
   afterEach(async () => {
     await shutdownAgentRuntime();
+    if (originalHppDataDir === undefined) delete process.env.HPP_DATA_DIR;
+    else process.env.HPP_DATA_DIR = originalHppDataDir;
   });
 
   it("exports a real UTF-8 Simplified Chinese policy", () => {

@@ -176,7 +176,7 @@ const normalizeModel = (value, fallbackId) => {
   return {
     id,
     name: asString(value.name) || asString(value.displayName) || id,
-    reasoning: supportedThinkingLevels !== undefined ? supportedThinkingLevels.length > 0 : value.reasoning === true,
+    reasoning: value.reasoning === true,
     imageInput: modelSupportsImages(value),
     ...(supportedThinkingLevels?.length ? { supportedThinkingLevels } : {}),
   };
@@ -212,7 +212,7 @@ export const toProviderConfig = (provider, existingValue = {}) => {
     const nextModel = {
       ...existingModel,
       name: model.name || model.id,
-      reasoning: supportedThinkingLevels.length > 0,
+      reasoning: model.reasoning === true,
       attachment: model.imageInput === true,
       modalities: {
         ...existingModalities,

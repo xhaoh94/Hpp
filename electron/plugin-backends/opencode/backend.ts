@@ -1,8 +1,10 @@
 import { join } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
+import { randomUUID } from "crypto";
 import { execFile, spawn, type ChildProcess } from "child_process";
 import * as http from "http";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
+import { rm, writeFile } from "fs/promises";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "../../plugin-runtime/process-events";
 import {
@@ -15,6 +17,11 @@ import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../..
 import type { AgentPermissionMode } from "../../../shared/agent-permissions";
 import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
 import { normalizeSupportedThinkingLevels, normalizeThinkingLevelId } from "../../../shared/models";
+import {
+  isCustomAgentCompactionModelConfigured,
+  normalizeAgentCompactionConfig,
+  type AgentCompactionConfig,
+} from "../../../shared/agent-compaction";
 import { isRecord } from "../../../src/types/ipc";
 import type {
   AgentActionCatalogEntry,
@@ -42,6 +49,7 @@ interface AgentSendOptions {
 
 interface AgentInitOptions {
   hostSystemPrompt?: string;
+  compaction?: AgentCompactionConfig;
 }
 
 interface AgentForkTarget {
@@ -166,30 +174,187 @@ function isToolPartComplete(props: unknown) {
   );
 }
 
-function readOpenCodeConfigContent(): string | undefined {
+const HPP_OPENCODE_COMPACTION_PROVIDER = "hpp-compaction";
+const HPP_OPENCODE_COMPACTION_PROVIDER_NAME = "Hpp 上下文压缩";
+
+function stripJsonComments(source: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      result += "  ";
+      index += 1;
+      while (index + 1 < source.length && source[index + 1] !== "\n" && source[index + 1] !== "\r") {
+        result += " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      result += "  ";
+      index += 1;
+      while (index + 1 < source.length) {
+        const commentChar = source[index + 1];
+        const commentNext = source[index + 2];
+        if (commentChar === "*" && commentNext === "/") {
+          result += "  ";
+          index += 2;
+          break;
+        }
+        result += commentChar === "\n" || commentChar === "\r" ? commentChar : " ";
+        index += 1;
+      }
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+function stripTrailingCommas(source: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+    if (char === ",") {
+      let lookahead = index + 1;
+      while (lookahead < source.length && /\s/.test(source[lookahead])) lookahead += 1;
+      if (source[lookahead] === "}" || source[lookahead] === "]") continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+function parseOpenCodeConfigContent(source?: string): UnknownRecord {
+  if (!source?.trim()) return {};
   try {
-    return readFileSync(process.env.OPENCODE_CONFIG || join(homedir(), ".config", "opencode", "opencode.json"), "utf-8");
+    const parsed = JSON.parse(stripTrailingCommas(stripJsonComments(source.replace(/^\uFEFF/, ""))));
+    if (!isRecord(parsed)) throw new Error("configuration root must be an object");
+    return parsed;
+  } catch (error) {
+    throw new Error(`无法解析 OpenCode 配置：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function readOpenCodeConfigContent(): string | undefined {
+  const inlineConfig = process.env.OPENCODE_CONFIG_CONTENT;
+  if (inlineConfig?.trim()) return inlineConfig;
+  const configuredPath = process.env.OPENCODE_CONFIG;
+  const configDir = join(homedir(), ".config", "opencode");
+  const jsonPath = join(configDir, "opencode.json");
+  const jsoncPath = join(configDir, "opencode.jsonc");
+  const configPath = configuredPath || (existsSync(jsonPath) ? jsonPath : jsoncPath);
+  try {
+    return readFileSync(configPath, "utf-8");
   } catch {
     return undefined;
   }
 }
 
-function buildOpenCodeConfigContent(existing?: string): string {
-  const source = existing?.trim() ? existing : readOpenCodeConfigContent();
-  if (!source?.trim()) {
-    return JSON.stringify({ permission: "allow" });
+function getOpenCodeCompactionVariant(config: AgentCompactionConfig): string | undefined {
+  if (config.thinkingLevel === "inherit") return undefined;
+  if (config.modelMode === "custom" && !config.customModel.reasoning) return undefined;
+  if (config.thinkingLevel === "xhigh") return "max";
+  return config.thinkingLevel;
+}
+
+function getAvailableCompactionProviderId(providers: UnknownRecord): string {
+  let providerId = HPP_OPENCODE_COMPACTION_PROVIDER;
+  let index = 2;
+  while (
+    providers[providerId] !== undefined
+    && asRecord(providers[providerId]).name !== HPP_OPENCODE_COMPACTION_PROVIDER_NAME
+  ) {
+    providerId = `${HPP_OPENCODE_COMPACTION_PROVIDER}-${index}`;
+    index += 1;
+  }
+  return providerId;
+}
+
+export function buildOpenCodeConfigContent(
+  source: string | undefined,
+  value: unknown,
+  currentModel?: { provider: string; id: string } | null,
+): string {
+  const config = normalizeAgentCompactionConfig(value);
+  const parsed = parseOpenCodeConfigContent(source);
+  const providers = { ...asRecord(parsed.provider) };
+  const agents = { ...asRecord(parsed.agent) };
+  const compactionAgent = { ...asRecord(agents.compaction) };
+  delete compactionAgent.model;
+  delete compactionAgent.variant;
+
+  const customConfigured = isCustomAgentCompactionModelConfigured(config);
+  if (customConfigured) {
+    const providerId = getAvailableCompactionProviderId(providers);
+    const custom = config.customModel;
+    providers[providerId] = {
+      npm: custom.api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible",
+      name: HPP_OPENCODE_COMPACTION_PROVIDER_NAME,
+      options: {
+        baseURL: custom.baseUrl,
+        ...(custom.apiKey ? { apiKey: custom.apiKey } : {}),
+      },
+      models: {
+        [custom.modelId]: {
+          name: custom.modelId,
+          reasoning: custom.reasoning,
+          attachment: false,
+          modalities: { input: ["text"], output: ["text"] },
+        },
+      },
+    };
+    compactionAgent.model = `${providerId}/${custom.modelId}`;
+  } else if (config.thinkingLevel !== "inherit" && currentModel?.provider && currentModel.id) {
+    // OpenCode 仅在 compaction agent 显式指定模型时应用 variant。
+    // 因此独立思考等级需要把“当前模型”固定为用户刚选择的模型。
+    compactionAgent.model = `${currentModel.provider}/${currentModel.id}`;
   }
 
-  try {
-    const parsed = JSON.parse(source);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !("permission" in parsed)) {
-      return JSON.stringify({ ...parsed, permission: "allow" });
-    }
-  } catch {
-    // Preserve caller-provided inline config if it is not plain JSON.
-  }
+  const variant = getOpenCodeCompactionVariant(customConfigured ? config : { ...config, modelMode: "current" });
+  if (variant && compactionAgent.model) compactionAgent.variant = variant;
+  agents.compaction = compactionAgent;
 
-  return source;
+  const nextConfig: UnknownRecord = {
+    ...parsed,
+    provider: providers,
+    agent: agents,
+    ...(!("permission" in parsed) ? { permission: "allow" } : {}),
+  };
+  if (customConfigured && Array.isArray(parsed.enabled_providers)) {
+    const customProviderId = String(compactionAgent.model).split("/")[0];
+    nextConfig.enabled_providers = [...new Set([...parsed.enabled_providers.map(String), customProviderId])];
+  }
+  return JSON.stringify(nextConfig);
 }
 
 function modelSupportsImages(modelInfo: unknown): boolean {
@@ -328,6 +493,10 @@ export class OpenCodeAgent {
   private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
   private permissionMode: AgentPermissionMode = "auto";
   private hostSystemPrompt = "";
+  private compactionConfig = normalizeAgentCompactionConfig(undefined);
+  private activeCompactionSignature = "";
+  private openCodeConfigSource: string | undefined;
+  private runtimeConfigPath: string | null = null;
   private actionKeys = new Set<string>();
   private eventBuffer: AgentEventBuffer;
 
@@ -337,30 +506,50 @@ export class OpenCodeAgent {
 
   /** Start opencode serve and wait for it to be ready */
   async init(projectPath: string, existingSessionId?: string, options?: AgentInitOptions): Promise<void> {
-    this.hostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
-    // If already running for same project, just restore session ID and return
-    if (this.process && this.projectPath === projectPath) {
+    const nextHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
+    const nextCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
+    const nextCompactionSignature = this.getCompactionSignature(nextCompactionConfig);
+    if (
+      this.process
+      && this.projectPath === projectPath
+      && this.hostSystemPrompt === nextHostSystemPrompt
+      && this.activeCompactionSignature === nextCompactionSignature
+    ) {
       if (existingSessionId) this.sessionId = existingSessionId;
       return;
     }
+    if (this.process && !this.isIdle()) {
+      throw new Error("OpenCode 会话正在运行，无法立即重载上下文压缩设置");
+    }
+    const sessionToResume = existingSessionId || this.sessionId || undefined;
 
     this.projectPath = projectPath;
     this.stopSSEListener();
     await this.killProcess();
+    this.hostSystemPrompt = nextHostSystemPrompt;
+    this.compactionConfig = nextCompactionConfig;
     this.processError = null;
     this.port = 10000 + Math.floor(Math.random() * 55000);
     this.sessionId = null;
+    this.openCodeConfigSource = readOpenCodeConfigContent();
+    this.runtimeConfigPath = join(tmpdir(), `hpp-opencode-${process.pid}-${randomUUID()}.json`);
+    await this.writeRuntimeConfig();
     this.emitEvent({ type: "agent_init", agentId: "opencode" });
 
     const opencodeCommand = resolveOpenCodeCommand();
+    const processEnv = getCommandEnv({
+      OPENCODE_DISABLE_AUTOUPDATE: "true",
+      // 使用进程专属临时配置，避免污染用户的 OpenCode 配置。
+      OPENCODE_CONFIG: this.runtimeConfigPath,
+    });
+    // 即使父进程设置过内联配置，也必须移除该变量，确保本会话只读取
+    // Hpp 生成的进程专属配置。
+    delete processEnv.OPENCODE_CONFIG_CONTENT;
     this.process = spawn(opencodeCommand, ["serve", "--port", String(this.port), "--hostname", this.host], {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       shell: isWindowsShellShim(opencodeCommand),
-      env: getCommandEnv({
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-        OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(process.env.OPENCODE_CONFIG_CONTENT),
-      }),
+      env: processEnv,
     });
 
     const childProcess = this.process!;
@@ -390,13 +579,13 @@ export class OpenCodeAgent {
     // If an existing session ID was provided, verify it exists on the server.
     // Otherwise create one now so the renderer can persist the real OpenCode
     // session id before the first prompt is sent.
-    if (existingSessionId) {
-      const valid = await this.verifySession(existingSessionId);
+    if (sessionToResume) {
+      const valid = await this.verifySession(sessionToResume);
       if (valid) {
-        this.sessionId = existingSessionId;
-        console.log("[opencode] Resumed session:", existingSessionId);
+        this.sessionId = sessionToResume;
+        console.log("[opencode] Resumed session:", sessionToResume);
       } else {
-        console.log("[opencode] Session", existingSessionId, "not found on server, will create new");
+        console.log("[opencode] Session", sessionToResume, "not found on server, will create new");
       }
     }
 
@@ -406,6 +595,7 @@ export class OpenCodeAgent {
         console.log("[opencode] Created session:", createdSessionId);
       }
     }
+    this.activeCompactionSignature = nextCompactionSignature;
   }
 
   /** Verify a session exists on the server */
@@ -1101,6 +1291,10 @@ export class OpenCodeAgent {
           const providerIdValue = provider.id || provider.name;
           if (providerIdValue === undefined || providerIdValue === null) continue;
           const providerId = String(providerIdValue);
+          if (
+            providerId.startsWith(HPP_OPENCODE_COMPACTION_PROVIDER)
+            && String(provider.name || "") === HPP_OPENCODE_COMPACTION_PROVIDER_NAME
+          ) continue;
           if (Array.isArray(provider.models)) {
             for (const rawModel of provider.models) {
               const model = asRecord(rawModel);
@@ -1160,9 +1354,27 @@ export class OpenCodeAgent {
 
   /** Set model for the session - stored and applied per-message */
   async setModel(provider: string, modelId: string) {
+    const modelChanged = this.currentModelId !== modelId || this.currentProviderId !== provider;
     this.currentModelId = modelId;
     this.currentProviderId = provider;
+    if (
+      modelChanged
+      && this.process
+      && this.compactionConfig.modelMode === "current"
+      && this.compactionConfig.thinkingLevel !== "inherit"
+    ) {
+      await this.restartRuntimeForCompaction();
+    }
     this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
+  }
+
+  async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
+    const normalized = normalizeAgentCompactionConfig(value);
+    const previousSignature = this.getCompactionSignature(this.compactionConfig);
+    this.compactionConfig = normalized;
+    if (this.process && this.getCompactionSignature(normalized) !== previousSignature) {
+      await this.restartRuntimeForCompaction();
+    }
   }
 
   /** Set the OpenCode model variant used by subsequent prompts. */
@@ -1199,9 +1411,44 @@ export class OpenCodeAgent {
       this.clearTurnRuntime();
     }
     this.sessionId = null;
+    this.activeCompactionSignature = "";
     this.models = [];
     this.modelVariants.clear();
     if (childProcess) await this.killProcessTree(childProcess);
+    const runtimeConfigPath = this.runtimeConfigPath;
+    this.runtimeConfigPath = null;
+    this.openCodeConfigSource = undefined;
+    if (runtimeConfigPath) await rm(runtimeConfigPath, { force: true }).catch(() => undefined);
+  }
+
+  private getCompactionSignature(config: AgentCompactionConfig): string {
+    const pinnedCurrentModel = config.modelMode === "current" && config.thinkingLevel !== "inherit"
+      ? { provider: this.currentProviderId, id: this.currentModelId }
+      : null;
+    return JSON.stringify({ config, pinnedCurrentModel });
+  }
+
+  private async restartRuntimeForCompaction(): Promise<void> {
+    if (!this.process || !this.projectPath) return;
+    if (!this.isIdle()) throw new Error("OpenCode 会话正在运行，无法立即重载上下文压缩设置");
+    const sessionId = this.sessionId || undefined;
+    await this.init(this.projectPath, sessionId, {
+      hostSystemPrompt: this.hostSystemPrompt,
+      compaction: this.compactionConfig,
+    });
+    await this.getModels();
+  }
+
+  private async writeRuntimeConfig(): Promise<void> {
+    if (!this.runtimeConfigPath) return;
+    const content = buildOpenCodeConfigContent(
+      this.openCodeConfigSource,
+      this.compactionConfig,
+      this.currentProviderId && this.currentModelId
+        ? { provider: this.currentProviderId, id: this.currentModelId }
+        : null,
+    );
+    await writeFile(this.runtimeConfigPath, `${content}\n`, "utf8");
   }
 
   private async killProcessTree(childProcess: ChildProcess) {

@@ -335,7 +335,7 @@ export function SettingsView() {
       },
     };
 
-    await window.electronAPI.saveData("settings", nextSettings);
+    return window.electronAPI.saveData("settings", nextSettings);
   }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray, theme, expandThinkingWhileRunning]);
 
   const saveShortcuts = (s: ShortcutConfig) => {

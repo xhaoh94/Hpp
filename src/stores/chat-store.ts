@@ -1084,6 +1084,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     s.currentModel.name === m.name &&
     s.currentModel.reasoning === m.reasoning &&
     s.currentModel.supportsImages === m.supportsImages &&
+    s.currentModel.thinkingLevelMode === m.thinkingLevelMode &&
     JSON.stringify(s.currentModel.supportedThinkingLevels) === JSON.stringify(m.supportedThinkingLevels)
       ? {}
       : { currentModel: m }
@@ -1100,6 +1101,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         model.name === models[index]?.name &&
         model.reasoning === models[index]?.reasoning &&
         model.supportsImages === models[index]?.supportsImages &&
+        model.thinkingLevelMode === models[index]?.thinkingLevelMode &&
         JSON.stringify(model.supportedThinkingLevels) === JSON.stringify(models[index]?.supportedThinkingLevels)
       )
     ) {

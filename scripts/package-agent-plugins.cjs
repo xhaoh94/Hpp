@@ -18,10 +18,13 @@ const outputRoot = join(rootDir, "release", `v${currentHppVersion}`, "agent-plug
 
 const defaultCapabilities = {
   planMode: "prompt",
+  permissions: false,
   guidance: false,
   fork: false,
+  actions: false,
   configuration: "none",
   providerActivation: "none",
+  compaction: "none",
 };
 
 function parseVersion(version) {
@@ -190,14 +193,25 @@ function normalizeProviderConfiguration(value) {
   };
 }
 
+function normalizeCompactionCapabilities(value) {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  if (!input) return "none";
+  const customModel = input.customModel === true;
+  const thinkingLevel = input.thinkingLevel === true;
+  return customModel || thinkingLevel ? { customModel, thinkingLevel } : "none";
+}
+
 function normalizeCapabilities(value) {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return {
     planMode: normalizePlanMode(input.planMode),
+    permissions: input.permissions === true,
     guidance: input.guidance === true,
     fork: input.fork === true,
+    actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
+    compaction: normalizeCompactionCapabilities(input.compaction),
   };
 }
 

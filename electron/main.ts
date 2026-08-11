@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, Tray } from "electron";
+import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
@@ -21,6 +22,9 @@ import { detectDesktopEnvironment, getLinuxChromiumSwitches } from "./linux-desk
 import { getDefaultCloseToTray, resolveCloseToTraySetting } from "../shared/desktop-platform";
 
 const env = detectDesktopEnvironment();
+// Bump the dev AppUserModelID when the taskbar icon changes to bypass
+// Windows' icon cache, which otherwise keeps showing the stale icon.
+const WINDOWS_APP_ID = is.dev ? "com.hpp.app.dev.v3" : "com.hpp.app";
 
 if (is.dev) {
   console.log("[Hpp] Display server:", env.displayServer);
@@ -38,7 +42,7 @@ for (const chromiumSwitch of getLinuxChromiumSwitches(process.platform, process.
 // Set app name
 app.setName("hpp");
 if (process.platform === "win32") {
-  app.setAppUserModelId(is.dev ? "com.hpp.app.dev" : "com.hpp.app");
+  app.setAppUserModelId(WINDOWS_APP_ID);
 }
 
 // Linux compositors do not guarantee a StatusNotifier tray host. Closing the
@@ -75,9 +79,16 @@ function focusMainWindow() {
 }
 
 function getIconPath() {
-  return is.dev
-    ? join(process.cwd(), "public/icon.png")
-    : join(__dirname, "../renderer/icon.png");
+  const iconNames = process.platform === "win32" ? ["icon.ico", "icon.png"] : ["icon.png"];
+  // In dev mode, prioritize the source `public/` folder because electron-vite
+  // may clean `out/renderer/` during dev startup, leaving no icon files there.
+  // In production, only `out/renderer/` is packaged.
+  const iconRoots = is.dev
+    ? [join(process.cwd(), "public"), join(__dirname, "../renderer"), join(app.getAppPath(), "out/renderer")]
+    : [join(__dirname, "../renderer"), join(app.getAppPath(), "out/renderer")];
+  const candidates = iconRoots.flatMap((root) => iconNames.map((name) => join(root, name)));
+  const found = candidates.find((candidate) => existsSync(candidate));
+  return found || candidates[0];
 }
 
 async function loadCloseToTraySetting() {
@@ -345,6 +356,7 @@ function createWindow() {
 
   // Load app icon for taskbar
   const iconPath = getIconPath();
+  const iconImage = nativeImage.createFromPath(iconPath);
 
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -353,8 +365,9 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#f7f7f8",
     title: "Hpp",
-    icon: iconPath,
+    icon: iconImage.isEmpty() ? iconPath : iconImage,
     frame: false,
+    show: false,
     webPreferences: {
       preload: join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
@@ -362,6 +375,22 @@ function createWindow() {
       backgroundThrottling: false,
       spellcheck: true,
     },
+  });
+  if (process.platform === "win32") {
+    try {
+      mainWindow.setAppDetails({
+        appId: WINDOWS_APP_ID,
+        appIconPath: iconPath,
+        appIconIndex: 0,
+      });
+    } catch (error) {
+      console.error("[Hpp] setAppDetails failed:", error);
+    }
+  }
+  if (process.platform !== "darwin") mainWindow.setIcon(iconImage.isEmpty() ? iconPath : iconImage);
+
+  mainWindow.once("ready-to-show", () => {
+    mainWindow?.show();
   });
 
   mainWindow.on("close", (event) => {

@@ -145,6 +145,14 @@ describe("mobile capability source constraints", () => {
     expect(stylesSource).toContain(".session-picker-row");
   });
 
+  it("navigates Android back from Agent to sessions and then to pairing", () => {
+    expect(appSource).toContain('CapacitorApp.addListener("backButton"');
+    expect(appSource).toContain("selectedSessionRef.current = null;");
+    expect(appSource).toContain("setSelectedSessionId(null);");
+    expect(appSource).toContain("leaveActiveHost();");
+    expect(appSource).toContain("void CapacitorApp.exitApp();");
+  });
+
   it("shows feedback after copying a message", () => {
     expect(appSource).toContain('showFloatingToast("已复制")');
     expect(appSource).toContain("onCopy={copyMessage}");

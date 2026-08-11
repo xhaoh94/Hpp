@@ -1,9 +1,10 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "child_process";
 import { StringDecoder } from "string_decoder";
+import { randomUUID } from "crypto";
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import {
   findCommandOnPath,
@@ -27,6 +28,11 @@ import type {
 } from "../../../shared/agent-actions";
 import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
 import { normalizeSupportedThinkingLevels } from "../../../shared/models";
+import {
+  isCustomAgentCompactionModelConfigured,
+  normalizeAgentCompactionConfig,
+  type AgentCompactionConfig,
+} from "../../../shared/agent-compaction";
 
 interface AgentModel {
   id: string;
@@ -48,6 +54,7 @@ interface AgentSendOptions {
 
 interface AgentInitOptions {
   hostSystemPrompt?: string;
+  compaction?: AgentCompactionConfig;
 }
 
 interface AgentForkTarget {
@@ -188,6 +195,57 @@ function getAskAnswerText(value: unknown) {
   return "";
 }
 
+const HPP_DROID_COMPACTION_MODEL_ID = "custom:hpp:compaction";
+
+function getDroidCompactionModel(config: AgentCompactionConfig): string {
+  return isCustomAgentCompactionModelConfigured(config) ? HPP_DROID_COMPACTION_MODEL_ID : "same";
+}
+
+export function buildDroidRuntimeSettings(baseValue: unknown, value: unknown): UnknownRecord {
+  const base = asRecord(baseValue);
+  const config = normalizeAgentCompactionConfig(value);
+  const customModels = Array.isArray(base.customModels)
+    ? base.customModels.map(asRecord).filter((model) => (
+        model.id !== HPP_DROID_COMPACTION_MODEL_ID && model.hppCompactionManaged !== true
+      ))
+    : [];
+  const customConfigured = isCustomAgentCompactionModelConfigured(config);
+
+  if (customConfigured) {
+    const custom = config.customModel;
+    customModels.push({
+      id: HPP_DROID_COMPACTION_MODEL_ID,
+      hppCompactionManaged: true,
+      model: custom.modelId,
+      displayName: `Hpp 压缩 · ${custom.modelId}`,
+      baseUrl: custom.baseUrl,
+      // Droid 要求 customModels.apiKey 非空；本地无鉴权服务使用无敏感信息的占位值。
+      apiKey: custom.apiKey || "hpp-local",
+      provider: custom.api === "openai-responses" ? "openai" : "generic-chat-completion-api",
+      noImageSupport: true,
+    });
+  }
+
+  return {
+    ...base,
+    customModels,
+    compactionModel: getDroidCompactionModel(config),
+  };
+}
+
+async function readDroidSettings(): Promise<UnknownRecord> {
+  const configPath = process.env.DROID_CONFIG_PATH || join(homedir(), ".factory", "settings.json");
+  try {
+    const parsed = JSON.parse(await readFile(configPath, "utf8"));
+    if (!isRecord(parsed)) throw new Error("configuration root must be an object");
+    return parsed;
+  } catch (error) {
+    const code = asRecord(error).code;
+    if (code === "ENOENT") return {};
+    throw new Error(`无法解析 Droid 配置 ${configPath}：${getErrorMessage(error)}`);
+  }
+}
+
 // ============================================================
 // Droid Agent - JSON-RPC over stdin/stdout
 // ============================================================
@@ -215,6 +273,9 @@ export class DroidAgent {
   private completedToolUses = new Set<string>();
   private actionKeys = new Set<string>();
   private hostSystemPrompt = "";
+  private compactionConfig = normalizeAgentCompactionConfig(undefined);
+  private activeCompactionSignature = "";
+  private runtimeSettingsPath: string | null = null;
   private eventBuffer: AgentEventBuffer;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
@@ -224,11 +285,14 @@ export class DroidAgent {
   /** Start droid exec in stream-jsonrpc mode */
   async init(projectPath: string, existingSessionId?: string, options?: AgentInitOptions): Promise<void> {
     const nextHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
+    const nextCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
+    const nextCompactionSignature = JSON.stringify(nextCompactionConfig);
     if (
       this.process &&
       this.isReady &&
       this.projectPath === projectPath &&
       this.hostSystemPrompt === nextHostSystemPrompt &&
+      this.activeCompactionSignature === nextCompactionSignature &&
       (!existingSessionId || this.sessionId === existingSessionId)
     ) {
       return;
@@ -237,9 +301,17 @@ export class DroidAgent {
     this.projectPath = projectPath;
     await this.killProcess();
     this.hostSystemPrompt = nextHostSystemPrompt;
+    this.compactionConfig = nextCompactionConfig;
     this.isReady = false;
     this.models = [];
     this.nativeModelIds.clear();
+    const baseSettings = await readDroidSettings();
+    this.runtimeSettingsPath = join(tmpdir(), `hpp-droid-${process.pid}-${randomUUID()}.json`);
+    await writeFile(
+      this.runtimeSettingsPath,
+      `${JSON.stringify(buildDroidRuntimeSettings(baseSettings, this.compactionConfig), null, 2)}\n`,
+      "utf8",
+    );
     this.emitEvent({ type: "agent_init", agentId: "droid" });
 
     const args = [
@@ -248,6 +320,7 @@ export class DroidAgent {
       "--output-format", "stream-jsonrpc",
       "--auto", this.autonomyLevel,
       "--cwd", projectPath,
+      "--settings", this.runtimeSettingsPath,
     ];
     // Droid's JSON-RPC `systemPromptOverride` replaces its native prompt.
     // The CLI append flag preserves that prompt and applies Hpp policy through
@@ -337,7 +410,11 @@ export class DroidAgent {
       if (!sessionId) throw new Error("Droid did not return a session id");
       this.sessionId = sessionId;
       this.isReady = true;
+      this.activeCompactionSignature = nextCompactionSignature;
       await this.applySessionResult(result, !!existingSessionId);
+      await this.sendRpcAsync("droid.update_session_settings", {
+        compactionModel: getDroidCompactionModel(this.compactionConfig),
+      });
       this.emitEvent({ type: "agent_ready", agentId: "droid", mock: false });
     } catch (error) {
       await this.killProcess();
@@ -547,6 +624,21 @@ export class DroidAgent {
     this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
   }
 
+  async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
+    const normalized = normalizeAgentCompactionConfig(value);
+    if (!this.process || !this.isReady || !this.projectPath) {
+      this.compactionConfig = normalized;
+      this.activeCompactionSignature = "";
+      return;
+    }
+    if (!this.isIdle()) throw new Error("Droid 会话正在运行，无法立即重载上下文压缩设置");
+    const existingSessionId = this.sessionId || undefined;
+    await this.init(this.projectPath, existingSessionId, {
+      hostSystemPrompt: this.hostSystemPrompt,
+      compaction: normalized,
+    });
+  }
+
   /** Set reasoning effort */
   async setThinkingLevel(level: string) {
     const effortMap: Record<string, string> = {
@@ -663,6 +755,7 @@ export class DroidAgent {
     }
     this.isReady = false;
     this.sessionId = null;
+    this.activeCompactionSignature = "";
     this.failPendingResponses(new Error("Droid process stopped"));
     this.clientMessageIdsByRequestId.clear();
     this.activeClientMessageId = null;
@@ -679,10 +772,15 @@ export class DroidAgent {
     } else {
       this.eventBuffer.flush();
     }
-    if (!childProcess) return;
-    if (await this.waitForExit(childProcess, 750)) return;
-    await this.killProcessTree(childProcess);
-    await this.waitForExit(childProcess, 500);
+    if (childProcess) {
+      if (!(await this.waitForExit(childProcess, 750))) {
+        await this.killProcessTree(childProcess);
+        await this.waitForExit(childProcess, 500);
+      }
+    }
+    const runtimeSettingsPath = this.runtimeSettingsPath;
+    this.runtimeSettingsPath = null;
+    if (runtimeSettingsPath) await rm(runtimeSettingsPath, { force: true }).catch(() => undefined);
   }
 
   private async killProcessTree(childProcess: ChildProcess): Promise<void> {
@@ -1092,6 +1190,7 @@ export class DroidAgent {
       const nativeModelId = String(model.id || model.modelId || "").trim();
       if (!nativeModelId) continue;
       const customModel = customByNativeId.get(nativeModelId);
+      if (customModel?.hppCompactionManaged === true) continue;
       const modelId = customModel
         ? String(customModel.model || nativeModelId).trim()
         : nativeModelId;
@@ -1120,7 +1219,9 @@ export class DroidAgent {
 
   private async readCustomModelConfig(): Promise<UnknownRecord[]> {
     try {
-      const configPath = process.env.DROID_CONFIG_PATH || join(homedir(), ".factory", "settings.json");
+      const configPath = this.runtimeSettingsPath
+        || process.env.DROID_CONFIG_PATH
+        || join(homedir(), ".factory", "settings.json");
       const config = asRecord(JSON.parse(await readFile(configPath, "utf-8")));
       return Array.isArray(config.customModels)
         ? config.customModels.map(asRecord).filter((model) => Object.keys(model).length > 0)

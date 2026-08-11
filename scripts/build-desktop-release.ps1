@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $electronDist "electron.exe"))) {
 }
 
 try {
-  & npx electron-builder "--config.directories.output=$stagingDir" "--config.electronDist=$electronDist"
+  & npx electron-builder "--publish=never" "--config.directories.output=$stagingDir" "--config.electronDist=$electronDist"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   $artifacts = @(

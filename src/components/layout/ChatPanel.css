@@ -67,7 +67,19 @@
   text-overflow: ellipsis;
   min-width: 0;
   flex-shrink: 1;
-  max-width: 260px;
+  max-width: 480px;
+}
+
+@media (min-width: 1400px) {
+  .chat-header-session-title {
+    max-width: 720px;
+  }
+}
+
+@media (min-width: 1600px) {
+  .chat-header-session-title {
+    max-width: 960px;
+  }
 }
 
 .chat-agent-dot {
@@ -75,6 +87,20 @@
   height: 8px;
   border-radius: 50%;
   background-color: #10b981;
+  flex-shrink: 0;
+}
+
+.chat-agent-dot-running {
+  animation: chat-agent-dot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes chat-agent-dot-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(16, 185, 129, 0);
+  }
 }
 
 .chat-agent-name {
@@ -238,26 +264,44 @@
 
 /* User message history button & popup */
 .chat-header-history-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
+  width: 44px;
+  height: 32px;
+  box-sizing: border-box;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: none;
-  border: none;
+  padding: 5px;
+  background: var(--floating-bg);
+  border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  border-radius: 4px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.15s;
+  box-shadow: 0 8px 24px var(--shadow-color);
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .chat-header-history-btn:hover {
-  background-color: var(--bg-hover);
+  background: var(--bg-hover);
+  border-color: var(--accent-color);
   color: var(--text-primary);
 }
 
 .chat-header-history-anchor {
-  position: relative;
+  /* 与处理过程吸顶按钮共享 .chat-messages 滚动容器和内容起点。 */
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  width: 44px;
+  height: 0;
+  align-self: flex-start;
+  pointer-events: none;
+}
+
+.chat-header-history-anchor .chat-header-history-btn {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: auto;
 }
 
 .chat-reference-control {
@@ -471,20 +515,18 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 锚点自身为 pointer-events: none，弹窗必须显式恢复鼠标命中。 */
+  pointer-events: auto;
+  /* 弹窗内滚动不能沿滚动链传递到聊天区域。 */
+  overscroll-behavior: contain;
 }
 
 .chat-header-history-anchor .chat-user-history-popup {
-  left: 0;
+  left: calc(100% + 6px);
   right: auto;
-}
-
-.chat-user-history-header {
-  padding: 8px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  border-bottom: 1px solid var(--border-color);
-  background-color: var(--bg-tertiary);
+  top: 0;
+  bottom: auto;
+  transform: none;
 }
 
 .chat-user-history-empty {
@@ -495,8 +537,12 @@
 }
 
 .chat-user-history-list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  max-height: 360px;
+  max-height: 400px;
+  /* 在列表到达顶部或底部时也不把滚轮交给聊天区域。 */
+  overscroll-behavior-y: contain;
 }
 
 .chat-user-history-item {
@@ -629,6 +675,8 @@
 }
 
 .chat-messages-area {
+  /* 左侧固定控件上下排列：发言记录按钮、处理过程吸顶按钮。 */
+  --chat-history-control-rail-height: 36px;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1436,6 +1484,11 @@
 /* Sticky locator bar: appears at the top-left once the process block has
    scrolled out of view, so long output can be located without scrolling
    back to the top. The bulb locates an expanded thinking row. */
+.chat-process-sticky-layer {
+  /* 让 Portal 中的定位条直接参与聊天滚动容器的布局，不受消息块边界限制。 */
+  display: contents;
+}
+
 .chat-process-wrap {
   width: 100%;
   max-width: 100%;
@@ -1449,11 +1502,20 @@
     var(--chat-process-thinking-button-width) + var(--chat-process-thinking-rail-gap)
   );
   position: sticky;
-  top: var(--chat-process-sticky-top, 0px);
+  /* 为上方的发言记录按钮留出一行，避免与返回顶部按钮重叠。 */
+  top: calc(
+    var(--chat-process-sticky-top, 0px) +
+    var(--chat-history-control-rail-height, 44px)
+  );
   height: 0;
   margin-bottom: -8px;
   overflow: visible;
   z-index: 25;
+}
+
+.chat-process-sticky-layer > .chat-process-sticky {
+  /* Portal 后仍复用原有负轨道偏移，使按钮与历史按钮共享左边缘。 */
+  margin-left: var(--chat-process-thinking-rail-width);
 }
 
 .chat-process-sticky-inner {
@@ -1465,14 +1527,15 @@
   max-width: 100%;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  /* 不做上下位移动画，避免进入时压到上方的历史按钮。 */
+  transform: none;
+  transition: opacity 0.15s ease;
 }
 
 .chat-process-sticky[data-visible="true"] .chat-process-sticky-inner {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
+  transform: none;
 }
 
 .chat-process-sticky-toggle {
@@ -1480,6 +1543,7 @@
   align-items: center;
   justify-content: center;
   width: var(--chat-process-thinking-button-width);
+  height: 32px;
   box-sizing: border-box;
   margin-left: calc(0px - var(--chat-process-thinking-rail-width));
   background: var(--floating-bg);
@@ -1501,16 +1565,13 @@
   border-color: var(--accent-color);
 }
 
-.chat-process-sticky-toggle:active {
-  transform: translateY(1px);
-}
-
 .chat-process-sticky-thinking {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: var(--chat-process-thinking-button-width);
+  height: 32px;
   box-sizing: border-box;
   background: var(--floating-bg);
   border: 1px solid var(--border-color);
@@ -1554,10 +1615,6 @@
 .chat-process-sticky-thinking:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
-}
-
-.chat-process-sticky-thinking:active {
-  transform: translateY(1px);
 }
 
 .chat-process {
@@ -3281,6 +3338,7 @@ body.chat-questionnaire-resizing {
   gap: 6px;
   margin-top: 8px;
   padding: 0 4px;
+  width: 100%;
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -3292,6 +3350,7 @@ body.chat-questionnaire-resizing {
   gap: 8px;
   margin: 0 4px 8px;
   padding: 6px 8px;
+  width: 100%;
   border: 1px solid rgba(245, 158, 11, 0.36);
   border-radius: 8px;
   background-color: rgba(245, 158, 11, 0.1);
@@ -3329,6 +3388,7 @@ body.chat-questionnaire-resizing {
   gap: 6px;
   margin: 0 4px 8px;
   padding: 8px;
+  width: 100%;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background-color: var(--bg-secondary);
@@ -3784,6 +3844,7 @@ body.chat-questionnaire-resizing {
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 4px;
+  width: 100%;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 12px;
@@ -4318,6 +4379,11 @@ body.chat-questionnaire-resizing .chat-bubble {
   opacity: 0.7;
 }
 
+/* 无档位声明模型的思考开关（开/关） */
+.chat-toolbar-thinking-toggle.active {
+  color: var(--text-primary);
+}
+
 /* Model dropdown */
 .chat-dropdown {
   position: absolute;
@@ -4698,6 +4764,7 @@ body.chat-questionnaire-resizing .chat-bubble {
   padding: 6px 8px;
   overflow-x: auto;
   margin-bottom: 8px;
+  width: 100%;
   align-items: center;
 }
 

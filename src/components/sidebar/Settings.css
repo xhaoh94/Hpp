@@ -1440,6 +1440,153 @@
   opacity: 0.42;
 }
 
+.settings-compaction-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-compaction-row + .settings-compaction-row {
+  margin-top: -1px;
+}
+
+.settings-compaction-select,
+.settings-compaction-input {
+  height: 32px;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.settings-compaction-select {
+  width: min(210px, 44%);
+  flex: 0 1 210px;
+  padding: 0 28px 0 9px;
+}
+
+.settings-compaction-input {
+  width: 100%;
+  padding: 0 9px;
+}
+
+.settings-compaction-select:focus,
+.settings-compaction-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 14%, transparent);
+}
+
+.settings-compaction-custom-model {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-top: 0;
+  background: color-mix(in srgb, var(--bg-tertiary) 62%, transparent);
+}
+
+.settings-compaction-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.settings-compaction-field > span {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.settings-compaction-field-control {
+  width: 100%;
+  flex-basis: auto;
+}
+
+.settings-compaction-reasoning {
+  grid-column: 1 / -1;
+  min-height: 54px;
+  margin: 0;
+  border: 1px solid var(--border-color);
+}
+
+.settings-compaction-note {
+  margin: 10px 2px 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.settings-compaction-actions {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.settings-compaction-status {
+  min-width: 0;
+  margin-right: auto;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.settings-compaction-status.success {
+  color: #22c55e;
+}
+
+.settings-compaction-status.error {
+  color: #ef4444;
+}
+
+.agent-compaction-modal-overlay {
+  z-index: 1060;
+}
+
+.settings-modal.agent-compaction-modal {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
+}
+
+.agent-compaction-modal-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.agent-compaction-modal-title h3,
+.agent-compaction-modal-title p {
+  margin: 0;
+}
+
+.agent-compaction-modal-title p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.agent-compaction-modal-content {
+  overscroll-behavior: contain;
+}
+
+.agent-compaction-native-value {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .settings-storage-body {
   border-top: 1px solid var(--border-color);
   background: var(--bg-primary);
@@ -1596,6 +1743,33 @@
   .settings-general-path-control {
     width: 100%;
     flex-basis: auto;
+  }
+
+  .settings-compaction-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-compaction-select {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .settings-compaction-custom-model {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-compaction-reasoning {
+    grid-column: auto;
+  }
+
+  .settings-compaction-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-compaction-actions .filter-add-btn {
+    width: 100%;
   }
 
   .settings-general-link-meta {
@@ -2523,13 +2697,39 @@
 .agent-config-model-row {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(180px, 1.1fr) minmax(150px, 0.9fr) auto minmax(280px, 1.45fr) 28px;
   align-items: center;
   gap: 9px;
   padding: 9px;
   border: 1px solid var(--border-color);
   border-radius: 7px;
   background: var(--bg-primary);
+}
+
+/* 内置模型没有自定义能力控件，两个输入框自动平分全部可用宽度。 */
+.agent-config-model-row.builtin {
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) 28px;
+}
+
+/* 自定义模型为图片能力和思考档位保留独立区域。 */
+.agent-config-model-row.custom {
+  grid-template-columns: minmax(140px, 1.05fr) minmax(120px, 0.95fr) minmax(250px, 1fr) 28px;
+}
+
+.agent-config-model-checks {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.agent-config-model-checks .agent-config-check {
+  flex: 0 0 auto;
+}
+
+.agent-config-model-checks .agent-config-thinking-levels {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .agent-config-thinking-levels {
@@ -2885,6 +3085,21 @@
   border-radius: 6px;
 }
 
+@media (max-width: 1080px) {
+  .agent-config-model-row.custom {
+    grid-template-columns: minmax(140px, 1fr) minmax(120px, 1fr) 28px;
+  }
+
+  .agent-config-model-row.custom .agent-config-model-checks {
+    grid-column: 1 / 3;
+  }
+
+  .agent-config-model-row.custom > .btn-delete {
+    grid-column: 3;
+    grid-row: 1 / 3;
+  }
+}
+
 @media (max-width: 760px) {
   .agent-config-grid {
     grid-template-columns: 1fr;
@@ -2894,8 +3109,19 @@
     grid-template-columns: 1fr;
   }
 
-  .agent-config-model-row {
+  .agent-config-model-row.builtin,
+  .agent-config-model-row.custom {
     grid-template-columns: 1fr;
+  }
+
+  .agent-config-model-row.custom .agent-config-model-checks,
+  .agent-config-model-row.custom > .btn-delete {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .agent-config-model-row > .btn-delete {
+    justify-self: end;
   }
 
   .agent-model-picker-row {

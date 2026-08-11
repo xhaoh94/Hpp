@@ -134,24 +134,20 @@ import {
 } from "@shared/composer-document";
 import { InlineComposerEditor, type InlineComposerEditorHandle } from "../../src/components/shared/InlineComposerEditor";
 import { ComposerMessageFlow } from "../../src/components/shared/ComposerMessageFlow";
-
-const SESSION_RUNNING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+import { BrailleSpinner } from "../../src/components/shared/BrailleSpinner";
 
 function SessionRunningIndicator() {
-  const [frame, setFrame] = useState(0);
-  useEffect(() => {
-    const timer = window.setInterval(() => setFrame((current) => (current + 1) % SESSION_RUNNING_FRAMES.length), 80);
-    return () => window.clearInterval(timer);
-  }, []);
-  return <span className="session-running-indicator" title="运行中" aria-label="运行中">{SESSION_RUNNING_FRAMES[frame]}</span>;
+  return <BrailleSpinner />;
 }
 import { MAX_REMOTE_IMAGES, MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { formatModelSwitchToastText } from "@shared/model-switch";
 import {
+  getEffectiveThinkingLevelMode,
   getModelThinkingLevels,
   getThinkingLevelLabel,
   groupModelsByProvider,
   includeCurrentModel,
+  normalizeThinkingLevelId,
 } from "@shared/models";
 import { getAgentActionDisplayDescription } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
@@ -527,11 +523,13 @@ function MobileThinkingPicker({
   levels,
   disabled,
   onSelect,
+  mode = "levels",
 }: {
   value: string;
   levels: ReturnType<typeof getModelThinkingLevels>;
   disabled: boolean;
   onSelect: (level: string) => void;
+  mode?: "levels" | "toggle";
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -562,6 +560,23 @@ function MobileThinkingPicker({
   }, [disabled]);
 
   const menuStyle = useAnchoredOverlay(open, rootRef, menuRef);
+  // 无档位声明的模型（如 mimo）：只有思考开关，开=medium、关=off。
+  if (mode === "toggle") {
+    const toggleOn = normalizeThinkingLevelId(value) !== "off";
+    return (
+      <div ref={rootRef} className="thinking-picker">
+        <button
+          type="button"
+          className={`thinking-picker-trigger ${toggleOn ? "active" : ""}`}
+          disabled={disabled}
+          onClick={() => onSelect(toggleOn ? "off" : "medium")}
+        >
+          <Lightbulb size={14} />
+          <span>思考: {toggleOn ? "开" : "关"}</span>
+        </button>
+      </div>
+    );
+  }
   return (
     <div ref={rootRef} className={`thinking-picker ${open ? "open" : ""}`}>
       <button
@@ -2103,10 +2118,10 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
                   className="queue-guide"
                   disabled={disabled || !currentSessionRunning || item.status === "sending"}
                   onClick={() => onGuide(item)}
-                  title={currentSessionRunning ? "立即作为引导发送" : "Agent 运行中才能引导"}
+                  title={item.status === "sending" ? "等待调度" : currentSessionRunning ? "立即作为引导发送" : "Agent 运行中才能引导"}
                 >
                   {item.status === "sending" ? <LoaderCircle className="spin" size={13} /> : <CornerDownRight size={13} />}
-                  <span>引导</span>
+                  <span>{item.status === "sending" ? "发送中" : "引导"}</span>
                 </button>
               )}
               <button type="button" className="queue-icon-button queue-remove" disabled={disabled || item.status === "sending"} onClick={() => onRemove(item)} title="移出队列" aria-label="移出队列"><Trash2 size={14} /></button>
@@ -2224,6 +2239,23 @@ export default function App() {
   const incomingWebPairingRef = useRef(
     !IS_NATIVE_APP ? new URLSearchParams(window.location.search).get("pair") : null,
   );
+  const backNavigationStateRef = useRef({
+    updateDialogOpen,
+    pairingMode,
+    editingHostId,
+    savingHostId,
+    drawerOpen,
+    editingQueueItem,
+    reloadConfirmOpen,
+    reloadingSession,
+    historyProjectId,
+    createProject,
+    historyOpen,
+    referenceSheetOpen,
+    actionSheetOpen,
+    composerAddMenuOpen,
+    commandBusy,
+  });
 
   selectedSessionRef.current = selectedSessionId;
   activeHostRef.current = activeHost;
@@ -2233,6 +2265,23 @@ export default function App() {
   configsRef.current = configs;
   updateStageRef.current = updateStage;
   draftValueRef.current = { text: composer, document: composerDocument, referenceSessionIds: pendingReferenceIds, action: pendingAction };
+  backNavigationStateRef.current = {
+    updateDialogOpen,
+    pairingMode,
+    editingHostId,
+    savingHostId,
+    drawerOpen,
+    editingQueueItem,
+    reloadConfirmOpen,
+    reloadingSession,
+    historyProjectId,
+    createProject,
+    historyOpen,
+    referenceSheetOpen,
+    actionSheetOpen,
+    composerAddMenuOpen,
+    commandBusy,
+  };
 
   const flushCurrentDraft = useCallback(() => {
     if (draftSaveTimerRef.current) {
@@ -2913,6 +2962,28 @@ export default function App() {
     void client.connect();
   }, [handleRemoteEvent, loadCatalog, loadSession]);
 
+  const leaveActiveHost = useCallback(() => {
+    flushCurrentDraft();
+    const client = clientRef.current;
+    clientRef.current = null;
+    client?.disconnect();
+    activeHostRef.current = null;
+    selectedSessionRef.current = null;
+    setActiveHost(null);
+    setConnectionState("disconnected");
+    setSelectedSessionId(null);
+    setDrawerOpen(false);
+    setEditingQueueItem(null);
+    setReloadConfirmOpen(false);
+    setHistoryProjectId(null);
+    setCreateProject(null);
+    setHistoryOpen(false);
+    setReferenceSheetOpen(false);
+    setActionSheetOpen(false);
+    setComposerAddMenuOpen(false);
+    setPairingMode("closed");
+  }, [flushCurrentDraft]);
+
   const openSavedHost = useCallback((host: PairedHost, availability: HostAvailability) => {
     if (availability !== "online") {
       showFloatingToast(availability === "offline"
@@ -2958,6 +3029,75 @@ export default function App() {
     }).then((handle) => { listener = handle; });
     return () => { void listener?.remove(); };
   }, [checkAndroidUpdate, flushCurrentDraft, syncAndroidUpdateDownload]);
+
+  useEffect(() => {
+    if (!IS_NATIVE_APP) return;
+    let listener: { remove: () => Promise<void> } | undefined;
+    const handleBackButton = () => {
+      const state = backNavigationStateRef.current;
+      if (state.updateDialogOpen) {
+        closeUpdateDialog();
+        return;
+      }
+      if (state.pairingMode !== "closed") {
+        setPairingMode("closed");
+        return;
+      }
+      if (state.editingHostId) {
+        if (!state.savingHostId) setEditingHostId(null);
+        return;
+      }
+      if (state.editingQueueItem) {
+        setEditingQueueItem(null);
+        return;
+      }
+      if (state.reloadConfirmOpen) {
+        if (!state.reloadingSession) setReloadConfirmOpen(false);
+        return;
+      }
+      if (state.historyOpen) {
+        setHistoryOpen(false);
+        return;
+      }
+      if (state.referenceSheetOpen) {
+        setReferenceSheetOpen(false);
+        return;
+      }
+      if (state.actionSheetOpen) {
+        setActionSheetOpen(false);
+        return;
+      }
+      if (state.createProject) {
+        if (!state.commandBusy) setCreateProject(null);
+        return;
+      }
+      if (state.historyProjectId) {
+        setHistoryProjectId(null);
+        return;
+      }
+      if (state.composerAddMenuOpen) {
+        setComposerAddMenuOpen(false);
+        return;
+      }
+      if (state.drawerOpen) {
+        setDrawerOpen(false);
+        return;
+      }
+      if (selectedSessionRef.current) {
+        flushCurrentDraft();
+        selectedSessionRef.current = null;
+        setSelectedSessionId(null);
+        return;
+      }
+      if (activeHostRef.current) {
+        leaveActiveHost();
+        return;
+      }
+      void CapacitorApp.exitApp();
+    };
+    void CapacitorApp.addListener("backButton", handleBackButton).then((handle) => { listener = handle; });
+    return () => { void listener?.remove(); };
+  }, [closeUpdateDialog, flushCurrentDraft, leaveActiveHost]);
 
   useEffect(() => () => clientRef.current?.disconnect(), []);
 
@@ -4339,7 +4479,7 @@ export default function App() {
             <strong>{activeHost.alias || activeHost.hostName}</strong>
             <span className={connectionState}>{connectionLabel(connectionState)} · {activeHost.baseUrl}</span>
           </div>
-          <button className="icon-button" onClick={() => { clientRef.current?.disconnect(); activeHostRef.current = null; setActiveHost(null); }} title="返回主机列表"><ArrowLeft size={18} /></button>
+          <button className="icon-button" onClick={leaveActiveHost} title="返回主机列表"><ArrowLeft size={18} /></button>
         </div>
         <div className="drawer-header">
           <div><strong>Projects</strong><span>{projects.length}</span></div>
@@ -4802,6 +4942,7 @@ export default function App() {
               <MobileThinkingPicker
                 value={selectedConfig?.thinkingLevel || "medium"}
                 levels={thinkingLevels}
+                mode={getEffectiveThinkingLevelMode(selectedConfig?.model)}
                 disabled={commandBusy}
                 onSelect={(level) => void runCommand<RemoteSessionConfig>("session.setThinking", { sessionId: selected.session.id, level }).then((config) => setConfigs((current) => ({ ...current, [selected.session.id]: config })))}
               />

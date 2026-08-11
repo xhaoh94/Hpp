@@ -81,7 +81,17 @@ import {
   observePendingUIEvent,
 } from "./pending-ui-events";
 
-afterEach(() => clearAllPendingUIEvents());
+const originalHppDataDir = process.env.HPP_DATA_DIR;
+
+beforeEach(() => {
+  process.env.HPP_DATA_DIR = `C:\\temp\\hpp-agent-manager-tests-${process.pid}-missing`;
+});
+
+afterEach(() => {
+  if (originalHppDataDir === undefined) delete process.env.HPP_DATA_DIR;
+  else process.env.HPP_DATA_DIR = originalHppDataDir;
+  clearAllPendingUIEvents();
+});
 
 function getHandler(channel: string) {
   const handler = testState.handlers.get(channel);
@@ -117,6 +127,7 @@ function createBackend(idle = true) {
     getModels: vi.fn(async () => []),
     setModel: vi.fn(),
     setThinkingLevel: vi.fn(),
+    setCompactionConfig: vi.fn(),
     sendUIResponse: vi.fn(),
     dispose: vi.fn(async () => undefined),
     get sessionFilePath() {
@@ -190,7 +201,7 @@ describe("AgentManager runtime updates", () => {
   it("supplies the host policy to guidance without trusting renderer options", async () => {
     const backend = createBackend(true);
     testState.createBackend.mockResolvedValueOnce(backend);
-    testState.getCapabilities.mockResolvedValueOnce({
+    testState.getCapabilities.mockResolvedValue({
       planMode: "native",
       permissions: true,
       guidance: true,
@@ -351,6 +362,107 @@ describe("AgentManager plugin removal", () => {
 
   afterEach(async () => {
     await shutdownAgentRuntime();
+  });
+
+  it("applies the generic compaction config to active supporting backends", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "compaction-session");
+
+    const config = {
+      thinkingLevel: "low",
+      modelMode: "current",
+      customModel: {
+        baseUrl: "",
+        apiKey: "",
+        modelId: "",
+        api: "openai-completions",
+        reasoning: false,
+      },
+    };
+    await expect(getHandler("agent:setCompactionConfig")({}, config)).resolves.toEqual({
+      success: true,
+      appliedSessionIds: ["compaction-session"],
+    });
+    expect(backend.setCompactionConfig).toHaveBeenCalledWith(config);
+  });
+
+  it("applies scoped compaction only to sessions whose plugin declares support", async () => {
+    const fullSupportBackend = createBackend(true);
+    const modelOnlyBackend = createBackend(true);
+    testState.createBackend
+      .mockResolvedValueOnce(fullSupportBackend)
+      .mockResolvedValueOnce(modelOnlyBackend);
+    testState.getCapabilities.mockImplementation(async (agentId: string) => ({
+      planMode: "native",
+      permissions: true,
+      guidance: false,
+      fork: true,
+      actions: true,
+      configuration: "none",
+      providerActivation: "none",
+      compaction: agentId === "full-support"
+        ? { customModel: true, thinkingLevel: true }
+        : { customModel: true, thinkingLevel: false },
+    }));
+    await getHandler("agent:createSession")({}, "full-support", "C:\\project", "full-compaction-session");
+    await getHandler("agent:createSession")({}, "model-only", "C:\\project", "model-only-compaction-session");
+
+    const config = {
+      thinkingLevel: "high",
+      modelMode: "current",
+      customModel: {
+        baseUrl: "",
+        apiKey: "",
+        modelId: "",
+        api: "openai-completions",
+        reasoning: false,
+      },
+    };
+    await expect(getHandler("agent:setAgentCompactionConfig")({}, "full-support", config)).resolves.toEqual({
+      success: true,
+      appliedSessionIds: ["full-compaction-session"],
+    });
+    expect(fullSupportBackend.setCompactionConfig).toHaveBeenCalledWith(config);
+    expect(modelOnlyBackend.setCompactionConfig).not.toHaveBeenCalled();
+
+    await expect(getHandler("agent:setAgentCompactionConfig")({}, "model-only", {
+      ...config,
+      modelMode: "custom",
+      customModel: {
+        ...config.customModel,
+        baseUrl: "https://summary.example/v1",
+        modelId: "summary-model",
+        reasoning: true,
+      },
+    })).resolves.toEqual({
+      success: true,
+      appliedSessionIds: ["model-only-compaction-session"],
+    });
+    expect(modelOnlyBackend.setCompactionConfig).toHaveBeenCalledWith(expect.objectContaining({
+      thinkingLevel: "inherit",
+      modelMode: "custom",
+      customModel: expect.objectContaining({ reasoning: false }),
+    }));
+  });
+
+  it("rejects scoped compaction when the plugin does not declare the capability", async () => {
+    testState.getCapabilities.mockResolvedValueOnce({
+      planMode: "native",
+      permissions: true,
+      guidance: false,
+      fork: true,
+      actions: true,
+      configuration: "none",
+      providerActivation: "none",
+      compaction: "none",
+    });
+
+    await expect(getHandler("agent:setAgentCompactionConfig")({}, "codex", {})).resolves.toEqual({
+      success: false,
+      error: "当前 Agent 未声明上下文压缩配置能力。",
+      appliedSessionIds: [],
+    });
   });
 
   it("returns a UI response failure when the target session has no active agent", async () => {

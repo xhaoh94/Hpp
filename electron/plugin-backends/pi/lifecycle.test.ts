@@ -35,6 +35,9 @@ const respondToInit = (
       if (command.type === "guidance") {
         child.stdout.write(`${JSON.stringify({ type: "guidance_done", id: command.id })}\n`);
       }
+      if (command.type === "setCompactionConfig") {
+        child.stdout.write(`${JSON.stringify({ type: "compaction_config_changed", id: command.id })}\n`);
+      }
     }
   });
 };
@@ -80,6 +83,42 @@ describe("Pi lifecycle", () => {
       type: "guidance",
       message: "steer this turn",
       hostSystemPrompt: "HPP_HOST_GUIDANCE",
+    }));
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
+  it("forwards and hot-updates the generic Agent compaction config", async () => {
+    const child = new FakePiProcess();
+    const commands: Record<string, unknown>[] = [];
+    respondToInit(child, "C:\\sessions\\pi.jsonl", (command) => commands.push(command));
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+    const initialConfig = {
+      thinkingLevel: "low" as const,
+      modelMode: "current" as const,
+      customModel: {
+        baseUrl: "",
+        apiKey: "",
+        modelId: "",
+        api: "openai-completions" as const,
+        reasoning: false,
+      },
+    };
+
+    await agent.init("C:\\project", undefined, { compaction: initialConfig });
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "init",
+      compactionConfig: initialConfig,
+    }));
+
+    const updatedConfig = {
+      ...initialConfig,
+      thinkingLevel: "off" as const,
+    };
+    await agent.setCompactionConfig(updatedConfig);
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "setCompactionConfig",
+      config: updatedConfig,
     }));
     (agent as unknown as { process: unknown }).process = null;
   });

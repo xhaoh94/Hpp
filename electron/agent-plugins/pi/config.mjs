@@ -16,6 +16,51 @@ const ENDPOINT_APIS = {
 
 const getConfigPath = () => process.env.PI_CONFIG_PATH || join(homedir(), ".pi", "agent", "models.json");
 
+const getModelsStorePath = () => {
+  const configPath = getConfigPath();
+  return join(dirname(configPath), "models-store.json");
+};
+
+// pi 运行时刷新的渠道目录缓存（与 models.json 同目录）。
+// 用于判定“内置能获取到的模型是否有档位声明”：有 thinkingLevelMap 的
+// 模型（如 deepseek 的 high/max）可配思考档位；无声明的（如 mimo）只有思考开关。
+const directoryStoreCache = new Map();
+const getDirectoryStore = () => {
+  const storePath = getModelsStorePath();
+  let entry = directoryStoreCache.get(storePath);
+  if (!entry) {
+    entry = (async () => {
+      try {
+        const store = await readJsonObject(storePath);
+        return isRecord(store) ? store : null;
+      } catch {
+        return null;
+      }
+    })();
+    directoryStoreCache.set(storePath, entry);
+  }
+  return entry;
+};
+
+// 在渠道目录（models-store.json）里按 provider + id 查模型条目，找不到时按 id 跨 provider 兜底。
+// 返回条目对象（可能无 thinkingLevelMap），用于判定“模型是否内置、内置档位是什么”。
+const getDirectoryModelEntry = async (provider, id) => {
+  const store = await getDirectoryStore();
+  if (!store) return null;
+  const findEntry = (models) => models.find((model) => isRecord(model) && model.id === id) || null;
+  const providerEntry = isRecord(store[provider]) ? store[provider] : null;
+  const providerModels = providerEntry && Array.isArray(providerEntry.models) ? providerEntry.models : [];
+  const providerMatch = findEntry(providerModels);
+  if (providerMatch) return providerMatch;
+  // 按 id 跨 provider 兜底。
+  for (const entry of Object.values(store)) {
+    if (!isRecord(entry) || !Array.isArray(entry.models)) continue;
+    const candidate = findEntry(entry.models);
+    if (candidate) return candidate;
+  }
+  return null;
+};
+
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const asString = (value) => typeof value === "string" ? value.trim() : "";
 const isMissingFileError = (error) => isRecord(error) && error.code === "ENOENT";
@@ -148,16 +193,37 @@ export const getProviderApi = (endpoint) => Object.prototype.hasOwnProperty.call
   ? ENDPOINT_APIS[endpoint]
   : undefined;
 
-const normalizeModel = (value) => {
+const normalizeModel = async (value, providerId) => {
   if (!isRecord(value)) return null;
   const id = asString(value.id) || asString(value.model) || asString(value.name);
   if (!id) return null;
-  const supportedThinkingLevels = mapToSupportedThinkingLevels(value);
+  const entryMap = isRecord(value.thinkingLevelMap) ? value.thinkingLevelMap : null;
+  const savedLevels = entryMap ? mapToSupportedThinkingLevels({ thinkingLevelMap: entryMap }) : [];
+  const directoryEntry = providerId ? await getDirectoryModelEntry(providerId, id) : null;
+  const directoryMap = isRecord(directoryEntry?.thinkingLevelMap) && Object.keys(directoryEntry.thinkingLevelMap).length > 0
+    ? directoryEntry.thinkingLevelMap
+    : null;
+  // 只有能从 Agent 目录完整取得 reasoning 和 input 能力的模型才算内置；
+  // 目录条目残缺时按非内置处理，配置弹窗保留自定义能力控件。
+  const isBuiltin = !!directoryEntry
+    && typeof directoryEntry.reasoning === "boolean"
+    && Array.isArray(directoryEntry.input);
+  // 内置模型始终使用目录档位（无 map 即“只有思考开关”），忽略 models.json 里
+  // 可能残留的旧自定义 map；非内置模型才使用用户保存的自定义档位。
+  const supportedThinkingLevels = isBuiltin
+    ? (directoryMap ? mapToSupportedThinkingLevels({ thinkingLevelMap: directoryMap }) : [])
+    : savedLevels;
+  const directoryReasoning = isBuiltin ? directoryEntry.reasoning === true : null;
+  const directoryImageInput = isBuiltin ? directoryEntry.input.includes("image") : null;
   return {
     id,
     name: asString(value.name) || id,
-    reasoning: value.reasoning === true,
-    imageInput: Array.isArray(value.input) && value.input.includes("image"),
+    reasoning: directoryReasoning !== null ? directoryReasoning : (value.reasoning === true),
+    imageInput: directoryImageInput !== null ? directoryImageInput : (Array.isArray(value.input) && value.input.includes("image")),
+    // 内置模型（目录命中）→ 能力由 Agent 管理，配置弹窗不显示能力控件；
+    // 非内置模型（目录里完全没有）→ 显示控件供自定义。
+    isBuiltin,
+    hasThinkingLevels: !isBuiltin,
     ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
   };
 };
@@ -221,14 +287,14 @@ export const toProviderConfig = (provider, existingProvider = {}) => {
         ...existingModel,
         id: model.id,
         name: model.name || model.id,
+        // 内置模型的 reasoning 来自目录；自定义模型已由 Hpp 根据档位是否非空派生。
+        // 只有支持思考且选了档位才写入自定义 map，否则让运行时回退到内置目录能力。
         reasoning: model.reasoning === true,
         input: model.imageInput ? ["text", "image"] : ["text"],
       };
-      // A declared level list wins; otherwise keep any map already present in
-      // models.json so pi reports the exact levels the channel advertised.
-      if (declaredLevels.length > 0) {
+      if (declaredLevels.length > 0 && model.reasoning === true) {
         entry.thinkingLevelMap = supportedThinkingLevelsToMap(declaredLevels);
-      } else if (model.reasoning !== true) {
+      } else {
         delete entry.thinkingLevelMap;
       }
       return entry;
@@ -242,20 +308,24 @@ export const toProviderConfig = (provider, existingProvider = {}) => {
 export const readProviderConfig = async () => {
   const config = await readJsonObject(getConfigPath());
   const providersRecord = isRecord(config.providers) ? config.providers : {};
-  const providers = Object.entries(providersRecord).flatMap(([providerId, value]) => {
-    if (!isManagedProvider(value)) return [];
-    const endpoint = getProviderEndpoint(value.api);
-    if (!endpoint) return [];
-    const models = Array.isArray(value.models) ? value.models.map(normalizeModel).filter(Boolean) : [];
-    return [{
-      providerId,
-      displayName: asString(value.name) || providerId,
-      baseUrl: asString(value.baseUrl) || asString(value.baseURL) || asString(value.url),
-      apiKey: asString(value.apiKey) || asString(value.api_key),
-      endpoint,
-      models,
-    }];
-  });
+  const providers = (await Promise.all(
+    Object.entries(providersRecord).map(async ([providerId, value]) => {
+      if (!isManagedProvider(value)) return [];
+      const endpoint = getProviderEndpoint(value.api);
+      if (!endpoint) return [];
+      const models = Array.isArray(value.models)
+        ? (await Promise.all(value.models.map((model) => normalizeModel(model, providerId)))).filter(Boolean)
+        : [];
+      return [{
+        providerId,
+        displayName: asString(value.name) || providerId,
+        baseUrl: asString(value.baseUrl) || asString(value.baseURL) || asString(value.url),
+        apiKey: asString(value.apiKey) || asString(value.api_key),
+        endpoint,
+        models,
+      }];
+    }),
+  )).flat();
   return {
     activeProviderId: asString(config.activeProviderId) || asString(config.activeProvider) || undefined,
     providers,

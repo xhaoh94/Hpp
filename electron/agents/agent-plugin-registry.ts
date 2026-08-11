@@ -106,6 +106,7 @@ const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   actions: false,
   configuration: "none",
   providerActivation: "none",
+  compaction: "none",
 };
 
 function getDataDir() {
@@ -232,6 +233,13 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
   };
 }
 
+function normalizeCompactionCapabilities(value: unknown): AgentCapabilities["compaction"] {
+  if (!isRecord(value)) return "none";
+  const customModel = value.customModel === true;
+  const thinkingLevel = value.thinkingLevel === true;
+  return customModel || thinkingLevel ? { customModel, thinkingLevel } : "none";
+}
+
 function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
   return {
@@ -242,12 +250,16 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
+    compaction: normalizeCompactionCapabilities(input.compaction),
   };
 }
 
 function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
   return {
     ...capabilities,
+    compaction: capabilities.compaction && capabilities.compaction !== "none"
+      ? { ...capabilities.compaction }
+      : "none",
     configuration: capabilities.configuration === "none"
       ? "none"
       : {

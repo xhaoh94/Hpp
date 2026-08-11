@@ -31,6 +31,10 @@ describe("OpenCode models", () => {
             disabled: { disabled: true },
           },
         }],
+      }, {
+        id: "hpp-compaction",
+        name: "Hpp 上下文压缩",
+        models: [{ id: "summary-only", name: "Summary only" }],
       }],
     }));
 

@@ -320,12 +320,14 @@ function MessageQueuePanel({
                   className="chat-queue-action"
                   onClick={() => onGuide(item)}
                   disabled={!currentSessionRunning || compactionInProgress || item.status === "sending"}
-                  title={compactionInProgress
-                    ? "会话压缩完成后才能引导"
-                    : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
+                  title={item.status === "sending"
+                    ? "等待调度"
+                    : compactionInProgress
+                      ? "会话压缩完成后才能引导"
+                      : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
                 >
                   <CornerDownRight size={14} />
-                  <span>引导</span>
+                  <span>{item.status === "sending" ? "发送中" : "引导"}</span>
                 </button>
               )}
               <button type="button" className="chat-queue-icon-btn" onClick={() => onRemove(item.id)} disabled={item.status === "sending"} title="移除">
@@ -834,8 +836,10 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
         <MessageCircle size={14} strokeWidth={1.8} />
       </button>
       {open && (
-        <div className="chat-user-history-popup">
-          <div className="chat-user-history-header">发言记录</div>
+        <div
+          className="chat-user-history-popup"
+          onWheel={(event) => event.stopPropagation()}
+        >
           {userMessagesReversed.length === 0 ? (
             <div className="chat-user-history-empty">暂无发言</div>
           ) : (
@@ -912,6 +916,8 @@ type ChatMessagesViewProps = {
   projectPath?: string;
   scrollRef: RefObject<HTMLDivElement | null>;
   showScrollBottom: boolean;
+  userMsgHistoryOpen: boolean;
+  userMsgHistoryRef: RefObject<HTMLDivElement | null>;
   onMessagesScroll: (event: ReactUIEvent<HTMLDivElement>) => void;
   onScrollToBottom: () => void;
   onContentChange: () => void;
@@ -924,6 +930,8 @@ type ChatMessagesViewProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
+  onUserMsgHistoryOpenChange: (open: boolean) => void;
+  onScrollToMessage: (messageId: string) => void;
 };
 
 type ChatMessageItemProps = {
@@ -943,6 +951,7 @@ type ChatMessageItemProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
+  stickyPortalTarget?: HTMLElement | null;
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
@@ -962,6 +971,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   onPreserveScroll,
   onForkMessage,
   forkingMessageId,
+  stickyPortalTarget,
 }: ChatMessageItemProps) {
   const [userMessageExpanded, setUserMessageExpanded] = useState(false);
   const openMessageProjectPath = useCallback(async (path: string) => {
@@ -1092,6 +1102,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           onPreserveScroll={onPreserveScroll}
           receivedMessageDocument={receivedUserMessage?.composerDocument || receivedUserMessage?.composerDraft?.document}
           projectPath={projectPath}
+          stickyPortalTarget={stickyPortalTarget}
         />
       )}
       {!msg.process && commentary.length > 0 && (
@@ -1399,6 +1410,7 @@ type ChatMessagesViewportProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
+  stickyPortalTarget?: HTMLElement | null;
 };
 
 const DeferredMessagesViewport = memo(function ChatMessagesViewport({
@@ -1420,6 +1432,7 @@ const DeferredMessagesViewport = memo(function ChatMessagesViewport({
   onPreserveScroll,
   onForkMessage,
   forkingMessageId,
+  stickyPortalTarget,
 }: ChatMessagesViewportProps) {
   return (
     <>
@@ -1446,6 +1459,7 @@ const DeferredMessagesViewport = memo(function ChatMessagesViewport({
           onPreserveScroll={onPreserveScroll}
           onForkMessage={onForkMessage}
           forkingMessageId={forkingMessageId}
+          stickyPortalTarget={stickyPortalTarget}
         />
       ))}
     </>
@@ -1461,6 +1475,8 @@ const ChatMessagesView = memo(function ChatMessagesView({
   projectPath,
   scrollRef,
   showScrollBottom,
+  userMsgHistoryOpen,
+  userMsgHistoryRef,
   onMessagesScroll,
   onScrollToBottom,
   onContentChange,
@@ -1474,6 +1490,8 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onForkMessage,
   forkingMessageId,
   expandThinkingWhileRunning,
+  onUserMsgHistoryOpenChange,
+  onScrollToMessage,
 }: ChatMessagesViewProps) {
   const messages = useChatStore((state) => state.messages);
   const activeTurnId = getActiveAssistantTurnId(messages, currentSessionRunning);
@@ -1488,6 +1506,10 @@ const ChatMessagesView = memo(function ChatMessagesView({
   const activeProcessWithTodos = messages.find((msg) => (
     msg.id === activeTurnId && !!msg.process && hasNativeTodoSteps(msg.process)
   ))?.process;
+  const [stickyPortalTarget, setStickyPortalTarget] = useState<HTMLDivElement | null>(null);
+  const setStickyPortalTargetRef = useCallback((element: HTMLDivElement | null) => {
+    setStickyPortalTarget(element);
+  }, []);
   const receivedUserMessages = useMemo(() => {
     const byAssistantId: Record<string, ChatMessage> = {};
     let latestUserMessage: ChatMessage | undefined;
@@ -1508,6 +1530,13 @@ const ChatMessagesView = memo(function ChatMessagesView({
   return (
     <div className={`chat-messages-area ${activeProcessWithTodos ? "has-todo-summary" : ""}`}>
       <div ref={scrollRef} className="chat-messages" onScroll={onMessagesScroll}>
+        <div ref={setStickyPortalTargetRef} className="chat-process-sticky-layer" />
+        <UserMessageHistoryControl
+          open={userMsgHistoryOpen}
+          anchorRef={userMsgHistoryRef}
+          onOpenChange={onUserMsgHistoryOpenChange}
+          onScrollToMessage={onScrollToMessage}
+        />
         {activeSessionId && !activeSessionInitialized ? (
           <div className="chat-loading-agent">
             <div className="chat-working-spinner" />
@@ -1527,6 +1556,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
               expandThinkingWhileRunning={expandThinkingWhileRunning}
               projectPath={projectPath}
               scrollRef={scrollRef}
+              stickyPortalTarget={stickyPortalTarget}
               onContentChange={onContentChange}
               onEditMessage={onEditMessage}
               onImageContextMenu={onImageContextMenu}
@@ -3072,6 +3102,8 @@ export function ChatPanel({
       >
       {/* Header */}
       <div className="chat-header">
+        <div className={`chat-agent-dot${currentSessionRunning ? " chat-agent-dot-running" : ""}`} />
+        <span className="chat-agent-name">{activeProject.name}</span>
         <button
           type="button"
           className="chat-agent-tag chat-agent-reload-trigger"
@@ -3082,12 +3114,6 @@ export function ChatPanel({
           <span>{getAgentName(currentAgentId)}</span>
           <RefreshCw size={10} strokeWidth={2} />
         </button>
-        <UserMessageHistoryControl
-          open={userMsgHistoryOpen}
-          anchorRef={userMsgHistoryRef}
-          onOpenChange={setUserMsgHistoryOpen}
-          onScrollToMessage={scrollToMessage}
-        />
         <span className="chat-header-session-title" title={activeSessionTitle}>
           {activeSessionTitle}
         </span>
@@ -3106,6 +3132,8 @@ export function ChatPanel({
         projectPath={activeProject.path}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}
+        userMsgHistoryOpen={userMsgHistoryOpen}
+        userMsgHistoryRef={userMsgHistoryRef}
         onMessagesScroll={handleMessagesScroll}
         onScrollToBottom={scrollToBottom}
         onContentChange={handleContentChange}
@@ -3118,6 +3146,8 @@ export function ChatPanel({
         onPreserveScroll={preserveScrollDuringLayoutChange}
         onForkMessage={handleForkFromMessage}
         forkingMessageId={forkingMessageId}
+        onUserMsgHistoryOpenChange={setUserMsgHistoryOpen}
+        onScrollToMessage={scrollToMessage}
       />
 
       {activeQuestionnaire && (

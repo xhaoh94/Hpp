@@ -10,6 +10,7 @@ import type {
   AgentImagePayload,
   AgentActionCatalogEntry,
   AgentActionListOptions,
+  AgentCompactionSupport,
   AgentUIResponse,
 } from "../../src/types/ipc";
 import {
@@ -35,6 +36,11 @@ import {
   HPP_AGENT_SYSTEM_PROMPT,
   withHppPlanModePrompt,
 } from "./agent-runtime-policy";
+import {
+  normalizeAgentCompactionConfig,
+  resolveStoredAgentCompactionConfig,
+  type AgentCompactionConfig,
+} from "../../shared/agent-compaction";
 import { normalizeAgentPermissionMode } from "../../shared/agent-permissions";
 import type {
   AgentBackend,
@@ -121,6 +127,43 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+function normalizeCompactionForSupport(
+  value: unknown,
+  support: AgentCompactionSupport | undefined,
+): AgentCompactionConfig {
+  const normalized = normalizeAgentCompactionConfig(value);
+  if (!support || support === "none") return normalized;
+  return {
+    ...normalized,
+    thinkingLevel: support.thinkingLevel ? normalized.thinkingLevel : "inherit",
+    modelMode: support.customModel ? normalized.modelMode : "current",
+    customModel: {
+      ...normalized.customModel,
+      reasoning: support.thinkingLevel && normalized.customModel.reasoning,
+    },
+  };
+}
+
+async function loadSavedAgentCompactionConfig(agentId: string): Promise<AgentCompactionConfig | undefined> {
+  try {
+    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
+    const settingsPath = join(dataDir, "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+      general?: {
+        agentCompaction?: unknown;
+        agentCompactionByAgent?: unknown;
+      };
+    };
+    return resolveStoredAgentCompactionConfig(
+      agentId,
+      settings.general?.agentCompactionByAgent,
+      settings.general?.agentCompaction,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 // ============================================================
 // Agent Manager - manages plugin backends per session.
 // ============================================================
@@ -169,12 +212,22 @@ export class AgentManager {
 
   private async initAgentBackend(
     agent: AgentBackend,
+    agentId: string,
     projectPath: string,
     existingSessionFilePath?: string
   ): Promise<void> {
+    const capabilities = await agentRegistry.getCapabilities(agentId);
+    const compactionSupport = capabilities.compaction;
+    const savedCompaction = compactionSupport && compactionSupport !== "none"
+      ? await loadSavedAgentCompactionConfig(agentId)
+      : undefined;
+    const compaction = savedCompaction
+      ? normalizeCompactionForSupport(savedCompaction, compactionSupport)
+      : undefined;
     await withTimeout(
       agent.init(projectPath, existingSessionFilePath, {
         hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+        ...(compaction ? { compaction } : {}),
       }),
       AGENT_SESSION_INIT_TIMEOUT_MS,
       "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
@@ -216,7 +269,7 @@ export class AgentManager {
       this.sessionProjectPaths.set(sessionId, projectPath);
       if (this.window) agent.setWindow(this.window);
       try {
-        await this.initAgentBackend(agent, projectPath, existingSessionFilePath);
+        await this.initAgentBackend(agent, agentId, projectPath, existingSessionFilePath);
       } catch (error) {
         if (this.sessionAgents.get(sessionId) === agent) {
           await Promise.resolve().then(() => agent.dispose()).catch(() => undefined);
@@ -331,6 +384,54 @@ export class AgentManager {
     const agent = this.getAgentForSession(sessionId);
     if (!agent) return [];
     return agent.listActions(options);
+  }
+
+  private async applyCompactionConfigToSessions(
+    config: AgentCompactionConfig,
+    supportedSessions: Array<[string, AgentBackend]>,
+  ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[] }> {
+    const results = await Promise.allSettled(supportedSessions.map(([, agent]) =>
+      agent.setCompactionConfig!(config)
+    ));
+    const failedIndex = results.findIndex((result) => result.status === "rejected");
+    if (failedIndex >= 0) {
+      const failure = results[failedIndex] as PromiseRejectedResult;
+      return {
+        success: false,
+        error: getErrorMessage(failure.reason),
+        appliedSessionIds: supportedSessions
+          .filter((_, index) => results[index]?.status === "fulfilled")
+          .map(([sessionId]) => sessionId),
+      };
+    }
+    return {
+      success: true,
+      appliedSessionIds: supportedSessions.map(([sessionId]) => sessionId),
+    };
+  }
+
+  /** 兼容旧版全局入口；新界面应使用按 Agent 定向的配置入口。 */
+  async setCompactionConfig(value: unknown): Promise<{ success: boolean; error?: string; appliedSessionIds: string[] }> {
+    const config = normalizeAgentCompactionConfig(value);
+    const supportedSessions = Array.from(this.sessionAgents.entries()).filter(([, agent]) =>
+      typeof agent.setCompactionConfig === "function"
+    );
+    return this.applyCompactionConfigToSessions(config, supportedSessions);
+  }
+
+  async setAgentCompactionConfig(
+    agentId: string,
+    value: unknown,
+  ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[] }> {
+    const capabilities = await agentRegistry.getCapabilities(agentId);
+    if (!capabilities.compaction || capabilities.compaction === "none") {
+      return { success: false, error: "当前 Agent 未声明上下文压缩配置能力。", appliedSessionIds: [] };
+    }
+    const config = normalizeCompactionForSupport(value, capabilities.compaction);
+    const supportedSessions = Array.from(this.sessionAgents.entries()).filter(([sessionId, agent]) =>
+      this.sessionAgentTypes.get(sessionId) === agentId && typeof agent.setCompactionConfig === "function"
+    );
+    return this.applyCompactionConfigToSessions(config, supportedSessions);
   }
 
   async getModelsByAgentId(agentId: string): Promise<AgentModel[]> {
@@ -470,7 +571,7 @@ export class AgentManager {
         // Track the backend before init so a partially initialized instance is
         // still disposed if init rejects after registering event listeners.
         initializedTargets.push(initializedTarget);
-        await this.initAgentBackend(nextAgent, target.projectPath, target.sessionFilePath);
+        await this.initAgentBackend(nextAgent, target.agentType, target.projectPath, target.sessionFilePath);
         initializedTarget.nextSessionFilePath = nextAgent.sessionFilePath || target.sessionFilePath;
       }
     } catch (error) {
@@ -660,7 +761,7 @@ export class AgentManager {
           const agent = await this.createAgentBackend(target.agentType, target.sessionId);
           restored.push({ target, agent });
           if (this.window) agent.setWindow(this.window);
-          await this.initAgentBackend(agent, target.projectPath, target.sessionFilePath);
+          await this.initAgentBackend(agent, target.agentType, target.projectPath, target.sessionFilePath);
         }
       } catch (error) {
         await Promise.allSettled(restored.map(({ agent }) => (
@@ -1258,6 +1359,22 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       return await agentManager.reloadConfig(agentId, sessionId);
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err), reloadedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agent:setCompactionConfig", async (_event, config: unknown) => {
+    try {
+      return await agentManager.setCompactionConfig(config);
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), appliedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agent:setAgentCompactionConfig", async (_event, agentId: string, config: unknown) => {
+    try {
+      return await agentManager.setAgentCompactionConfig(agentId, config);
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), appliedSessionIds: [] };
     }
   });
 

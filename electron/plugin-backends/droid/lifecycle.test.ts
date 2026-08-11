@@ -1,7 +1,10 @@
 import { EventEmitter } from "events";
 import { PassThrough } from "stream";
 import type { ChildProcess } from "child_process";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 
@@ -26,8 +29,21 @@ interface DroidInternals {
 }
 
 describe("Droid lifecycle", () => {
-  beforeEach(() => {
+  const originalConfigPath = process.env.DROID_CONFIG_PATH;
+  const tempRoots: string[] = [];
+
+  beforeEach(async () => {
     spawnMock.mockReset();
+    const root = await mkdtemp(join(tmpdir(), "hpp-droid-lifecycle-"));
+    tempRoots.push(root);
+    process.env.DROID_CONFIG_PATH = join(root, "settings.json");
+    await writeFile(process.env.DROID_CONFIG_PATH, JSON.stringify({ keepMe: true }), "utf8");
+  });
+
+  afterEach(async () => {
+    if (originalConfigPath === undefined) delete process.env.DROID_CONFIG_PATH;
+    else process.env.DROID_CONFIG_PATH = originalConfigPath;
+    await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
   it("loads an existing Droid session instead of creating a new one", async () => {
@@ -63,8 +79,18 @@ describe("Droid lifecycle", () => {
     const systemPromptFlagIndex = spawnArgs.indexOf("--append-system-prompt");
     expect(systemPromptFlagIndex).toBeGreaterThan(-1);
     expect(spawnArgs[systemPromptFlagIndex + 1]).toBe("Always answer in Simplified Chinese.");
+    const settingsFlagIndex = spawnArgs.indexOf("--settings");
+    expect(settingsFlagIndex).toBeGreaterThan(-1);
+    const runtimeSettingsPath = spawnArgs[settingsFlagIndex + 1];
+    const runtimeSettings = JSON.parse(await readFile(runtimeSettingsPath, "utf8"));
+    expect(runtimeSettings).toMatchObject({ keepMe: true, compactionModel: "same" });
+    expect(requests[1]).toMatchObject({
+      method: "droid.update_session_settings",
+      params: { compactionModel: "same" },
+    });
     expect(agent.sessionFilePath).toBe("existing-session");
     await agent.dispose();
+    await expect(readFile(runtimeSettingsPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects initialization when the Droid process cannot start", async () => {

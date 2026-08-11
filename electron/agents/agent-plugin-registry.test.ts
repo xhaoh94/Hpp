@@ -117,6 +117,7 @@ describe("AgentPluginRegistry", () => {
     expect(result.success).toBe(true);
     expect(result.agent?.id).toBe("fake-agent");
     expect(result.agent?.capabilities.providerActivation).toBe("none");
+    expect(result.agent?.capabilities.compaction).toBe("none");
 
     const backend = await registry.createBackend("fake-agent", "session-1");
     await backend.init(tempRoot);
@@ -124,6 +125,20 @@ describe("AgentPluginRegistry", () => {
     await expect(backend.getModels()).resolves.toEqual([
       { id: "model-a", name: "Model A", provider: "test", reasoning: false },
     ]);
+  });
+
+  it("normalizes plugin-declared context compaction capabilities", async () => {
+    const source = await createPluginSource(tempRoot, "compaction-agent", "1.0.0", {
+      planMode: "native",
+      configuration: providerConfiguration,
+      compaction: { customModel: true, thinkingLevel: false },
+    });
+    const result = await registry.installFromPath(source);
+
+    expect(result.agent?.capabilities.compaction).toEqual({
+      customModel: true,
+      thinkingLevel: false,
+    });
   });
 
   it("passes host system prompt options to plugin init before runtime startup", async () => {

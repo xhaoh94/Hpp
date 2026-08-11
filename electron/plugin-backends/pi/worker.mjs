@@ -13,10 +13,6 @@ import {
   validateShellCommand,
 } from "./shell-environment.mjs";
 import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
-import {
-  normalizeImplicitOpenAIResponsesPayload,
-  withImplicitOpenAIResponsesThinkingLevels,
-} from "./thinking-level-compat.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
@@ -32,6 +28,36 @@ const FILE_DISCOVERY_GUIDANCE = [
   "不要猜测多个文件名并逐个试错。",
   "如果 bash 不可用，继续使用 ls、find 和 grep，不要反复重试基于 Shell 的文件发现。",
 ].join(" ");
+const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const AGENT_COMPACTION_THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const DEFAULT_AGENT_COMPACTION_CONFIG = {
+  thinkingLevel: "low",
+  modelMode: "current",
+  customModel: {
+    baseUrl: "",
+    apiKey: "",
+    modelId: "",
+    api: "openai-completions",
+    reasoning: false,
+  },
+};
+const normalizeAgentCompactionConfig = (value) => {
+  const config = isRecord(value) ? value : {};
+  const customModel = isRecord(config.customModel) ? config.customModel : {};
+  return {
+    thinkingLevel: AGENT_COMPACTION_THINKING_LEVELS.has(config.thinkingLevel)
+      ? config.thinkingLevel
+      : DEFAULT_AGENT_COMPACTION_CONFIG.thinkingLevel,
+    modelMode: config.modelMode === "custom" ? "custom" : "current",
+    customModel: {
+      baseUrl: String(customModel.baseUrl || "").trim(),
+      apiKey: String(customModel.apiKey || "").trim(),
+      modelId: String(customModel.modelId || "").trim(),
+      api: customModel.api === "openai-responses" ? "openai-responses" : "openai-completions",
+      reasoning: customModel.reasoning === true,
+    },
+  };
+};
 const PLAN_MODE_SYSTEM_PROMPT = `[HPP 计划模式已启用]
 当前回合处于计划模式。请在不改变环境的前提下，输出完整、可执行的实施计划。
 
@@ -47,6 +73,8 @@ let session = null;
 let modelRegistry = null;
 let resourceLoader = null;
 let uiBridge = null;
+let activeSettingsManager = null;
+let activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
 let unsubscribe = null;
 let projectPath = "";
 let activePromptId = null;
@@ -74,24 +102,6 @@ const finishPrompt = (id) => {
   if (activePromptId === id) activePromptId = null;
   send({ type: "prompt_done", id });
   setTimeout(() => completedPromptIds.delete(id), 60000);
-};
-
-const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-
-const applyPiModelThinkingCompatibility = (model) => {
-  const compatibleModel = withImplicitOpenAIResponsesThinkingLevels(model);
-  if (compatibleModel === model || !isRecord(model)) return compatibleModel;
-  try {
-    // Pi model objects are mutable catalogue records. Preserve their identity
-    // so the active session and registry expose the same repaired capability
-    // map after a model switch.
-    model.thinkingLevelMap = compatibleModel.thinkingLevelMap;
-    return model;
-  } catch {
-    // A future SDK may freeze catalogue objects; setModel can still accept the
-    // compatible copy returned by the pure helper.
-    return compatibleModel;
-  }
 };
 
 const readPath = (value, path) => {
@@ -535,7 +545,20 @@ const buildCommandContextActions = (sess) => ({
   },
 });
 
-const disposeSession = () => {
+const waitForPromise = (promise, timeoutMs) => new Promise((resolve) => {
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve();
+  };
+  const timer = setTimeout(finish, timeoutMs);
+  Promise.resolve(promise).then(finish, finish);
+});
+
+const disposeSession = async () => {
+  const disposingSession = session;
   activePromptId = null;
   activePermissionMode = "full-access";
   activePlanMode = false;
@@ -546,12 +569,28 @@ const disposeSession = () => {
   completedPromptIds.clear();
   unsubscribe?.();
   unsubscribe = null;
+  uiBridge?.dismissAll("dispose");
   uiBridge?.dispose();
   uiBridge = null;
-  session?.dispose();
-  session = null;
+
+  if (disposingSession) {
+    // 自动压缩发生在正文结束之后，但仍属于同一个 Pi 会话运行。
+    // 退出时先取消压缩并等待异步运行收尾，避免进程在 SDK 尚未完成
+    // 会话状态清理时被直接结束，导致下次恢复会话失败。
+    try {
+      disposingSession.abortCompaction?.();
+      await waitForPromise(disposingSession.abort?.(), 1000);
+    } catch {
+      // dispose() 自身仍会执行兜底中止和资源清理。
+    }
+    disposingSession.dispose();
+  }
+
+  if (session === disposingSession) session = null;
   modelRegistry = null;
   resourceLoader = null;
+  activeSettingsManager = null;
+  activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
   actionKeys.clear();
   builtinThinkingLevelMaps = null;
   builtinThinkingLevelMapsFailed = false;
@@ -704,17 +743,133 @@ const hppPermissionExtension = (pi) => {
   });
 };
 
+const isCompactionThinkingLevelSupported = (model, level) => {
+  if (level === "off") return true;
+  if (model?.reasoning !== true) return false;
+  const map = isRecord(model?.thinkingLevelMap) ? model.thinkingLevelMap : null;
+  if (!map) return level !== "xhigh" && level !== "max";
+  const mapped = map[level];
+  if (mapped === null) return false;
+  if (level === "xhigh" || level === "max") return mapped !== undefined;
+  return true;
+};
+
+const getCompactionThinkingLevel = (config, model, inheritedLevel) => {
+  if (model?.reasoning !== true) return "off";
+  const requested = config.thinkingLevel === "inherit"
+    ? String(inheritedLevel || "off")
+    : config.thinkingLevel;
+  if (isCompactionThinkingLevelSupported(model, requested)) return requested;
+  return ["minimal", "low", "medium", "high", "xhigh", "max"]
+    .find((level) => isCompactionThinkingLevelSupported(model, level)) || "off";
+};
+
+const createCustomCompactionTarget = (config) => {
+  const custom = config.customModel;
+  if (config.modelMode !== "custom" || !custom.baseUrl || !custom.modelId) return null;
+  return {
+    model: {
+      id: custom.modelId,
+      name: custom.modelId,
+      provider: "hpp-compaction",
+      api: custom.api,
+      baseUrl: custom.baseUrl.replace(/\/+$/, ""),
+      reasoning: custom.reasoning,
+      ...(custom.reasoning ? {
+        // 用户已显式声明该自定义模型支持思考，因此允许手动选择全部通用档位。
+        thinkingLevelMap: {
+          minimal: "minimal",
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: "xhigh",
+          max: "max",
+        },
+      } : {}),
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 262144,
+      maxTokens: 16384,
+      ...(custom.api === "openai-completions" && custom.reasoning
+        ? { compat: { supportsReasoningEffort: true } }
+        : {}),
+    },
+    auth: {
+      apiKey: custom.apiKey || "hpp-local",
+    },
+  };
+};
+
+const resolveCurrentCompactionTarget = async (context) => {
+  const model = context?.model || session?.model;
+  if (!model) throw new Error("当前 Agent 没有可用于压缩的模型");
+  const registry = context?.modelRegistry || modelRegistry;
+  if (!registry?.getApiKeyAndHeaders) {
+    throw new Error("当前 Agent 运行时不支持解析压缩模型凭据");
+  }
+  const auth = await registry.getApiKeyAndHeaders(model);
+  if (!auth?.ok) throw new Error(auth?.error || "压缩模型认证失败");
+  return { model, auth };
+};
+
+const runConfiguredCompaction = async (event, context, target, config) => {
+  if (typeof sdk?.compact !== "function") {
+    throw new Error("当前 Agent 运行时不支持自定义压缩");
+  }
+  const thinkingLevel = getCompactionThinkingLevel(config, target.model, context?.thinkingLevel || session?.thinkingLevel);
+  return sdk.compact(
+    event.preparation,
+    target.model,
+    target.auth.apiKey,
+    target.auth.headers,
+    event.customInstructions,
+    event.signal,
+    thinkingLevel,
+    undefined,
+    target.auth.env,
+    activeSettingsManager?.getRetrySettings?.(),
+  );
+};
+
+const hppCompactionExtension = (pi) => {
+  pi.on("session_before_compact", async (event, context) => {
+    const config = normalizeAgentCompactionConfig(activeCompactionConfig);
+    const customTarget = createCustomCompactionTarget(config);
+    if (customTarget) {
+      try {
+        return { compaction: await runConfiguredCompaction(event, context, customTarget, config) };
+      } catch (error) {
+        if (event.signal?.aborted) return undefined;
+        send({
+          type: "status",
+          id: `hpp-compaction-custom-model-fallback-${randomUUID()}`,
+          status: "warning",
+          title: "自定义压缩模型不可用，已回退当前模型",
+          detail: error?.message || String(error),
+        });
+      }
+    }
+
+    try {
+      const currentTarget = await resolveCurrentCompactionTarget(context);
+      return { compaction: await runConfiguredCompaction(event, context, currentTarget, config) };
+    } catch (error) {
+      if (!event.signal?.aborted) {
+        send({
+          type: "status",
+          id: `hpp-compaction-default-fallback-${randomUUID()}`,
+          status: "warning",
+          title: "独立压缩策略不可用，已使用 Agent 默认压缩",
+          detail: error?.message || String(error),
+        });
+      }
+      // 返回 undefined 让 Agent 的原生压缩流程接管，避免配置错误阻断会话恢复。
+      return undefined;
+    }
+  });
+};
+
 const hppRuntimePolicyExtension = (pi) => {
-  // Pi's OpenAI Responses adapter builds the final provider payload before
-  // invoking Agent.onPayload. Normalize only compatibility models here; the
-  // helper preserves usable explicit maps while repairing Luna's null/
-  // identity entries that still leave unsupported values on the wire.
-  pi.on("before_provider_request", (event, context) =>
-    normalizeImplicitOpenAIResponsesPayload(
-      event?.payload,
-      context?.model || session?.model,
-      context?.thinkingLevel ?? session?.thinkingLevel,
-    ));
   pi.on("before_agent_start", (event) => {
     const additions = [];
     if (activePlanMode) additions.push(PLAN_MODE_SYSTEM_PROMPT);
@@ -914,9 +1069,10 @@ const requireSDKFactory = (name) => {
   return factory;
 };
 
-const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt }) => {
-  disposeSession();
+const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig }) => {
+  await disposeSession();
   activeHostSystemPrompt = String(hostSystemPrompt || "").trim();
+  activeCompactionConfig = normalizeAgentCompactionConfig(compactionConfig);
   projectPath = cwd;
   sdk = await loadPiSDK();
   const eventBus = sdk.createEventBus();
@@ -935,13 +1091,19 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt })
       modelsPath: join(agentDir, "models.json"),
     });
     createdModelRegistry = new sdk.ModelRegistry(modelRuntime);
-    await createdModelRegistry.refresh?.();
+    try {
+      await createdModelRegistry.refresh?.();
+    } catch {
+      // Offline or network error – fall back to whatever models.json already
+      // contains from a previous successful refresh.
+    }
   } else {
     authStorage = requireSDKFactory("AuthStorage").create(join(agentDir, "auth.json"));
     createdModelRegistry = requireSDKFactory("ModelRegistry").create(authStorage, join(agentDir, "models.json"));
   }
   const settingsManager = requireSDKFactory("SettingsManager").create(cwd, agentDir);
   const effectiveSettingsManager = resolveShellSettings(settingsManager);
+  activeSettingsManager = effectiveSettingsManager;
   shellEnvironment = getShellEnvironment(effectiveSettingsManager);
   shellAvailable = !probeShell(effectiveSettingsManager);
   const shellEnvironmentContract = buildShellEnvironmentContract({
@@ -954,7 +1116,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt })
     agentDir,
     settingsManager: effectiveSettingsManager,
     eventBus,
-    extensionFactories: [hppPermissionExtension, hppRuntimePolicyExtension],
+    extensionFactories: [hppPermissionExtension, hppRuntimePolicyExtension, hppCompactionExtension],
     appendSystemPrompt: [
       FILE_DISCOVERY_GUIDANCE,
       shellEnvironmentContract,
@@ -985,12 +1147,9 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt })
     sessionManager,
   });
   session = result.session;
-  const compatibleInitialModel = applyPiModelThinkingCompatibility(session?.model);
-  if (compatibleInitialModel && compatibleInitialModel !== session?.model && typeof session?.setModel === "function") {
-    await session.setModel(compatibleInitialModel);
-  }
-  // Re-evaluate a restored setting against the repaired map. This matters for
-  // sessions opened from disk before Hpp asks the worker for its model list.
+  // Re-evaluate a restored setting so the session enforces the current
+  // model's supported levels; sessions opened from disk may carry a value
+  // the SDK accepted before the model catalogue was known.
   if (typeof session?.thinkingLevel === "string") {
     session?.setThinkingLevel?.(session.thinkingLevel);
   }
@@ -1191,6 +1350,14 @@ const handleSessionEvent = (event) => {
 // preserved as-is by Hpp's UI label helper.
 const PI_STANDARD_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/** 内置目录的能力 map 是否声明完整（7 个标准档位都有键）。 */
+const isCompleteThinkingLevelMap = (map) =>
+  PI_STANDARD_THINKING_LEVELS.every((level) => Object.prototype.hasOwnProperty.call(map, level));
+
+/** 能力 map 中显式声明“不支持”(null) 的档位数。 */
+const countNullThinkingLevels = (map) =>
+  PI_STANDARD_THINKING_LEVELS.filter((level) => map[level] === null).length;
+
 // Lazy index of the SDK's built-in catalogue capability maps. Hpp-synced
 // models.json entries for custom channels carry only id/name/reasoning/input,
 // so pi reports the default 5 levels for them. When a model omits its own
@@ -1216,7 +1383,24 @@ const getBuiltinThinkingLevelMaps = async () => {
       if (!map || Object.keys(map).length === 0) continue;
       const provider = String(model.provider || "");
       if (!maps.has(`provider:${provider}:${model.id}`)) maps.set(`provider:${provider}:${model.id}`, map);
-      if (!maps.has(`id:${model.id}`)) maps.set(`id:${model.id}`, map);
+      // 按 id 兜底时优先采用“声明完整”的能力 map：目录中同一模型可能有多个
+      // provider 条目且声明质量不一（例如 azure 条目只写了 off/xhigh/max，其余
+      // 档位缺键会被“缺键=支持”误读为全部支持，导致多出本不支持的档位）。
+      // 完整声明（7 个标准档都有键）能给出准确的支持列表；完整声明之间优先
+      // “显式排除(null)更多”的保守声明，避免向自定义渠道过度承诺其不支持的档位。
+      const idKey = `id:${model.id}`;
+      const existing = maps.get(idKey);
+      if (!existing) {
+        maps.set(idKey, map);
+      } else if (isCompleteThinkingLevelMap(map) && !isCompleteThinkingLevelMap(existing)) {
+        maps.set(idKey, map);
+      } else if (
+        isCompleteThinkingLevelMap(map)
+        && isCompleteThinkingLevelMap(existing)
+        && countNullThinkingLevels(map) > countNullThinkingLevels(existing)
+      ) {
+        maps.set(idKey, map);
+      }
     }
     builtinThinkingLevelMaps = maps;
     return maps;
@@ -1228,23 +1412,33 @@ const getBuiltinThinkingLevelMaps = async () => {
 
 const getModelSupportedThinkingLevels = async (model) => {
   if (!isRecord(model)) return undefined;
-  if (model.reasoning !== true) return ["off"];
+  if (model.reasoning !== true) return { levels: ["off"], hasDeclaredLevels: false };
   let map = isRecord(model.thinkingLevelMap) ? model.thinkingLevelMap : null;
+  let hasDeclaredLevels = !!map && Object.keys(map).length > 0;
   if (!map) {
     const builtinMaps = await getBuiltinThinkingLevelMaps();
     if (builtinMaps) {
       map = builtinMaps.get(`provider:${model.provider}:${model.id}`)
         || builtinMaps.get(`id:${model.id}`)
         || null;
+      // 目录/条目声明过档位（如 deepseek 的 high/max）才视为“有档位”；
+      // 无任何档位声明的模型（如 mimo）只有思考开关，走默认 5 档。
+      hasDeclaredLevels = !!map;
     }
   }
   const effectiveMap = map || {};
-  return PI_STANDARD_THINKING_LEVELS.filter((level) => {
-    const mapped = effectiveMap[level];
-    if (mapped === null) return false;
-    if (level === "xhigh" || level === "max") return mapped !== undefined;
-    return true;
-  });
+  if (Object.keys(effectiveMap).length === 0) {
+    return { levels: ["off", "minimal", "low", "medium", "high"], hasDeclaredLevels: false };
+  }
+  return {
+    levels: PI_STANDARD_THINKING_LEVELS.filter((level) => {
+      const mapped = effectiveMap[level];
+      if (mapped === null) return false;
+      if (level === "xhigh" || level === "max") return mapped !== undefined;
+      return true;
+    }),
+    hasDeclaredLevels: true,
+  };
 };
 
 const getModels = async () => {
@@ -1256,18 +1450,23 @@ const getModels = async () => {
     : undefined;
   const results = [];
   for (const model of models) {
-    const compatibleModel = applyPiModelThinkingCompatibility(model);
-    const computedLevels = await getModelSupportedThinkingLevels(compatibleModel);
+    const computed = await getModelSupportedThinkingLevels(model);
     const isActive = activeModel &&
       model.provider === activeModel.provider &&
       (model.id || model.modelId) === (activeModel.id || activeModel.modelId);
+    // 思考档位呈现模式：声明了档位且非 off 档位 >1 → 下拉；否则（无声明 / 只 1 档）→ 开关。
+    const declaredLevels = (computed?.levels || []).filter((level) => level !== "off");
+    const hasMultipleDeclaredLevels = computed?.hasDeclaredLevels === true && declaredLevels.length > 1;
     results.push({
       id: model.id || model.modelId,
       name: model.name || model.id || model.modelId,
       provider: model.provider,
       reasoning: !!model.reasoning,
       supportsImages: Array.isArray(model.input) ? model.input.includes("image") : false,
-      supportedThinkingLevels: computedLevels || (isActive ? activeThinkingLevels : undefined),
+      supportedThinkingLevels: computed?.levels || (isActive ? activeThinkingLevels : undefined),
+      thinkingLevelMode: model.reasoning === true
+        ? (hasMultipleDeclaredLevels ? "levels" : "toggle")
+        : undefined,
     });
   }
   return results;
@@ -1351,14 +1550,17 @@ const handleCommand = async (command) => {
         if (!modelRegistry?.hasConfiguredAuth?.(registeredModel)) {
           throw new Error(`No API key found for model: ${command.provider}/${command.modelId}`);
         }
-        const model = applyPiModelThinkingCompatibility(registeredModel);
-        await session.setModel(model);
+        await session.setModel(registeredModel);
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
       }
       case "setThinkingLevel":
         session?.setThinkingLevel(command.level);
         send({ type: "thinking_level_changed", id: command.id, level: session?.thinkingLevel || command.level });
+        break;
+      case "setCompactionConfig":
+        activeCompactionConfig = normalizeAgentCompactionConfig(command.config);
+        send({ type: "compaction_config_changed", id: command.id, config: activeCompactionConfig });
         break;
       case "uiResponse":
         if (!uiBridge?.handleResponse(command.response)) {
@@ -1370,7 +1572,7 @@ const handleCommand = async (command) => {
         send({ type: "ui_response_done", id: command.id });
         break;
       case "dispose":
-        disposeSession();
+        await disposeSession();
         process.exit(0);
         break;
     }

@@ -1,9 +1,10 @@
 {
   "name": "hpp",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
+    "postinstall": "node scripts/ensure-electron.cjs",
     "dev": "electron-vite dev",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -93,7 +94,7 @@
     "asar": false,
     "win": {
       "target": "nsis",
-      "icon": "public/icon.png"
+      "icon": "public/icon.ico"
     },
     "mac": {
       "icon": "public/icon.png"

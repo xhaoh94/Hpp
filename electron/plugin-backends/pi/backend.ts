@@ -6,6 +6,10 @@ import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProc
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
+import {
+  normalizeAgentCompactionConfig,
+  type AgentCompactionConfig,
+} from "../../../shared/agent-compaction";
 import type {
   AgentActionCatalogEntry,
   AgentActionInvocation,
@@ -19,6 +23,8 @@ interface AgentModel {
   reasoning: boolean;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
+  /** 思考档位呈现模式：levels=有档位声明（下拉）；toggle=仅有思考开关（无档位声明，如 mimo）。 */
+  thinkingLevelMode?: "levels" | "toggle";
 }
 
 interface AgentSendOptions {
@@ -32,6 +38,7 @@ interface AgentSendOptions {
 
 interface AgentInitOptions {
   hostSystemPrompt?: string;
+  compaction?: AgentCompactionConfig;
 }
 
 interface AgentForkTarget {
@@ -81,6 +88,9 @@ const normalizeModels = (value: unknown): AgentModel[] => {
       supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
         ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
         : undefined,
+      thinkingLevelMode: model.thinkingLevelMode === "levels" || model.thinkingLevelMode === "toggle"
+        ? model.thinkingLevelMode
+        : undefined,
     }];
   });
 };
@@ -119,6 +129,8 @@ export class PiSDKAgent {
   private initKey: string | null = null;
   private isReady = false;
   private hostSystemPrompt = "";
+  private compactionConfig = normalizeAgentCompactionConfig(undefined);
+  private guidancePendingResponse = false;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -131,7 +143,8 @@ export class PiSDKAgent {
   async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
     const requestedSessionFilePath = existingSessionFilePath || null;
     const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
-    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}`;
+    const requestedCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
+    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}\n${JSON.stringify(requestedCompactionConfig)}`;
     if (this.initPromise && this.initKey === nextInitKey) {
       return this.initPromise;
     }
@@ -141,6 +154,7 @@ export class PiSDKAgent {
       this.isReady &&
       this.projectPath === projectPath &&
       this.hostSystemPrompt === requestedHostSystemPrompt &&
+      JSON.stringify(this.compactionConfig) === JSON.stringify(requestedCompactionConfig) &&
       (!requestedSessionFilePath || this._sessionFilePath === requestedSessionFilePath)
     ) {
       return;
@@ -152,6 +166,7 @@ export class PiSDKAgent {
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
     this.hostSystemPrompt = requestedHostSystemPrompt;
+    this.compactionConfig = requestedCompactionConfig;
     this.models = [];
     this.isReady = false;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
@@ -243,6 +258,7 @@ export class PiSDKAgent {
           projectPath,
           sessionFilePath: existingSessionFilePath,
           hostSystemPrompt: this.hostSystemPrompt,
+          compactionConfig: this.compactionConfig,
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "ready") {
@@ -374,6 +390,7 @@ export class PiSDKAgent {
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "accepted" || data.type === "guidance_done") {
+            if (data.type === "guidance_done") this.guidancePendingResponse = true;
             resolve();
           } else {
             reject(new Error(optionalString(data.error) || "Pi SDK guidance failed"));
@@ -558,6 +575,16 @@ export class PiSDKAgent {
     });
   }
 
+  async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
+    const config = normalizeAgentCompactionConfig(value);
+    this.compactionConfig = config;
+    if (!this.process) return;
+    const data = await this.requestWorkerCommand({ type: "setCompactionConfig", config }, 8_000);
+    if (data.type !== "compaction_config_changed") {
+      throw new Error(optionalString(data.error) || "Pi SDK set compaction config failed");
+    }
+  }
+
   async sendUIResponse(response: AgentUIResponse): Promise<void> {
     const id = optionalString(response.id) || optionalString(response.requestId);
     const data = await this.requestWorkerCommand({
@@ -711,8 +738,10 @@ export class PiSDKAgent {
             this.streamedTextBuffer += delta;
             this.streamedMessageTextBuffer += delta;
           }
+          this.tryEmitGuidanceResponseStarted();
           this.emitEventThrottled({ type: "stream_delta", delta });
         } else if (assistantEvent.type === "thinking_delta") {
+          this.tryEmitGuidanceResponseStarted();
           this.emitEventThrottled({ type: "thinking_delta", delta: String(assistantEvent.delta || "") });
         }
         this.refreshAgentEndFallback();
@@ -749,6 +778,7 @@ export class PiSDKAgent {
         break;
       case "tool_execution_start":
         this.clearTurnFallback();
+        this.tryEmitGuidanceResponseStarted();
         this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
         break;
       case "tool_execution_update": {
@@ -1047,6 +1077,13 @@ export class PiSDKAgent {
       this.emitEvent({ type: "agent_disconnected", detail: error });
     }
     this.finishAbortState();
+  }
+
+  private tryEmitGuidanceResponseStarted() {
+    if (this.guidancePendingResponse) {
+      this.guidancePendingResponse = false;
+      this.emitEvent({ type: "guidance_response_started" });
+    }
   }
 
   private emitEvent(data: unknown) {

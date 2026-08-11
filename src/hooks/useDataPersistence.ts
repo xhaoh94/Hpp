@@ -36,6 +36,8 @@ interface PersistedModel {
   currentModel?: ModelInfo | null;
   thinkingLevel?: string;
   thinkingLevels?: Record<string, string>;
+  /** sessionId -> modelKey -> thinking level */
+  thinkingLevelsByModel?: Record<string, Record<string, string>>;
   models?: Record<string, ModelInfo>;
 }
 
@@ -316,6 +318,16 @@ const parseStringRecord = (value: unknown): Record<string, string> => {
   return result;
 };
 
+const parseStringRecordMap = (value: unknown): Record<string, Record<string, string>> => {
+  if (!isRecord(value)) return {};
+  const result: Record<string, Record<string, string>> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const parsed = parseStringRecord(item);
+    if (Object.keys(parsed).length > 0) result[key] = parsed;
+  }
+  return result;
+};
+
 const hasStreamingMessages = (sessionMessages: Record<string, ChatMessage[]>) =>
   Object.values(sessionMessages).some((messages) =>
     messages.some(hasOpenAssistantProcessState)
@@ -328,6 +340,7 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
     currentModel: parseModelInfo(value.currentModel),
     thinkingLevel: getString(value.thinkingLevel),
     thinkingLevels: parseStringRecord(value.thinkingLevels),
+    thinkingLevelsByModel: parseStringRecordMap(value.thinkingLevelsByModel),
     models: parseModelRecord(value.models),
   };
 };
@@ -335,6 +348,7 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
 // In-memory cache for per-session models and thinking levels, synced to disk.
 let _sessionModelsCache: Record<string, ModelInfo> = {};
 let _sessionThinkingCache: Record<string, string> = {};
+let _sessionModelThinkingCache: Record<string, Record<string, string>> = {};
 export const SESSION_CONFIG_UPDATED_EVENT = "session-config-updated";
 export const SESSION_DATA_PURGED_EVENT = "session-data-purged";
 export const DISK_USAGE_INVALIDATED_EVENT = "disk-usage-invalidated";
@@ -432,7 +446,8 @@ function flushModelsToDisk() {
   window.electronAPI.saveData("currentModel", {
     models: { ..._sessionModelsCache },
     thinkingLevels: { ..._sessionThinkingCache },
-    modelVersion: 5,
+    thinkingLevelsByModel: { ..._sessionModelThinkingCache },
+    modelVersion: 6,
   });
 }
 
@@ -462,6 +477,33 @@ export function getSessionThinking(sessionId: string): string | null {
   return _sessionThinkingCache[sessionId] || null;
 }
 
+const getModelThinkingCacheKey = (model: Pick<ModelInfo, "provider" | "id">) =>
+  `${model.provider}:${model.id}`;
+
+/** Save a thinking level for a specific session and model. */
+export function saveSessionModelThinking(
+  sessionId: string,
+  model: Pick<ModelInfo, "provider" | "id">,
+  level: string,
+) {
+  const previous = _sessionModelThinkingCache[sessionId] || {};
+  _sessionModelThinkingCache[sessionId] = {
+    ...previous,
+    [getModelThinkingCacheKey(model)]: level,
+  };
+  _cacheDirty = true;
+  saveScheduler.schedule("models", 500, flushModelsToDisk);
+  notifySessionConfigUpdated(sessionId);
+}
+
+/** Get a thinking level previously selected for a specific session and model. */
+export function getSessionModelThinking(
+  sessionId: string,
+  model: Pick<ModelInfo, "provider" | "id">,
+): string | null {
+  return _sessionModelThinkingCache[sessionId]?.[getModelThinkingCacheKey(model)] || null;
+}
+
 const withoutSessionKeys = <T>(record: Record<string, T>, sessionIds: Set<string>) =>
   Object.fromEntries(Object.entries(record).filter(([sessionId]) => !sessionIds.has(sessionId)));
 
@@ -472,11 +514,14 @@ export async function purgeDeletedSessionData(sessionIds: string[], projectIds: 
 
   const previousModelCount = Object.keys(_sessionModelsCache).length;
   const previousThinkingCount = Object.keys(_sessionThinkingCache).length;
+  const previousModelThinkingCount = Object.keys(_sessionModelThinkingCache).length;
   _sessionModelsCache = withoutSessionKeys(_sessionModelsCache, normalizedSessionIds);
   _sessionThinkingCache = withoutSessionKeys(_sessionThinkingCache, normalizedSessionIds);
+  _sessionModelThinkingCache = withoutSessionKeys(_sessionModelThinkingCache, normalizedSessionIds);
   if (
     Object.keys(_sessionModelsCache).length !== previousModelCount ||
-    Object.keys(_sessionThinkingCache).length !== previousThinkingCount
+    Object.keys(_sessionThinkingCache).length !== previousThinkingCount ||
+    Object.keys(_sessionModelThinkingCache).length !== previousModelThinkingCount
   ) {
     _cacheDirty = true;
     saveScheduler.schedule("models", 500, flushModelsToDisk);
@@ -618,6 +663,7 @@ export function useDataPersistence() {
         if (!model.modelVersion || model.modelVersion < 5) {
           _sessionModelsCache = {};
           _sessionThinkingCache = {};
+          _sessionModelThinkingCache = {};
           // Migrate legacy global thinkingLevel if present
           if (model.thinkingLevel) {
             _sessionThinkingCache = {};
@@ -625,17 +671,22 @@ export function useDataPersistence() {
           window.electronAPI.saveData("currentModel", {
             models: {},
             thinkingLevels: {},
-            modelVersion: 5,
+            thinkingLevelsByModel: {},
+            modelVersion: 6,
           });
         } else {
           if (model.models) _sessionModelsCache = { ...model.models };
           if (model.thinkingLevels) _sessionThinkingCache = { ...model.thinkingLevels };
+          if (model.thinkingLevelsByModel) _sessionModelThinkingCache = { ...model.thinkingLevelsByModel };
           if (validSessionIds) {
             _sessionModelsCache = Object.fromEntries(
               Object.entries(_sessionModelsCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
             );
             _sessionThinkingCache = Object.fromEntries(
               Object.entries(_sessionThinkingCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
+            );
+            _sessionModelThinkingCache = Object.fromEntries(
+              Object.entries(_sessionModelThinkingCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
             );
           }
         }

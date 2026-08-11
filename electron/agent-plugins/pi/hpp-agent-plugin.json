@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "pi",
   "name": "Pi",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "minHppVersion": "0.1.8",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",
@@ -18,6 +18,10 @@
     "guidance": true,
     "fork": true,
     "actions": true,
+    "compaction": {
+      "customModel": true,
+      "thinkingLevel": true
+    },
     "configuration": {
       "type": "provider",
       "storage": "plugin",

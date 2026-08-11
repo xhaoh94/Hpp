@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentEvent,
+  AgentCompactionConfig,
   AgentImagePayload,
   AgentSendOptions,
   AgentActionListOptions,
@@ -127,6 +128,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:forkSession", sessionId, target),
   agentReloadConfig: (agentId: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:reloadConfig", agentId, sessionId),
+  agentSetCompactionConfig: (config: AgentCompactionConfig) =>
+    ipcRenderer.invoke("agent:setCompactionConfig", config),
+  agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) =>
+    ipcRenderer.invoke("agent:setAgentCompactionConfig", agentId, config),
   agentConfigList: (agentId: string) =>
     ipcRenderer.invoke("agentConfig:list", agentId),
   agentConfigGetModelVisibility: (agentId: string) =>

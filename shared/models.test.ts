@@ -7,6 +7,9 @@ import {
   isSameModel,
   getModelThinkingLevels,
   normalizeModelThinkingLevel,
+  getEffectiveThinkingLevelMode,
+  getThinkingToggleLevel,
+  isModelThinkingLevelSelectable,
 } from "./models";
 
 const models = [
@@ -47,6 +50,7 @@ describe("shared model rules", () => {
     expect(getModelThinkingLevels(claudeModel).map((level) => level.id))
       .toEqual(["off", "low", "medium", "high", "xhigh"]);
     expect(normalizeModelThinkingLevel("minimal", claudeModel)).toBe("medium");
+    expect(normalizeModelThinkingLevel("off", { ...models[0], supportedThinkingLevels: ["high"] })).toBe("off");
     expect(getModelThinkingLevels(models[0])).toEqual([]);
   });
 
@@ -63,5 +67,48 @@ describe("shared model rules", () => {
     ]);
     expect(normalizeModelThinkingLevel("none", model)).toBe("off");
     expect(normalizeModelThinkingLevel("max", model)).toBe("max");
+  });
+
+  it("derives effective thinking level mode from backend mode or supported levels", () => {
+    // 非 reasoning 模型 → undefined
+    expect(getEffectiveThinkingLevelMode({ ...models[0], reasoning: false })).toBeUndefined();
+    // 后端已设 thinkingLevelMode → 直接使用
+    expect(getEffectiveThinkingLevelMode({ ...models[0], thinkingLevelMode: "levels" })).toBe("levels");
+    expect(getEffectiveThinkingLevelMode({ ...models[0], thinkingLevelMode: "toggle" })).toBe("toggle");
+    // 非 pi 后端未产出 mode：按自定义等级数量推导
+    // 0 档 → toggle（思考开关）
+    expect(getEffectiveThinkingLevelMode(models[0])).toBe("toggle");
+    // 1 档 → toggle
+    expect(getEffectiveThinkingLevelMode({ ...models[0], supportedThinkingLevels: ["medium"] })).toBe("toggle");
+    // >1 档 → levels
+    expect(getEffectiveThinkingLevelMode({
+      ...models[0],
+      supportedThinkingLevels: ["low", "medium", "high"],
+    })).toBe("levels");
+    // off 不计入有效档位：off+medium → toggle
+    expect(getEffectiveThinkingLevelMode({
+      ...models[0],
+      supportedThinkingLevels: ["off", "medium"],
+    })).toBe("toggle");
+    // null/undefined → undefined
+    expect(getEffectiveThinkingLevelMode(null)).toBeUndefined();
+    expect(getEffectiveThinkingLevelMode(undefined)).toBeUndefined();
+  });
+
+  it("selects the correct enabled level for a thinking toggle", () => {
+    expect(getThinkingToggleLevel({ supportedThinkingLevels: ["high"] })).toBe("high");
+    expect(getThinkingToggleLevel({ supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"] })).toBe("medium");
+    expect(getThinkingToggleLevel({ supportedThinkingLevels: [] })).toBe("medium");
+    expect(getThinkingToggleLevel(null)).toBe("medium");
+  });
+
+  it("validates toggle values even when off/default are not declared levels", () => {
+    const singleLevel = { ...models[0], supportedThinkingLevels: ["high"] };
+    expect(isModelThinkingLevelSelectable(singleLevel, "high")).toBe(true);
+    expect(isModelThinkingLevelSelectable(singleLevel, "off")).toBe(true);
+    expect(isModelThinkingLevelSelectable(singleLevel, "medium")).toBe(false);
+    expect(isModelThinkingLevelSelectable(models[0], "medium")).toBe(true);
+    expect(isModelThinkingLevelSelectable(models[0], "off")).toBe(true);
+    expect(isModelThinkingLevelSelectable({ ...models[0], reasoning: false }, "off")).toBe(false);
   });
 });

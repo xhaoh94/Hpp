@@ -189,6 +189,24 @@ describe("chat interaction regression constraints", () => {
     expect(thinkingStyles).toContain("font-weight: inherit");
   });
 
+  it("keeps the user-message history popup isolated from the conversation scroller", () => {
+    expect(chatPanelSource).not.toContain('className="chat-user-history-header"');
+    expect(chatPanelSource).toContain('onWheel={(event) => event.stopPropagation()}');
+    const popupStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-user-history-popup {"),
+      chatPanelStyles.indexOf(".chat-header-history-anchor .chat-user-history-popup")
+    );
+    const listStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-user-history-list {"),
+      chatPanelStyles.indexOf(".chat-user-history-item")
+    );
+    expect(popupStyles).toContain("pointer-events: auto");
+    expect(popupStyles).toContain("overscroll-behavior: contain");
+    expect(listStyles).toContain("overflow-y: auto");
+    expect(listStyles).toContain("max-height: 400px");
+    expect(listStyles).toContain("overscroll-behavior-y: contain");
+  });
+
   it("contains long thinking code lines without widening the conversation scroller", () => {
     const messageScrollerStyles = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-messages {"),

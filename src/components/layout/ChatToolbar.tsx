@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Check, Settings, Shield, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
-import { groupModelsByProvider, includeCurrentModel } from "@shared/models";
+import { getEffectiveThinkingLevelMode, getThinkingToggleLevel, groupModelsByProvider, includeCurrentModel, normalizeThinkingLevelId } from "@shared/models";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
 
@@ -285,39 +285,63 @@ export function ChatToolbar({
         )}
       </div>
 
-      {currentModel?.reasoning && currentThinking && thinkingLevels.length > 0 && <div ref={thinkingRef} className="relative">
-        <button
-          onClick={() => {
-            onThinkingOpenChange(!thinkingOpen);
-            onModelOpenChange(false);
-            onPermissionOpenChange(false);
-          }}
-          className="chat-toolbar-select"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
-            <path d="M10 21h4" />
-          </svg>
-          <span>思考: {currentThinking.label}</span>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
-        {thinkingOpen && createPortal(
-          <div ref={thinkingMenuRef} style={thinkingMenuStyle} className="chat-thinking-dropdown" data-chat-toolbar-overlay>
-            {thinkingLevels.map((level) => (
-              <button
-                key={level.id}
-                onClick={() => onSelectThinking(level.id)}
-                className={`chat-thinking-option ${thinkingLevel === level.id ? "active" : ""}`}
-              >
-                {level.label}
-              </button>
-            ))}
-          </div>,
-          document.body,
-        )}
-      </div>}
+      {(() => {
+        const effectiveMode = getEffectiveThinkingLevelMode(currentModel);
+        if (!currentModel?.reasoning || !effectiveMode) return null;
+        if (effectiveMode === "toggle") {
+          const enabledLevel = getThinkingToggleLevel(currentModel);
+          // 无档位声明时开=medium；自定义只选 1 档时开=该档；关始终为 off。
+          return (
+            <button
+              onClick={() => onSelectThinking(normalizeThinkingLevelId(thinkingLevel) === "off" ? enabledLevel : "off")}
+              className={`chat-toolbar-select chat-toolbar-thinking-toggle ${normalizeThinkingLevelId(thinkingLevel) !== "off" ? "active" : ""}`}
+              title={normalizeThinkingLevelId(thinkingLevel) === "off" ? "开启思考" : "关闭思考"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
+                <path d="M10 21h4" />
+              </svg>
+              <span>思考: {normalizeThinkingLevelId(thinkingLevel) === "off" ? "关" : "开"}</span>
+            </button>
+          );
+        }
+        if (!currentThinking || thinkingLevels.length === 0) return null;
+        return (
+        <div ref={thinkingRef} className="relative">
+          <button
+            onClick={() => {
+              onThinkingOpenChange(!thinkingOpen);
+              onModelOpenChange(false);
+              onPermissionOpenChange(false);
+            }}
+            className="chat-toolbar-select"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
+              <path d="M10 21h4" />
+            </svg>
+            <span>思考: {currentThinking.label}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {thinkingOpen && createPortal(
+            <div ref={thinkingMenuRef} style={thinkingMenuStyle} className="chat-thinking-dropdown" data-chat-toolbar-overlay>
+              {thinkingLevels.map((level) => (
+                <button
+                  key={level.id}
+                  onClick={() => onSelectThinking(level.id)}
+                  className={`chat-thinking-option ${thinkingLevel === level.id ? "active" : ""}`}
+                >
+                  {level.label}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
+        </div>
+        );
+      })()}
     </div>
   );
 }

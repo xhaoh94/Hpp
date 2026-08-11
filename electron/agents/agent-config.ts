@@ -10,14 +10,15 @@ import { getAgentPluginRegistry } from "./agent-plugin-registry";
 export interface AgentCustomModelConfig {
   id: string;
   name: string;
+  /** 内置模型来自 Agent 能力；自定义模型由 supportedThinkingLevels 是否非空派生。 */
   reasoning: boolean;
   imageInput: boolean;
   /**
-   * Per-model thinking levels declared in the provider configuration.
-   * Unknown ids are preserved as-is; the value is the canonical list of
-   * thinking levels this model exposes, regardless of the plugin default.
+   * 模型声明的思考档位。未知档位保持原值；对自定义模型而言，空值表示不支持思考。
    */
   supportedThinkingLevels?: string[];
+  /** 该模型是否在 Agent 内置目录中（能力由 Agent 管理，配置弹窗不显示能力控件）。 */
+  isBuiltin?: boolean;
 }
 
 export type AgentProviderEndpoint = string;
@@ -49,6 +50,7 @@ export interface AgentConfigResult {
     reasoning: boolean;
     supportsImages?: boolean;
     supportedThinkingLevels?: string[];
+    thinkingLevelMode?: "levels" | "toggle";
   }>;
   reloadedSessionIds?: string[];
 }
@@ -96,14 +98,17 @@ function normalizeModel(value: unknown): AgentCustomModelConfig | null {
   if (!isRecord(value)) return null;
   const id = asString(value.id);
   if (!id) return null;
-  const hasThinkingLevelDeclaration = Array.isArray(value.supportedThinkingLevels);
   const supportedThinkingLevels = normalizeSupportedThinkingLevels(value.supportedThinkingLevels);
+  const isBuiltin = value.isBuiltin === true;
   return {
     id,
     name: asString(value.name) || id,
-    reasoning: hasThinkingLevelDeclaration ? supportedThinkingLevels.length > 0 : value.reasoning === true,
+    // 内置模型使用 Agent 目录的 reasoning；自定义模型由思考档位是否非空决定。
+    reasoning: isBuiltin ? value.reasoning === true : supportedThinkingLevels.length > 0,
     imageInput: value.imageInput === true,
     ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
+    ...(value.hasThinkingLevels === true || supportedThinkingLevels.length > 0 ? { hasThinkingLevels: true } : {}),
+    ...(isBuiltin ? { isBuiltin: true } : {}),
   };
 }
 
@@ -245,6 +250,64 @@ async function writeAgentConfigState(agentId: string, state: AgentConfigState) {
   await writeSettings(settings);
 }
 
+// 旧版保存的 hpp 配置里没有 hasThinkingLevels/isBuiltin 字段（能力标记是派生信息）。
+// 打开配置弹窗时用插件实时发现结果（读 models.json + 渠道目录）补全：
+// 内置目录模型（如 deepseek/mimo）的能力（reasoning/imageInput/thinkingLevels）由 Agent
+// 自身管理，配置弹窗不显示能力控件；非内置（自定义）模型才显示控件供自定义。
+async function enrichWithDiscoveredThinkingLevels(
+  agentId: string,
+  state: AgentConfigState,
+): Promise<AgentConfigState> {
+  try {
+    const discovered = await getAgentPluginRegistry().readProviderConfig(agentId);
+    if (discovered === undefined) return state;
+    const discoveredByKey = new Map<string, AgentCustomModelConfig>();
+    const discoveredById = new Map<string, AgentCustomModelConfig>();
+    for (const provider of discovered.providers) {
+      for (const model of provider.models) {
+        discoveredByKey.set(`${provider.providerId}/${model.id}`, model);
+        // 按 modelId 跨 provider 兜底：用户自定义渠道的 providerId 可能与
+        // 插件内置目录的 providerId 不同，但模型 id 相同（如 gpt-5.6-sol 在
+        // 自定义渠道 tanwan 下和 pi 内置 opencode 下同名）。
+        discoveredById.set(model.id, model);
+      }
+    }
+    if (discoveredByKey.size === 0) return state;
+    return {
+      ...state,
+      providers: state.providers.map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) => {
+          // 先按 providerId/modelId 精确匹配，找不到时按 modelId 跨 provider 兜底。
+          const discoveredModel = discoveredByKey.get(`${provider.providerId}/${model.id}`)
+            || discoveredById.get(model.id);
+          if (!discoveredModel) {
+            // 插件发现结果里没有该模型（id 未同步 / 渠道外手动添加）→
+            // 按“非内置”处理，提供自定义能力控件。
+            return { ...model, isBuiltin: false, hasThinkingLevels: true };
+          }
+          const merged: AgentCustomModelConfig = { ...model };
+          // 采用最新发现的 isBuiltin / hasThinkingLevels：内置模型不显示能力控件，
+          // 非内置模型显示控件。避免旧版保存的值残留。
+          merged.isBuiltin = discoveredModel.isBuiltin === true;
+          merged.hasThinkingLevels = discoveredModel.hasThinkingLevels === true;
+          // 内置模型的能力（reasoning/imageInput）以目录为权威。
+          merged.reasoning = discoveredModel.reasoning;
+          merged.imageInput = discoveredModel.imageInput;
+          // 旧配置没有档位时，用内置模型的内置档位预填（如 deepseek 的 high/max）。
+          if (!model.supportedThinkingLevels?.length && discoveredModel.supportedThinkingLevels?.length) {
+            merged.supportedThinkingLevels = discoveredModel.supportedThinkingLevels;
+          }
+          return merged;
+        }),
+      })),
+    };
+  } catch {
+    // 插件发现失败时保持已保存的状态原样。
+    return state;
+  }
+}
+
 async function readCurrentAgentConfigState(
   agentId: string,
   configuration?: AgentProviderConfiguration,
@@ -252,7 +315,9 @@ async function readCurrentAgentConfigState(
   const resolvedConfiguration = configuration || await getProviderConfiguration(agentId);
   if (resolvedConfiguration.storage === "hpp") {
     const saved = await readSavedAgentConfigEntry(agentId, resolvedConfiguration);
-    if (saved.exists) return saved.state;
+    if (saved.exists) {
+      return enrichWithDiscoveredThinkingLevels(agentId, saved.state);
+    }
     const discovered = await getAgentPluginRegistry().readProviderConfig(agentId);
     const state = normalizeState(discovered, resolvedConfiguration);
     if (discovered !== undefined && (state.activeProviderId || state.providers.length > 0)) {
@@ -351,7 +416,10 @@ export async function saveAgentProviderConfig(agentId: string, providerValue: un
       providers,
     };
     await persistAgentConfigState(agentId, nextState, configuration);
-    return { success: true, config: nextState };
+    // 写入后重新读取一次，让插件/目录重新派生 isBuiltin、图片能力和内置档位。
+    // 这样手动输入一个内置模型 ID 后，无需关闭整个配置弹窗再打开才能得到正确界面。
+    const persistedState = await readCurrentAgentConfigState(agentId, configuration);
+    return { success: true, config: persistedState };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -504,6 +572,7 @@ export async function getConfiguredAgentModels(
   reasoning: boolean;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
+  thinkingLevelMode?: "levels" | "toggle";
 }>> {
   const registry = getAgentPluginRegistry();
   const capabilities = await registry.getCapabilities(agentId);
@@ -512,13 +581,25 @@ export async function getConfiguredAgentModels(
   const providers = options.activeOnly && capabilities.providerActivation === "single-active"
     ? state.providers.filter((provider) => provider.providerId === state.activeProviderId)
     : state.providers;
-  return providers.flatMap((provider) => provider.models.map((model) => ({
-    id: model.id,
-    name: model.name || model.id,
-    provider: provider.providerId,
-    reasoning: model.reasoning === true,
-    supportsImages: model.imageInput === true,
-    supportedThinkingLevels:
-      model.supportedThinkingLevels ?? configuration.modelDefaults.supportedThinkingLevels,
-  })));
+  return providers.flatMap((provider) => provider.models.map((model) => {
+    // 内置模型使用插件发现后写入 model 的档位；非内置模型只认用户显式勾选的档位。
+    // 缺少档位是有意义的（显示思考开关），不能再用 agent 级默认值把它误变成下拉。
+    const supportedThinkingLevels = normalizeSupportedThinkingLevels(model.supportedThinkingLevels);
+    const selectableLevelCount = supportedThinkingLevels.filter((level) => level !== "off").length;
+    const usesLevelDropdown = model.isBuiltin
+      ? selectableLevelCount > 0
+      : selectableLevelCount > 1;
+    const thinkingLevelMode = model.reasoning === true
+      ? (usesLevelDropdown ? "levels" : "toggle")
+      : undefined;
+    return {
+      id: model.id,
+      name: model.name || model.id,
+      provider: provider.providerId,
+      reasoning: model.reasoning === true,
+      supportsImages: model.imageInput === true,
+      ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
+      ...(thinkingLevelMode ? { thinkingLevelMode } : {}),
+    };
+  }));
 }

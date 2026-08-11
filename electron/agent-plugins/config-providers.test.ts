@@ -62,6 +62,22 @@ describe("official plugin config providers", () => {
     });
   });
 
+  it("declares context compaction support in plugin manifests", async () => {
+    const readManifest = async (agentId: string) => JSON.parse(await readFile(
+      join(process.cwd(), "electron", "agent-plugins", agentId, "hpp-agent-plugin.json"),
+      "utf8",
+    ));
+    const [pi, opencode, droid, codex, claude] = await Promise.all(
+      ["pi", "opencode", "droid", "codex", "claude"].map(readManifest),
+    );
+
+    expect(pi.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: true });
+    expect(opencode.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: true });
+    expect(droid.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: false });
+    expect(codex.capabilities.compaction).toBeUndefined();
+    expect(claude.capabilities.compaction).toBeUndefined();
+  });
+
   it("maps Pi endpoints through the plugin adapter", async () => {
     const { getProviderApi, getProviderEndpoint, toProviderConfig } = await import("./pi/config.mjs");
     expect(toProviderConfig(provider("responses"))).toMatchObject({ api: "openai-responses" });
@@ -106,6 +122,91 @@ describe("official plugin config providers", () => {
           id: "deepseek-v4-flash-free",
           supportedThinkingLevels: ["high", "max", "future-tier"],
         }],
+      }],
+    });
+  });
+
+  it("keeps Pi reasoning independent from the declared thinking levels", async () => {
+    const pi = await import("./pi/config.mjs");
+    const base = provider("chat-completions");
+
+    // reasoning: true 但没勾选思考档位 → 保留 reasoning（开关模式），不写 map。
+    const unselected = pi.toProviderConfig({
+      ...base,
+      models: [{ id: "mimo", name: "Mimo", reasoning: true, imageInput: true }],
+    });
+    expect(unselected.models[0]).toMatchObject({ reasoning: true });
+    expect(unselected.models[0]).not.toHaveProperty("thinkingLevelMap");
+
+    // reasoning: false + 勾选思考档位 → 档位无效，不写 map。
+    const disabled = pi.toProviderConfig({
+      ...base,
+      models: [{ id: "mimo", name: "Mimo", reasoning: false, supportedThinkingLevels: ["low", "high"] }],
+    });
+    expect(disabled.models[0]).toMatchObject({ reasoning: false });
+    expect(disabled.models[0]).not.toHaveProperty("thinkingLevelMap");
+
+    // reasoning: true + 勾选思考档位 → 写 map。
+    const selected = pi.toProviderConfig({
+      ...base,
+      models: [{
+        id: "mimo",
+        name: "Mimo",
+        reasoning: true,
+        imageInput: true,
+        supportedThinkingLevels: ["low", "high"],
+      }],
+    });
+    expect(selected.models[0]).toMatchObject({ reasoning: true });
+    // 勾选 low/high → map 只写显式排除项（缺键 = 支持，pi 语义）。
+    expect(selected.models[0].thinkingLevelMap).toEqual({
+      off: null,
+      minimal: null,
+      medium: null,
+    });
+  });
+
+  it("flags directory-declared thinking levels when reading Pi models", async () => {
+    const pi = await import("./pi/config.mjs");
+    // 模拟目录数据（models-store.json）：deepseek 有档位声明、mimo 有目录条目但无档位、GLM 不在目录。
+    await writeFile(
+      process.env.PI_CONFIG_PATH!.replace(/pi\.json$/, "models-store.json"),
+      JSON.stringify({
+        opencode: {
+          models: [
+            // 与真实目录一致：内置条目同时声明 reasoning/input；完整 map 中缺键 = 支持（pi 语义）。
+            { id: "deepseek-v4-flash-free", reasoning: true, input: ["text"], thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: "max" } },
+            { id: "mimo-v2.5-free", reasoning: true, input: ["text", "image"] },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(process.env.PI_CONFIG_PATH!, JSON.stringify({
+      providers: {
+        custom: {
+          baseUrl: "https://api.example/v1",
+          api: "openai-completions",
+          name: "Custom",
+          models: [
+            { id: "deepseek-v4-flash-free", name: "DeepSeek", reasoning: true, input: ["text"] },
+            { id: "mimo-v2.5-free", name: "MiMo", reasoning: true, input: ["text", "image"] },
+            { id: "GLM-5.1", name: "GLM", reasoning: true, input: ["text"] },
+          ],
+        },
+      },
+    }), "utf8");
+    await expect(pi.readProviderConfig()).resolves.toMatchObject({
+      providers: [{
+        models: [
+          // 内置模型（目录命中）→ 能力由 Agent 管理，isBuiltin:true/hasThinkingLevels:false；
+          // supportedThinkingLevels 仍按目录预填，用于后端档位计算。
+          { id: "deepseek-v4-flash-free", reasoning: true, imageInput: false, isBuiltin: true, hasThinkingLevels: false, supportedThinkingLevels: ["high", "max"] },
+          // 内置但无档位声明 → 同样不显示能力控件。
+          { id: "mimo-v2.5-free", reasoning: true, imageInput: true, isBuiltin: true, hasThinkingLevels: false },
+          // 目录里完全没有 → 非内置，提供自定义能力控件。
+          { id: "GLM-5.1", reasoning: true, imageInput: false, isBuiltin: false, hasThinkingLevels: true },
+        ],
       }],
     });
   });
@@ -189,7 +290,7 @@ describe("official plugin config providers", () => {
       options: { baseURL: "https://api.example/v1", apiKey: "key", timeout: 1234 },
       models: {
         model: {
-          reasoning: false,
+          reasoning: true,
           attachment: true,
           hppSupportedThinkingLevels: [],
           cost: { input: 1, output: 2 },

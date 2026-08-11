@@ -1,6 +1,8 @@
 import type {
   AgentEvent,
   AgentPendingUIEventSnapshot,
+  AgentCompactionConfig,
+  AgentCompactionConfigResult,
   AgentImagePayload,
   AgentPermissionMode,
   AgentSendOptions,
@@ -57,6 +59,10 @@ export type {
   AgentPendingUIEventSnapshot,
   AgentCapabilities,
   AgentBackendModelVisibility,
+  AgentCompactionCapabilities,
+  AgentCompactionConfig,
+  AgentCompactionConfigResult,
+  AgentCompactionSupport,
   AgentConfigurationSupport,
   AgentDescriptor,
   AgentImagePayload,
@@ -110,15 +116,22 @@ export interface AgentModel {
   reasoning: boolean;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
+  /** 思考档位呈现模式：levels=有档位声明（下拉）；toggle=仅有思考开关（无档位声明，如 mimo）。 */
+  thinkingLevelMode?: "levels" | "toggle";
 }
 
 export interface AgentCustomModelConfig {
   id: string;
   name: string;
+  /** 内置模型来自 Agent 能力；自定义模型由 supportedThinkingLevels 是否非空派生。 */
   reasoning: boolean;
   imageInput: boolean;
-  /** Per-model thinking levels declared in the provider configuration. */
+  /** 自定义模型选中的思考档位；空数组或缺失表示不支持思考。 */
   supportedThinkingLevels?: string[];
+  /** 旧版兼容字段；配置控件当前仅由 isBuiltin 决定是否显示。 */
+  hasThinkingLevels?: boolean;
+  /** 该模型是否在 Agent 内置目录中（能力由 Agent 管理，配置弹窗不显示能力控件）。 */
+  isBuiltin?: boolean;
 }
 
 export type AgentProviderEndpoint = string;
@@ -272,6 +285,8 @@ export interface ElectronAPI {
   agentSendMessage: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentForkSession: (sessionId: string, target: AgentForkTarget) => Promise<AgentForkResult>;
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
+  agentSetCompactionConfig: (config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
+  agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
   agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) => Promise<AgentModelVisibilityResult>;

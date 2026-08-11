@@ -1,6 +1,7 @@
 import type { ChatMessage } from "@/stores/chat-store";
 import type { ProjectSession, SessionReference } from "@/stores/project-store";
 import { getAgentName } from "@/lib/agents";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 
 const MAX_TITLE_CHARS = 48;
 const MAX_MESSAGE_CHARS = 700;
@@ -35,7 +36,9 @@ const getLastMessageTime = (session: ProjectSession, messages: ChatMessage[]) =>
 
 export const getSessionReferenceTitle = (session: ProjectSession, messages: ChatMessage[] = []) => {
   const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
-  return truncate(firstUserMessage?.content || session.title, MAX_TITLE_CHARS);
+  if (!firstUserMessage) return truncate(session.title, MAX_TITLE_CHARS);
+  const cleaned = getChatMessagePreviewText(firstUserMessage);
+  return truncate(cleaned || session.title, MAX_TITLE_CHARS);
 };
 
 const selectReferenceMessages = (messages: ChatMessage[]) => {

@@ -1,4 +1,5 @@
 import { getAgentName } from "@/lib/agents";
+import { confirmGuidanceResponse } from "@/lib/session-command-coordinator";
 import { formatModelRequestFailure } from "@/i18n/text";
 import { useProjectStore } from "@/stores/project-store";
 import {
@@ -340,6 +341,10 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
   if (!currentSessionId) return;
   if (!isOpenProjectSession(currentSessionId)) {
     discardRuntime(currentSessionId, event);
+    return;
+  }
+  if (event.type === "guidance_response_started") {
+    confirmGuidanceResponse(currentSessionId);
     return;
   }
   const runtime = getRuntime(currentSessionId);

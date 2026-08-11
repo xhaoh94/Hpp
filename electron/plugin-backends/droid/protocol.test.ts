@@ -50,6 +50,11 @@ describe("Droid protocol adapter", () => {
         id: "custom:hpp:custom-provider:model",
         model: "model",
         displayName: "Custom model",
+      }, {
+        hppCompactionManaged: true,
+        id: "custom:hpp:compaction",
+        model: "summary-only",
+        displayName: "Hpp summary only",
       }],
     }), "utf8");
 
@@ -67,6 +72,12 @@ describe("Droid protocol adapter", () => {
         id: "custom:hpp:custom-provider:model",
         modelProvider: "custom",
         displayName: "Custom model",
+        supportedReasoningEfforts: ["none"],
+        noImageSupport: true,
+      }, {
+        id: "custom:hpp:compaction",
+        modelProvider: "custom",
+        displayName: "Hpp summary only",
         supportedReasoningEfforts: ["none"],
         noImageSupport: true,
       }],

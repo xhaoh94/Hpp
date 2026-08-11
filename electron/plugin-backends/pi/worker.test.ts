@@ -34,6 +34,7 @@ class FakeSession {
   toolCallHandlers = [];
   beforeAgentStartHandlers = [];
   beforeProviderRequestHandlers = [];
+  sessionBeforeCompactHandlers = [];
   registeredTools = [];
   lastSystemPrompt = "BASE_SYSTEM_PROMPT";
   baseSystemPrompt = "BASE_SYSTEM_PROMPT";
@@ -55,6 +56,7 @@ class FakeSession {
           if (eventName === "tool_call") this.toolCallHandlers.push(handler);
           if (eventName === "before_agent_start") this.beforeAgentStartHandlers.push(handler);
           if (eventName === "before_provider_request") this.beforeProviderRequestHandlers.push(handler);
+          if (eventName === "session_before_compact") this.sessionBeforeCompactHandlers.push(handler);
         },
         registerTool: (tool) => this.registeredTools.push(tool),
       });
@@ -154,12 +156,38 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
-    if (message === "compact") {
+    if (message === "compact" || message === "slow-compact") {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "compaction_start", reason: "threshold" });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      let compaction;
+      for (const handler of this.sessionBeforeCompactHandlers) {
+        const result = await handler({
+          type: "session_before_compact",
+          preparation: {
+            firstKeptEntryId: "kept-1",
+            messagesToSummarize: [{ role: "user", content: "summarize this", timestamp: Date.now() }],
+            turnPrefixMessages: [],
+            isSplitTurn: false,
+            tokensBefore: 1000,
+            previousSummary: undefined,
+            fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+            settings: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
+          },
+          reason: "threshold",
+          willRetry: false,
+          signal: new AbortController().signal,
+        }, {
+          modelRegistry: this.modelRegistry,
+          model: this.model,
+          thinkingLevel: this.thinkingLevel,
+          hasUI: true,
+          ui: this.uiContext,
+        });
+        if (result?.compaction) compaction = result.compaction;
+      }
+      await new Promise((resolve) => setTimeout(resolve, message === "slow-compact" ? 200 : 20));
       this.listener?.({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: true });
-      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" } });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: compaction?.summary || "continued" }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -222,6 +250,14 @@ const availableModels = [{
   reasoning: true,
   input: ["text"],
   thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+}, {
+  // 只声明 1 个非 off 档位（medium）：hasDeclaredLevels=true 但只 1 档 → 思考开关。
+  id: "single-level-model",
+  name: "Single Level",
+  provider: "test-provider",
+  reasoning: true,
+  input: ["text"],
+  thinkingLevelMap: { off: null, minimal: null, low: null, medium: "medium", high: null },
 }];
 const configuredDeepSeekModel = {
   id: "deepseek-v4-flash-free",
@@ -248,7 +284,16 @@ const proxyModel = {
     max: "max",
   },
 };
-export const ModelRuntime = process.env.PI_TEST_BUILTIN_FALLBACK === "1"
+// 自定义渠道配置的模型：无 thinkingLevelMap，依赖内置目录按 id 兜底。
+const configuredTerraModel = {
+  id: "gpt-5.6-terra",
+  name: "GPT-5.6 Terra",
+  provider: "luna",
+  api: "openai-responses",
+  reasoning: true,
+  input: ["text"],
+};
+export const ModelRuntime = process.env.PI_TEST_BUILTIN_FALLBACK === "1" || process.env.PI_TEST_BUILTIN_ID_FALLBACK === "1"
   ? { create: async (options = {}) => ({ modelsPath: options.modelsPath }) }
   : undefined;
 export class ModelRegistry {
@@ -257,18 +302,26 @@ export class ModelRegistry {
     return [
       ...availableModels,
       ...(process.env.PI_TEST_BUILTIN_FALLBACK === "1" ? [configuredDeepSeekModel] : []),
+      ...(process.env.PI_TEST_BUILTIN_ID_FALLBACK === "1" ? [configuredTerraModel] : []),
       proxyModel,
     ];
   }
   getAll() {
-    if (this.runtime?.modelsPath === null) return [builtinDeepSeekModel];
+    if (this.runtime?.modelsPath === null) {
+      return [
+        builtinDeepSeekModel,
+        ...(process.env.PI_TEST_BUILTIN_ID_FALLBACK === "1" ? builtinTerraModels : []),
+      ];
+    }
     return [...availableModels, proxyModel];
   }
   find(provider, id) { return availableModels.find((model) => model.provider === provider && model.id === id)
     || (provider === configuredDeepSeekModel.provider && id === configuredDeepSeekModel.id ? configuredDeepSeekModel : undefined)
+    || (provider === configuredTerraModel.provider && id === configuredTerraModel.id ? configuredTerraModel : undefined)
     || (provider === proxyModel.provider && id === proxyModel.id ? proxyModel : undefined); }
   getError() { return undefined; }
   hasConfiguredAuth() { return true; }
+  async getApiKeyAndHeaders() { return { ok: true, apiKey: "test-api-key", headers: { "x-test": "1" } }; }
   static create() { return new ModelRegistry({}); }
 }
 const builtinDeepSeekModel = {
@@ -287,7 +340,32 @@ const builtinDeepSeekModel = {
     max: "max",
   },
 };
-export const SettingsManager = { create: () => ({}) };
+// 模拟 pi-ai 内置目录：同一模型存在多条 provider 声明，且声明质量不一。
+// azure 的残缺声明在前（缺键会被“缺键=支持”误读为全部支持），opencode 的
+// 完整声明在后（off/minimal 均标 null → 仅 low~max 5 档）。
+const builtinTerraModels = [
+  {
+    id: "gpt-5.6-terra",
+    provider: "azure-openai-responses",
+    reasoning: true,
+    thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+  },
+  {
+    id: "gpt-5.6-terra",
+    provider: "opencode",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
+  },
+];
+export const SettingsManager = { create: () => ({ getRetrySettings: () => ({ enabled: true, maxRetries: 1, baseDelayMs: 1 }) }) };
 export class DefaultResourceLoader {
   constructor(options = {}) {
     this.extensionFactories = options.extensionFactories || [];
@@ -313,6 +391,23 @@ export const createAgentSession = async ({ sessionManager, modelRegistry, modelR
     resourceLoader.extensionFactories,
     resourceLoader.appendSystemPrompt,
   ),
+});
+export const compact = async (_preparation, model, apiKey, headers, _instructions, _signal, thinkingLevel, _streamFn, env, retry) => ({
+  summary: JSON.stringify({
+    id: model.id,
+    provider: model.provider,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    reasoning: model.reasoning,
+    apiKey,
+    headers,
+    env,
+    thinkingLevel,
+    retry,
+  }),
+  firstKeptEntryId: "kept-1",
+  tokensBefore: 1000,
+  details: { readFiles: [], modifiedFiles: [] },
 });
 export const createBashToolDefinition = (_cwd, options = {}) => ({
   name: "bash",
@@ -437,11 +532,23 @@ describe("Pi SDK worker protocol", () => {
     expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
       id: "pi-model",
       supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+      // 无档位声明（无 thinkingLevelMap、目录兜底 miss）→ 思考开关模式。
+      thinkingLevelMode: "toggle",
     })]));
     // Every registry model (not just the active one) exposes its own levels.
+    // GPT-5.6's catalogue map marks off/minimal as unsupported, so those
+    // choices are simply not listed.
     expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
       id: "gpt-5.6-luna",
-      supportedThinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+      supportedThinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+      // 条目自带档位 map → 档位下拉模式。
+      thinkingLevelMode: "levels",
+    })]));
+    // 只声明 1 个非 off 档位 → 虽有声明但只 1 档 → 思考开关模式。
+    expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: "single-level-model",
+      supportedThinkingLevels: ["medium"],
+      thinkingLevelMode: "toggle",
     })]));
 
     worker.send({ id: "thinking", type: "setThinkingLevel", level: "xhigh" });
@@ -461,62 +568,27 @@ describe("Pi SDK worker protocol", () => {
       id: "deepseek-v4-flash-free",
       provider: "opencode",
       supportedThinkingLevels: ["high", "max"],
+      // 内置目录兜底命中档位 map → 档位下拉模式。
+      thinkingLevelMode: "levels",
     })]));
   });
 
-  it("normalizes implicit OpenAI Responses thinking at the provider hook boundary", async () => {
-    const worker = startWorker(runtimeRoot, agentDir);
+  it("prefers a complete capability map when the id fallback matches several catalogue entries", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_BUILTIN_ID_FALLBACK: "1" });
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "models", type: "getModels" });
+    const modelsMessage = await worker.waitFor((message) => message.id === "models");
 
-    worker.send({
-      id: "luna-model",
-      type: "setModel",
+    // 内置目录中同一模型存在多条声明：azure 的残缺声明（只写 off/xhigh/max，
+    // 其余档位缺键会被误读为支持）不应被采用；应命中完整的 opencode 声明，
+    // off/minimal 均标 null → 仅 low~max 5 档，不出现“最低”。
+    expect(modelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: "gpt-5.6-terra",
       provider: "luna",
-      modelId: "gpt-5.6-luna",
-    });
-    await worker.waitFor((message) => message.type === "model_changed" && message.id === "luna-model");
-
-    worker.send({ id: "luna-models", type: "getModels" });
-    const lunaModelsMessage = await worker.waitFor((message) => message.id === "luna-models");
-    expect(lunaModelsMessage.models).toEqual(expect.arrayContaining([expect.objectContaining({
-      id: "gpt-5.6-luna",
-      supportedThinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+      supportedThinkingLevels: ["low", "medium", "high", "xhigh", "max"],
     })]));
-
-    const runProviderPayload = async (id: string, payload: Record<string, unknown>) => {
-      worker.send({
-        id,
-        type: "prompt",
-        message: `provider-payload:${JSON.stringify(payload)}`,
-        permissionMode: "full-access",
-      });
-      await worker.waitFor((message) => message.type === "prompt_done" && message.id === id);
-      const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
-      return JSON.parse(String((message?.message as { text?: unknown })?.text || "null")) as Record<string, unknown>;
-    };
-
-    worker.send({ id: "minimal-level", type: "setThinkingLevel", level: "minimal" });
-    await worker.waitFor((message) => message.id === "minimal-level");
-    await expect(runProviderPayload("minimal", {
-      model: "gpt-5.6-luna",
-      reasoning: { effort: "high", summary: "auto" },
-    })).resolves.toEqual({
-      model: "gpt-5.6-luna",
-      reasoning: { effort: "low", summary: "auto" },
-    });
-
-    worker.send({ id: "off-level", type: "setThinkingLevel", level: "off" });
-    await worker.waitFor((message) => message.id === "off-level");
-    await expect(runProviderPayload("off", {
-      model: "gpt-5.6-luna",
-      reasoning: { effort: "high" },
-      include: ["reasoning.encrypted_content", "output_text"],
-    })).resolves.toEqual({
-      model: "gpt-5.6-luna",
-      include: ["output_text"],
-    });
   });
 
   it("emits prompt_done only after the final settled retry", async () => {
@@ -547,6 +619,82 @@ describe("Pi SDK worker protocol", () => {
     expect(worker.messages.indexOf(completed)).toBeLessThan(
       worker.messages.findIndex((message) => message.type === "prompt_done" && message.id === "compact-1"),
     );
+  });
+
+  it("uses low thinking by default for Agent compaction", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-low", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-low");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({
+      id: "pi-model",
+      provider: "test-provider",
+      apiKey: "test-api-key",
+      thinkingLevel: "low",
+    });
+  });
+
+  it("uses a configured OpenAI-compatible model for Agent compaction", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      compactionConfig: {
+        thinkingLevel: "low",
+        modelMode: "custom",
+        customModel: {
+          baseUrl: "https://summary.example.com/v1/",
+          apiKey: "summary-key",
+          modelId: "summary-fast",
+          api: "openai-responses",
+          reasoning: true,
+        },
+      },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-custom", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-custom");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({
+      id: "summary-fast",
+      provider: "hpp-compaction",
+      api: "openai-responses",
+      baseUrl: "https://summary.example.com/v1",
+      reasoning: true,
+      apiKey: "summary-key",
+      thinkingLevel: "low",
+    });
+  });
+
+  it("waits for an active post-turn compaction to settle before worker exit", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "slow-compact", type: "prompt", message: "slow-compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "context_compaction" && message.phase === "started");
+
+    const startedAt = Date.now();
+    worker.send({ id: "dispose-during-compaction", type: "dispose" });
+    await new Promise<void>((resolvePromise, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Pi worker did not exit after compaction disposal")), 1500);
+      worker.child.once("exit", () => {
+        clearTimeout(timeout);
+        resolvePromise();
+      });
+    });
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
+    expect(worker.child.exitCode).toBe(0);
   });
 
   it("keeps tools available while the permission hook guards execution", async () => {

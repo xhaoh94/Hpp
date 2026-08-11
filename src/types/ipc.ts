@@ -2,6 +2,7 @@ export type UnknownRecord = Record<string, unknown>;
 
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
+export type { AgentCompactionConfig } from "@shared/agent-compaction";
 export type { AgentPermissionMode } from "@shared/agent-permissions";
 export type {
   AgentActionCatalogEntry,
@@ -26,6 +27,12 @@ export interface AgentSendOptions {
   permissionMode?: AgentPermissionMode;
   clientMessageId?: string;
   action?: AgentActionInvocation;
+}
+
+export interface AgentCompactionConfigResult {
+  success: boolean;
+  error?: string;
+  appliedSessionIds?: string[];
 }
 
 export interface AgentEvent {
@@ -137,6 +144,13 @@ export interface AgentProviderConfiguration {
 
 export type AgentConfigurationSupport = AgentProviderConfiguration | "none";
 
+export interface AgentCompactionCapabilities {
+  customModel: boolean;
+  thinkingLevel: boolean;
+}
+
+export type AgentCompactionSupport = AgentCompactionCapabilities | "none";
+
 export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
   permissions: boolean;
@@ -145,6 +159,7 @@ export interface AgentCapabilities {
   actions: boolean;
   configuration: AgentConfigurationSupport;
   providerActivation: AgentProviderActivationSupport;
+  compaction?: AgentCompactionSupport;
 }
 
 export interface SessionDataPurgeRequest {

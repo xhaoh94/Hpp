@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   AgentCommentary,
   AgentProcess,
@@ -996,6 +997,7 @@ export function ProcessBlock({
   onPreserveScroll,
   receivedMessageDocument,
   projectPath,
+  stickyPortalTarget,
 }: {
   messageId: string;
   process: AgentProcess;
@@ -1011,6 +1013,8 @@ export function ProcessBlock({
   onPreserveScroll: PreserveScroll;
   receivedMessageDocument?: ComposerDocument;
   projectPath?: string;
+  /** 吸顶定位条挂载到聊天滚动容器的公共顶层，避免受消息块边界限制。 */
+  stickyPortalTarget?: HTMLElement | null;
 }) {
   const viewProcess = useMemo(() => normalizeProcessForView(process, {
     running,
@@ -1108,7 +1112,7 @@ export function ProcessBlock({
 
     const containerTop = container.getBoundingClientRect().top;
     const stickyTopOffset = Number.parseFloat(
-      stickyElementRef.current?.style.getPropertyValue("--chat-process-sticky-top") || "0",
+      stickyElementRef.current ? window.getComputedStyle(stickyElementRef.current).top : "0",
     ) || 0;
     const processBoundary = containerTop + stickyTopOffset;
     const toggle = processToggleElementRef.current;
@@ -1257,8 +1261,7 @@ export function ProcessBlock({
     });
   }, []);
 
-  return (
-    <>
+  const stickyLocator = (
       <div
         ref={stickyElementRef}
         className="chat-process-sticky"
@@ -1309,6 +1312,13 @@ export function ProcessBlock({
           )}
         </div>
       </div>
+  );
+
+  return (
+    <>
+      {stickyPortalTarget
+        ? createPortal(stickyLocator, stickyPortalTarget)
+        : stickyLocator}
       <div className="chat-process-wrap" data-process-message-id={messageId}>
       <div className={`chat-process ${interrupted ? "interrupted" : ""}`}>
         <button ref={processToggleRef} className="chat-process-toggle" onClick={(event) => onToggle(messageId, event.currentTarget)}>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
+import { BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -7,6 +7,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { getThinkingLevelLabel, normalizeSupportedThinkingLevels, THINKING_LEVELS } from "@shared/models";
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
+import { AgentCompactionModal } from "./AgentCompactionModal";
 import { AgentConfigIO } from "./AgentConfigIO";
 import "./Settings.css";
 
@@ -27,8 +28,11 @@ const emptyModel = (configuration?: AgentProviderConfiguration): AgentCustomMode
   return {
     id: "",
     name: "",
+    // 自定义模型不再单独配置 reasoning：选中任意思考档位即支持思考，未选即不支持。
     reasoning: supportedThinkingLevels.length > 0,
     imageInput: configuration?.modelDefaults.imageInput === true,
+    hasThinkingLevels: false,
+    isBuiltin: false,
     supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
   };
 };
@@ -308,6 +312,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const endpointOptions = providerConfiguration?.endpoints || [];
   const authModeOptions = providerConfiguration?.authModes || [];
   const backendModelVisibility = providerConfiguration?.backendModelVisibility;
+  const compactionCapabilities = activeAgent?.capabilities.compaction;
+  const supportsCompactionConfiguration = !!compactionCapabilities && compactionCapabilities !== "none";
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
@@ -336,6 +342,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [modelSearch, setModelSearch] = useState("");
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [compactionModalOpen, setCompactionModalOpen] = useState(false);
   const [copySourceProvider, setCopySourceProvider] = useState<AgentProviderConfig | null>(null);
   const [copyingTargetAgentId, setCopyingTargetAgentId] = useState("");
   const [copyProviderError, setCopyProviderError] = useState("");
@@ -353,6 +360,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   useEffect(() => {
     setAgentId(initialAgentId);
   }, [initialAgentId]);
+
+  useEffect(() => {
+    setCompactionModalOpen(false);
+  }, [agentId]);
 
   const selectedSavedProvider = useMemo(
     () => config.providers.find((provider) => provider.providerId === selectedProviderId) || null,
@@ -726,6 +737,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         name: model.name || model.id,
         reasoning: supportedThinkingLevels.length > 0,
         imageInput: providerConfiguration?.modelDefaults.imageInput === true,
+        hasThinkingLevels: false,
+        isBuiltin: false,
         supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
       }];
     });
@@ -756,15 +769,18 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         baseUrl: draft.baseUrl.trim(),
         apiKey: draft.apiKey.trim(),
         models: draft.models.map((model) => {
-          const supportedThinkingLevels = getConfiguredThinkingLevels(model.supportedThinkingLevels);
+          const isBuiltin = model.isBuiltin === true;
+          // 只有 Agent 内置目录命中的模型由 Agent 管理能力；非内置模型始终保留用户自定义的
+          // 图片、思考和思考档位配置，不再被 agent 级 fixedModelCapabilities 覆盖。
+          const supportedThinkingLevels = isBuiltin
+            ? []
+            : getConfiguredThinkingLevels(model.supportedThinkingLevels);
           return {
             ...model,
             id: model.id.trim(),
             name: (model.name || model.id).trim(),
-            reasoning: supportedThinkingLevels.length > 0,
-            imageInput: providerConfiguration?.fixedModelCapabilities
-              ? providerConfiguration.modelDefaults.imageInput
-              : model.imageInput,
+            reasoning: isBuiltin ? model.reasoning === true : supportedThinkingLevels.length > 0,
+            imageInput: model.imageInput,
             supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
           };
         }),
@@ -1042,6 +1058,17 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     onChange={(event) => void handleBackendModelsVisibleChange(event.target.checked)}
                   />
                 </label>
+              )}
+              {supportsCompactionConfiguration && (
+                <button
+                  type="button"
+                  className="btn-action"
+                  onClick={() => setCompactionModalOpen(true)}
+                  disabled={loading}
+                >
+                  <BrainCircuit size={13} />
+                  上下文压缩
+                </button>
               )}
               <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
                 <RefreshCw size={13} />
@@ -1402,7 +1429,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
               {modelFetchError && <div className="status-message error agent-config-fetch-error">{modelFetchError}</div>}
               <div className="agent-config-model-list">
                 {draft.models.map((model, index) => (
-                  <div key={index} className="agent-config-model-row">
+                  <div
+                    key={index}
+                    className={`agent-config-model-row ${model.isBuiltin ? "builtin" : "custom"}`}
+                  >
                     <input
                       value={model.id}
                       onChange={(event) => updateModel(index, { id: event.target.value })}
@@ -1415,25 +1445,28 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                       className="input-field"
                       placeholder="显示名"
                     />
-                    <label className="agent-config-check">
-                      <input
-                        type="checkbox"
-                        checked={model.imageInput}
-                        onChange={(event) => updateModel(index, { imageInput: event.target.checked })}
-                        disabled={providerConfiguration?.fixedModelCapabilities}
-                      />
-                      图片
-                    </label>
-                    <label className="agent-config-thinking-levels">
-                      <span>思考档位</span>
-                      <ThinkingLevelsMultiSelect
-                        levels={model.supportedThinkingLevels}
-                        onChange={(supportedThinkingLevels) => updateModel(index, {
-                          supportedThinkingLevels,
-                          reasoning: !!supportedThinkingLevels?.length,
-                        })}
-                      />
-                    </label>
+                    {!model.isBuiltin && (
+                      <div className="agent-config-model-checks">
+                        <label className="agent-config-check">
+                          <input
+                            type="checkbox"
+                            checked={model.imageInput}
+                            onChange={(event) => updateModel(index, { imageInput: event.target.checked })}
+                          />
+                          图片
+                        </label>
+                        <label className="agent-config-thinking-levels">
+                          <span>思考档位</span>
+                          <ThinkingLevelsMultiSelect
+                            levels={model.supportedThinkingLevels}
+                            onChange={(supportedThinkingLevels) => updateModel(index, {
+                              supportedThinkingLevels,
+                              reasoning: getConfiguredThinkingLevels(supportedThinkingLevels).length > 0,
+                            })}
+                          />
+                        </label>
+                      </div>
+                    )}
                     <button
                       type="button"
                       className="btn-icon btn-delete"
@@ -1597,6 +1630,14 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
             </div>
           </div>
         </div>
+      )}
+      {compactionModalOpen && compactionCapabilities && compactionCapabilities !== "none" && (
+        <AgentCompactionModal
+          agentId={agentId}
+          agentName={activeAgent?.name || getAgentName(agentId)}
+          capabilities={compactionCapabilities}
+          onClose={() => setCompactionModalOpen(false)}
+        />
       )}
       {deleteConfirmProvider && (
         <div className="settings-modal-overlay agent-provider-delete-overlay" onMouseDown={closeDeleteConfirm}>

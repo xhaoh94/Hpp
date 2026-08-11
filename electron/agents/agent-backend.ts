@@ -2,6 +2,7 @@ import type { BrowserWindow } from "electron";
 import type {
   AgentActionCatalogEntry,
   AgentActionListOptions,
+  AgentCompactionConfig,
   AgentImagePayload,
   AgentSendOptions as BaseAgentSendOptions,
   AgentUIResponse,
@@ -14,6 +15,8 @@ export interface AgentModel {
   reasoning: boolean;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
+  /** levels=思考档位下拉；toggle=只有思考开关。 */
+  thinkingLevelMode?: "levels" | "toggle";
 }
 
 export interface AgentSendOptions extends BaseAgentSendOptions {
@@ -29,6 +32,8 @@ export interface AgentInitOptions {
    * changing the visible user message or persisted conversation history.
    */
   hostSystemPrompt?: string;
+  /** 通用 Agent 压缩策略；不支持自定义压缩的适配器可以忽略。 */
+  compaction?: AgentCompactionConfig;
 }
 
 export interface AgentForkTarget {
@@ -63,6 +68,8 @@ export interface AgentBackend {
   listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]>;
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
+  /** 热更新通用压缩策略；未实现时在下次初始化读取。 */
+  setCompactionConfig?(config: AgentCompactionConfig): Promise<void>;
   sendUIResponse(response: AgentUIResponse): Promise<void>;
   dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;

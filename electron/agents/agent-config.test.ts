@@ -57,6 +57,7 @@ describe("agent provider config", () => {
   let getAgentConfigStateForBackend: typeof import("./agent-config").getAgentConfigStateForBackend;
   let getConfiguredAgentModels: typeof import("./agent-config").getConfiguredAgentModels;
   let getAgentModelVisibility: typeof import("./agent-config").getAgentModelVisibility;
+  let listAgentConfig: typeof import("./agent-config").listAgentConfig;
   let saveAgentProviderConfig: typeof import("./agent-config").saveAgentProviderConfig;
   let setAgentBackendModelsVisible: typeof import("./agent-config").setAgentBackendModelsVisible;
   let activateAgentProviderConfig: typeof import("./agent-config").activateAgentProviderConfig;
@@ -93,6 +94,7 @@ describe("agent provider config", () => {
       getAgentConfigStateForBackend,
       getAgentModelVisibility,
       getConfiguredAgentModels,
+      listAgentConfig,
       saveAgentProviderConfig,
       setAgentBackendModelsVisible,
     } = await import("./agent-config"));
@@ -137,7 +139,7 @@ describe("agent provider config", () => {
     });
   });
 
-  it("derives reasoning exclusively from the selected thinking levels", async () => {
+  it("derives custom-model reasoning from whether thinking levels are selected", async () => {
     const result = await saveAgentProviderConfig("test-agent", {
       ...provider("provider-a"),
       models: [{
@@ -162,14 +164,106 @@ describe("agent provider config", () => {
           providerId: "provider-a",
           models: [expect.objectContaining({
             id: "enabled-model",
+            // 自定义模型选中任意档位即支持思考，忽略旧 reasoning 值。
             reasoning: true,
             supportedThinkingLevels: ["high", "future-tier"],
+            hasThinkingLevels: true,
           }), expect.objectContaining({
             id: "disabled-model",
+            // 自定义模型未选档位即不支持思考。
             reasoning: false,
           })],
         })]),
       },
+    });
+  });
+
+  it("enriches saved configs with discovered thinking-level declarations", async () => {
+    // settings 里保存的是旧版配置：模型没有 hasThinkingLevels 字段。
+    const settingsPath = join(tempRoot, "hpp-data", "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    settings.agentConfigs["test-agent"].providers.push({
+      providerId: "opencode",
+      displayName: "opencode",
+      baseUrl: "https://opencode.example/v1",
+      apiKey: "key",
+      endpoint: "chat-completions",
+      models: [{ id: "deepseek-v4-flash-free", name: "DeepSeek", reasoning: true, imageInput: false }],
+    });
+    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+    // 插件实时发现（读 models.json + 渠道目录）：内置目录模型由 Agent 自身管理能力，
+    // isBuiltin:true/hasThinkingLevels:false，配置弹窗不显示能力控件。
+    testState.nativeState = {
+      providers: [{
+        providerId: "opencode",
+        displayName: "opencode",
+        baseUrl: "https://opencode.example/v1",
+        apiKey: "key",
+        endpoint: "chat-completions",
+        models: [{
+          id: "deepseek-v4-flash-free",
+          name: "DeepSeek",
+          reasoning: true,
+          imageInput: false,
+          isBuiltin: true,
+          hasThinkingLevels: false,
+        }],
+      }],
+    };
+
+    const result = await listAgentConfig("test-agent");
+    const opencode = result.config?.providers.find((item) => item.providerId === "opencode");
+    expect(opencode?.models[0]).toMatchObject({
+      id: "deepseek-v4-flash-free",
+      reasoning: true,
+      imageInput: false,
+      // 内置目录模型 → 能力由 Agent 管理，配置弹窗不显示能力控件。
+      isBuiltin: true,
+      hasThinkingLevels: false,
+    });
+  });
+
+  it("cross-matches discovered models by id across provider ids", async () => {
+    // 用户的自定义渠道 providerId 为 "tanwan"，但模型 "gpt-5.6-sol" 在 pi 内置目录
+    // 中由 "opencode" provider 声明。enrich 应按 modelId 跨 provider 兜底查找。
+    const settingsPath = join(tempRoot, "hpp-data", "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    settings.agentConfigs["test-agent"].providers.push({
+      providerId: "tanwan",
+      displayName: "tanwan",
+      baseUrl: "https://api.example/v1",
+      apiKey: "key",
+      endpoint: "chat-completions",
+      models: [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, imageInput: false }],
+    });
+    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+    // 插件发现结果中，模型 "gpt-5.6-sol" 属于 opencode provider。
+    testState.nativeState = {
+      providers: [{
+        providerId: "opencode",
+        displayName: "opencode",
+        baseUrl: "https://opencode.example/v1",
+        apiKey: "key",
+        endpoint: "chat-completions",
+        models: [{
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          reasoning: true,
+          imageInput: true,
+          isBuiltin: true,
+          hasThinkingLevels: false,
+        }],
+      }],
+    };
+
+    const result = await listAgentConfig("test-agent");
+    const tanwan = result.config?.providers.find((item) => item.providerId === "tanwan");
+    // 跨 provider 兜底匹配成功 → 标记为内置，能力由 Agent 管理。
+    expect(tanwan?.models[0]).toMatchObject({
+      id: "gpt-5.6-sol",
+      isBuiltin: true,
+      hasThinkingLevels: false,
+      imageInput: true, // 目录权威值覆盖配置值
     });
   });
 
@@ -217,7 +311,7 @@ describe("agent provider config", () => {
         providers: expect.arrayContaining([expect.objectContaining({
           providerId: "opencode-copy-2",
           endpoint: "chat-completions",
-          models: [expect.objectContaining({ reasoning: true, imageInput: false })],
+          models: [expect.objectContaining({ reasoning: false, imageInput: false })],
         })]),
       },
     });
@@ -304,14 +398,14 @@ describe("agent provider config", () => {
         id: "provider-a-model",
         name: "provider-a",
         provider: "provider-a",
-        reasoning: true,
+        reasoning: false,
         supportsImages: true,
       },
       {
         id: "provider-b-model",
         name: "provider-b",
         provider: "provider-b",
-        reasoning: true,
+        reasoning: false,
         supportsImages: true,
       },
     ]);
@@ -319,7 +413,7 @@ describe("agent provider config", () => {
       id: "provider-a-model",
       name: "provider-a",
       provider: "provider-a",
-      reasoning: true,
+      reasoning: false,
       supportsImages: true,
     }]);
   });
@@ -352,6 +446,52 @@ describe("agent provider config", () => {
 
     const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
     expect(settings.agentModelPreferences["test-agent"].backendModelsVisible).toBe(true);
+  });
+
+  it("derives chat thinking controls from builtin capabilities and custom selections", async () => {
+    const dataDir = join(tempRoot, "hpp-data");
+    testState.capabilities = {
+      configuration: {
+        ...providerConfiguration("hpp"),
+        modelDefaults: {
+          reasoning: true,
+          imageInput: false,
+          supportedThinkingLevels: ["low", "medium", "high"],
+        },
+      },
+      providerActivation: "none",
+    };
+    await writeFile(join(dataDir, "settings.json"), JSON.stringify({
+      agentConfigs: {
+        "test-agent": {
+          providers: [{
+            providerId: "provider-a",
+            displayName: "provider-a",
+            baseUrl: "https://provider-a.example/v1",
+            apiKey: "key",
+            authMode: "bearer",
+            endpoint: "responses",
+            models: [
+              { id: "builtin-levels", name: "Builtin Levels", reasoning: true, imageInput: true, isBuiltin: true, supportedThinkingLevels: ["high", "max"] },
+              { id: "builtin-toggle", name: "Builtin Toggle", reasoning: true, imageInput: true, isBuiltin: true },
+              { id: "builtin-single", name: "Builtin Single", reasoning: true, imageInput: true, isBuiltin: true, supportedThinkingLevels: ["high"] },
+              { id: "custom-toggle", name: "Custom Toggle", reasoning: true, imageInput: false, supportedThinkingLevels: ["high"] },
+              { id: "custom-levels", name: "Custom Levels", reasoning: true, imageInput: false, supportedThinkingLevels: ["low", "high"] },
+              { id: "custom-off", name: "Custom Off", reasoning: false, imageInput: false, supportedThinkingLevels: ["high"] },
+            ],
+          }],
+        },
+      },
+    }), "utf8");
+
+    await expect(getConfiguredAgentModels("test-agent")).resolves.toEqual([
+      expect.objectContaining({ id: "builtin-levels", thinkingLevelMode: "levels", supportedThinkingLevels: ["high", "max"] }),
+      expect.objectContaining({ id: "builtin-toggle", thinkingLevelMode: "toggle" }),
+      expect.objectContaining({ id: "builtin-single", thinkingLevelMode: "levels", supportedThinkingLevels: ["high"] }),
+      expect.objectContaining({ id: "custom-toggle", thinkingLevelMode: "toggle", supportedThinkingLevels: ["high"] }),
+      expect.objectContaining({ id: "custom-levels", thinkingLevelMode: "levels", supportedThinkingLevels: ["low", "high"] }),
+      expect.objectContaining({ id: "custom-off", reasoning: true, thinkingLevelMode: "toggle", supportedThinkingLevels: ["high"] }),
+    ]);
   });
 
   it("keeps per-model thinking levels from the provider configuration", async () => {
@@ -388,6 +528,7 @@ describe("agent provider config", () => {
         reasoning: true,
         supportsImages: false,
         supportedThinkingLevels: ["off", "deep", "auto"],
+        thinkingLevelMode: "levels",
       },
     ]);
   });

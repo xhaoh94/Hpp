@@ -13,9 +13,11 @@ import {
 } from "@/lib/session-references";
 import {
   getSessionModel,
+  getSessionModelThinking,
   getSessionThinking,
   getSessionThinkingOrDefault,
   saveSessionModel,
+  saveSessionModelThinking,
   saveSessionThinking,
   selectSessionModel,
 } from "@/hooks/useDataPersistence";
@@ -35,6 +37,7 @@ import type { AgentForkResult, AgentImagePayload, AgentReloadConfigResult } from
 import { getQuestionnaireAnswerLabel } from "@shared/questionnaire";
 import {
   getModelThinkingLevels,
+  isModelThinkingLevelSelectable,
   normalizeModelThinkingLevel,
   normalizeThinkingLevelId,
 } from "@shared/models";
@@ -219,7 +222,7 @@ const restoreActiveSessionSettings = (sessionId: string) => {
   const model = getSessionModel(sessionId);
   if (model) chat.setCurrentModel(model);
 
-  const thinking = getSessionThinking(sessionId);
+  const thinking = (model ? getSessionModelThinking(sessionId, model) : null) || getSessionThinking(sessionId);
   if (thinking) {
     chat.setThinkingLevel(normalizeModelThinkingLevel(thinking, model || chat.currentModel));
   }
@@ -235,11 +238,13 @@ const reconcileThinkingForModel = async (
   // A model switch can invalidate the persisted level (for example,
   // minimal -> a model that starts at low). Reconcile it immediately rather
   // than showing a toolbar fallback while keeping/sending the stale value.
-  const requestedThinking = await getSessionThinkingOrDefault(sessionId, agentId);
+  const rememberedThinking = getSessionModelThinking(sessionId, model);
+  const requestedThinking = rememberedThinking || await getSessionThinkingOrDefault(sessionId, agentId);
   const effectiveThinking = normalizeModelThinkingLevel(requestedThinking, model);
   const thinkingResult = await window.electronAPI.agentSetThinkingLevel(effectiveThinking, sessionId);
   if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
   saveSessionThinking(sessionId, effectiveThinking);
+  saveSessionModelThinking(sessionId, model, effectiveThinking);
   if (useProjectStore.getState().activeSessionId === sessionId) {
     useChatStore.getState().setThinkingLevel(effectiveThinking);
   }
@@ -265,7 +270,6 @@ async function runInitialization(
 
   let models: ModelInfo[] = [];
   let warning: string | undefined;
-  let runtimeStateUnknown = false;
   try {
     const needsRuntimeInitialization = !useProjectStore.getState().initializedSessionIds.has(sessionId);
 
@@ -283,7 +287,6 @@ async function runInitialization(
     if (needsRuntimeInitialization) {
       const backendActivity = await getBackendSessionActivity(sessionId);
       if (backendActivity === "unknown") {
-        runtimeStateUnknown = true;
         throw new Error("SESSION_RUNTIME_STATE_UNKNOWN");
       }
       if (backendActivity === "missing") {
@@ -349,11 +352,11 @@ async function runInitialization(
   } catch (error) {
     warning = getErrorMessage(error);
     if (!options.recordFailure) throw error;
-    // An unavailable/stale state query proves neither that a backend exists
-    // nor that it is safe to create a replacement. Leave the session
-    // uninitialized so a later explicit/automatic initialization can probe
-    // again without disposing a possibly live task.
-    if (!runtimeStateUnknown) useProjectStore.getState().markSessionInitialized(sessionId);
+    // 初始化任一步骤失败都不能把会话锁定为“已初始化”。特别是应用在
+    // 自动压缩期间退出后，首次恢复可能遇到短暂的 worker/文件清理延迟；
+    // 保持未初始化状态，后续自动初始化、切换或发送才能真正重试。
+    // 即使 backend 已经创建成功，下一次状态探测也会复用它，不会重复创建。
+    clearMissingRuntimeInitialization(sessionId);
     addStartupError(sessionId, warning);
   }
 
@@ -939,12 +942,12 @@ export async function setThinking(
   const normalizedLevel = normalizeThinkingLevelId(level);
   const chat = useChatStore.getState();
   const knownModel = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
-  if (knownModel && !getModelThinkingLevels(knownModel).some((candidate) => candidate.id === normalizedLevel)) {
+  if (knownModel && !isModelThinkingLevelSelectable(knownModel, normalizedLevel)) {
     throw new Error("UNSUPPORTED_THINKING_LEVEL");
   }
   await initializeSession(sessionId);
   const model = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
-  if (!getModelThinkingLevels(model).some((candidate) => candidate.id === normalizedLevel)) {
+  if (!isModelThinkingLevelSelectable(model, normalizedLevel)) {
     throw new Error("UNSUPPORTED_THINKING_LEVEL");
   }
   const previous = getSessionThinking(sessionId) ||
@@ -952,6 +955,7 @@ export async function setThinking(
   const result = await window.electronAPI.agentSetThinkingLevel(normalizedLevel, sessionId);
   if (!result.success) throw new Error("THINKING_LEVEL_FAILED");
   saveSessionThinking(sessionId, normalizedLevel);
+  saveSessionModelThinking(sessionId, model, normalizedLevel);
   if (useChatStore.getState().activeSessionId === sessionId) useChatStore.getState().setThinkingLevel(normalizedLevel);
   return { level: normalizedLevel, previous };
 }
@@ -996,7 +1000,8 @@ export async function getActions(sessionId: string, reload = false): Promise<Age
 export async function getSessionCommandConfig(sessionId: string, includeModels = false) {
   const chat = useChatStore.getState();
   const model = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
-  const storedThinking = getSessionThinking(sessionId) ||
+  const storedThinking = (model ? getSessionModelThinking(sessionId, model) : null) ||
+    getSessionThinking(sessionId) ||
     (chat.activeSessionId === sessionId ? chat.thinkingLevel : "medium");
   return {
     model,
@@ -1040,6 +1045,53 @@ export function prepareSessionReferenceContext(
   };
 }
 
+// Pending guidance confirmations: when guidance IPC succeeds, we store the
+// entry data here. The agentEventDispatcher calls confirmGuidanceResponse
+// when the agent actually starts responding to the guidance.
+interface PendingGuidanceData {
+  guidanceEntryId: string;
+  queueItemId: string;
+  displayContent: string;
+  composerDocument: ComposerDocument | null;
+  messageImages: Array<{ id: string; src: string; name: string }> | undefined;
+  fallbackTimer: ReturnType<typeof setTimeout>;
+}
+
+const pendingGuidanceConfirmations = new Map<string, PendingGuidanceData>();
+
+export function confirmGuidanceResponse(sessionId: string) {
+  const pending = pendingGuidanceConfirmations.get(sessionId);
+  if (!pending) return;
+  pendingGuidanceConfirmations.delete(sessionId);
+  clearTimeout(pending.fallbackTimer);
+  if (!sessionIsOpen(sessionId)) return;
+  useChatStore.getState().appendLastAssistantProcessEntry({
+    id: pending.guidanceEntryId,
+    type: "info",
+    kind: USER_GUIDANCE_PROCESS_KIND,
+    toolKind: "guidance_messages",
+    title: "引导",
+    detail: pending.displayContent || undefined,
+    timestamp: Date.now(),
+    state: "completed",
+    completedAt: Date.now(),
+    guidanceDocument: pending.composerDocument
+      ? cloneComposerDocument(pending.composerDocument)
+      : undefined,
+    guidanceImages: pending.messageImages?.map((image) => ({ ...image })),
+  }, sessionId);
+  useChatStore.getState().removeQueuedMessage(sessionId, pending.queueItemId);
+}
+
+export function clearPendingGuidanceConfirmation(sessionId: string) {
+  const pending = pendingGuidanceConfirmations.get(sessionId);
+  if (!pending) return;
+  pendingGuidanceConfirmations.delete(sessionId);
+  clearTimeout(pending.fallbackTimer);
+}
+
+const GUIDANCE_CONFIRM_TIMEOUT_MS = 120_000;
+
 export async function guideQueuedMessage(sessionId: string, queueItemId: string) {
   return withSessionSendLock(sessionId, async () => {
     const { session } = getSessionCommandTarget(sessionId);
@@ -1053,20 +1105,6 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
     if (item.action) throw new Error("GUIDANCE_NOT_SUPPORTED_FOR_ACTION");
     const guidanceEntryId = `guidance-${item.id}`;
     chat.markQueuedMessageSending(sessionId, queueItemId);
-    chat.appendLastAssistantProcessEntry({
-      id: guidanceEntryId,
-      type: "info",
-      kind: USER_GUIDANCE_PROCESS_KIND,
-      toolKind: "guidance_message",
-      title: "引导",
-      detail: item.displayContent || undefined,
-      timestamp: Date.now(),
-      state: "running",
-      guidanceDocument: item.composerDocument
-        ? cloneComposerDocument(item.composerDocument)
-        : undefined,
-      guidanceImages: item.messageImages?.map((image) => ({ ...image })),
-    }, sessionId);
     try {
       const result = await window.electronAPI.agentSendGuidance(
         item.sendContent,
@@ -1075,15 +1113,25 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
         { planModeEnabled: !!item.planModeEnabled, permissionMode: item.permissionMode },
       );
       if (!result.success) throw new Error(result.error || "GUIDANCE_FAILED");
-      useChatStore.getState().updateLastAssistantProcessEntry(guidanceEntryId, {
-        state: "completed",
-        completedAt: Date.now(),
-      }, sessionId);
-      if (!sessionIsOpen(sessionId)) return { success: false, queueItemId, abandoned: true };
-      useChatStore.getState().removeQueuedMessage(sessionId, queueItemId);
+      // Don't create the guidance entry yet. Wait for the agent to actually
+      // start responding to the guidance. The backend emits a
+      // guidance_response_started event when the first content event arrives
+      // after guidance_done, which the agentEventDispatcher uses to call
+      // confirmGuidanceResponse. A timeout fallback ensures the entry is
+      // created even if the event never arrives.
+      const fallbackTimer = setTimeout(() => {
+        confirmGuidanceResponse(sessionId);
+      }, GUIDANCE_CONFIRM_TIMEOUT_MS);
+      pendingGuidanceConfirmations.set(sessionId, {
+        guidanceEntryId,
+        queueItemId,
+        displayContent: item.displayContent || "",
+        composerDocument: item.composerDocument ? cloneComposerDocument(item.composerDocument) : null,
+        messageImages: item.messageImages,
+        fallbackTimer,
+      });
       return { success: true, queueItemId };
     } catch (error) {
-      useChatStore.getState().removeLastAssistantProcessEntries([guidanceEntryId], sessionId);
       if (sessionIsOpen(sessionId)) {
         useChatStore.getState().markQueuedMessageFailed(sessionId, queueItemId, getErrorMessage(error));
       }

@@ -95,6 +95,24 @@ describe("official agent plugins", () => {
     });
   });
 
+  it("preserves plugin-declared context compaction capabilities", () => {
+    const plugins = validateOfficialPluginCatalog({
+      ...validCatalog,
+      plugins: [{
+        ...validCatalog.plugins[0],
+        capabilities: {
+          ...validCatalog.plugins[0].capabilities,
+          compaction: { customModel: true, thinkingLevel: true },
+        },
+      }],
+    }, "0.1.5");
+
+    expect(plugins[0].capabilities.compaction).toEqual({
+      customModel: true,
+      thinkingLevel: true,
+    });
+  });
+
   it("marks plugins requiring a newer Hpp version as incompatible", () => {
     const plugins = validateOfficialPluginCatalog({
       ...validCatalog,

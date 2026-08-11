@@ -1282,6 +1282,42 @@ describe("SessionCommandCoordinator", () => {
     });
   });
 
+  it("keeps a failed resumed session retryable instead of marking it initialized", async () => {
+    useProjectStore.setState({ initializedSessionIds: new Set(["session-one"]) });
+    electronAPI.agentGetSessionState.mockReset().mockResolvedValue({
+      success: false,
+      idle: true,
+      error: "No active agent",
+    });
+    electronAPI.agentCreateSession.mockReset()
+      .mockResolvedValueOnce({ success: false, error: "resume failed" })
+      .mockResolvedValueOnce({ success: true, sessionFilePath: "recovered-session.json", models: [] });
+
+    try {
+      const failed = await SessionCommandCoordinator.initializeSession("session-two", {
+        recordFailure: true,
+      });
+
+      expect(failed.warning).toBe("resume failed");
+      expect(useProjectStore.getState().initializedSessionIds.has("session-two")).toBe(false);
+
+      const recovered = await SessionCommandCoordinator.initializeSession("session-two", {
+        recordFailure: true,
+      });
+
+      expect(recovered.warning).toBeUndefined();
+      expect(electronAPI.agentCreateSession).toHaveBeenCalledTimes(2);
+      expect(useProjectStore.getState().initializedSessionIds.has("session-two")).toBe(true);
+    } finally {
+      electronAPI.agentGetSessionState.mockReset().mockResolvedValue({ success: true, idle: true });
+      electronAPI.agentCreateSession.mockReset().mockResolvedValue({
+        success: true,
+        sessionFilePath: "session.json",
+        models: [],
+      });
+    }
+  });
+
   it("does not replace a possibly live backend when its state probe is stale", async () => {
     useProjectStore.setState({ initializedSessionIds: new Set(["session-one"]) });
     electronAPI.agentGetSessionState.mockResolvedValueOnce({
@@ -1492,6 +1528,27 @@ describe("SessionCommandCoordinator", () => {
     expect(electronAPI.agentSetThinkingLevel).not.toHaveBeenCalled();
   });
 
+  it("allows a custom single-level model to toggle between off and its selected level", async () => {
+    const model = {
+      id: "custom-high",
+      name: "Custom High",
+      provider: "custom",
+      reasoning: true,
+      supportedThinkingLevels: ["high"],
+      thinkingLevelMode: "toggle" as const,
+    };
+    saveSessionModel("session-one", model);
+    useChatStore.setState({ currentModel: model });
+
+    await expect(SessionCommandCoordinator.setThinking("session-one", "off"))
+      .resolves.toMatchObject({ level: "off" });
+    expect(electronAPI.agentSetThinkingLevel).toHaveBeenLastCalledWith("off", "session-one");
+
+    await expect(SessionCommandCoordinator.setThinking("session-one", "high"))
+      .resolves.toMatchObject({ level: "high" });
+    expect(electronAPI.agentSetThinkingLevel).toHaveBeenLastCalledWith("high", "session-one");
+  });
+
   it("canonicalizes the none protocol alias while preserving native max", async () => {
     const model = {
       id: "alias-reasoner",
@@ -1545,6 +1602,41 @@ describe("SessionCommandCoordinator", () => {
     expect(electronAPI.agentSetThinkingLevel).toHaveBeenCalledWith("medium", "session-one");
     expect(getSessionThinking("session-one")).toBe("medium");
     expect(useChatStore.getState().thinkingLevel).toBe("medium");
+  });
+
+  it("restores each model's last supported thinking level after switching away and back", async () => {
+    const modelOne = {
+      id: "reasoner-one",
+      name: "Reasoner One",
+      provider: "test",
+      reasoning: true,
+      supportedThinkingLevels: ["off", "low", "medium", "high"],
+    };
+    const modelTwo = {
+      id: "reasoner-two",
+      name: "Reasoner Two",
+      provider: "test",
+      reasoning: true,
+      supportedThinkingLevels: ["off", "low", "medium"],
+    };
+    saveSessionModel("session-one", modelOne);
+    useChatStore.setState({
+      currentModel: modelOne,
+      availableModels: [modelOne, modelTwo],
+      thinkingLevel: "medium",
+    });
+
+    await SessionCommandCoordinator.setThinking("session-one", "high");
+    await SessionCommandCoordinator.setModel("session-one", modelTwo, {
+      models: [modelOne, modelTwo],
+    });
+    expect(useChatStore.getState().thinkingLevel).toBe("medium");
+
+    await SessionCommandCoordinator.setModel("session-one", modelOne, {
+      models: [modelOne, modelTwo],
+    });
+    expect(electronAPI.agentSetThinkingLevel).toHaveBeenLastCalledWith("high", "session-one");
+    expect(useChatStore.getState().thinkingLevel).toBe("high");
   });
 
   it("normalizes an inactive session without overwriting the active toolbar", async () => {

@@ -22,6 +22,7 @@ describe("desktop general settings layout", () => {
     expect(quickActions).not.toContain("过滤规则");
     expect(generalSettings).toContain("openShortcutSettings");
     expect(generalSettings).toContain("openFilterSettings");
+    expect(generalSettings).not.toContain("上下文压缩");
     expect(generalSettings).toContain("编辑与文件");
     expect(generalSettings).toContain("图片与缓存");
     expect(generalSettings).toContain("存储");
@@ -42,5 +43,36 @@ describe("desktop general settings layout", () => {
     expect(source).toContain("SHORTCUTS_UPDATED_EVENT");
     const styles = readWorkspaceFile("src/components/sidebar/Settings.css");
     expect(styles).toContain("grid-template-columns: repeat(3, minmax(108px, 138px))");
+  });
+
+  it("moves Agent compaction into plugin-capability-driven channel configuration", () => {
+    const configModal = readWorkspaceFile("src/components/sidebar/AgentConfigModal.tsx");
+    const compactionModal = readWorkspaceFile("src/components/sidebar/AgentCompactionModal.tsx");
+    const buttonIndex = configModal.indexOf("上下文压缩");
+    const reloadIndex = configModal.indexOf("重新载入当前配置");
+
+    expect(buttonIndex).toBeGreaterThan(-1);
+    expect(buttonIndex).toBeLessThan(reloadIndex);
+    expect(configModal).toContain('activeAgent?.capabilities.compaction');
+    expect(configModal).toContain('compactionCapabilities !== "none"');
+    expect(configModal).not.toContain('agentId === "pi"');
+    expect(compactionModal).toContain("压缩思考等级");
+    expect(compactionModal).toContain("当前 Agent 模型");
+    expect(compactionModal).toContain("自定义模型");
+    expect(compactionModal).toContain("Base URL");
+    expect(compactionModal).toContain("模型 ID");
+    expect(compactionModal).toContain("agentCompactionByAgent");
+    expect(compactionModal).toContain("agentSetAgentCompactionConfig");
+    expect(compactionModal).toContain('typeof applyConfig !== "function"');
+    expect(compactionModal).toContain("完全退出并重启 Hpp 后将应用到该 Agent");
+
+    const preload = readWorkspaceFile("electron/preload.ts");
+    expect(preload).toContain("agentSetAgentCompactionConfig");
+    expect(preload).toContain('ipcRenderer.invoke("agent:setAgentCompactionConfig", agentId, config)');
+
+    const styles = readWorkspaceFile("src/components/sidebar/Settings.css");
+    expect(styles).toContain(".settings-compaction-custom-model");
+    expect(styles).toContain(".agent-compaction-modal-overlay");
+    expect(styles).toContain("grid-template-columns: repeat(2, minmax(0, 1fr))");
   });
 });

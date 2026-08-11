@@ -58,11 +58,66 @@ function Resize-Png([string]$sourcePath, [string]$outputPath, [int]$size) {
   }
 }
 
+function New-Ico([object[]]$images, [string]$outputPath) {
+  $headerSize = 6
+  $directoryEntrySize = 16
+  $offset = $headerSize + ($directoryEntrySize * $images.Count)
+  $entries = @()
+
+  foreach ($image in $images) {
+    $bytes = [System.IO.File]::ReadAllBytes($image.Path)
+    $entries += [PSCustomObject]@{
+      Size = [int]$image.Size
+      Bytes = $bytes
+      Offset = $offset
+    }
+    $offset += $bytes.Length
+  }
+
+  $stream = New-Object System.IO.MemoryStream
+  $writer = New-Object System.IO.BinaryWriter($stream)
+  try {
+    $writer.Write([uint16]0)
+    $writer.Write([uint16]1)
+    $writer.Write([uint16]$entries.Count)
+
+    foreach ($entry in $entries) {
+      $dimension = if ($entry.Size -ge 256) { [byte]0 } else { [byte]$entry.Size }
+      $writer.Write($dimension)
+      $writer.Write($dimension)
+      $writer.Write([byte]0)
+      $writer.Write([byte]0)
+      $writer.Write([uint16]1)
+      $writer.Write([uint16]32)
+      $writer.Write([uint32]$entry.Bytes.Length)
+      $writer.Write([uint32]$entry.Offset)
+    }
+
+    foreach ($entry in $entries) {
+      $writer.Write($entry.Bytes)
+    }
+
+    $writer.Flush()
+    [System.IO.File]::WriteAllBytes($outputPath, $stream.ToArray())
+  } finally {
+    $writer.Dispose()
+    $stream.Dispose()
+  }
+}
+
 $squareMaster = Render-Svg "hpp-icon.svg" "square.png"
 $roundMaster = Render-Svg "hpp-icon-round.svg" "round.png"
 $foregroundMaster = Render-Svg "hpp-icon-foreground.svg" "foreground.png"
 
 Copy-Item -Force $squareMaster (Join-Path $workspace "public\icon.png")
+
+$desktopIconSizes = @(16, 24, 32, 48, 64, 96, 128, 256)
+$desktopIconImages = foreach ($size in $desktopIconSizes) {
+  $path = Join-Path $renderDir "desktop-$size.png"
+  Resize-Png $squareMaster $path $size
+  [PSCustomObject]@{ Size = $size; Path = $path }
+}
+New-Ico $desktopIconImages (Join-Path $workspace "public\icon.ico")
 
 $launcherSizes = [ordered]@{
   "mdpi" = 48
