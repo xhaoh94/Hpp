@@ -687,10 +687,19 @@ export class AgentPluginRegistry {
   private stopping = false;
   private permanentShutdown = false;
   private shutdownPromise: Promise<void> | null = null;
+  private loadPromise: Promise<AgentDescriptor[]> | null = null;
 
   async ensureLoaded() {
     if (this.loaded) return;
-    await this.reload();
+    // Concurrent callers at app startup (session init, catalog load, config
+    // queries) must share one reload: interleaved reloads call shutdown()
+    // against each other and can kill freshly spawned plugin host processes.
+    if (!this.loadPromise) {
+      this.loadPromise = this.reload().finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    await this.loadPromise;
   }
 
   async reload(): Promise<AgentDescriptor[]> {

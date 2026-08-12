@@ -23,6 +23,7 @@ import {
   showFloatingToastMessage,
 } from "./lib/floating-toast";
 import TitleBar from "./components/layout/TitleBar";
+import { AppDialogHost } from "./components/shared/AppDialogHost";
 import { CheckCircle2 } from "lucide-react";
 import { isSameModel } from "@shared/models";
 import { SessionCommandCoordinator } from "./lib/session-command-coordinator";
@@ -361,6 +362,7 @@ export default function App() {
           <span>{floatingToast.text}</span>
         </div>
       )}
+      <AppDialogHost />
     </div>
   );
 }

@@ -726,6 +726,17 @@ export class PiSDKAgent {
       case "agent_start":
         this.beginTurn();
         break;
+      // The worker emits guidance_delivered when the steer message is really
+      // consumed by the agent (its message enters the agent message flow)
+      // instead of when the guidance command resolves (which only queues it).
+      // Emitting the response start only then keeps the guidance bubble from
+      // landing in the middle of pre-guidance output.
+      case "guidance_delivered":
+        if (this.guidancePendingResponse) {
+          this.guidancePendingResponse = false;
+          this.emitEvent({ type: "guidance_response_started" });
+        }
+        break;
       case "message_update": {
         if (!this.turnActive && this.activePromptIds.size > 0) this.beginTurn();
         if (!this.turnActive) break;
@@ -738,10 +749,8 @@ export class PiSDKAgent {
             this.streamedTextBuffer += delta;
             this.streamedMessageTextBuffer += delta;
           }
-          this.tryEmitGuidanceResponseStarted();
           this.emitEventThrottled({ type: "stream_delta", delta });
         } else if (assistantEvent.type === "thinking_delta") {
-          this.tryEmitGuidanceResponseStarted();
           this.emitEventThrottled({ type: "thinking_delta", delta: String(assistantEvent.delta || "") });
         }
         this.refreshAgentEndFallback();
@@ -778,7 +787,6 @@ export class PiSDKAgent {
         break;
       case "tool_execution_start":
         this.clearTurnFallback();
-        this.tryEmitGuidanceResponseStarted();
         this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
         break;
       case "tool_execution_update": {
@@ -1077,13 +1085,6 @@ export class PiSDKAgent {
       this.emitEvent({ type: "agent_disconnected", detail: error });
     }
     this.finishAbortState();
-  }
-
-  private tryEmitGuidanceResponseStarted() {
-    if (this.guidancePendingResponse) {
-      this.guidancePendingResponse = false;
-      this.emitEvent({ type: "guidance_response_started" });
-    }
   }
 
   private emitEvent(data: unknown) {

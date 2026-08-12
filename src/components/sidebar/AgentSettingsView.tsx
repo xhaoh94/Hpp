@@ -7,6 +7,7 @@ import {
   supportsNativePlanMode,
 } from "@/lib/agents";
 import { compareVersions } from "@/lib/version";
+import { showAppConfirm } from "@/lib/app-dialog";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -350,7 +351,10 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
       setPluginStatus({ type: "error", text: "请选择插件目录或 ZIP 文件" });
       return;
     }
-    const trusted = window.confirm("本地 Agent 插件会在主进程中执行 JavaScript。请只安装你信任的插件。是否继续安装？");
+    const trusted = await showAppConfirm(
+      "本地 Agent 插件会在主进程中执行 JavaScript。请只安装你信任的插件。是否继续安装？",
+      { title: "安装本地插件", confirmLabel: "继续安装" },
+    );
     if (!trusted) return;
 
     setInstallingPlugin(true);
@@ -384,7 +388,10 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
       return;
     }
 
-    const trusted = window.confirm("Agent 插件等同运行本机程序。请确认信任 xhaoh94/Hpp Release 后继续安装。");
+    const trusted = await showAppConfirm(
+      "Agent 插件等同运行本机程序。请确认信任 xhaoh94/Hpp Release 后继续安装。",
+      { title: "安装官方插件", confirmLabel: "继续安装" },
+    );
     if (!trusted) return;
 
     setInstallingOfficialAgentIds((prev) => ({ ...prev, [plugin.id]: true }));

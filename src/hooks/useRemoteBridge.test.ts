@@ -614,11 +614,11 @@ describe("remote renderer serialization", () => {
     ]);
   });
 
-  it("uses the same first-user-message title shown by the desktop", () => {
+  it("uses the complete first-user-message title for responsive web truncation", () => {
     expect(getRemoteSessionTitle("新会话", [message("assistant")])).toBe("新会话");
     expect(getRemoteSessionTitle("新会话", [{ ...message("reference-only", ""), role: "user" }])).toBe("新会话");
     expect(getRemoteSessionTitle("新会话", [{ ...message("user", "同步后的会话标题"), role: "user" }])).toBe("同步后的会话标题");
-    const longTitle = "a".repeat(35);
-    expect(getRemoteSessionTitle("新会话", [{ ...message("user", longTitle), role: "user" }])).toBe(`${"a".repeat(30)}...`);
+    const longTitle = "a".repeat(120);
+    expect(getRemoteSessionTitle("新会话", [{ ...message("user", longTitle), role: "user" }])).toBe(longTitle);
   });
 });

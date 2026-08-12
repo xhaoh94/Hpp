@@ -11,6 +11,11 @@ import { normalizeModelThinkingLevel } from "@shared/models";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 
 const MODEL_FETCH_RETRY_DELAYS = [0, 500, 1000, 2000, 4000, 8000];
+// Startup initialization can lose a race against plugin/catalog warm-up and
+// fail silently (the spinner overlay hides the startup-error message). Retry
+// the auto-init a few times instead of spinning forever until the user
+// manually switches sessions.
+const AUTO_INIT_RETRY_DELAYS_MS = [1500, 4000];
 
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -125,6 +130,7 @@ export function useSessionModels({
 
   useEffect(() => {
     const fetchRunId = ++modelFetchRunIdRef.current;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     if (!activeSessionId || !activeSessionAgentId) {
       clearModels();
@@ -132,10 +138,43 @@ export function useSessionModels({
     }
 
     if (!activeSessionInitialized) {
+      const scheduleRetry = (attempt: number) => {
+        if (attempt >= AUTO_INIT_RETRY_DELAYS_MS.length) return;
+        retryTimer = setTimeout(() => {
+          const projectState = useProjectStore.getState();
+          if (
+            projectState.activeSessionId !== activeSessionId ||
+            projectState.initializedSessionIds.has(activeSessionId)
+          ) return;
+          const session = projectState.projects
+            .flatMap((candidate) => candidate.sessions)
+            .find((candidate) => candidate.id === activeSessionId);
+          if (!session || session.agentId !== activeSessionAgentId) return;
+          void SessionCommandCoordinator.initializeSession(activeSessionId, {
+            recordFailure: true,
+          }).finally(() => {
+            if (
+              useProjectStore.getState().activeSessionId === activeSessionId &&
+              !useProjectStore.getState().initializedSessionIds.has(activeSessionId)
+            ) {
+              scheduleRetry(attempt + 1);
+            }
+          });
+        }, AUTO_INIT_RETRY_DELAYS_MS[attempt]);
+      };
       void SessionCommandCoordinator.initializeSession(activeSessionId, {
         recordFailure: true,
+      }).finally(() => {
+        if (
+          useProjectStore.getState().activeSessionId === activeSessionId &&
+          !useProjectStore.getState().initializedSessionIds.has(activeSessionId)
+        ) {
+          scheduleRetry(0);
+        }
       });
-      return;
+      return () => {
+        if (retryTimer) clearTimeout(retryTimer);
+      };
     }
 
     void fetchModels(activeSessionId, fetchRunId);

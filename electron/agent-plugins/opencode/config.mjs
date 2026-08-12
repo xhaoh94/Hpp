@@ -168,17 +168,24 @@ const getModelThinkingLevels = (value) => {
 const normalizeModel = (value, fallbackId) => {
   if (!isRecord(value)) {
     const id = asString(fallbackId) || asString(value);
-    return id ? { id, name: id, reasoning: false, imageInput: false } : null;
+    return id ? { id, name: id, reasoning: false, imageInput: false, isBuiltin: false, hasThinkingLevels: false } : null;
   }
   const id = asString(value.id) || asString(value.model) || asString(value.name) || asString(fallbackId);
   if (!id) return null;
   const supportedThinkingLevels = getModelThinkingLevels(value);
+  const reasoning = value.reasoning === true;
+  const imageInput = modelSupportsImages(value);
+  // OpenCode 没有内置 catalog，所有模型均为用户配置的自定义模型。
+  // 有显式档位声明的模型不需要用户再配置；有 reasoning 但无档位的允许用户配置。
+  const hasExplicitLevels = Array.isArray(supportedThinkingLevels) && supportedThinkingLevels.length > 0;
   return {
     id,
     name: asString(value.name) || asString(value.displayName) || id,
-    reasoning: value.reasoning === true,
-    imageInput: modelSupportsImages(value),
-    ...(supportedThinkingLevels?.length ? { supportedThinkingLevels } : {}),
+    reasoning,
+    imageInput,
+    isBuiltin: false,
+    hasThinkingLevels: reasoning && !hasExplicitLevels,
+    ...(hasExplicitLevels ? { supportedThinkingLevels } : {}),
   };
 };
 

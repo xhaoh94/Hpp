@@ -720,6 +720,28 @@ describe("Pi lifecycle", () => {
     agent.dispose();
   });
 
+  it("emits guidance_response_started only when the steer message is delivered", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    await agent.sendMessage("work", undefined, { clientMessageId: "client-1" });
+
+    // steer() only queues the guidance: sending it resolves but must not yet
+    // report the guidance response as started.
+    await agent.sendGuidance("steer this turn");
+    child.stdout.write(`${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "still finishing" } })}\n`);
+    expect(events.some((event) => event.type === "guidance_response_started")).toBe(false);
+
+    // The worker emits guidance_delivered once the steer message enters the
+    // agent message flow, right before the guidance output begins.
+    child.stdout.write(`${JSON.stringify({ type: "guidance_delivered" })}\n`);
+    expect(events.some((event) => event.type === "guidance_response_started")).toBe(true);
+    agent.dispose();
+  });
+
   it("relays Pi history and native turn metadata", async () => {
     const child = new FakePiProcess();
     child.stdin.on("data", (chunk) => {

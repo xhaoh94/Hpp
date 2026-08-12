@@ -81,6 +81,11 @@ let activePromptId = null;
 let activePermissionMode = "full-access";
 let activePlanMode = false;
 let activeHostSystemPrompt = "";
+// Set after a guidance command resolves (steer is only queued at that point).
+// Cleared when the steer message actually enters the agent message flow
+// (message_start with a user message), which happens right before the agent
+// starts the output that responds to the guidance.
+let pendingGuidanceDelivered = false;
 let fullAccessToolNames = [];
 let planModeToolNames = [];
 let shellWarning = "";
@@ -1261,6 +1266,17 @@ const handleSessionEvent = (event) => {
     case "agent_start":
       send({ type: "agent_start" });
       break;
+    case "message_start": {
+      // Pi's steer() only queues the message; the agent consumes it right
+      // before its next assistant output and emits message_start (user) at
+      // that point. Signal the backend so the guidance bubble is placed at
+      // the start of the guidance response, not earlier.
+      if (pendingGuidanceDelivered && isRecord(event.message) && event.message.role === "user") {
+        pendingGuidanceDelivered = false;
+        send({ type: "guidance_delivered" });
+      }
+      break;
+    }
     case "agent_end":
       send({ type: "agent_end" });
       break;
@@ -1519,6 +1535,7 @@ const handleCommand = async (command) => {
         }
         await session.steer(command.message, command.images);
         send({ type: "guidance_done", id: command.id });
+        pendingGuidanceDelivered = true;
         break;
       case "forkSession": {
         const result = await forkSessionAtMessage(command);

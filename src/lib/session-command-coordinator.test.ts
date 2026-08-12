@@ -9,10 +9,11 @@ import {
 } from "@/hooks/useDataPersistence";
 import { createComposerDocument } from "@shared/composer-document";
 import {
+  confirmGuidanceResponse,
   SessionCommandCoordinator,
   classifyBackendSessionState,
   type PreparedSessionMessage,
-} from "./session-command-coordinator";
+} from "@/lib/session-command-coordinator";
 
 const session = (id: string): ProjectSession => ({
   id,
@@ -294,6 +295,9 @@ describe("SessionCommandCoordinator", () => {
       status: "queued",
     });
 
+    // The guidance bubble is only rendered once the agent actually starts
+    // responding to the guidance (see confirmGuidanceResponse). Sending the
+    // guidance resolves before that and must not render the bubble yet.
     await expect(SessionCommandCoordinator.guideQueuedMessage("session-one", "queued-guidance"))
       .resolves.toEqual({ success: true, queueItemId: "queued-guidance" });
 
@@ -304,10 +308,20 @@ describe("SessionCommandCoordinator", () => {
       { planModeEnabled: true, permissionMode: "ask" },
     );
     const assistant = useChatStore.getState().sessionMessages["session-one"].find((item) => item.id === "assistant-running");
-    expect(assistant?.process?.entries).toEqual([expect.objectContaining({
+    expect(assistant?.process?.entries).toEqual([]);
+    // The queue item is kept until the guidance response starts.
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({ id: "queued-guidance" }),
+    ]);
+
+    // Once the agent starts responding, the bubble is rendered and the queue
+    // item is removed.
+    confirmGuidanceResponse("session-one");
+    const confirmed = useChatStore.getState().sessionMessages["session-one"].find((item) => item.id === "assistant-running");
+    expect(confirmed?.process?.entries).toEqual([expect.objectContaining({
       id: "guidance-queued-guidance",
       kind: "user_guidance",
-      toolKind: "guidance_message",
+      toolKind: "guidance_messages",
       title: "引导",
       detail: "继续检查 [file: README.md]",
       state: "completed",
@@ -1504,12 +1518,36 @@ describe("SessionCommandCoordinator", () => {
     expect(useProjectStore.getState().activeSessionId).toBe("session-one");
   });
 
-  it("rejects model and thinking changes while the session is busy", async () => {
+  it("keeps allowing model and thinking changes while the session is busy", async () => {
+    const modelA = {
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: true,
+      supportedThinkingLevels: ["off", "low", "medium", "high"],
+    };
+    const modelB = {
+      id: "model-b",
+      name: "Model B",
+      provider: "test",
+      reasoning: true,
+      supportedThinkingLevels: ["off", "medium", "high"],
+    };
+    saveSessionModel("session-one", modelA);
+    useChatStore.setState({
+      currentModel: modelA,
+      availableModels: [modelA, modelB],
+      thinkingLevel: "medium",
+    });
+    electronAPI.agentGetModels.mockResolvedValueOnce([modelA, modelB]);
+    // Mark the session as running to exercise the previously-busy path.
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
-    await expect(SessionCommandCoordinator.setModel("session-one", { provider: "openai", id: "gpt" }))
-      .rejects.toThrow("SESSION_BUSY");
+
+    await expect(SessionCommandCoordinator.setModel("session-one", modelB, {
+      models: [modelA, modelB],
+    })).resolves.toMatchObject({ model: modelB });
     await expect(SessionCommandCoordinator.setThinking("session-one", "high"))
-      .rejects.toThrow("SESSION_BUSY");
+      .resolves.toMatchObject({ level: "high" });
   });
 
   it("rejects thinking levels not supported by the current model", async () => {

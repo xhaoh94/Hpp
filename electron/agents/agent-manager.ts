@@ -81,6 +81,11 @@ interface SuspendedPluginSessions {
 
 const AGENT_SESSION_INIT_TIMEOUT_MS = 90_000;
 const AGENT_SESSION_STATE_REFRESH_TIMEOUT_MS = 3_000;
+// Quick backend roundtrips (model list, model/thinking switches) must never
+// stall session initialization: a hung plugin backend call without a timeout
+// leaves the renderer waiting on the creation IPC forever, which surfaces as
+// an endless "initializing" spinner with no error message.
+const AGENT_BACKEND_CALL_TIMEOUT_MS = 15_000;
 // A host UI request that stays untouched for this long while the backend
 // itself reports idle is stale residue from a finished turn. Reuse the
 // session instead of reporting busy forever.
@@ -216,19 +221,25 @@ export class AgentManager {
     projectPath: string,
     existingSessionFilePath?: string
   ): Promise<void> {
-    const capabilities = await agentRegistry.getCapabilities(agentId);
-    const compactionSupport = capabilities.compaction;
-    const savedCompaction = compactionSupport && compactionSupport !== "none"
-      ? await loadSavedAgentCompactionConfig(agentId)
-      : undefined;
-    const compaction = savedCompaction
-      ? normalizeCompactionForSupport(savedCompaction, compactionSupport)
-      : undefined;
+    // Capability lookups and saved-config reads run before the backend init
+    // and can themselves wait on the plugin registry; bound the whole chain
+    // so createSession always settles even if a step other than agent.init
+    // hangs.
     await withTimeout(
-      agent.init(projectPath, existingSessionFilePath, {
-        hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
-        ...(compaction ? { compaction } : {}),
-      }),
+      (async () => {
+        const capabilities = await agentRegistry.getCapabilities(agentId);
+        const compactionSupport = capabilities.compaction;
+        const savedCompaction = compactionSupport && compactionSupport !== "none"
+          ? await loadSavedAgentCompactionConfig(agentId)
+          : undefined;
+        const compaction = savedCompaction
+          ? normalizeCompactionForSupport(savedCompaction, compactionSupport)
+          : undefined;
+        await agent.init(projectPath, existingSessionFilePath, {
+          hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
+          ...(compaction ? { compaction } : {}),
+        });
+      })(),
       AGENT_SESSION_INIT_TIMEOUT_MS,
       "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
     );
@@ -259,7 +270,11 @@ export class AgentManager {
       console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
       let agent = this.sessionAgents.get(sessionId);
       if (!agent) {
-        agent = await this.createAgentBackend(agentId, sessionId);
+        agent = await withTimeout(
+          this.createAgentBackend(agentId, sessionId),
+          AGENT_SESSION_INIT_TIMEOUT_MS,
+          "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
+        );
         this.sessionAgents.set(sessionId, agent);
         this.sessionAgentTypes.set(sessionId, agentId);
         console.log("[agent-manager] Created new agent:", agent.constructor.name);
@@ -375,7 +390,20 @@ export class AgentManager {
   async getModelsBySessionId(sessionId: string): Promise<AgentModel[]> {
     const agent = this.sessionAgents.get(sessionId);
     if (!agent) return [];
-    const models = await agent.getModels();
+    // Model discovery is not part of session creation itself: degrade to an
+    // empty list instead of hanging the creation response when the plugin
+    // backend does not answer (the renderer refreshes models later).
+    let models: AgentModel[];
+    try {
+      models = await withTimeout(
+        agent.getModels(),
+        AGENT_BACKEND_CALL_TIMEOUT_MS,
+        "获取模型列表超时",
+      );
+    } catch (error) {
+      console.warn("[agent-manager] getModelsBySessionId failed for", sessionId, ":", getErrorMessage(error));
+      return [];
+    }
     const agentType = this.sessionAgentTypes.get(sessionId);
     return mergeModelsWithConfiguredAgentModels(agentType, models);
   }
@@ -1620,7 +1648,17 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       : agentManager.getActiveAgent();
     console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
     if (!agent) return [];
-    const models = await agent.getModels();
+    let models: AgentModel[];
+    try {
+      models = await withTimeout(
+        agent.getModels(),
+        AGENT_BACKEND_CALL_TIMEOUT_MS,
+        "获取模型列表超时",
+      );
+    } catch (error) {
+      console.warn("[agent-manager] getModels failed:", getErrorMessage(error));
+      return [];
+    }
     const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
     return mergeModelsWithConfiguredAgentModels(agentType, models);
   });
@@ -1659,7 +1697,11 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       }
       const agent = agentManager.getAgentForSession(sessionId);
       if (!agent) return { success: false, error: "No active agent" };
-      await agent.setModel(provider, modelId);
+      await withTimeout(
+        agent.setModel(provider, modelId),
+        AGENT_BACKEND_CALL_TIMEOUT_MS,
+        "切换模型超时，插件未响应，请重试。",
+      );
       return { success: true };
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err) };
@@ -1669,8 +1711,16 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agent:setThinkingLevel", async (_event, level: string, sessionId?: string) => {
     const agent = agentManager.getAgentForSession(sessionId);
     if (!agent) return { success: false };
-    await agent.setThinkingLevel(level);
-    return { success: true };
+    try {
+      await withTimeout(
+        agent.setThinkingLevel(level),
+        AGENT_BACKEND_CALL_TIMEOUT_MS,
+        "设置思考等级超时，插件未响应，请重试。",
+      );
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
   });
 
   ipcMain.handle("agent:sendUIResponse", async (_event, response: AgentUIResponse) => {

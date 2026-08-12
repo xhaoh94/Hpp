@@ -1305,7 +1305,8 @@ const MessageItem = memo(function MessageItem({
               ))}
               {messagePresentation.text && (
                 <div className="message-content">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{messagePresentation.text}</ReactMarkdown>
+                  {/* 用户发言按纯文本展示，避免 Markdown 语法（# 标题、` 代码）造成字号忽大忽小 */}
+                  <p>{messagePresentation.text}</p>
                 </div>
               )}
                 </>
@@ -4480,10 +4481,7 @@ export default function App() {
             <span className={connectionState}>{connectionLabel(connectionState)} · {activeHost.baseUrl}</span>
           </div>
           <button className="icon-button" onClick={leaveActiveHost} title="返回主机列表"><ArrowLeft size={18} /></button>
-        </div>
-        <div className="drawer-header">
-          <div><strong>Projects</strong><span>{projects.length}</span></div>
-          <button className="icon-button" onClick={() => setDrawerOpen(false)}><X size={19} /></button>
+          <button className="icon-button" onClick={() => setDrawerOpen(false)} title="关闭项目列表" aria-label="关闭侧边栏"><X size={19} /></button>
         </div>
         <nav className="project-list">
           {projects.map((project) => {
@@ -4530,10 +4528,12 @@ export default function App() {
                 <div className="session-list">
                   {openSessions.map((session) => (
                     <div className={`session-row ${selectedSessionId === session.id ? "active" : ""}`} key={session.id}>
-                      <button className={`session-main ${session.status === "running" ? "has-running" : ""}`} onClick={() => selectSession(session.id)}>
-                        <span className={`session-state ${session.status}`} />
-                        <span><strong>{session.title}</strong><small>{session.agentId} · {session.status}</small></span>
+                      <button className="session-main" onClick={() => selectSession(session.id)}>
                         {session.status === "running" && <SessionRunningIndicator />}
+                        <span className="session-list-copy">
+                          <small>{session.agentId}</small>
+                          <strong>{session.title}</strong>
+                        </span>
                       </button>
                       <button
                         type="button"
@@ -4557,10 +4557,9 @@ export default function App() {
       {drawerOpen && <button className="drawer-scrim" onClick={() => setDrawerOpen(false)} aria-label="关闭项目列表" />}
 
       {historyProject && (
-        <div className="sheet-backdrop" onClick={() => { if (!commandBusy) setHistoryProjectId(null); }}>
-          <section className="bottom-sheet project-history-sheet" onClick={(event) => event.stopPropagation()}>
-            <div className="sheet-handle" />
-            <div className="sheet-title">
+        <div className="sheet-backdrop dialog-backdrop-center" onClick={() => { if (!commandBusy) setHistoryProjectId(null); }}>
+          <section className="history-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-title history-dialog-title">
               <div><h2>历史会话</h2><p>{historyProject.name} · {historyProjectSessions.length} 个会话</p></div>
               <button className="icon-button" disabled={commandBusy} onClick={() => setHistoryProjectId(null)}><X size={19} /></button>
             </div>
@@ -4591,10 +4590,9 @@ export default function App() {
       )}
 
       {createProject && (
-        <div className="sheet-backdrop" onClick={() => { if (!commandBusy) setCreateProject(null); }}>
-          <section className="bottom-sheet create-session-sheet" onClick={(event) => event.stopPropagation()}>
-            <div className="sheet-handle" />
-            <div className="sheet-title">
+        <div className="sheet-backdrop dialog-backdrop-center" onClick={() => { if (!commandBusy) setCreateProject(null); }}>
+          <section className="history-dialog create-session-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-title history-dialog-title">
               <div><h2>新建会话</h2><p>{createProject.name}</p></div>
               <button className="icon-button" disabled={commandBusy} onClick={() => setCreateProject(null)}><X size={19} /></button>
             </div>
@@ -4609,7 +4607,7 @@ export default function App() {
                   onClick={() => setCreateAgentId(agent.id)}
                 >
                   <span className="agent-picker-icon"><Bot size={17} /></span>
-                  <span><strong>{agent.name}</strong><small>{agent.description || agent.id}</small></span>
+                  <span><strong>{agent.name}</strong></span>
                   <span className="agent-picker-radio" />
                 </button>
               ))}
@@ -4623,12 +4621,11 @@ export default function App() {
       )}
 
       {historyOpen && selected && (
-        <div className="sheet-backdrop" onClick={() => setHistoryOpen(false)}>
-          <section className="bottom-sheet history-sheet" onClick={(event) => event.stopPropagation()}>
-            <div className="sheet-handle" />
-            <div className="sheet-title">
-              <div><h2>发言记录</h2><p>{selected.session.title}</p></div>
-              <button className="icon-button" onClick={() => setHistoryOpen(false)}><X size={19} /></button>
+        <div className="sheet-backdrop dialog-backdrop-center" onClick={() => setHistoryOpen(false)}>
+          <section className="history-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-title history-dialog-title history-dialog-title-compact">
+              <div><h2>发言记录</h2></div>
+              <button className="icon-button" onClick={() => setHistoryOpen(false)} title="关闭" aria-label="关闭发言记录"><X size={19} /></button>
             </div>
             <div className="history-list">
               {selectedUserMessages.map((message, index) => (
@@ -4717,16 +4714,15 @@ export default function App() {
                     {openSessions.map((session) => (
                       <button
                         type="button"
-                        className={`session-picker-row ${session.status === "running" ? "has-running" : ""}`}
+                        className="session-picker-row"
                         key={session.id}
                         onClick={() => selectSession(session.id)}
                       >
-                        <span className={`session-state ${session.status}`} />
-                        <span className="session-picker-copy">
-                          <strong>{session.title}</strong>
-                          <small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}</small>
-                        </span>
                         {session.status === "running" && <SessionRunningIndicator />}
+                        <span className="session-picker-copy">
+                          <small>{agents.find((agent) => agent.id === session.agentId)?.name || session.agentId}</small>
+                          <strong>{session.title}</strong>
+                        </span>
                         <ChevronRight size={16} />
                       </button>
                     ))}

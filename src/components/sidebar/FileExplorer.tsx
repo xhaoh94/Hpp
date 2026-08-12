@@ -19,6 +19,7 @@ import { scheduleAbortableTask } from "@/lib/abortable-task-scheduler";
 import { invalidateProjectFileIndex, queryProjectFileIndex } from "@/lib/project-file-index";
 import { replaceEmojiWithImages } from "@/lib/emoji";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
+import { showAppAlert } from "@/lib/app-dialog";
 import { getFileFilterKey, isFileEntryExcluded, type FileFilterConfig } from "@shared/file-filters";
 import type { FileEntry } from "@/types";
 import {
@@ -366,7 +367,7 @@ export function FileExplorer() {
       await navigator.clipboard.writeText(value);
       showFloatingToastMessage(value.includes("\n") ? "已复制多个路径" : "已复制路径");
     } catch {
-      window.alert("复制失败");
+      showAppAlert("复制失败");
     } finally {
       closeContextMenu();
     }
@@ -375,7 +376,7 @@ export function FileExplorer() {
   const addToChat = useCallback(async (entries: FileEntry[]) => {
     const sessionId = useProjectStore.getState().activeSessionId;
     if (!sessionId) {
-      window.alert("请先选择一个会话再添加到聊天");
+      showAppAlert("请先选择一个会话再添加到聊天");
       closeContextMenu();
       return;
     }
@@ -383,7 +384,7 @@ export function FileExplorer() {
     for (const entry of entries) {
       const result = await window.electronAPI.statPath(entry.path);
       if (!result.success || !result.attachment) {
-        window.alert(result.error || `无法添加资源：${entry.name}`);
+        showAppAlert(result.error || `无法添加资源：${entry.name}`);
         continue;
       }
       useChatStore.getState().addPendingPathAttachment({ id: crypto.randomUUID(), ...result.attachment }, sessionId);
@@ -396,7 +397,7 @@ export function FileExplorer() {
   const openInExplorer = useCallback(async (entries: FileEntry[]) => {
     for (const entry of entries) {
       const result = await window.electronAPI.showItemInFolder(entry.path);
-      if (!result.success) window.alert(result.error || `无法打开：${entry.name}`);
+      if (!result.success) showAppAlert(result.error || `无法打开：${entry.name}`);
     }
     closeContextMenu();
   }, [closeContextMenu]);

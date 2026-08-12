@@ -342,36 +342,37 @@
   overflow: hidden;
 }
 
-.fp-cm-header {
-  padding: 8px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  border-bottom: 1px solid var(--border-color);
-}
-
-.fp-cm-info {
-  padding: 6px 12px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
 .fp-cm-btn {
-  display: block;
+  display: flex;
   width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   padding: 8px 12px;
   background: none;
   border: none;
-  border-top: 1px solid var(--border-color);
   color: var(--text-primary);
   font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
 
+.fp-cm-btn-title {
+  font-weight: 600;
+}
+
+.fp-cm-btn-target {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
 .fp-cm-btn:hover {
   background: var(--accent-color);
   color: white;
+}
+
+.fp-cm-btn:hover .fp-cm-btn-target {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 /* highlight.js tokens (same palette as Markdown code blocks) */

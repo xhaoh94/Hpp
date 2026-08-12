@@ -269,6 +269,8 @@ export class DroidAgent {
   private permissionMode: import("../../../shared/agent-permissions").AgentPermissionMode = "auto";
   private turnActive = false;
   private isAborting = false;
+  private guidancePendingResponse = false;
+  private guidanceRequestId: string | null = null;
   private runningToolUses = new Map<string, RunningDroidTool>();
   private completedToolUses = new Set<string>();
   private actionKeys = new Set<string>();
@@ -455,6 +457,34 @@ export class DroidAgent {
       await this.sendRpcAsync("droid.add_user_message", msgParams, 30000, requestId);
     } catch (error) {
       if (this.process) this.failActiveTurn("Droid request failed", getErrorMessage(error));
+      throw error;
+    }
+  }
+
+  /** Send a guidance message into the active session (mid-turn steering). */
+  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
+    if (!this.process || !this.isReady) throw new Error("Droid is not ready");
+
+    // Guidance steers the already-running conversation, so it must not reset
+    // the currently streaming turn's state (turnActive / tool sets) the way
+    // sendMessage does. Droid accepts a second add_user_message while a turn
+    // is active; it will reply to it in context.
+    const msgParams: DroidUserMessageParams = { text: message };
+    if (images && images.length > 0) {
+      msgParams.images = images.map((img) => ({
+        type: "base64",
+        mediaType: img.mimeType,
+        data: img.data,
+      }));
+    }
+    const requestId = this.nextRpcId();
+    this.guidanceRequestId = requestId;
+    this.guidancePendingResponse = true;
+    try {
+      await this.sendRpcAsync("droid.add_user_message", msgParams, 30000, requestId);
+    } catch (error) {
+      this.guidancePendingResponse = false;
+      this.guidanceRequestId = null;
       throw error;
     }
   }
@@ -1026,6 +1056,21 @@ export class DroidAgent {
             }
           }
           this.emitTurnMetadata(message.id, clientMessageId);
+          // A guidance message is Droid's second add_user_message into the
+          // active turn. When its create_message (user) notification arrives,
+          // the guidance has truly entered the conversation and the assistant
+          // is about to reply to it — emit the response-start signal there so
+          // the guidance bubble lands right at the start of that reply.
+          if (
+            this.guidancePendingResponse &&
+            this.guidanceRequestId &&
+            requestId &&
+            requestId === this.guidanceRequestId
+          ) {
+            this.guidancePendingResponse = false;
+            this.guidanceRequestId = null;
+            this.emitEvent({ type: "guidance_response_started" });
+          }
         }
         break;
       case "assistant_text_delta":

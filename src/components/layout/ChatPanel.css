@@ -294,6 +294,8 @@
   width: 44px;
   height: 0;
   align-self: flex-start;
+  /* 在“面板左缘 → 内容列左缘”的间隙内居中：与按钮到聊天内容的间距保持一致。 */
+  margin-left: var(--chat-left-rail-inset);
   pointer-events: none;
 }
 
@@ -687,6 +689,9 @@
 .chat-messages {
   flex: 1;
   min-height: 0;
+  /* 左侧浮动按钮（发言记录/返回顶部/思考）相对内容框内缩 4px，
+     使按钮在面板左缘与内容列左缘之间居中，左右间距一致。 */
+  --chat-left-rail-inset: -4px;
   /* This is the vertical conversation scroller. Wide Markdown content owns
      its own horizontal scrolling inside code/table containers. */
   overflow-x: hidden;
@@ -1514,8 +1519,9 @@
 }
 
 .chat-process-sticky-layer > .chat-process-sticky {
-  /* Portal 后仍复用原有负轨道偏移，使按钮与历史按钮共享左边缘。 */
-  margin-left: var(--chat-process-thinking-rail-width);
+  /* Portal 后仍复用原有负轨道偏移，使按钮与历史按钮共享左边缘；
+     叠加左轨道内缩，让按钮组在内容间隙内居中。 */
+  margin-left: calc(var(--chat-process-thinking-rail-width) + var(--chat-left-rail-inset));
 }
 
 .chat-process-sticky-inner {

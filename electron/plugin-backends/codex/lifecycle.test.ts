@@ -128,6 +128,28 @@ describe("Codex lifecycle", () => {
     await agent.dispose();
   });
 
+  it("emits guidance_response_started when the steered turn produces new output", async () => {
+    const child = new FakeCodexProcess();
+    respondToLifecycle(child);
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new CodexAgent("session-1", (event) => events.push(event as AgentEvent));
+    await agent.init("C:\\project");
+    await agent.sendMessage("work", undefined, { clientMessageId: "prompt-1" });
+
+    // Steer resolves (injects input) but must not report the guidance as
+    // started yet.
+    await agent.sendGuidance("steer this turn");
+    child.stdout.write(`${JSON.stringify({ type: "stream_delta", delta: "still finishing" })}\n`);
+    expect(events.some((event) => event.type === "guidance_response_started")).toBe(false);
+
+    // The worker emits guidance_delivered alongside the first new item after
+    // the steer, right before the guidance output begins.
+    child.stdout.write(`${JSON.stringify({ type: "guidance_delivered" })}\n`);
+    expect(events.some((event) => event.type === "guidance_response_started")).toBe(true);
+    await agent.dispose();
+  });
+
   it("keeps the first prompt active when a concurrent prompt is rejected", async () => {
     const child = new FakeCodexProcess();
     respondToLifecycle(child);

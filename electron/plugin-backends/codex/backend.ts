@@ -518,16 +518,24 @@ export class CodexAgent {
       case "agent_start":
         this.emitEvent({ type: "agent_start" });
         break;
+      // The worker emits guidance_delivered when the steer message really
+      // starts producing new output (its first new item) instead of when the
+      // turn/steer command resolves (which only injects the input). Emitting
+      // the response start only then keeps the guidance bubble from landing
+      // in the middle of pre-guidance output.
+      case "guidance_delivered":
+        if (this.guidancePendingResponse) {
+          this.guidancePendingResponse = false;
+          this.emitEvent({ type: "guidance_response_started" });
+        }
+        break;
       case "stream_start":
-        this.tryEmitGuidanceResponseStarted();
         this.emitEvent({ type: "stream_start", role: record.role || "assistant" });
         break;
       case "stream_delta":
-        this.tryEmitGuidanceResponseStarted();
         this.emitEvent({ type: "stream_delta", delta: String(record.delta || "") });
         break;
       case "commentary_delta":
-        this.tryEmitGuidanceResponseStarted();
         this.emitEvent({
           type: "commentary_delta",
           itemId: optionalString(record.itemId),
@@ -548,7 +556,6 @@ export class CodexAgent {
         this.emitEvent({ type: "stream_end", content: String(record.content || ""), force: record.force });
         break;
       case "thinking_delta":
-        this.tryEmitGuidanceResponseStarted();
         this.emitEvent({ type: "thinking_delta", delta: String(record.delta || "") });
         break;
       case "thinking_end":
@@ -560,7 +567,6 @@ export class CodexAgent {
       case "plan_update":
       case "context_compaction":
       case "diff_update":
-        if (record.type === "tool_start") this.tryEmitGuidanceResponseStarted();
         this.emitEvent(record);
         break;
       case "process_event":
@@ -728,13 +734,6 @@ export class CodexAgent {
       }
     } catch (error: unknown) {
       console.warn("[codex-history] Failed to recover session history:", error);
-    }
-  }
-
-  private tryEmitGuidanceResponseStarted() {
-    if (this.guidancePendingResponse) {
-      this.guidancePendingResponse = false;
-      this.emitEvent({ type: "guidance_response_started" });
     }
   }
 

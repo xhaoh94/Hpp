@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -21,8 +21,14 @@ const getModelsStorePath = () => {
   return join(dirname(configPath), "models-store.json");
 };
 
+// SDK 内置 catalog 路径：HPP_DATA_DIR/pi-sdk-runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/data
+const getBuiltinCatalogPath = () => {
+  const dataDir = process.env.HPP_DATA_DIR || process.cwd();
+  return join(dataDir, "pi-sdk-runtime", "node_modules", "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data");
+};
+
 // pi 运行时刷新的渠道目录缓存（与 models.json 同目录）。
-// 用于判定“内置能获取到的模型是否有档位声明”：有 thinkingLevelMap 的
+// 用于判定"内置能获取到的模型是否有档位声明"：有 thinkingLevelMap 的
 // 模型（如 deepseek 的 high/max）可配思考档位；无声明的（如 mimo）只有思考开关。
 const directoryStoreCache = new Map();
 const getDirectoryStore = () => {
@@ -42,9 +48,93 @@ const getDirectoryStore = () => {
   return entry;
 };
 
-// 在渠道目录（models-store.json）里按 provider + id 查模型条目，找不到时按 id 跨 provider 兜底。
-// 返回条目对象（可能无 thinkingLevelMap），用于判定“模型是否内置、内置档位是什么”。
+// SDK 内置 catalog 缓存：直接读取 SDK 包内的 JSON 文件，不需要联网。
+// 格式：Map<provider:modelId, modelEntry> 和 Map<modelId, modelEntry>
+let builtinCatalogCache = null;
+let builtinCatalogLoaded = false;
+const getBuiltinCatalog = async () => {
+  if (builtinCatalogLoaded) return builtinCatalogCache;
+  builtinCatalogLoaded = true;
+  const catalogPath = getBuiltinCatalogPath();
+  try {
+    const files = await readdir(catalogPath);
+    const jsonFiles = files.filter((f) => f.endsWith(".json") && f !== ".manifest.json");
+    const byProviderAndId = new Map();
+    const byId = new Map();
+    for (const file of jsonFiles) {
+      try {
+        const content = await readFile(join(catalogPath, file), "utf8");
+        const data = JSON.parse(content);
+        if (!isRecord(data)) continue;
+        // 每个 JSON 文件格式：{ "api-type": { "model-id": { model-entry } } }
+        for (const apiType of Object.keys(data)) {
+          const apiModels = data[apiType];
+          if (!isRecord(apiModels)) continue;
+          for (const modelId of Object.keys(apiModels)) {
+            const model = apiModels[modelId];
+            if (!isRecord(model) || !model.id) continue;
+            const provider = asString(model.provider) || "";
+            const key = provider ? `${provider}:${model.id}` : model.id;
+            // 优先保留"声明完整"的能力 map
+            const existing = byProviderAndId.get(key);
+            if (!existing || isBetterCatalogEntry(model, existing)) {
+              byProviderAndId.set(key, model);
+              // 按 id 兜底时，同样保留一份
+              const idKey = model.id;
+              const existingById = byId.get(idKey);
+              if (!existingById || isBetterCatalogEntry(model, existingById)) {
+                byId.set(idKey, model);
+              }
+            }
+          }
+        }
+      } catch {
+        // 单个文件读取失败，继续处理其他文件
+      }
+    }
+    builtinCatalogCache = { byProviderAndId, byId };
+    return builtinCatalogCache;
+  } catch {
+    return null;
+  }
+};
+
+// 判断 catalog entry 是否比现有的更好：
+// 1. 完整声明（7 个标准档都有键）优于不完整声明
+// 2. 完整声明之间，显式排除(null)更多的更保守（更准确）
+const PI_STANDARD_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const isCompleteThinkingLevelMap = (map) =>
+  isRecord(map) && PI_STANDARD_THINKING_LEVELS.every((level) => Object.prototype.hasOwnProperty.call(map, level));
+const countNullThinkingLevels = (map) =>
+  isRecord(map) ? PI_STANDARD_THINKING_LEVELS.filter((level) => map[level] === null).length : 0;
+const isBetterCatalogEntry = (candidate, existing) => {
+  const candidateMap = isRecord(candidate.thinkingLevelMap) ? candidate.thinkingLevelMap : null;
+  const existingMap = isRecord(existing.thinkingLevelMap) ? existing.thinkingLevelMap : null;
+  const candidateComplete = candidateMap && isCompleteThinkingLevelMap(candidateMap);
+  const existingComplete = existingMap && isCompleteThinkingLevelMap(existingMap);
+  if (candidateComplete && !existingComplete) return true;
+  if (!candidateComplete && existingComplete) return false;
+  if (candidateComplete && existingComplete) {
+    return countNullThinkingLevels(candidateMap) > countNullThinkingLevels(existingMap);
+  }
+  // 都没有完整声明，保留有 reasoning/imageInput 的
+  if (candidate.reasoning !== undefined && existing.reasoning === undefined) return true;
+  return false;
+};
+
+// 在 SDK 内置 catalog 里按 provider + id 查模型条目，找不到时按 id 跨 provider 兜底。
+// 返回条目对象（可能无 thinkingLevelMap），用于判定"模型是否内置、内置档位是什么"。
 const getDirectoryModelEntry = async (provider, id) => {
+  // 优先使用 SDK 内置 catalog（不需要联网）
+  const catalog = await getBuiltinCatalog();
+  if (catalog) {
+    const providerKey = provider ? `${provider}:${id}` : "";
+    const providerMatch = providerKey ? catalog.byProviderAndId.get(providerKey) : null;
+    if (providerMatch) return providerMatch;
+    const idMatch = catalog.byId.get(id);
+    if (idMatch) return idMatch;
+  }
+  // SDK catalog 找不到时，回退到 models-store.json（历史兼容）
   const store = await getDirectoryStore();
   if (!store) return null;
   const findEntry = (models) => models.find((model) => isRecord(model) && model.id === id) || null;

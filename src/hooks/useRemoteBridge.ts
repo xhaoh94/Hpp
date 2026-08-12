@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getSessionModel, getSessionThinking, SESSION_CONFIG_UPDATED_EVENT } from "@/hooks/useDataPersistence";
 import { executeRemoteSessionCommand } from "@/lib/remote-session-commands";
 import { relativeRemotePath } from "@/lib/project-file-path";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+
+export { relativeRemotePath } from "@/lib/project-file-path";
 import { useChatStore, type ChatMessage, type QueuedMessage } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useProjectStore, type AgentStatus, type Project } from "@/stores/project-store";
@@ -259,9 +262,7 @@ function buildSessionConfig(
 export function getRemoteSessionTitle(sessionTitle: string, messages: ChatMessage[]) {
   const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
   if (!firstUserMessage) return sessionTitle;
-  return firstUserMessage.content.length > 30
-    ? `${firstUserMessage.content.substring(0, 30)}...`
-    : firstUserMessage.content;
+  return getChatMessagePreviewText(firstUserMessage) || sessionTitle;
 }
 
 function buildCatalog(

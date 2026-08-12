@@ -223,3 +223,70 @@ body.layout-sidebar-resizing * {
     transform: translate(-50%, -10px);
   }
 }
+
+/* In-app alert/confirm dialogs (AppDialogHost) — native window.alert/confirm
+   popups corrupt window focus on Windows in Electron (electron/electron#41602). */
+.app-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay-backdrop);
+}
+
+.app-dialog {
+  width: min(420px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-color, inherit);
+  box-shadow: 0 18px 48px var(--shadow-color);
+}
+
+.app-dialog-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-dialog-message {
+  margin: 0;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.app-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.app-dialog-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.app-dialog-btn:hover { border-color: var(--accent-color); }
+
+.app-dialog-btn.primary {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+  color: var(--text-on-accent);
+}
+
+.app-dialog-btn.primary:hover { filter: brightness(1.08); }

@@ -34,8 +34,10 @@ import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { useAppStore } from "@/stores/app-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
+import { showAppAlert } from "@/lib/app-dialog";
 import {
   createSessionReferenceSnapshot,
+  getSessionHeaderTitle,
   getSessionReferenceTitle,
 } from "@/lib/session-references";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
@@ -1844,7 +1846,7 @@ export function ChatPanel({
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
   const activeSessionTitle = activeSession
-    ? getSessionReferenceTitle(activeSession, activeSessionId ? sessionMessages[activeSessionId] || [] : [])
+    ? getSessionHeaderTitle(activeSession, activeSessionId ? sessionMessages[activeSessionId] || [] : [])
     : "";
   const currentAgentId = activeSession?.agentId || activeAgentId;
   const activeDraft = useChatStore(useShallow((state) => {
@@ -2816,12 +2818,7 @@ export function ChatPanel({
   const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
     if (!activeSessionSupportsGuidance) return;
     try {
-      const result = await SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id);
-      if (result?.success) {
-        const preview = item.displayContent.replace(/\s+/g, " ").trim();
-        const shortPreview = preview.length > 24 ? `${preview.slice(0, 24)}...` : preview;
-        showFloatingToastMessage(shortPreview ? `引导已发送：${shortPreview}` : "引导已发送");
-      }
+      await SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id);
     } catch (error) {
       showFloatingToastMessage(error instanceof Error ? error.message : String(error));
     }
@@ -2931,7 +2928,7 @@ export function ChatPanel({
       });
     } catch (error) {
       if (error instanceof Error && error.message === "SESSION_BUSY") {
-        window.alert("切换 Agent 渠道或模型需要等当前 Agent 运行结束后再操作。");
+        showAppAlert("切换 Agent 渠道或模型需要等当前 Agent 运行结束后再操作。");
         return;
       }
       addMessage({
@@ -3026,7 +3023,7 @@ export function ChatPanel({
       });
     } catch (error) {
       if (error instanceof Error && error.message === "SESSION_BUSY") {
-        window.alert("调整思考级别需要等当前 Agent 运行结束后再操作。");
+        showAppAlert("调整思考级别需要等当前 Agent 运行结束后再操作。");
       }
     }
   };

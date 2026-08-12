@@ -75,6 +75,10 @@ let activePermissionMode = "auto";
 let activePromptId = null;
 let activeTurnId = null;
 let activeThreadId = null;
+// Set after a guidance command resolves (turn/steer only injects the input).
+// Cleared when the agent starts a new item (the first output that responds
+// to the guidance), which the backend uses to place the guidance bubble.
+let steerResponsePending = false;
 let promptRunning = false;
 let aborting = false;
 let abortRequested = false;
@@ -1830,6 +1834,10 @@ const handleServerNotification = (method, params) => {
       if (threadId) send({ type: "session_file_path", sessionFilePath: threadId, threadId });
       break;
     case "turn/started":
+      if (steerResponsePending) {
+        steerResponsePending = false;
+        send({ type: "guidance_delivered" });
+      }
       handleTurnStarted(params);
       break;
     case "turn/completed":
@@ -1857,6 +1865,13 @@ const handleServerNotification = (method, params) => {
       }
       break;
     case "item/started":
+      // A steered turn keeps streaming the same turn; the first new item
+      // after turn/steer is the first output that answers the guidance.
+      // Emit before handleItem so the guidance bubble precedes the item.
+      if (steerResponsePending) {
+        steerResponsePending = false;
+        send({ type: "guidance_delivered" });
+      }
       if (!promptRunning || abortRequested) return;
       handleItem(params.item, "started", params);
       break;
@@ -2103,6 +2118,7 @@ const runGuidance = async (command) => {
     activeTurnId = result?.turnId || activeTurnId;
     sendTurnMetadata(activeTurnId);
     send({ type: "guidance_done", id: command.id });
+    steerResponsePending = true;
   } finally {
     if (!cleanupRegistered) await imagePayload.cleanup();
   }

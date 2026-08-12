@@ -31,6 +31,11 @@ interface RpcEvent {
 
 type HostMethods = Record<string, (...args: unknown[]) => unknown>;
 
+// The plugin host must answer the initial `load` request within this window.
+// Windows antivirus scans and heavy plugin entries can delay startup, but an
+// unbounded wait here hangs the whole session initialization chain.
+const PLUGIN_HOST_LOAD_TIMEOUT_MS = 30_000;
+
 export interface PluginHostCapabilities {
   getStatus: boolean;
   update: boolean;
@@ -228,7 +233,42 @@ export class AgentPluginProcess {
         "plugin-host-stdout-end",
       );
     });
-    return this.request("load", { entryPath: this.entryPath, meta: this.meta }) as Promise<PluginHostCapabilities>;
+    return this.requestWithLoadTimeout(child, this.request("load", { entryPath: this.entryPath, meta: this.meta }) as Promise<PluginHostCapabilities>);
+  }
+
+  /**
+   * Bound the load handshake: a spawned host that never answers `load` (slow
+   * plugin entry, antivirus scans, lost output) would otherwise hang session
+   * initialization forever, because nothing upstream of this promise has a
+   * timeout. On timeout the child is detached and killed, and the terminal
+   * state is cleared so the next ensureLoaded respawns a fresh host.
+   */
+  private requestWithLoadTimeout(
+    child: ChildProcessWithoutNullStreams,
+    loadRequest: Promise<PluginHostCapabilities>,
+  ): Promise<PluginHostCapabilities> {
+    const agentId = String(this.meta.agentId || "");
+    return new Promise<PluginHostCapabilities>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.child === child) this.child = null;
+        this.loadPromise = null;
+        this.terminalError = null;
+        const error = new Error(`插件宿主进程 ${agentId || "unknown"} 启动超时，请重试。`);
+        this.rejectPending(error);
+        void this.killProcessTree(child);
+        reject(error);
+      }, PLUGIN_HOST_LOAD_TIMEOUT_MS);
+      loadRequest.then(
+        (capabilities) => {
+          clearTimeout(timer);
+          resolve(capabilities);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   private request(method: string, params?: unknown): Promise<unknown> {

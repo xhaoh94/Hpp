@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -18,10 +18,54 @@ const VALID_THINKING_LEVELS = new Set([
 const getCodexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const getConfigPath = () => join(getCodexHome(), "config.toml");
 const getAuthPath = () => join(getCodexHome(), "auth.json");
+const getModelsCachePath = () => join(getCodexHome(), "models_cache.json");
 
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const asString = (value) => typeof value === "string" ? value.trim() : "";
 const isMissingFileError = (error) => error?.code === "ENOENT";
+
+// Codex 官方模型目录缓存（models_cache.json）：从 OpenAI 服务器获取后写入本地。
+// 包含每个模型的 supported_reasoning_levels 和 input_modalities，离线时可复用。
+let modelsCacheMap = null;
+let modelsCacheLoaded = false;
+const getModelsCache = async () => {
+  if (modelsCacheLoaded) return modelsCacheMap;
+  modelsCacheLoaded = true;
+  try {
+    const content = await readFile(getModelsCachePath(), "utf8");
+    const parsed = JSON.parse(content);
+    if (!isRecord(parsed) || !Array.isArray(parsed.models)) return null;
+    const bySlug = new Map();
+    for (const model of parsed.models) {
+      if (!isRecord(model) || !model.slug) continue;
+      bySlug.set(asString(model.slug), model);
+    }
+    modelsCacheMap = bySlug;
+    return modelsCacheMap;
+  } catch {
+    return null;
+  }
+};
+
+// 从 models_cache.json 条目提取模型能力信息
+const getModelCapabilitiesFromCache = async (modelId) => {
+  const cache = await getModelsCache();
+  if (!cache) return null;
+  const entry = cache.get(modelId);
+  if (!entry) return null;
+  const levels = Array.isArray(entry.supported_reasoning_levels)
+    ? entry.supported_reasoning_levels
+        .map((level) => isRecord(level) ? asString(level.effort) : asString(level))
+        .filter(Boolean)
+    : [];
+  const imageInput = Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image");
+  return {
+    displayName: asString(entry.display_name) || modelId,
+    supportedThinkingLevels: levels,
+    reasoning: levels.length > 0,
+    imageInput,
+  };
+};
 
 const parseJsonObject = (content, filePath) => {
   try {
@@ -221,7 +265,31 @@ export const readProviderConfig = async () => {
   }
   for (const provider of providers.values()) {
     provider.apiKey = asString(auth.OPENAI_API_KEY);
-    provider.models = [{ id: activeModelId, name: activeModelId, reasoning: true, imageInput: true }];
+    // 从 models_cache.json 查找模型能力，找到则视为内置模型
+    const capabilities = await getModelCapabilitiesFromCache(activeModelId);
+    if (capabilities) {
+      provider.models = [{
+        id: activeModelId,
+        name: capabilities.displayName,
+        reasoning: capabilities.reasoning,
+        imageInput: capabilities.imageInput,
+        isBuiltin: true,
+        hasThinkingLevels: false,
+        ...(capabilities.supportedThinkingLevels.length > 0
+          ? { supportedThinkingLevels: capabilities.supportedThinkingLevels }
+          : {}),
+      }];
+    } else {
+      // 不在官方目录中 → 自定义模型，允许用户配置能力
+      provider.models = [{
+        id: activeModelId,
+        name: activeModelId,
+        reasoning: true,
+        imageInput: true,
+        isBuiltin: false,
+        hasThinkingLevels: true,
+      }];
+    }
   }
   return { activeProviderId, providers: Array.from(providers.values()) };
 };

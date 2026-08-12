@@ -24,6 +24,15 @@ class FakeDroidProcess extends EventEmitter {
 
 interface DroidInternals {
   process: ChildProcess | null;
+  isReady: boolean;
+  turnActive: boolean;
+  clientMessageIdsByRequestId: Map<string, string>;
+  activeClientMessageId: string | null;
+  guidancePendingResponse: boolean;
+  guidanceRequestId: string | null;
+  sendRpcAsync: (...args: unknown[]) => Promise<unknown>;
+  handleNotification: (method: string, params: unknown) => void;
+  sendGuidance: (message: string) => Promise<void>;
   waitForExit: (childProcess: ChildProcess, timeoutMs: number) => Promise<boolean>;
   killProcessTree: (childProcess: ChildProcess) => Promise<void>;
 }
@@ -117,5 +126,51 @@ describe("Droid lifecycle", () => {
     expect(internals.killProcessTree).toHaveBeenCalledWith(child);
     expect(internals.waitForExit).toHaveBeenNthCalledWith(1, child, 750);
     expect(internals.waitForExit).toHaveBeenNthCalledWith(2, child, 500);
+  });
+
+  it("emits guidance_response_started only when the guidance message enters the conversation", async () => {
+    const events: Array<{ type: string }> = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as { type: string }));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = (new FakeDroidProcess() as unknown) as ChildProcess;
+    internals.isReady = true;
+    internals.sendRpcAsync = vi.fn(async () => ({ result: {} }));
+
+    // Droid accepts a second add_user_message while a turn is active (mid-turn
+    // guidance). sendGuidance resolves on the RPC ack and arms the response
+    // signal.
+    await internals.sendGuidance("steer this turn");
+    expect(internals.guidancePendingResponse).toBe(true);
+    expect(internals.sendRpcAsync).toHaveBeenCalledWith(
+      "droid.add_user_message",
+      expect.objectContaining({ text: "steer this turn" }),
+      30000,
+      expect.any(String),
+    );
+    const guidanceRequestId = internals.guidanceRequestId;
+    expect(typeof guidanceRequestId).toBe("string");
+
+    // Assistant content streaming before the guidance message enters must NOT
+    // signal the response started (mirrors the pi/codex fix).
+    internals.handleNotification("droid.session_notification", {
+      notification: { type: "assistant_text_delta", messageId: "old", blockIndex: 0, textDelta: "old" },
+    });
+    expect(events.some((event) => event.type === "guidance_response_started")).toBe(false);
+    expect(internals.guidancePendingResponse).toBe(true);
+
+    // When the guidance user message is committed (create_message with the
+    // guidance requestId), Droid is about to reply to it -> emit the signal.
+    internals.clientMessageIdsByRequestId.set(String(guidanceRequestId), "hpp-guidance");
+    internals.handleNotification("droid.session_notification", {
+      notification: {
+        type: "create_message",
+        requestId: guidanceRequestId,
+        message: { id: "droid-guidance", role: "user" },
+      },
+    });
+
+    expect(events.some((event) => event.type === "guidance_response_started")).toBe(true);
+    expect(internals.guidancePendingResponse).toBe(false);
+    expect(internals.guidanceRequestId).toBeNull();
   });
 });

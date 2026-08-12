@@ -11,6 +11,7 @@ import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
+import { showAppAlert } from "@/lib/app-dialog";
 import { GitBranch, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
@@ -169,7 +170,7 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
       const agent = agents.find((a) => a.id === agentId);
       const name = agent?.name || agentId;
       const cmd = agent?.command || agentId;
-      alert(`${name} 未安装，请先安装：\n\n${getInstallHint(agent || cmd)}`);
+      showAppAlert(`${name} 未安装，请先安装：\n\n${getInstallHint(agent || cmd)}`);
       return;
     }
 
@@ -181,7 +182,7 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
         verifyInstalled: false,
       });
     } catch (error) {
-      alert(getErrorMessage(error));
+      showAppAlert(getErrorMessage(error));
     }
   };
 
@@ -206,7 +207,7 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
       .then((results) => {
         const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
         if (failures.length > 0) {
-          alert(
+          showAppAlert(
             `项目未删除，${failures.length} 个会话关闭失败：\n\n${failures.map(getErrorMessage).join("\n")}`,
           );
           return;
@@ -247,7 +248,7 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
       await purgeDeletedSessionData(uniqueSessionIds);
     } catch (error) {
       console.error("[persistence] session cleanup failed:", error);
-      alert(`会话已从列表移除，但磁盘数据清理失败：${getErrorMessage(error)}`);
+      showAppAlert(`会话已从列表移除，但磁盘数据清理失败：${getErrorMessage(error)}`);
       throw error;
     }
   };

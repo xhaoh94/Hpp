@@ -34,6 +34,7 @@ import {
 import "./Settings.css";
 import type { DiskUsageCategoryId, DiskUsageStats } from "@/types";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
+import { showAppConfirm } from "@/lib/app-dialog";
 import { DISK_USAGE_INVALIDATED_EVENT } from "@/hooks/useDataPersistence";
 import { publishFileFilters } from "@/hooks/useFileFilters";
 import {
@@ -238,7 +239,7 @@ export function SettingsView() {
       "",
       "不会删除现有会话、插件或正在使用的 Agent 运行时。继续清理吗？",
     ].join("\n");
-    if (!window.confirm(cleanupNotice)) return;
+    if (!(await showAppConfirm(cleanupNotice, { title: "磁盘清理", confirmLabel: "继续清理" }))) return;
     setDiskCleanupLoading(true);
     setDiskUsageError("");
     try {

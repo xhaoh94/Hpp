@@ -397,36 +397,50 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     (e: React.MouseEvent) => {
       if (isImage) return;
       setContextMenu(null);
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed) return;
-      const selectedText = selection.toString();
-      if (!selectedText.trim()) return;
 
       const contentEl = contentRef.current;
       if (!contentEl) return;
 
-      let startLine = 1;
-      let endLine = 1;
-      try {
-        const range = selection.getRangeAt(0);
-        let startNode: Node | null = range.startContainer;
-        while (startNode && startNode !== contentEl) {
-          if (startNode instanceof HTMLElement && startNode.dataset.line) {
-            startLine = parseInt(startNode.dataset.line, 10);
-            break;
-          }
-          startNode = startNode.parentNode;
+      // 无选中文本时，定位右键点击所在的代码行（点行号不触发）
+      const clickedLine = (() => {
+        let node: HTMLElement | null = (e.target as HTMLElement).closest(".fp-line-content");
+        while (node && node !== contentEl) {
+          if (node.dataset.line) return parseInt(node.dataset.line, 10);
+          node = node.parentElement;
         }
-        let endNode: Node | null = range.endContainer;
-        while (endNode && endNode !== contentEl) {
-          if (endNode instanceof HTMLElement && endNode.dataset.line) {
-            endLine = parseInt(endNode.dataset.line, 10);
-            break;
+        return null;
+      })();
+
+      const selection = window.getSelection();
+      const selectedText = selection && !selection.isCollapsed ? selection.toString() : "";
+
+      // 无选中文本且未点在某行内容上，不弹发送菜单
+      if (!selectedText.trim() && clickedLine === null) return;
+
+      let startLine = clickedLine ?? 1;
+      let endLine = clickedLine ?? 1;
+      if (selectedText.trim() && selection) {
+        try {
+          const range = selection.getRangeAt(0);
+          let startNode: Node | null = range.startContainer;
+          while (startNode && startNode !== contentEl) {
+            if (startNode instanceof HTMLElement && startNode.dataset.line) {
+              startLine = parseInt(startNode.dataset.line, 10);
+              break;
+            }
+            startNode = startNode.parentNode;
           }
-          endNode = endNode.parentNode;
-        }
-        if (endLine < startLine) endLine = startLine;
-      } catch {}
+          let endNode: Node | null = range.endContainer;
+          while (endNode && endNode !== contentEl) {
+            if (endNode instanceof HTMLElement && endNode.dataset.line) {
+              endLine = parseInt(endNode.dataset.line, 10);
+              break;
+            }
+            endNode = endNode.parentNode;
+          }
+          if (endLine < startLine) endLine = startLine;
+        } catch {}
+      }
 
       e.preventDefault();
       setTimeout(() => {
@@ -661,7 +675,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
           )}
         </div>
         <div className="fp-footer">
-          <span>{isImage ? "图片预览" : "选择内容后右键可发送到聊天"}</span>
+          <span>{isImage ? "图片预览" : "右键当前行或选中内容可发送到聊天"}</span>
           {!isImage && totalLines > MAX_RENDER_LINES && (
             <span>当前显示第 {renderWindow.startIndex + 1} - {renderWindow.endIndex} 行，共 {totalLines} 行</span>
           )}
@@ -670,10 +684,9 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
 
       {contextMenu && (
         <div className="fp-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
-          <div className="fp-cm-header">发送到聊天</div>
-          <div className="fp-cm-info">第 {contextMenu.startLine} - {contextMenu.endLine} 行</div>
           <button className="fp-cm-btn" onClick={handleSendToChat}>
-            发送 [{fileName}:{contextMenu.startLine}-{contextMenu.endLine}]
+            <span className="fp-cm-btn-title">发送到聊天</span>
+            <span className="fp-cm-btn-target">{fileName}:{contextMenu.startLine}-{contextMenu.endLine}</span>
           </button>
         </div>
       )}

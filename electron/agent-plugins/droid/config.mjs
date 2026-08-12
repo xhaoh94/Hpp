@@ -135,14 +135,20 @@ export const readProviderConfig = async () => {
     if (!group || !modelId || group.models.some((item) => item.id === modelId)) continue;
     const supportedThinkingLevels = normalizeThinkingLevels(model.hppSupportedThinkingLevels);
     const hasThinkingLevelDeclaration = Array.isArray(model.hppSupportedThinkingLevels);
+    const reasoning = hasThinkingLevelDeclaration
+      ? supportedThinkingLevels.length > 0
+      : model.hppReasoning === true || model.reasoning === true || model.enableThinking === true;
+    // Droid 没有内置 catalog，所有模型均为用户配置的自定义模型。
+    // 有 reasoning 但无显式档位的模型允许用户配置思考等级。
+    const hasExplicitLevels = supportedThinkingLevels.length > 0;
     group.models.push({
       id: modelId,
       name: asString(model.displayName) || modelId,
-      reasoning: hasThinkingLevelDeclaration
-        ? supportedThinkingLevels.length > 0
-        : model.hppReasoning === true || model.reasoning === true || model.enableThinking === true,
+      reasoning,
       imageInput: model.noImageSupport !== true,
-      ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
+      isBuiltin: false,
+      hasThinkingLevels: reasoning && !hasExplicitLevels,
+      ...(hasExplicitLevels ? { supportedThinkingLevels } : {}),
     });
     const nativeModelId = asString(model.id);
     if (nativeModelId) group.nativeModelIds.add(nativeModelId);

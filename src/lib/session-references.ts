@@ -34,11 +34,24 @@ const getLastMessageTime = (session: ProjectSession, messages: ChatMessage[]) =>
   return session.lastActiveAt;
 };
 
-export const getSessionReferenceTitle = (session: ProjectSession, messages: ChatMessage[] = []) => {
-  const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
-  if (!firstUserMessage) return truncate(session.title, MAX_TITLE_CHARS);
-  const cleaned = getChatMessagePreviewText(firstUserMessage);
+const pickUserMessage = (messages: ChatMessage[], position: "first" | "last") => {
+  const ordered = position === "last" ? [...messages].reverse() : messages;
+  return ordered.find((message) => message.role === "user" && message.content.trim());
+};
+
+const getUserMessageTitle = (session: ProjectSession, userMessage?: ChatMessage) => {
+  if (!userMessage) return truncate(session.title, MAX_TITLE_CHARS);
+  const cleaned = getChatMessagePreviewText(userMessage);
   return truncate(cleaned || session.title, MAX_TITLE_CHARS);
+};
+
+export const getSessionReferenceTitle = (session: ProjectSession, messages: ChatMessage[] = []) => {
+  return getUserMessageTitle(session, pickUserMessage(messages, "first"));
+};
+
+/** 聊天区顶部标题：取最后一条用户消息，没有时回退到 session.title。 */
+export const getSessionHeaderTitle = (session: ProjectSession, messages: ChatMessage[] = []) => {
+  return getUserMessageTitle(session, pickUserMessage(messages, "last"));
 };
 
 const selectReferenceMessages = (messages: ChatMessage[]) => {

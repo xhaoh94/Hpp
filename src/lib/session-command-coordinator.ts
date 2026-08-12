@@ -130,6 +130,10 @@ export type SendMessageResult = {
 };
 
 const initializations = new Map<string, Promise<SessionCommandResult>>();
+// Safety net above the main-process timeouts (90s session init + 15s backend
+// calls): if an initialization still has not settled by then, treat it as
+// failed so the user sees an error and the automatic retry can run.
+const SESSION_INITIALIZATION_TIMEOUT_MS = 120_000;
 const sessionSendLocks = new Map<string, Promise<void>>();
 const recoveredRuntimeMonitors = new Map<string, ReturnType<typeof setTimeout>>();
 const RECOVERED_RUNTIME_POLL_MS = 2_000;
@@ -285,11 +289,13 @@ async function runInitialization(
 
     let createdRuntime = false;
     if (needsRuntimeInitialization) {
+      console.info(`[agent] init(${sessionId}): probing backend activity`);
       const backendActivity = await getBackendSessionActivity(sessionId);
       if (backendActivity === "unknown") {
         throw new Error("SESSION_RUNTIME_STATE_UNKNOWN");
       }
       if (backendActivity === "missing") {
+        console.info(`[agent] init(${sessionId}): creating session runtime (${session.agentId})`);
         const result = await window.electronAPI.agentCreateSession(
           session.agentId,
           project.path,
@@ -302,6 +308,7 @@ async function runInitialization(
         }
         models = (result.models || []) as ModelInfo[];
         createdRuntime = true;
+        console.info(`[agent] init(${sessionId}): session runtime created`);
       } else {
         recoverExistingBackendRuntime(sessionId, backendActivity);
       }
@@ -322,6 +329,7 @@ async function runInitialization(
     if (createdRuntime) {
       if (selectedModel) {
         saveSessionModel(sessionId, selectedModel);
+        console.info(`[agent] init(${sessionId}): selecting model ${selectedModel.provider}/${selectedModel.id}`);
         const modelResult = await window.electronAPI.agentSetModel(selectedModel.provider, selectedModel.id, sessionId);
         if (!modelResult.success) throw new Error(modelResult.error || "MODEL_SWITCH_FAILED");
         const refreshedModels = await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
@@ -338,6 +346,7 @@ async function runInitialization(
       if (thinkingLevels.length > 0) {
         const requestedThinking = await getSessionThinkingOrDefault(sessionId, session.agentId);
         const thinking = normalizeModelThinkingLevel(requestedThinking, selectedModel);
+        console.info(`[agent] init(${sessionId}): setting thinking level ${thinking}`);
         const thinkingResult = await window.electronAPI.agentSetThinkingLevel(thinking, sessionId);
         if (!thinkingResult.success) throw new Error("THINKING_LEVEL_FAILED");
         saveSessionThinking(sessionId, thinking);
@@ -349,8 +358,12 @@ async function runInitialization(
     if (options.activate && useProjectStore.getState().activeSessionId === sessionId) {
       await window.electronAPI.agentSwitchSession(sessionId);
     }
+    if (createdRuntime) console.info(`[agent] init(${sessionId}): completed`);
   } catch (error) {
     warning = getErrorMessage(error);
+    // The spinner overlay hides startup-error messages, so keep a console
+    // trail for intermittent startup failures (e.g. startup races).
+    console.warn(`[agent] session initialization failed (${sessionId}):`, warning);
     if (!options.recordFailure) throw error;
     // 初始化任一步骤失败都不能把会话锁定为“已初始化”。特别是应用在
     // 自动压缩期间退出后，首次恢复可能遇到短暂的 worker/文件清理延迟；
@@ -374,9 +387,25 @@ export async function initializeSession(
     if (options.activate) return runInitialization(sessionId, { ...options, refreshModels: true });
     return result;
   }
-  const pending = runInitialization(sessionId, options).finally(() => initializations.delete(sessionId));
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const pending = runInitialization(sessionId, options).finally(() => {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    initializations.delete(sessionId);
+  });
+  // A hung IPC/backend roundtrip must not spin the session spinner forever
+  // with no error: bail out of the wait so the failure is recorded (and the
+  // automatic retry can run), instead of pending indefinitely.
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      // The original attempt may still be running in the main process; drop
+      // the dedupe entry anyway so the next call starts a fresh attempt
+      // instead of awaiting a permanently hung promise.
+      initializations.delete(sessionId);
+      reject(new Error("Agent 会话初始化长时间未完成，已自动中断，正在重试。"));
+    }, SESSION_INITIALIZATION_TIMEOUT_MS);
+  });
   initializations.set(sessionId, pending);
-  return pending;
+  return Promise.race([pending, timeout]);
 }
 
 export async function createSession(input: {
@@ -907,7 +936,10 @@ export async function setModel(
   model: Pick<ModelInfo, "id" | "provider">,
   options: { models?: ModelInfo[]; isProcessActive?: (sessionId: string) => boolean } = {},
 ) {
-  if (isRunning(sessionId, { isProcessActive: options.isProcessActive })) throw new Error("SESSION_BUSY");
+  // Switching the model only updates session-level parameters: all backends
+  // (droid/pi/codex/opencode) apply it to subsequent requests without
+  // restarting the process or interrupting the currently-streaming turn, so it
+  // is safe to switch while the agent is running.
   const { session } = await initializeSession(sessionId);
   const models = options.models || await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
   const selected = models.find((candidate) => candidate.provider === model.provider && candidate.id === model.id);
@@ -938,7 +970,9 @@ export async function setThinking(
   level: string,
   options: { isProcessActive?: (sessionId: string) => boolean } = {},
 ) {
-  if (isRunning(sessionId, { isProcessActive: options.isProcessActive })) throw new Error("SESSION_BUSY");
+  // Adjusting the thinking level only updates session-level parameters (it
+  // does not interrupt the currently-streaming turn), so allow it while the
+  // agent is running.
   const normalizedLevel = normalizeThinkingLevelId(level);
   const chat = useChatStore.getState();
   const knownModel = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);

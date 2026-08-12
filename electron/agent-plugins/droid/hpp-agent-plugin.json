@@ -16,7 +16,7 @@
   "capabilities": {
     "planMode": "native",
     "permissions": true,
-    "guidance": false,
+    "guidance": true,
     "fork": true,
     "actions": true,
     "compaction": {
