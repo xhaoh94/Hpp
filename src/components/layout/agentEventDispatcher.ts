@@ -451,6 +451,16 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       // end cannot leave the renderer process open when stream_end is missing.
       scheduleAgentEndGrace(currentSessionId);
       break;
+    case "token_usage":
+      {
+        const inputTokens = Number(event.inputTokens) || 0;
+        const outputTokens = Number(event.outputTokens) || 0;
+        const cacheInputTokens = Number(event.cacheInputTokens) || 0;
+        if (inputTokens > 0 || outputTokens > 0) {
+          useChatStore.getState().addAssistantTokenUsage(inputTokens, outputTokens, cacheInputTokens, currentSessionId);
+        }
+      }
+      break;
     case "agent_disconnected":
       if (runtime.manualAbortRequested) {
         finishManualAbort(currentSessionId);

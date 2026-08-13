@@ -464,6 +464,18 @@ export class ClaudeSDKAgent {
         // settle the newer prompt. Doing so would leave its id behind while
         // turnActive becomes false, making isIdle() stay false indefinitely.
         if (id && id !== this.activePromptId) break;
+        {
+          const usage = asRecord(data.usage);
+          // input_tokens 不含缓存部分，缓存命中/写入的输入也要计入总消耗。
+          const inputTokens = (Number(usage.input_tokens) || 0)
+            + (Number(usage.cache_read_input_tokens) || 0)
+            + (Number(usage.cache_creation_input_tokens) || 0);
+          const outputTokens = Number(usage.output_tokens) || 0;
+          const cacheInputTokens = Number(usage.cache_read_input_tokens) || 0;
+          if (inputTokens > 0 || outputTokens > 0) {
+            this.emitEvent({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+          }
+        }
         this.activePromptId = null;
         this.finishTurn(true);
         break;

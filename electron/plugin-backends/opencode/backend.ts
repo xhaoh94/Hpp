@@ -485,6 +485,9 @@ export class OpenCodeAgent {
   private completedToolParts = new Set<string>();
   private pendingQuestionToolParts = new Set<string>();
   private partTypes = new Map<string, string>();
+  // OpenCode 每次模型调用对应一个 step part，tokens 是该次调用用量；
+  // 消息级 info.tokens 只反映最后一次调用，不能直接用。按 part id 记差值上报。
+  private partTokenUsage = new Map<string, { input: number; output: number; cacheInput: number }>();
   private turnActive = false;
   private turnRevision = 0;
   private idleObservedWhileWaitingForUI = false;
@@ -788,6 +791,7 @@ export class OpenCodeAgent {
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
     this.partTypes.clear();
+    this.partTokenUsage.clear();
 
     return new Promise((resolve, reject) => {
       let connected = false;
@@ -961,6 +965,7 @@ export class OpenCodeAgent {
       case "message.part.added":
       case "message.part.updated": {
         this.rememberPartType(part);
+        this.emitPartTokenUsageDelta(part);
         if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
@@ -1026,6 +1031,9 @@ export class OpenCodeAgent {
           this.completedToolParts.add(tool.toolCallId);
         }
         if (partId) this.partTypes.delete(partId);
+        // part 结束时再对齐一次最终用量，随后清理追踪记录。
+        this.emitPartTokenUsageDelta(part);
+        if (partId) this.partTokenUsage.delete(partId);
         break;
       }
       case "message.part.delta": {
@@ -1103,6 +1111,7 @@ export class OpenCodeAgent {
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
     this.pendingUIRequests.clear();
+    this.partTokenUsage.clear();
     this.idleObservedWhileWaitingForUI = false;
     this.clearActiveTurn();
   }
@@ -1558,6 +1567,34 @@ export class OpenCodeAgent {
       await this.httpPost(`/question/${encodeURIComponent(requestId)}/reply`, { answers });
     }
     this.completePendingUIRequest(requestId, turnRevision);
+  }
+
+  // step part 的 tokens（input/output/reasoning/cache）随流式输出可能多次更新，
+  // 只在差值为正时上报，渲染端按回合累加即为全部调用的总消耗。
+  private emitPartTokenUsageDelta(part: UnknownRecord) {
+    const partId = typeof part.id === "string" ? part.id : "";
+    if (!partId) return;
+    const tokens = asRecord(part.tokens);
+    // tokens.input 不含缓存部分，缓存命中/写入的输入一并计入总消耗；
+    // 缓存命中单独记 cacheInput（写入不算命中）。
+    const cache = asRecord(tokens.cache);
+    const cacheRead = Number(cache.read) || 0;
+    const cacheWrite = Number(cache.write) || 0;
+    const input = (Number(tokens.input) || 0) + cacheRead + cacheWrite;
+    const output = Number(tokens.output) || 0;
+    if (input <= 0 && output <= 0) return;
+    const previous = this.partTokenUsage.get(partId) || { input: 0, output: 0, cacheInput: 0 };
+    const deltaInput = input - previous.input;
+    const deltaOutput = output - previous.output;
+    const deltaCacheInput = cacheRead - previous.cacheInput;
+    if (deltaInput <= 0 && deltaOutput <= 0) return;
+    this.partTokenUsage.set(partId, { input, output, cacheInput: cacheRead });
+    this.emitEvent({
+      type: "token_usage",
+      inputTokens: Math.max(0, deltaInput),
+      outputTokens: Math.max(0, deltaOutput),
+      cacheInputTokens: Math.max(0, deltaCacheInput),
+    });
   }
 
   private recordAssistantMessageId(value: unknown) {

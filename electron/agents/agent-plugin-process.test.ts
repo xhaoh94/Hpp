@@ -23,6 +23,7 @@ describe("AgentPluginProcess pending UI capture", () => {
       readProviderConfig: false,
       writeProviderConfig: false,
       activateProvider: false,
+      lookupModel: false,
     });
     const internals = pluginProcess as unknown as {
       request: ReturnType<typeof vi.fn>;

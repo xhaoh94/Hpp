@@ -220,6 +220,24 @@ const upsertProviderValue = (content, providerId, key, value) => {
   return lines.join("\n");
 };
 
+// 未保存前实时判定模型是否在官方目录（models_cache.json）中：
+// 与 readProviderConfig 的内置判定规则保持一致，供配置弹窗输入 model-id 时即时判定。
+export const lookupModel = async (modelId) => {
+  const id = asString(modelId);
+  if (!id) return null;
+  const capabilities = await getModelCapabilitiesFromCache(id);
+  if (!capabilities) return null;
+  return {
+    isBuiltin: true,
+    name: capabilities.displayName || undefined,
+    reasoning: capabilities.reasoning,
+    imageInput: capabilities.imageInput,
+    ...(capabilities.supportedThinkingLevels.length > 0
+      ? { supportedThinkingLevels: capabilities.supportedThinkingLevels }
+      : {}),
+  };
+};
+
 export const readProviderConfig = async () => {
   const [content, auth] = await Promise.all([
     readTextFile(getConfigPath()),

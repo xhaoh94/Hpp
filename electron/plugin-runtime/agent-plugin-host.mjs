@@ -98,6 +98,7 @@ const methods = {
       readProviderConfig: typeof pluginModule.configProvider?.read === "function",
       writeProviderConfig: typeof pluginModule.configProvider?.write === "function",
       activateProvider: typeof pluginModule.configProvider?.activateProvider === "function",
+      lookupModel: typeof pluginModule.configProvider?.lookupModel === "function",
     };
   },
   async getStatus() { return pluginModule.getStatus?.(createStatusContext()); },
@@ -107,6 +108,7 @@ const methods = {
   async readProviderConfig(args) { return pluginModule.configProvider?.read?.(createStatusContext(), args); },
   async writeProviderConfig(args) { return pluginModule.configProvider?.write?.(createStatusContext(), args); },
   async activateProvider(args) { return pluginModule.configProvider?.activateProvider?.(createStatusContext(), args); },
+  async lookupModel(args) { return pluginModule.configProvider?.lookupModel?.(createStatusContext(), args); },
   async createBackend({ backendId, sessionId }) {
     const backend = await pluginModule.createAgentBackend(createContext(sessionId, backendId));
     if (!backend || typeof backend !== "object") throw new Error("Plugin backend must be an object.");

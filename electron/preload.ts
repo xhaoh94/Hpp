@@ -134,6 +134,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:setAgentCompactionConfig", agentId, config),
   agentConfigList: (agentId: string) =>
     ipcRenderer.invoke("agentConfig:list", agentId),
+  agentConfigLookupModel: (agentId: string, modelId: string) =>
+    ipcRenderer.invoke("agentConfig:lookupModel", agentId, modelId),
   agentConfigGetModelVisibility: (agentId: string) =>
     ipcRenderer.invoke("agentConfig:getModelVisibility", agentId),
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) =>

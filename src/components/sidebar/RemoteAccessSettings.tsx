@@ -163,7 +163,7 @@ export function RemoteAccessSettings({ onClose }: { onClose: () => void }) {
           <section className={`remote-access-overview ${status?.running ? "online" : "offline"}`}>
             <div className="remote-access-overview-main">
               <span className="remote-access-state-icon">
-                {status?.running ? <Wifi size={17} /> : <WifiOff size={17} />}
+                {status?.running ? <Wifi size={18} /> : <WifiOff size={18} />}
               </span>
               <div>
                 <strong>启用远程访问</strong>

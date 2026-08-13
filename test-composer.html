@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 30px; background: #f5f5f5; }
+  .editor {
+    width: 420px;
+    box-sizing: border-box;
+    font-size: 15px;
+    line-height: 29px;
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    overflow: hidden;
+    background: #fff;
+  }
+  .entity-base { display: inline-flex; height: 26px; align-items: center; gap: 4px; box-sizing: border-box; margin: 0 2px; padding: 2px 6px; border: 1px solid #999; border-radius: 6px; background: #eee; font-size: 13px; line-height: 18px; vertical-align: baseline; }
+  .entity-mid { display: inline-flex; height: 26px; align-items: center; gap: 4px; box-sizing: border-box; margin: 0 2px; padding: 2px 6px; border: 1px solid #999; border-radius: 6px; background: #eee; font-size: 13px; line-height: 18px; vertical-align: middle; }
+  .entity-top { display: inline-flex; height: 26px; align-items: center; gap: 4px; box-sizing: border-box; margin: 0 2px; padding: 2px 6px; border: 1px solid #999; border-radius: 6px; background: #eee; font-size: 13px; line-height: 18px; vertical-align: top; }
+</style>
+</head>
+<body>
+  <div class="editor" id="PLAIN">是的发生的是的发生</div>
+  <div class="editor" id="BASELINE">是的发生的是的发生 <span class="host"><span class="entity-base">electron.vite.config.ts</span></span> 是的发生的</div>
+  <div class="editor" id="MIDDLE">是的发生的是的发生 <span class="host"><span class="entity-mid">electron.vite.config.ts</span></span> 是的发生的</div>
+  <div class="editor" id="TOP">是的发生的是的发生 <span class="host"><span class="entity-top">electron.vite.config.ts</span></span> 是的发生的</div>
+  <pre id="out"></pre>
+<script>
+  const out = [];
+  out.push('PLAIN: ' + document.getElementById('PLAIN').offsetHeight + 'px');
+  for (const id of ['BASELINE','MIDDLE','TOP']) {
+    out.push(id + ': ' + document.getElementById(id).offsetHeight + 'px');
+  }
+  document.getElementById('out').textContent = out.join('\n');
+</script>
+</body>
+</html>

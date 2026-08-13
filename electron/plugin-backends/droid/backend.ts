@@ -1028,6 +1028,8 @@ export class DroidAgent {
               this.startToolUses(contentBlocks);
             }
             this.emitTurnMetadata(message.id);
+            // 新版 droid exec 流会在消息事件里携带 usage；旧版没有时静默跳过。
+            this.emitMessageTokenUsage(message);
             break;
           }
           if (message.role !== "user") break;
@@ -1339,5 +1341,24 @@ export class DroidAgent {
       nativeTurnId,
       clientUserMessageId: clientMessageId,
     });
+  }
+
+  // 新版 droid exec 流在消息事件里携带 token 用量，字段名各版本不一，
+  // 这里兼容常见写法；解析不到时不上报。
+  private emitMessageTokenUsage(message: UnknownRecord) {
+    for (const candidate of [message.usage, message.tokenUsage, message.token_usage]) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const usage = asRecord(candidate);
+      const inputTokens = Number(
+        usage.inputTokens ?? usage.input_tokens ?? usage.input ?? usage.promptTokens ?? usage.prompt_tokens,
+      ) || 0;
+      const outputTokens = Number(
+        usage.outputTokens ?? usage.output_tokens ?? usage.output ?? usage.completionTokens ?? usage.completion_tokens,
+      ) || 0;
+      if (inputTokens > 0 || outputTokens > 0) {
+        this.emitEvent({ type: "token_usage", inputTokens, outputTokens });
+        return;
+      }
+    }
   }
 }

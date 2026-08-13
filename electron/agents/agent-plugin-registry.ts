@@ -776,6 +776,15 @@ export class AgentPluginRegistry {
     return await pluginProcess.call("writeProviderConfig", { state }) as PluginActivateProviderResult || {};
   }
 
+  async lookupModel(agentId: string, modelId: string): Promise<unknown> {
+    await this.ensureLoaded();
+    const record = this.pluginRecords.get(agentId);
+    if (!record) throw new Error(`未安装 agent 插件：${agentId}`);
+    const pluginProcess = await this.getPluginProcess(record);
+    if (!record.processCapabilities?.lookupModel) return undefined;
+    return pluginProcess.call("lookupModel", { modelId });
+  }
+
   async activateProvider(
     agentId: string,
     args: PluginActivateProviderArgs

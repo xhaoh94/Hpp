@@ -211,6 +211,65 @@ describe("official plugin config providers", () => {
     });
   });
 
+  it("looks up Pi builtin models by id before saving", async () => {
+    const pi = await import("./pi/config.mjs");
+    await writeFile(
+      process.env.PI_CONFIG_PATH!.replace(/pi\.json$/, "models-store.json"),
+      JSON.stringify({
+        opencode: {
+          models: [
+            { id: "deepseek-v4-flash-free", reasoning: true, input: ["text"], thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: "max" } },
+            { id: "mimo-v2.5-free", reasoning: true, input: ["text", "image"] },
+          ],
+        },
+      }),
+      "utf8",
+    );
+
+    // 目录命中 → 返回内置能力（与 readProviderConfig 的内置判定一致）。
+    await expect(pi.lookupModel("deepseek-v4-flash-free")).resolves.toMatchObject({
+      isBuiltin: true,
+      reasoning: true,
+      imageInput: false,
+      supportedThinkingLevels: ["high", "max"],
+    });
+    // 内置但无档位声明 → 不返回 supportedThinkingLevels。
+    await expect(pi.lookupModel("mimo-v2.5-free")).resolves.toMatchObject({
+      isBuiltin: true,
+      reasoning: true,
+      imageInput: true,
+    });
+    expect(await pi.lookupModel("mimo-v2.5-free")).not.toHaveProperty("supportedThinkingLevels");
+    // 不在目录 / 空 id → 非内置。
+    await expect(pi.lookupModel("GLM-5.1")).resolves.toBeNull();
+    await expect(pi.lookupModel("")).resolves.toBeNull();
+  });
+
+  it("looks up Codex builtin models from models_cache.json before saving", async () => {
+    const codexHome = process.env.CODEX_HOME!;
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({
+      models: [
+        {
+          slug: "gpt-5.1-codex",
+          display_name: "GPT-5.1 Codex",
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }],
+          input_modalities: ["text", "image"],
+        },
+      ],
+    }), "utf8");
+
+    const { lookupModel } = await import("./codex/config.mjs");
+    await expect(lookupModel("gpt-5.1-codex")).resolves.toMatchObject({
+      isBuiltin: true,
+      name: "GPT-5.1 Codex",
+      reasoning: true,
+      imageInput: true,
+      supportedThinkingLevels: ["low", "medium", "high"],
+    });
+    await expect(lookupModel("unknown-model")).resolves.toBeNull();
+  });
+
   it("maps all Droid endpoint protocols through the plugin adapter", async () => {
     const { getProviderEndpoint, getProviderType } = await import("./droid/config.mjs");
     expect(getProviderType("chat-completions")).toBe("generic-chat-completion-api");

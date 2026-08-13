@@ -122,6 +122,11 @@ export interface ChatMessage {
   action?: AgentActionInvocation;
   composerDraft?: ComposerDraftSnapshot;
   composerDocument?: ComposerDocument;
+  /** 回合开始时记录的调用模型名称与思考档位，用于消息底部展示。 */
+  modelLabel?: string;
+  thinkingLevel?: string;
+  /** 本回合累计的输入/输出 token 消耗，cacheInput 为输入中命中缓存的部分。 */
+  tokenUsage?: { input: number; output: number; cacheInput?: number };
 }
 
 export interface PendingFile {
@@ -239,6 +244,7 @@ interface ChatState {
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
   updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
+  addAssistantTokenUsage: (inputTokens: number, outputTokens: number, cacheInputTokens: number, sessionId?: string | null) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   finishAssistantProcessContainingEntry: (entryId: string, endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   finishAllAssistantProcesses: (endedAt?: number, finalState?: AgentProcessFinalState, sessionId?: string | null) => void;
@@ -297,7 +303,11 @@ const findLastAssistantIndex = (messages: ChatMessage[]) => {
   return -1;
 };
 
-const ensureAssistantProcess = (messages: ChatMessage[], startedAt = Date.now()) => {
+const ensureAssistantProcess = (
+  messages: ChatMessage[],
+  startedAt = Date.now(),
+  turnModel?: { modelLabel?: string; thinkingLevel?: string },
+) => {
   const msgs = [...messages];
   let index = findLastAssistantIndex(msgs);
   const last = msgs[msgs.length - 1];
@@ -328,6 +338,8 @@ const ensureAssistantProcess = (messages: ChatMessage[], startedAt = Date.now())
       timestamp: startedAt,
       isStreaming: true,
       process: { startedAt, expanded: true, entries: [] },
+      modelLabel: turnModel?.modelLabel,
+      thinkingLevel: turnModel?.thinkingLevel,
     };
     // A provider may resume the same turn after compacting its context. Keep
     // that continuation before the trailing divider so the divider remains
@@ -350,6 +362,12 @@ const ensureAssistantProcess = (messages: ChatMessage[], startedAt = Date.now())
 
   return { msgs, index };
 };
+
+// 回合创建时快照当前会话的调用模型与思考档位，后续同一回合的追加事件复用首次记录。
+const getTurnModelSnapshot = (state: ChatState) => ({
+  modelLabel: state.currentModel?.name || state.currentModel?.id,
+  thinkingLevel: state.thinkingLevel,
+});
 
 const updateSessionMessages = (
   state: ChatState,
@@ -710,7 +728,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => updateSessionMessages(s, sessionId, (messages) => {
       const normalizedContent = content.trim();
       if (!normalizedContent) return messages;
-      const { msgs, index } = ensureAssistantProcess(messages);
+      const { msgs, index } = ensureAssistantProcess(messages, Date.now(), getTurnModelSnapshot(s));
       const message = msgs[index];
       const existingContent = message.content.trimEnd();
       msgs[index] = {
@@ -814,7 +832,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   startAssistantProcess: (startedAt, sessionId) =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
-        const { msgs } = ensureAssistantProcess(messages, startedAt);
+        const { msgs } = ensureAssistantProcess(messages, startedAt, getTurnModelSnapshot(s));
         return msgs;
       });
     }),
@@ -822,7 +840,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   appendLastAssistantCommentaryDelta: (itemId, delta, timestamp = Date.now(), sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => {
       if (!itemId || !delta) return messages;
-      const { msgs, index } = ensureAssistantProcess(messages, timestamp);
+      const { msgs, index } = ensureAssistantProcess(messages, timestamp, getTurnModelSnapshot(s));
       const message = msgs[index];
       const commentary = message.commentary || [];
       const itemIndex = commentary.findIndex((item) => item.id === itemId);
@@ -846,7 +864,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   finishLastAssistantCommentary: (itemId, content, timestamp = Date.now(), sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => {
       if (!itemId) return messages;
-      const { msgs, index } = ensureAssistantProcess(messages, timestamp);
+      const { msgs, index } = ensureAssistantProcess(messages, timestamp, getTurnModelSnapshot(s));
       const message = msgs[index];
       const commentary = message.commentary || [];
       const itemIndex = commentary.findIndex((item) => item.id === itemId);
@@ -876,7 +894,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   appendLastAssistantProcessEntry: (entry, sessionId) =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
-      const { msgs, index } = ensureAssistantProcess(messages, entry.timestamp);
+      const { msgs, index } = ensureAssistantProcess(messages, entry.timestamp, getTurnModelSnapshot(s));
       const msg = msgs[index];
       const process = msg.process || { startedAt: entry.timestamp, expanded: true, entries: [] };
       const normalizedEntry: AgentProcessEntry = {
@@ -976,6 +994,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return msgs;
       });
     }),
+
+  // 后端上报的 token 用量累加到当前回合的助手消息上（同一回合多次上报时求和）。
+  addAssistantTokenUsage: (inputTokens, outputTokens, cacheInputTokens, sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      const input = Number(inputTokens) || 0;
+      const output = Number(outputTokens) || 0;
+      const cacheInput = Number(cacheInputTokens) || 0;
+      if (input <= 0 && output <= 0) return messages;
+      const index = findLastAssistantIndex(messages);
+      if (index < 0) return messages;
+      const message = messages[index];
+      const previous = message.tokenUsage || { input: 0, output: 0, cacheInput: 0 };
+      const msgs = [...messages];
+      msgs[index] = {
+        ...message,
+        tokenUsage: {
+          input: previous.input + input,
+          output: previous.output + output,
+          cacheInput: (previous.cacheInput ?? 0) + cacheInput,
+        },
+      };
+      return msgs;
+    })),
 
   finishLastAssistantProcess: (endedAt, finalState = "completed", sessionId) =>
     set((s) => {

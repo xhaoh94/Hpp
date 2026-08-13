@@ -782,6 +782,12 @@ export class PiSDKAgent {
             this.emitPendingAssistantText();
             this.streamedMessageTextBuffer = "";
           }
+          const inputTokens = Number(record.inputTokens) || 0;
+          const outputTokens = Number(record.outputTokens) || 0;
+          const cacheInputTokens = Number(record.cacheInputTokens) || 0;
+          if (inputTokens > 0 || outputTokens > 0) {
+            this.emitEvent({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+          }
         }
         this.refreshAgentEndFallback();
         break;

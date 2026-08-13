@@ -502,6 +502,15 @@ export class CodexAgent {
         this._sessionFilePath = optionalString(record.sessionFilePath) || optionalString(record.threadId) || this._sessionFilePath;
         this.emitEvent({ type: "session_file_path", sessionFilePath: this._sessionFilePath, threadId: record.threadId });
         break;
+      case "token_usage": {
+        const inputTokens = Number(record.inputTokens) || 0;
+        const outputTokens = Number(record.outputTokens) || 0;
+        const cacheInputTokens = Number(record.cacheInputTokens) || 0;
+        if (inputTokens > 0 || outputTokens > 0) {
+          this.emitEvent({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+        }
+        break;
+      }
       case "turn_metadata": {
         const nativeTurnId = optionalString(record.nativeTurnId) || optionalString(record.turnId);
         if (nativeTurnId) {

@@ -44,6 +44,7 @@ export interface PluginHostCapabilities {
   readProviderConfig: boolean;
   writeProviderConfig: boolean;
   activateProvider: boolean;
+  lookupModel: boolean;
 }
 
 export class AgentPluginProcess {

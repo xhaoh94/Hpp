@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, Trash2, WandSparkles, X } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -788,7 +788,6 @@ function SessionReferenceControl({
                         return;
                       }
                       onAddOrRefresh(session);
-                      onOpenChange(false);
                     }}
                   >
                     {selected ? <Check size={13} /> : <Plus size={13} />}
@@ -816,6 +815,13 @@ type UserMessageHistoryControlProps = {
   anchorRef: RefObject<HTMLDivElement | null>;
   onOpenChange: (open: boolean) => void;
   onScrollToMessage: (messageId: string) => void;
+};
+
+// 消息底部的 token 数量用紧凑格式（1.2k / 3.4M），悬停 title 里保留完整数字。
+const formatTokenCount = (count: number) => {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(count);
 };
 
 const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
@@ -932,6 +938,7 @@ type ChatMessagesViewProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
+  onResendMessage: (message: ChatMessage) => void;
   onUserMsgHistoryOpenChange: (open: boolean) => void;
   onScrollToMessage: (messageId: string) => void;
 };
@@ -953,6 +960,7 @@ type ChatMessageItemProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
+  onResendMessage: (message: ChatMessage) => void;
   stickyPortalTarget?: HTMLElement | null;
 };
 
@@ -973,6 +981,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   onPreserveScroll,
   onForkMessage,
   forkingMessageId,
+  onResendMessage,
   stickyPortalTarget,
 }: ChatMessageItemProps) {
   const [userMessageExpanded, setUserMessageExpanded] = useState(false);
@@ -1201,6 +1210,14 @@ const ChatMessageItem = memo(function ChatMessageItem({
                   <time className="chat-message-time">{formatMessageActionTime(msg.timestamp)}</time>
                   <button
                     className="chat-copy-btn"
+                    onClick={() => void onResendMessage(msg)}
+                    title="重新发送"
+                    aria-label="重新发送"
+                  >
+                    <RotateCcw size={12} strokeWidth={2} />
+                  </button>
+                  <button
+                    className="chat-copy-btn"
                     onClick={() => onEditMessage(msg)}
                     title="编辑"
                   >
@@ -1251,6 +1268,32 @@ const ChatMessageItem = memo(function ChatMessageItem({
                 <GitBranch size={15} strokeWidth={1.9} />
               </button>
               <time className="chat-message-time">{formatMessageActionTime(msg.timestamp)}</time>
+              {(msg.modelLabel || msg.tokenUsage) && (
+                <span
+                  className="chat-assistant-model-info"
+                  title={[
+                    msg.modelLabel ? `调用模型：${msg.modelLabel}` : "",
+                    msg.tokenUsage
+                      ? `输入 ${msg.tokenUsage.input.toLocaleString()}（未命中 ${(msg.tokenUsage.input - (msg.tokenUsage.cacheInput ?? 0)).toLocaleString()}，缓存命中 ${(msg.tokenUsage.cacheInput ?? 0).toLocaleString()}）/ 输出 ${msg.tokenUsage.output.toLocaleString()} tokens`
+                      : "",
+                  ].filter(Boolean).join(" · ")}
+                >
+                  {msg.modelLabel}
+                  {msg.modelLabel && msg.tokenUsage ? " · " : ""}
+                  {msg.tokenUsage && (
+                    <>
+                      <span className="token-arrow">↑</span>
+                      <span className="token-value">
+                        {formatTokenCount(Math.max(0, msg.tokenUsage.input - (msg.tokenUsage.cacheInput ?? 0)))}
+                        {(msg.tokenUsage.cacheInput ?? 0) > 0 ? `(${formatTokenCount(msg.tokenUsage.cacheInput ?? 0)})` : ""}
+                      </span>
+                      {" "}
+                      <span className="token-arrow">↓</span>
+                      <span className="token-value">{formatTokenCount(msg.tokenUsage.output)}</span>
+                    </>
+                  )}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -1412,6 +1455,7 @@ type ChatMessagesViewportProps = {
   onPreserveScroll: (action: () => void, anchor?: HTMLElement | null) => void;
   onForkMessage: (message: ChatMessage) => void;
   forkingMessageId: string | null;
+  onResendMessage: (message: ChatMessage) => void;
   stickyPortalTarget?: HTMLElement | null;
 };
 
@@ -1434,6 +1478,7 @@ const DeferredMessagesViewport = memo(function ChatMessagesViewport({
   onPreserveScroll,
   onForkMessage,
   forkingMessageId,
+  onResendMessage,
   stickyPortalTarget,
 }: ChatMessagesViewportProps) {
   return (
@@ -1461,6 +1506,7 @@ const DeferredMessagesViewport = memo(function ChatMessagesViewport({
           onPreserveScroll={onPreserveScroll}
           onForkMessage={onForkMessage}
           forkingMessageId={forkingMessageId}
+          onResendMessage={onResendMessage}
           stickyPortalTarget={stickyPortalTarget}
         />
       ))}
@@ -1491,6 +1537,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onPreserveScroll,
   onForkMessage,
   forkingMessageId,
+  onResendMessage,
   expandThinkingWhileRunning,
   onUserMsgHistoryOpenChange,
   onScrollToMessage,
@@ -1569,6 +1616,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
               onPreserveScroll={onPreserveScroll}
               onForkMessage={onForkMessage}
               forkingMessageId={forkingMessageId}
+              onResendMessage={onResendMessage}
             />
 
             {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
@@ -2815,6 +2863,45 @@ export function ChatPanel({
     setComposerInput,
   ]);
 
+  // 重发某条发言：以新消息的形式重新提交原内容（含图片/引用/技能），
+  // 用于发送失败后的一键重试；若原消息其实已送达会产生重复。
+  const handleResendMessage = useCallback(async (msg: ChatMessage) => {
+    if (msg.role !== "user" || forkingMessageIdRef.current) return;
+    const targetSessionId = useProjectStore.getState().activeSessionId;
+    if (!targetSessionId) return;
+    // 图片仅还原 base64 data URL 的，其它来源静默跳过。
+    const images = (msg.images || []).flatMap((image) => {
+      const match = /^data:(image\/(?:jpeg|png|webp|gif));base64,.+$/.exec(image.src || "");
+      return match ? [{ id: image.id, name: image.name, mimeType: match[1], src: image.src }] : [];
+    });
+    try {
+      const payload = await buildSessionMessagePayload({
+        text: msg.content,
+        images,
+        pendingFiles: [],
+        pendingPathAttachments: [],
+        sessionReferences: (msg.sessionReferences || []).map((reference) => ({
+          sourceSessionId: reference.sourceSessionId,
+          sourceTitle: reference.sourceTitle,
+          sourceAgentId: "",
+          sourceUpdatedAt: "",
+          addedAt: new Date(msg.timestamp).toISOString(),
+          summary: "",
+        })),
+        document: msg.composerDocument,
+        action: msg.action,
+        readFile: (path) => window.electronAPI.readFile(path),
+      });
+      await sendPayloadNow(targetSessionId, payload, {
+        planModeEnabled,
+        permissionMode,
+        queueIfRunning: true,
+      });
+    } catch (error) {
+      showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [permissionMode, planModeEnabled, sendPayloadNow]);
+
   const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
     if (!activeSessionSupportsGuidance) return;
     try {
@@ -3143,6 +3230,7 @@ export function ChatPanel({
         onPreserveScroll={preserveScrollDuringLayoutChange}
         onForkMessage={handleForkFromMessage}
         forkingMessageId={forkingMessageId}
+        onResendMessage={handleResendMessage}
         onUserMsgHistoryOpenChange={setUserMsgHistoryOpen}
         onScrollToMessage={scrollToMessage}
       />
@@ -3259,6 +3347,21 @@ export function ChatPanel({
           onAbort={handleAbort}
         />
 
+        {activeProject && activeSession && referenceOpen && (
+          <div ref={referenceRef} className="chat-reference-floating-anchor">
+            <SessionReferenceControl
+              project={activeProject}
+              activeSession={activeSession}
+              references={activeSessionReferences}
+              open={referenceOpen}
+              showTrigger={false}
+              onOpenChange={setReferenceOpen}
+              onAddOrRefresh={handleAddOrRefreshReference}
+              onRemove={handleRemoveReference}
+            />
+          </div>
+        )}
+
         <ChatToolbar
           activeAgentId={activeAgentId}
           activeSessionAgentId={activeSession?.agentId}
@@ -3279,22 +3382,7 @@ export function ChatPanel({
           modelRef={modelRef}
           thinkingRef={thinkingRef}
           permissionRef={permissionRef}
-          leadingContent={
-            activeProject && activeSession && (activeSessionReferences.length > 0 || referenceOpen) ? (
-              <div ref={referenceRef} className="relative">
-                <SessionReferenceControl
-                  project={activeProject}
-                  activeSession={activeSession}
-                  references={activeSessionReferences}
-                  open={referenceOpen}
-                  showTrigger={activeSessionReferences.length > 0}
-                  onOpenChange={setReferenceOpen}
-                  onAddOrRefresh={handleAddOrRefreshReference}
-                  onRemove={handleRemoveReference}
-                />
-              </div>
-            ) : null
-          }
+          leadingContent={null}
           getPlanModeTooltip={getAgentPlanModeTooltip}
           onExpandedProviderChange={setExpandedProvider}
           onModelOpenChange={(open) => {

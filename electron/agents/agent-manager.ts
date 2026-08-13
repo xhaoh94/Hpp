@@ -21,6 +21,7 @@ import {
   getAgentModelVisibility,
   getConfiguredAgentModels,
   listAgentConfig,
+  lookupAgentModel,
   reorderAgentProviderConfigs,
   restoreNativeConfigSnapshots,
   saveAgentProviderConfig,
@@ -1408,6 +1409,10 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
 
   ipcMain.handle("agentConfig:list", async (_event, agentId: string) => {
     return listAgentConfig(agentId);
+  });
+
+  ipcMain.handle("agentConfig:lookupModel", async (_event, agentId: string, modelId: string) => {
+    return lookupAgentModel(agentId, modelId);
   });
 
   ipcMain.handle("agentConfig:getModelVisibility", async (_event, agentId: string) => {

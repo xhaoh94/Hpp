@@ -310,6 +310,23 @@
   position: relative;
 }
 
+/* 引用会话浮层锚点：绝对定位到输入区顶部，弹窗从这里向上弹入消息区，
+   从而不遮挡下方的聊天输入框。脱离文档流，避免影响输入区布局。 */
+.chat-reference-floating-anchor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 0;
+  z-index: 120;
+}
+
+.chat-reference-floating-anchor .chat-reference-popup {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 6px);
+  left: 0;
+}
+
 .chat-header-reference-btn {
   min-width: 28px;
   height: 28px;
@@ -411,6 +428,32 @@
   min-height: 0;
   padding: 8px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.chat-reference-section:hover {
+  scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+}
+
+.chat-reference-section::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.chat-reference-section::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-reference-section::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 6px;
+  min-height: 32px;
+}
+
+.chat-reference-section::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 .chat-reference-section + .chat-reference-section {
@@ -1149,6 +1192,21 @@
   white-space: nowrap;
   margin: 0 4px;
 }
+
+/* 助手回合底部：模型名 · ↑未命中缓存(缓存命中) ↓输出 */
+.chat-assistant-model-info {
+  max-width: 320px;
+  align-self: center;
+  overflow: hidden;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0 4px;
+}
+
+/* token 数字加粗，与箭头和模型名等普通文字区分 */
+.chat-assistant-model-info .token-value { font-weight: 600; }
 
 .chat-user-expand-btn {
   display: flex;
@@ -3024,6 +3082,7 @@ body.chat-questionnaire-resizing {
   max-width: none;
   margin-inline: auto;
   flex-direction: column;
+  position: relative;
 }
 
 .chat-input-area.questionnaire-active {
@@ -3347,6 +3406,7 @@ body.chat-questionnaire-resizing {
   width: 100%;
   min-width: 0;
   flex-wrap: wrap;
+  position: relative;
 }
 
 .chat-attachment-alert {
@@ -3854,7 +3914,7 @@ body.chat-questionnaire-resizing {
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 12px;
-  padding: 4px;
+  padding: 2px 4px;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -4043,6 +4103,7 @@ body.chat-questionnaire-resizing {
   align-items: center;
   gap: 2px;
   padding: 4px;
+  margin-bottom: 2px;
 }
 
 .chat-input-btn {
@@ -4070,13 +4131,13 @@ body.chat-questionnaire-resizing {
   background: none;
   border: none;
   color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.5;
-  padding: 8px 12px;
+  font-size: 16px;
+  line-height: 27px;
+  padding: 6px 12px;
   resize: none;
   outline: none;
   font-family: inherit;
-  min-height: 24px;
+  min-height: 27px;
   max-height: 150px;
   user-select: text;
   -webkit-user-select: text;
@@ -4115,15 +4176,15 @@ body.chat-questionnaire-resizing .chat-bubble {
 }
 
 .inline-composer-content {
-  min-height: 36px;
-  padding: 8px 12px;
+  min-height: 42px;
+  padding: 7px 0px 4px 0px;
   outline: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .inline-composer-paragraph {
-  min-height: 21px;
+  min-height: 30px;
   margin: 0;
 }
 
@@ -4139,21 +4200,20 @@ body.chat-questionnaire-resizing .chat-bubble {
 }
 
 .inline-composer-entity-host {
-  display: inline-flex;
-  align-items: center;
-  transform: translateY(-2px);
+  display: inline-block;
   vertical-align: middle;
+  transform: translateY(-2px);
 }
 
 .inline-composer-entity,
 .composer-message-entity {
   display: inline-flex;
   height: 26px;
-  max-width: min(240px, 70vw);
+  max-width: min(180px, 70vw);
   align-items: center;
   gap: 4px;
   box-sizing: border-box;
-  margin: 1px 2px;
+  margin: 0 6px;
   padding: 2px 6px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -4162,7 +4222,6 @@ body.chat-questionnaire-resizing .chat-bubble {
   color: var(--text-primary);
   font-size: 13px;
   line-height: 18px;
-  vertical-align: middle;
 }
 
 .inline-composer-entity.selected {
@@ -4198,7 +4257,6 @@ body.chat-questionnaire-resizing .chat-bubble {
 }
 
 .composer-message-entity {
-  transform: translateY(-2px);
 }
 
 .inline-composer-entity .composer-entity-icon.folder,
@@ -4283,6 +4341,7 @@ body.chat-questionnaire-resizing .chat-bubble {
   cursor: pointer;
   transition: all 0.15s;
   flex-shrink: 0;
+  margin-bottom: 3px;
 }
 
 .chat-send-btn:hover:not(:disabled) {
@@ -5044,6 +5103,32 @@ body.chat-questionnaire-resizing .chat-bubble {
   padding: 0 5px 6px;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.chat-action-list:hover {
+  scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+}
+
+.chat-action-list::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.chat-action-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-action-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 6px;
+  min-height: 32px;
+}
+
+.chat-action-list::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 .chat-action-group-title {

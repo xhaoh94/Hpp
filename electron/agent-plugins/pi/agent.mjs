@@ -1,4 +1,4 @@
-import { readProviderConfig, writeProviderConfig } from "./config.mjs";
+import { lookupModel, readProviderConfig, writeProviderConfig } from "./config.mjs";
 import { getStatus as getRuntimeStatus, uninstall as uninstallRuntime, update as updateRuntime } from "./runtime.mjs";
 
 export async function createAgentBackend(context) {
@@ -27,5 +27,8 @@ export const configProvider = {
   },
   write(_context, { state }) {
     return writeProviderConfig(state);
+  },
+  lookupModel(_context, { modelId }) {
+    return lookupModel(modelId);
   },
 };

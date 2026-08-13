@@ -861,6 +861,10 @@ button:disabled { opacity: 0.48; }
 .message-actions button:active:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 .message-actions button:disabled { opacity: 0.38; }
 .message-action-time { color: var(--faint); font-size: 11px; white-space: nowrap; margin: 0 3px; }
+/* 助手回合底部：模型名 · ↑输入(缓存命中) ↓输出 */
+.message-model-info { max-width: 46vw; overflow: hidden; color: var(--faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; margin: 0 3px; }
+/* token 数字加粗，与箭头和模型名等普通文字区分 */
+.message-model-info .token-value { font-weight: 600; }
 
 .message-images { display: flex; gap: 7px; overflow-x: auto; }
 .message-images { margin-bottom: 8px; }

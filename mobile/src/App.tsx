@@ -1207,6 +1207,13 @@ function MessageProcess({
   );
 }
 
+// 消息底部的 token 数量用紧凑格式（1.2k / 3.4M），悬停 title 里保留完整数字。
+const formatTokenCount = (count: number) => {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(count);
+};
+
 const MessageItem = memo(function MessageItem({
   message,
   receivedUserMessage,
@@ -1217,6 +1224,7 @@ const MessageItem = memo(function MessageItem({
   onEdit,
   onCopy,
   onFork,
+  onResend,
 }: {
   message: RemoteChatMessage;
   receivedUserMessage?: RemoteChatMessage;
@@ -1227,6 +1235,7 @@ const MessageItem = memo(function MessageItem({
   onEdit: (content: string) => void;
   onCopy: (content: string) => void;
   onFork: (message: RemoteChatMessage) => void;
+  onResend: (message: RemoteChatMessage) => void;
 }) {
   const messagePresentation = message.role === "user"
     ? extractUserMessageAttachments(message.content)
@@ -1342,6 +1351,11 @@ const MessageItem = memo(function MessageItem({
             <time className="message-action-time">{formatMessageActionTime(message.timestamp)}</time>
           )}
           {message.role === "user" && (
+            <button type="button" onClick={() => onResend(message)} disabled={actionsDisabled} title="重新发送" aria-label="重新发送">
+              <RotateCcw size={15} />
+            </button>
+          )}
+          {message.role === "user" && (
             <button type="button" onClick={() => onEdit(message.content)} disabled={actionsDisabled || !message.content} title="编辑" aria-label="编辑">
               <Pencil size={15} />
             </button>
@@ -1355,6 +1369,32 @@ const MessageItem = memo(function MessageItem({
             </button>
           )}
           {assistantActionsReady && <time className="message-action-time">{formatMessageActionTime(message.timestamp)}</time>}
+          {assistantActionsReady && (message.modelLabel || message.tokenUsage) && (
+            <span
+              className="message-model-info"
+              title={[
+                message.modelLabel ? `调用模型：${message.modelLabel}` : "",
+                message.tokenUsage
+                  ? `输入 ${message.tokenUsage.input.toLocaleString()}（未命中 ${(message.tokenUsage.input - (message.tokenUsage.cacheInput ?? 0)).toLocaleString()}，缓存命中 ${(message.tokenUsage.cacheInput ?? 0).toLocaleString()}）/ 输出 ${message.tokenUsage.output.toLocaleString()} tokens`
+                  : "",
+              ].filter(Boolean).join(" · ")}
+            >
+              {message.modelLabel}
+              {message.modelLabel && message.tokenUsage ? " · " : ""}
+              {message.tokenUsage && (
+                <>
+                  <span className="token-arrow">↑</span>
+                  <span className="token-value">
+                    {formatTokenCount(Math.max(0, message.tokenUsage.input - (message.tokenUsage.cacheInput ?? 0)))}
+                    {(message.tokenUsage.cacheInput ?? 0) > 0 ? `(${formatTokenCount(message.tokenUsage.cacheInput ?? 0)})` : ""}
+                  </span>
+                  {" "}
+                  <span className="token-arrow">↓</span>
+                  <span className="token-value">{formatTokenCount(message.tokenUsage.output)}</span>
+                </>
+              )}
+            </span>
+          )}
         </div>
       )}
     </article>
@@ -1371,6 +1411,7 @@ const MessageListView = memo(function MessageListView({
   onEdit,
   onCopy,
   onFork,
+  onResend,
 }: {
   messages: RemoteChatMessage[];
   receivedUserMessages: Record<string, RemoteChatMessage | undefined>;
@@ -1381,6 +1422,7 @@ const MessageListView = memo(function MessageListView({
   onEdit: (content: string) => void;
   onCopy: (content: string) => void;
   onFork: (message: RemoteChatMessage) => void;
+  onResend: (message: RemoteChatMessage) => void;
 }) {
   return (
     <>
@@ -1396,6 +1438,7 @@ const MessageListView = memo(function MessageListView({
           onEdit={onEdit}
           onCopy={onCopy}
           onFork={onFork}
+          onResend={onResend}
         />
       ))}
     </>
@@ -4120,6 +4163,40 @@ export default function App() {
     }
   }, [activeHost, composer, composerComposition, composerDocument, configs, demoMode, pendingAction, pendingImages, replaceComposer, returnToMessageBottom, runCommand, selectedReferenceSessions, selectedSessionId]);
 
+  // 重发某条发言：以新的 clientMessageId 重新提交同样的内容（含图片/引用/技能）。
+  const resendMessage = useCallback(async (message: RemoteChatMessage) => {
+    if (!selectedSessionId || message.role !== "user" || demoMode) return;
+    if (!message.content?.trim() && !(message.images?.length)) return;
+    const config = configs[selectedSessionId];
+    // 从消息里的 data URL 还原图片载荷；解析失败（如非 base64 源）则静默跳过。
+    const images = (message.images || []).flatMap((image) => {
+      const match = /^data:(image\/(?:jpeg|png|webp|gif));base64,(.+)$/.exec(image.src || "");
+      if (!match) return [];
+      return [{
+        id: image.id,
+        name: image.name,
+        mimeType: match[1] as "image/jpeg" | "image/png" | "image/webp" | "image/gif",
+        data: match[2],
+      }];
+    });
+    try {
+      await runCommand<{ queued?: boolean }>("session.send", {
+        sessionId: selectedSessionId,
+        clientMessageId: createClientId(),
+        content: message.content,
+        planModeEnabled: config?.planModeEnabled === true,
+        permissionMode: config?.permissionMode || "auto",
+        images,
+        sessionReferences: (message.sessionReferences || []).map(({ sourceSessionId }) => ({ sourceSessionId })),
+        composerDocument: message.composerDocument,
+        action: message.action,
+      });
+      requestAnimationFrame(returnToMessageBottom);
+    } catch {
+      // 与首次发送一致：错误继续在全局错误条展示，不自动重试。
+    }
+  }, [configs, demoMode, returnToMessageBottom, runCommand, selectedSessionId]);
+
   const submitInteraction = useCallback(async (answers: unknown[], text: string, cancelled = false, confirmed?: boolean) => {
     if (!selectedSessionId || !selectedInteraction) return;
     const normalizedInteractionMethod = selectedInteraction.method?.toLowerCase() || "";
@@ -4760,6 +4837,7 @@ export default function App() {
                 onEdit={editMessage}
                 onCopy={copyMessage}
                 onFork={forkMessage}
+                onResend={resendMessage}
               />
               {loadingSession && selectedMessages.length === 0 && <div className="loading-chat"><LoaderCircle className="spin" size={22} /></div>}
             </div>

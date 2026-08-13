@@ -1297,6 +1297,12 @@ const handleSessionEvent = (event) => {
       if (message?.role === "assistant") {
         const promptId = activePromptId;
         const previousLeafId = session?.sessionManager.getLeafId?.();
+        const usage = message.usage && typeof message.usage === "object" ? message.usage : null;
+        // Pi 的 usage.input 只是未命中缓存的部分，缓存命中的输入记在 cacheRead；
+        // 服务商侧统计的输入 token = input + cacheRead + cacheWrite，这里保持一致。
+        const inputTokens = (Number(usage?.input) || 0)
+          + (Number(usage?.cacheRead) || 0)
+          + (Number(usage?.cacheWrite) || 0);
         send({
           type: "message_end",
           message: {
@@ -1306,6 +1312,9 @@ const handleSessionEvent = (event) => {
             stopReason: message.stopReason,
             errorMessage: getErrorFromMessage(message),
           },
+          inputTokens,
+          outputTokens: Number(usage?.output) || 0,
+          cacheInputTokens: Number(usage?.cacheRead) || 0,
         });
         emitLatestAssistantTurnMetadata(promptId, previousLeafId);
       }

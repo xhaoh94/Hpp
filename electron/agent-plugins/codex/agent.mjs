@@ -1,4 +1,4 @@
-import { activateProvider, getDefaultThinkingLevel as readDefaultThinkingLevel, readProviderConfig } from "./config.mjs";
+import { activateProvider, getDefaultThinkingLevel as readDefaultThinkingLevel, lookupModel, readProviderConfig } from "./config.mjs";
 
 export async function createAgentBackend(context) {
   return context.createBuiltinBackend("codex");
@@ -38,5 +38,8 @@ export const configProvider = {
   },
   activateProvider(_context, { provider }) {
     return activateProvider(provider);
+  },
+  lookupModel(_context, { modelId }) {
+    return lookupModel(modelId);
   },
 };

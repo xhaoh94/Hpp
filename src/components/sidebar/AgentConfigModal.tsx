@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, Undo2, X, Zap } from "lucide-react";
+import { BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -37,6 +37,46 @@ const emptyModel = (configuration?: AgentProviderConfiguration): AgentCustomMode
   };
 };
 
+/** 渠道保存前的归一化：trim、内置模型不写自定义档位、自定义模型由档位派生 reasoning。 */
+const buildNormalizedProviderPayload = (draft: AgentProviderConfig, originalProviderId: string) => {
+  const normalizedDraft = {
+    ...draft,
+    providerId: draft.providerId.trim(),
+    displayName: (draft.displayName || draft.providerId).trim(),
+    baseUrl: draft.baseUrl.trim(),
+    apiKey: draft.apiKey.trim(),
+    models: draft.models.map((model) => {
+      const isBuiltin = model.isBuiltin === true;
+      // 只有 Agent 内置目录命中的模型由 Agent 管理能力；非内置模型始终保留用户自定义的
+      // 图片、思考和思考档位配置，不再被 agent 级 fixedModelCapabilities 覆盖。
+      // off 与其他档位共存时原样保存（仅选 off 在提交阶段已归为空）。
+      const supportedThinkingLevels = isBuiltin
+        ? []
+        : normalizeSupportedThinkingLevels(model.supportedThinkingLevels);
+      return {
+        ...model,
+        id: model.id.trim(),
+        name: (model.name || model.id).trim(),
+        reasoning: isBuiltin ? model.reasoning === true : getConfiguredThinkingLevels(model.supportedThinkingLevels).length > 0,
+        imageInput: model.imageInput,
+        supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
+      };
+    }),
+  };
+  return originalProviderId
+    ? { ...normalizedDraft, originalProviderId }
+    : normalizedDraft;
+};
+
+/** 自动保存的静默跳过条件：草稿不完整时不打断输入，也不弹错误。 */
+const isProviderPayloadSavable = (
+  payload: { providerId: string; baseUrl: string; apiKey: string; models: { id: string }[] },
+) => /^[a-zA-Z0-9._:-]+$/.test(payload.providerId)
+  && !!payload.baseUrl
+  && !!payload.apiKey
+  && payload.models.length > 0
+  && payload.models.every((model) => !!model.id);
+
 type ThinkingLevelsMultiSelectProps = {
   levels?: string[];
   onChange: (levels?: string[]) => void;
@@ -52,9 +92,10 @@ function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSele
   const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0, placement: "above" as "above" | "below" });
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const selectedLevels = getConfiguredThinkingLevels(levels);
+  // 选中态保留 off，让它能与其他档位一起多选；仅选 off 时在提交阶段归为空。
+  const selectedLevels = useMemo(() => normalizeSupportedThinkingLevels(levels), [levels]);
   const visibleThinkingLevels = useMemo(
-    () => THINKING_LEVELS.filter((level) => level.id !== "off"),
+    () => THINKING_LEVELS,
     [],
   );
   const knownLevelIds = useMemo(() => new Set<string>(visibleThinkingLevels.map((level) => level.id)), [visibleThinkingLevels]);
@@ -124,8 +165,10 @@ function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSele
   }, [open]);
 
   const commitLevels = (nextLevels: string[]) => {
-    const normalized = getConfiguredThinkingLevels(nextLevels);
-    onChange(normalized.length > 0 ? normalized : undefined);
+    const normalized = normalizeSupportedThinkingLevels(nextLevels);
+    // 仅选中“关闭”等同一个没选（无思考等级）；off 与其他档位共存时原样保留。
+    const onlyOffSelected = normalized.length === 1 && normalized[0] === "off";
+    onChange(normalized.length > 0 && !onlyOffSelected ? normalized : undefined);
   };
 
   const toggleLevel = (level: string) => {
@@ -135,7 +178,7 @@ function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSele
   };
 
   const addCustomLevel = () => {
-    const [normalized] = getConfiguredThinkingLevels([customLevel]);
+    const [normalized] = normalizeSupportedThinkingLevels([customLevel]);
     if (!normalized) return;
     if (!selectedLevels.includes(normalized)) commitLevels([...selectedLevels, normalized]);
     setCustomLevel("");
@@ -177,7 +220,7 @@ function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSele
           <div className="agent-thinking-multiselect-header">
             <div>
               <div className="agent-thinking-multiselect-title">选择思考档位</div>
-              <div className="agent-thinking-multiselect-subtitle">可多选，不选即关闭推理</div>
+              <div className="agent-thinking-multiselect-subtitle">可多选，不可单选关闭</div>
             </div>
             <div className="agent-thinking-multiselect-actions">
               {selectedLevels.length > 0 && (
@@ -194,6 +237,9 @@ function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSele
           </div>
           <div className="agent-thinking-multiselect-options">
             {visibleThinkingLevels.map((level) => {
+              // “关闭”可与其他档位一起多选；仅选它时提交阶段会归为空，
+              // 效果等同一个没选（无思考等级）。
+              const isOff = level.id === "off";
               const selected = selectedLevels.includes(level.id);
               return (
                 <button
@@ -203,6 +249,7 @@ function ThinkingLevelsMultiSelect({ levels, onChange }: ThinkingLevelsMultiSele
                   onClick={() => toggleLevel(level.id)}
                   role="option"
                   aria-selected={selected}
+                  title={isOff ? "仅选中此项等同不选" : undefined}
                 >
                   <span>{level.label}</span>
                   {selected && <CheckCircle2 size={13} />}
@@ -317,11 +364,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
-  const [editorBaseline, setEditorBaseline] = useState<AgentProviderConfig | null>(null);
   const [editorOriginalProviderId, setEditorOriginalProviderId] = useState<string>("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [activatingProviderId, setActivatingProviderId] = useState<string>("");
   const [deletingProviderId, setDeletingProviderId] = useState<string>("");
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<AgentProviderConfig | null>(null);
@@ -348,10 +393,76 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [copyProviderError, setCopyProviderError] = useState("");
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelFetchRequest = useRef(0);
+  // 模型内置实时判定的防抖计时器与请求序号（按模型行索引隔离，避免乱序覆盖）。
+  const modelLookupTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const modelLookupSeq = useRef(new Map<number, number>());
+  // 渠道自动保存：防抖计时器、并发保护与最近一次已保存的 payload 指纹。
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSaveInFlight = useRef(false);
+  const autoSavePending = useRef(false);
+  const lastSavedPayload = useRef("");
+  const draftRef = useRef<AgentProviderConfig | null>(null);
+  const editorOriginalProviderIdRef = useRef("");
+  // 保存最新自动保存函数的引用，供卸载清理（早于定义处）调用。
+  const performAutoSaveRef = useRef(() => Promise.resolve());
   const pendingProviderEditor = useRef<{ agentId: string; providerId: string } | null>(null);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const providerScrollRef = useRef<HTMLDivElement>(null);
   const { update: updateProviderAutoScroll, stop: stopProviderAutoScroll } = useDragAutoScroll(providerScrollRef);
+
+  const clearModelLookupState = useCallback(() => {
+    for (const timer of modelLookupTimers.current.values()) clearTimeout(timer);
+    modelLookupTimers.current.clear();
+    modelLookupSeq.current.clear();
+  }, []);
+
+  // 模型 ID 变化时防抖实时查询 Agent 内置目录，未保存即可切换内置/自定义形态。
+  const scheduleModelBuiltinLookup = useCallback((index: number, modelId: string) => {
+    const previousTimer = modelLookupTimers.current.get(index);
+    if (previousTimer) clearTimeout(previousTimer);
+    const id = modelId.trim();
+    if (!id) return;
+    modelLookupTimers.current.set(index, setTimeout(() => {
+      modelLookupTimers.current.delete(index);
+      const seq = (modelLookupSeq.current.get(index) || 0) + 1;
+      modelLookupSeq.current.set(index, seq);
+      void window.electronAPI.agentConfigLookupModel(agentId, id).then((result) => {
+        if (modelLookupSeq.current.get(index) !== seq) return;
+        const builtinModel = result.success && result.builtin ? result.model : undefined;
+        setDraft((current) => {
+          if (!current) return current;
+          const target = current.models[index];
+          if (!target || target.id.trim() !== id) return current;
+          if (builtinModel) {
+            // 命中内置目录：能力改由目录接管（保存时插件会再次校验）。
+            return {
+              ...current,
+              models: current.models.map((model, modelIndex) => modelIndex === index ? {
+                ...model,
+                isBuiltin: true,
+                reasoning: builtinModel.reasoning,
+                imageInput: builtinModel.imageInput,
+                supportedThinkingLevels: builtinModel.supportedThinkingLevels,
+                name: model.name.trim() ? model.name : (builtinModel.name || model.name),
+              } : model),
+            };
+          }
+          // 非内置：仅当该行之前被判为内置时才回退为自定义默认能力，
+          // 避免覆盖用户已勾选的自定义能力（也兼容未实现 lookupModel 的插件）。
+          if (!target.isBuiltin) return current;
+          const customDefault = emptyModel(providerConfiguration);
+          return {
+            ...current,
+            models: current.models.map((model, modelIndex) => modelIndex === index ? {
+              ...customDefault,
+              id: model.id,
+              name: model.name,
+            } : model),
+          };
+        });
+      }).catch(() => undefined);
+    }, 300));
+  }, [agentId, providerConfiguration]);
 
   useEffect(() => {
     void loadAgents();
@@ -424,12 +535,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       if (pendingProvider) {
         const nextDraft = cloneProvider(pendingProvider);
         setDraft(nextDraft);
-        setEditorBaseline(cloneProvider(nextDraft));
+        lastSavedPayload.current = JSON.stringify(
+          buildNormalizedProviderPayload(nextDraft, pendingProvider.providerId),
+        );
         setEditorOriginalProviderId(pendingProvider.providerId);
         setEditorOpen(true);
       } else {
         setDraft(null);
-        setEditorBaseline(null);
         setEditorOriginalProviderId("");
         setEditorOpen(false);
       }
@@ -473,11 +585,19 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   useEffect(() => {
     return () => {
       if (apiKeyCopyTimer.current) clearTimeout(apiKeyCopyTimer.current);
+      clearModelLookupState();
+      if (autoSaveTimer.current) {
+        clearTimeout(autoSaveTimer.current);
+        autoSaveTimer.current = null;
+      }
+      // 关闭整个配置弹窗时冲刷防抖窗口内的改动，避免丢失。
+      void performAutoSaveRef.current();
     };
-  }, []);
+  }, [clearModelLookupState]);
 
   useEffect(() => {
     if (editorOpen) return;
+    clearModelLookupState();
     modelFetchRequest.current += 1;
     setFetchingModels(false);
     setModelFetchError("");
@@ -485,7 +605,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setSelectedRemoteModelIds(new Set());
     setModelSearch("");
     setModelPickerOpen(false);
-  }, [editorOpen]);
+  }, [editorOpen, clearModelLookupState]);
 
   const configuredModelIds = useMemo(
     () => new Set((draft?.models || []).map((model) => model.id.trim()).filter(Boolean)),
@@ -563,7 +683,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     const provider = createProvider(index, providerConfiguration);
     if (!usesActivation) setSelectedProviderId(provider.providerId);
     setDraft(provider);
-    setEditorBaseline(cloneProvider(provider));
+    lastSavedPayload.current = "";
     setEditorOriginalProviderId("");
     setEditorOpen(true);
     setStatus(null);
@@ -578,7 +698,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     const nextDraft = cloneProvider(provider);
     setSelectedProviderId(provider.providerId);
     setDraft(nextDraft);
-    setEditorBaseline(cloneProvider(nextDraft));
+    lastSavedPayload.current = JSON.stringify(
+      buildNormalizedProviderPayload(nextDraft, provider.providerId),
+    );
     setEditorOriginalProviderId(provider.providerId);
     setEditorOpen(true);
     setStatus(null);
@@ -638,13 +760,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     }
   }, [agentId, configurableAgentList, copyingTargetAgentId, copySourceProvider, handleEditProvider, onModelsUpdated]);
 
-  const handleUndoDraft = useCallback(() => {
-    if (!editorBaseline) return;
-    setDraft(cloneProvider(editorBaseline));
-    setApiKeyCopied(false);
-    setStatus({ type: "success", text: "已撤销未保存改动" });
-  }, [editorBaseline]);
-
   const updateDraft = useCallback((patch: Partial<AgentProviderConfig>) => {
     setDraft((current) => current ? { ...current, ...patch } : current);
   }, []);
@@ -659,7 +774,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         ),
       };
     });
-  }, []);
+    if (patch.id !== undefined) scheduleModelBuiltinLookup(index, patch.id);
+  }, [scheduleModelBuiltinLookup]);
 
   const addModel = useCallback(() => {
     setDraft((current) => current ? { ...current, models: [...current.models, emptyModel(providerConfiguration)] } : current);
@@ -757,76 +873,82 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     });
   }, []);
 
-  const handleSave = useCallback(async () => {
-    if (!draft) return;
-    setSaving(true);
-    setStatus(null);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  useEffect(() => {
+    editorOriginalProviderIdRef.current = editorOriginalProviderId;
+  }, [editorOriginalProviderId]);
+
+  // 渠道编辑改为自动保存：每次草稿变化防抖后直接写入，无需保存按钮。
+  const performAutoSave = useCallback(async () => {
+    const currentDraft = draftRef.current;
+    if (!currentDraft) return;
+    const payload = buildNormalizedProviderPayload(currentDraft, editorOriginalProviderIdRef.current);
+    // 草稿不完整（新建渠道填写中）时静默跳过，不弹错误。
+    if (!isProviderPayloadSavable(payload)) return;
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastSavedPayload.current) return;
+    if (autoSaveInFlight.current) {
+      // 保存进行中的改动记为待补存，完成后立即再存一次。
+      autoSavePending.current = true;
+      return;
+    }
+    autoSaveInFlight.current = true;
     try {
-      const normalizedDraft = {
-        ...draft,
-        providerId: draft.providerId.trim(),
-        displayName: (draft.displayName || draft.providerId).trim(),
-        baseUrl: draft.baseUrl.trim(),
-        apiKey: draft.apiKey.trim(),
-        models: draft.models.map((model) => {
-          const isBuiltin = model.isBuiltin === true;
-          // 只有 Agent 内置目录命中的模型由 Agent 管理能力；非内置模型始终保留用户自定义的
-          // 图片、思考和思考档位配置，不再被 agent 级 fixedModelCapabilities 覆盖。
-          const supportedThinkingLevels = isBuiltin
-            ? []
-            : getConfiguredThinkingLevels(model.supportedThinkingLevels);
-          return {
-            ...model,
-            id: model.id.trim(),
-            name: (model.name || model.id).trim(),
-            reasoning: isBuiltin ? model.reasoning === true : supportedThinkingLevels.length > 0,
-            imageInput: model.imageInput,
-            supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
-          };
-        }),
-      };
-      const payload = editorOriginalProviderId
-        ? { ...normalizedDraft, originalProviderId: editorOriginalProviderId }
-        : normalizedDraft;
       const result = await window.electronAPI.agentConfigSave(agentId, payload as AgentProviderConfig);
       if (!result.success || !result.config) {
         setStatus({ type: "error", text: result.error || "保存配置失败" });
         return;
       }
+      lastSavedPayload.current = serialized;
       setConfig(result.config);
-      const isNewProvider = !editorOriginalProviderId;
-      const keepSelectedProviderId = selectedProviderId && result.config.providers.some((provider) =>
-        provider.providerId === selectedProviderId
-      );
-      setSelectedProviderId(
-        usesActivation && isNewProvider
-          ? (keepSelectedProviderId ? selectedProviderId : result.config.providers[0]?.providerId || "")
-          : normalizedDraft.providerId
-      );
-      setDraft(cloneProvider(normalizedDraft));
-      setEditorBaseline(null);
-      setEditorOriginalProviderId("");
-      setEditorOpen(false);
-      if (result.models) {
-        onModelsUpdated(agentId, result.models);
-      }
-      const count = result.reloadedSessionIds?.length || 0;
-      setStatus({
-        type: "success",
-        text: usesActivation
-          ? normalizedDraft.providerId === result.config.activeProviderId
-            ? "配置已保存，点击重新应用后写入本地配置并重载"
-            : "配置已保存，点击启用后写入本地配置并重载"
-          : result.error || (count > 0
-            ? `本地配置已保存，已重载 ${count} 个会话`
-            : "本地配置已保存，暂无已初始化会话"),
-      });
+      setSelectedProviderId(payload.providerId);
+      // 渠道已按新 ID 落盘：后续改动就地更新，不再携带重命名标记，
+      // 同时保证已有渠道的标题保持“编辑渠道”。
+      editorOriginalProviderIdRef.current = payload.providerId;
+      setEditorOriginalProviderId(payload.providerId);
+      if (result.models) onModelsUpdated(agentId, result.models);
     } catch (error) {
       setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setSaving(false);
+      autoSaveInFlight.current = false;
+      if (autoSavePending.current) {
+        autoSavePending.current = false;
+        void performAutoSave();
+      }
     }
-  }, [agentId, draft, editorOriginalProviderId, onModelsUpdated, providerConfiguration, selectedProviderId, usesActivation]);
+  }, [agentId, onModelsUpdated]);
+
+  useEffect(() => {
+    performAutoSaveRef.current = performAutoSave;
+  }, [performAutoSave]);
+
+  useEffect(() => {
+    if (!editorOpen || !draft) return;
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      autoSaveTimer.current = null;
+      void performAutoSave();
+    }, 600);
+    return () => {
+      if (autoSaveTimer.current) {
+        clearTimeout(autoSaveTimer.current);
+        autoSaveTimer.current = null;
+      }
+    };
+  }, [draft, editorOpen, performAutoSave]);
+
+  // 关闭编辑器前立即冲刷一次，避免防抖窗口内的改动丢失。
+  const closeProviderEditor = useCallback(() => {
+    if (autoSaveTimer.current) {
+      clearTimeout(autoSaveTimer.current);
+      autoSaveTimer.current = null;
+    }
+    void performAutoSave();
+    setEditorOpen(false);
+  }, [performAutoSave]);
 
   const handleActivate = useCallback(async (providerId: string) => {
     setActivatingProviderId(providerId);
@@ -873,7 +995,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       const nextSelected = result.config.providers[nextSelectedIndex]?.providerId || "";
       setSelectedProviderId(nextSelected);
       setDraft(null);
-      setEditorBaseline(null);
       setEditorOriginalProviderId("");
       setEditorOpen(false);
       setDeleteConfirmProvider(null);
@@ -1280,7 +1401,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           className="settings-modal-overlay agent-provider-editor-overlay"
           onMouseDown={(event) => {
             event.stopPropagation();
-            setEditorOpen(false);
+            closeProviderEditor();
           }}
         >
           <div className="settings-modal agent-provider-editor-modal" onMouseDown={(event) => event.stopPropagation()}>
@@ -1292,21 +1413,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
               <div className="agent-config-form-actions">
                 <button
                   type="button"
-                  className="btn-action"
-                  onClick={handleUndoDraft}
-                  disabled={!editorBaseline}
-                >
-                  <Undo2 size={13} />
-                  撤销
-                </button>
-                <button type="button" className="filter-add-btn agent-config-save-btn" onClick={() => void handleSave()} disabled={saving}>
-                  <Save size={13} />
-                  {saving ? "保存中..." : "保存"}
-                </button>
-                <button
-                  type="button"
                   className="settings-modal-close"
-                  onClick={() => setEditorOpen(false)}
+                  onClick={closeProviderEditor}
                   aria-label="关闭"
                 >
                   <X size={18} />

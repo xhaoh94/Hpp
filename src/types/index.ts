@@ -160,6 +160,19 @@ export interface AgentConfigResult {
   reloadedSessionIds?: string[];
 }
 
+/** 未保存前实时判定模型是否内置的结果。 */
+export interface AgentModelLookupResult {
+  success: boolean;
+  error?: string;
+  builtin: boolean;
+  model?: {
+    name?: string;
+    reasoning: boolean;
+    imageInput: boolean;
+    supportedThinkingLevels?: string[];
+  };
+}
+
 export interface AgentRemoteModel {
   id: string;
   name: string;
@@ -288,6 +301,7 @@ export interface ElectronAPI {
   agentSetCompactionConfig: (config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
+  agentConfigLookupModel: (agentId: string, modelId: string) => Promise<AgentModelLookupResult>;
   agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) => Promise<AgentModelVisibilityResult>;
   agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: AgentProviderAuthMode) => Promise<AgentConfigFetchModelsResult>;

@@ -395,6 +395,31 @@ export const toProviderConfig = (provider, existingProvider = {}) => {
   return nextProvider;
 };
 
+// 未保存前实时判定模型是否内置：与 normalizeModel 的内置判定规则保持一致，
+// 供配置弹窗在输入 model-id 时即时隐藏/显示自定义能力控件。
+export const lookupModel = async (modelId) => {
+  const id = asString(modelId);
+  if (!id) return null;
+  const directoryEntry = await getDirectoryModelEntry(null, id);
+  const isBuiltin = !!directoryEntry
+    && typeof directoryEntry.reasoning === "boolean"
+    && Array.isArray(directoryEntry.input);
+  if (!isBuiltin) return null;
+  const directoryMap = isRecord(directoryEntry.thinkingLevelMap) && Object.keys(directoryEntry.thinkingLevelMap).length > 0
+    ? directoryEntry.thinkingLevelMap
+    : null;
+  const supportedThinkingLevels = directoryMap
+    ? mapToSupportedThinkingLevels({ thinkingLevelMap: directoryMap })
+    : [];
+  return {
+    isBuiltin: true,
+    name: asString(directoryEntry.name) || undefined,
+    reasoning: directoryEntry.reasoning === true,
+    imageInput: directoryEntry.input.includes("image"),
+    ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
+  };
+};
+
 export const readProviderConfig = async () => {
   const config = await readJsonObject(getConfigPath());
   const providersRecord = isRecord(config.providers) ? config.providers : {};

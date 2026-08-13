@@ -396,6 +396,39 @@ export async function listAgentConfig(agentId: string): Promise<AgentConfigResul
   }
 }
 
+export interface AgentModelLookupResult {
+  success: boolean;
+  error?: string;
+  builtin: boolean;
+  model?: Pick<AgentCustomModelConfig, "reasoning" | "imageInput" | "supportedThinkingLevels"> & { name?: string };
+}
+
+/**
+ * 未保存前实时判定模型是否为 Agent 内置模型：插件未实现 lookupModel 或
+ * 目录中查不到时返回 builtin=false，配置弹窗按自定义模型处理。
+ */
+export async function lookupAgentModel(agentId: string, modelId: string): Promise<AgentModelLookupResult> {
+  const id = asString(modelId);
+  if (!id) return { success: true, builtin: false };
+  try {
+    const raw = await getAgentPluginRegistry().lookupModel(agentId, id);
+    if (!isRecord(raw) || raw.isBuiltin !== true) return { success: true, builtin: false };
+    const supportedThinkingLevels = normalizeSupportedThinkingLevels(raw.supportedThinkingLevels);
+    return {
+      success: true,
+      builtin: true,
+      model: {
+        name: asString(raw.name) || undefined,
+        reasoning: raw.reasoning === true,
+        imageInput: raw.imageInput === true,
+        ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
+      },
+    };
+  } catch (error) {
+    return { success: false, builtin: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function saveAgentProviderConfig(agentId: string, providerValue: unknown): Promise<AgentConfigResult> {
   try {
     const configuration = await getProviderConfiguration(agentId);

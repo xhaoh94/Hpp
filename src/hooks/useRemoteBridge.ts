@@ -65,6 +65,8 @@ export function sanitizeRemoteMessage(
     isStreaming: message.isStreaming === true ? turnRunning : message.isStreaming,
     systemType: message.systemType,
     compactionState: message.compactionState,
+    modelLabel: message.modelLabel,
+    tokenUsage: message.tokenUsage ? { ...message.tokenUsage } : undefined,
     nativeTurnId: message.nativeTurnId,
     commentary: message.commentary?.map((item) => ({
       id: item.id,

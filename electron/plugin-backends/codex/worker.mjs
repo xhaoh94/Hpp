@@ -1843,6 +1843,19 @@ const handleServerNotification = (method, params) => {
     case "turn/completed":
       handleTurnCompleted(params);
       break;
+    case "token_count": {
+      // app-server 协议在每次模型调用后推送 lastTokenUsage（本次增量），
+      // totalTokenUsage 是会话累计值，不能直接累加给渲染端。
+      if (!promptRunning || abortRequested) break;
+      const usage = params?.lastTokenUsage || params?.last_token_usage;
+      const inputTokens = Number(usage?.inputTokens ?? usage?.input_tokens) || 0;
+      const outputTokens = Number(usage?.outputTokens ?? usage?.output_tokens) || 0;
+      const cacheInputTokens = Number(usage?.cachedInputTokens ?? usage?.cached_input_tokens) || 0;
+      if (inputTokens > 0 || outputTokens > 0) {
+        send({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+      }
+      break;
+    }
     case "turn/plan/updated":
       if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.plan)) {
