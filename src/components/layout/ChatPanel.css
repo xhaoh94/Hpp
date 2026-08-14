@@ -735,6 +735,8 @@
   /* 左侧浮动按钮（发言记录/返回顶部/思考）相对内容框内缩 4px，
      使按钮在面板左缘与内容列左缘之间居中，左右间距一致。 */
   --chat-left-rail-inset: -4px;
+  /* 全局「返回上一条发言」按钮占用的吸顶轨道高度，思考吸顶条在其下方排布。 */
+  --chat-previous-message-rail-height: 40px;
   /* This is the vertical conversation scroller. Wide Markdown content owns
      its own horizontal scrolling inside code/table containers. */
   overflow-x: hidden;
@@ -1581,15 +1583,44 @@
     var(--chat-process-thinking-button-width) + var(--chat-process-thinking-rail-gap)
   );
   position: sticky;
-  /* 为上方的发言记录按钮留出一行，避免与返回顶部按钮重叠。 */
+  /* 为上方的发言记录按钮留出一行，并让出全局「返回上一条发言」按钮轨道，
+     避免与返回顶部按钮重叠。 */
   top: calc(
     var(--chat-process-sticky-top, 0px) +
-    var(--chat-history-control-rail-height, 44px)
+    var(--chat-history-control-rail-height, 44px) +
+    var(--chat-previous-message-rail-height, 0px)
   );
   height: 0;
   margin-bottom: -8px;
   overflow: visible;
   z-index: 25;
+}
+
+.chat-sticky-previous-message {
+  /* 复用思考吸顶条的轨道宽度变量，保证与返回顶部按钮/思考条左缘对齐。 */
+  --chat-process-thinking-button-width: 44px;
+  --chat-process-thinking-rail-gap: 8px;
+  --chat-process-thinking-rail-width: calc(
+    var(--chat-process-thinking-button-width) + var(--chat-process-thinking-rail-gap)
+  );
+  position: sticky;
+  /* 常驻在发言记录按钮下方一行，思考吸顶条再往下排，互不重叠。 */
+  top: var(--chat-history-control-rail-height, 44px);
+  height: 0;
+  margin-bottom: -8px;
+  margin-left: calc(var(--chat-process-thinking-rail-width) + var(--chat-left-rail-inset, -4px));
+  overflow: visible;
+  z-index: 25;
+}
+
+.chat-sticky-previous-message[data-visible="true"] .chat-process-sticky-toggle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-sticky-previous-message[data-visible="false"] .chat-process-sticky-toggle {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .chat-process-sticky-layer > .chat-process-sticky {

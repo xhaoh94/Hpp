@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/stores/chat-store";
+import { isUserSpeechMessage, type ChatMessage } from "@/stores/chat-store";
 import type { ProjectSession, SessionReference } from "@/stores/project-store";
 import { getAgentName } from "@/lib/agents";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
@@ -36,7 +36,7 @@ const getLastMessageTime = (session: ProjectSession, messages: ChatMessage[]) =>
 
 const pickUserMessage = (messages: ChatMessage[], position: "first" | "last") => {
   const ordered = position === "last" ? [...messages].reverse() : messages;
-  return ordered.find((message) => message.role === "user" && message.content.trim());
+  return ordered.find((message) => isUserSpeechMessage(message) && message.content.trim());
 };
 
 const getUserMessageTitle = (session: ProjectSession, userMessage?: ChatMessage) => {

@@ -127,7 +127,15 @@ export interface ChatMessage {
   thinkingLevel?: string;
   /** 本回合累计的输入/输出 token 消耗，cacheInput 为输入中命中缓存的部分。 */
   tokenUsage?: { input: number; output: number; cacheInput?: number };
+  /** 该条 user 消息是否为 UI 应答（问卷提交、问题回复等）而非用户在输入框的真实发言。
+   *  真实发言不带此标记；UI 应答不计入「发言记录」历史弹窗，也不参与「返回上一条发言」按钮计算。 */
+  uiGenerated?: boolean;
 }
+
+/** 判断一条消息是否算“真实发言”：仅用户在输入框主动发送的 user 消息。
+ *  问卷提交、UI 应答等不算发言记录，历史弹窗与「返回上一条发言」按钮均以此过滤。 */
+export const isUserSpeechMessage = (message: Pick<ChatMessage, "role" | "uiGenerated">): boolean =>
+  message.role === "user" && !message.uiGenerated;
 
 export interface PendingFile {
   id: string;

@@ -72,6 +72,61 @@ const createContext = (sessionId, backendId) => ({
 
 const createStatusContext = () => ({ ...pluginMeta, host });
 
+// 聚合插件宿主进程内各后端已缓存的实时模型（代码型后端通过 worker 从 app-server 拉取）。
+// 与 configProvider 同进程，可直接在内存中共享，避免写回 app-server 持有的 models_cache.json。
+const getRealtimeModels = () => {
+  const seen = new Map();
+  for (const backend of backends.values()) {
+    const models = backend?.models;
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      if (model && typeof model.id === "string" && model.id && !seen.has(model.id)) {
+        seen.set(model.id, model);
+      }
+    }
+  }
+  return Array.from(seen.values());
+};
+
+// 懒加载的「模型发现后端」：用户没开过 Codex 会话直接打开设置时，也能主动启动
+// 一次 worker → app-server → model/list，把实时模型缓存到宿主进程内。
+// 这样 gpt-5.6-sol 等新模型就能被 configProvider.read/lookup 按 id 命中。
+const DISCOVERY_BACKEND_ID = "__model_discovery__";
+let discoveryPromise = null;
+const ensureDiscoveryModels = async () => {
+  if (discoveryPromise) return discoveryPromise;
+  discoveryPromise = (async () => {
+    try {
+      if (!backends.has(DISCOVERY_BACKEND_ID)) {
+        const backend = await pluginModule.createAgentBackend(createContext(DISCOVERY_BACKEND_ID, DISCOVERY_BACKEND_ID));
+        if (!backend) return getRealtimeModels();
+        backends.set(DISCOVERY_BACKEND_ID, backend);
+        if (typeof backend.init === "function") {
+          try {
+            await backend.init(process.cwd(), null, {});
+          } catch (error) {
+            console.warn("[plugin-host] discovery backend init failed:", error?.message || String(error));
+          }
+        }
+      }
+      const backend = backends.get(DISCOVERY_BACKEND_ID);
+      if (backend && typeof backend.getModels === "function") {
+        try { await backend.getModels(); } catch { /* ignored, getRealtimeModels will still aggregate */ }
+      }
+    } catch (error) {
+      console.warn("[plugin-host] discovery models failed:", error?.message || String(error));
+    }
+    return getRealtimeModels();
+  })();
+  return discoveryPromise;
+};
+// 插件支持 configProvider.read / lookupModel 时：一旦主进程首次请求，就提前触发发现，
+// 避免上层调用 getRealtimeModels() 时 backends 还是空数组。
+const prefetchDiscoveryForConfig = async () => {
+  try { await ensureDiscoveryModels(); } catch { /* ignored */ }
+  return getRealtimeModels();
+};
+
 const disposeAllBackends = async () => {
   const activeBackends = Array.from(backends.values());
   backends.clear();
@@ -105,10 +160,16 @@ const methods = {
   async update(args) { return pluginModule.update?.(createStatusContext(), args); },
   async uninstall() { return pluginModule.uninstall?.(createStatusContext()); },
   async getDefaultThinkingLevel() { return pluginModule.getDefaultThinkingLevel?.(createStatusContext()); },
-  async readProviderConfig(args) { return pluginModule.configProvider?.read?.(createStatusContext(), args); },
+  async readProviderConfig(args) {
+    const realtimeModels = await prefetchDiscoveryForConfig();
+    return pluginModule.configProvider?.read?.(createStatusContext(), { ...args, realtimeModels });
+  },
   async writeProviderConfig(args) { return pluginModule.configProvider?.write?.(createStatusContext(), args); },
   async activateProvider(args) { return pluginModule.configProvider?.activateProvider?.(createStatusContext(), args); },
-  async lookupModel(args) { return pluginModule.configProvider?.lookupModel?.(createStatusContext(), args); },
+  async lookupModel(args) {
+    const realtimeModels = await prefetchDiscoveryForConfig();
+    return pluginModule.configProvider?.lookupModel?.(createStatusContext(), { ...args, realtimeModels });
+  },
   async createBackend({ backendId, sessionId }) {
     const backend = await pluginModule.createAgentBackend(createContext(sessionId, backendId));
     if (!backend || typeof backend !== "object") throw new Error("Plugin backend must be an object.");

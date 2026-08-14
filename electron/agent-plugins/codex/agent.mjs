@@ -33,13 +33,13 @@ export function getDefaultThinkingLevel() {
 }
 
 export const configProvider = {
-  read() {
-    return readProviderConfig();
+  read(_context, args = {}) {
+    return readProviderConfig(args.realtimeModels);
   },
   activateProvider(_context, { provider }) {
     return activateProvider(provider);
   },
-  lookupModel(_context, { modelId }) {
-    return lookupModel(modelId);
+  lookupModel(_context, args = {}) {
+    return lookupModel(args.modelId, args.realtimeModels);
   },
 };

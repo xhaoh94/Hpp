@@ -1,9 +1,9 @@
 import { createInterface } from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import {
   getRollbackTurnCountForIndex,
   getRollbackTurnCountForTarget,

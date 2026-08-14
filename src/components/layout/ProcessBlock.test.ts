@@ -89,10 +89,10 @@ describe("ProcessBlock", () => {
   });
 
   it("keeps the compact process locator in the same left rail as thinking locators", () => {
-    const source = readFileSync(resolve("src/components/layout/ProcessBlock.tsx"), "utf8");
+    const chatPanel = readFileSync(resolve("src/components/layout/ChatPanel.tsx"), "utf8");
     const styles = readFileSync(resolve("src/components/layout/ChatPanel.css"), "utf8");
-    expect(source).toContain('<path d="m6 15 6-6 6 6" />');
-    expect(source).not.toContain('<span>{interrupted ? "中断" : "耗时"}</span>');
+    expect(chatPanel).toContain('<path d="m6 15 6-6 6 6" />');
+    expect(chatPanel).not.toContain('<span>{interrupted ? "中断" : "耗时"}</span>');
     const processLocatorStyles = styles.slice(
       styles.indexOf(".chat-process-sticky-toggle {"),
       styles.indexOf(".chat-process-sticky-toggle:hover"),

@@ -14,6 +14,7 @@ import chatScrollSource from "./useChatScroll.ts?raw";
 import chatVirtualizerSource from "./useChatVirtualizer.ts?raw";
 import agentEventControllerSource from "./agentEventController.ts?raw";
 import processBlockSource from "./ProcessBlock.tsx?raw";
+import chatStoreSource from "../../stores/chat-store.ts?raw";
 
 const chatPanelStyles = readFileSync(
   resolve(process.cwd(), "src/components/layout/ChatPanel.css"),
@@ -76,21 +77,38 @@ describe("chat interaction regression constraints", () => {
     expect(portaledStickyStyles).toContain("margin-bottom: 0");
   });
 
-  it("scrolls the sticky process locator to the previous user bubble", () => {
-    // 吸顶按钮不再回到“处理过程开头”，而是跳到当前处理过程之前最近的用户气泡。
-    expect(processBlockSource).toContain("previousUserMessageId");
-    expect(processBlockSource).toContain("onScrollToMessage?: (messageId: string) => void");
-    expect(processBlockSource).toContain("scrollToPreviousUserMessage");
-    expect(processBlockSource).toContain("返回我的上一条发言");
-    expect(chatPanelSource).toContain("previousUserMessageId={receivedUserMessage?.id}");
+  it("shows one global sticky button that jumps to the previous user bubble", () => {
+    // 返回按钮从“每个处理过程”改为全局一个，常驻吸顶；目标按视野内最上面的用户气泡计算。
+    expect(chatPanelSource).toContain("chat-sticky-previous-message");
+    expect(chatPanelSource).toContain("refreshPreviousUserTarget");
+    expect(chatPanelSource).toContain('querySelectorAll<HTMLElement>(".chat-virtual-row")');
+    expect(chatPanelSource).toContain('querySelector<HTMLElement>(".chat-bubble.user")');
+    expect(chatPanelSource).toContain("返回我的上一条发言");
+    // 处理过程吸顶条不再携带返回按钮/跳转目标，避免每个处理过程各渲染一个按钮。
+    expect(processBlockSource).not.toContain("previousUserMessageId");
+    expect(processBlockSource).not.toContain("onScrollToMessage");
+    expect(processBlockSource).not.toContain("scrollToPreviousUserMessage");
   });
 
-  it("shows the previous user message text in the sticky toggle tooltip", () => {
+  it("shows the previous user message text in the global sticky toggle tooltip", () => {
     // 悬浮提示（title）显示上一条用户发言内容，而非处理耗时。
-    expect(processBlockSource).toContain("previousUserMessageText");
-    expect(chatPanelSource).toContain(
-      "previousUserMessageText={receivedUserMessage ? getChatMessagePreviewText(receivedUserMessage) : undefined}",
-    );
+    expect(chatPanelSource).toContain("previousUserTargetPreview");
+    expect(chatPanelSource).toContain("getChatMessagePreviewText(previousUserTarget)");
+  });
+
+  it("reserves a rail below the global sticky button for thinking locators", () => {
+    expect(chatPanelStyles).toContain(".chat-sticky-previous-message");
+    expect(chatPanelStyles).toContain("--chat-previous-message-rail-height");
+  });
+
+  it("excludes UI responses (questionnaire submissions) from speech history and the previous-speech button", () => {
+    // 发言记录与「返回上一条发言」按钮只统计用户真实发言，问卷/UI 应答不参与。
+    expect(chatStoreSource).toContain("export const isUserSpeechMessage");
+    expect(chatStoreSource).toContain("message.role === \"user\" && !message.uiGenerated");
+    expect(chatPanelSource).toContain("state.messages.filter((message) => isUserSpeechMessage(message))");
+    expect(chatPanelSource).toContain("const speechIds = new Set<string>()");
+    expect(chatPanelSource).toContain("isUserSpeechMessage(messages[i])");
+    expect(pendingUIResponseSource).toContain("uiGenerated: true");
   });
 
   it("clears questionnaire options and custom text in both directions", () => {

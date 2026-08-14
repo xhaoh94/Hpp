@@ -1310,7 +1310,13 @@ export async function respondToInteraction(
       chat.finishLastAssistantProcess(Date.now(), cancelled ? "interrupted" : "completed", input.sessionId);
     }
     if (!cancelled && !isConfirmation && !isPermissionChoice) {
-      chat.addMessage({ id: crypto.randomUUID(), role: "user", content: summary, timestamp: Date.now() }, input.sessionId);
+      chat.addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: summary,
+        timestamp: Date.now(),
+        uiGenerated: true,
+      }, input.sessionId);
     }
     context.onResponsePrepared?.(input.sessionId);
 

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
-import { useChatStore } from "@/stores/chat-store";
+import { useChatStore, isUserSpeechMessage } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
@@ -472,7 +472,7 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
                 <span className="terminal-child-title">
                   {(() => {
                     const msgs = sessionMessages[session.id];
-                    const firstUserMsg = msgs?.find((m) => m.role === "user");
+                    const firstUserMsg = msgs?.find((m) => isUserSpeechMessage(m));
                     const preview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
                     return preview
                       ? <AttachmentPreviewText content={preview} maxLength={30} />

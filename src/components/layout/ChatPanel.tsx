@@ -28,6 +28,7 @@ import {
   type QueuedMessageEditableDraft,
   EMPTY_CHAT_DRAFT,
   cloneChatDraft,
+  isUserSpeechMessage,
 } from "@/stores/chat-store";
 import { useProjectStore, type AgentStatus, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
@@ -841,7 +842,7 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
   onScrollToMessage,
 }: UserMessageHistoryControlProps) {
   const userMessagesReversed = useChatStore(useShallow((state) =>
-    state.messages.filter((message) => message.role === "user").slice().reverse()
+    state.messages.filter((message) => isUserSpeechMessage(message)).slice().reverse()
   ));
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const historyItemKeys = useMemo(
@@ -927,7 +928,7 @@ const SessionStarterList = memo(function SessionStarterList({
     <div className="chat-session-list">
       {openSessions.map((session) => {
         const messages = sessionMessages[session.id];
-        const firstUserMsg = messages?.find((message) => message.role === "user");
+        const firstUserMsg = messages?.find((message) => isUserSpeechMessage(message));
         const firstUserPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
         return (
           <button
@@ -1003,7 +1004,6 @@ type ChatMessageItemProps = {
   userMessageExpanded?: boolean;
   onUserMessageExpandedChange?: (messageId: string, expanded: boolean) => void;
   onDiffOpenChange?: (messageId: string, open: boolean) => void;
-  onScrollToMessage?: (messageId: string) => void;
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
@@ -1029,7 +1029,6 @@ const ChatMessageItem = memo(function ChatMessageItem({
   userMessageExpanded = false,
   onUserMessageExpandedChange,
   onDiffOpenChange,
-  onScrollToMessage,
 }: ChatMessageItemProps) {
   const openMessageProjectPath = useCallback(async (path: string) => {
     const resolvedPath = resolveProjectFilePath(path, projectPath || "");
@@ -1161,9 +1160,6 @@ const ChatMessageItem = memo(function ChatMessageItem({
           projectPath={projectPath}
           stickyPortalTarget={stickyPortalTarget}
           messageIndex={messageIndex}
-          previousUserMessageId={receivedUserMessage?.id}
-          previousUserMessageText={receivedUserMessage ? getChatMessagePreviewText(receivedUserMessage) : undefined}
-          onScrollToMessage={onScrollToMessage}
         />
       )}
       {!msg.process && commentary.length > 0 && (
@@ -1326,9 +1322,10 @@ const ChatMessageItem = memo(function ChatMessageItem({
                 <span
                   className="chat-assistant-model-info"
                   title={[
-                    msg.modelLabel ? `调用模型：${msg.modelLabel}` : "",
+                    msg.modelLabel || "",
+                    msg.thinkingLevel || "",
                     msg.tokenUsage
-                      ? `输入 ${msg.tokenUsage.input.toLocaleString()}（未命中 ${(msg.tokenUsage.input - (msg.tokenUsage.cacheInput ?? 0)).toLocaleString()}，缓存命中 ${(msg.tokenUsage.cacheInput ?? 0).toLocaleString()}，命中率 ${Math.round(((msg.tokenUsage.cacheInput ?? 0) / Math.max(1, msg.tokenUsage.input)) * 1000) / 10}%）/ 输出 ${msg.tokenUsage.output.toLocaleString()} tokens`
+                      ? `输入${msg.tokenUsage.input.toLocaleString()} (未命中${(msg.tokenUsage.input - (msg.tokenUsage.cacheInput ?? 0)).toLocaleString()} 缓存${(msg.tokenUsage.cacheInput ?? 0).toLocaleString()} · ${Math.round(((msg.tokenUsage.cacheInput ?? 0) / Math.max(1, msg.tokenUsage.input)) * 1000) / 10}%) / 输出${msg.tokenUsage.output.toLocaleString()}`
                       : "",
                   ].filter(Boolean).join(" · ")}
                 >
@@ -1446,7 +1443,6 @@ type ChatMessagesViewportProps = {
   forkingMessageId: string | null;
   onResendMessage: (message: ChatMessage) => void;
   stickyPortalTarget?: HTMLElement | null;
-  onScrollToMessage?: (messageId: string) => void;
 };
 
 const VirtualMessagesViewport = memo(function ChatMessagesViewport({
@@ -1476,7 +1472,6 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   forkingMessageId,
   onResendMessage,
   stickyPortalTarget,
-  onScrollToMessage,
 }: ChatMessagesViewportProps) {
   const itemKeys = useMemo(
     () => [
@@ -1532,7 +1527,6 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
                 messageIndex={virtualRow.index}
                 msg={message}
                 receivedUserMessage={receivedUserMessages[message.id]}
-                onScrollToMessage={onScrollToMessage}
                 turnRunning={message.id === activeTurnId}
                 compactionRunning={message.id === activeCompactionMessageId}
                 processTerminalState={processTerminalState}
@@ -1611,12 +1605,14 @@ const ChatMessagesView = memo(function ChatMessagesView({
   const [stickyPortalTarget, setStickyPortalTarget] = useState<HTMLDivElement | null>(null);
   const [expandedUserMessageIds, setExpandedUserMessageIds] = useState<ReadonlySet<string>>(() => new Set());
   const [activeDiffMessageId, setActiveDiffMessageId] = useState<string | null>(null);
+  const [previousUserTargetId, setPreviousUserTargetId] = useState<string | null>(null);
   const setStickyPortalTargetRef = useCallback((element: HTMLDivElement | null) => {
     setStickyPortalTarget(element);
   }, []);
   useEffect(() => {
     setExpandedUserMessageIds(new Set());
     setActiveDiffMessageId(null);
+    setPreviousUserTargetId(null);
   }, [activeSessionId]);
   const handleUserMessageExpandedChange = useCallback((messageId: string, expanded: boolean) => {
     setExpandedUserMessageIds((current) => {
@@ -1629,6 +1625,81 @@ const ChatMessagesView = memo(function ChatMessagesView({
   const handleDiffOpenChange = useCallback((messageId: string, open: boolean) => {
     setActiveDiffMessageId(open ? messageId : null);
   }, []);
+  // 全局「返回上一条发言」按钮：目标 = 视野内最上面完整出现的用户气泡的上一条；
+  // 视野内没有完整用户气泡时回落到最新一条用户消息；第一条用户消息无上一条时隐藏。
+  const refreshPreviousUserTarget = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) {
+      setPreviousUserTargetId(null);
+      return;
+    }
+    const containerRect = el.getBoundingClientRect();
+    // 只把“真实发言”气泡计入定位：UI 应答（问卷提交等）不参与按钮计算。
+    const speechIds = new Set<string>();
+    for (const message of messages) {
+      if (isUserSpeechMessage(message)) speechIds.add(message.id);
+    }
+    let topmostId: string | null = null;
+    let topmostTop = Number.POSITIVE_INFINITY;
+    for (const row of Array.from(el.querySelectorAll<HTMLElement>(".chat-virtual-row"))) {
+      const rowMsgId = row.dataset.msgId;
+      if (!rowMsgId || !speechIds.has(rowMsgId)) continue;
+      const bubble = row.querySelector<HTMLElement>(".chat-bubble.user");
+      if (!bubble) continue;
+      const r = bubble.getBoundingClientRect();
+      if (r.top >= containerRect.top - 1 && r.bottom <= containerRect.bottom + 1 && r.top < topmostTop) {
+        topmostTop = r.top;
+        topmostId = rowMsgId;
+      }
+    }
+    if (topmostId) {
+      const index = messages.findIndex((message) => message.id === topmostId);
+      for (let i = index - 1; i >= 0; i -= 1) {
+        if (isUserSpeechMessage(messages[i])) {
+          setPreviousUserTargetId(messages[i].id);
+          return;
+        }
+      }
+      setPreviousUserTargetId(null);
+      return;
+    }
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (isUserSpeechMessage(messages[i])) {
+        setPreviousUserTargetId(messages[i].id);
+        return;
+      }
+    }
+    setPreviousUserTargetId(null);
+  }, [messages, scrollRef]);
+  const previousUserTarget = previousUserTargetId
+    ? messages.find((message) => message.id === previousUserTargetId)
+    : undefined;
+  const previousUserTargetPreview = previousUserTarget ? getChatMessagePreviewText(previousUserTarget) : "";
+  const previousUserTargetTip = previousUserTargetPreview && previousUserTargetPreview.trim()
+    ? (previousUserTargetPreview.length > 120
+        ? `${previousUserTargetPreview.slice(0, 120)}…`
+        : previousUserTargetPreview)
+    : "返回我的上一条发言";
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(refreshPreviousUserTarget);
+    };
+    el.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    schedule();
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [refreshPreviousUserTarget, scrollRef]);
+  useLayoutEffect(() => {
+    refreshPreviousUserTarget();
+  }, [refreshPreviousUserTarget]);
   const activeDiffMessageIndex = activeDiffMessageId
     ? messages.findIndex((message) => message.id === activeDiffMessageId)
     : -1;
@@ -1636,7 +1707,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
     const byAssistantId: Record<string, ChatMessage> = {};
     let latestUserMessage: ChatMessage | undefined;
     for (const message of messages) {
-      if (message.role === "user") {
+      if (isUserSpeechMessage(message)) {
         latestUserMessage = message;
       } else if (message.role === "assistant" && message.process && latestUserMessage) {
         byAssistantId[message.id] = latestUserMessage;
@@ -1648,7 +1719,33 @@ const ChatMessagesView = memo(function ChatMessagesView({
   return (
     <div className={`chat-messages-area ${activeProcessWithTodos ? "has-todo-summary" : ""}`}>
       <div ref={scrollRef} className="chat-messages" onScroll={onMessagesScroll}>
-        <div ref={setStickyPortalTargetRef} className="chat-process-sticky-layer" />
+        <div ref={setStickyPortalTargetRef} className="chat-process-sticky-layer">
+          {previousUserTarget && (
+            <div className="chat-sticky-previous-message" data-visible="true">
+              <button
+                type="button"
+                className="chat-process-sticky-toggle"
+                onClick={() => onScrollToMessage(previousUserTarget.id)}
+                title={previousUserTargetTip}
+                aria-label={`返回我的上一条发言${previousUserTargetPreview ? `：${previousUserTargetPreview}` : ""}`}
+              >
+                <svg
+                  aria-hidden="true"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="m6 15 6-6 6 6" />
+                </svg>
+              </button>
+            </div>
+          )}
+        </div>
         <UserMessageHistoryControl
           open={userMsgHistoryOpen}
           anchorRef={userMsgHistoryRef}
@@ -1692,7 +1789,6 @@ const ChatMessagesView = memo(function ChatMessagesView({
               onForkMessage={onForkMessage}
               forkingMessageId={forkingMessageId}
               onResendMessage={onResendMessage}
-              onScrollToMessage={onScrollToMessage}
             />
           </>
         )}

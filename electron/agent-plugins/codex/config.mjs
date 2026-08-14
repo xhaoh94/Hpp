@@ -24,15 +24,17 @@ const isRecord = (value) => !!value && typeof value === "object" && !Array.isArr
 const asString = (value) => typeof value === "string" ? value.trim() : "";
 const isMissingFileError = (error) => error?.code === "ENOENT";
 
-// Codex 官方模型目录缓存（models_cache.json）：从 OpenAI 服务器获取后写入本地。
+// Codex 官方模型目录缓存（models_cache.json）：由 codex-app-server 从 OpenAI 服务器获取后写入本地。
 // 包含每个模型的 supported_reasoning_levels 和 input_modalities，离线时可复用。
-let modelsCacheMap = null;
-let modelsCacheLoaded = false;
-const getModelsCache = async () => {
-  if (modelsCacheLoaded) return modelsCacheMap;
-  modelsCacheLoaded = true;
+// 本模块只读该文件，绝不写回；实时模型目录优先通过插件宿主进程内的后端内存数据提供。
+// 注意：该文件归 app-server 私有，一旦它写入了临时空文件、BOM 前缀或异常 JSON，
+// 我们必须静默降级（返回 null）而不是抛错，以免影响 app-server 自身重新拉取。
+const loadModelsCache = async () => {
   try {
-    const content = await readFile(getModelsCachePath(), "utf8");
+    const raw = await readFile(getModelsCachePath(), "utf8");
+    // 兼容空文件 / 原子写入留下的 0 字节文件 → 视为无缓存，等待 app-server 重写。
+    const content = String(raw || "").replace(/^\uFEFF/, "").trim();
+    if (!content) return null;
     const parsed = JSON.parse(content);
     if (!isRecord(parsed) || !Array.isArray(parsed.models)) return null;
     const bySlug = new Map();
@@ -40,19 +42,58 @@ const getModelsCache = async () => {
       if (!isRecord(model) || !model.slug) continue;
       bySlug.set(asString(model.slug), model);
     }
-    modelsCacheMap = bySlug;
-    return modelsCacheMap;
+    return bySlug;
   } catch {
     return null;
   }
 };
+let modelsCacheMap = null;
+let modelsCacheLoaded = false;
+const getModelsCache = async (force = false) => {
+  if (!force && modelsCacheLoaded) return modelsCacheMap;
+  const loaded = await loadModelsCache();
+  modelsCacheMap = loaded;
+  modelsCacheLoaded = true;
+  return loaded;
+};
+
+// 从后端实时模型（插件宿主进程内内存数据）提取模型能力信息。
+// 后端通过 worker 从 app-server 拉取实时模型目录，与 configProvider 同进程，
+// 因此可直接在内存中共享，无需写回 models_cache.json（该文件由 app-server 持有）。
+const getModelCapabilitiesFromRealtime = (realtimeModels, modelId) => {
+  if (!Array.isArray(realtimeModels)) return null;
+  const found = realtimeModels.find((model) => isRecord(model) && asString(model.id) === modelId);
+  if (!found) return null;
+  const levels = Array.isArray(found.supportedThinkingLevels)
+    ? found.supportedThinkingLevels.map((level) => asString(level)).filter(Boolean)
+    : [];
+  return {
+    displayName: asString(found.name) || modelId,
+    supportedThinkingLevels: levels,
+    reasoning: levels.length > 0 || found.reasoning === true,
+    imageInput: found.supportsImages === true,
+  };
+};
+
+// 获取模型能力：优先使用实时内存模型，其次只读读取官方目录缓存（models_cache.json）。
+const getModelCapabilities = async (modelId, realtimeModels) => {
+  const fromRealtime = getModelCapabilitiesFromRealtime(realtimeModels, modelId);
+  if (fromRealtime) return fromRealtime;
+  return getModelCapabilitiesFromCache(modelId);
+};
 
 // 从 models_cache.json 条目提取模型能力信息
 const getModelCapabilitiesFromCache = async (modelId) => {
-  const cache = await getModelsCache();
+  let cache = await getModelsCache();
   if (!cache) return null;
-  const entry = cache.get(modelId);
-  if (!entry) return null;
+  let entry = cache.get(modelId);
+  if (!entry) {
+    // 文件可能已被 worker 同步更新，重新读取一次再判定，避免使用过期的内存缓存。
+    cache = await getModelsCache(true);
+    if (!cache) return null;
+    entry = cache.get(modelId);
+    if (!entry) return null;
+  }
   const levels = Array.isArray(entry.supported_reasoning_levels)
     ? entry.supported_reasoning_levels
         .map((level) => isRecord(level) ? asString(level.effort) : asString(level))
@@ -222,10 +263,10 @@ const upsertProviderValue = (content, providerId, key, value) => {
 
 // 未保存前实时判定模型是否在官方目录（models_cache.json）中：
 // 与 readProviderConfig 的内置判定规则保持一致，供配置弹窗输入 model-id 时即时判定。
-export const lookupModel = async (modelId) => {
+export const lookupModel = async (modelId, realtimeModels) => {
   const id = asString(modelId);
   if (!id) return null;
-  const capabilities = await getModelCapabilitiesFromCache(id);
+  const capabilities = await getModelCapabilities(id, realtimeModels);
   if (!capabilities) return null;
   return {
     isBuiltin: true,
@@ -238,7 +279,44 @@ export const lookupModel = async (modelId) => {
   };
 };
 
-export const readProviderConfig = async () => {
+// 收集所有已知的内置模型：实时内存模型 + 文件缓存模型。
+// 这些模型会追加到 provider.models 末尾，让上层 mergeModelsWithConfiguredAgentModels
+// 的 discoveredById Map 能按 id 命中 gpt-5.6-sol 等任何已存在于内置目录里的模型。
+const collectAllBuiltinModels = async (realtimeModels) => {
+  const byId = new Map();
+  const toEntry = (id, cap) => ({
+    id,
+    name: cap.displayName,
+    reasoning: cap.reasoning,
+    imageInput: cap.imageInput,
+    isBuiltin: true,
+    hasThinkingLevels: false,
+    ...(cap.supportedThinkingLevels.length > 0
+      ? { supportedThinkingLevels: cap.supportedThinkingLevels }
+      : {}),
+  });
+  if (Array.isArray(realtimeModels)) {
+    for (const raw of realtimeModels) {
+      const id = asString(raw?.id);
+      if (!id || byId.has(id)) continue;
+      const cap = getModelCapabilitiesFromRealtime(realtimeModels, id);
+      if (!cap) continue;
+      byId.set(id, toEntry(id, cap));
+    }
+  }
+  const fileCache = await getModelsCache();
+  if (fileCache) {
+    for (const slug of fileCache.keys()) {
+      if (byId.has(slug)) continue;
+      const cap = await getModelCapabilitiesFromCache(slug);
+      if (!cap) continue;
+      byId.set(slug, toEntry(slug, cap));
+    }
+  }
+  return byId;
+};
+
+export const readProviderConfig = async (realtimeModels) => {
   const [content, auth] = await Promise.all([
     readTextFile(getConfigPath()),
     readJsonObject(getAuthPath()),
@@ -281,10 +359,11 @@ export const readProviderConfig = async () => {
       models: [],
     });
   }
+  const allBuiltins = await collectAllBuiltinModels(realtimeModels);
   for (const provider of providers.values()) {
     provider.apiKey = asString(auth.OPENAI_API_KEY);
-    // 从 models_cache.json 查找模型能力，找到则视为内置模型
-    const capabilities = await getModelCapabilitiesFromCache(activeModelId);
+    // 1) 当前激活模型放在第一个（保持原本 activeModelId 的主位语义）
+    const capabilities = await getModelCapabilities(activeModelId, realtimeModels);
     if (capabilities) {
       provider.models = [{
         id: activeModelId,
@@ -307,6 +386,12 @@ export const readProviderConfig = async () => {
         isBuiltin: false,
         hasThinkingLevels: true,
       }];
+    }
+    // 2) 把所有已知内置模型追加到末尾（包括 gpt-5.6-sol 这类新模型），
+    //    让 discoveredById Map 能按 id 命中，判定为内置。
+    for (const [id, builtin] of allBuiltins) {
+      if (id === activeModelId) continue;
+      provider.models.push(builtin);
     }
   }
   return { activeProviderId, providers: Array.from(providers.values()) };

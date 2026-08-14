@@ -5,7 +5,7 @@ import { relativeRemotePath } from "@/lib/project-file-path";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 
 export { relativeRemotePath } from "@/lib/project-file-path";
-import { useChatStore, type ChatMessage, type QueuedMessage } from "@/stores/chat-store";
+import { useChatStore, isUserSpeechMessage, type ChatMessage, type QueuedMessage } from "@/stores/chat-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useProjectStore, type AgentStatus, type Project } from "@/stores/project-store";
 import type { PendingUIResponse } from "@/components/layout/agentEventTypes";
@@ -262,7 +262,7 @@ function buildSessionConfig(
 }
 
 export function getRemoteSessionTitle(sessionTitle: string, messages: ChatMessage[]) {
-  const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
+  const firstUserMessage = messages.find((message) => isUserSpeechMessage(message) && message.content.trim());
   if (!firstUserMessage) return sessionTitle;
   return getChatMessagePreviewText(firstUserMessage) || sessionTitle;
 }

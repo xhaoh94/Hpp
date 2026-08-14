@@ -325,6 +325,7 @@ export function usePendingUIResponseActions({
         role: "user",
         content: text,
         timestamp: Date.now(),
+        uiGenerated: true,
       }, targetSessionId);
       setComposerInput("");
       setPendingUIResponseState(null);
@@ -365,6 +366,7 @@ export function usePendingUIResponseActions({
         role: "user",
         content: answerSummary || "已提交问卷回答",
         timestamp: Date.now(),
+        uiGenerated: true,
       }, targetSessionId);
       setPendingUIResponseState(null);
       finishPendingQuestionTurn(targetSessionId, pendingResponse);

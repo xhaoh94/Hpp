@@ -143,7 +143,9 @@ export function useChatScroll({
     const scrollTargetToTop = (root: HTMLDivElement, target: Element) => {
       const rootRect = root.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      const topInset = 16;
+      // 让出顶部吸顶区：发言记录 rail(36) + 全局「返回上一条发言」按钮轨道(40)，
+      // 避免跳转后的气泡顶部被常驻吸顶按钮遮挡。
+      const topInset = 30;
       root.scrollTo({
         top: Math.max(0, root.scrollTop + targetRect.top - rootRect.top - topInset),
         behavior: "auto",

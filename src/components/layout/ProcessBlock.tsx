@@ -1008,9 +1008,6 @@ export function ProcessBlock({
   projectPath,
   stickyPortalTarget,
   messageIndex,
-  previousUserMessageId,
-  previousUserMessageText,
-  onScrollToMessage,
 }: {
   messageId: string;
   process: AgentProcess;
@@ -1029,12 +1026,6 @@ export function ProcessBlock({
   /** 吸顶定位条挂载到聊天滚动容器的公共顶层，避免受消息块边界限制。 */
   stickyPortalTarget?: HTMLElement | null;
   messageIndex?: number;
-  /** 当前处理过程之前最近的一条用户发言：吸顶按钮优先跳到它的气泡。 */
-  previousUserMessageId?: string;
-  /** 上一条用户发言的预览文本（用于吸顶按钮的悬浮提示）。 */
-  previousUserMessageText?: string;
-  /** 历史跳转回调（虚拟列表下按消息 ID 定位并校正气泡顶部）。 */
-  onScrollToMessage?: (messageId: string) => void;
 }) {
   const viewProcess = useMemo(() => normalizeProcessForView(process, {
     running,
@@ -1281,15 +1272,6 @@ export function ProcessBlock({
     });
   }, []);
 
-  const scrollToPreviousUserMessage = !!previousUserMessageId && !!onScrollToMessage;
-  const previousUserMessageTip = scrollToPreviousUserMessage
-    ? (previousUserMessageText && previousUserMessageText.trim()
-        ? (previousUserMessageText.length > 120
-            ? `${previousUserMessageText.slice(0, 120)}…`
-            : previousUserMessageText)
-        : "返回我的上一条发言")
-    : `${interrupted ? uiText.process.interrupted : uiText.process.elapsed} ${elapsed}`;
-
   const stickyLocator = (
       <div
         ref={stickyElementRef}
@@ -1299,33 +1281,6 @@ export function ProcessBlock({
         data-visible={processStuck ? "true" : "false"}
       >
         <div className="chat-process-sticky-inner">
-          <button
-            type="button"
-            className="chat-process-sticky-toggle"
-            onClick={scrollToPreviousUserMessage
-              ? () => onScrollToMessage!(previousUserMessageId!)
-              : scrollToProcess}
-            title={previousUserMessageTip}
-            aria-label={`${
-              interrupted ? uiText.process.interrupted : uiText.process.elapsed
-            } ${elapsed}，${
-              scrollToPreviousUserMessage ? `返回我的上一条发言：${previousUserMessageTip}` : "返回处理过程开头"
-            }`}
-          >
-            <svg
-              aria-hidden="true"
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="m6 15 6-6 6 6" />
-            </svg>
-          </button>
           {sortedStuckThinkingIds.length > 0 && (
             <div className="chat-process-sticky-thinking-list" aria-label="当前吸顶思考">
               {sortedStuckThinkingIds.map((entryId, index) => (
