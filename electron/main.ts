@@ -389,6 +389,9 @@ function createWindow() {
   }
   if (process.platform !== "darwin") mainWindow.setIcon(iconImage.isEmpty() ? iconPath : iconImage);
 
+  // Maximize by default on all platforms.
+  mainWindow.maximize();
+
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
   });
