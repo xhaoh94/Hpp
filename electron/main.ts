@@ -24,7 +24,7 @@ import { getDefaultCloseToTray, resolveCloseToTraySetting } from "../shared/desk
 const env = detectDesktopEnvironment();
 // Bump the dev AppUserModelID when the taskbar icon changes to bypass
 // Windows' icon cache, which otherwise keeps showing the stale icon.
-const WINDOWS_APP_ID = is.dev ? "com.hpp.app.dev.v4" : "com.hpp.app";
+const WINDOWS_APP_ID = is.dev ? "com.hpp.app.dev.v5" : "com.hpp.app";
 
 if (is.dev) {
   console.log("[Hpp] Display server:", env.displayServer);

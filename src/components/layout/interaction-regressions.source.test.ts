@@ -37,7 +37,7 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("estimateChatMessageHeight");
     expect(chatPanelSource).toContain("onContentChange();");
     expect(chatVirtualizerSource).toContain("useVirtualizer");
-    expect(chatVirtualizerSource).toContain('anchorTo: "end"');
+    expect(chatVirtualizerSource).toContain("anchorTo = \"end\"");
     expect(chatVirtualizerSource).toContain("rangeExtractor");
     expect(chatVirtualizerSource).toContain("scrollToEnd");
   });
@@ -53,6 +53,15 @@ describe("chat interaction regression constraints", () => {
     expect(scrollToMessageSource).toContain("scrollTargetToTop");
   });
 
+  it("virtualizes the user message history popup with anchored rows", () => {
+    expect(chatPanelSource).toContain("chat-user-history-list");
+    expect(chatPanelSource).toContain("historyVirtualizer.getTotalSize()");
+    expect(chatPanelSource).toContain("historyVirtualizer.getVirtualItems()");
+    expect(chatPanelSource).toContain('className="chat-virtual-row chat-user-history-item"');
+    expect(chatPanelSource).toContain("USER_HISTORY_ITEM_ESTIMATED_HEIGHT");
+    expect(chatPanelSource).toContain("anchorTo: \"start\"");
+  });
+
   it("keeps virtualized overlays pinned while their popover is open", () => {
     expect(chatPanelSource).toContain("pinnedMessageIndex");
     expect(chatPanelSource).toContain("onDiffOpenChange");
@@ -65,6 +74,23 @@ describe("chat interaction regression constraints", () => {
       chatPanelStyles.indexOf(".chat-process-sticky-inner"),
     );
     expect(portaledStickyStyles).toContain("margin-bottom: 0");
+  });
+
+  it("scrolls the sticky process locator to the previous user bubble", () => {
+    // 吸顶按钮不再回到“处理过程开头”，而是跳到当前处理过程之前最近的用户气泡。
+    expect(processBlockSource).toContain("previousUserMessageId");
+    expect(processBlockSource).toContain("onScrollToMessage?: (messageId: string) => void");
+    expect(processBlockSource).toContain("scrollToPreviousUserMessage");
+    expect(processBlockSource).toContain("返回我的上一条发言");
+    expect(chatPanelSource).toContain("previousUserMessageId={receivedUserMessage?.id}");
+  });
+
+  it("shows the previous user message text in the sticky toggle tooltip", () => {
+    // 悬浮提示（title）显示上一条用户发言内容，而非处理耗时。
+    expect(processBlockSource).toContain("previousUserMessageText");
+    expect(chatPanelSource).toContain(
+      "previousUserMessageText={receivedUserMessage ? getChatMessagePreviewText(receivedUserMessage) : undefined}",
+    );
   });
 
   it("clears questionnaire options and custom text in both directions", () => {

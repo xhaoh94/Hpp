@@ -29,6 +29,8 @@ type UseChatVirtualizerOptions = {
   scrollRef: RefObject<HTMLDivElement | null>;
   estimateSize: (index: number) => number;
   pinnedIndexes?: ReadonlySet<number>;
+  gap?: number;
+  anchorTo?: "start" | "end";
   overscan?: number;
 };
 
@@ -43,6 +45,8 @@ export function useChatVirtualizer({
   scrollRef,
   estimateSize,
   pinnedIndexes,
+  gap = 12,
+  anchorTo = "end",
   overscan = 12,
 }: UseChatVirtualizerOptions) {
   const rangeExtractor = useMemo(
@@ -62,11 +66,11 @@ export function useChatVirtualizer({
     getItemKey: (index) => itemKeys[index] || index,
     rangeExtractor,
     overscan,
-    gap: 12,
+    gap,
     // Let the virtualizer preserve the visible anchor when an estimated row is
     // replaced by its measured height. Bottom-following is coordinated by
     // useChatScroll, so this option must not force every append to the bottom.
-    anchorTo: "end",
+    anchorTo,
     scrollEndThreshold: 50,
     useAnimationFrameWithResizeObserver: true,
   });

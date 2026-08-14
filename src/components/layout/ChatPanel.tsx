@@ -830,6 +830,10 @@ const formatTokenCount = (count: number) => {
   return String(count);
 };
 
+// 发言记录弹窗的虚拟行高度估算：12px 文本行高（约 16.8px）+ 上下 8px padding
+// + 1px 底部边框。真实高度由 ResizeObserver 测量后自动校正。
+const USER_HISTORY_ITEM_ESTIMATED_HEIGHT = 34;
+
 const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
   open,
   anchorRef,
@@ -839,6 +843,24 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
   const userMessagesReversed = useChatStore(useShallow((state) =>
     state.messages.filter((message) => message.role === "user").slice().reverse()
   ));
+  const historyListRef = useRef<HTMLDivElement | null>(null);
+  const historyItemKeys = useMemo(
+    () => userMessagesReversed.map((message) => message.id),
+    [userMessagesReversed],
+  );
+  const { virtualizer: historyVirtualizer, handle: historyVirtualHandle } = useChatVirtualizer({
+    count: open ? userMessagesReversed.length : 0,
+    itemKeys: historyItemKeys,
+    scrollRef: historyListRef,
+    estimateSize: () => USER_HISTORY_ITEM_ESTIMATED_HEIGHT,
+    gap: 0,
+    anchorTo: "start",
+    overscan: 8,
+  });
+  useLayoutEffect(() => {
+    // 弹窗是条件挂载，滚动容器 ref 在打开后才可用，需触发一次测量。
+    if (open) historyVirtualHandle.measure();
+  }, [open, historyVirtualHandle]);
 
   return (
     <div ref={anchorRef} className="relative chat-header-history-anchor">
@@ -857,19 +879,27 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
           {userMessagesReversed.length === 0 ? (
             <div className="chat-user-history-empty">暂无发言</div>
           ) : (
-            <div className="chat-user-history-list persistent-scroll">
-              {userMessagesReversed.map((msg) => (
-                <div
-                  key={msg.id}
-                  className="chat-user-history-item"
-                  onClick={() => onScrollToMessage(msg.id)}
-                >
-                  <AttachmentPreviewText content={getChatMessagePreviewText(msg)} className="chat-user-history-text" />
-                  <span className="chat-user-history-time">
-                    {formatHistoryMessageTime(msg.timestamp)}
-                  </span>
-                </div>
-              ))}
+            <div ref={historyListRef} className="chat-user-history-list persistent-scroll">
+              <div className="chat-virtual-content" style={{ height: historyVirtualizer.getTotalSize() }}>
+                {historyVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const msg = userMessagesReversed[virtualRow.index];
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      ref={historyVirtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      className="chat-virtual-row chat-user-history-item"
+                      style={{ transform: `translateY(${virtualRow.start}px)` }}
+                      onClick={() => onScrollToMessage(msg.id)}
+                    >
+                      <AttachmentPreviewText content={getChatMessagePreviewText(msg)} className="chat-user-history-text" />
+                      <span className="chat-user-history-time">
+                        {formatHistoryMessageTime(msg.timestamp)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -973,6 +1003,7 @@ type ChatMessageItemProps = {
   userMessageExpanded?: boolean;
   onUserMessageExpandedChange?: (messageId: string, expanded: boolean) => void;
   onDiffOpenChange?: (messageId: string, open: boolean) => void;
+  onScrollToMessage?: (messageId: string) => void;
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
@@ -998,6 +1029,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   userMessageExpanded = false,
   onUserMessageExpandedChange,
   onDiffOpenChange,
+  onScrollToMessage,
 }: ChatMessageItemProps) {
   const openMessageProjectPath = useCallback(async (path: string) => {
     const resolvedPath = resolveProjectFilePath(path, projectPath || "");
@@ -1129,6 +1161,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
           projectPath={projectPath}
           stickyPortalTarget={stickyPortalTarget}
           messageIndex={messageIndex}
+          previousUserMessageId={receivedUserMessage?.id}
+          previousUserMessageText={receivedUserMessage ? getChatMessagePreviewText(receivedUserMessage) : undefined}
+          onScrollToMessage={onScrollToMessage}
         />
       )}
       {!msg.process && commentary.length > 0 && (
@@ -1293,7 +1328,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
                   title={[
                     msg.modelLabel ? `调用模型：${msg.modelLabel}` : "",
                     msg.tokenUsage
-                      ? `输入 ${msg.tokenUsage.input.toLocaleString()}（未命中 ${(msg.tokenUsage.input - (msg.tokenUsage.cacheInput ?? 0)).toLocaleString()}，缓存命中 ${(msg.tokenUsage.cacheInput ?? 0).toLocaleString()}）/ 输出 ${msg.tokenUsage.output.toLocaleString()} tokens`
+                      ? `输入 ${msg.tokenUsage.input.toLocaleString()}（未命中 ${(msg.tokenUsage.input - (msg.tokenUsage.cacheInput ?? 0)).toLocaleString()}，缓存命中 ${(msg.tokenUsage.cacheInput ?? 0).toLocaleString()}，命中率 ${Math.round(((msg.tokenUsage.cacheInput ?? 0) / Math.max(1, msg.tokenUsage.input)) * 1000) / 10}%）/ 输出 ${msg.tokenUsage.output.toLocaleString()} tokens`
                       : "",
                   ].filter(Boolean).join(" · ")}
                 >
@@ -1411,6 +1446,7 @@ type ChatMessagesViewportProps = {
   forkingMessageId: string | null;
   onResendMessage: (message: ChatMessage) => void;
   stickyPortalTarget?: HTMLElement | null;
+  onScrollToMessage?: (messageId: string) => void;
 };
 
 const VirtualMessagesViewport = memo(function ChatMessagesViewport({
@@ -1440,6 +1476,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   forkingMessageId,
   onResendMessage,
   stickyPortalTarget,
+  onScrollToMessage,
 }: ChatMessagesViewportProps) {
   const itemKeys = useMemo(
     () => [
@@ -1495,6 +1532,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
                 messageIndex={virtualRow.index}
                 msg={message}
                 receivedUserMessage={receivedUserMessages[message.id]}
+                onScrollToMessage={onScrollToMessage}
                 turnRunning={message.id === activeTurnId}
                 compactionRunning={message.id === activeCompactionMessageId}
                 processTerminalState={processTerminalState}
@@ -1654,6 +1692,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
               onForkMessage={onForkMessage}
               forkingMessageId={forkingMessageId}
               onResendMessage={onResendMessage}
+              onScrollToMessage={onScrollToMessage}
             />
           </>
         )}

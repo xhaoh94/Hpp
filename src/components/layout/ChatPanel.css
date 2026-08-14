@@ -2062,12 +2062,15 @@
 @media (prefers-reduced-motion: reduce) {
   .chat-process-thinking-row.jump-highlight .chat-process-thinking-toggle,
   .chat-process-thinking-toggle.running {
-    animation-duration: 1ms;
-    animation-delay: 0s;
+    /* 静态亮色灯泡，不再脉动：1ms 无限循环会把平滑呼吸压成高频闪烁。 */
+    animation: none;
+    color: var(--text-primary);
   }
   .chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
-    animation-duration: 1ms;
-    animation-delay: 0s;
+    /* 静态可读预览：恢复文字颜色，关闭扫光（background-clip 下文字需有颜色）。 */
+    animation: none;
+    color: var(--text-secondary);
+    background-image: none;
   }
 }
 
