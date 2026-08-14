@@ -862,7 +862,40 @@ button:disabled { opacity: 0.48; }
 .message-actions button:disabled { opacity: 0.38; }
 .message-action-time { color: var(--faint); font-size: 11px; white-space: nowrap; margin: 0 3px; }
 /* 助手回合底部：模型名 · ↑输入(缓存命中) ↓输出 */
-.message-model-info { max-width: 46vw; overflow: hidden; color: var(--faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; margin: 0 3px; }
+.message-model-info {
+  display: block;
+  /* 放宽限制宽度：手机端显示更完整的 token 数据。 */
+  max-width: 70vw;
+  min-width: 0;
+  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+  margin: 0 3px;
+}
+.message-model-info-content {
+  display: inline-block;
+  white-space: nowrap;
+  will-change: transform;
+}
+/* 宽度不足时自动横向滚动（跑马灯），来回展示完整内容，不显示滚动条 */
+.message-model-info.auto-scroll .message-model-info-content {
+  animation: model-info-marquee 8s ease-in-out infinite alternate;
+}
+@keyframes model-info-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(calc(-1 * var(--model-info-scroll-distance, 0px))); }
+}
+/* 确保任何浏览器内核都不显示这条信息行的滚动条。 */
+.message-model-info::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
 /* token 数字加粗，与箭头和模型名等普通文字区分 */
 .message-model-info .token-value { font-weight: 600; }
 

@@ -78,6 +78,40 @@ describe("parseActiveFileMention", () => {
     });
   });
 
+  it("does not swallow a CJK sentence after an ASCII search term", () => {
+    // User typed "请看一下", moved the caret to the front, then typed "@Read"
+    // to reference a file: the trailing sentence has no whitespace separator,
+    // so the token must end at the caret instead of eating the whole line.
+    const value = "@Read请看一下";
+    const caret = "@Read".length;
+    expect(parseActiveFileMention(value, caret)).toEqual({
+      query: "Read",
+      start: 0,
+      end: caret,
+    });
+  });
+
+  it("does not swallow a CJK sentence after a partial ASCII path term", () => {
+    const value = "@src/main.ts 请先看这里";
+    const caret = "@src/main.ts".length;
+    expect(parseActiveFileMention(value, caret)).toEqual({
+      query: "src/main.ts",
+      start: 0,
+      end: caret,
+    });
+  });
+
+  it("still covers a full CJK filename when the query itself is CJK", () => {
+    // Caret inside a Chinese filename: the token must still span the whole
+    // name so replacing it removes the in-progress query too.
+    const value = "@配置文件";
+    expect(parseActiveFileMention(value, 3)).toEqual({
+      query: "配置",
+      start: 0,
+      end: value.length,
+    });
+  });
+
   it("supports a mention at the start of a later line", () => {
     const value = "first line\n@src/file.ts";
     expect(parseActiveFileMention(value, value.length)).toEqual({

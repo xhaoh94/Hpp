@@ -11,6 +11,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type TouchEvent as ReactTouchEvent,
+  type CSSProperties as ReactCSSProperties,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -1214,6 +1216,52 @@ const formatTokenCount = (count: number) => {
   return String(count);
 };
 
+// 模型名 / token 信息行：宽度不足时自动横向滚动（跑马灯）展示完整内容，不显示滚动条。
+const AutoScrollModelInfo = memo(function AutoScrollModelInfo({
+  title,
+  children,
+}: {
+  title?: string;
+  children: ReactNode;
+}) {
+  const containerRef = useRef<HTMLSpanElement | null>(null);
+  const [overflow, setOverflow] = useState(false);
+  const [distance, setDistance] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const content = el.firstElementChild as HTMLElement | null;
+    const measure = () => {
+      if (!content) return;
+      const gap = content.scrollWidth - el.clientWidth;
+      if (gap > 0) {
+        setDistance(gap);
+        setOverflow(true);
+      } else {
+        setDistance(0);
+        setOverflow(false);
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    if (content) ro.observe(content);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <span
+      ref={containerRef}
+      className={`message-model-info${overflow ? " auto-scroll" : ""}`}
+      title={title}
+      style={overflow ? ({ "--model-info-scroll-distance": `${distance}px` } as ReactCSSProperties) : undefined}
+    >
+      <span className="message-model-info-content">{children}</span>
+    </span>
+  );
+});
+
 const MessageItem = memo(function MessageItem({
   message,
   receivedUserMessage,
@@ -1370,8 +1418,7 @@ const MessageItem = memo(function MessageItem({
           )}
           {assistantActionsReady && <time className="message-action-time">{formatMessageActionTime(message.timestamp)}</time>}
           {assistantActionsReady && (message.modelLabel || message.tokenUsage) && (
-            <span
-              className="message-model-info"
+            <AutoScrollModelInfo
               title={[
                 message.modelLabel ? `调用模型：${message.modelLabel}` : "",
                 message.tokenUsage
@@ -1393,7 +1440,7 @@ const MessageItem = memo(function MessageItem({
                   <span className="token-value">{formatTokenCount(message.tokenUsage.output)}</span>
                 </>
               )}
-            </span>
+            </AutoScrollModelInfo>
           )}
         </div>
       )}

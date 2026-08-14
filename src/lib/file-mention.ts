@@ -12,6 +12,7 @@ export interface FileMentionReplacement {
 const isWhitespace = (character: string) => /\s/u.test(character);
 const isEmailOrIdentifierCharacter = (character: string) => /[A-Za-z0-9_.+@-]/u.test(character);
 const isHorizontalWhitespace = (character: string) => /[^\S\r\n]/u.test(character);
+const isAsciiPathCharacter = (character: string) => /[A-Za-z0-9_.+\-/\\~()\[\]{}',;!#$%&]/u.test(character);
 
 export function parseActiveFileMention(
   value: string,
@@ -43,8 +44,23 @@ export function parseActiveFileMention(
     };
   }
 
+  // Only continue the token with characters of the same class as the query's
+  // tail. An ASCII search term typed in front of pre-existing CJK text has no
+  // whitespace separator, so scanning ahead blindly would swallow the rest of
+  // the line (e.g. the user types a sentence, moves the caret to the front,
+  // then @-references a file after typing a search term).
+  const lastQueryCharacter = [...query][query.length - 1] ?? "";
+  const asciiQueryTail = isAsciiPathCharacter(lastQueryCharacter);
+
   let end = caret;
-  while (end < value.length && value[end] !== "@" && !isWhitespace(value[end])) end += 1;
+  while (
+    end < value.length
+    && value[end] !== "@"
+    && !isWhitespace(value[end])
+    && (!asciiQueryTail || isAsciiPathCharacter(value[end]))
+  ) {
+    end += 1;
+  }
 
   return {
     query,

@@ -6,7 +6,10 @@ const config: CapacitorConfig = {
   webDir: "dist",
   android: {
     allowMixedContent: true,
-    captureInput: true,
+    // Keep WebView's native InputConnection. Capacitor's captureInput mode
+    // replaces it with a generic BaseInputConnection, which cannot reliably
+    // deliver IME composition/commit text to contenteditable editors.
+    captureInput: false,
     webContentsDebuggingEnabled: true,
   },
   plugins: {
