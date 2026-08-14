@@ -79,6 +79,12 @@ import { useRemoteBridge } from "@/hooks/useRemoteBridge";
 import { useQuestionnaireResize } from "./useQuestionnaireResize";
 import { useSessionModels } from "./useSessionModels";
 import {
+  useChatVirtualizer,
+  useExposeChatVirtualizer,
+  type ChatVirtualizerHandle,
+  type ChatVirtualizerRef,
+} from "./useChatVirtualizer";
+import {
   activateSessionRuntimeTurn,
   asRecord,
   createSessionRuntime,
@@ -941,6 +947,7 @@ type ChatMessagesViewProps = {
   onResendMessage: (message: ChatMessage) => void;
   onUserMsgHistoryOpenChange: (open: boolean) => void;
   onScrollToMessage: (messageId: string) => void;
+  virtualizerRef?: ChatVirtualizerRef;
 };
 
 type ChatMessageItemProps = {
@@ -962,9 +969,14 @@ type ChatMessageItemProps = {
   forkingMessageId: string | null;
   onResendMessage: (message: ChatMessage) => void;
   stickyPortalTarget?: HTMLElement | null;
+  messageIndex?: number;
+  userMessageExpanded?: boolean;
+  onUserMessageExpandedChange?: (messageId: string, expanded: boolean) => void;
+  onDiffOpenChange?: (messageId: string, open: boolean) => void;
 };
 
 const ChatMessageItem = memo(function ChatMessageItem({
+  messageIndex,
   msg,
   receivedUserMessage,
   turnRunning,
@@ -983,8 +995,10 @@ const ChatMessageItem = memo(function ChatMessageItem({
   forkingMessageId,
   onResendMessage,
   stickyPortalTarget,
+  userMessageExpanded = false,
+  onUserMessageExpandedChange,
+  onDiffOpenChange,
 }: ChatMessageItemProps) {
-  const [userMessageExpanded, setUserMessageExpanded] = useState(false);
   const openMessageProjectPath = useCallback(async (path: string) => {
     const resolvedPath = resolveProjectFilePath(path, projectPath || "");
     const result = await window.electronAPI.statPath(resolvedPath);
@@ -1096,7 +1110,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   );
 
   return (
-    <div data-msg-id={msg.id} className="chat-msg-wrapper" onClick={handleMessageMarkdownLinkClick}>
+    <div data-msg-id={msg.id} data-msg-index={messageIndex} className="chat-msg-wrapper" onClick={handleMessageMarkdownLinkClick}>
       {msg.role === "assistant" && msg.process && (
         <ProcessBlock
           messageId={msg.id}
@@ -1114,6 +1128,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           receivedMessageDocument={receivedUserMessage?.composerDocument || receivedUserMessage?.composerDraft?.document}
           projectPath={projectPath}
           stickyPortalTarget={stickyPortalTarget}
+          messageIndex={messageIndex}
         />
       )}
       {!msg.process && commentary.length > 0 && (
@@ -1185,7 +1200,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
                           <button
                             type="button"
                             className="chat-user-expand-btn"
-                            onClick={() => setUserMessageExpanded((expanded) => !expanded)}
+                            onClick={() => onUserMessageExpandedChange?.(msg.id, !userMessageExpanded)}
                           >
                             {userMessageExpanded ? "收起" : "显示更多"}
                             <ChevronDown
@@ -1243,7 +1258,11 @@ const ChatMessageItem = memo(function ChatMessageItem({
           )}
           {msg.role !== "user" && renderSessionReferences()}
           {hasDiffs && (
-            <DiffBlock diffs={visibleDiffs} projectPath={projectPath} />
+            <DiffBlock
+              diffs={visibleDiffs}
+              projectPath={projectPath}
+              onOpenChange={(open) => onDiffOpenChange?.(msg.id, open)}
+            />
           )}
           {showAssistantActions && (
             <div className="chat-assistant-actions">
@@ -1346,14 +1365,9 @@ function TodoSummaryPill({ process }: { process: AgentProcess }) {
   );
 }
 
-const CHAT_MESSAGE_INITIAL_RENDER_COUNT = 14;
-const CHAT_MESSAGE_RENDER_ROOT_MARGIN = "900px 0px";
-
 /**
- * Estimate the space occupied by a message while its expensive subtree is
- * deferred. The estimate only needs to be stable enough to keep the scroll
- * thumb usable; the real height replaces it as soon as the row approaches the
- * viewport.
+ * Estimate a row before Markdown, images and process timelines have been
+ * measured. The virtualizer replaces this estimate with the real row height.
  */
 const estimateChatMessageHeight = (message: ChatMessage): number => {
   if (message.role === "system") return 44;
@@ -1370,72 +1384,6 @@ const estimateChatMessageHeight = (message: ChatMessage): number => {
   return Math.min(1_200, 84 + Math.min(entryCount, 18) * 28 + Math.min(commentaryCount, 6) * 54 + textLines * 22);
 };
 
-type DeferredChatMessageItemProps = ChatMessageItemProps & {
-  index: number;
-  total: number;
-  rootRef: RefObject<HTMLDivElement | null>;
-  onContentChange: () => void;
-};
-
-/**
- * Keep the message anchor in the DOM, but defer Markdown, process timelines,
- * diffs and image nodes until the row is close to the viewport. Once a row has
- * been materialized it stays mounted so expanding/collapsing it does not lose
- * local UI state.
- */
-const DeferredChatMessageItem = memo(function DeferredChatMessageItem({
-  index,
-  total,
-  rootRef,
-  onContentChange,
-  ...messageProps
-}: DeferredChatMessageItemProps) {
-  const initiallyVisible = index >= Math.max(0, total - CHAT_MESSAGE_INITIAL_RENDER_COUNT);
-  const [materialized, setMaterialized] = useState(initiallyVisible);
-  const placeholderRef = useRef<HTMLDivElement>(null);
-  const deferredRef = useRef(!initiallyVisible);
-
-  useEffect(() => {
-    if (materialized) return;
-    const placeholder = placeholderRef.current;
-    const root = rootRef.current;
-    if (!placeholder || !root || typeof IntersectionObserver === "undefined") {
-      setMaterialized(true);
-      return;
-    }
-
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0)) return;
-      observer.disconnect();
-      setMaterialized(true);
-    }, {
-      root,
-      rootMargin: CHAT_MESSAGE_RENDER_ROOT_MARGIN,
-      threshold: 0,
-    });
-    observer.observe(placeholder);
-    return () => observer.disconnect();
-  }, [materialized, rootRef]);
-
-  useLayoutEffect(() => {
-    if (!materialized || !deferredRef.current) return;
-    deferredRef.current = false;
-    onContentChange();
-  }, [materialized, onContentChange]);
-
-  if (materialized) return <ChatMessageItem {...messageProps} />;
-
-  return (
-    <div
-      ref={placeholderRef}
-      data-msg-id={messageProps.msg.id}
-      className="chat-msg-wrapper chat-message-lazy-placeholder"
-      style={{ minHeight: `${estimateChatMessageHeight(messageProps.msg)}px` }}
-      aria-hidden="true"
-    />
-  );
-});
-
 type ChatMessagesViewportProps = {
   messages: ChatMessage[];
   receivedUserMessages: Record<string, ChatMessage>;
@@ -1443,8 +1391,14 @@ type ChatMessagesViewportProps = {
   activeCompactionMessageId: string | null;
   processTerminalState: ProcessTerminalViewState;
   expandThinkingWhileRunning: boolean;
+  showWorking: boolean;
+  expandedUserMessageIds: ReadonlySet<string>;
+  onUserMessageExpandedChange: (messageId: string, expanded: boolean) => void;
+  pinnedMessageIndex?: number;
+  onDiffOpenChange: (messageId: string, open: boolean) => void;
   projectPath?: string;
   scrollRef: RefObject<HTMLDivElement | null>;
+  virtualizerRef?: ChatVirtualizerRef;
   onContentChange: () => void;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
@@ -1459,15 +1413,21 @@ type ChatMessagesViewportProps = {
   stickyPortalTarget?: HTMLElement | null;
 };
 
-const DeferredMessagesViewport = memo(function ChatMessagesViewport({
+const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   messages,
   receivedUserMessages,
   activeTurnId,
   activeCompactionMessageId,
   processTerminalState,
   expandThinkingWhileRunning,
+  showWorking,
+  expandedUserMessageIds,
+  onUserMessageExpandedChange,
+  pinnedMessageIndex,
+  onDiffOpenChange,
   projectPath,
   scrollRef,
+  virtualizerRef,
   onContentChange,
   onEditMessage,
   onImageContextMenu,
@@ -1481,36 +1441,90 @@ const DeferredMessagesViewport = memo(function ChatMessagesViewport({
   onResendMessage,
   stickyPortalTarget,
 }: ChatMessagesViewportProps) {
+  const itemKeys = useMemo(
+    () => [
+      ...messages.map((message) => message.id),
+      ...(showWorking ? ["__chat-working__"] : []),
+    ],
+    [messages, showWorking],
+  );
+  const pinnedIndexes = useMemo(() => {
+    const next = new Set<number>();
+    messages.forEach((message, index) => {
+      if (message.role === "assistant" && message.process?.expanded) next.add(index);
+    });
+    if (pinnedMessageIndex !== undefined) next.add(pinnedMessageIndex);
+    return next.size > 0 ? next : undefined;
+  }, [messages, pinnedMessageIndex]);
+  const { virtualizer, handle } = useChatVirtualizer({
+    count: itemKeys.length,
+    itemKeys,
+    scrollRef,
+    pinnedIndexes,
+    estimateSize: (index) => index < messages.length
+      ? estimateChatMessageHeight(messages[index])
+      : 40,
+  });
+  useExposeChatVirtualizer(virtualizerRef, handle);
+
+  useLayoutEffect(() => {
+    // Row ResizeObserver measures Markdown, images and process output changes.
+    // Do not clear the whole measurement cache on every streaming update.
+    onContentChange();
+  }, [messages, onContentChange, showWorking]);
+
   return (
-    <>
-      {messages.map((msg, index) => (
-        <DeferredChatMessageItem
-          key={msg.id}
-          index={index}
-          total={messages.length}
-          rootRef={scrollRef}
-          msg={msg}
-          receivedUserMessage={receivedUserMessages[msg.id]}
-          turnRunning={msg.id === activeTurnId}
-          compactionRunning={msg.id === activeCompactionMessageId}
-          processTerminalState={processTerminalState}
-          expandThinkingWhileRunning={expandThinkingWhileRunning}
-          projectPath={projectPath}
-          onContentChange={onContentChange}
-          onEditMessage={onEditMessage}
-          onImageContextMenu={onImageContextMenu}
-          onOpenImage={onOpenImage}
-          onOpenFile={onOpenFile}
-          onToggleAssistantProcess={onToggleAssistantProcess}
-          onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
-          onPreserveScroll={onPreserveScroll}
-          onForkMessage={onForkMessage}
-          forkingMessageId={forkingMessageId}
-          onResendMessage={onResendMessage}
-          stickyPortalTarget={stickyPortalTarget}
-        />
-      ))}
-    </>
+    <div
+      className="chat-virtual-content"
+      style={{ height: `${virtualizer.getTotalSize()}px` }}
+    >
+      {virtualizer.getVirtualItems().map((virtualRow) => {
+        const message = messages[virtualRow.index];
+        const isWorking = !message && showWorking && virtualRow.index === messages.length;
+        return (
+          <div
+            key={virtualRow.key}
+            ref={virtualizer.measureElement}
+            data-index={virtualRow.index}
+            data-msg-id={message?.id}
+            className="chat-virtual-row"
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
+          >
+            {message ? (
+              <ChatMessageItem
+                messageIndex={virtualRow.index}
+                msg={message}
+                receivedUserMessage={receivedUserMessages[message.id]}
+                turnRunning={message.id === activeTurnId}
+                compactionRunning={message.id === activeCompactionMessageId}
+                processTerminalState={processTerminalState}
+                expandThinkingWhileRunning={expandThinkingWhileRunning}
+                userMessageExpanded={expandedUserMessageIds.has(message.id)}
+                onUserMessageExpandedChange={onUserMessageExpandedChange}
+                onDiffOpenChange={onDiffOpenChange}
+                projectPath={projectPath}
+                onEditMessage={onEditMessage}
+                onImageContextMenu={onImageContextMenu}
+                onOpenImage={onOpenImage}
+                onOpenFile={onOpenFile}
+                onToggleAssistantProcess={onToggleAssistantProcess}
+                onToggleAssistantProcessEntry={onToggleAssistantProcessEntry}
+                onPreserveScroll={onPreserveScroll}
+                onForkMessage={onForkMessage}
+                forkingMessageId={forkingMessageId}
+                onResendMessage={onResendMessage}
+                stickyPortalTarget={stickyPortalTarget}
+              />
+            ) : isWorking ? (
+              <div className="chat-working">
+                <div className="chat-working-spinner" />
+                <span>正在处理您的请求...</span>
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
   );
 });
 
@@ -1541,6 +1555,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   expandThinkingWhileRunning,
   onUserMsgHistoryOpenChange,
   onScrollToMessage,
+  virtualizerRef,
 }: ChatMessagesViewProps) {
   const messages = useChatStore((state) => state.messages);
   const activeTurnId = getActiveAssistantTurnId(messages, currentSessionRunning);
@@ -1556,9 +1571,29 @@ const ChatMessagesView = memo(function ChatMessagesView({
     msg.id === activeTurnId && !!msg.process && hasNativeTodoSteps(msg.process)
   ))?.process;
   const [stickyPortalTarget, setStickyPortalTarget] = useState<HTMLDivElement | null>(null);
+  const [expandedUserMessageIds, setExpandedUserMessageIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [activeDiffMessageId, setActiveDiffMessageId] = useState<string | null>(null);
   const setStickyPortalTargetRef = useCallback((element: HTMLDivElement | null) => {
     setStickyPortalTarget(element);
   }, []);
+  useEffect(() => {
+    setExpandedUserMessageIds(new Set());
+    setActiveDiffMessageId(null);
+  }, [activeSessionId]);
+  const handleUserMessageExpandedChange = useCallback((messageId: string, expanded: boolean) => {
+    setExpandedUserMessageIds((current) => {
+      const next = new Set(current);
+      if (expanded) next.add(messageId);
+      else next.delete(messageId);
+      return next;
+    });
+  }, []);
+  const handleDiffOpenChange = useCallback((messageId: string, open: boolean) => {
+    setActiveDiffMessageId(open ? messageId : null);
+  }, []);
+  const activeDiffMessageIndex = activeDiffMessageId
+    ? messages.findIndex((message) => message.id === activeDiffMessageId)
+    : -1;
   const receivedUserMessages = useMemo(() => {
     const byAssistantId: Record<string, ChatMessage> = {};
     let latestUserMessage: ChatMessage | undefined;
@@ -1571,10 +1606,6 @@ const ChatMessagesView = memo(function ChatMessagesView({
     }
     return byAssistantId;
   }, [messages]);
-
-  useLayoutEffect(() => {
-    onContentChange();
-  }, [messages, onContentChange]);
 
   return (
     <div className={`chat-messages-area ${activeProcessWithTodos ? "has-todo-summary" : ""}`}>
@@ -1603,8 +1634,14 @@ const ChatMessagesView = memo(function ChatMessagesView({
               activeCompactionMessageId={activeCompactionMessageId}
               processTerminalState={processTerminalState}
               expandThinkingWhileRunning={expandThinkingWhileRunning}
+              showWorking={currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user"}
+              expandedUserMessageIds={expandedUserMessageIds}
+              onUserMessageExpandedChange={handleUserMessageExpandedChange}
+              pinnedMessageIndex={activeDiffMessageIndex >= 0 ? activeDiffMessageIndex : undefined}
+              onDiffOpenChange={handleDiffOpenChange}
               projectPath={projectPath}
               scrollRef={scrollRef}
+              virtualizerRef={virtualizerRef}
               stickyPortalTarget={stickyPortalTarget}
               onContentChange={onContentChange}
               onEditMessage={onEditMessage}
@@ -1618,13 +1655,6 @@ const ChatMessagesView = memo(function ChatMessagesView({
               forkingMessageId={forkingMessageId}
               onResendMessage={onResendMessage}
             />
-
-            {currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user" && (
-              <div className="chat-working">
-                <div className="chat-working-spinner" />
-                <span>正在处理您的请求...</span>
-              </div>
-            )}
           </>
         )}
       </div>
@@ -1795,7 +1825,7 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
   return null;
 });
 
-const ChatMessagesViewport = DeferredMessagesViewport;
+const ChatMessagesViewport = VirtualMessagesViewport;
 
 const IMAGE_UNSUPPORTED_HINT = "当前模型未标记支持图片输入，请切换支持图片的模型，或在 Agent 配置中启用该模型的图片能力。";
 
@@ -2109,6 +2139,11 @@ export function ChatPanel({
     enabled: !!activeQuestionnaire,
     resetKey: questionnaireResetKey,
   });
+  const chatVirtualizerRef = useRef<ChatVirtualizerHandle | null>(null);
+  const getMessageIndex = useCallback(
+    (messageId: string) => useChatStore.getState().messages.findIndex((message) => message.id === messageId),
+    [],
+  );
   const {
     scrollRef,
     showScrollBottom,
@@ -2124,6 +2159,8 @@ export function ChatPanel({
     activeSessionId,
     activeSessionInitialized,
     questionnairePaneHeight,
+    virtualizerRef: chatVirtualizerRef,
+    getMessageIndex,
   });
 
   const syncInputState = useCallback((value: string) => {
@@ -3233,6 +3270,7 @@ export function ChatPanel({
         onResendMessage={handleResendMessage}
         onUserMsgHistoryOpenChange={setUserMsgHistoryOpen}
         onScrollToMessage={scrollToMessage}
+        virtualizerRef={chatVirtualizerRef}
       />
 
       {activeQuestionnaire && (

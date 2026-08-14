@@ -14,6 +14,11 @@ describe("diff popover viewport constraints", () => {
     expect(diffBlockSource).toContain("document.body");
   });
 
+  it("notifies the virtualized owner while a diff popover is open", () => {
+    expect(diffBlockSource).toContain("onOpenChange?: (open: boolean) => void");
+    expect(diffBlockSource).toContain("onOpenChange?.(!!activeFile)");
+  });
+
   it("keeps the popover inside the visible application area", () => {
     const backdrop = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-diff-popover-backdrop"),

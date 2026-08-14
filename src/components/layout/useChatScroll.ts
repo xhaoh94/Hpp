@@ -6,6 +6,7 @@ import {
   useState,
   type UIEvent as ReactUIEvent,
 } from "react";
+import type { ChatVirtualizerRef } from "./useChatVirtualizer";
 
 const SCROLL_BOTTOM_THRESHOLD = 50;
 
@@ -13,10 +14,14 @@ export function useChatScroll({
   activeSessionId,
   activeSessionInitialized,
   questionnairePaneHeight,
+  virtualizerRef,
+  getMessageIndex,
 }: {
   activeSessionId: string | null;
   activeSessionInitialized: boolean;
   questionnairePaneHeight: number | null;
+  virtualizerRef?: ChatVirtualizerRef;
+  getMessageIndex?: (messageId: string) => number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoFollowBottomRef = useRef(true);
@@ -105,22 +110,25 @@ export function useChatScroll({
     if (!el) return;
     autoFollowBottomRef.current = true;
     setShowScrollBottom(false);
+    virtualizerRef?.current?.scrollToEnd("auto");
     el.scrollTop = el.scrollHeight;
     requestAnimationFrame(() => {
       const current = scrollRef.current;
       if (!current) return;
+      virtualizerRef?.current?.scrollToEnd("auto");
       current.scrollTop = current.scrollHeight;
       updateScrollBottomState(current);
     });
-  }, [updateScrollBottomState]);
+  }, [updateScrollBottomState, virtualizerRef]);
 
   const scrollToBottomNow = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     autoFollowBottomRef.current = true;
+    virtualizerRef?.current?.scrollToEnd("auto");
     el.scrollTop = el.scrollHeight;
     updateScrollBottomState(el);
-  }, [updateScrollBottomState]);
+  }, [updateScrollBottomState, virtualizerRef]);
 
   const scrollToMessage = useCallback((msgId: string) => {
     const el = scrollRef.current;
@@ -132,45 +140,53 @@ export function useChatScroll({
       const message = root.querySelector<HTMLElement>(`[data-msg-id="${msgId}"]`);
       return message?.querySelector<HTMLElement>(".chat-bubble.user") || message;
     };
-    const scrollTargetToTop = (root: HTMLDivElement, target: Element, behavior: ScrollBehavior) => {
+    const scrollTargetToTop = (root: HTMLDivElement, target: Element) => {
       const rootRect = root.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
       const topInset = 16;
       root.scrollTo({
         top: Math.max(0, root.scrollTop + targetRect.top - rootRect.top - topInset),
-        behavior,
+        behavior: "auto",
       });
     };
 
-    const msgEl = getMessageTarget(el);
-    if (!msgEl) return;
+    const messageIndex = getMessageIndex?.(msgId) ?? -1;
+    const initialTarget = getMessageTarget(el);
+    if (!initialTarget && messageIndex < 0) return;
 
-    // 从发言记录跳转时，目标可能还是延迟渲染占位节点。先关闭自动跟随底部，
-    // 否则占位节点进入视口并替换成真实消息的过程中，ResizeObserver 可能把这次
-    // 手动定位误判成“仍在底部”，从而把长消息再次滚回底部。
+    // 手动跳转期间禁止底部跟随。目标行可能尚未挂载，虚拟列表会先按索引
+    // 定位，之后再等待真实气泡出现并校正顶部位置。
     autoFollowBottomRef.current = false;
-    suppressAutoScrollUntilRef.current = Date.now() + 800;
-    scrollTargetToTop(el, msgEl, "smooth");
+    suppressAutoScrollUntilRef.current = Date.now() + 1_200;
+    if (messageIndex >= 0) {
+      virtualizerRef?.current?.scrollToIndex(messageIndex, {
+        align: "start",
+        behavior: "auto",
+      });
+    }
+    if (initialTarget) scrollTargetToTop(el, initialTarget);
 
-    const htmlEl = msgEl as HTMLElement;
-    htmlEl.classList.add("chat-msg-highlight");
-    setTimeout(() => {
-      htmlEl.classList.remove("chat-msg-highlight");
-    }, 1500);
-
-    // 延迟渲染完成后重新查找用户气泡并校正位置。此时不能再定位外层回合，
-    // 否则第一条消息后面的处理过程会再次把气泡推到可视区域之外。
-    requestAnimationFrame(() => {
+    let attempts = 0;
+    const settle = () => {
       requestAnimationFrame(() => {
         const current = scrollRef.current;
         const currentMsg = current ? getMessageTarget(current) : null;
-        if (!current || !currentMsg) return;
-        scrollTargetToTop(current, currentMsg, "auto");
+        if (!current) return;
+        if (!currentMsg && attempts < 8) {
+          attempts += 1;
+          settle();
+          return;
+        }
+        if (!currentMsg) return;
+        scrollTargetToTop(current, currentMsg);
+        currentMsg.classList.add("chat-msg-highlight");
+        window.setTimeout(() => currentMsg.classList.remove("chat-msg-highlight"), 1_500);
         updateScrollBottomState(current);
         autoFollowBottomRef.current = false;
       });
-    });
-  }, [updateScrollBottomState]);
+    };
+    settle();
+  }, [getMessageIndex, updateScrollBottomState, virtualizerRef]);
 
   const preserveScrollDuringLayoutChange = useCallback((action: () => void, anchor?: HTMLElement | null) => {
     const el = scrollRef.current;

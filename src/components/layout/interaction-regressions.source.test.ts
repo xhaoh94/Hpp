@@ -11,6 +11,7 @@ import permissionChoiceSource from "./PermissionChoicePanel.tsx?raw";
 import pendingUIResponseSource from "./usePendingUIResponse.ts?raw";
 import agentEventsSource from "./useAgentEvents.ts?raw";
 import chatScrollSource from "./useChatScroll.ts?raw";
+import chatVirtualizerSource from "./useChatVirtualizer.ts?raw";
 import agentEventControllerSource from "./agentEventController.ts?raw";
 import processBlockSource from "./ProcessBlock.tsx?raw";
 
@@ -29,15 +30,19 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).not.toContain("doc: sourceComposerDocument?.nodes.map");
   });
 
-  it("defers expensive message subtrees until they approach the viewport", () => {
-    expect(chatPanelSource).toContain("CHAT_MESSAGE_INITIAL_RENDER_COUNT");
-    expect(chatPanelSource).toContain("IntersectionObserver");
-    expect(chatPanelSource).toContain("chat-message-lazy-placeholder");
-    expect(chatPanelSource).toContain("const ChatMessagesViewport");
+  it("virtualizes expensive message subtrees with measured rows", () => {
+    expect(chatPanelSource).toContain("useChatVirtualizer");
+    expect(chatPanelSource).toContain("getVirtualItems()");
+    expect(chatPanelSource).toContain("chat-virtual-row");
+    expect(chatPanelSource).toContain("estimateChatMessageHeight");
     expect(chatPanelSource).toContain("onContentChange();");
+    expect(chatVirtualizerSource).toContain("useVirtualizer");
+    expect(chatVirtualizerSource).toContain('anchorTo: "end"');
+    expect(chatVirtualizerSource).toContain("rangeExtractor");
+    expect(chatVirtualizerSource).toContain("scrollToEnd");
   });
 
-  it("keeps history jumps stable while lazy messages are materialized", () => {
+  it("keeps history jumps stable while virtual rows are materialized", () => {
     const scrollToMessageSource = chatScrollSource.slice(
       chatScrollSource.indexOf("const scrollToMessage"),
       chatScrollSource.indexOf("const preserveScrollDuringLayoutChange"),
@@ -46,6 +51,12 @@ describe("chat interaction regression constraints", () => {
     expect(scrollToMessageSource).toContain("suppressAutoScrollUntilRef.current");
     expect(scrollToMessageSource).toContain('querySelector<HTMLElement>(".chat-bubble.user")');
     expect(scrollToMessageSource).toContain("scrollTargetToTop");
+  });
+
+  it("keeps virtualized overlays pinned while their popover is open", () => {
+    expect(chatPanelSource).toContain("pinnedMessageIndex");
+    expect(chatPanelSource).toContain("onDiffOpenChange");
+    expect(chatVirtualizerSource).toContain("pinnedIndexes");
   });
 
   it("does not let portaled sticky process controls shrink the top scroll range", () => {
@@ -273,7 +284,7 @@ describe("chat interaction regression constraints", () => {
 
   it("stops stale process timers and running decorations after the session settles", () => {
     expect(chatPanelSource).toContain("getActiveAssistantTurnId(messages, currentSessionRunning)");
-    expect(chatPanelSource).toContain("turnRunning={msg.id === activeTurnId}");
+    expect(chatPanelSource).toContain("turnRunning={message.id === activeTurnId}");
     expect(chatPanelSource).toContain("running={processRunning}");
     expect(processBlockSource).toContain("normalizeProcessForView(process");
     expect(processBlockSource).toContain("useProcessTicker(processRunning)");

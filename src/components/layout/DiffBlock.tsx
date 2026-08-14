@@ -6,6 +6,7 @@ import { buildDiffSummary, type DiffFileSummary, type DiffLike } from "@shared/d
 type DiffBlockProps = {
   diffs: DiffLike[];
   projectPath?: string;
+  onOpenChange?: (open: boolean) => void;
 };
 
 const DEFAULT_VISIBLE_FILES = 3;
@@ -27,7 +28,7 @@ const renderDiffLines = (file: string, patches: string[]) =>
     );
   });
 
-export function DiffBlock({ diffs, projectPath }: DiffBlockProps) {
+export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) {
   const [expanded, setExpanded] = useState(false);
   const [activeFile, setActiveFile] = useState<DiffFileSummary | null>(null);
   const [revertState, setRevertState] = useState<"idle" | "reverting" | "reverted">("idle");
@@ -52,6 +53,10 @@ export function DiffBlock({ diffs, projectPath }: DiffBlockProps) {
         : revertState === "reverted"
         ? "已撤销"
         : "撤销本次文件修改";
+
+  useEffect(() => {
+    onOpenChange?.(!!activeFile);
+  }, [activeFile, onOpenChange]);
 
   useEffect(() => {
     if (!activeFile) return;

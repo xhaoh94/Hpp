@@ -746,6 +746,22 @@
   padding-bottom: 76px;
 }
 
+/* The virtualizer owns row positions and the inner total height. Keep rows
+   inside the existing .chat-messages scroll container so sticky process
+   locators and bottom-following continue to use the same scroll root. */
+.chat-virtual-content {
+  position: relative;
+  width: 100%;
+}
+
+.chat-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .chat-floating-status {
   position: absolute;
   left: 50%;

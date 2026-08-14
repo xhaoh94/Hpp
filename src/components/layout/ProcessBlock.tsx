@@ -784,8 +784,17 @@ export const getStickyButtonStackHeight = (
 ) => buttonHeights.reduce((total, height) => total + Math.max(0, height), 0) +
   Math.max(0, buttonHeights.length - 1) * gap;
 
+const getStickyMessageIndex = (element: HTMLElement) => {
+  const value = Number.parseInt(element.dataset.messageIndex || "", 10);
+  return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+};
+
+const getStickyElements = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll<HTMLElement>(".chat-process-sticky"))
+    .sort((left, right) => getStickyMessageIndex(left) - getStickyMessageIndex(right));
+
 const getVisibleStickyElements = (container: HTMLElement) =>
-  Array.from(container.querySelectorAll<HTMLElement>('.chat-process-sticky[data-visible="true"]'));
+  getStickyElements(container).filter((element) => element.dataset.visible === "true");
 
 const getProcessOwnerId = (element: HTMLElement | null) =>
   element?.closest<HTMLElement>("[data-process-message-id]")?.dataset.processMessageId || null;
@@ -795,7 +804,7 @@ const pendingStickyScrollCancels = new WeakMap<HTMLElement, () => void>();
 /** Keep every active locator in document order instead of letting sticky bars overlap. */
 const updateStickyStackLayout = (container: HTMLElement) => {
   let offset = 0;
-  for (const sticky of Array.from(container.querySelectorAll<HTMLElement>(".chat-process-sticky"))) {
+  for (const sticky of getStickyElements(container)) {
     if (sticky.dataset.visible !== "true") {
       sticky.style.removeProperty("--chat-process-sticky-top");
       continue;
@@ -998,6 +1007,7 @@ export function ProcessBlock({
   receivedMessageDocument,
   projectPath,
   stickyPortalTarget,
+  messageIndex,
 }: {
   messageId: string;
   process: AgentProcess;
@@ -1015,6 +1025,7 @@ export function ProcessBlock({
   projectPath?: string;
   /** 吸顶定位条挂载到聊天滚动容器的公共顶层，避免受消息块边界限制。 */
   stickyPortalTarget?: HTMLElement | null;
+  messageIndex?: number;
 }) {
   const viewProcess = useMemo(() => normalizeProcessForView(process, {
     running,
@@ -1266,6 +1277,7 @@ export function ProcessBlock({
         ref={stickyElementRef}
         className="chat-process-sticky"
         data-process-message-id={messageId}
+        data-message-index={messageIndex ?? ""}
         data-visible={processStuck ? "true" : "false"}
       >
         <div className="chat-process-sticky-inner">
