@@ -37,6 +37,25 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("onContentChange();");
   });
 
+  it("keeps history jumps stable while lazy messages are materialized", () => {
+    const scrollToMessageSource = chatScrollSource.slice(
+      chatScrollSource.indexOf("const scrollToMessage"),
+      chatScrollSource.indexOf("const preserveScrollDuringLayoutChange"),
+    );
+    expect(scrollToMessageSource).toContain("autoFollowBottomRef.current = false");
+    expect(scrollToMessageSource).toContain("suppressAutoScrollUntilRef.current");
+    expect(scrollToMessageSource).toContain('querySelector<HTMLElement>(".chat-bubble.user")');
+    expect(scrollToMessageSource).toContain("scrollTargetToTop");
+  });
+
+  it("does not let portaled sticky process controls shrink the top scroll range", () => {
+    const portaledStickyStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-process-sticky-layer > .chat-process-sticky"),
+      chatPanelStyles.indexOf(".chat-process-sticky-inner"),
+    );
+    expect(portaledStickyStyles).toContain("margin-bottom: 0");
+  });
+
   it("clears questionnaire options and custom text in both directions", () => {
     expect(questionnaireSource).toContain('setCustomText((current) => ({ ...current, [questionIndex]: "" }))');
     expect(questionnaireSource).toContain('setSingleChoice((current) => ({ ...current, [questionIndex]: "" }))');

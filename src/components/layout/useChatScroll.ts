@@ -125,16 +125,52 @@ export function useChatScroll({
   const scrollToMessage = useCallback((msgId: string) => {
     const el = scrollRef.current;
     if (!el) return;
-    const msgEl = el.querySelector(`[data-msg-id="${msgId}"]`);
-    if (msgEl) {
-      msgEl.scrollIntoView({ behavior: "smooth", block: "center" });
-      const htmlEl = msgEl as HTMLElement;
-      htmlEl.classList.add("chat-msg-highlight");
-      setTimeout(() => {
-        htmlEl.classList.remove("chat-msg-highlight");
-      }, 1500);
-    }
-  }, []);
+
+    // data-msg-id 在整条回合容器上，而用户消息后面还可能跟着很高的处理过程。
+    // 跳转整条回合并居中会把用户发言气泡顶到滚动区域外，所以优先定位用户气泡。
+    const getMessageTarget = (root: HTMLDivElement) => {
+      const message = root.querySelector<HTMLElement>(`[data-msg-id="${msgId}"]`);
+      return message?.querySelector<HTMLElement>(".chat-bubble.user") || message;
+    };
+    const scrollTargetToTop = (root: HTMLDivElement, target: Element, behavior: ScrollBehavior) => {
+      const rootRect = root.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const topInset = 16;
+      root.scrollTo({
+        top: Math.max(0, root.scrollTop + targetRect.top - rootRect.top - topInset),
+        behavior,
+      });
+    };
+
+    const msgEl = getMessageTarget(el);
+    if (!msgEl) return;
+
+    // 从发言记录跳转时，目标可能还是延迟渲染占位节点。先关闭自动跟随底部，
+    // 否则占位节点进入视口并替换成真实消息的过程中，ResizeObserver 可能把这次
+    // 手动定位误判成“仍在底部”，从而把长消息再次滚回底部。
+    autoFollowBottomRef.current = false;
+    suppressAutoScrollUntilRef.current = Date.now() + 800;
+    scrollTargetToTop(el, msgEl, "smooth");
+
+    const htmlEl = msgEl as HTMLElement;
+    htmlEl.classList.add("chat-msg-highlight");
+    setTimeout(() => {
+      htmlEl.classList.remove("chat-msg-highlight");
+    }, 1500);
+
+    // 延迟渲染完成后重新查找用户气泡并校正位置。此时不能再定位外层回合，
+    // 否则第一条消息后面的处理过程会再次把气泡推到可视区域之外。
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const current = scrollRef.current;
+        const currentMsg = current ? getMessageTarget(current) : null;
+        if (!current || !currentMsg) return;
+        scrollTargetToTop(current, currentMsg, "auto");
+        updateScrollBottomState(current);
+        autoFollowBottomRef.current = false;
+      });
+    });
+  }, [updateScrollBottomState]);
 
   const preserveScrollDuringLayoutChange = useCallback((action: () => void, anchor?: HTMLElement | null) => {
     const el = scrollRef.current;

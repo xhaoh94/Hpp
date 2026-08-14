@@ -964,8 +964,8 @@
   max-width: none;
   margin-inline: auto;
   border-radius: 8px;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 160px;
+  /* 消息列表已经由 DeferredChatMessageItem 使用 IntersectionObserver 延迟渲染。
+     不再叠加原生 content-visibility，避免首条消息定位时使用估算高度导致内容被裁切。 */
   transition: background-color 0.3s ease;
 }
 
@@ -1578,8 +1578,11 @@
 
 .chat-process-sticky-layer > .chat-process-sticky {
   /* Portal 后仍复用原有负轨道偏移，使按钮与历史按钮共享左边缘；
-     叠加左轨道内缩，让按钮组在内容间隙内居中。 */
+     叠加左轨道内缩，让按钮组在内容间隙内居中。
+     Portal 到滚动容器顶部后不能再保留消息块内部使用的负下边距，
+     否则会把首条消息挤到滚动范围之外。 */
   margin-left: calc(var(--chat-process-thinking-rail-width) + var(--chat-left-rail-inset));
+  margin-bottom: 0;
 }
 
 .chat-process-sticky-inner {
