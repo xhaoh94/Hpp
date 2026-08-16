@@ -1,5 +1,5 @@
 import { ipcMain, dialog, BrowserWindow, shell } from "electron";
-import { readdir, readFile, access, stat } from "fs/promises";
+import { readdir, readFile, access, stat, open } from "fs/promises";
 import { basename, extname, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
@@ -9,6 +9,7 @@ import { collectProjectFileIndex } from "./project-file-indexer";
 
 const SEARCH_RESULT_LIMIT = 50;
 const MAX_IMAGE_PREVIEW_BYTES = 25 * 1024 * 1024;
+const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024; // 10 MB — files larger than this are not loaded as text
 const IMAGE_MIME_TYPES: Record<string, string> = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
@@ -113,8 +114,35 @@ export function registerFileHandlers() {
       return { success: false, error: "Invalid file path" };
     }
     try {
-      const content = await readFile(filePath, "utf-8");
-      return { success: true, content };
+      const info = await stat(filePath);
+      if (!info.isFile()) {
+        return { success: false, error: "Path is not a file" };
+      }
+
+      // For large files: only probe 8 KB for binary detection.
+      // If it's text, reject — loading multi-MB strings causes UI freezes.
+      if (info.size > MAX_TEXT_FILE_BYTES) {
+        const fd = await open(filePath, "r");
+        try {
+          const probe = Buffer.alloc(8192);
+          const { bytesRead } = await fd.read(probe, 0, 8192, 0);
+          if (probe.subarray(0, bytesRead).includes(0)) {
+            return { success: true, binary: true };
+          }
+        } finally {
+          await fd.close();
+        }
+        const sizeMB = (info.size / 1024 / 1024).toFixed(1);
+        return { success: false, error: `文件过大（${sizeMB} MB），无法在预览中显示` };
+      }
+
+      // For files within size limit: read fully as Buffer, then check binary.
+      const buffer = await readFile(filePath);
+      const sample = buffer.subarray(0, Math.min(8192, buffer.length));
+      if (sample.includes(0)) {
+        return { success: true, binary: true };
+      }
+      return { success: true, content: buffer.toString("utf-8") };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }

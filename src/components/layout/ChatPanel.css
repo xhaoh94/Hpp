@@ -5339,3 +5339,874 @@ body.chat-questionnaire-resizing .chat-bubble {
   background: var(--accent-color);
   box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.14);
 }
+
+/* ===== 代码审核（全屏 diff 对比） ===== */
+.chat-diff-review-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 5px 11px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent-color);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.chat-diff-review-btn:hover {
+  background-color: var(--surface-muted);
+}
+
+.chat-review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.chat-review-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background-color: var(--diff-popover-bg);
+  color: var(--text-primary);
+  box-shadow: 0 22px 54px var(--shadow-color);
+}
+
+.chat-review-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--diff-header-bg);
+}
+
+.chat-review-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-review-header-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background-color: var(--surface-inset);
+  color: var(--accent-color);
+}
+
+.chat-review-header-name {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.chat-review-header-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 560;
+  color: var(--text-secondary);
+}
+
+.chat-review-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.chat-review-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background-color: var(--surface-inset);
+}
+
+.chat-review-mode-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-review-mode-toggle button.active {
+  background-color: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.chat-review-mode-toggle button:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+.chat-review-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-review-tool-btn:hover:not(:disabled) {
+  background-color: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.chat-review-tool-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-review-tool-btn.active {
+  background-color: var(--accent-muted, rgba(56, 139, 253, 0.15));
+  color: var(--accent-color, #58a6ff);
+}
+
+.chat-review-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border-color);
+}
+
+.chat-review-nav-count {
+  min-width: 34px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-review-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-review-files {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 220px;
+  min-width: 0;
+  border-right: 1px solid var(--border-color);
+  background-color: var(--diff-bg);
+  transition: flex-basis 0.18s ease;
+}
+
+.chat-review-files.collapsed {
+  flex-basis: 40px;
+}
+
+.chat-review-files-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.chat-review-files-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.chat-review-files-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-review-files-collapse:hover {
+  background-color: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.chat-review-files-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.chat-review-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.chat-review-file-item:hover,
+.chat-review-file-item.active {
+  background-color: var(--surface-muted);
+}
+
+.chat-review-file-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.chat-review-file-item.active .chat-review-file-status {
+  color: var(--accent-color);
+}
+
+.chat-review-file-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+
+.chat-review-file-stats {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-review-files.collapsed .chat-review-files-title,
+.chat-review-files.collapsed .chat-review-file-path,
+.chat-review-files.collapsed .chat-review-file-stats {
+  display: none;
+}
+
+.chat-review-files.collapsed .chat-review-file-item {
+  justify-content: center;
+  padding: 4px;
+}
+
+.chat-review-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-review-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--diff-header-bg);
+}
+
+.chat-review-file-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chat-review-pane-labels {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.chat-review-pane-labels span {
+  min-width: 80px;
+  text-align: center;
+}
+
+/* ---- undo buttons ---- */
+
+.chat-review-file-undo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.chat-review-file-undo:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--border-color) 50%, var(--accent-color, #58a6ff));
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.chat-review-file-undo:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.chat-review-file-reverted {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-review-hunk-undo {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+  z-index: 2;
+}
+
+.chat-review-col-line:hover .chat-review-hunk-undo,
+.chat-review-line:hover .chat-review-hunk-undo {
+  opacity: 1;
+}
+
+.chat-review-hunk-undo:hover:not(:disabled) {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--border-color) 50%, var(--accent-color, #58a6ff));
+}
+
+.chat-review-hunk-undo:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.chat-review-hunk-badge {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  z-index: 2;
+}
+
+.chat-review-hunk-badge.reverted {
+  opacity: 0.7;
+}
+
+/* 已撤销的 hunk 行变暗 */
+.chat-review-col-line.hunk-reverted,
+.chat-review-line.hunk-reverted {
+  opacity: 0.45;
+}
+
+.chat-review-undo-error {
+  flex: 0 0 auto;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: #ff6b6b;
+  background: rgba(255, 79, 94, 0.08);
+  border-top: 1px solid rgba(255, 79, 94, 0.2);
+}
+
+.chat-review-diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background-color: var(--diff-bg);
+}
+
+.chat-review-split {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.chat-review-row {
+  display: flex;
+  min-width: 0;
+}
+
+/* 隐藏删除行时：左右两列独立紧凑（左=完整原文件，右=修改后内容） */
+.chat-review-split-cols {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.chat-review-col {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid var(--border-color);
+}
+
+.chat-review-col:last-child {
+  border-right: none;
+}
+
+.chat-review-col-line {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  position: relative;
+}
+
+/* 左列（原文件）保持干净原样；仅右列（修改后）标出增删 */
+.chat-review-col.right .chat-review-col-line.add {
+  background-color: rgba(36, 225, 147, 0.12);
+}
+
+.chat-review-col.right .chat-review-col-line.del {
+  background-color: rgba(255, 79, 94, 0.12);
+}
+
+.chat-review-col.right .chat-review-col-line.del .chat-review-code {
+  color: #ff4f5e;
+}
+
+.chat-review-cell {
+  display: flex;
+  align-items: flex-start;
+  width: 50%;
+  min-width: 50%;
+  border-right: 1px solid var(--border-color);
+}
+
+.chat-review-cell:last-child {
+  border-right: none;
+}
+
+.chat-review-cell.context,
+.chat-review-cell.empty {
+  background-color: var(--diff-bg);
+}
+
+.chat-review-cell.add {
+  background-color: rgba(36, 225, 147, 0.12);
+}
+
+/* 右栏集中显示：被删除的行在右侧以红色标出 */
+.chat-review-cell.right.del {
+  background-color: rgba(255, 79, 94, 0.12);
+}
+
+.chat-review-cell.right.del .chat-review-code {
+  color: #ff4f5e;
+}
+
+.chat-review-line-no {
+  flex: 0 0 48px;
+  padding: 0 8px 0 4px;
+  text-align: right;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  user-select: none;
+  font-size: 12px;
+}
+
+.chat-review-code {
+  flex: 1;
+  min-width: 0;
+  padding-right: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.chat-review-code-empty {
+  display: inline-block;
+}
+
+.chat-review-unified {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.chat-review-line {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  position: relative;
+}
+
+.chat-review-line.context {
+  background-color: var(--diff-bg);
+}
+
+.chat-review-line.del {
+  background-color: rgba(255, 79, 94, 0.12);
+}
+
+.chat-review-line.add {
+  background-color: rgba(36, 225, 147, 0.12);
+}
+
+.chat-review-line .chat-review-line-no.left {
+  flex-basis: 48px;
+}
+
+.chat-review-line .chat-review-line-no.right {
+  flex-basis: 48px;
+}
+
+.chat-review-marker {
+  flex: 0 0 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.chat-review-line.del .chat-review-marker {
+  color: #ff4f5e;
+}
+
+.chat-review-line.add .chat-review-marker {
+  color: #24e193;
+}
+
+.chat-review-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 32px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.chat-review-truncated {
+  padding: 8px 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  background-color: var(--diff-header-bg);
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-review-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.chat-review-spin {
+  animation: chat-review-spin 1s linear infinite;
+}
+
+@keyframes chat-review-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* highlight.js tokens — VSCode Dark+ (dark) / Light+ (light) */
+.chat-review-code .hljs-comment,
+.chat-review-code .hljs-quote {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.chat-review-code .hljs-keyword,
+.chat-review-code .hljs-selector-tag {
+  color: #569cd6;
+}
+
+.chat-review-code .hljs-literal {
+  color: #569cd6;
+}
+
+.chat-review-code .hljs-number {
+  color: #b5cea8;
+}
+
+.chat-review-code .hljs-string,
+.chat-review-code .hljs-addition {
+  color: #ce9178;
+}
+
+.chat-review-code .hljs-built_in,
+.chat-review-code .hljs-type {
+  color: #4ec9b0;
+}
+
+.chat-review-code .hljs-function,
+.chat-review-code .hljs-title,
+.chat-review-code .hljs-section {
+  color: #dcdcaa;
+}
+
+.chat-review-code .hljs-variable,
+.chat-review-code .hljs-template-variable {
+  color: #9cdcfe;
+}
+
+.chat-review-code .hljs-attr,
+.chat-review-code .hljs-attribute {
+  color: #9cdcfe;
+}
+
+.chat-review-code .hljs-symbol,
+.chat-review-code .hljs-bullet {
+  color: #b5cea8;
+}
+
+.chat-review-code .hljs-meta {
+  color: #c586c0;
+}
+
+.chat-review-code .hljs-tag {
+  color: #808080;
+}
+
+.chat-review-code .hljs-name {
+  color: #569cd6;
+}
+
+.chat-review-code .hljs-params {
+  color: #9cdcfe;
+}
+
+.chat-review-code .hljs-regexp {
+  color: #d16969;
+}
+
+.chat-review-code .hljs-link {
+  color: #3794ff;
+  text-decoration: underline;
+}
+
+.chat-review-code .hljs-selector-id,
+.chat-review-code .hljs-selector-class {
+  color: #9cdcfe;
+}
+
+.chat-review-code .hljs-formula {
+  color: #ce9178;
+}
+
+.chat-review-code .hljs-deletion {
+  color: #f44747;
+}
+
+.chat-review-code .hljs-emphasis {
+  font-style: italic;
+  color: #9cdcfe;
+}
+
+.chat-review-code .hljs-strong {
+  font-weight: bold;
+  color: #569cd6;
+}
+
+/* VSCode Light+ overrides */
+:root[data-theme="light"] .chat-review-code .hljs-comment,
+:root[data-theme="light"] .chat-review-code .hljs-quote {
+  color: #008000;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-keyword,
+:root[data-theme="light"] .chat-review-code .hljs-selector-tag {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-literal {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-number {
+  color: #098658;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-string,
+:root[data-theme="light"] .chat-review-code .hljs-addition {
+  color: #a31515;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-built_in,
+:root[data-theme="light"] .chat-review-code .hljs-type {
+  color: #267f99;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-function,
+:root[data-theme="light"] .chat-review-code .hljs-title,
+:root[data-theme="light"] .chat-review-code .hljs-section {
+  color: #795e26;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-variable,
+:root[data-theme="light"] .chat-review-code .hljs-template-variable {
+  color: #001080;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-attr,
+:root[data-theme="light"] .chat-review-code .hljs-attribute {
+  color: #001080;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-symbol,
+:root[data-theme="light"] .chat-review-code .hljs-bullet {
+  color: #098658;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-meta {
+  color: #af00db;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-tag {
+  color: #800000;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-name {
+  color: #800000;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-params {
+  color: #001080;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-regexp {
+  color: #811f3f;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-link {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-selector-id,
+:root[data-theme="light"] .chat-review-code .hljs-selector-class {
+  color: #ff0000;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-formula {
+  color: #a31515;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-deletion {
+  color: #ad3222;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-emphasis {
+  color: #001080;
+}
+
+:root[data-theme="light"] .chat-review-code .hljs-strong {
+  color: #0000ff;
+}

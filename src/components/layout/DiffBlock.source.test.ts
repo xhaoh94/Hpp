@@ -8,27 +8,25 @@ const chatPanelStyles = readFileSync(
   "utf8",
 );
 
-describe("diff popover viewport constraints", () => {
-  it("renders the popover at the document level", () => {
-    expect(diffBlockSource).toContain('import { createPortal } from "react-dom"');
-    expect(diffBlockSource).toContain("document.body");
+describe("diff block viewport constraints", () => {
+  it("adds an audit button and mounts the full-screen review dialog", () => {
+    expect(diffBlockSource).toContain('className="chat-diff-review-btn"');
+    expect(diffBlockSource).toContain("ScanSearch");
+    expect(diffBlockSource).toContain("<CodeReviewDialog");
+    expect(diffBlockSource).toContain("reviewOpen");
+    expect(diffBlockSource).toContain("initialFile");
   });
 
-  it("notifies the virtualized owner while a diff popover is open", () => {
+  it("opens the review dialog with the clicked file preselected", () => {
+    expect(diffBlockSource).toContain("reviewInitialFile");
+    expect(diffBlockSource).toContain("setReviewInitialFile(file.file)");
+    expect(diffBlockSource).toContain("setReviewOpen(true)");
+    expect(diffBlockSource).toContain('aria-haspopup="dialog"');
+  });
+
+  it("notifies the virtualized owner while the review dialog is open", () => {
     expect(diffBlockSource).toContain("onOpenChange?: (open: boolean) => void");
-    expect(diffBlockSource).toContain("onOpenChange?.(!!activeFile)");
-  });
-
-  it("keeps the popover inside the visible application area", () => {
-    const backdrop = chatPanelStyles.slice(
-      chatPanelStyles.indexOf(".chat-diff-popover-backdrop"),
-      chatPanelStyles.indexOf(".chat-diff-popover-header"),
-    );
-    expect(backdrop).toContain("position: fixed");
-    expect(backdrop).toContain("inset: 32px 0 0");
-    expect(backdrop).toContain("max-width: 100%");
-    expect(backdrop).toContain("max-height: 100%");
-    expect(backdrop).toContain("overflow: hidden");
+    expect(diffBlockSource).toContain("onOpenChange?.(reviewOpen)");
   });
 
   it("keeps the desktop summary header as compact as one visible file item", () => {

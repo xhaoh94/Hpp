@@ -156,7 +156,7 @@
 
 /* Fallback code block styling when highlight.js doesn't apply */
 .md-content .md-code-block pre code {
-  color: #c9d1d9;
+  color: #d4d4d4;
 }
 
 /* --- Lists --- */
@@ -270,98 +270,110 @@
 }
 
 /* ============================================================
-   highlight.js dark theme overrides (github-dark inspired)
+   highlight.js theme — VSCode Dark+ (dark) / Light+ (light)
    ============================================================ */
 
 .md-content .hljs {
   background: transparent !important;
-  color: #c9d1d9;
+  color: #d4d4d4;
 }
 
 .md-content .hljs-comment,
 .md-content .hljs-quote {
-  color: #8b949e;
+  color: #6a9955;
   font-style: italic;
 }
 
 .md-content .hljs-keyword,
 .md-content .hljs-selector-tag {
-  color: #ff7b72;
+  color: #569cd6;
 }
 
-.md-content .hljs-literal,
+.md-content .hljs-literal {
+  color: #569cd6;
+}
+
 .md-content .hljs-number {
-  color: #79c0ff;
+  color: #b5cea8;
 }
 
 .md-content .hljs-string,
 .md-content .hljs-addition {
-  color: #a5d6ff;
+  color: #ce9178;
 }
 
 .md-content .hljs-built_in,
 .md-content .hljs-type {
-  color: #ffa657;
+  color: #4ec9b0;
 }
 
+.md-content .hljs-function,
 .md-content .hljs-title,
 .md-content .hljs-section {
-  color: #d2a8ff;
-}
-
-.md-content .hljs-name {
-  color: #7ee787;
-}
-
-.md-content .hljs-attr,
-.md-content .hljs-attribute {
-  color: #79c0ff;
+  color: #dcdcaa;
 }
 
 .md-content .hljs-variable,
 .md-content .hljs-template-variable {
-  color: #ffa657;
+  color: #9cdcfe;
 }
 
-.md-content .hljs-deletion {
-  color: #ffa198;
-}
-
-.md-content .hljs-meta {
-  color: #8b949e;
-}
-
-.md-content .hljs-params {
-  color: #c9d1d9;
-}
-
-.md-content .hljs-selector-id,
-.md-content .hljs-selector-class {
-  color: #d2a8ff;
+.md-content .hljs-attr,
+.md-content .hljs-attribute {
+  color: #9cdcfe;
 }
 
 .md-content .hljs-symbol,
 .md-content .hljs-bullet {
-  color: #79c0ff;
+  color: #b5cea8;
+}
+
+.md-content .hljs-name {
+  color: #569cd6;
+}
+
+.md-content .hljs-meta {
+  color: #c586c0;
+}
+
+.md-content .hljs-tag {
+  color: #808080;
+}
+
+.md-content .hljs-regexp {
+  color: #d16969;
+}
+
+.md-content .hljs-link {
+  color: #3794ff;
+  text-decoration: underline;
+}
+
+.md-content .hljs-selector-id,
+.md-content .hljs-selector-class {
+  color: #9cdcfe;
+}
+
+.md-content .hljs-params {
+  color: #9cdcfe;
+}
+
+.md-content .hljs-formula {
+  color: #ce9178;
+}
+
+.md-content .hljs-deletion {
+  color: #f44747;
 }
 
 .md-content .hljs-emphasis {
   font-style: italic;
-  color: #d2a8ff;
+  color: #9cdcfe;
 }
 
 .md-content .hljs-strong {
   font-weight: 700;
-  color: #f0f6fc;
-}
-
-.md-content .hljs-link {
-  color: #5b9cf6;
-  text-decoration: underline;
-}
-
-.md-content .hljs-formula {
-  color: #d2a8ff;
+  color: #569cd6;
 }
 
 /* Diff syntax */
@@ -378,20 +390,6 @@
   display: inline;
   padding: 0 2px;
   border-radius: 2px;
-}
-
-/* JSON / key highlight */
-.md-content .hljs-attr {
-  color: #79c0ff;
-}
-
-/* Shell / bash */
-.md-content .hljs-meta {
-  color: #8b949e;
-}
-
-.md-content .hljs-built_in {
-  color: #ffa657;
 }
 
 /* ============================================================
@@ -475,57 +473,93 @@
 }
 
 :root[data-theme="light"] .md-content .hljs-comment,
-:root[data-theme="light"] .md-content .hljs-quote,
-:root[data-theme="light"] .md-content .hljs-meta {
-  color: #6e7781;
+:root[data-theme="light"] .md-content .hljs-quote {
+  color: #008000;
 }
 
 :root[data-theme="light"] .md-content .hljs-keyword,
 :root[data-theme="light"] .md-content .hljs-selector-tag {
-  color: #cf222e;
+  color: #0000ff;
 }
 
-:root[data-theme="light"] .md-content .hljs-literal,
-:root[data-theme="light"] .md-content .hljs-number,
-:root[data-theme="light"] .md-content .hljs-attr,
-:root[data-theme="light"] .md-content .hljs-attribute,
-:root[data-theme="light"] .md-content .hljs-symbol,
-:root[data-theme="light"] .md-content .hljs-bullet,
-:root[data-theme="light"] .md-content .hljs-link {
-  color: #0550ae;
+:root[data-theme="light"] .md-content .hljs-literal {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .md-content .hljs-number {
+  color: #098658;
 }
 
 :root[data-theme="light"] .md-content .hljs-string,
 :root[data-theme="light"] .md-content .hljs-addition {
-  color: #0a3069;
+  color: #a31515;
 }
 
 :root[data-theme="light"] .md-content .hljs-built_in,
-:root[data-theme="light"] .md-content .hljs-type,
-:root[data-theme="light"] .md-content .hljs-variable,
-:root[data-theme="light"] .md-content .hljs-template-variable {
-  color: #953800;
+:root[data-theme="light"] .md-content .hljs-type {
+  color: #267f99;
 }
 
+:root[data-theme="light"] .md-content .hljs-function,
 :root[data-theme="light"] .md-content .hljs-title,
-:root[data-theme="light"] .md-content .hljs-section,
-:root[data-theme="light"] .md-content .hljs-selector-id,
-:root[data-theme="light"] .md-content .hljs-selector-class,
-:root[data-theme="light"] .md-content .hljs-emphasis,
-:root[data-theme="light"] .md-content .hljs-formula {
-  color: #8250df;
+:root[data-theme="light"] .md-content .hljs-section {
+  color: #795e26;
+}
+
+:root[data-theme="light"] .md-content .hljs-variable,
+:root[data-theme="light"] .md-content .hljs-template-variable {
+  color: #001080;
+}
+
+:root[data-theme="light"] .md-content .hljs-attr,
+:root[data-theme="light"] .md-content .hljs-attribute {
+  color: #001080;
+}
+
+:root[data-theme="light"] .md-content .hljs-symbol,
+:root[data-theme="light"] .md-content .hljs-bullet {
+  color: #098658;
 }
 
 :root[data-theme="light"] .md-content .hljs-name {
-  color: #116329;
+  color: #800000;
+}
+
+:root[data-theme="light"] .md-content .hljs-meta {
+  color: #af00db;
+}
+
+:root[data-theme="light"] .md-content .hljs-tag {
+  color: #800000;
+}
+
+:root[data-theme="light"] .md-content .hljs-regexp {
+  color: #811f3f;
+}
+
+:root[data-theme="light"] .md-content .hljs-link {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .md-content .hljs-selector-id,
+:root[data-theme="light"] .md-content .hljs-selector-class {
+  color: #ff0000;
+}
+
+:root[data-theme="light"] .md-content .hljs-formula {
+  color: #a31515;
 }
 
 :root[data-theme="light"] .md-content .hljs-deletion {
-  color: #82071e;
+  color: #ad3222;
+}
+
+:root[data-theme="light"] .md-content .hljs-emphasis {
+  color: #001080;
 }
 
 :root[data-theme="light"] .md-content .hljs-strong {
-  color: #1f2328;
+  color: #0000ff;
 }
 
 :root[data-theme="light"] .md-content .md-code-block pre::-webkit-scrollbar-thumb {

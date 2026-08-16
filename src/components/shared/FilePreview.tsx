@@ -92,6 +92,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   const [imageSrc, setImageSrc] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isBinary, setIsBinary] = useState(false);
   const [previewMode, setPreviewMode] = useState<boolean | null>(null);
   const [previewHistory, setPreviewHistory] = useState<string[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -169,6 +170,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
       setError(null);
       setContent("");
       setImageSrc("");
+      setIsBinary(false);
       try {
         if (isImage) {
           const result = await window.electronAPI.readFileDataUrl(activeFilePath);
@@ -182,7 +184,11 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
           const result = await window.electronAPI.readFile(activeFilePath);
           if (cancelled) return;
           if (result.success) {
-            setContent(result.content || "");
+            if (result.binary) {
+              setIsBinary(true);
+            } else {
+              setContent(result.content || "");
+            }
           } else {
             setError(result.error || "无法读取文件");
           }
@@ -623,6 +629,16 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
             <div className="fp-status">加载中...</div>
           ) : error ? (
             <div className="fp-status fp-error">{error}</div>
+          ) : isBinary ? (
+            <div className="fp-binary-notice">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2">
+                <path d="M6 2H14L20 8V20C20 21.1046 19.1046 22 18 22H6C4.89543 22 4 21.1046 4 20V4C4 2.89543 4.89543 2 6 2Z" />
+                <path d="M14 2V8H20" />
+                <path d="M9 13L15 13M9 17L15 17" strokeLinecap="round" />
+              </svg>
+              <p className="fp-binary-title">无法显示内容</p>
+              <p className="fp-binary-desc">该文件是二进制文件或使用了不受支持的文本编码，无法在编辑器中显示。</p>
+            </div>
           ) : isImage ? (
             <div className="fp-image-preview">
               {imageSrc ? (
@@ -675,7 +691,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
           )}
         </div>
         <div className="fp-footer">
-          <span>{isImage ? "图片预览" : "右键当前行或选中内容可发送到聊天"}</span>
+          <span>{isImage ? "图片预览" : isBinary ? "二进制文件" : "右键当前行或选中内容可发送到聊天"}</span>
           {!isImage && totalLines > MAX_RENDER_LINES && (
             <span>当前显示第 {renderWindow.startIndex + 1} - {renderWindow.endIndex} 行，共 {totalLines} 行</span>
           )}

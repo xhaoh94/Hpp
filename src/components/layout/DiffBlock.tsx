@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { ChevronDown, FileDiff as FileDiffIcon, Loader2, Undo2, X } from "lucide-react";
-import { buildDiffSummary, type DiffFileSummary, type DiffLike } from "@shared/diff-summary";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, FileDiff as FileDiffIcon, Loader2, ScanSearch, Undo2 } from "lucide-react";
+import { buildDiffSummary, type DiffLike } from "@shared/diff-summary";
+import { uiText } from "@/i18n/text";
+import { CodeReviewDialog } from "./CodeReviewDialog";
 
 type DiffBlockProps = {
   diffs: DiffLike[];
@@ -11,29 +12,12 @@ type DiffBlockProps = {
 
 const DEFAULT_VISIBLE_FILES = 3;
 
-const renderDiffLines = (file: string, patches: string[]) =>
-  patches.join("\n").split("\n").map((line, index) => {
-    let cls = "chat-diff-line";
-    if (line.startsWith("@@") || line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++")) {
-      cls += " chat-diff-header-line";
-    } else if (line.startsWith("+")) {
-      cls += " chat-diff-add-line";
-    } else if (line.startsWith("-")) {
-      cls += " chat-diff-del-line";
-    }
-    return (
-      <span key={`${file}-${index}`} className={cls}>
-        {line || " "}
-      </span>
-    );
-  });
-
 export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) {
   const [expanded, setExpanded] = useState(false);
-  const [activeFile, setActiveFile] = useState<DiffFileSummary | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewInitialFile, setReviewInitialFile] = useState<string | null>(null);
   const [revertState, setRevertState] = useState<"idle" | "reverting" | "reverted">("idle");
   const [error, setError] = useState<string | null>(null);
-  const popoverRef = useRef<HTMLDivElement | null>(null);
   const summary = useMemo(() => buildDiffSummary(diffs, projectPath), [diffs, projectPath]);
   const hiddenCount = Math.max(0, summary.files.length - DEFAULT_VISIBLE_FILES);
   const visibleFiles = expanded ? summary.files : summary.files.slice(0, DEFAULT_VISIBLE_FILES);
@@ -55,30 +39,8 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
         : "撤销本次文件修改";
 
   useEffect(() => {
-    onOpenChange?.(!!activeFile);
-  }, [activeFile, onOpenChange]);
-
-  useEffect(() => {
-    if (!activeFile) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setActiveFile(null);
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [activeFile]);
-
-  useEffect(() => {
-    if (!activeFile) return;
-    const handleMouseDown = (event: MouseEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (popoverRef.current?.contains(target)) return;
-      if (target instanceof Element && target.closest(".chat-diff-file-row")) return;
-      setActiveFile(null);
-    };
-    document.addEventListener("mousedown", handleMouseDown);
-    return () => document.removeEventListener("mousedown", handleMouseDown);
-  }, [activeFile]);
+    onOpenChange?.(reviewOpen);
+  }, [reviewOpen, onOpenChange]);
 
   const handleRevert = async () => {
     if (!canRevert || !projectPath) return;
@@ -132,22 +94,37 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
           <span>{revertState === "reverted" ? "已撤销" : "撤销"}</span>
         </button>
         )}
+        <button
+          type="button"
+          className="chat-diff-review-btn"
+          onClick={() => {
+            setReviewInitialFile(null);
+            setReviewOpen(true);
+          }}
+          title={uiText.review.audit}
+          aria-label={uiText.review.audit}
+        >
+          <ScanSearch size={16} strokeWidth={2} />
+          <span>{uiText.review.audit}</span>
+        </button>
       </div>
 
       <div className="chat-diff-file-list">
         {visibleFiles.map((file) => {
-          const isActive = activeFile?.file === file.file;
           const hasPatch = file.patches.length > 0;
           return (
-            <div key={file.file} className={`chat-diff-file-item ${isActive ? "active" : ""}`}>
+            <div key={file.file} className="chat-diff-file-item">
               <button
                 type="button"
                 className="chat-diff-file-row"
-                onClick={() => hasPatch && setActiveFile((current) => current?.file === file.file ? null : file)}
+                onClick={() => {
+                  if (!hasPatch) return;
+                  setReviewInitialFile(file.file);
+                  setReviewOpen(true);
+                }}
                 disabled={!hasPatch}
                 title={hasPatch ? file.file : `${file.file}（没有可查看的 diff）`}
-                aria-haspopup={hasPatch ? "dialog" : undefined}
-                aria-expanded={hasPatch ? isActive : undefined}
+                aria-haspopup="dialog"
               >
                 <span className="chat-diff-file-path">
                   {file.file}
@@ -160,7 +137,7 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
                   <ChevronDown
                     size={14}
                     strokeWidth={2}
-                    className={`chat-diff-file-chevron ${isActive ? "expanded" : ""}`}
+                    className="chat-diff-file-chevron"
                     aria-hidden="true"
                   />
                 )}
@@ -169,43 +146,6 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
           );
         })}
       </div>
-
-      {activeFile && createPortal(
-        <div
-          className="chat-diff-popover-backdrop"
-          onMouseDown={() => setActiveFile(null)}
-        >
-          <div
-            ref={popoverRef}
-            className="chat-diff-popover"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`${activeFile.file} diff`}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div className="chat-diff-popover-header">
-              <span className="chat-diff-popover-title">{activeFile.file}</span>
-              <span className="chat-diff-popover-stats">
-                <span className="chat-diff-add">+{activeFile.additions}</span>
-                <span className="chat-diff-del">-{activeFile.deletions}</span>
-              </span>
-              <button
-                type="button"
-                className="chat-diff-popover-close"
-                onClick={() => setActiveFile(null)}
-                title="关闭 diff"
-                aria-label="关闭 diff"
-              >
-                <X size={16} strokeWidth={2} />
-              </button>
-            </div>
-            <pre className="chat-diff-popover-content">
-              {renderDiffLines(activeFile.file, activeFile.patches)}
-            </pre>
-          </div>
-        </div>,
-        document.body,
-      )}
 
       {hiddenCount > 0 && (
         <button
@@ -229,6 +169,14 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
           {error}
         </div>
       )}
+
+      <CodeReviewDialog
+        open={reviewOpen}
+        diffs={diffs}
+        projectPath={projectPath}
+        initialFile={reviewInitialFile ?? undefined}
+        onClose={() => setReviewOpen(false)}
+      />
     </section>
   );
 }

@@ -240,7 +240,7 @@ export interface ElectronAPI {
   readDirectory: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   showItemInFolder: (targetPath: string) => Promise<{ success: boolean; error?: string }>;
   indexProjectFiles?: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
-  readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
+  readFile: (filePath: string) => Promise<{ success: boolean; content?: string; binary?: boolean; error?: string }>;
   readFileDataUrl: (filePath: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>;
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getPathForFile: (file: File) => string;
