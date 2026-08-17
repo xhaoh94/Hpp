@@ -96,7 +96,7 @@ export function CodeReviewDialog({
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ReviewViewMode>("split");
   const [filesCollapsed, setFilesCollapsed] = useState(false);
-  const [showDeletedInRight, setShowDeletedInRight] = useState(true);
+  const [showDeletedInRight, setShowDeletedInRight] = useState(false);
   const [diffCursor, setDiffCursor] = useState(0);
   const [fileContent, setFileContent] = useState<Record<string, string | null>>({});
   const loadedRef = useRef<Set<string>>(new Set());
@@ -600,19 +600,43 @@ export function CodeReviewDialog({
                     ) : viewMode === "split" ? (
                       <div className="chat-review-split">
                         <div className="chat-review-split-cols">
-                          {/* 左列：原文件原文——始终完整、干净，不受开关影响 */}
+                          {/* 左列：原文件原文——被删除的行标红，始终完整显示 */}
                           <div className="chat-review-col left">
                             {highlightedPairs.map((pair, index) => {
                               if (!pair.left) return null;
                               const isDiff = pair.left.cell.type === "del";
+                              const hunkIdx = hunkStartMap.get(index);
+                              // 右列默认隐藏删除行时，hunk 起始的删除行在右列不可见，在左列补充撤销按钮。
+                              const rightHidden =
+                                !pair.right && !!pair.left && pair.left.cell.type === "del" && !showDeletedInRight;
                               return (
                                 <div
-                                  className="chat-review-col-line"
+                                  className={`chat-review-col-line ${pair.left.cell.type}${hunkIdx !== undefined && isHunkReverted(hunkIdx) ? " hunk-reverted" : ""}`}
                                   key={index}
                                   data-review-diff-index={isDiff ? index : undefined}
                                 >
                                   <span className="chat-review-line-no">{pair.left.cell.lineNo}</span>
                                   <span className="chat-review-code">{renderTokens(pair.left.tokens)}</span>
+                                  {hunkIdx !== undefined && rightHidden && (
+                                    isHunkReverted(hunkIdx) ? (
+                                      <span className="chat-review-hunk-badge reverted">已撤销</span>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        className="chat-review-hunk-undo"
+                                        onClick={() => handleHunkUndo(hunkIdx)}
+                                        disabled={isHunkUndoing(hunkIdx)}
+                                        title="撤销此段修改"
+                                      >
+                                        {isHunkUndoing(hunkIdx) ? (
+                                          <Loader2 className="chat-review-spin" size={11} />
+                                        ) : (
+                                          <Undo2 size={11} strokeWidth={2.2} />
+                                        )}
+                                        <span>撤销</span>
+                                      </button>
+                                    )
+                                  )}
                                 </div>
                               );
                             })}

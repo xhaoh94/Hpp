@@ -5861,7 +5861,15 @@ body.chat-questionnaire-resizing .chat-bubble {
   position: relative;
 }
 
-/* 左列（原文件）保持干净原样；仅右列（修改后）标出增删 */
+/* 左列（原文件）：被删除的行标红；右列（修改后）标出增删 */
+.chat-review-col.left .chat-review-col-line.del {
+  background-color: rgba(255, 79, 94, 0.12);
+}
+
+.chat-review-col.left .chat-review-col-line.del .chat-review-code {
+  color: #ff4f5e;
+}
+
 .chat-review-col.right .chat-review-col-line.add {
   background-color: rgba(36, 225, 147, 0.12);
 }
