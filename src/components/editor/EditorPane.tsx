@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorView, basicSetup } from "codemirror";
-import { Compartment, EditorState, EditorSelection, StateEffect, StateField } from "@codemirror/state";
+import { Compartment, EditorState, EditorSelection, Extension, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, keymap } from "@codemirror/view";
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
@@ -13,6 +13,8 @@ import { python } from "@codemirror/lang-python";
 import { sql } from "@codemirror/lang-sql";
 import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
+import { lua } from "@codemirror/legacy-modes/mode/lua";
+import { csharp } from "@codemirror/legacy-modes/mode/clike";
 import { uiText } from "@/i18n/text";
 import { useChatStore } from "@/stores/chat-store";
 import { requestComposerInsert } from "@/lib/composer-insert-event";
@@ -144,7 +146,7 @@ function buildEditorTheme(colors: typeof DARK_COLORS) {
       "&.cm-focused": { outline: "none" },
       ".cm-scroller": {
         fontFamily:
-          '"Cascadia Code", "Fira Code", Consolas, monospace',
+          'Consolas, "Cascadia Code", "Courier New", monospace',
         lineHeight: "1.6",
       },
       ".cm-content": {
@@ -227,7 +229,7 @@ const searchHighlightField = StateField.define<EditorSearchHighlight>({
     }),
 });
 
-function getLanguageExtension(filePath: string): ReturnType<typeof javascript>[] {
+function getLanguageExtension(filePath: string): Extension[] {
   const fileName = filePath.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   const ext = fileName.split(".").pop() ?? "";
   const base = fileName.replace(/\.(json|jsonc)$/i, "");
@@ -271,6 +273,10 @@ function getLanguageExtension(filePath: string): ReturnType<typeof javascript>[]
     case "yaml":
     case "yml":
       return [yaml()];
+    case "lua":
+      return [StreamLanguage.define(lua)];
+    case "cs":
+      return [StreamLanguage.define(csharp)];
     default:
       return [];
   }

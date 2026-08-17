@@ -3191,74 +3191,88 @@ export default function App() {
     return () => { void listener?.remove(); };
   }, [checkAndroidUpdate, flushCurrentDraft, syncAndroidUpdateDownload]);
 
+  const handleBackButtonRef = useRef<() => void>(() => {});
+  handleBackButtonRef.current = () => {
+    const state = backNavigationStateRef.current;
+    if (state.updateDialogOpen) {
+      closeUpdateDialog();
+      return;
+    }
+    if (state.pairingMode !== "closed") {
+      setPairingMode("closed");
+      return;
+    }
+    if (state.editingHostId) {
+      if (!state.savingHostId) setEditingHostId(null);
+      return;
+    }
+    if (state.editingQueueItem) {
+      setEditingQueueItem(null);
+      return;
+    }
+    if (state.reloadConfirmOpen) {
+      if (!state.reloadingSession) setReloadConfirmOpen(false);
+      return;
+    }
+    if (state.historyOpen) {
+      setHistoryOpen(false);
+      return;
+    }
+    if (state.referenceSheetOpen) {
+      setReferenceSheetOpen(false);
+      return;
+    }
+    if (state.actionSheetOpen) {
+      setActionSheetOpen(false);
+      return;
+    }
+    if (state.createProject) {
+      if (!state.commandBusy) setCreateProject(null);
+      return;
+    }
+    if (state.historyProjectId) {
+      setHistoryProjectId(null);
+      return;
+    }
+    if (selectedSessionRef.current) {
+      flushCurrentDraft();
+      selectedSessionRef.current = null;
+      setSelectedSessionId(null);
+      return;
+    }
+    if (activeHostRef.current) {
+      leaveActiveHost();
+      return;
+    }
+    if (state.composerAddMenuOpen) {
+      setComposerAddMenuOpen(false);
+      return;
+    }
+    if (state.drawerOpen) {
+      setDrawerOpen(false);
+      return;
+    }
+    void CapacitorApp.exitApp();
+  };
+
   useEffect(() => {
     if (!IS_NATIVE_APP) return;
-    let listener: { remove: () => Promise<void> } | undefined;
-    const handleBackButton = () => {
-      const state = backNavigationStateRef.current;
-      if (state.updateDialogOpen) {
-        closeUpdateDialog();
-        return;
+    let removed = false;
+    let remove: (() => Promise<void>) | undefined;
+    void CapacitorApp.addListener("backButton", () => {
+      handleBackButtonRef.current();
+    }).then((handle) => {
+      if (removed) {
+        void handle.remove();
+      } else {
+        remove = handle.remove;
       }
-      if (state.pairingMode !== "closed") {
-        setPairingMode("closed");
-        return;
-      }
-      if (state.editingHostId) {
-        if (!state.savingHostId) setEditingHostId(null);
-        return;
-      }
-      if (state.editingQueueItem) {
-        setEditingQueueItem(null);
-        return;
-      }
-      if (state.reloadConfirmOpen) {
-        if (!state.reloadingSession) setReloadConfirmOpen(false);
-        return;
-      }
-      if (state.historyOpen) {
-        setHistoryOpen(false);
-        return;
-      }
-      if (state.referenceSheetOpen) {
-        setReferenceSheetOpen(false);
-        return;
-      }
-      if (state.actionSheetOpen) {
-        setActionSheetOpen(false);
-        return;
-      }
-      if (state.createProject) {
-        if (!state.commandBusy) setCreateProject(null);
-        return;
-      }
-      if (state.historyProjectId) {
-        setHistoryProjectId(null);
-        return;
-      }
-      if (state.composerAddMenuOpen) {
-        setComposerAddMenuOpen(false);
-        return;
-      }
-      if (state.drawerOpen) {
-        setDrawerOpen(false);
-        return;
-      }
-      if (selectedSessionRef.current) {
-        flushCurrentDraft();
-        selectedSessionRef.current = null;
-        setSelectedSessionId(null);
-        return;
-      }
-      if (activeHostRef.current) {
-        leaveActiveHost();
-        return;
-      }
-      void CapacitorApp.exitApp();
+    });
+    return () => {
+      removed = true;
+      void remove?.();
     };
-    void CapacitorApp.addListener("backButton", handleBackButton).then((handle) => { listener = handle; });
-    return () => { void listener?.remove(); };
-  }, [closeUpdateDialog, flushCurrentDraft, leaveActiveHost]);
+  }, []);
 
   useEffect(() => () => clientRef.current?.disconnect(), []);
 
