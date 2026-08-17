@@ -33,6 +33,7 @@ import {
 import { useProjectStore, type AgentStatus, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { useAppStore } from "@/stores/app-store";
+import { useEditorStore } from "@/stores/editor-store";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import { showAppAlert } from "@/lib/app-dialog";
@@ -2540,6 +2541,10 @@ export function ChatPanel({
     const resolvedPath = resolveProjectFilePath(path, activeProject?.path || "");
     if (options.preview === false) {
       useAppStore.getState().revealFile(resolvedPath, { preview: false });
+      return;
+    }
+    if (useEditorStore.getState().mode) {
+      useEditorStore.getState().openFile(resolvedPath);
       return;
     }
     setPreviewFile(resolvedPath);

@@ -47,6 +47,11 @@ type CodeReviewDialogProps = {
   initialFile?: string;
   onClose: () => void;
   onOpenFile?: (path: string, options?: { preview?: boolean }) => void;
+  onRevertAll?: () => void;
+  revertState?: "idle" | "reverting" | "reverted";
+  revertCanRevert?: boolean;
+  revertTitle?: string;
+  showRevertButton?: boolean;
 };
 
 const MAX_RENDER_LINES = 5000;
@@ -92,6 +97,11 @@ export function CodeReviewDialog({
   initialFile,
   onClose,
   onOpenFile,
+  onRevertAll,
+  revertState = "idle",
+  revertCanRevert = false,
+  revertTitle,
+  showRevertButton = false,
 }: CodeReviewDialogProps) {
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ReviewViewMode>("split");
@@ -557,6 +567,25 @@ export function CodeReviewDialog({
                   );
                 })}
               </div>
+              {!filesCollapsed && showRevertButton && onRevertAll && (
+                <div className="chat-review-files-footer">
+                  <button
+                    type="button"
+                    className="chat-review-revert-all-btn"
+                    onClick={onRevertAll}
+                    disabled={!revertCanRevert}
+                    title={revertTitle}
+                    aria-label={revertTitle}
+                  >
+                    {revertState === "reverting" ? (
+                      <Loader2 className="chat-review-spin" size={14} strokeWidth={2} />
+                    ) : (
+                      <Undo2 size={14} strokeWidth={2} />
+                    )}
+                    <span>{revertState === "reverted" ? "已撤销" : "撤销全部修改"}</span>
+                  </button>
+                </div>
+              )}
             </aside>
 
             <div className="chat-review-content">

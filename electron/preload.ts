@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   indexProjectFiles: (dirPath: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:indexProjectFiles", dirPath, filters),
   readFile: (filePath: string) => ipcRenderer.invoke("fs:readFile", filePath),
+  writeFile: (filePath: string, content: string) =>
+    ipcRenderer.invoke("fs:writeFile", filePath, content),
   readFileDataUrl: (filePath: string) => ipcRenderer.invoke("fs:readFileDataUrl", filePath),
   statPath: (filePath: string) => ipcRenderer.invoke("fs:statPath", filePath),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

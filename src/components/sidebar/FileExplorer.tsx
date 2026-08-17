@@ -11,6 +11,7 @@ import {
 import { useAppStore, type FileRevealRequest } from "@/stores/app-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useChatStore } from "@/stores/chat-store";
+import { useEditorStore } from "@/stores/editor-store";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { useFileFilters } from "@/hooks/useFileFilters";
 import { isFileTreePathWithin, isSameFileTreePath } from "@/lib/file-tree-paths";
@@ -328,7 +329,11 @@ export function FileExplorer() {
   const activeTreeCommand = treeCommand?.scopeKey === treeScopeKey ? treeCommand : null;
 
   const handleFileClick = useCallback((path: string) => {
-    setPreviewFile(path);
+    if (useEditorStore.getState().mode) {
+      useEditorStore.getState().openFile(path);
+    } else {
+      setPreviewFile(path);
+    }
   }, []);
 
   const handleSelect = useCallback((entry: FileEntry, event: MouseEvent<HTMLDivElement>, siblings: FileEntry[]) => {
@@ -467,7 +472,15 @@ export function FileExplorer() {
 
   useEffect(() => {
     if (!revealRequest) return;
-    setPreviewFile(revealRequest.preview ? revealRequest.path : null);
+    if (revealRequest.preview) {
+      if (useEditorStore.getState().mode) {
+        useEditorStore.getState().openFile(revealRequest.path);
+      } else {
+        setPreviewFile(revealRequest.path);
+      }
+    } else {
+      setPreviewFile(null);
+    }
   }, [revealRequest?.requestId]);
 
   useEffect(() => {

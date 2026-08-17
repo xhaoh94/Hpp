@@ -1,0 +1,537 @@
+/* ===== Editor layout ===== */
+.editor-area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-secondary);
+}
+
+/* ===== Tab bar ===== */
+.editor-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  height: 36px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  user-select: none;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.editor-tabs::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.editor-tabs-empty {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ===== Tab item ===== */
+.editor-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  min-width: 0;
+  max-width: 200px;
+  height: 100%;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.12s, background-color 0.12s;
+}
+
+.editor-tab:hover {
+  color: var(--text-primary);
+}
+
+.editor-tab.active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.editor-tab.active::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-color);
+}
+
+.editor-tab-pin {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.editor-tab-icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.editor-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  line-height: 1;
+}
+
+.editor-tab-dirty {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-color);
+}
+
+.editor-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: background-color 0.12s, opacity 0.12s;
+}
+
+.editor-tab:hover .editor-tab-close,
+.editor-tab.active .editor-tab-close {
+  opacity: 0.7;
+}
+
+.editor-tab-close:hover {
+  background: var(--bg-hover);
+  opacity: 1 !important;
+}
+
+/* ===== Panes ===== */
+.editor-panes {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ===== Empty state ===== */
+.editor-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  color: var(--text-secondary);
+}
+
+.editor-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  opacity: 0.5;
+}
+
+.editor-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.editor-empty-desc {
+  font-size: 13px;
+}
+
+/* ===== Editor pane ===== */
+.editor-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.editor-pane-hidden {
+  display: none;
+}
+
+.editor-pane-codemirror {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor-pane-status {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.editor-pane-status-error {
+  color: #e74c3c;
+}
+
+/* ===== Editor scrollbars — same style as chat area =====
+   Track is always transparent. Thumb is hidden by default,
+   only appears when the mouse is over the editor. */
+.cm-editor .cm-scroller {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: transparent transparent;
+}
+
+.cm-editor:hover .cm-scroller {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 6px;
+  min-height: 32px;
+}
+
+.cm-editor:hover .cm-scroller::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+.cm-editor:hover .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* ===== Status bar ===== */
+.editor-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 12px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.editor-status-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-status-spacer {
+  flex: 1;
+}
+
+/* ===== Tab context menu ===== */
+.editor-tab-menu {
+  position: fixed;
+  min-width: 160px;
+  padding: 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+}
+
+.editor-tab-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.editor-tab-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.editor-tab-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border-color);
+}
+
+/* ===== Editor content context menu (send to chat) ===== */
+.editor-context-menu {
+  position: fixed;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  z-index: 1001;
+  min-width: 200px;
+  overflow: hidden;
+}
+
+.editor-context-menu-btn {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.editor-context-menu-title {
+  font-weight: 600;
+}
+
+.editor-context-menu-target {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.editor-context-menu-btn:hover {
+  background: var(--accent-color);
+  color: white;
+}
+
+.editor-context-menu-btn:hover .editor-context-menu-target {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* ===== Find widget & Go-to-line widget (synced from FilePreview) ===== */
+.editor-find-widget {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 10;
+  min-width: 440px;
+  max-width: calc(100% - 32px);
+  min-height: 36px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  box-shadow: 0 4px 16px var(--shadow-color);
+}
+
+.editor-widget-input {
+  min-width: 0;
+  flex: 1;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  outline: none;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.editor-widget-input:focus {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.editor-widget-input-error,
+.editor-widget-input-error:focus {
+  border-color: var(--danger-color);
+  box-shadow: 0 0 0 1px var(--danger-color);
+}
+
+.editor-find-count {
+  min-width: 48px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-search-option-btn {
+  width: 25px;
+  height: 24px;
+  flex: 0 0 25px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 22px;
+}
+
+.editor-search-option-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.editor-search-option-btn.active {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+  color: white;
+}
+
+.editor-search-option-btn.editor-whole-word {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.editor-widget-btn {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 26px;
+}
+
+.editor-widget-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.editor-widget-btn:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.editor-go-to-line-widget {
+  min-width: 330px;
+}
+
+.editor-go-to-line-error {
+  color: var(--danger-color);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* ===== Search match highlights in the editor ===== */
+.editor-search-match {
+  background-color: rgba(255, 215, 0, 0.25);
+}
+
+.editor-search-match-current {
+  background-color: rgba(255, 140, 0, 0.55) !important;
+}
+
+/* ===== Confirm dialog ===== */
+.editor-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.editor-confirm {
+  min-width: 320px;
+  max-width: 420px;
+  padding: 20px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.editor-confirm-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.editor-confirm-message {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.editor-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.editor-confirm-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+
+.editor-confirm-btn:hover {
+  background: var(--bg-hover);
+}
+
+.editor-confirm-btn.primary {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: #fff;
+}
+
+.editor-confirm-btn.primary:hover {
+  opacity: 0.9;
+}

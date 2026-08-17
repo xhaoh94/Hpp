@@ -828,7 +828,7 @@ button:disabled { opacity: 0.48; }
 .message-content h3 { font-size: 14px; }
 .message-content a { color: var(--accent); }
 .message-content code { padding: 2px 4px; border-radius: 3px; background: var(--code); font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
-.message-content pre { overflow-x: auto; padding: 10px; border: 1px solid var(--user-bubble-border); border-radius: 5px; background: var(--user-bubble); }
+.message-content pre { overflow-x: auto; padding: 10px; border: 1px solid var(--user-bubble-border); border-radius: 5px; background: var(--user-bubble); -webkit-mask-image: linear-gradient(to right, transparent 0, black 12px, black calc(100% - 12px), transparent 100%); mask-image: linear-gradient(to right, transparent 0, black 12px, black calc(100% - 12px), transparent 100%); }
 .message-content pre code { padding: 0; background: transparent; }
 .message-content blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--border-strong); color: var(--muted); }
 .message-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }

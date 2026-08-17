@@ -39,6 +39,9 @@ describe("store handlers", () => {
 
     await expect(save({}, "settings", { theme: "dark" })).resolves.toEqual({ success: true });
     await expect(load({}, "settings")).resolves.toEqual({ theme: "dark" });
+
+    await expect(save({}, "editor", { mode: true, tabs: [], activeKey: null })).resolves.toEqual({ success: true });
+    await expect(load({}, "editor")).resolves.toEqual({ mode: true, tabs: [], activeKey: null });
   });
 
   it("rejects path traversal keys", async () => {

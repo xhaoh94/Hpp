@@ -201,8 +201,43 @@
 
 .titlebar-controls {
   display: flex;
+  align-items: center;
+  gap: 4px;
   height: 100%;
+  padding-right: 4px;
   -webkit-app-region: no-drag;
+}
+
+.titlebar-mode-btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.titlebar-mode-btn:hover {
+  border-color: var(--accent-color);
+  color: var(--text-primary);
+}
+
+.titlebar-mode-btn.active {
+  border-color: var(--accent-color);
+  background: rgba(96, 165, 250, 0.16);
+  color: #8ec5ff;
+}
+
+:root[data-theme="light"] .titlebar-mode-btn.active {
+  background: rgba(9, 105, 218, 0.12);
+  color: #0969da;
 }
 
 .titlebar-btn {

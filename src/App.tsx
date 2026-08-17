@@ -10,9 +10,12 @@ import {
 import { Sidebar } from "./components/layout/Sidebar";
 import { ContentArea } from "./components/layout/ContentArea";
 import { ChatPanel } from "./components/layout/ChatPanel";
+import { EditorArea } from "./components/editor/EditorArea";
 import { FileSearch, type FileSearchSelection } from "./components/shared/FileSearch";
 import { useDataPersistence } from "./hooks/useDataPersistence";
+import { useEditorPersistence } from "./hooks/useEditorPersistence";
 import { DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useAppStore } from "./stores/app-store";
+import { useEditorStore } from "./stores/editor-store";
 import { useAgentCatalogStore } from "./stores/agent-catalog-store";
 import { useChatStore } from "./stores/chat-store";
 import { useProjectStore } from "./stores/project-store";
@@ -39,22 +42,34 @@ const ACTIVITY_BAR_WIDTH = 48;
 const SIDEBAR_COLLAPSE_THRESHOLD = 160;
 const SIDEBAR_MAX_WIDTH = 520;
 const CHAT_MIN_WIDTH = 360;
+const DEFAULT_CHAT_WIDTH = 450;
+/** 编辑器模式下聊天区可拖动的最小宽度。 */
+const CHAT_RESIZE_MIN_WIDTH = 300;
+/** 编辑器列宽低于此值时自动切回预览模式。 */
+const EDITOR_MIN_WIDTH = 240;
 const SIDEBAR_KEYBOARD_STEP = 16;
 const SIDEBAR_KEYBOARD_LARGE_STEP = 48;
+const CHAT_RESIZE_KEYBOARD_STEP = 16;
+const CHAT_RESIZE_KEYBOARD_LARGE_STEP = 48;
 
 export default function App() {
   useDataPersistence();
+  useEditorPersistence();
   const [showFileSearch, setShowFileSearch] = useState(false);
   const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);
   const layoutContentRef = useRef<HTMLDivElement>(null);
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
+  const chatResizeCleanupRef = useRef<(() => void) | null>(null);
   const floatingToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [sidebarHoverExpanded, setSidebarHoverExpanded] = useState(false);
+  const [chatResizing, setChatResizing] = useState(false);
+  const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH);
   const sidebarCollapsed = useAppStore((s) => s.sidebarCollapsed);
   const sidebarWidth = useAppStore((s) => s.sidebarWidth);
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth);
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed);
+  const editorMode = useEditorStore((s) => s.mode);
 
   // Load shortcuts from settings
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
@@ -161,7 +176,15 @@ export default function App() {
   }, [shortcuts, cycleModel]);
 
   const handleFileSelect = useCallback((selection: FileSearchSelection) => {
-    useAppStore.getState().revealFile(selection.path, { preview: !selection.isDirectory });
+    if (selection.isDirectory) {
+      useAppStore.getState().revealFile(selection.path, { preview: false });
+      return;
+    }
+    if (useEditorStore.getState().mode) {
+      useEditorStore.getState().openFile(selection.path);
+    } else {
+      useAppStore.getState().revealFile(selection.path, { preview: true });
+    }
   }, []);
 
   const getSidebarMaxWidth = useCallback(() => {
@@ -284,6 +307,84 @@ export default function App() {
     applySidebarWidth(sidebarWidth + direction * step);
   }, [applySidebarWidth, sidebarWidth]);
 
+  // ---- Chat width (editor mode) ----
+  const getChatMaxWidth = useCallback(() => {
+    const layoutWidth = layoutContentRef.current?.getBoundingClientRect().width || window.innerWidth;
+    return Math.max(CHAT_RESIZE_MIN_WIDTH, layoutWidth - ACTIVITY_BAR_WIDTH - sidebarWidth - EDITOR_MIN_WIDTH);
+  }, [sidebarWidth]);
+
+  const applyChatWidth = useCallback((nextWidth: number) => {
+    const maxWidth = getChatMaxWidth();
+    setChatWidth(Math.min(Math.max(CHAT_RESIZE_MIN_WIDTH, nextWidth), Math.max(CHAT_RESIZE_MIN_WIDTH, maxWidth)));
+  }, [getChatMaxWidth]);
+
+  const finishChatResize = useCallback(() => {
+    document.body.classList.remove("layout-chat-resizing");
+    setChatResizing(false);
+  }, []);
+
+  const handleChatResizePointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const layoutRect = layoutContentRef.current?.getBoundingClientRect();
+    if (!layoutRect) return;
+
+    setChatResizing(true);
+    document.body.classList.add("layout-chat-resizing");
+
+    const cleanupPointerListeners = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      window.removeEventListener("blur", handlePointerUp);
+      chatResizeCleanupRef.current = null;
+    };
+
+    // 拖动时不做上限钳制：一旦编辑区窄于 EDITOR_MIN_WIDTH，由自动切换 effect 切回预览模式。
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      setChatWidth(Math.max(CHAT_RESIZE_MIN_WIDTH, layoutRect.right - moveEvent.clientX));
+    };
+
+    const handlePointerUp = () => {
+      cleanupPointerListeners();
+      finishChatResize();
+    };
+
+    chatResizeCleanupRef.current?.();
+    chatResizeCleanupRef.current = cleanupPointerListeners;
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    window.addEventListener("blur", handlePointerUp);
+  }, [finishChatResize]);
+
+  const handleChatResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.shiftKey ? CHAT_RESIZE_KEYBOARD_LARGE_STEP : CHAT_RESIZE_KEYBOARD_STEP;
+    const direction = event.key === "ArrowLeft" ? 1 : -1;
+    applyChatWidth(chatWidth + direction * step);
+  }, [applyChatWidth, chatWidth]);
+
+  // 编辑器模式下编辑区过窄时自动切回预览模式，并重置聊天区宽度。
+  useEffect(() => {
+    if (!editorMode) return;
+    const check = () => {
+      const layoutWidth = layoutContentRef.current?.getBoundingClientRect().width || window.innerWidth;
+      const editorWidth = layoutWidth - ACTIVITY_BAR_WIDTH - sidebarWidth - chatWidth;
+      if (editorWidth < EDITOR_MIN_WIDTH) {
+        useEditorStore.getState().setMode(false);
+        setChatWidth(DEFAULT_CHAT_WIDTH);
+        // 若正在拖动聊天区分隔条，立即终止拖动，避免 pointermove 继续覆盖已重置的宽度。
+        chatResizeCleanupRef.current?.();
+        finishChatResize();
+      }
+    };
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, [editorMode, sidebarWidth, chatWidth, finishChatResize]);
+
   useEffect(() => {
     if (!sidebarCollapsed) {
       const maxWidth = getSidebarMaxWidth();
@@ -305,8 +406,10 @@ export default function App() {
 
   useEffect(() => () => {
     sidebarResizeCleanupRef.current?.();
+    chatResizeCleanupRef.current?.();
     if (floatingToastTimerRef.current) clearTimeout(floatingToastTimerRef.current);
     document.body.classList.remove("layout-sidebar-resizing");
+    document.body.classList.remove("layout-chat-resizing");
   }, []);
 
   const hoverExpanded = sidebarCollapsed && sidebarHoverExpanded;
@@ -316,8 +419,8 @@ export default function App() {
       <TitleBar />
       <div
         ref={layoutContentRef}
-        className={`layout-content ${sidebarCollapsed ? "collapsed" : ""} ${hoverExpanded ? "hover-expanded" : ""} ${sidebarResizing ? "resizing" : ""}`}
-        style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+        className={`layout-content ${sidebarCollapsed ? "collapsed" : ""} ${hoverExpanded ? "hover-expanded" : ""} ${sidebarResizing ? "resizing" : ""} ${chatResizing ? "chat-resizing" : ""} ${editorMode ? "editor-mode" : ""}`}
+        style={{ "--sidebar-width": `${sidebarWidth}px`, "--editor-chat-width": `${chatWidth}px` } as CSSProperties}
         onPointerEnter={handleLayoutPointerEnter}
         onPointerMove={handleLayoutPointerMove}
         onPointerLeave={handleLayoutPointerLeave}
@@ -339,6 +442,20 @@ export default function App() {
           tabIndex={sidebarCollapsed ? -1 : 0}
           onPointerDown={handleSidebarResizePointerDown}
           onKeyDown={handleSidebarResizeKeyDown}
+        />
+        <EditorArea />
+        <button
+          type="button"
+          className={`chat-resizer ${chatResizing ? "resizing" : ""}`}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整聊天区宽度"
+          aria-valuemin={CHAT_RESIZE_MIN_WIDTH}
+          aria-valuemax={Math.max(CHAT_RESIZE_MIN_WIDTH, getChatMaxWidth())}
+          aria-valuenow={chatWidth}
+          tabIndex={editorMode ? 0 : -1}
+          onPointerDown={handleChatResizePointerDown}
+          onKeyDown={handleChatResizeKeyDown}
         />
         <ChatPanel
           sendKey={shortcuts.sendKey}

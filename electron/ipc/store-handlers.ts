@@ -6,7 +6,7 @@ import type { SessionDataPurgeRequest } from "../../src/types/ipc";
 
 const dataDir = join(app.getPath("userData"), "hpp-data");
 const COMPACT_JSON_KEYS = new Set(["sessionMessages"]);
-const ALLOWED_STORE_KEYS = new Set(["settings", "projects", "sessionMessages", "currentModel"]);
+const ALLOWED_STORE_KEYS = new Set(["settings", "projects", "sessionMessages", "currentModel", "editor"]);
 const storeWriteQueues = new Map<string, Promise<void>>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

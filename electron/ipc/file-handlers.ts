@@ -1,5 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, shell } from "electron";
 import { readdir, readFile, access, stat, open } from "fs/promises";
+import { writeTextFile } from "./write-text-file";
 import { basename, extname, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
@@ -146,6 +147,10 @@ export function registerFileHandlers() {
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+  });
+
+  ipcMain.handle("fs:writeFile", async (_event, filePath: string, content: string) => {
+    return writeTextFile(filePath, content);
   });
 
   ipcMain.handle("fs:readFileDataUrl", async (_event, filePath: string) => {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, FileDiff as FileDiffIcon, Loader2, ScanSearch, Undo2 } from "lucide-react";
+import { ChevronDown, FileDiff as FileDiffIcon, ScanSearch } from "lucide-react";
 import { buildDiffSummary, type DiffLike } from "@shared/diff-summary";
 import { uiText } from "@/i18n/text";
 import { CodeReviewDialog } from "./CodeReviewDialog";
@@ -70,30 +70,9 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
         </div>
         <div className="chat-diff-title-group">
           <div className="chat-diff-title">
-            {revertState === "reverted" ? "已撤销" : `已编辑 ${summary.files.length} 个文件`}
-          </div>
-          <div className="chat-diff-total-stats" aria-label={`新增 ${summary.totalAdditions} 行，删除 ${summary.totalDeletions} 行`}>
-            <span className="chat-diff-add">+{summary.totalAdditions}</span>
-            <span className="chat-diff-del">-{summary.totalDeletions}</span>
+            {revertState === "reverted" ? "已撤销" : `${summary.files.length} 个文件`}
           </div>
         </div>
-        {showRevertButton && (
-        <button
-          type="button"
-          className="chat-diff-revert-btn"
-          onClick={handleRevert}
-          disabled={!canRevert}
-          title={revertTitle}
-          aria-label={revertTitle}
-        >
-          {revertState === "reverting" ? (
-            <Loader2 className="chat-diff-spin" size={16} strokeWidth={2} />
-          ) : (
-            <Undo2 size={16} strokeWidth={2} />
-          )}
-          <span>{revertState === "reverted" ? "已撤销" : "撤销"}</span>
-        </button>
-        )}
         <button
           type="button"
           className="chat-diff-review-btn"
@@ -176,6 +155,11 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
         projectPath={projectPath}
         initialFile={reviewInitialFile ?? undefined}
         onClose={() => setReviewOpen(false)}
+        onRevertAll={handleRevert}
+        revertState={revertState}
+        revertCanRevert={canRevert}
+        revertTitle={revertTitle}
+        showRevertButton={showRevertButton}
       />
     </section>
   );

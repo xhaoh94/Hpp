@@ -92,12 +92,28 @@
   max-width: 100%;
   box-sizing: border-box;
   margin: 0;
-  padding: 14px 52px 14px 16px;
+  padding: 14px 16px;
   overflow-x: auto;
   background: transparent !important;
+  /* 渐变遮罩：左右边缘淡出，避免滚动时文字紧贴边框硬切 */
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    black 16px,
+    black calc(100% - 16px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    black 16px,
+    black calc(100% - 16px),
+    transparent 100%
+  );
 }
 
 .md-content .md-code-block:has(.md-code-lang) pre {
+  /* 有语言标签时，右侧留出更多空间避开标签与复制按钮。 */
   padding-right: 96px;
 }
 

@@ -33,7 +33,7 @@ describe("code review dialog", () => {
       chatPanelStyles.indexOf(".chat-review-dialog {"),
     );
     expect(overlay).toContain("position: fixed");
-    expect(overlay).toContain("inset: 32px 0 0");
+    expect(overlay).toContain("inset: 0");
     expect(overlay).toContain("z-index: 2000");
   });
 
@@ -69,7 +69,8 @@ describe("code review dialog", () => {
   it("navigates between diff points from the header toolbar", () => {
     expect(dialogSource).toContain("goNextDiff");
     expect(dialogSource).toContain("goPrevDiff");
-    expect(dialogSource).toContain("scrollIntoView");
+    // 使用 container.scrollTo 手动居中（无平滑动画）定位到修改点。
+    expect(dialogSource).toContain("container.scrollTo");
     expect(dialogSource).toContain("data-review-diff-index");
     expect(dialogSource).toContain("chat-review-nav");
   });
@@ -107,7 +108,7 @@ describe("code review dialog", () => {
 
   it("scrolls to the first change point by default when a file is shown", () => {
     expect(dialogSource).toContain("scrolledRef");
-    expect(dialogSource).toContain("scrollToDiff(0)");
+    expect(dialogSource).toContain("scrollToDiff(cursor)");
     expect(dialogSource).toContain("requestAnimationFrame");
   });
 });
