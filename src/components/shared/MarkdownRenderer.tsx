@@ -90,17 +90,48 @@ function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
             }
 
             // Code block
+            // 横向滚动容器（pre）自身的左右 padding 在 Chromium 中会被"吞掉"，
+            // 故在其外套一层不滚动的 wrapper 负责四边间距，pre 内部 padding 为 0。
+            // 语言标签与复制按钮放在独立的 header 行，不再用 absolute 悬浮在内容上方，
+            // 从根本上避免标签与长内容重叠，同时 wrapper 的左右 padding 可统一为 24px。
             return (
-              <div className="md-code-block">
-                {language && (
-                  <div className="md-code-lang">{language}</div>
-                )}
-                <CopyButton text={text} />
-                <pre className={className}>
-                  <code className={className} {...props}>
-                    {children}
-                  </code>
-                </pre>
+              <div className={`md-code-block${language ? " md-code-block--with-lang" : ""}`}>
+                <div className="md-code-header">
+                  {language ? (
+                    <div className="md-code-lang">{language}</div>
+                  ) : (
+                    <span />
+                  )}
+                  <CopyButton text={text} />
+                </div>
+                <div
+                  className="md-code-scroll-wrapper"
+                  style={{
+                    boxSizing: "border-box",
+                    width: "100%",
+                    padding: "4px 24px 8px 24px",
+                  }}
+                >
+                  <pre style={{
+                    boxSizing: "border-box",
+                    margin: 0,
+                    padding: 0,
+                    overflowX: "auto",
+                    maxWidth: "100%",
+                  }}>
+                    <code
+                      className={className}
+                      {...props}
+                      style={{
+                        display: "block",
+                        whiteSpace: "pre",
+                        padding: 0,
+                      }}
+                    >
+                      {children}
+                    </code>
+                  </pre>
+                </div>
               </div>
             );
           },

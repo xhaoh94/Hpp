@@ -16,8 +16,8 @@ describe("MarkdownRenderer code block layout", () => {
   });
 
   it("reserves room for language and copy controls without forcing full width", () => {
-    expect(styles).toContain("padding: 14px 52px 14px 16px");
-    expect(styles).toContain(".md-content .md-code-block:has(.md-code-lang) pre");
+    expect(styles).toContain("padding: 20px 24px");
+    expect(styles).toContain(".md-content .md-code-block:has(.md-code-lang) pre code");
     expect(styles).toContain("padding-right: 96px");
   });
 
@@ -28,12 +28,13 @@ describe("MarkdownRenderer code block layout", () => {
     );
     const preStyles = styles.slice(
       styles.indexOf(".md-content .md-code-block pre {"),
-      styles.indexOf(".md-content .md-code-block:has(.md-code-lang) pre"),
+      styles.indexOf(".md-content .md-code-block pre code {"),
     );
     expect(contentStyles).toContain("min-width: 0");
     expect(contentStyles).toContain("max-width: 100%");
     expect(preStyles).toContain("min-width: 0");
     expect(preStyles).toContain("max-width: 100%");
     expect(preStyles).toContain("overflow-x: auto");
+    expect(preStyles).toContain("padding: 0");
   });
 });

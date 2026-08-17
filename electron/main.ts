@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, Tray } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, session, Tray } from "electron";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
@@ -415,6 +415,8 @@ function createWindow() {
 
 if (singleInstanceLock) {
   app.whenReady().then(async () => {
+    // Clear cache to ensure latest CSS/JS assets are loaded (not stale cached versions)
+    await session.defaultSession.clearCache();
     await loadCloseToTraySetting();
     await remoteAccessServer.initialize(() => mainWindow);
     createWindow();

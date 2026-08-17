@@ -3174,6 +3174,16 @@ body.chat-questionnaire-resizing {
   margin-inline: auto;
   flex-direction: column;
   position: relative;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 6px 8px 8px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.chat-input-content:focus-within {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.15);
 }
 
 .chat-input-area.questionnaire-active {
@@ -3492,13 +3502,14 @@ body.chat-questionnaire-resizing {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 8px;
-  padding: 0 4px;
+  margin-top: 4px;
+  padding: 4px 4px 0;
   width: 100%;
   min-width: 0;
   flex-wrap: nowrap;
   overflow: hidden;
   position: relative;
+  border-top: 1px solid var(--border-color);
 }
 
 /* 窄宽度下工具栏保持一行：子项允许收缩，文字超出以省略号截断。 */
@@ -4009,11 +4020,10 @@ body.chat-questionnaire-resizing {
   align-items: flex-end;
   gap: 4px;
   width: 100%;
-  background-color: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
+  background-color: transparent;
+  border: none;
+  border-radius: 0;
   padding: 2px 4px;
-  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .chat-input-image-previews {
@@ -4191,10 +4201,7 @@ body.chat-questionnaire-resizing {
   }
 }
 
-.chat-input-container:focus-within {
-  border-color: var(--accent-color);
-  box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.15);
-}
+
 
 .chat-input-actions-left {
   display: flex;
@@ -4236,7 +4243,7 @@ body.chat-questionnaire-resizing {
   outline: none;
   font-family: inherit;
   min-height: 27px;
-  max-height: 150px;
+  max-height: 93px;
   user-select: text;
   -webkit-user-select: text;
   scrollbar-width: none;

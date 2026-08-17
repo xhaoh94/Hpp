@@ -18,10 +18,16 @@ describe("editor pane (CodeMirror wrapper)", () => {
     expect(paneSource).toContain("EditorView.domEventHandlers");
   });
 
-  it("reports dirty only once per change burst via a ref guard", () => {
+  it("reports dirty based on comparison with original content, clearing the flag on undo", () => {
     expect(paneSource).toContain("dirtyRef.current");
     expect(paneSource).toContain("update.docChanged");
-    expect(paneSource).toContain("onDirtyChangeRef.current(true)");
+    expect(paneSource).toContain("originalContentRef.current");
+    expect(paneSource).toContain("const isDirty = currentContent !== originalContentRef.current");
+    expect(paneSource).toContain("onDirtyChangeRef.current(isDirty)");
+  });
+
+  it("updates the original content baseline after a successful save", () => {
+    expect(paneSource).toContain("originalContentRef.current = content");
   });
 
   it("never marks the file dirty from the initial load dispatch", () => {

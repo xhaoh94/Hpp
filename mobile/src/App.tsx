@@ -60,9 +60,43 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
+import { isValidElement, useCallback, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+
+function WebCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  }, [text]);
+  return (
+    <button type="button" className="web-code-copy-btn" aria-label="copy" onClick={handleCopy}>
+      {copied ? <Check size={14} /> : <Copy size={14} />}
+    </button>
+  );
+}
+
+function extractText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(extractText).join("");
+  if (isValidElement(node)) return extractText((node.props as { children?: ReactNode }).children);
+  return "";
+}
 
 function renderAttachmentPreview(content: string, maxLength?: number) {
   let preview = content;
@@ -1099,8 +1133,44 @@ function useProcessTicker(enabled: boolean) {
 
 const MarkdownContent = memo(function MarkdownContent({ text, className }: { text: string; className?: string }) {
   return (
-    <div className={className || "message-content"}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{text}</ReactMarkdown>
+    <div className={`md-content ${className || "message-content"}`}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeHighlight, { detect: false, ignoreMissing: true }]]}
+        components={{
+          code(props) {
+            const { children, className, node, ...rest } = props as any;
+            const match = /language-(\w+)/.exec(className || "");
+            const isInline = !node?.position?.start.line || node.position.start.line === node.position.end.line;
+            const text = extractText(children);
+            if (isInline) {
+              return (
+                <code className={className} {...rest}>
+                  {children}
+                </code>
+              );
+            }
+            const language = match ? match[1] : null;
+            return (
+              <div className={`md-code-block${language ? " md-code-block--with-lang" : ""}`}>
+                <div className="md-code-header">
+                  {language ? <div className="md-code-lang">{language}</div> : <span />}
+                  <WebCopyButton text={text} />
+                </div>
+                <div className="md-code-scroll-wrapper">
+                  <pre>
+                    <code className={className} {...rest}>
+                      {children}
+                    </code>
+                  </pre>
+                </div>
+              </div>
+            );
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
 });

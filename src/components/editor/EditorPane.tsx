@@ -293,6 +293,7 @@ export function EditorPane({
   const savingRef = useRef(false);
   const readonlyRef = useRef(false);
   const initializingRef = useRef(false);
+  const originalContentRef = useRef<string>("");
   const [status, setStatus] = useState<EditorPaneStatus>("loading");
   const [statusMessage, setStatusMessage] = useState("");
   const [contextMenu, setContextMenu] = useState<EditorContextMenuState | null>(null);
@@ -344,6 +345,9 @@ export function EditorPane({
       const content = view.state.doc.toString();
       const result = await window.electronAPI.writeFile(path, content);
       if (result.success) {
+        // 保存成功后，将原始内容基准更新为已保存的内容，
+        // 这样后续 undo 回到保存点时能正确清除脏标记。
+        originalContentRef.current = content;
         dirtyRef.current = false;
         onDirtyChangeRef.current(false);
         onSavedRef.current(path);
@@ -547,10 +551,13 @@ export function EditorPane({
           ...getLanguageExtension(path),
           readOnlyCompartment.of(EditorState.readOnly.of(false)),
           EditorView.updateListener.of((update) => {
-            // 初始加载（readFile 后 dispatch 内容）不属于用户编辑，不应标记 dirty。
-            if (update.docChanged && !dirtyRef.current && !initializingRef.current) {
-              dirtyRef.current = true;
-              onDirtyChangeRef.current(true);
+            if (update.docChanged && !initializingRef.current) {
+              const currentContent = update.state.doc.toString();
+              const isDirty = currentContent !== originalContentRef.current;
+              if (isDirty !== dirtyRef.current) {
+                dirtyRef.current = isDirty;
+                onDirtyChangeRef.current(isDirty);
+              }
             }
             // 搜索面板打开期间文档变化时刷新匹配位置。
             if (update.docChanged && searchOpenRef.current) {
@@ -641,6 +648,7 @@ export function EditorPane({
         return;
       }
       const content = result.content ?? "";
+      originalContentRef.current = content;
       initializingRef.current = true;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: content },
