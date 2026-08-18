@@ -24,6 +24,15 @@ import {
   parseGoToLine,
   type SearchMatch,
 } from "@/lib/file-preview-code";
+import {
+  estimateTextBytes,
+  getTextMateLanguage,
+  MAX_TM_BYTES,
+  MAX_TM_LINES,
+  tmEnableEffect,
+  tmHighlightPlugin,
+  type TmStatus,
+} from "./tm-highlight";
 
 export type EditorPaneStatus = "loading" | "ready" | "readonly" | "error";
 
@@ -48,6 +57,8 @@ interface EditorPaneProps {
   onSaveError: (path: string, error: string) => void;
   /** Register an imperative save function so the parent can save before closing. */
   registerSave: (path: string, fn: () => Promise<boolean>) => () => void;
+  /** TextMate 高亮运行时状态（状态栏指示用）。 */
+  onTmStatus?: (status: TmStatus) => void;
 }
 
 const DARK_COLORS = {
@@ -289,12 +300,14 @@ export function EditorPane({
   onSaved,
   onSaveError,
   registerSave,
+  onTmStatus,
 }: EditorPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const readOnlyCompartmentRef = useRef<Compartment | null>(null);
   const themeCompartmentRef = useRef<Compartment | null>(null);
   const highlightCompartmentRef = useRef<Compartment | null>(null);
+  const langCompartmentRef = useRef<Compartment | null>(null);
   const dirtyRef = useRef(false);
   const savingRef = useRef(false);
   const readonlyRef = useRef(false);
@@ -331,6 +344,8 @@ export function EditorPane({
   onSaveErrorRef.current = onSaveError;
   const registerSaveRef = useRef(registerSave);
   registerSaveRef.current = registerSave;
+  const onTmStatusRef = useRef(onTmStatus);
+  onTmStatusRef.current = onTmStatus;
 
   const setReadOnly = useCallback((readOnly: boolean) => {
     readonlyRef.current = readOnly;
@@ -508,8 +523,11 @@ export function EditorPane({
     themeCompartmentRef.current = themeCompartment;
     const highlightCompartment = new Compartment();
     highlightCompartmentRef.current = highlightCompartment;
+    const langCompartment = new Compartment();
+    langCompartmentRef.current = langCompartment;
 
     const colors = getColors();
+    const langExtensions = getLanguageExtension(path);
     const view = new EditorView({
       parent: container,
       state: EditorState.create({
@@ -554,7 +572,13 @@ export function EditorPane({
           themeCompartment.of(buildEditorTheme(colors)),
           highlightCompartment.of(syntaxHighlighting(buildHighlightStyle(colors))),
           searchHighlightField,
-          ...getLanguageExtension(path),
+          langCompartment.of(langExtensions),
+          tmHighlightPlugin({
+            language: getTextMateLanguage(path),
+            langCompartment,
+            fallbackLanguage: langExtensions,
+            onStatus: (status) => onTmStatusRef.current?.(status),
+          }),
           readOnlyCompartment.of(EditorState.readOnly.of(false)),
           EditorView.updateListener.of((update) => {
             if (update.docChanged && !initializingRef.current) {
@@ -661,6 +685,14 @@ export function EditorPane({
       });
       initializingRef.current = false;
       setStatus("ready");
+      // TextMate 高亮：lua/cs 且文件在阈值内时启用（大文件自动回退 StreamLanguage）。
+      const tmLanguage = getTextMateLanguage(path);
+      if (tmLanguage) {
+        const bytes = estimateTextBytes(content);
+        const lineCount = content.split("\n").length;
+        const enabled = bytes <= MAX_TM_BYTES && lineCount <= MAX_TM_LINES;
+        view.dispatch({ effects: tmEnableEffect.of({ language: tmLanguage, enabled }) });
+      }
       requestAnimationFrame(() => view.requestMeasure());
     });
 
@@ -674,6 +706,7 @@ export function EditorPane({
       readOnlyCompartmentRef.current = null;
       themeCompartmentRef.current = null;
       highlightCompartmentRef.current = null;
+      langCompartmentRef.current = null;
     };
   }, [path, setReadOnly, save, openSearch, openGoToLine]);
 

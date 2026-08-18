@@ -260,6 +260,38 @@
   flex: 1;
 }
 
+/* ===== TextMate 高亮状态徽标（状态栏） ===== */
+.tm-badge {
+  font-size: 11px;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.tm-badge-on {
+  color: #4ec9b0;
+  background: rgba(78, 201, 176, 0.12);
+}
+
+.tm-badge-off {
+  color: var(--text-secondary);
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.tm-badge-error {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.12);
+}
+
+:root[data-theme="light"] .tm-badge-on {
+  color: #267f99;
+}
+
+:root[data-theme="light"] .tm-badge-error {
+  color: #c62828;
+}
+
 /* ===== Tab context menu ===== */
 .editor-tab-menu {
   position: fixed;
@@ -535,3 +567,43 @@
 .editor-confirm-btn.primary:hover {
   opacity: 0.9;
 }
+
+/* ============================================================
+   TextMate 语法高亮（vscode-textmate）—— 对齐 VSCode Dark+ / Light+
+   class 由 tm-highlight worker 生成：cm-tm-<cls>
+   ============================================================ */
+.cm-tm-comment { color: #6a9955; font-style: italic; }
+.cm-tm-string { color: #ce9178; }
+.cm-tm-number { color: #b5cea8; }
+.cm-tm-constant { color: #569cd6; }
+.cm-tm-keyword { color: #569cd6; }
+.cm-tm-type { color: #4ec9b0; }
+.cm-tm-function { color: #dcdcaa; }
+.cm-tm-variable { color: #9cdcfe; }
+.cm-tm-parameter { color: #9cdcfe; }
+.cm-tm-property { color: #9cdcfe; }
+.cm-tm-label { color: #c586c0; }
+.cm-tm-preprocessor { color: #c586c0; }
+.cm-tm-operator { color: #d4d4d4; }
+.cm-tm-punctuation { color: #d4d4d4; }
+.cm-tm-link { color: #3794ff; text-decoration: underline; }
+.cm-tm-strong { font-weight: bold; }
+.cm-tm-emphasis { font-style: italic; }
+.cm-tm-heading { color: #dcdcaa; font-weight: bold; }
+
+:root[data-theme="light"] .cm-tm-comment { color: #008000; }
+:root[data-theme="light"] .cm-tm-string { color: #a31515; }
+:root[data-theme="light"] .cm-tm-number { color: #098658; }
+:root[data-theme="light"] .cm-tm-constant { color: #0000ff; }
+:root[data-theme="light"] .cm-tm-keyword { color: #0000ff; }
+:root[data-theme="light"] .cm-tm-type { color: #267f99; }
+:root[data-theme="light"] .cm-tm-function { color: #795e26; }
+:root[data-theme="light"] .cm-tm-variable { color: #001080; }
+:root[data-theme="light"] .cm-tm-parameter { color: #001080; }
+:root[data-theme="light"] .cm-tm-property { color: #795e26; }
+:root[data-theme="light"] .cm-tm-label { color: #af00db; }
+:root[data-theme="light"] .cm-tm-preprocessor { color: #af00db; }
+:root[data-theme="light"] .cm-tm-operator { color: #24272d; }
+:root[data-theme="light"] .cm-tm-punctuation { color: #24272d; }
+:root[data-theme="light"] .cm-tm-link { color: #0969da; }
+:root[data-theme="light"] .cm-tm-heading { color: #795e26; }

@@ -6,6 +6,7 @@ import { showAppConfirm } from "@/lib/app-dialog";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { uiText } from "@/i18n/text";
 import { EditorPane } from "./EditorPane";
+import type { TmStatus } from "./tm-highlight";
 import "./EditorArea.css";
 
 interface TabMenuState {
@@ -77,8 +78,16 @@ export function EditorArea() {
 
   const [tabMenu, setTabMenu] = useState<TabMenuState | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmCloseState | null>(null);
+  const [tmStatusMap, setTmStatusMap] = useState<Record<string, TmStatus>>({});
   const saveFnsRef = useRef(new Map<string, () => Promise<boolean>>());
   const tabsRef = useRef<HTMLDivElement>(null);
+
+  const handleTmStatus = useCallback((key: string) => (status: TmStatus) => {
+    setTmStatusMap((prev) => {
+      if (prev[key] === status) return prev;
+      return { ...prev, [key]: status };
+    });
+  }, []);
 
   const handleTabsWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
     const el = tabsRef.current;
@@ -274,6 +283,7 @@ export function EditorArea() {
             onSaved={handleSaved}
             onSaveError={handleSaveError}
             registerSave={registerSave}
+            onTmStatus={handleTmStatus(tab.key)}
           />
         ))}
         {tabs.length === 0 && (
@@ -293,6 +303,7 @@ export function EditorArea() {
             {activeTab.path}
           </span>
           <span className="editor-status-spacer" />
+          {activeTab && <TmStatusBadge status={tmStatusMap[activeTab.key]} />}
           <span>UTF-8</span>
           <span>LF</span>
         </div>
@@ -364,5 +375,34 @@ export function EditorArea() {
         </div>
       )}
     </div>
+  );
+}
+
+function TmStatusBadge({ status }: { status: TmStatus | undefined }) {
+  // 永远渲染：undefined/idle 也显示灰色“等待中”，便于确认代码是否生效。
+  const kind: TmStatus["kind"] = status?.kind ?? "idle";
+  const map: Record<TmStatus["kind"], { text: string; className: string; title?: string }> = {
+    on: { text: "TextMate ✓", className: "tm-badge tm-badge-on", title: "TextMate 语法高亮已启用" },
+    off: {
+      text: "TextMate ✗",
+      className: "tm-badge tm-badge-off",
+      title: status?.kind === "off" ? status.reason : "TextMate 未启用",
+    },
+    error: {
+      text: "TextMate ✗",
+      className: "tm-badge tm-badge-error",
+      title: status?.kind === "error" ? status.reason : "TextMate 引擎错误",
+    },
+    idle: {
+      text: "TextMate –",
+      className: "tm-badge tm-badge-off",
+      title: "等待 TextMate 引擎初始化；若打开 .cs/.lua 后仍显示此状态，请按 Ctrl+R 强制刷新或重启 dev",
+    },
+  };
+  const item = map[kind];
+  return (
+    <span className={item.className} title={item.title}>
+      {item.text}
+    </span>
   );
 }

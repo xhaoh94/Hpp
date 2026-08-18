@@ -5,3 +5,6 @@ dist
 out
 mobile/android/.idea
 docs/release.md
+# electron-vite 每次 dev 启动时用 esbuild 打包配置生成的临时缓存（正常退出自删，
+# 强杀进程会遗留，已人工清理过多次）
+electron.vite.config.*.mjs
