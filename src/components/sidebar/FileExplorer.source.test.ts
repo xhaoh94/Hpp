@@ -93,4 +93,23 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("refreshVersion");
     expect(source).toContain("invalidateProjectFileIndex(activeProject.path, filters)");
   });
+
+  it("portals the right-click menu to the body so collapsed sidebar styles can't occlude it", () => {
+    const source = readSource();
+
+    expect(source).toContain('import { createPortal } from "react-dom"');
+    expect(source).toContain("createPortal(");
+    expect(source).toContain("document.body");
+    expect(source).toContain('className="file-tree-context-menu"');
+  });
+
+  it("exposes a copy-name entry that copies just the file basename", () => {
+    const source = readSource();
+
+    expect(source).toContain("复制名字");
+    expect(source).toContain("entry.name");
+    expect(source).toContain("copyName(");
+    expect(source).toContain("<Copy");
+    expect(source).toContain("已复制名字");
+  });
 });

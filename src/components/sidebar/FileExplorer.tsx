@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { useAppStore, type FileRevealRequest } from "@/stores/app-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useChatStore } from "@/stores/chat-store";
@@ -27,6 +28,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clipboard,
+  Copy,
   CopyMinus,
   FolderOpen,
   MessageCirclePlus,
@@ -378,6 +380,17 @@ export function FileExplorer() {
     }
   }, [closeContextMenu]);
 
+  const copyName = useCallback(async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      showFloatingToastMessage(value.includes("\n") ? "已复制多个名字" : "已复制名字");
+    } catch {
+      showAppAlert("复制失败");
+    } finally {
+      closeContextMenu();
+    }
+  }, [closeContextMenu]);
+
   const addToChat = useCallback(async (entries: FileEntry[]) => {
     const sessionId = useProjectStore.getState().activeSessionId;
     if (!sessionId) {
@@ -587,17 +600,19 @@ export function FileExplorer() {
       </div>
 
       <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />
-      {contextMenu && (
+      {contextMenu && createPortal(
         <div
           className="file-tree-context-menu"
-          style={{ left: Math.min(contextMenu.x, window.innerWidth - 210), top: Math.min(contextMenu.y, window.innerHeight - 180) }}
+          style={{ left: Math.min(contextMenu.x, window.innerWidth - 210), top: Math.min(contextMenu.y, window.innerHeight - 200) }}
           onPointerDown={(event) => event.stopPropagation()}
         >
           <button type="button" onClick={() => void openInExplorer(contextMenu.entries)}><FolderOpen size={15} />在资源管理器打开</button>
           <button type="button" onClick={() => void addToChat(contextMenu.entries)}><MessageCirclePlus size={15} />添加到聊天</button>
           <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => entry.path).join("\n"))}><Clipboard size={15} />复制路径</button>
           <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => activeProject ? getRelativeFilePath(entry.path, activeProject.path) : entry.path).join("\n"))}><Clipboard size={15} />复制相对路径</button>
-        </div>
+          <button type="button" onClick={() => void copyName(contextMenu.entries.map((entry) => entry.name).join("\n"))}><Copy size={15} />复制名字</button>
+        </div>,
+        document.body,
       )}
     </div>
   );

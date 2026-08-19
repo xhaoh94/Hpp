@@ -337,7 +337,7 @@ function MessageQueuePanel({
                       : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
                 >
                   <CornerDownRight size={14} />
-                  <span>{item.status === "sending" ? "发送中" : "引导"}</span>
+                  <span>{item.status === "sending" ? "等待调度" : "引导"}</span>
                 </button>
               )}
               <button type="button" className="chat-queue-icon-btn" onClick={() => onRemove(item.id)} disabled={item.status === "sending"} title="移除">
@@ -842,16 +842,16 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
   onOpenChange,
   onScrollToMessage,
 }: UserMessageHistoryControlProps) {
-  const userMessagesReversed = useChatStore(useShallow((state) =>
-    state.messages.filter((message) => isUserSpeechMessage(message)).slice().reverse()
+  const userMessages = useChatStore(useShallow((state) =>
+    state.messages.filter((message) => isUserSpeechMessage(message)).slice()
   ));
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const historyItemKeys = useMemo(
-    () => userMessagesReversed.map((message) => message.id),
-    [userMessagesReversed],
+    () => userMessages.map((message) => message.id),
+    [userMessages],
   );
   const { virtualizer: historyVirtualizer, handle: historyVirtualHandle } = useChatVirtualizer({
-    count: open ? userMessagesReversed.length : 0,
+    count: open ? userMessages.length : 0,
     itemKeys: historyItemKeys,
     scrollRef: historyListRef,
     estimateSize: () => USER_HISTORY_ITEM_ESTIMATED_HEIGHT,
@@ -860,8 +860,12 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
     overscan: 8,
   });
   useLayoutEffect(() => {
-    // 弹窗是条件挂载，滚动容器 ref 在打开后才可用，需触发一次测量。
-    if (open) historyVirtualHandle.measure();
+    // 弹窗是条件挂载，滚动容器 ref 在打开后才可用，需触发一次测量，
+    // 并默认滚动到最新一行（正序后最新在底部）。
+    if (open) {
+      historyVirtualHandle.measure();
+      historyVirtualHandle.scrollToEnd();
+    }
   }, [open, historyVirtualHandle]);
 
   return (
@@ -878,13 +882,13 @@ const UserMessageHistoryControl = memo(function UserMessageHistoryControl({
           className="chat-user-history-popup"
           onWheel={(event) => event.stopPropagation()}
         >
-          {userMessagesReversed.length === 0 ? (
+          {userMessages.length === 0 ? (
             <div className="chat-user-history-empty">暂无发言</div>
           ) : (
             <div ref={historyListRef} className="chat-user-history-list persistent-scroll">
               <div className="chat-virtual-content" style={{ height: historyVirtualizer.getTotalSize() }}>
                 {historyVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const msg = userMessagesReversed[virtualRow.index];
+                  const msg = userMessages[virtualRow.index];
                   return (
                     <div
                       key={virtualRow.key}
@@ -1383,7 +1387,7 @@ function TodoSummaryPill({ process }: { process: AgentProcess }) {
   return (
     <div className="chat-todo-summary">
       <span className="chat-todo-summary-dot" />
-      <span className="chat-todo-summary-text">进度 {completedCount}/{steps.length}</span>
+      <span className="chat-todo-summary-text">步骤 {completedCount}/{steps.length}</span>
       {changeText && <span className="chat-todo-summary-change">· {changeText}</span>}
       <div className="chat-todo-summary-popover">
         {steps.map((step) => (
@@ -1756,7 +1760,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
         {activeSessionId && !activeSessionInitialized ? (
           <div className="chat-loading-agent">
             <div className="chat-working-spinner" />
-            <span>正在初始化 Agent 会话...</span>
+            <span>正在初始化会话...</span>
           </div>
         ) : (
           <>
@@ -3192,7 +3196,7 @@ export function ChatPanel({
       });
     } catch (error) {
       if (error instanceof Error && error.message === "SESSION_BUSY") {
-        showAppAlert("切换 Agent 渠道或模型需要等当前 Agent 运行结束后再操作。");
+        showAppAlert("切换渠道或模型需要等当前运行结束后再操作。");
         return;
       }
       addMessage({
@@ -3287,7 +3291,7 @@ export function ChatPanel({
       });
     } catch (error) {
       if (error instanceof Error && error.message === "SESSION_BUSY") {
-        showAppAlert("调整思考级别需要等当前 Agent 运行结束后再操作。");
+        showAppAlert("调整思考级别需要等当前运行结束后再操作。");
       }
     }
   };

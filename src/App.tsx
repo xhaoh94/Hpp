@@ -42,7 +42,7 @@ const ACTIVITY_BAR_WIDTH = 48;
 const SIDEBAR_COLLAPSE_THRESHOLD = 160;
 const SIDEBAR_MAX_WIDTH = 520;
 const CHAT_MIN_WIDTH = 360;
-const DEFAULT_CHAT_WIDTH = 450;
+const DEFAULT_CHAT_WIDTH = 420;
 /** 编辑器模式下聊天区可拖动的最小宽度。 */
 const CHAT_RESIZE_MIN_WIDTH = 300;
 /** 编辑器列宽低于此值时自动切回预览模式。 */

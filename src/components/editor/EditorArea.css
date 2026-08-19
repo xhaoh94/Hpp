@@ -7,6 +7,7 @@
   height: 100%;
   overflow: hidden;
   background-color: var(--bg-secondary);
+  position: relative;
 }
 
 /* ===== Tab bar ===== */
@@ -198,40 +199,32 @@
   color: #e74c3c;
 }
 
-/* ===== Editor scrollbars — same style as chat area =====
-   Track is always transparent. Thumb is hidden by default,
-   only appears when the mouse is over the editor. */
+/* ===== Editor scrollbars — hidden; minimap overlay acts as the scroll indicator =====
+   The right-gutter minimap (showMinimap) renders a viewport rectangle that you can
+   drag to scroll, so the native scrollbar is redundant and is suppressed. */
 .cm-editor .cm-scroller {
-  scrollbar-width: thin;
-  scrollbar-gutter: stable;
-  scrollbar-color: transparent transparent;
-}
-
-.cm-editor:hover .cm-scroller {
-  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-width: none;
 }
 
 .cm-editor .cm-scroller::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 0;
+  height: 0;
+  display: none;
 }
 
-.cm-editor .cm-scroller::-webkit-scrollbar-track {
-  background: transparent;
+/* Tweak the minimap gutter + viewport overlay to fit the editor palette. */
+.cm-editor .cm-minimap {
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-primary);
 }
 
-.cm-editor .cm-scroller::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 6px;
-  min-height: 32px;
+.cm-editor .cm-minimap-overlay {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
 }
 
-.cm-editor:hover .cm-scroller::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
-}
-
-.cm-editor:hover .cm-scroller::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
+:root[data-theme="light"] .cm-editor .cm-minimap-overlay {
+  background: rgba(0, 0, 0, 0.18);
 }
 
 /* ===== Status bar ===== */
@@ -374,29 +367,112 @@
   color: rgba(255, 255, 255, 0.85);
 }
 
-/* ===== Find widget & Go-to-line widget (synced from FilePreview) ===== */
+/* ===== Find widget & Go-to-line widget (VSCode 风格) ===== */
 .editor-find-widget {
   position: absolute;
   top: 8px;
-  right: 16px;
+  right: 100px;
   z-index: 10;
-  min-width: 440px;
-  max-width: calc(100% - 32px);
-  min-height: 36px;
   box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px;
+  min-width: 270px;
+  max-width: 270px;
+  padding: 4px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-primary);
   box-shadow: 0 4px 16px var(--shadow-color);
 }
 
+.editor-find-grid {
+  display: grid;
+  grid-template-columns: 22px minmax(50px, 1fr) auto;
+  column-gap: 6px;
+  row-gap: 4px;
+  align-items: center;
+}
+
+/* 左侧折叠手柄：居中、灰色、无蓝底 */
+.editor-find-toggle {
+  grid-column: 1;
+  width: 22px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.editor-find-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 带边框输入框：选项（Aa/ab/.*、AB）在框内右侧 */
+.editor-find-input {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  height: 26px;
+  box-sizing: border-box;
+  padding-right: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.editor-find-input:focus-within {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.editor-find-input-error,
+.editor-find-input-error:focus-within {
+  border-color: var(--danger-color);
+  box-shadow: 0 0 0 1px var(--danger-color);
+}
+
+.editor-find-input-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0 6px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.editor-find-input-options {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: 0 0 auto;
+  padding-left: 2px;
+}
+
+/* 右侧操作区（计数 + 导航 + 更多 + 关闭 / 替换 + 替换全部） */
+.editor-find-actions {
+  grid-column: 3;
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.editor-find-row-spacer {
+  grid-column: 1;
+}
+
 .editor-widget-input {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
+  width: 100%;
   height: 26px;
   box-sizing: border-box;
   padding: 3px 8px;
@@ -421,16 +497,17 @@
 }
 
 .editor-find-count {
-  min-width: 48px;
+  min-width: 56px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 10px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .editor-search-option-btn {
   width: 25px;
-  height: 24px;
+  height: 25px;
   flex: 0 0 25px;
   padding: 0;
   border: 1px solid transparent;
@@ -438,8 +515,13 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 11px;
-  line-height: 22px;
+  font-weight: 600;
+  line-height: 1;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 .editor-search-option-btn:hover {
@@ -450,7 +532,7 @@
 .editor-search-option-btn.active {
   border-color: var(--accent-color);
   background: var(--accent-color);
-  color: white;
+  color: #fff;
 }
 
 .editor-search-option-btn.editor-whole-word {
@@ -460,17 +542,21 @@
 }
 
 .editor-widget-btn {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
   padding: 0;
   border: none;
   border-radius: 3px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 15px;
-  line-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 .editor-widget-btn:hover:not(:disabled) {
@@ -478,9 +564,72 @@
   color: var(--text-primary);
 }
 
+.editor-widget-btn.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 .editor-widget-btn:disabled {
   cursor: default;
   opacity: 0.35;
+}
+
+/* 更多操作下拉菜单 */
+.editor-find-menu {
+  position: absolute;
+  top: calc(100% - 2px);
+  right: 4px;
+  z-index: 11;
+  min-width: 184px;
+  padding: 4px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--shadow-color);
+}
+
+.editor-find-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.editor-find-menu button:hover {
+  background: var(--accent-color);
+  color: #fff;
+}
+
+.editor-find-menu button[aria-checked="true"] {
+  color: var(--accent-color);
+}
+
+.editor-find-menu button[aria-checked="true"]:hover {
+  color: #fff;
+}
+
+.editor-find-menu-shortcut {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.editor-find-menu button:hover .editor-find-menu-shortcut {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.editor-find-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border-color);
 }
 
 .editor-go-to-line-widget {
@@ -607,3 +756,373 @@
 :root[data-theme="light"] .cm-tm-punctuation { color: #24272d; }
 :root[data-theme="light"] .cm-tm-link { color: #0969da; }
 :root[data-theme="light"] .cm-tm-heading { color: #795e26; }
+
+/* ===== Find widget options row（区分大小写 / 全字匹配 / 正则匹配 / 更多操作） ===== */
+.editor-find-options-row {
+  grid-column: 2 / -1;
+  order: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-height: 26px;
+}
+
+/* 展开替换时，让“替换行”排在“选项行”之上（第二、三行互换） */
+.editor-find-replace-row,
+.editor-find-replace-actions,
+.editor-find-replace-order {
+  order: 1;
+}
+
+.editor-find-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.editor-find-option:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.editor-find-option.active {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+.editor-find-scope-select {
+  height: 24px;
+  min-width: 0;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  outline: none;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.editor-find-scope-select:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.editor-find-scope-select:focus {
+  border-color: var(--accent-color);
+}
+
+/* “所有文件”范围下手动关闭结果窗口后，出现在下拉框右侧的“重新打开”按钮，
+   与下拉选项绑定（切回“当前文件”时一同消失）。 */
+.editor-find-reopen {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.editor-find-reopen:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent-color);
+}
+
+/* ===== 扩大搜索结果面板（VSCode 风格：锚定到搜索栏下方，按文件分组，匹配文字高亮） ===== */
+.editor-expand-search {
+  position: absolute;
+  /* top 由 JS 动态测量搜索栏高度后注入（随展开/收起自适应）；
+     此处仅作无 JS 时的兜底。 */
+  top: 148px;
+  right: 100px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  width: min(520px, calc(100% - 120px));
+  max-height: calc(100% - 156px);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  box-shadow: 0 4px 16px var(--shadow-color);
+  overflow: hidden;
+}
+
+.editor-expand-search-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.editor-expand-search-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.editor-expand-search-close {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.editor-expand-search-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.editor-expand-search-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 0;
+}
+
+/* 虚拟化内容容器：用总高度撑起滚动条，行按绝对定位放置。 */
+.editor-expand-search-virtual {
+  position: relative;
+  width: 100%;
+}
+
+.editor-expand-search-vrow {
+  overflow: hidden;
+}
+
+.editor-expand-search-group {
+  margin: 0;
+}
+
+.editor-expand-search-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 27px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.editor-expand-search-group-head:hover {
+  background: var(--bg-hover);
+}
+
+.editor-expand-search-chevron {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.editor-expand-search-fileicon {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.editor-expand-search-name {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.editor-expand-search-count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.editor-expand-search-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  text-align: right;
+  direction: rtl;
+}
+
+.editor-expand-search-matches {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.editor-expand-search-match {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 2px 8px 2px 24px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.editor-expand-search-match:hover {
+  background: var(--bg-hover);
+}
+
+.editor-expand-search-match-line {
+  flex: 0 0 auto;
+  min-width: 36px;
+  padding-top: 1px;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 11px;
+  text-align: right;
+}
+
+.editor-expand-search-match-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.editor-expand-search-mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: rgba(255, 165, 0, 0.35);
+  color: inherit;
+}
+
+/* 匹配项行容器：grid 布局，预览列 1fr 占满 + 替换按钮列 auto；默认按钮列 width:0，
+   悬停时按钮列扩展到 ~22px，预览列自动收缩截断（vscode 风格）。 */
+.editor-expand-search-match-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  position: relative;
+}
+
+/* 展开替换时的替换预览：原文（红色底 + 删除线）后接替换词（选中底）。 */
+.editor-expand-search-replace-old {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: rgba(231, 76, 60, 0.32);
+  color: inherit;
+  text-decoration: line-through;
+  text-decoration-color: rgba(231, 76, 60, 0.9);
+}
+
+:root[data-theme="light"] .editor-expand-search-replace-old {
+  background: rgba(255, 0, 0, 0.22);
+}
+
+.editor-expand-search-replace-new {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: rgba(0, 122, 204, 0.38);
+  color: inherit;
+  text-decoration: none;
+}
+
+:root[data-theme="light"] .editor-expand-search-replace-new {
+  background: rgba(9, 105, 218, 0.32);
+}
+
+/* 每行的“替换”按钮：默认 width:0 占布局 0 宽度（不挤压预览），悬停时扩展到 22px，
+   预览列随之收缩触发 ellipsis 截断。整列过渡平顺显示。 */
+.editor-expand-search-replace-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 0;
+  min-width: 0;
+  height: 20px;
+  margin: 2px 4px 2px 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  overflow: hidden;
+  transition: width 0.12s ease, background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.editor-expand-search-match-item:hover .editor-expand-search-replace-btn {
+  width: 22px;
+  border-color: var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.editor-expand-search-replace-btn:hover {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: #fff;
+}
+
+.editor-expand-search-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+}

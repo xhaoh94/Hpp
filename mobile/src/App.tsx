@@ -37,7 +37,6 @@ import {
   History,
   Link2,
   Lightbulb,
-  ListChecks,
   LoaderCircle,
   Menu,
   MessageCircle,
@@ -501,7 +500,6 @@ function MobileModelPicker({
           });
         }}
       >
-        <Bot size={14} />
         <span>{currentModel?.name || "选择模型"}</span>
         <ChevronDown size={13} />
       </button>
@@ -3511,9 +3509,19 @@ export default function App() {
     [selectedConfig?.model],
   );
   const selectedUserMessages = useMemo(
-    () => selectedMessages.filter((message) => message.role === "user").slice().reverse(),
+    () => selectedMessages.filter((message) => message.role === "user").slice(),
     [selectedMessages],
   );
+  // 发言记录弹窗：正序后最新在底部，打开且数据就绪时默认滚动到最新一行。
+  const historyListRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (historyOpen && historyListRef.current && selectedUserMessages.length > 0) {
+      const el = historyListRef.current;
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+    }
+  }, [historyOpen, selectedUserMessages]);
   const referenceCandidates = useMemo(
     () => selected ? selected.project.sessions.filter((session) => session.id !== selected.session.id) : [],
     [selected],
@@ -4835,22 +4843,22 @@ export default function App() {
               <div><h2>发言记录</h2></div>
               <button className="icon-button" onClick={() => setHistoryOpen(false)} title="关闭" aria-label="关闭发言记录"><X size={19} /></button>
             </div>
-            <div className="history-list">
-              {selectedUserMessages.map((message, index) => (
-                <button type="button" className="history-item" key={message.id} onClick={() => openHistoryMessage(message.id)}>
-                  <span>{message.content ? renderAttachmentPreview(message.content) : "图片消息"}</span>
-                  <div className="history-item-meta">
-                    <time>{formatHistoryMessageTime(message.timestamp)}</time>
-                    {index === 0 && selected.session.status === "running" && <SessionRunningIndicator />}
-                  </div>
-                </button>
-              ))}
-              {selectedUserMessages.length === 0 && <div className="history-empty">暂无发言</div>}
+            <div className="history-list" ref={historyListRef}>
               {nextBefore[selected.session.id] !== null && nextBefore[selected.session.id] !== undefined && (
                 <button className="history-load-older" disabled={loadingSession} onClick={() => void loadSession(selected.session.id, false, nextBefore[selected.session.id])}>
                   {loadingSession ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} 加载更早发言
                 </button>
               )}
+              {selectedUserMessages.map((message, index) => (
+                <button type="button" className="history-item" key={message.id} onClick={() => openHistoryMessage(message.id)}>
+                  <span>{message.content ? renderAttachmentPreview(message.content) : "图片消息"}</span>
+                  <div className="history-item-meta">
+                    <time>{formatHistoryMessageTime(message.timestamp)}</time>
+                    {index === selectedUserMessages.length - 1 && selected.session.status === "running" && <SessionRunningIndicator />}
+                  </div>
+                </button>
+              ))}
+              {selectedUserMessages.length === 0 && <div className="history-empty">暂无发言</div>}
             </div>
           </section>
         </div>
@@ -5126,8 +5134,7 @@ export default function App() {
                 disabled={commandBusy}
                 onClick={() => void runCommand<{ enabled: boolean }>("settings.setPlanMode", { enabled: selectedConfig?.planModeEnabled !== true }).then(({ enabled }) => setConfigs((current) => Object.fromEntries(Object.entries(current).map(([id, config]) => [id, { ...config, planModeEnabled: enabled }] ))))}
               >
-                <ListChecks size={14} />
-                <span>Plan</span>
+                <span>计划</span>
               </button>
               {selectedAgent?.supportsPermissions === true && (
                 <MobilePermissionPicker

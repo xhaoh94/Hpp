@@ -1,24 +1,21 @@
 import powershell from "highlight.js/lib/languages/powershell";
 import { common, createLowlight } from "lowlight";
+// 搜索函数从 text-search.ts 导入（无 lowlight 依赖，可被 Worker 安全引用）。
+export {
+  findTextMatches,
+  getNextSearchMatchIndex,
+  isRegexValid,
+  applyPreserveCase,
+  escapeRegExp,
+  type SearchMatch,
+  type TextSearchOptions,
+  type IndexedSearchMatch,
+} from "./text-search";
+import type { SearchMatch } from "./text-search";
 
 export interface SyntaxToken {
   text: string;
   classNames: string[];
-}
-
-export interface SearchMatch {
-  lineNumber: number;
-  startColumn: number;
-  endColumn: number;
-}
-
-export interface TextSearchOptions {
-  matchCase?: boolean;
-  wholeWord?: boolean;
-}
-
-export interface IndexedSearchMatch extends SearchMatch {
-  matchIndex: number;
 }
 
 export interface DisplayToken extends SyntaxToken {
@@ -142,59 +139,6 @@ export function buildHighlightedLines(content: string, language: string | null):
   }
 }
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const WORD_CHARACTER_PATTERN = /[\p{L}\p{N}_]/u;
-
-function getPreviousCharacter(value: string, index: number) {
-  return value.slice(0, index).match(/.$/u)?.[0] || "";
-}
-
-function getNextCharacter(value: string, index: number) {
-  return value.slice(index).match(/^./u)?.[0] || "";
-}
-
-function isWholeWordMatch(line: string, query: string, startColumn: number, endColumn: number) {
-  const queryCharacters = Array.from(query);
-  const firstQueryCharacter = queryCharacters[0] || "";
-  const lastQueryCharacter = queryCharacters[queryCharacters.length - 1] || "";
-  const previousCharacter = getPreviousCharacter(line, startColumn);
-  const nextCharacter = getNextCharacter(line, endColumn);
-
-  return !(
-    (WORD_CHARACTER_PATTERN.test(firstQueryCharacter) && WORD_CHARACTER_PATTERN.test(previousCharacter))
-    || (WORD_CHARACTER_PATTERN.test(lastQueryCharacter) && WORD_CHARACTER_PATTERN.test(nextCharacter))
-  );
-}
-
-export function findTextMatches(
-  lines: string[],
-  query: string,
-  options: TextSearchOptions = {},
-): SearchMatch[] {
-  if (!query) return [];
-  const expression = new RegExp(escapeRegExp(query), options.matchCase ? "gu" : "giu");
-  const matches: SearchMatch[] = [];
-
-  lines.forEach((line, lineIndex) => {
-    expression.lastIndex = 0;
-    for (const match of line.matchAll(expression)) {
-      const startColumn = match.index;
-      const endColumn = startColumn + match[0].length;
-      if (options.wholeWord && !isWholeWordMatch(line, query, startColumn, endColumn)) continue;
-      matches.push({
-        lineNumber: lineIndex + 1,
-        startColumn,
-        endColumn,
-      });
-    }
-  });
-
-  return matches;
-}
-
 export function getRenderWindow(
   totalLines: number,
   targetLine: number,
@@ -208,18 +152,6 @@ export function getRenderWindow(
     maximumStart,
   );
   return { startIndex, endIndex: startIndex + maximumLines };
-}
-
-export function getNextSearchMatchIndex(
-  currentIndex: number,
-  totalMatches: number,
-  direction: 1 | -1,
-): number {
-  if (totalMatches <= 0) return -1;
-  if (currentIndex < 0 || currentIndex >= totalMatches) {
-    return direction === 1 ? 0 : totalMatches - 1;
-  }
-  return (currentIndex + direction + totalMatches) % totalMatches;
 }
 
 export function parseGoToLine(value: string, totalLines: number): number | null {

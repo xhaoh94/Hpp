@@ -65,8 +65,8 @@ export default defineConfig({
   renderer: {
     root: resolve(__dirname, "src"),
     publicDir: resolve(__dirname, "public"),
-    // 开启 renderer HMR，但忽略 out/ 目录避免构建产物回环触发刷新。
     server: {
+      hmr: false,
       watch: {
         ignored: [resolve(__dirname, "out/**")],
       },

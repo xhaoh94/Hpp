@@ -6,6 +6,7 @@ import {
   getFilePreviewLanguage,
   getNextSearchMatchIndex,
   getRenderWindow,
+  isRegexValid,
   parseGoToLine,
 } from "./file-preview-code";
 
@@ -79,5 +80,19 @@ describe("file preview code utilities", () => {
     }]);
     expect(display.filter((token) => token.matchIndex === 0).map((token) => token.text).join(""))
       .toBe("value");
+  });
+
+  it("treats the query as a regex when the regex option is set", () => {
+    expect(findTextMatches(["foo123 bar456 baz789"], "\\d+", { regex: true })).toEqual([
+      { lineNumber: 1, startColumn: 3, endColumn: 6 },
+      { lineNumber: 1, startColumn: 10, endColumn: 13 },
+      { lineNumber: 1, startColumn: 17, endColumn: 20 },
+    ]);
+    // 普通模式下正则元字符会被转义，不匹配数字。
+    expect(findTextMatches(["foo123 bar456"], "\\d+")).toEqual([]);
+    // 非法正则返回无结果，而不是抛错。
+    expect(findTextMatches(["abc"], "(", { regex: true })).toEqual([]);
+    expect(isRegexValid("(", false)).toBe(false);
+    expect(isRegexValid("\\d+", false)).toBe(true);
   });
 });

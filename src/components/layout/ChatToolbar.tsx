@@ -110,15 +110,7 @@ export function ChatToolbar({
         title={getPlanModeTooltip(agentId)}
         aria-pressed={planModeEnabled}
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M9 6h11" />
-          <path d="M9 12h11" />
-          <path d="M9 18h11" />
-          <path d="M4 6l1 1 2-2" />
-          <path d="M4 12l1 1 2-2" />
-          <path d="M4 18l1 1 2-2" />
-        </svg>
-        <span>Plan</span>
+        <span>计划</span>
       </button>
 
       {permissionModeSupported && <div ref={permissionRef} className="relative chat-permission-control">
@@ -132,7 +124,7 @@ export function ChatToolbar({
           className={`chat-toolbar-select chat-permission-trigger ${permissionMode === "full-access" ? "danger" : ""}`}
           aria-haspopup="menu"
           aria-expanded={permissionOpen}
-          title="设置 Agent 权限"
+          title="设置权限"
         >
           {permissionMode === "full-access"
             ? <ShieldAlert size={14} />
@@ -195,12 +187,12 @@ export function ChatToolbar({
           }}
           className="chat-toolbar-select"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          {/* <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="3" y="3" width="18" height="18" rx="3" />
             <circle cx="8.5" cy="8.5" r="1.5" />
             <circle cx="15.5" cy="8.5" r="1.5" />
             <path d="M8 14c0 0 1.5 2 4 2s4-2 4-2" />
-          </svg>
+          </svg> */}
           <span>{currentModel?.name || "选择模型"}</span>
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <path d="M6 9l6 6 6-6" />
@@ -301,7 +293,7 @@ export function ChatToolbar({
                 <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
                 <path d="M10 21h4" />
               </svg>
-              <span>思考: {normalizeThinkingLevelId(thinkingLevel) === "off" ? "关" : "开"}</span>
+              <span>{normalizeThinkingLevelId(thinkingLevel) === "off" ? "关" : "开"}</span>
             </button>
           );
         }
@@ -320,7 +312,7 @@ export function ChatToolbar({
               <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
               <path d="M10 21h4" />
             </svg>
-            <span>思考: {currentThinking.label}</span>
+            <span>{currentThinking.label}</span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M6 9l6 6 6-6" />
             </svg>

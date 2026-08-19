@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search, WholeWord } from "lucide-react";
 import { EditorView, basicSetup } from "codemirror";
-import { Compartment, EditorState, EditorSelection, Extension, StateEffect, StateField } from "@codemirror/state";
+import { Compartment, EditorState, EditorSelection, Extension, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { Decoration, keymap } from "@codemirror/view";
+import { redo, undo } from "@codemirror/commands";
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { javascript } from "@codemirror/lang-javascript";
@@ -14,13 +16,17 @@ import { sql } from "@codemirror/lang-sql";
 import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
 import { lua } from "@codemirror/legacy-modes/mode/lua";
+import { showMinimap } from "../../lib/codemirror-minimap/index.js";
 import { csharp } from "@codemirror/legacy-modes/mode/clike";
+import { EDITOR_GOTO_MATCH_EVENT, EDITOR_REPLACE_MATCH_EVENT, pendingGoto, requestGotoMatch, sharedSearchConfig, type AllFileMatch, type GotoMatchDetail, type ReplaceMatchDetail } from "./searchConfig";
 import { uiText } from "@/i18n/text";
 import { useChatStore } from "@/stores/chat-store";
 import { requestComposerInsert } from "@/lib/composer-insert-event";
 import {
+  applyPreserveCase,
   findTextMatches,
   getNextSearchMatchIndex,
+  isRegexValid,
   parseGoToLine,
   type SearchMatch,
 } from "@/lib/file-preview-code";
@@ -59,6 +65,26 @@ interface EditorPaneProps {
   registerSave: (path: string, fn: () => Promise<boolean>) => () => void;
   /** TextMate 高亮运行时状态（状态栏指示用）。 */
   onTmStatus?: (status: TmStatus) => void;
+  /** “所有文件”搜索范围：触发项目级内容搜索。openPanel 为 true 时结果弹窗在命中后打开。 */
+  onRunAllFilesSearch: (openPanel: boolean) => void;
+  /** “所有文件”搜索范围下的匹配结果（与查找框计数/导航共享）。 */
+  allFileMatches: AllFileMatch[];
+  /** “所有文件”搜索是否进行中。 */
+  allFileLoading: boolean;
+  /** 跳转到其他文件时（来自“扩大搜索”结果或跨文件查找导航），请求父级打开并激活该文件。 */
+  onOpenFile: (path: string) => void;
+  /** “所有文件”结果面板是否当前打开（父级持有并下发，用于决定“重新打开”按钮显隐）。 */
+  allFilesPanelOpen: boolean;
+  /** “所有文件”搜索结果数量（>0 才显示“重新打开”按钮）。 */
+  allFilesResultsCount: number;
+  /** 手动“重新打开”“所有文件”结果面板。 */
+  onReopenAllFilesPanel: () => void;
+  /** 搜索范围变化回调：父级据此在切回“当前文件”时关闭面板。 */
+  onSearchScopeChange: (scope: "current" | "all") => void;
+  /** 替换状态（展开替换 / 替换词 / 保留大小写）变化时通知父级，供“所有文件”结果面板显示替换预览与按钮。 */
+  onReplaceStateChange: (state: { replaceOpen: boolean; replaceQuery: string; preserveCase: boolean }) => void;
+  /** 查找栏（搜索控件）关闭时回调父级，用于一并收起“所有文件”结果面板。 */
+  onSearchClose: () => void;
 }
 
 const DARK_COLORS = {
@@ -175,8 +201,8 @@ function buildEditorTheme(colors: typeof DARK_COLORS) {
         borderRight: `1px solid ${isDark ? "#3c3c3c" : "#d2d6dc"}`,
       },
       ".cm-lineNumbers .cm-gutterElement": {
-        padding: "0 10px 0 14px",
-        minWidth: "34px",
+        padding: "0 6px 0 8px",
+        minWidth: "28px",
       },
       ".cm-activeLine": {
         backgroundColor: isDark ? "rgba(255, 255, 255, 0.06)" : "rgba(15, 23, 42, 0.065)",
@@ -220,6 +246,9 @@ const searchHighlightField = StateField.define<EditorSearchHighlight>({
     for (const e of tr.effects) {
       if (e.is(setSearchHighlightEffect)) return e.value;
     }
+    // React 会基于新文档重新计算匹配。transaction 提交期间先清空旧范围，
+    // 避免 undo/redo 缩短文档时把越界 decoration 交给 CodeMirror。
+    if (tr.docChanged) return { matches: [], activeIndex: -1 };
     return value;
   },
   provide: (field) =>
@@ -301,6 +330,16 @@ export function EditorPane({
   onSaveError,
   registerSave,
   onTmStatus,
+  onRunAllFilesSearch,
+  allFileMatches,
+  allFileLoading,
+  onOpenFile,
+  allFilesPanelOpen,
+  allFilesResultsCount,
+  onReopenAllFilesPanel,
+  onSearchScopeChange,
+  onReplaceStateChange,
+  onSearchClose,
 }: EditorPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -319,10 +358,24 @@ export function EditorPane({
   const addPendingFile = useChatStore((state) => state.addPendingFile);
 
   // ===== Search & Go-to-line state =====
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchMatchCase, setSearchMatchCase] = useState(false);
-  const [searchWholeWord, setSearchWholeWord] = useState(false);
+  // 初始化自 sharedSearchConfig：切换标签页时沿用同一份搜索状态（searchOpen/query/选项等），
+  // 实现“打开 Ctrl+F 后切换文件仍保持搜索同一关键词”。各 pane 仍按自身文档计算匹配。
+  const [searchOpen, setSearchOpen] = useState(sharedSearchConfig.searchOpen);
+  const [searchQuery, setSearchQuery] = useState(sharedSearchConfig.searchQuery);
+  // 防抖搜索词：输入过程中只更新输入框文本（searchQuery），停止输入 ~500ms 后才
+  // 更新 debouncedSearchQuery 并触发搜索计算，避免大文件连续按键每键一次正则匹配导致卡顿。
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(sharedSearchConfig.searchQuery);
+  useEffect(() => {
+    // 清空立即生效（清空结果无需防抖）。
+    if (!searchQuery) {
+      setDebouncedSearchQuery((current) => (current === "" ? current : ""));
+      return;
+    }
+    const timer = window.setTimeout(() => setDebouncedSearchQuery(searchQuery), 500);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+  const [searchMatchCase, setSearchMatchCase] = useState(sharedSearchConfig.searchMatchCase);
+  const [searchWholeWord, setSearchWholeWord] = useState(sharedSearchConfig.searchWholeWord);
   const [activeMatchIndex, setActiveMatchIndex] = useState(-1);
   const [goToLineOpen, setGoToLineOpen] = useState(false);
   const [goToLineValue, setGoToLineValue] = useState("");
@@ -331,10 +384,46 @@ export function EditorPane({
   const [docVersion, setDocVersion] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const goToLineInputRef = useRef<HTMLInputElement>(null);
+  const goToLineWidgetRef = useRef<HTMLDivElement>(null);
   const searchOpenRef = useRef(false);
   searchOpenRef.current = searchOpen;
   const goToLineOpenRef = useRef(false);
   goToLineOpenRef.current = goToLineOpen;
+  // ===== Replace state (Ctrl+H) =====
+  const [searchRegex, setSearchRegex] = useState(sharedSearchConfig.searchRegex);
+  const [replaceOpen, setReplaceOpen] = useState(sharedSearchConfig.replaceOpen);
+  const [replaceQuery, setReplaceQuery] = useState(sharedSearchConfig.replaceQuery);
+  const [preserveCase, setPreserveCase] = useState(sharedSearchConfig.preserveCase);
+  const [searchScope, setSearchScope] = useState<"current" | "all">(sharedSearchConfig.searchScope);
+  const replaceInputRef = useRef<HTMLInputElement>(null);
+  const searchRegexRef = useRef(false);
+  searchRegexRef.current = searchRegex;
+  const replaceOpenRef = useRef(false);
+  replaceOpenRef.current = replaceOpen;
+  const replaceQueryRef = useRef("");
+  replaceQueryRef.current = replaceQuery;
+  const preserveCaseRef = useRef(false);
+  preserveCaseRef.current = preserveCase;
+  // 显式导航计数：仅在上一项/下一项/打开搜索等用户动作时自增，
+  // 用于隔离“文档被编辑导致匹配变化”与“用户主动跳转”——编辑时不滚动。
+  const [navTick, setNavTick] = useState(0);
+  const activeMatchIndexRef = useRef(-1);
+  activeMatchIndexRef.current = activeMatchIndex;
+  // 显式滚动目标：在用户主动跳转/打开搜索/切文件时由处理函数写入，
+  // 滚动 effect 仅消费它（避免依赖 activeMatchIndex 的异步重置导致滚动到错误位置）。
+  const pendingScrollRef = useRef(-1);
+  // 仅当用户显式按 ↑/↓ 导航时，才允许“所有文件”范围跨文件跳转打开其它文件；
+  // 打开搜索、输入文本等隐式动作不自动打开其它文件（避免抢走输入框焦点、意外跳页）。
+  const crossFileNavAllowedRef = useRef(false);
+  // 供全局事件监听闭包读取最新值（避免闭包捕获过期状态）。
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+  const onRunAllFilesSearchRef = useRef(onRunAllFilesSearch);
+  onRunAllFilesSearchRef.current = onRunAllFilesSearch;
 
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
@@ -346,6 +435,12 @@ export function EditorPane({
   registerSaveRef.current = registerSave;
   const onTmStatusRef = useRef(onTmStatus);
   onTmStatusRef.current = onTmStatus;
+  const onReplaceStateChangeRef = useRef(onReplaceStateChange);
+  onReplaceStateChangeRef.current = onReplaceStateChange;
+  // 用 ref 持有最新 onSearchScopeChange，避免 openSearch/openReplace 因该（父级内联、易变）回调
+  // 身份变化而被重新创建，进而触发 EditorView 创建 effect 反复重建编辑器。
+  const onSearchScopeChangeRef = useRef(onSearchScopeChange);
+  onSearchScopeChangeRef.current = onSearchScopeChange;
 
   const setReadOnly = useCallback((readOnly: boolean) => {
     readonlyRef.current = readOnly;
@@ -397,20 +492,56 @@ export function EditorPane({
 
   // ===== Search & Go-to-line logic =====
   const searchMatches = useMemo<SearchMatch[]>(() => {
-    if (!searchOpen || !searchQuery) return [];
+    if (!searchOpen || !debouncedSearchQuery) return [];
     const view = viewRef.current;
     if (!view) return [];
     const lines = view.state.doc.toString().split("\n");
-    return findTextMatches(lines, searchQuery, {
+    return findTextMatches(lines, debouncedSearchQuery, {
       matchCase: searchMatchCase,
       wholeWord: searchWholeWord,
+      regex: searchRegex,
     });
-  }, [searchOpen, searchQuery, searchMatchCase, searchWholeWord, docVersion]);
+  }, [searchOpen, debouncedSearchQuery, searchMatchCase, searchWholeWord, searchRegex, docVersion]);
 
-  // Reset active match index whenever the match set changes.
+  // 查找框实际使用的匹配集合：
+  // - 当前文件：直接用本文件 searchMatches；
+  // - 所有文件：复用父级下发的项目级搜索结果（allFileMatches），用于计数与跨文件导航。
+  // 带 path 字段以便导航时判断是否跨文件。
+  const displayMatches = useMemo<Array<SearchMatch & { path?: string }>>(() => {
+    if (searchScope === "all") {
+      return allFileMatches.map((match) => ({
+        lineNumber: match.lineNumber,
+        startColumn: match.startColumn,
+        endColumn: match.endColumn,
+        path: match.path,
+      }));
+    }
+    return searchMatches;
+  }, [searchScope, searchMatches, allFileMatches]);
+
+  // 正则模式下，源非法则无结果并显示错误态。
+  const searchRegexError = useMemo<boolean>(() => {
+    if (!searchOpen || !searchRegex || !searchQuery) return false;
+    return !isRegexValid(searchQuery, searchMatchCase);
+  }, [searchOpen, searchRegex, searchQuery, searchMatchCase]);
+
+  // 防抖查询 / 选项 / 范围变化后：回到第一个匹配。当前文件范围同时滚动到首个匹配
+  // （debounce 落地后才滚动，避免连续按键时滚动到旧匹配）。
   useEffect(() => {
-    setActiveMatchIndex(searchMatches.length > 0 ? 0 : -1);
-  }, [searchMatches]);
+    setActiveMatchIndex(displayMatches.length > 0 ? 0 : -1);
+    if (searchScope === "current" && searchOpen && debouncedSearchQuery) {
+      pendingScrollRef.current = 0;
+      setNavTick((tick) => tick + 1);
+    }
+  }, [debouncedSearchQuery, searchMatchCase, searchWholeWord, searchRegex, searchScope, searchOpen]);
+
+  useEffect(() => {
+    setActiveMatchIndex((current) => {
+      if (displayMatches.length === 0) return -1;
+      if (current < 0 || current >= displayMatches.length) return 0;
+      return current;
+    });
+  }, [displayMatches]);
 
   // Push highlight decorations into the CodeMirror editor.
   useEffect(() => {
@@ -423,7 +554,8 @@ export function EditorPane({
     view.dispatch({
       effects: setSearchHighlightEffect.of({
         matches: absoluteMatches,
-        activeIndex: activeMatchIndex,
+        // 所有文件范围下，activeMatchIndex 指向跨文件结果，不应错误高亮本文件某项，故置 -1。
+        activeIndex: searchScope === "all" ? -1 : activeMatchIndex,
       }),
     });
   }, [searchMatches, activeMatchIndex]);
@@ -439,10 +571,24 @@ export function EditorPane({
   }, [searchOpen]);
 
   // Scroll the active match into view.
+  // 依赖 navTick（而非 activeMatchIndex/displayMatches）：编辑文档导致匹配变化时 navTick 不变，
+  // 因此不会自动跳走；仅当用户显式导航/打开搜索/切换文件（处理函数自增 navTick）才滚动。
   useEffect(() => {
-    if (activeMatchIndex < 0) return;
-    const match = searchMatches[activeMatchIndex];
+    const idx = pendingScrollRef.current;
+    if (idx < 0) return;
+    pendingScrollRef.current = -1;
+    const match = displayMatches[idx];
     if (!match) return;
+    // 所有文件范围且目标不在当前文件：仅当用户显式 ↑/↓ 导航时才跨文件跳转打开目标文件；
+    // 打开搜索 / 输入文本等隐式动作不应自动打开其它文件（避免抢焦点、意外跳页）。
+    const matchPath = (match as SearchMatch & { path?: string }).path;
+    if (searchScope === "all" && matchPath && matchPath !== path) {
+      if (crossFileNavAllowedRef.current) {
+        crossFileNavAllowedRef.current = false;
+        requestGotoMatch(matchPath, match.lineNumber);
+      }
+      return;
+    }
     const view = viewRef.current;
     if (!view) return;
     const line = view.state.doc.line(match.lineNumber);
@@ -450,7 +596,7 @@ export function EditorPane({
     view.dispatch({
       effects: EditorView.scrollIntoView(from, { y: "center" }),
     });
-  }, [activeMatchIndex, searchMatches]);
+  }, [navTick]);
 
   // Focus the search / goto-line input shortly after it opens.
   useEffect(() => {
@@ -465,14 +611,232 @@ export function EditorPane({
     return () => cancelAnimationFrame(frame);
   }, [goToLineOpen]);
 
+  // 查找栏关闭（任意路径：× 按钮 / Esc / Ctrl+Alt+W / 点击文档外）时通知父级一并收起“所有文件”结果面板。
+  // 用 ref 持有回调使 effect 仅在 searchOpen 跳变时运行，避免父级重渲染导致重复触发。
+  const onSearchCloseRef = useRef(onSearchClose);
+  onSearchCloseRef.current = onSearchClose;
+  const prevSearchOpenRef = useRef(searchOpen);
+  useEffect(() => {
+    if (prevSearchOpenRef.current && !searchOpen) {
+      onSearchCloseRef.current();
+    }
+    prevSearchOpenRef.current = searchOpen;
+  }, [searchOpen]);
+
+  // 本地搜索状态 → 共享单例：任意变更都回写到 sharedSearchConfig，
+  // 使切换标签页时其他 pane 能沿用同一份搜索状态（同一关键词/选项）。
+  useEffect(() => {
+    sharedSearchConfig.searchOpen = searchOpen;
+    sharedSearchConfig.searchQuery = searchQuery;
+    sharedSearchConfig.searchMatchCase = searchMatchCase;
+    sharedSearchConfig.searchWholeWord = searchWholeWord;
+    sharedSearchConfig.searchRegex = searchRegex;
+    sharedSearchConfig.replaceOpen = replaceOpen;
+    sharedSearchConfig.replaceQuery = replaceQuery;
+    sharedSearchConfig.preserveCase = preserveCase;
+    sharedSearchConfig.searchScope = searchScope;
+    // 通知父级（EditorArea）：替换状态变化，使其“所有文件”结果面板能实时反映替换预览与按钮。
+    onReplaceStateChangeRef.current?.({ replaceOpen, replaceQuery, preserveCase });
+  }, [searchOpen, searchQuery, searchMatchCase, searchWholeWord, searchRegex, replaceOpen, replaceQuery, preserveCase, searchScope]);
+
+  // 成为可见标签页时，从共享单例同步回本地状态：保留同一关键词并跳到首个匹配。
+  useEffect(() => {
+    if (!visible) return;
+    setSearchOpen(sharedSearchConfig.searchOpen);
+    setSearchQuery(sharedSearchConfig.searchQuery);
+    setDebouncedSearchQuery(sharedSearchConfig.searchQuery);
+    setSearchMatchCase(sharedSearchConfig.searchMatchCase);
+    setSearchWholeWord(sharedSearchConfig.searchWholeWord);
+    setSearchRegex(sharedSearchConfig.searchRegex);
+    setReplaceOpen(sharedSearchConfig.replaceOpen);
+    setReplaceQuery(sharedSearchConfig.replaceQuery);
+    setPreserveCase(sharedSearchConfig.preserveCase);
+    setSearchScope(sharedSearchConfig.searchScope);
+    // 切到该标签页时滚到首个匹配；但若本次正是"扩大搜索"跳转目标（pendingGoto 指向本文件），
+    // 则交给 pendingGoto effect 滚动到精确行，避免被"滚到首个匹配"覆盖。
+    // "所有文件"范围下不自动滚动：displayMatches[0] 可能是其他文件的匹配，
+    // requestGotoMatch 会打开该文件，导致切 tab 时老是跳到第一个匹配文件。
+    if (sharedSearchConfig.searchOpen && sharedSearchConfig.searchQuery && sharedSearchConfig.searchScope !== "all" && pendingGoto.path !== path) {
+      pendingScrollRef.current = 0;
+      setActiveMatchIndex(0);
+      setNavTick((tick) => tick + 1);
+    }
+  }, [visible]);
+
+  // 监听“扩大搜索”结果跳转：目标为本 pane 则滚动；否则（且本 pane 当前可见）请求打开目标文件，
+  // 由目标 pane 在文档 ready 后完成滚动。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<GotoMatchDetail>).detail;
+      if (!detail) return;
+      if (detail.path === path) {
+        if (visibleRef.current && statusRef.current === "ready") {
+          scrollToLine(detail.line);
+          pendingGoto.path = null;
+        } else {
+          pendingGoto.path = path;
+          pendingGoto.line = detail.line;
+        }
+        return;
+      }
+      if (visibleRef.current) {
+        onOpenFileRef.current(detail.path);
+      }
+    };
+    window.addEventListener(EDITOR_GOTO_MATCH_EVENT, handler);
+    return () => window.removeEventListener(EDITOR_GOTO_MATCH_EVENT, handler);
+  }, [path]);
+
+  // 文档加载完成且本 pane 可见时，若有待办跳转（来自“扩大搜索”结果），执行滚动并清除。
+  useEffect(() => {
+    if (status !== "ready" || !visible) return;
+    if (pendingGoto.path === path) {
+      scrollToLine(pendingGoto.line);
+      pendingGoto.path = null;
+    }
+  }, [status, visible, path]);
+
+  // 监听“所有文件”结果面板发起的单处替换：本 pane 负责该 path 时，
+  // 在 CodeMirror 实时文档内重新定位该次出现并就地替换（保持脏标记与 undo），
+  // 文件未打开的场景由父级走磁盘读写回退。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ReplaceMatchDetail>).detail;
+      if (!detail || detail.path !== path) return;
+      const view = viewRef.current;
+      if (!view || statusRef.current !== "ready") return;
+      const total = view.state.doc.lines;
+      if (detail.lineNumber < 1 || detail.lineNumber > total) return;
+      const line = view.state.doc.line(detail.lineNumber);
+      const matches = findTextMatches([line.text], detail.query, {
+        matchCase: detail.matchCase,
+        wholeWord: detail.wholeWord,
+        regex: detail.regex,
+      });
+      // 优先按原始列范围定位；实时行内容漂移时回退到该行的第一个出现。
+      const target =
+        matches.find((m) => m.startColumn === detail.matchStart && m.endColumn === detail.matchEnd) ?? matches[0];
+      if (!target) return;
+      const from = line.from + target.startColumn;
+      const to = line.from + target.endColumn;
+      view.dispatch({
+        changes: { from, to, insert: detail.replacement },
+        selection: EditorSelection.cursor(from + detail.replacement.length),
+        effects: EditorView.scrollIntoView(from + detail.replacement.length, { y: "center" }),
+      });
+    };
+    window.addEventListener(EDITOR_REPLACE_MATCH_EVENT, handler);
+    return () => window.removeEventListener(EDITOR_REPLACE_MATCH_EVENT, handler);
+  }, [path]);
+
+  // 所有文件范围下，关键词/选项变化时防抖重新检索（不强制弹窗，仅刷新计数与导航结果）。
+  // 通过 sharedSearchConfig.lastAllFilesSearchKey 去重：切 tab 或新 pane 挂载时若参数未变则跳过，避免重复搜索。
+  const allFilesSearchTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (searchScope !== "all" || !searchOpen || !searchQuery.trim()) return;
+    // 构建当前搜索参数键，与上次实际搜索的参数键比对。
+    const paramsKey = JSON.stringify({
+      query: searchQuery.trim(),
+      matchCase: searchMatchCase,
+      wholeWord: searchWholeWord,
+      regex: searchRegex,
+    });
+    if (paramsKey === sharedSearchConfig.lastAllFilesSearchKey) return;
+    if (allFilesSearchTimerRef.current) window.clearTimeout(allFilesSearchTimerRef.current);
+    allFilesSearchTimerRef.current = window.setTimeout(() => {
+      onRunAllFilesSearchRef.current(false);
+    }, 250);
+    return () => {
+      if (allFilesSearchTimerRef.current) window.clearTimeout(allFilesSearchTimerRef.current);
+    };
+  }, [searchQuery, searchMatchCase, searchWholeWord, searchRegex, searchScope, searchOpen]);
+
+  // 选中文本后按 Ctrl+F / Ctrl+H：把当前编辑器选区文本直接填入搜索框。
+  // 仅在确实存在选区时才覆盖旧查询，避免清空用户已输入的内容。
+  const fillSearchFromSelection = useCallback(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const sel = view.state.selection.main;
+    if (sel.from !== sel.to) {
+      const selectedText = view.state.sliceDoc(sel.from, sel.to).replace(/\r?\n+$/, "");
+      if (selectedText) setSearchQuery(selectedText);
+    }
+  }, []);
+
+  // 滚动到指定行号（用于“扩大搜索”结果跳转与全局 goto 事件）。
+  const scrollToLine = useCallback((lineNumber: number) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const total = view.state.doc.lines;
+    const clamped = Math.max(1, Math.min(lineNumber, total));
+    const line = view.state.doc.line(clamped);
+    view.dispatch({
+      selection: EditorSelection.cursor(line.from),
+      effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+    });
+    view.focus();
+  }, []);
+
+  // 选项（区分大小写/全字匹配/正则）切换后回到第一个匹配并滚动。
+  const resetSearchToFirstAndScroll = useCallback(() => {
+    pendingScrollRef.current = 0;
+    setActiveMatchIndex(0);
+    setNavTick((tick) => tick + 1);
+  }, []);
+
+  const toggleMatchCase = useCallback(() => {
+    setSearchMatchCase((current) => !current);
+    resetSearchToFirstAndScroll();
+  }, [resetSearchToFirstAndScroll]);
+
+  const toggleWholeWord = useCallback(() => {
+    setSearchWholeWord((current) => !current);
+    resetSearchToFirstAndScroll();
+  }, [resetSearchToFirstAndScroll]);
+
+  const toggleRegex = useCallback(() => {
+    setSearchRegex((current) => !current);
+    resetSearchToFirstAndScroll();
+  }, [resetSearchToFirstAndScroll]);
+
   const openSearch = useCallback(() => {
     setGoToLineOpen(false);
     setGoToLineError(false);
+    fillSearchFromSelection();
+    // 重新打开搜索框：把范围下拉重置回“当前文件”，并收起“所有文件”结果面板
+    // （面板与该下拉选项绑定，切回“当前文件”即关闭）。
+    setSearchScope("current");
+    onSearchScopeChangeRef.current?.("current");
     setSearchOpen(true);
+    pendingScrollRef.current = 0;
+    setActiveMatchIndex(0);
+    setNavTick((tick) => tick + 1);
+  }, [fillSearchFromSelection]);
+
+  const openReplace = useCallback(() => {
+    setGoToLineOpen(false);
+    setGoToLineError(false);
+    fillSearchFromSelection();
+    // 与 Ctrl+F 一致：打开查找/替换时把范围重置回“当前文件”并收起“所有文件”面板。
+    setSearchScope("current");
+    onSearchScopeChangeRef.current?.("current");
+    setSearchOpen(true);
+    setReplaceOpen(true);
+    pendingScrollRef.current = 0;
+    setActiveMatchIndex(0);
+    setNavTick((tick) => tick + 1);
+  }, [fillSearchFromSelection]);
+
+  // 左侧折叠手柄：在查找 / 查找替换之间切换；展开时把焦点移到替换输入框。
+  const toggleReplace = useCallback(() => {
+    const next = !replaceOpenRef.current;
+    setReplaceOpen(next);
+    if (next) requestAnimationFrame(() => replaceInputRef.current?.focus());
   }, []);
 
   const openGoToLine = useCallback(() => {
     setSearchOpen(false);
+    setReplaceOpen(false);
     setGoToLineValue("");
     setGoToLineError(false);
     setGoToLineOpen(true);
@@ -480,11 +844,15 @@ export function EditorPane({
 
   const navigateSearch = useCallback(
     (direction: 1 | -1) => {
-      if (searchMatches.length === 0) return;
-      const nextIndex = getNextSearchMatchIndex(activeMatchIndex, searchMatches.length, direction);
+      if (displayMatches.length === 0) return;
+      const nextIndex = getNextSearchMatchIndex(activeMatchIndex, displayMatches.length, direction);
+      pendingScrollRef.current = nextIndex;
       setActiveMatchIndex(nextIndex);
+      // 标记这是用户显式 ↑/↓ 导航，允许“所有文件”范围跨文件跳转。
+      crossFileNavAllowedRef.current = true;
+      setNavTick((tick) => tick + 1);
     },
-    [activeMatchIndex, searchMatches],
+    [activeMatchIndex, displayMatches],
   );
 
   const submitGoToLine = useCallback(() => {
@@ -505,6 +873,55 @@ export function EditorPane({
     setGoToLineError(false);
     setGoToLineOpen(false);
   }, [goToLineValue]);
+
+  // ===== Replace logic (Ctrl+H) =====
+  // 保留大小写改写复用 file-preview-code 的 applyPreserveCase（与“所有文件”结果预览/替换同源）。
+
+  const replaceOne = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || searchMatches.length === 0) return;
+    const idx = activeMatchIndex >= 0 ? activeMatchIndex : 0;
+    const match = searchMatches[idx];
+    if (!match) return;
+    const line = view.state.doc.line(match.lineNumber);
+    const from = line.from + match.startColumn;
+    const to = line.from + match.endColumn;
+    const originalText = view.state.sliceDoc(from, to);
+    const replacement = preserveCaseRef.current
+      ? applyPreserveCase(originalText, replaceQueryRef.current)
+      : replaceQueryRef.current;
+    view.dispatch({
+      changes: { from, to, insert: replacement },
+      selection: EditorSelection.cursor(from + replacement.length),
+      effects: EditorView.scrollIntoView(from + replacement.length, { y: "center" }),
+    });
+    // docVersion 自增后 searchMatches 重算，activeMatchIndex 保持停靠在下一项。
+  }, [searchMatches, activeMatchIndex, applyPreserveCase]);
+
+  const replaceAll = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || searchMatches.length === 0) return;
+    const changes = searchMatches.map((m) => {
+      const line = view.state.doc.line(m.lineNumber);
+      const from = line.from + m.startColumn;
+      const to = line.from + m.endColumn;
+      const originalText = view.state.sliceDoc(from, to);
+      const insert = preserveCaseRef.current
+        ? applyPreserveCase(originalText, replaceQueryRef.current)
+        : replaceQueryRef.current;
+      return { from, to, insert };
+    });
+    // 按位置从大到小应用，避免前面的改动影响后面区间的偏移。
+    changes.sort((a, b) => b.from - a.from);
+    const first = changes[changes.length - 1];
+    const firstReplacedLength = first.insert.length;
+    const newCursor = first.from + firstReplacedLength;
+    view.dispatch({
+      changes,
+      selection: EditorSelection.cursor(newCursor),
+      effects: EditorView.scrollIntoView(newCursor, { y: "center" }),
+    });
+  }, [searchMatches, applyPreserveCase]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -537,9 +954,35 @@ export function EditorPane({
           // 抢先拦截 Ctrl/Cmd+F / Ctrl/Cmd+G，阻止 basicSetup.searchKeymap 弹出原生 find widget。
           keymap.of([
             {
+              key: "Mod-z",
+              run: undo,
+              preventDefault: true,
+              stopPropagation: true,
+            },
+            {
+              key: "Shift-Mod-z",
+              run: redo,
+              preventDefault: true,
+              stopPropagation: true,
+            },
+            {
+              key: "Mod-y",
+              run: redo,
+              preventDefault: true,
+              stopPropagation: true,
+            },
+            {
               key: "Mod-f",
               run: () => {
                 openSearch();
+                return true;
+              },
+              preventDefault: true,
+            },
+            {
+              key: "Mod-h",
+              run: () => {
+                openReplace();
                 return true;
               },
               preventDefault: true,
@@ -558,6 +1001,11 @@ export function EditorPane({
               preventDefault: true,
             },
             {
+              key: "Shift-Mod-h",
+              run: () => true,
+              preventDefault: true,
+            },
+            {
               key: "Mod-F3",
               run: () => true,
               preventDefault: true,
@@ -569,6 +1017,14 @@ export function EditorPane({
             },
           ]),
           basicSetup,
+          // 代码缩略图（minimap）：右侧以彩色微缩文本渲染整个文档，
+          // 自带 viewport 覆盖层充当滚动条，所以隐藏常规滚动条。
+          showMinimap.of({
+            create: () => ({ dom: document.createElement("div") }),
+            displayText: "characters",
+            showOverlay: "mouse-over",
+            width: 80,
+          }),
           themeCompartment.of(buildEditorTheme(colors)),
           highlightCompartment.of(syntaxHighlighting(buildHighlightStyle(colors))),
           searchHighlightField,
@@ -595,9 +1051,19 @@ export function EditorPane({
             }
           }),
           EditorView.domEventHandlers({
-            keydown: (event) => {
+            keydown: (event, currentView) => {
               const modifierPressed = (event.ctrlKey || event.metaKey) && !event.altKey;
               const key = event.key.toLowerCase();
+              if (modifierPressed && key === "z") {
+                event.preventDefault();
+                event.stopPropagation();
+                return event.shiftKey ? redo(currentView) : undo(currentView);
+              }
+              if (modifierPressed && key === "y") {
+                event.preventDefault();
+                event.stopPropagation();
+                return redo(currentView);
+              }
               if (modifierPressed && key === "s") {
                 event.preventDefault();
                 event.stopPropagation();
@@ -609,6 +1075,13 @@ export function EditorPane({
                 event.preventDefault();
                 event.stopPropagation();
                 openSearch();
+                return true;
+              }
+              // Ctrl+H — open search + replace.
+              if (modifierPressed && key === "h") {
+                event.preventDefault();
+                event.stopPropagation();
+                openReplace();
                 return true;
               }
               // Ctrl+G — open go-to-line.
@@ -682,6 +1155,9 @@ export function EditorPane({
       initializingRef.current = true;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: content },
+        // 文件载入是初始化，不是用户编辑。否则首次 Ctrl/Cmd+Z 会撤销
+        // 从空文档到文件内容的这次 transaction，表现为整个文件被清空。
+        annotations: Transaction.addToHistory.of(false),
       });
       initializingRef.current = false;
       setStatus("ready");
@@ -755,6 +1231,20 @@ export function EditorPane({
     };
   }, [contextMenu]);
 
+  // Close go-to-line on clicking a blank area (anywhere outside the widget).
+  useEffect(() => {
+    if (!goToLineOpen) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && goToLineWidgetRef.current?.contains(target)) return;
+      setGoToLineOpen(false);
+      setGoToLineError(false);
+      viewRef.current?.focus();
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [goToLineOpen]);
+
   // ===== Global document-level keyboard shortcuts (like FilePreview) =====
   // Reliably intercepts Ctrl+F / Ctrl+G / Esc regardless of where focus is
   // (editor content, search input, goto input).
@@ -789,6 +1279,12 @@ export function EditorPane({
         openSearch();
         return;
       }
+      // Ctrl+H — open search + replace
+      if (modifierPressed && key === "h") {
+        event.preventDefault();
+        openReplace();
+        return;
+      }
       // Ctrl+G — open go-to-line
       if (modifierPressed && key === "g") {
         event.preventDefault();
@@ -819,7 +1315,7 @@ export function EditorPane({
     };
     document.addEventListener("keydown", handleKeyDown, true);
     return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [contextMenu, openGoToLine, openSearch]);
+  }, [contextMenu, openGoToLine, openSearch, openReplace]);
 
   return (
     <div className={`editor-pane${visible ? "" : " editor-pane-hidden"}`}>
@@ -833,111 +1329,278 @@ export function EditorPane({
       <div ref={containerRef} className="editor-pane-codemirror" />
       {searchOpen && (
         <div className="editor-find-widget" role="search">
-          <input
-            ref={searchInputRef}
-            className={`editor-widget-input ${searchQuery && searchMatches.length === 0 ? "editor-widget-input-error" : ""}`}
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              const modifierPressed = (event.ctrlKey || event.metaKey) && !event.altKey;
-              const key = event.key.toLowerCase();
-              if (modifierPressed && key === "f") {
-                event.preventDefault();
-                searchInputRef.current?.select();
-                return;
-              }
-              if (modifierPressed && key === "g") {
-                event.preventDefault();
-                openGoToLine();
-                return;
-              }
-              if (event.altKey && !event.ctrlKey && !event.metaKey && key === "c") {
-                event.preventDefault();
-                setSearchMatchCase((current) => !current);
-                return;
-              }
-              if (event.altKey && !event.ctrlKey && !event.metaKey && key === "w") {
-                event.preventDefault();
-                setSearchWholeWord((current) => !current);
-                return;
-              }
-              if (event.key === "Enter") {
-                event.preventDefault();
-                navigateSearch(event.shiftKey ? -1 : 1);
-                return;
-              }
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSearchOpen(false);
-                viewRef.current?.focus();
-              }
-            }}
-            placeholder="搜索"
-            aria-label="搜索文件内容"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <button
-            type="button"
-            className={`editor-search-option-btn ${searchMatchCase ? "active" : ""}`}
-            onClick={() => setSearchMatchCase((current) => !current)}
-            title="区分大小写 (Alt+C)"
-            aria-label="区分大小写"
-            aria-pressed={searchMatchCase}
-          >
-            Aa
-          </button>
-          <button
-            type="button"
-            className={`editor-search-option-btn editor-whole-word ${searchWholeWord ? "active" : ""}`}
-            onClick={() => setSearchWholeWord((current) => !current)}
-            title="全字匹配 (Alt+W)"
-            aria-label="全字匹配"
-            aria-pressed={searchWholeWord}
-          >
-            ab
-          </button>
-          <span className="editor-find-count">
-            {searchQuery && searchMatches.length === 0
-              ? "无结果"
-              : `${searchMatches.length > 0 ? activeMatchIndex + 1 : 0}/${searchMatches.length}`}
-          </span>
-          <button
-            type="button"
-            className="editor-widget-btn"
-            onClick={() => navigateSearch(-1)}
-            disabled={searchMatches.length === 0}
-            title="上一个匹配项 (Shift+Enter)"
-            aria-label="上一个匹配项"
-          >
-            ↑
-          </button>
-          <button
-            type="button"
-            className="editor-widget-btn"
-            onClick={() => navigateSearch(1)}
-            disabled={searchMatches.length === 0}
-            title="下一个匹配项 (Enter)"
-            aria-label="下一个匹配项"
-          >
-            ↓
-          </button>
-          <button
-            type="button"
-            className="editor-widget-btn"
-            onClick={() => {
-              setSearchOpen(false);
-              viewRef.current?.focus();
-            }}
-            title="关闭 (Esc)"
-            aria-label="关闭搜索"
-          >
-            ×
-          </button>
+          <div className="editor-find-grid">
+            {/* 左侧折叠手柄：居中、无蓝底 */}
+            <button
+              type="button"
+              className="editor-find-toggle"
+              onClick={toggleReplace}
+              title={replaceOpen ? "折叠替换 (Ctrl+H)" : "展开替换 (Ctrl+H)"}
+              aria-label="切换替换"
+              aria-expanded={replaceOpen}
+            >
+              {replaceOpen ? <ChevronDown size={16} strokeWidth={2} /> : <ChevronRight size={16} strokeWidth={2} />}
+            </button>
+
+            {/* 查找输入框：Aa / ab / .* 选项在框内右侧 */}
+            <div
+              className={`editor-find-input ${
+                searchRegexError || (debouncedSearchQuery && !allFileLoading && displayMatches.length === 0)
+                  ? "editor-find-input-error"
+                  : ""
+              }`}
+            >
+              <input
+                ref={searchInputRef}
+                className="editor-find-input-field"
+                value={searchQuery}
+                onChange={(event) => {
+                  setSearchQuery(event.target.value);
+                  // 搜索与滚动由 debouncedSearchQuery 驱动（停止输入 ~500ms 后执行），
+                  // 这里只更新输入框文本，避免连续按键时每键一次正则匹配导致卡顿。
+                }}
+                onKeyDown={(event) => {
+                  const modifierPressed = (event.ctrlKey || event.metaKey) && !event.altKey;
+                  const key = event.key.toLowerCase();
+                  if (modifierPressed && key === "f") {
+                    event.preventDefault();
+                    searchInputRef.current?.select();
+                    return;
+                  }
+                  if (modifierPressed && key === "h") {
+                    event.preventDefault();
+                    openReplace();
+                    return;
+                  }
+                  if (modifierPressed && key === "g") {
+                    event.preventDefault();
+                    openGoToLine();
+                    return;
+                  }
+                  if (event.altKey && !event.ctrlKey && !event.metaKey && key === "c") {
+                    event.preventDefault();
+                    toggleMatchCase();
+                    return;
+                  }
+                  if (event.altKey && !event.ctrlKey && !event.metaKey && key === "w") {
+                    event.preventDefault();
+                    toggleWholeWord();
+                    return;
+                  }
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    // 立即应用防抖中的查询，回车导航基于最新关键词。
+                    if (searchQuery !== debouncedSearchQuery) {
+                      setDebouncedSearchQuery(searchQuery);
+                    }
+                    navigateSearch(event.shiftKey ? -1 : 1);
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setSearchOpen(false);
+                    viewRef.current?.focus();
+                  }
+                }}
+                placeholder="搜索"
+                aria-label="搜索文件内容"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+
+            {/* 查找行右侧操作：计数 + 上下 + 更多 + 关闭 */}
+            <div className="editor-find-actions">
+              <span className="editor-find-count">
+                {searchRegexError
+                  ? "正则无效"
+                  : searchScope === "all" && allFileLoading
+                    ? "搜索中…"
+                    : debouncedSearchQuery && !allFileLoading && displayMatches.length === 0
+                      ? "无结果"
+                      : activeMatchIndex >= 0
+                        ? `第 ${activeMatchIndex + 1} 项，共 ${displayMatches.length} 项`
+                        : `共 ${displayMatches.length} 项`}
+              </span>
+              <button
+                type="button"
+                className="editor-widget-btn"
+                onClick={() => navigateSearch(-1)}
+                disabled={displayMatches.length === 0}
+                title="上一个匹配项 (Shift+Enter)"
+                aria-label="上一个匹配项"
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                className="editor-widget-btn"
+                onClick={() => navigateSearch(1)}
+                disabled={displayMatches.length === 0}
+                title="下一个匹配项 (Enter)"
+                aria-label="下一个匹配项"
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                className="editor-widget-btn"
+                onClick={() => {
+                  setSearchOpen(false);
+                  viewRef.current?.focus();
+                }}
+                title="关闭 (Esc)"
+                aria-label="关闭搜索"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* 选项行：区分大小写 / 全字匹配 / 正则匹配 / 更多操作
+                （未展开替换时为第二行，展开替换时为第三行） */}
+            <div className="editor-find-options-row">
+              <button
+                type="button"
+                className={`editor-find-option ${searchMatchCase ? "active" : ""}`}
+                onClick={toggleMatchCase}
+                aria-pressed={searchMatchCase}
+                title="区分大小写 (Alt+C)"
+              >
+                <CaseSensitive size={14} strokeWidth={2} />
+              </button>
+              <button
+                type="button"
+                className={`editor-find-option ${searchWholeWord ? "active" : ""}`}
+                onClick={toggleWholeWord}
+                aria-pressed={searchWholeWord}
+                title="全字匹配 (Alt+W)"
+              >
+                <WholeWord size={14} strokeWidth={2} />
+              </button>
+              <button
+                type="button"
+                className={`editor-find-option ${searchRegex ? "active" : ""}`}
+                onClick={toggleRegex}
+                aria-pressed={searchRegex}
+                title="使用正则表达式"
+              >
+                <Regex size={14} strokeWidth={2} />
+              </button>
+              <select
+                className="editor-find-scope-select"
+                value={searchScope}
+                onChange={(event) => {
+                  const scope = event.target.value as "current" | "all";
+                  setSearchScope(scope);
+                  onSearchScopeChange(scope);
+                  if (scope === "all") {
+                    // 选“所有文件”：立即检索并在命中后弹出结果面板。
+                    onRunAllFilesSearch(true);
+                  }
+                }}
+                title="搜索范围"
+                aria-label="搜索范围"
+              >
+                <option value="current">当前文件</option>
+                <option value="all">所有文件</option>
+              </select>
+              {/* “所有文件”范围下手动关闭结果窗口后，在下拉框右侧显示“重新打开”按钮；
+                  切回“当前文件”时该按钮随面板一并消失（窗口与下拉选项绑定）。 */}
+              {searchScope === "all" && !allFilesPanelOpen && allFilesResultsCount > 0 && (
+                <button
+                  type="button"
+                  className="editor-find-reopen"
+                  onClick={onReopenAllFilesPanel}
+                  title="重新打开搜索结果"
+                  aria-label="重新打开搜索结果"
+                >
+                  <Search size={14} strokeWidth={2} />
+                </button>
+              )}
+            </div>
+
+            {/* 替换行（展开替换时显示） */}
+            {replaceOpen && (
+              <>
+                <span className="editor-find-row-spacer editor-find-replace-order" aria-hidden="true" />
+                <div className="editor-find-input editor-find-replace-row">
+                  <input
+                    ref={replaceInputRef}
+                    className="editor-find-input-field"
+                    value={replaceQuery}
+                    onChange={(event) => setReplaceQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      const modifierPressed = (event.ctrlKey || event.metaKey) && !event.altKey;
+                      const key = event.key.toLowerCase();
+                      if (modifierPressed && key === "f") {
+                        event.preventDefault();
+                        openSearch();
+                        return;
+                      }
+                      if (modifierPressed && key === "h") {
+                        event.preventDefault();
+                        openSearch();
+                        return;
+                      }
+                      if (modifierPressed && key === "g") {
+                        event.preventDefault();
+                        openGoToLine();
+                        return;
+                      }
+                      if (event.altKey && !event.ctrlKey && !event.metaKey && key === "p") {
+                        event.preventDefault();
+                        setPreserveCase((current) => !current);
+                        return;
+                      }
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        replaceOne();
+                        return;
+                      }
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        setSearchOpen(false);
+                        viewRef.current?.focus();
+                      }
+                    }}
+                    placeholder="替换"
+                    aria-label="替换内容"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="editor-find-actions editor-find-replace-actions">
+                  <button
+                    type="button"
+                    className="editor-widget-btn"
+                    onClick={replaceOne}
+                    disabled={searchMatches.length === 0}
+                    title="替换 (Enter)"
+                    aria-label="替换当前匹配项"
+                  >
+                    <Replace size={15} strokeWidth={2} />
+                  </button>
+                  <button
+                    type="button"
+                    className="editor-widget-btn"
+                    onClick={replaceAll}
+                    disabled={searchMatches.length === 0}
+                    title="全部替换"
+                    aria-label="全部替换"
+                  >
+                    <ReplaceAll size={15} strokeWidth={2} />
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
       {goToLineOpen && (
-        <div className="editor-find-widget editor-go-to-line-widget">
+        <div
+          ref={goToLineWidgetRef}
+          className="editor-find-widget editor-go-to-line-widget"
+        >
           <input
             ref={goToLineInputRef}
             className={`editor-widget-input ${goToLineError ? "editor-widget-input-error" : ""}`}
@@ -978,19 +1641,6 @@ export function EditorPane({
             spellCheck={false}
           />
           {goToLineError && <span className="editor-go-to-line-error">行号无效</span>}
-          <button
-            type="button"
-            className="editor-widget-btn"
-            onClick={() => {
-              setGoToLineOpen(false);
-              setGoToLineError(false);
-              viewRef.current?.focus();
-            }}
-            title="关闭 (Esc)"
-            aria-label="关闭跳行"
-          >
-            ×
-          </button>
         </div>
       )}
       {contextMenu && (

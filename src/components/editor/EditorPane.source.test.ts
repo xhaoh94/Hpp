@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 import paneSource from "./EditorPane.tsx?raw";
 import areaSource from "./EditorArea.tsx?raw";
+import expandSearchListSource from "./ExpandSearchList.tsx?raw";
 import editorCssSource from "./EditorArea.css?raw";
 import layoutCssSource from "../layout/Layout.css?raw";
+import filePreviewSource from "../../lib/file-preview-code.ts?raw";
+import textSearchSource from "../../lib/text-search.ts?raw";
+import minimapSource from "../../lib/codemirror-minimap/index.js?raw";
 
 const editorCss = readFileSync(resolve(process.cwd(), "src/components/editor/EditorArea.css"), "utf8");
 const layoutCss = readFileSync(resolve(process.cwd(), "src/components/layout/Layout.css"), "utf8");
@@ -30,9 +33,10 @@ describe("editor pane (CodeMirror wrapper)", () => {
     expect(paneSource).toContain("originalContentRef.current = content");
   });
 
-  it("never marks the file dirty from the initial load dispatch", () => {
+  it("keeps initial file loading out of undo history and dirty tracking", () => {
     expect(paneSource).toContain("initializingRef.current");
     expect(paneSource).toContain("!initializingRef.current");
+    expect(paneSource).toContain("annotations: Transaction.addToHistory.of(false)");
   });
 
   it("saves with Ctrl/Cmd+S through the writeFile IPC bridge", () => {
@@ -42,6 +46,23 @@ describe("editor pane (CodeMirror wrapper)", () => {
     expect(paneSource).toContain("window.electronAPI.writeFile");
     expect(paneSource).toContain("event.stopPropagation()");
     expect(paneSource).toContain("onSavedRef.current(path)");
+  });
+
+  it("keeps undo and redo inside CodeMirror without bubbling to application shortcuts", () => {
+    expect(paneSource).toContain('key: "Mod-z"');
+    expect(paneSource).toContain('key: "Shift-Mod-z"');
+    expect(paneSource).toContain('key: "Mod-y"');
+    expect(paneSource).toContain("run: undo");
+    expect(paneSource).toContain("run: redo");
+    expect(paneSource).toContain("stopPropagation: true");
+    expect(paneSource).toContain("if (tr.docChanged) return { matches: [], activeIndex: -1 }");
+  });
+
+  it("discards stale minimap work after undo, redo, or editor teardown", () => {
+    expect(minimapSource).toContain("const generation = ++this._updateGeneration");
+    expect(minimapSource).toContain("generation !== this._updateGeneration");
+    expect(minimapSource).toContain("this.view.state !== state");
+    expect(minimapSource).toContain("this.text.destroy()");
   });
 
   it("switches to read-only via a Compartment for binary/error files", () => {
@@ -58,6 +79,14 @@ describe("editor pane (CodeMirror wrapper)", () => {
   it("exposes an imperative save function for save-and-close flows", () => {
     expect(paneSource).toContain("registerSave");
     expect(paneSource).toContain("registerSaveRef");
+  });
+
+  it("fills the search box with the current selection when opening find via Ctrl+F", () => {
+    expect(paneSource).toContain("openSearch");
+    expect(paneSource).toContain("selection.main");
+    expect(paneSource).toContain("sliceDoc");
+    expect(paneSource).toContain('setSearchQuery(selectedText)');
+    expect(paneSource).toContain('sel.from !== sel.to');
   });
 
   it("maps known extensions to CodeMirror language support", () => {
@@ -116,6 +145,17 @@ describe("editor area (tab chrome + keep-alive)", () => {
     expect(areaSource).toContain("closeOthersConfirm");
     expect(areaSource).toContain("closeAllConfirm");
   });
+
+  it("virtualizes all-files results with synchronous positioning during scrollbar drags", () => {
+    expect(areaSource).toContain('from "./ExpandSearchList"');
+    expect(expandSearchListSource).toContain("buildExpandSearchRows(groups, collapsed)");
+    expect(expandSearchListSource).toContain("getExpandSearchVisibleRows(model");
+    expect(expandSearchListSource).toContain("flushSync(() =>");
+    expect(expandSearchListSource).toContain("top: row.top");
+    expect(expandSearchListSource).toContain("style={{ height: model.totalHeight }}");
+    expect(expandSearchListSource).not.toContain("useVirtualizer");
+    expect(expandSearchListSource).not.toContain("translateY");
+  });
 });
 
 describe("editor mode layout wiring", () => {
@@ -131,5 +171,36 @@ describe("editor mode layout wiring", () => {
   it("hides the editor area entirely in preview mode (never unmounts editors)", () => {
     expect(layoutCss).toContain(".layout-content:not(.editor-mode) .editor-area {");
     expect(layoutCss).toContain("display: none;");
+  });
+});
+
+describe("search supports regex + VSCode-style replace (Ctrl+H)", () => {
+  it("findTextMatches honors a regex option and isRegexValid guards invalid patterns", () => {
+    expect(textSearchSource).toContain("options.regex");
+    expect(textSearchSource).toContain("export function isRegexValid");
+  });
+
+  it("opens the replace row via Ctrl+H (openReplace / Mod-h) and keeps the selection-fill", () => {
+    expect(paneSource).toContain("openReplace");
+    expect(paneSource).toContain('key: "Mod-h"');
+    expect(paneSource).toContain("setReplaceOpen(true)");
+  });
+
+  it("implements replace-one / replace-all with preserve-case (Ab) support", () => {
+    expect(paneSource).toContain("replaceOne");
+    expect(paneSource).toContain("replaceAll");
+    expect(paneSource).toContain("applyPreserveCase");
+    expect(paneSource).toContain("preserveCase");
+  });
+
+  it("renders the VSCode-style two-row widget (left collapse toggle + replace row)", () => {
+    expect(paneSource).toContain("editor-find-toggle");
+    expect(paneSource).toContain("editor-find-grid");
+    expect(paneSource).toContain("editor-find-replace-row");
+    expect(paneSource).toContain("editor-find-scope-select");
+    expect(paneSource).toContain("CaseSensitive");
+    expect(paneSource).toContain("WholeWord");
+    expect(paneSource).toContain("Regex");
+    expect(paneSource).toContain("ReplaceAll");
   });
 });
