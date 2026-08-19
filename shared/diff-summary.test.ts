@@ -12,6 +12,18 @@ describe("shared diff summary", () => {
     expect(summary.reversiblePatches).toEqual([patch]);
   });
 
+  it("keeps reversible patches in chronological order even when file summaries are sorted", () => {
+    const secondFileFirst = "--- a/src/z.ts\n+++ b/src/z.ts\n-old-z\n+new-z";
+    const firstFileSecond = "--- a/src/a.ts\n+++ b/src/a.ts\n-old-a\n+new-a";
+    const summary = buildDiffSummary([
+      { file: "src/z.ts", patch: secondFileFirst },
+      { file: "src/a.ts", patch: firstFileSecond },
+      { file: "src/z.ts", patch: secondFileFirst },
+    ]);
+    expect(summary.files.map((file) => file.file)).toEqual(["src/a.ts", "src/z.ts"]);
+    expect(summary.reversiblePatches).toEqual([secondFileFirst, firstFileSecond]);
+  });
+
   it("collects process file changes once by change key", () => {
     const result = collectProcessDiffs({ entries: [{
       id: "edit",

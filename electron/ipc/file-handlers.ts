@@ -3,8 +3,8 @@ import { readdir, readFile, access, stat, open } from "fs/promises";
 import { writeTextFile } from "./write-text-file";
 import { basename, extname, join } from "path";
 import { homedir } from "os";
-import { spawnSync } from "child_process";
 import { commandExists } from "../utils/command-utils";
+import { reverseApplyPatches } from "./reverse-apply-patches";
 import { isFileEntryExcluded, normalizeFileFilters } from "../../shared/file-filters";
 import { collectProjectFileIndex } from "./project-file-indexer";
 
@@ -212,32 +212,8 @@ export function registerFileHandlers() {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
 
-    const patchInput = patches
-      .filter((patch): patch is string => typeof patch === "string" && patch.trim().length > 0)
-      .map((patch) => patch.trimEnd())
-      .join("\n");
-
-    if (!patchInput.trim()) {
-      return { success: false, error: "No patch content to revert" };
-    }
-
     try {
-      const result = spawnSync("git", ["apply", "--reverse", "--whitespace=nowarn", "-"], {
-        cwd: projectPath,
-        input: `${patchInput}\n`,
-        encoding: "utf-8",
-        shell: false,
-        maxBuffer: 10 * 1024 * 1024,
-      });
-
-      if (result.error) {
-        return { success: false, error: result.error.message };
-      }
-      if (result.status !== 0) {
-        const detail = (result.stderr || result.stdout || "").trim();
-        return { success: false, error: detail || `git apply exited with code ${result.status}` };
-      }
-      return { success: true };
+      return reverseApplyPatches(projectPath, patches);
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }

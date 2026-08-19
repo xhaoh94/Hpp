@@ -646,8 +646,8 @@ function selections(view) {
 }
 
 /* 选中文本时，在 minimap 中标注出文档内所有相同文本出现的行。
-   高亮颜色取一个在深浅主题下都清晰的主题蓝。 */
-const MATCH_COLOR = "#3b82f6";
+   高亮颜色取中性灰，整行底色不透明，深浅主题下均清晰。 */
+const MATCH_COLOR = "#808080";
 class MatchesState extends LineBasedState {
     constructor(view) {
         super(view);
@@ -691,8 +691,8 @@ class MatchesState extends LineBasedState {
         const { context, lineHeight, offsetY } = ctx;
         const w = context.canvas.width;
         const bar = 4; // 左右强调条宽度
-        // 整行高亮底色（作为背景，文本绘制于其上），显著提高不透明度更醒目
-        context.globalAlpha = 0.38;
+        // 整行高亮底色（作为背景，文本绘制于其上），不透明灰色，醒目定位
+        context.globalAlpha = 1;
         context.fillStyle = MATCH_COLOR;
         context.fillRect(0, offsetY + 0.5, w, Math.max(1, lineHeight - 1));
         // 左右两侧实心强调条，在窄 minimap 中左右夹击、一眼定位

@@ -167,6 +167,33 @@ describe("mobile capability source constraints", () => {
     expect(stylesSource).toContain(".queue-item.drop-target.after::before");
   });
 
+  it("caps the mobile queue width like the composer input shell", () => {
+    // 输入框 .composer-input-shell 限制 max-width: 860px 并居中；
+    // 消息队列 .queue-strip 在 .composer 内同样应限制最大宽度并居中，宽屏下与输入框对齐。
+    const shellStyles = stylesSource.slice(
+      stylesSource.indexOf(".composer-input-shell {"),
+      stylesSource.indexOf(".composer-input-shell textarea"),
+    );
+    expect(shellStyles).toContain("max-width: 860px");
+    expect(shellStyles).toContain("margin: 0 auto");
+    const stripStyles = stylesSource.slice(
+      stylesSource.indexOf(".queue-strip {"),
+      stylesSource.indexOf(".queue-header {"),
+    );
+    expect(stripStyles).toContain("max-width: 860px");
+    expect(stripStyles).toContain("margin: 0 auto 8px");
+  });
+
+  it("anchors the queue edit composer placeholder to the editor box", () => {
+    // .inline-composer-placeholder 是 absolute 定位，必须由 .queue-edit-composer 提供定位祖先，
+    // 否则空内容时占位文字（如“编辑消息内容”）会飘到界面左上角。
+    const composerStyles = stylesSource.slice(
+      stylesSource.indexOf(".queue-edit-composer {"),
+      stylesSource.indexOf(".queue-edit-composer:focus-within"),
+    );
+    expect(composerStyles).toContain("position: relative");
+  });
+
   it("pauses host availability polling while editing a desktop note", () => {
     expect(appSource).toContain("!hostsLoaded || activeHost || editingHostId || hosts.length === 0");
     expect(appSource).toContain("let probing = false");

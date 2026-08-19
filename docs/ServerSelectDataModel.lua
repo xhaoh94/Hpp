@@ -96,6 +96,7 @@ function ServerSelectDataModel:ClearServerInfo()
     self.simpleServerList = {}
     self.roleServerData = nil
     self.targetServerData = nil
+    
 end
 
 -- 红点注册

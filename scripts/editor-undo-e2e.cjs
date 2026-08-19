@@ -45,8 +45,8 @@ const source = `
   });
   view.focus();
   window.undoTest = {
-    edit() {
-      view.dispatch({ changes: { from: 14, to: 15, insert: "2" } });
+    prepareEdit() {
+      view.dispatch({ selection: { anchor: 14, head: 15 } });
       view.focus();
     },
     state() {
@@ -97,7 +97,12 @@ app.whenReady().then(async () => {
   await new Promise((resolve) => setTimeout(resolve, 100));
   const afterInitialUndo = await window.webContents.executeJavaScript("window.undoTest.state()");
 
-  await window.webContents.executeJavaScript("window.undoTest.edit()");
+  await window.webContents.executeJavaScript("window.undoTest.prepareEdit()");
+  window.webContents.sendInputEvent({ type: "keyDown", keyCode: "2" });
+  window.webContents.sendInputEvent({ type: "char", keyCode: "2" });
+  window.webContents.sendInputEvent({ type: "keyUp", keyCode: "2" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const afterEdit = await window.webContents.executeJavaScript("window.undoTest.state()");
   sendShortcut(window, "Z", ["control"]);
   await new Promise((resolve) => setTimeout(resolve, 100));
   const afterEditUndo = await window.webContents.executeJavaScript("window.undoTest.state()");
@@ -110,6 +115,7 @@ app.whenReady().then(async () => {
     ok: !rendererGone
       && errors.length === 0
       && afterInitialUndo.text === "const value = 1;\n"
+      && afterEdit.text === "const value = 2;\n"
       && afterEditUndo.text === "const value = 1;\n"
       && afterRedo.text === "const value = 2;\n"
       && afterInitialUndo.bubbledUndoCount === 0
@@ -120,6 +126,7 @@ app.whenReady().then(async () => {
     rendererGone,
     errors,
     afterInitialUndo,
+    afterEdit,
     afterEditUndo,
     afterRedo,
   };

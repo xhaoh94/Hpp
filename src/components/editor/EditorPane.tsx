@@ -1054,16 +1054,6 @@ export function EditorPane({
             keydown: (event, currentView) => {
               const modifierPressed = (event.ctrlKey || event.metaKey) && !event.altKey;
               const key = event.key.toLowerCase();
-              if (modifierPressed && key === "z") {
-                event.preventDefault();
-                event.stopPropagation();
-                return event.shiftKey ? redo(currentView) : undo(currentView);
-              }
-              if (modifierPressed && key === "y") {
-                event.preventDefault();
-                event.stopPropagation();
-                return redo(currentView);
-              }
               if (modifierPressed && key === "s") {
                 event.preventDefault();
                 event.stopPropagation();

@@ -324,17 +324,15 @@ function MessageQueuePanel({
               <button type="button" className="chat-queue-icon-btn" onClick={() => onEdit(item)} disabled={item.status === "sending"} title="编辑">
                 <Pencil size={14} />
               </button>
-              {canGuide && !item.action && (
+              {canGuide && !compactionInProgress && !item.action && (
                 <button
                   type="button"
                   className="chat-queue-action"
                   onClick={() => onGuide(item)}
-                  disabled={!currentSessionRunning || compactionInProgress || item.status === "sending"}
+                  disabled={!currentSessionRunning || item.status === "sending"}
                   title={item.status === "sending"
                     ? "等待调度"
-                    : compactionInProgress
-                      ? "会话压缩完成后才能引导"
-                      : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
+                    : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
                 >
                   <CornerDownRight size={14} />
                   <span>{item.status === "sending" ? "等待调度" : "引导"}</span>
@@ -604,82 +602,84 @@ function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage 
                 if (event.key === "Enter" && event.ctrlKey) { event.preventDefault(); void submit(); }
               }}
             />
-            <div className="chat-queue-edit-add-control" ref={addMenuRef}>
-              <button
-                type="button"
-                className={`chat-queue-edit-add-button${addMenuOpen ? " active" : ""}`}
-                aria-label="添加附件或引用"
-                aria-expanded={addMenuOpen}
-                title="添加附件或引用"
-                onClick={() => {
-                  setAddMenuOpen((open) => {
-                    if (open) setReferencePickerOpen(false);
-                    return !open;
-                  });
-                }}
-              >
-                <Plus size={16} />
-              </button>
-              {addMenuOpen && addMenuPosition && createPortal(
-                <>
-                  <div
-                    className="chat-queue-edit-add-backdrop"
-                    aria-hidden="true"
-                    onMouseDown={(event) => {
-                      event.stopPropagation();
-                      setAddMenuOpen(false);
-                      setReferencePickerOpen(false);
-                    }}
-                  />
-                  <div
-                    className={`chat-queue-edit-add-menu${referencePickerOpen ? " references" : ""}`}
-                    role="menu"
-                    style={addMenuPosition}
-                    onMouseDown={(event) => event.stopPropagation()}
-                  >
-                  {referencePickerOpen ? (
-                    <>
-                      <div className="chat-queue-edit-add-menu-header">
-                        <button type="button" onClick={() => setReferencePickerOpen(false)} title="返回"><ChevronLeft size={15} /></button>
-                        <span>引用会话</span>
-                        <small>{draft.sessionReferences.length > 0 ? `已选 ${draft.sessionReferences.length}` : ""}</small>
-                      </div>
-                      <div className="chat-queue-edit-reference-list">
-                        {referenceCandidates.length === 0 ? (
-                          <div className="chat-queue-edit-reference-empty">暂无可引用的会话</div>
-                        ) : referenceCandidates.map((candidate) => {
-                          const selected = draft.sessionReferences.some((reference) => reference.sourceSessionId === candidate.id);
-                          return (
-                            <button type="button" className={selected ? "selected" : ""} key={candidate.id} onClick={() => toggleReference(candidate)}>
-                              <Link2 size={14} />
-                              <AttachmentPreviewText content={candidate.title} />
-                              {selected && <Check size={14} />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); imageInputRef.current?.click(); }}><ImagePlus size={15} /><span>图片</span></button>
-                      <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); fileInputRef.current?.click(); }}><FileText size={15} /><span>文件</span></button>
-                      <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); addFolder(); }}><Folder size={15} /><span>文件夹</span></button>
-                      <button type="button" role="menuitem" onClick={() => setReferencePickerOpen(true)}><Link2 size={15} /><span>引用会话</span></button>
-                    </>
-                  )}
-                  </div>
-                </>,
-                document.body,
-              )}
-              <input ref={imageInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImages(Array.from(event.target.files || [])); event.target.value = ""; }} />
-              <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => { addLocalFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
-            </div>
           </div>
           {error && <div className="chat-queue-edit-error">{error}</div>}
         </div>
         <footer className="chat-queue-edit-actions">
-          <button type="button" className="btn-action" onClick={onClose} disabled={saving}>取消</button>
-          <button type="button" className="filter-add-btn" onClick={() => void submit()} disabled={!hasContent || saving}>{saving ? "保存中..." : "保存修改"}</button>
+          <div className="chat-queue-edit-add-control" ref={addMenuRef}>
+            <button
+              type="button"
+              className={`chat-queue-edit-add-button${addMenuOpen ? " active" : ""}`}
+              aria-label="添加附件或引用"
+              aria-expanded={addMenuOpen}
+              title="添加附件或引用"
+              onClick={() => {
+                setAddMenuOpen((open) => {
+                  if (open) setReferencePickerOpen(false);
+                  return !open;
+                });
+              }}
+            >
+              <Plus size={16} />
+            </button>
+            {addMenuOpen && addMenuPosition && createPortal(
+              <>
+                <div
+                  className="chat-queue-edit-add-backdrop"
+                  aria-hidden="true"
+                  onMouseDown={(event) => {
+                    event.stopPropagation();
+                    setAddMenuOpen(false);
+                    setReferencePickerOpen(false);
+                  }}
+                />
+                <div
+                  className={`chat-queue-edit-add-menu${referencePickerOpen ? " references" : ""}`}
+                  role="menu"
+                  style={addMenuPosition}
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                {referencePickerOpen ? (
+                  <>
+                    <div className="chat-queue-edit-add-menu-header">
+                      <button type="button" onClick={() => setReferencePickerOpen(false)} title="返回"><ChevronLeft size={15} /></button>
+                      <span>引用会话</span>
+                      <small>{draft.sessionReferences.length > 0 ? `已选 ${draft.sessionReferences.length}` : ""}</small>
+                    </div>
+                    <div className="chat-queue-edit-reference-list">
+                      {referenceCandidates.length === 0 ? (
+                        <div className="chat-queue-edit-reference-empty">暂无可引用的会话</div>
+                      ) : referenceCandidates.map((candidate) => {
+                        const selected = draft.sessionReferences.some((reference) => reference.sourceSessionId === candidate.id);
+                        return (
+                          <button type="button" className={selected ? "selected" : ""} key={candidate.id} onClick={() => toggleReference(candidate)}>
+                            <Link2 size={14} />
+                            <AttachmentPreviewText content={candidate.title} />
+                            {selected && <Check size={14} />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); imageInputRef.current?.click(); }}><ImagePlus size={15} /><span>图片</span></button>
+                    <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); fileInputRef.current?.click(); }}><FileText size={15} /><span>文件</span></button>
+                    <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); addFolder(); }}><Folder size={15} /><span>文件夹</span></button>
+                    <button type="button" role="menuitem" onClick={() => setReferencePickerOpen(true)}><Link2 size={15} /><span>引用会话</span></button>
+                  </>
+                )}
+                </div>
+              </>,
+              document.body,
+            )}
+            <input ref={imageInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImages(Array.from(event.target.files || [])); event.target.value = ""; }} />
+            <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => { addLocalFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
+          </div>
+          <div className="chat-queue-edit-action-buttons">
+            <button type="button" className="btn-action" onClick={onClose} disabled={saving}>取消</button>
+            <button type="button" className="filter-add-btn" onClick={() => void submit()} disabled={!hasContent || saving}>{saving ? "保存中..." : "保存修改"}</button>
+          </div>
         </footer>
       </section>
     </div>
@@ -2271,6 +2271,25 @@ export function ChatPanel({
   const questionnaireResetKey = activeQuestionnaire
     ? `${activeQuestionnaire.sessionId}:${activeQuestionnaire.requestId || ""}:${activeQuestionnaire.entryId || ""}`
     : null;
+  // 问卷弹出时，若窗口不在前台则发系统通知提醒（与任务完成通知一致，避免前台打扰）。
+  const notifiedQuestionnaireKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!activeQuestionnaire || !questionnaireResetKey) return;
+    if (notifiedQuestionnaireKeysRef.current.has(questionnaireResetKey)) return;
+    if (
+      typeof document === "undefined" ||
+      (document.visibilityState === "visible" && document.hasFocus())
+    ) {
+      return;
+    }
+    notifiedQuestionnaireKeysRef.current.add(questionnaireResetKey);
+    void window.electronAPI.showNotification({
+      title: "有新的问题需要你回答",
+      body: "Agent 正在等待你的选择，点击查看 Hpp",
+    }).catch((error) => {
+      console.error("[notification] questionnaire show failed:", error);
+    });
+  }, [activeQuestionnaire, questionnaireResetKey]);
   const {
     questionnairePaneHeight,
     handleQuestionnaireResizeStart,
@@ -3428,6 +3447,20 @@ export function ChatPanel({
         />
       )}
 
+      {/* 发送队列：移到输入框上方、聊天输入框之外，避免挤在输入框内显得杂乱 */}
+      <MessageQueuePanel
+        items={activeQueuedMessages}
+        canGuide={activeSessionSupportsGuidance}
+        currentSessionRunning={currentSessionRunning}
+        compactionInProgress={activeSessionCompacting}
+        onGuide={handleGuideQueuedMessage}
+        onEdit={(item) => setQueueEditingId(item.id)}
+        onReorder={handleReorderQueuedMessage}
+        onRemove={(itemId) => {
+          if (activeSessionId) SessionCommandCoordinator.removeQueuedMessage(activeSessionId, itemId);
+        }}
+      />
+
       {/* Input area */}
       <div
         className={`chat-input-area${activeInteraction ? " questionnaire-active" : ""}${activeQuestionnaire && questionnairePaneHeight !== null ? " questionnaire-resized" : ""}`}
@@ -3459,19 +3492,6 @@ export function ChatPanel({
             onCancel={handleCancelQuestionnaire}
           />
         )}
-
-        <MessageQueuePanel
-          items={activeQueuedMessages}
-          canGuide={activeSessionSupportsGuidance}
-          currentSessionRunning={currentSessionRunning}
-          compactionInProgress={activeSessionCompacting}
-          onGuide={handleGuideQueuedMessage}
-          onEdit={(item) => setQueueEditingId(item.id)}
-          onReorder={handleReorderQueuedMessage}
-          onRemove={(itemId) => {
-            if (activeSessionId) SessionCommandCoordinator.removeQueuedMessage(activeSessionId, itemId);
-          }}
-        />
 
         <ChatComposer
           activeQuestionnaire={!!activeInteraction}

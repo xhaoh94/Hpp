@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
@@ -56,6 +64,9 @@ type CodeReviewDialogProps = {
 
 const MAX_RENDER_LINES = 5000;
 const MAX_HIGHLIGHT_CHARS = 2000;
+const FILES_MIN_WIDTH = 180;
+const FILES_MAX_WIDTH = 420;
+const DIFF_MIN_WIDTH = 320;
 
 type HighlightedCell = {
   cell: DiffLineCell;
@@ -106,6 +117,8 @@ export function CodeReviewDialog({
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ReviewViewMode>("split");
   const [filesCollapsed, setFilesCollapsed] = useState(false);
+  const [filesWidth, setFilesWidth] = useState(220);
+  const [filesResizing, setFilesResizing] = useState(false);
   const [showDeletedInRight, setShowDeletedInRight] = useState(false);
   const [diffCursor, setDiffCursor] = useState(0);
   const [fileContent, setFileContent] = useState<Record<string, string | null>>({});
@@ -113,6 +126,7 @@ export function CodeReviewDialog({
   const scrolledRef = useRef<string | null>(null);
   const diffPairIndicesRef = useRef<number[]>([]);
   const diffScrollRef = useRef<HTMLDivElement | null>(null);
+  const reviewBodyRef = useRef<HTMLDivElement | null>(null);
   const [revertedHunks, setRevertedHunks] = useState<Set<string>>(new Set());
   const [revertedFiles, setRevertedFiles] = useState<Set<string>>(new Set());
   const [undoingKey, setUndoingKey] = useState<string | null>(null);
@@ -121,7 +135,9 @@ export function CodeReviewDialog({
   const files = useMemo(() => buildReviewDiff(diffs, projectPath), [diffs, projectPath]);
 
   // 打开时回到初始选中的文件（或第一个有补丁的文件），保持视图为并排对比。
-  useEffect(() => {
+  // useLayoutEffect（声明靠前）确保在默认定位 useLayoutEffect 之前重置 scrolledRef，
+  // 使重新打开同一文件时能再次以 auto 立即定位。
+  useLayoutEffect(() => {
     if (!open) return;
     setActiveFileKey(initialFile ?? null);
     setViewMode("split");
@@ -138,6 +154,54 @@ export function CodeReviewDialog({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
+
+  const getMaxFilesWidth = () => {
+    const bodyWidth = reviewBodyRef.current?.clientWidth ?? FILES_MAX_WIDTH + DIFF_MIN_WIDTH;
+    return Math.max(FILES_MIN_WIDTH, Math.min(FILES_MAX_WIDTH, bodyWidth - DIFF_MIN_WIDTH));
+  };
+
+  const clampFilesWidth = (width: number) =>
+    Math.max(FILES_MIN_WIDTH, Math.min(getMaxFilesWidth(), width));
+
+  useEffect(() => {
+    if (!filesResizing) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const body = reviewBodyRef.current;
+      if (!body) return;
+      const bodyRect = body.getBoundingClientRect();
+      setFilesWidth(clampFilesWidth(event.clientX - bodyRect.left));
+    };
+    const handlePointerUp = () => setFilesResizing(false);
+
+    document.addEventListener("pointermove", handlePointerMove);
+    document.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerUp);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [filesResizing]);
+
+  const handleFilesResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setFilesCollapsed(false);
+    setFilesResizing(true);
+  };
+
+  const handleFilesResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setFilesCollapsed(false);
+    setFilesWidth((width) => clampFilesWidth(width + (event.key === "ArrowRight" ? 16 : -16)));
+  };
 
   const active = useMemo(() => {
     if (files.length === 0) return null;
@@ -271,7 +335,7 @@ export function CodeReviewDialog({
     setUndoingKey(key);
     setUndoError(null);
     try {
-      const result = await window.electronAPI.reverseApplyPatch(projectPath, [active.patch]);
+      const result = await window.electronAPI.reverseApplyPatch(projectPath, active.patches);
       if (!result.success) {
         setUndoError(result.error || "撤销失败");
       } else {
@@ -352,25 +416,24 @@ export function CodeReviewDialog({
     }
   };
 
-  // 默认定位到当前文件的第一个变化点（每个文件只执行一次）。
-  // 等待文件内容读取完成、完整对比就绪后再定位，避免偶发首次定位失败。
-  useEffect(() => {
-    if (!active || pairs === null) return;
-    if (fileContent[active.displayFile] === undefined) return;
-    const key = active.displayFile;
-    if (scrolledRef.current === key) return;
+  // 默认定位到当前文件的第一个变化点。
+  // 用 useLayoutEffect（commit 后、paint 前同步执行）立即定位，无帧延迟、无闪烁。
+  // 打开瞬间用补丁行对定位（不等文件内容读取完成），文件内容读取完成后若修改点位置
+  // 变化则平滑过渡到完整对比的精确位置；文件已缓存时打开即精确、无延迟。
+  // 依赖含 open：重新打开同一文件时 scrolledRef 已在打开时重置，会再次定位。
+  useLayoutEffect(() => {
+    if (!open || !active || pairs === null) return;
     if (diffPairIndices.length === 0) return;
-    scrolledRef.current = key;
+    const key = active.displayFile;
+    const contentReady = fileContent[key] !== undefined;
+    const isFirst = scrolledRef.current !== key;
+    if (isFirst) scrolledRef.current = key;
     // 用户可能在文件内容加载前已翻页，定位到当前游标而非总是第一个。
     const cursor = Math.min(diffCursor, diffPairIndices.length - 1);
     if (cursor !== diffCursor) setDiffCursor(cursor);
-    // 双帧后再定位：确保完整对比完成渲染与布局，避免偶发首次定位失败。
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        scrollToDiff(cursor);
-      });
-    });
-  }, [active, pairs, diffPairIndices, fileContent, diffCursor]);
+    // 首次（打开/切换文件）立即 auto 定位；内容升级为完整对比后平滑过渡，避免突兀跳动。
+    scrollToDiff(cursor, !isFirst && contentReady);
+  }, [open, active, pairs, diffPairIndices, fileContent, diffCursor]);
 
   const goPrevDiff = () => {
     const next = Math.max(0, diffCursor - 1);
@@ -431,7 +494,7 @@ export function CodeReviewDialog({
                 type="button"
                 className="chat-review-tool-btn"
                 onClick={goPrevDiff}
-                disabled={totalDiffs === 0 || diffCursor <= 0}
+                disabled={totalDiffs === 0 || (totalDiffs > 1 && diffCursor <= 0)}
                 title={uiText.review.prevDiff}
                 aria-label={uiText.review.prevDiff}
               >
@@ -444,7 +507,7 @@ export function CodeReviewDialog({
                 type="button"
                 className="chat-review-tool-btn"
                 onClick={goNextDiff}
-                disabled={totalDiffs === 0 || diffCursor >= totalDiffs - 1}
+                disabled={totalDiffs === 0 || (totalDiffs > 1 && diffCursor >= totalDiffs - 1)}
                 title={uiText.review.nextDiff}
                 aria-label={uiText.review.nextDiff}
               >
@@ -526,8 +589,11 @@ export function CodeReviewDialog({
         {files.length === 0 ? (
           <div className="chat-review-empty">{uiText.review.noChanges}</div>
         ) : (
-          <div className="chat-review-body">
-            <aside className={`chat-review-files ${filesCollapsed ? "collapsed" : ""}`}>
+          <div ref={reviewBodyRef} className="chat-review-body">
+            <aside
+              className={`chat-review-files ${filesCollapsed ? "collapsed" : ""} ${filesResizing ? "resizing" : ""}`}
+              style={filesCollapsed ? undefined : { flexBasis: `${filesWidth}px` }}
+            >
               <div className="chat-review-files-head">
                 {!filesCollapsed && <span className="chat-review-files-title">{uiText.review.files}</span>}
                 <button
@@ -586,6 +652,19 @@ export function CodeReviewDialog({
                   </button>
                 </div>
               )}
+              <div
+                className="chat-review-files-resizer"
+                role="separator"
+                tabIndex={0}
+                aria-orientation="vertical"
+                aria-label={uiText.review.resizeFiles}
+                aria-valuemin={FILES_MIN_WIDTH}
+                aria-valuemax={getMaxFilesWidth()}
+                aria-valuenow={filesCollapsed ? 40 : Math.round(filesWidth)}
+                title={uiText.review.resizeFiles}
+                onPointerDown={handleFilesResizeStart}
+                onKeyDown={handleFilesResizeKeyDown}
+              />
             </aside>
 
             <div className="chat-review-content">

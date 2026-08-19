@@ -132,6 +132,19 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("<PermissionChoicePanel");
   });
 
+  it("notifies once per questionnaire when the window is in the background", () => {
+    // 问卷弹出时发系统通知（后台才弹，与任务完成通知一致）；按 key 去重避免重复提醒。
+    expect(chatPanelSource).toContain("notifiedQuestionnaireKeysRef");
+    expect(chatPanelSource).toContain(
+      'document.visibilityState === "visible" && document.hasFocus()',
+    );
+    expect(chatPanelSource).toContain('window.electronAPI.showNotification({');
+    expect(chatPanelSource).toContain('title: "有新的问题需要你回答"');
+    expect(chatPanelSource).toContain(
+      'notifiedQuestionnaireKeysRef.current.has(questionnaireResetKey)',
+    );
+  });
+
   it("settles renderer state when an abort request throws", () => {
     const failureBranch = agentEventsSource.slice(agentEventsSource.indexOf("} catch (error) {"));
     expect(failureBranch).toContain("finishManualAbort(sessionId)");
@@ -196,7 +209,32 @@ describe("chat interaction regression constraints", () => {
     expect(chatComposerSource).toContain('placeholder={placeholder}');
     expect(chatComposerSource).not.toContain("sendDisabled && !(compactionInProgress && hasPendingContent)");
     expect(chatPanelSource).toContain("queueIfRunning: true");
+    expect(chatPanelSource).toContain("canGuide && !compactionInProgress && !item.action");
     expect(chatPanelSource).not.toContain('showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送")');
+  });
+
+  it("keeps the queue edit dialog composer contained and its placeholder anchored to the editor", () => {
+    // 队列编辑弹窗使用 Lexical contenteditable（InlineComposerEditor），
+    // 旧的 `> textarea` 规则不生效：必须给实际渲染的 .inline-composer-editor
+    // 补齐尺寸、换行与纵向滚动，并让 .inline-composer-placeholder 相对输入框定位，
+    // 避免占位文字飘到标题区域形成“重影”。
+    const queueComposerStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-queue-edit-composer {"),
+      chatPanelStyles.indexOf(".chat-queue-edit-section {"),
+    );
+    expect(queueComposerStyles).toContain("position: relative");
+    expect(queueComposerStyles).toContain(".chat-queue-edit-composer > .inline-composer-editor");
+    expect(queueComposerStyles).toContain("overflow-y: auto");
+    expect(queueComposerStyles).toContain("overflow-x: hidden");
+    expect(queueComposerStyles).toContain("overflow-wrap: anywhere");
+    expect(queueComposerStyles).toContain(".chat-queue-edit-composer .inline-composer-placeholder");
+    // 主输入框（ChatComposer）传入 className="chat-textarea"，编辑器根自身即定位祖先，
+    // 占位文字锚定到输入框内部，不会飘到视口左上角。
+    const mainComposerStyles = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-textarea.inline-composer-editor {"),
+      chatPanelStyles.indexOf(".chat-textarea.inline-composer-editor:focus-within"),
+    );
+    expect(mainComposerStyles).toContain("position: relative");
   });
 
   it("moves a still-running compaction below the final response body", () => {

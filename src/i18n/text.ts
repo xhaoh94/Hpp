@@ -95,6 +95,7 @@ export const uiText = {
     close: "关闭",
     collapseFiles: "收起文件列表",
     expandFiles: "展开文件列表",
+    resizeFiles: "调整文件栏宽度",
     diffNav: "修改点导航",
     prevDiff: "上一个修改点",
     nextDiff: "下一个修改点",

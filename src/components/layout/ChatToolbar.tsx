@@ -1,6 +1,6 @@
 import { useMemo, useRef, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Check, Settings, Shield, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Check, Settings, Shield, ShieldAlert, ShieldCheck, WandSparkles } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
 import { getEffectiveThinkingLevelMode, getThinkingToggleLevel, groupModelsByProvider, includeCurrentModel, normalizeThinkingLevelId } from "@shared/models";
@@ -110,6 +110,7 @@ export function ChatToolbar({
         title={getPlanModeTooltip(agentId)}
         aria-pressed={planModeEnabled}
       >
+        <WandSparkles size={14} />
         <span>计划</span>
       </button>
 

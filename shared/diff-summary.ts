@@ -47,11 +47,17 @@ const countPatchChanges = (patch: string) => ({
 
 export function buildDiffSummary(diffs: DiffLike[], projectPath?: string) {
   const byFile = new Map<string, DiffFileAccumulator>();
+  const reversiblePatches: string[] = [];
+  const seenReversiblePatches = new Set<string>();
   for (const diff of diffs) {
     const file = toProjectRelativePath(diff.file || "未命名文件", projectPath);
     const patch = typeof diff.patch === "string" ? diff.patch : "";
     const trimmedPatch = patch.trim();
     const countedPatch = trimmedPatch ? countPatchChanges(patch) : { additions: 0, deletions: 0 };
+    if (isReversiblePatch(patch) && !seenReversiblePatches.has(patch)) {
+      seenReversiblePatches.add(patch);
+      reversiblePatches.push(patch);
+    }
     const changeKey = trimmedPatch
       ? `patch:${patch}`
       : `meta:${diff.status || "modified"}:${diff.additions || 0}:${diff.deletions || 0}`;
@@ -92,7 +98,8 @@ export function buildDiffSummary(diffs: DiffLike[], projectPath?: string) {
     totalAdditions: files.reduce((sum, file) => sum + file.additions, 0),
     totalDeletions: files.reduce((sum, file) => sum + file.deletions, 0),
     patchCount: files.reduce((sum, file) => sum + file.patches.length, 0),
-    reversiblePatches: files.flatMap((file) => file.patches).filter(isReversiblePatch),
+    // 保留 diff 的产生顺序；IPC 会按逆序逐份反向应用，支持同一文件多次修改。
+    reversiblePatches,
   };
 }
 

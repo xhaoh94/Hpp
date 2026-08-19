@@ -24,6 +24,8 @@ export interface ReviewFileDiff {
   hasPatch: boolean;
   /** 合并后的原始补丁文本（用于还原完整文件对比）。 */
   patch: string;
+  /** 同一文件各次修改的原始补丁，按产生顺序保存，撤销时需逆序应用。 */
+  patches: string[];
   /** 补丁内按顺序排列的行（patch-only 渲染回退）。 */
   lines: ReviewSplitLine[];
 }
@@ -298,7 +300,7 @@ export function buildReviewDiff(diffs: DiffLike[], projectPath?: string): Review
     const status = REVIEW_STATUS_KEYS[diff.status || ""];
     if (status) entry.status = status;
     if (typeof diff.patch === "string" && diff.patch.trim()) {
-      entry.patches.push(diff.patch);
+      if (!entry.patches.includes(diff.patch)) entry.patches.push(diff.patch);
     } else {
       entry.additions += Math.max(0, diff.additions || 0);
       entry.deletions += Math.max(0, diff.deletions || 0);
@@ -326,6 +328,7 @@ export function buildReviewDiff(diffs: DiffLike[], projectPath?: string): Review
       deletions,
       hasPatch,
       patch,
+      patches: [...entry.patches],
       lines,
     });
   }

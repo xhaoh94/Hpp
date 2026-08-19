@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   AppWindow,
   Bot,
@@ -530,7 +531,7 @@ export function SettingsView() {
         </div>
       </div>
 
-      {showShortcutModal && (
+      { showShortcutModal && createPortal(
         <div className="settings-modal-overlay" onClick={closeShortcutSettings}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
@@ -618,10 +619,11 @@ export function SettingsView() {
               </p>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {showFilterModal && (
+      { showFilterModal && createPortal(
         <div className="settings-modal-overlay" onClick={closeFilterSettings}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
@@ -680,9 +682,10 @@ export function SettingsView() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
-      {showAgentSettingsModal && (
+      { showAgentSettingsModal && createPortal(
         <div className="settings-modal-overlay" onClick={() => setShowAgentSettingsModal(false)}>
           <div className="settings-modal settings-modal-agent" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
@@ -704,10 +707,12 @@ export function SettingsView() {
               <AgentSettingsView embedded />
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
-      {showRemoteAccessModal && (
-        <RemoteAccessSettings onClose={() => setShowRemoteAccessModal(false)} />
+      {showRemoteAccessModal && createPortal(
+        <RemoteAccessSettings onClose={() => setShowRemoteAccessModal(false)} />,
+        document.body,
       )}
       {configAgent && (
         <AgentConfigModal
@@ -717,7 +722,7 @@ export function SettingsView() {
           onModelsUpdated={syncActiveAgentModels}
         />
       )}
-      {showGeneralModal && (
+      { showGeneralModal && createPortal(
         <div className="settings-modal-overlay" onClick={() => setShowGeneralModal(false)}>
           <div className="settings-modal settings-general-modal" onClick={(e) => e.stopPropagation()}>
             <div className="settings-modal-header">
@@ -1008,7 +1013,8 @@ export function SettingsView() {
               </section>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

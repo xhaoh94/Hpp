@@ -187,6 +187,10 @@ describe("buildReviewDiff", () => {
     );
     expect(files).toHaveLength(1);
     expect(files[0].lines).toHaveLength(4);
+    expect(files[0].patches).toEqual([
+      "@@ -1 +1 @@\n-a\n+b\n",
+      "@@ -2 +2 @@\n-c\n+d\n",
+    ]);
   });
 });
 

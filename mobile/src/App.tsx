@@ -59,7 +59,7 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
-import { isValidElement, useCallback, useState, type MouseEvent, type ReactNode } from "react";
+import { isValidElement, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -4993,19 +4993,6 @@ export default function App() {
             )}
           </div>
 
-          {selectedQueue.length > 0 && (
-            <QueuePanel
-              items={selectedQueue}
-              disabled={commandBusy}
-              canGuide={selectedAgent?.supportsGuidance === true}
-              currentSessionRunning={selected.session.status === "running"}
-              onEdit={setEditingQueueItem}
-              onGuide={(item) => void guideQueuedMessage(item)}
-              onReorder={(itemId, toIndex) => void reorderQueuedMessage(itemId, toIndex)}
-              onRemove={(item) => void removeQueuedMessage(item)}
-            />
-          )}
-
           {selectedInteraction && (
             selectedInteraction.method?.toLowerCase() === "confirm"
               ? <Confirmation
@@ -5030,6 +5017,18 @@ export default function App() {
           )}
 
           <footer className="composer">
+            {selectedQueue.length > 0 && (
+              <QueuePanel
+                items={selectedQueue}
+                disabled={commandBusy}
+                canGuide={selectedAgent?.supportsGuidance === true}
+                currentSessionRunning={selected.session.status === "running"}
+                onEdit={setEditingQueueItem}
+                onGuide={(item) => void guideQueuedMessage(item)}
+                onReorder={(itemId, toIndex) => void reorderQueuedMessage(itemId, toIndex)}
+                onRemove={(item) => void removeQueuedMessage(item)}
+              />
+            )}
             {pendingAction && (
               <div className="composer-preview-bar">
                 {pendingAction && (
@@ -5134,6 +5133,7 @@ export default function App() {
                 disabled={commandBusy}
                 onClick={() => void runCommand<{ enabled: boolean }>("settings.setPlanMode", { enabled: selectedConfig?.planModeEnabled !== true }).then(({ enabled }) => setConfigs((current) => Object.fromEntries(Object.entries(current).map(([id, config]) => [id, { ...config, planModeEnabled: enabled }] ))))}
               >
+                <WandSparkles size={14} />
                 <span>计划</span>
               </button>
               {selectedAgent?.supportsPermissions === true && (

@@ -37,9 +37,32 @@ describe("code review dialog", () => {
     expect(overlay).toContain("z-index: 2000");
   });
 
+  it("uses the editor surface background for the review dialog", () => {
+    const dialog = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-review-dialog {"),
+      chatPanelStyles.indexOf(".chat-review-header {"),
+    );
+    expect(dialog).toContain("background-color: var(--bg-secondary)");
+    expect(dialog).not.toContain("var(--diff-popover-bg)");
+    // 弹窗内的 diff 背景（文件栏/代码区）与编辑器代码背景保持一致，
+    // 而不是全局 --diff-bg 的深黑（暗色 #171717）。
+    expect(dialog).toContain("--diff-bg: var(--bg-secondary)");
+    expect(dialog).toContain(':root[data-theme="light"] .chat-review-dialog');
+    expect(dialog).toContain("--diff-bg: #ffffff");
+  });
+
   it("lets the file list collapse to give the diff more room", () => {
     expect(dialogSource).toContain("filesCollapsed");
     expect(chatPanelStyles).toContain(".chat-review-files.collapsed");
+  });
+
+  it("lets the file list resize from its right edge", () => {
+    expect(dialogSource).toContain("handleFilesResizeStart");
+    expect(dialogSource).toContain("handleFilesResizeKeyDown");
+    expect(dialogSource).toContain('className="chat-review-files-resizer"');
+    expect(dialogSource).toContain('role="separator"');
+    expect(chatPanelStyles).toContain("cursor: col-resize");
+    expect(chatPanelStyles).toContain(".chat-review-files.resizing");
   });
 
   it("keeps the diff content large and the chrome compact", () => {
@@ -66,6 +89,11 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("linesToPairs");
   });
 
+  it("reverts every edit of one file as ordered patches instead of one merged patch", () => {
+    expect(dialogSource).toContain("reverseApplyPatch(projectPath, active.patches)");
+    expect(dialogSource).not.toContain("reverseApplyPatch(projectPath, [active.patch])");
+  });
+
   it("navigates between diff points from the header toolbar", () => {
     expect(dialogSource).toContain("goNextDiff");
     expect(dialogSource).toContain("goPrevDiff");
@@ -73,6 +101,20 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("container.scrollTo");
     expect(dialogSource).toContain("data-review-diff-index");
     expect(dialogSource).toContain("chat-review-nav");
+  });
+
+  it("keeps the diff navigation buttons usable when there is exactly one change point", () => {
+    // 单修改点（如纯新增的新文件或单 hunk 插入）时，totalDiffs===1，
+    // 两个按钮都不应禁用：点击后仍能 scrollToDiff 重新定位到唯一修改点。
+    expect(dialogSource).toContain(
+      "disabled={totalDiffs === 0 || (totalDiffs > 1 && diffCursor <= 0)}",
+    );
+    expect(dialogSource).toContain(
+      "disabled={totalDiffs === 0 || (totalDiffs > 1 && diffCursor >= totalDiffs - 1)}",
+    );
+    // 点击逻辑本身对 totalDiffs===1 天然安全：next 被夹到 0，prev 被夹到 0。
+    expect(dialogSource).toContain("Math.min(totalDiffs - 1, diffCursor + 1)");
+    expect(dialogSource).toContain("Math.max(0, diffCursor - 1)");
   });
 
   it("merges consecutive diff lines into one navigation point", () => {
@@ -108,7 +150,17 @@ describe("code review dialog", () => {
 
   it("scrolls to the first change point by default when a file is shown", () => {
     expect(dialogSource).toContain("scrolledRef");
-    expect(dialogSource).toContain("scrollToDiff(cursor)");
-    expect(dialogSource).toContain("requestAnimationFrame");
+    expect(dialogSource).toContain("scrollToDiff(cursor,");
+    // useLayoutEffect：commit 后、paint 前同步定位，无帧延迟、无闪烁。
+    expect(dialogSource).toContain("useLayoutEffect");
+    expect(dialogSource).not.toContain("requestAnimationFrame(() => {");
+    // 打开瞬间用补丁行对立即定位，不等文件内容读取完成；内容就绪后平滑过渡。
+    expect(dialogSource).toContain("contentReady");
+    expect(dialogSource).toContain("scrollToDiff(cursor, !isFirst && contentReady)");
+    // 重新打开同一文件也会再次定位：依赖含 open，且打开时重置 scrolledRef。
+    expect(dialogSource).toContain("if (!open || !active || pairs === null) return;");
+    expect(dialogSource).toContain(
+      "[open, active, pairs, diffPairIndices, fileContent, diffCursor]",
+    );
   });
 });
