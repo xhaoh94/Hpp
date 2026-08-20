@@ -365,6 +365,9 @@ export function EditorPane({
   // 防抖搜索词：输入过程中只更新输入框文本（searchQuery），停止输入 ~500ms 后才
   // 更新 debouncedSearchQuery 并触发搜索计算，避免大文件连续按键每键一次正则匹配导致卡顿。
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(sharedSearchConfig.searchQuery);
+  // 持有最新查询，供 openSearch/openReplace 等 useCallback（依赖不含 debouncedSearchQuery）读取，避免闭包捕获到初始空值。
+  const debouncedSearchQueryRef = useRef(debouncedSearchQuery);
+  debouncedSearchQueryRef.current = debouncedSearchQuery;
   useEffect(() => {
     // 清空立即生效（清空结果无需防抖）。
     if (!searchQuery) {
@@ -395,6 +398,8 @@ export function EditorPane({
   const [replaceQuery, setReplaceQuery] = useState(sharedSearchConfig.replaceQuery);
   const [preserveCase, setPreserveCase] = useState(sharedSearchConfig.preserveCase);
   const [searchScope, setSearchScope] = useState<"current" | "all">(sharedSearchConfig.searchScope);
+  const searchScopeRef = useRef<"current" | "all">(sharedSearchConfig.searchScope);
+  searchScopeRef.current = searchScope;
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const searchRegexRef = useRef(false);
   searchRegexRef.current = searchRegex;
@@ -407,11 +412,25 @@ export function EditorPane({
   // 显式导航计数：仅在上一项/下一项/打开搜索等用户动作时自增，
   // 用于隔离“文档被编辑导致匹配变化”与“用户主动跳转”——编辑时不滚动。
   const [navTick, setNavTick] = useState(0);
+  // 通过选区填充搜索文本（Ctrl+F 前已选中文本）后，用于触发“定位到选区所属匹配项”的 effect。
+  const [selectionLocateTick, setSelectionLocateTick] = useState(0);
+  // 选区起点在文档中的绝对偏移；非空时表示本次打开搜索源自选区填充，
+  // 需在匹配就绪后把“当前匹配项”定位到选区所属那一项，而非默认跳到第 1 项。
+  const pendingSelectionAnchorRef = useRef<number | null>(null);
   const activeMatchIndexRef = useRef(-1);
   activeMatchIndexRef.current = activeMatchIndex;
   // 显式滚动目标：在用户主动跳转/打开搜索/切文件时由处理函数写入，
   // 滚动 effect 仅消费它（避免依赖 activeMatchIndex 的异步重置导致滚动到错误位置）。
   const pendingScrollRef = useRef(-1);
+  // 已打开搜索框时再次按 Ctrl+F / Ctrl+H：标记本次不要自动滚动/重置到第 1 项，
+  // 仅聚焦输入框、保持当前匹配项与视图位置。
+  const suppressAutoScrollRef = useRef(false);
+  // 记录上一次防抖查询，用于区分“搜索框文字变动”与“切换匹配选项”等其它触发：
+  // 文字变动 / 匹配选项（大小写、全字、正则）变化时，优先定位到当前滚动位置附近的匹配项，而不是无脑回第 1 项。
+  const prevDebouncedQueryRef = useRef(debouncedSearchQuery);
+  const prevMatchCaseRef = useRef(searchMatchCase);
+  const prevWholeWordRef = useRef(searchWholeWord);
+  const prevRegexRef = useRef(searchRegex);
   // 仅当用户显式按 ↑/↓ 导航时，才允许“所有文件”范围跨文件跳转打开其它文件；
   // 打开搜索、输入文本等隐式动作不自动打开其它文件（避免抢走输入框焦点、意外跳页）。
   const crossFileNavAllowedRef = useRef(false);
@@ -525,23 +544,114 @@ export function EditorPane({
     return !isRegexValid(searchQuery, searchMatchCase);
   }, [searchOpen, searchRegex, searchQuery, searchMatchCase]);
 
+  const prevSearchKeyRef = useRef<string | null>(null);
   // 防抖查询 / 选项 / 范围变化后：回到第一个匹配。当前文件范围同时滚动到首个匹配
   // （debounce 落地后才滚动，避免连续按键时滚动到旧匹配）。
+  // 注意：仅当“查询内容 / 选项”真正变化时才重置到第 1 项；单纯 searchOpen（开 / 关）变化
+  // （如查找框已有内容时再次按 Ctrl+F）不应重置，否则会丢失当前匹配位置。
   useEffect(() => {
-    setActiveMatchIndex(displayMatches.length > 0 ? 0 : -1);
+    // 源自选区填充：交由下方定位 effect 把“当前项”设为选区所属匹配，且不滚动。
+    if (pendingSelectionAnchorRef.current != null) return;
+    const searchKey = `${debouncedSearchQuery} ${searchMatchCase} ${searchWholeWord} ${searchRegex} ${searchScope}`;
+    const queryChanged = prevDebouncedQueryRef.current !== debouncedSearchQuery;
+    prevDebouncedQueryRef.current = debouncedSearchQuery;
+    // 匹配选项（大小写 / 全字 / 正则）切换时同样按“优先当前滚动位置”处理。
+    const optionChanged =
+      prevMatchCaseRef.current !== searchMatchCase ||
+      prevWholeWordRef.current !== searchWholeWord ||
+      prevRegexRef.current !== searchRegex;
+    prevMatchCaseRef.current = searchMatchCase;
+    prevWholeWordRef.current = searchWholeWord;
+    prevRegexRef.current = searchRegex;
+    if (prevSearchKeyRef.current === searchKey) return;
+    prevSearchKeyRef.current = searchKey;
+
+    // 查询文字变动 / 匹配选项切换时：优先定位到当前滚动位置（视口中心）附近的匹配项，
+    // 而不是无脑回第 1 项；“所有文件”范围下仍回第 1 项（跨文件结果不在此定位）。
+    const preferViewport = (queryChanged || optionChanged) && searchScope === "current";
+    let targetIdx = 0;
+    const view = viewRef.current;
+    if (preferViewport && view && displayMatches.length > 0) {
+      const centerPos = view.posAtCoords({ x: 0, y: view.scrollDOM.clientHeight / 2 });
+      if (centerPos != null) {
+        let below = -1;
+        let above = -1;
+        for (let i = 0; i < displayMatches.length; i++) {
+          const m = displayMatches[i];
+          const from = view.state.doc.line(m.lineNumber).from + m.startColumn;
+          if (from >= centerPos) {
+            below = i;
+            break;
+          }
+          above = i;
+        }
+        targetIdx = below >= 0 ? below : above;
+      }
+    }
+
+    setActiveMatchIndex(displayMatches.length > 0 ? targetIdx : -1);
     if (searchScope === "current" && searchOpen && debouncedSearchQuery) {
-      pendingScrollRef.current = 0;
-      setNavTick((tick) => tick + 1);
+      // 已打开时重复按 Ctrl+F/H：抑制自动滚动，保持当前视图位置。
+      if (suppressAutoScrollRef.current) {
+        suppressAutoScrollRef.current = false;
+      } else if (preferViewport && view && displayMatches.length > 0) {
+        // 目标匹配已在视口内则只更新高亮，不滚动；否则滚动到该匹配。
+        const m = displayMatches[targetIdx];
+        const pos = view.state.doc.line(m.lineNumber).from + m.startColumn;
+        const inView = pos >= view.viewport.from && pos <= view.viewport.to;
+        if (!inView) {
+          pendingScrollRef.current = targetIdx;
+          setNavTick((tick) => tick + 1);
+        }
+      } else {
+        pendingScrollRef.current = 0;
+        setNavTick((tick) => tick + 1);
+      }
     }
   }, [debouncedSearchQuery, searchMatchCase, searchWholeWord, searchRegex, searchScope, searchOpen]);
 
   useEffect(() => {
+    const anchor = pendingSelectionAnchorRef.current;
+    if (anchor != null) {
+      // 源自选区填充：仅当防抖查询已反映当前搜索词（即匹配集对应选区文本）时才定位，
+      // 否则（防抖尚未落地，displayMatches 仍是旧搜索词的匹配）保留锚点等待，
+      // 避免用旧匹配集错误定位并清空锚点，导致随后被 530 effect 归零滚动到第 1 项。
+      if (displayMatches.length > 0 && debouncedSearchQuery === searchQuery) {
+        // 把“当前项”定位到选区起点所属的那一项匹配，并保持当前视图位置（不滚动到该匹配）。
+        const view = viewRef.current;
+        let idx = -1;
+        for (let i = 0; i < displayMatches.length; i++) {
+          const m = displayMatches[i];
+          const line = view ? view.state.doc.line(m.lineNumber) : null;
+          const from = line ? line.from + m.startColumn : -1;
+          const to = line ? line.from + m.endColumn : -1;
+          if (anchor >= from && anchor <= to) {
+            idx = i;
+            break;
+          }
+        }
+        if (idx < 0) {
+          // 选区未精确落在某匹配内（如跨边界）：取起点不超过锚点的最后一个匹配。
+          for (let i = 0; i < displayMatches.length; i++) {
+            const m = displayMatches[i];
+            const line = view ? view.state.doc.line(m.lineNumber) : null;
+            const from = line ? line.from + m.startColumn : -1;
+            if (from <= anchor) idx = i;
+            else break;
+          }
+        }
+        pendingSelectionAnchorRef.current = null;
+        setActiveMatchIndex(idx);
+      }
+      // 尚未就绪：保留锚点，不做任何重置。
+      return;
+    }
     setActiveMatchIndex((current) => {
       if (displayMatches.length === 0) return -1;
       if (current < 0 || current >= displayMatches.length) return 0;
       return current;
     });
-  }, [displayMatches]);
+  }, [displayMatches, selectionLocateTick, debouncedSearchQuery, searchQuery]);
 
   // Push highlight decorations into the CodeMirror editor.
   useEffect(() => {
@@ -759,8 +869,16 @@ export function EditorPane({
     const sel = view.state.selection.main;
     if (sel.from !== sel.to) {
       const selectedText = view.state.sliceDoc(sel.from, sel.to).replace(/\r?\n+$/, "");
-      if (selectedText) setSearchQuery(selectedText);
+      if (selectedText) {
+        // 记录选区起点，便于打开搜索后定位到选区所属匹配项（而非跳到第 1 项）。
+        pendingSelectionAnchorRef.current = sel.from;
+        setSelectionLocateTick((tick) => tick + 1);
+        setSearchQuery(selectedText);
+        return;
+      }
     }
+    // 无有效选区：清除锚点，沿用默认“回到第 1 项并滚动”的行为。
+    pendingSelectionAnchorRef.current = null;
   }, []);
 
   // 滚动到指定行号（用于“扩大搜索”结果跳转与全局 goto 事件）。
@@ -777,54 +895,76 @@ export function EditorPane({
     view.focus();
   }, []);
 
-  // 选项（区分大小写/全字匹配/正则）切换后回到第一个匹配并滚动。
-  const resetSearchToFirstAndScroll = useCallback(() => {
-    pendingScrollRef.current = 0;
-    setActiveMatchIndex(0);
-    setNavTick((tick) => tick + 1);
-  }, []);
-
+  // 选项（区分大小写/全字匹配/正则）切换：仅切换状态，定位交由上方“防抖落地”effect
+  // 统一按“优先当前滚动位置”规则处理（与查询文字变动一致），避免切选项跳回第 1 项。
   const toggleMatchCase = useCallback(() => {
     setSearchMatchCase((current) => !current);
-    resetSearchToFirstAndScroll();
-  }, [resetSearchToFirstAndScroll]);
+  }, []);
 
   const toggleWholeWord = useCallback(() => {
     setSearchWholeWord((current) => !current);
-    resetSearchToFirstAndScroll();
-  }, [resetSearchToFirstAndScroll]);
+  }, []);
 
   const toggleRegex = useCallback(() => {
     setSearchRegex((current) => !current);
-    resetSearchToFirstAndScroll();
-  }, [resetSearchToFirstAndScroll]);
+  }, []);
 
   const openSearch = useCallback(() => {
     setGoToLineOpen(false);
     setGoToLineError(false);
+    const wasOpen = searchOpenRef.current;
     fillSearchFromSelection();
     // 重新打开搜索框：把范围下拉重置回“当前文件”，并收起“所有文件”结果面板
     // （面板与该下拉选项绑定，切回“当前文件”即关闭）。
-    setSearchScope("current");
-    onSearchScopeChangeRef.current?.("current");
+    const scopeWasNotCurrent = searchScopeRef.current !== "current";
+    if (scopeWasNotCurrent) {
+      setSearchScope("current");
+      onSearchScopeChangeRef.current?.("current");
+    } else {
+      onSearchScopeChangeRef.current?.("current");
+    }
     setSearchOpen(true);
-    pendingScrollRef.current = 0;
-    setActiveMatchIndex(0);
-    setNavTick((tick) => tick + 1);
+    // 仅在“首次打开、无现成查询且非选区填充”时才回到第 1 项并滚动；
+    // 若查找框已有内容（复用既有查询，例如再次按 Ctrl+F 时），保持当前匹配项与视图位置，
+    // 仅把焦点拉回输入框（由下方 rAF 处理），避免重复按 Ctrl+F 跳到第 1 项。
+    if (!wasOpen && pendingSelectionAnchorRef.current == null && !debouncedSearchQueryRef.current) {
+      pendingScrollRef.current = 0;
+      setActiveMatchIndex(0);
+      setNavTick((tick) => tick + 1);
+    } else if (wasOpen && scopeWasNotCurrent) {
+      // 已打开且 scope 刚切回 current 会触发下方自动滚动，此处抑制以保持当前视图位置。
+      suppressAutoScrollRef.current = true;
+    }
+    // 搜索框已打开时再次按 Ctrl+F：searchOpen 状态不变，上面的 effect 不会重新触发，
+    // 这里显式重新聚焦输入框，确保焦点回到搜索框（例如焦点已回到编辑器内容时）。
+    requestAnimationFrame(() => searchInputRef.current?.focus());
   }, [fillSearchFromSelection]);
 
   const openReplace = useCallback(() => {
     setGoToLineOpen(false);
     setGoToLineError(false);
+    const wasOpen = searchOpenRef.current || replaceOpenRef.current;
     fillSearchFromSelection();
     // 与 Ctrl+F 一致：打开查找/替换时把范围重置回“当前文件”并收起“所有文件”面板。
-    setSearchScope("current");
-    onSearchScopeChangeRef.current?.("current");
+    const scopeWasNotCurrent = searchScopeRef.current !== "current";
+    if (scopeWasNotCurrent) {
+      setSearchScope("current");
+      onSearchScopeChangeRef.current?.("current");
+    } else {
+      onSearchScopeChangeRef.current?.("current");
+    }
     setSearchOpen(true);
     setReplaceOpen(true);
-    pendingScrollRef.current = 0;
-    setActiveMatchIndex(0);
-    setNavTick((tick) => tick + 1);
+    // 与 openSearch 一致：已打开、来自选区或已有查询内容时不重置到首项、不滚动。
+    if (!wasOpen && pendingSelectionAnchorRef.current == null && !debouncedSearchQueryRef.current) {
+      pendingScrollRef.current = 0;
+      setActiveMatchIndex(0);
+      setNavTick((tick) => tick + 1);
+    } else if (wasOpen && scopeWasNotCurrent) {
+      suppressAutoScrollRef.current = true;
+    }
+    // 查找替换已打开时再次按 Ctrl+H：状态不变，effect 不会重新触发，这里显式重新聚焦。
+    requestAnimationFrame(() => replaceInputRef.current?.focus());
   }, [fillSearchFromSelection]);
 
   // 左侧折叠手柄：在查找 / 查找替换之间切换；展开时把焦点移到替换输入框。
