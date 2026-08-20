@@ -1,6 +1,7 @@
-const { createReadStream, existsSync, readFileSync, statSync, mkdirSync, readdirSync } = require("fs");
-const { basename, join, resolve } = require("path");
+const { existsSync, readFileSync, mkdirSync, readdirSync } = require("fs");
+const { join, resolve } = require("path");
 const https = require("https");
+const { spawnSync } = require("child_process");
 
 const owner = "xhaoh94";
 const repo = "Hpp";
@@ -72,38 +73,6 @@ function requestJson(method, path, body) {
   });
 }
 
-function uploadFile(uploadUrl, filePath, contentType, label) {
-  return new Promise((resolvePromise, reject) => {
-    const fileName = basename(filePath);
-    const url = new URL(uploadUrl.replace("{?name,label}", ""));
-    url.searchParams.set("name", fileName);
-    if (label) url.searchParams.set("label", label);
-    const size = statSync(filePath).size;
-    const request = https.request({
-      hostname: url.hostname,
-      method: "POST",
-      path: `${url.pathname}${url.search}`,
-      headers: {
-        ...apiHeaders,
-        "Content-Type": contentType,
-        "Content-Length": size,
-      },
-    }, (response) => {
-      let text = "";
-      response.on("data", (chunk) => { text += chunk; });
-      response.on("end", () => {
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`Upload ${fileName} HTTP ${response.statusCode}: ${text.slice(0, 500)}`));
-          return;
-        }
-        resolvePromise(JSON.parse(text));
-      });
-    });
-    request.on("error", reject);
-    createReadStream(filePath).pipe(request);
-  });
-}
-
 // ---- Main ----
 async function main() {
   // 1. Find or create the release (NON-destructive!)
@@ -172,30 +141,18 @@ async function main() {
   }
   console.log(`Found ${preparedAssets.length} assets to upload.`);
 
-  // 4. Get existing release asset IDs for deletion (to avoid duplicates)
-  const existingAssetIds = new Map();
-  for (const asset of (release.assets || [])) {
-    existingAssetIds.set(asset.name, asset.id);
-  }
+  // 5. Upload all assets via gh CLI (reliable for large files like APK)
+  const assetPaths = preparedAssets.map((a) => a.filePath);
+  console.log(`\nUploading ${assetPaths.length} assets via gh CLI...`);
+  const uploadResult = spawnSync("gh", [
+    "release", "upload", tag,
+    ...assetPaths,
+    "--repo", `${owner}/${repo}`,
+    "--clobber",
+  ], { stdio: "inherit", cwd: resolve(__dirname, "..") });
 
-  // 5. Upload each asset (delete old one with same name first if exists)
-  for (const { filePath, contentType, label, size } of preparedAssets) {
-    const fileName = basename(filePath);
-    console.log(`Uploading ${fileName} (${size.toLocaleString()} bytes)...`);
-
-    // Delete existing asset with same name to avoid duplicates
-    const existingId = existingAssetIds.get(fileName);
-    if (existingId) {
-      console.log(`  Replacing existing asset (id=${existingId})`);
-      try {
-        await requestJson("DELETE", `/repos/${owner}/${repo}/releases/assets/${existingId}`);
-      } catch (e) {
-        console.warn(`  Warning: could not delete old asset: ${e.message}`);
-      }
-    }
-
-    await uploadFile(release.upload_url, filePath, contentType, label);
-    console.log(`  Done.`);
+  if (uploadResult.status !== 0) {
+    throw new Error(`gh release upload failed with exit code ${uploadResult.status}`);
   }
 
   console.log(`\nPublished: ${release.html_url}`);
