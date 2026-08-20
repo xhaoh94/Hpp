@@ -16,9 +16,13 @@ describe("MarkdownRenderer code block layout", () => {
   });
 
   it("reserves room for language and copy controls without forcing full width", () => {
-    expect(styles).toContain("padding: 20px 24px");
-    expect(styles).toContain(".md-content .md-code-block:has(.md-code-lang) pre code");
-    expect(styles).toContain("padding-right: 96px");
+    expect(styles).toContain(".md-content .md-code-header");
+    expect(styles).toContain("padding: 6px 12px 0 12px");
+    expect(styles).toContain("justify-content: space-between");
+    expect(styles).toContain(".md-content .md-code-copy-btn");
+    expect(styles).toContain("width: 28px");
+    expect(styles).toContain("height: 28px");
+    expect(styles).toContain("position: static");
   });
 
   it("keeps long code lines inside the code block scroll container", () => {
