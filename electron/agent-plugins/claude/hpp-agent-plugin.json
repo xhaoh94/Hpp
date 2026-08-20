@@ -3,7 +3,7 @@
   "id": "claude",
   "name": "Claude Code",
   "version": "1.0.2",
-  "minHppVersion": "0.1.8",
+  "minHppVersion": "0.1.0",
   "description": "Anthropic Claude Code Agent SDK",
   "entry": "agent.mjs",
   "runtime": "sdk",

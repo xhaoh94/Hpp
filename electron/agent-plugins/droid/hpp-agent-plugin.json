@@ -3,7 +3,7 @@
   "id": "droid",
   "name": "Droid",
   "version": "1.3.5",
-  "minHppVersion": "0.1.8",
+  "minHppVersion": "0.1.0",
   "description": "Droid CLI programming agent",
   "entry": "agent.mjs",
   "runtime": "cli",

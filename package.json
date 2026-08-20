@@ -1,6 +1,6 @@
 {
   "name": "hpp",
-  "version": "0.1.15",
+  "version": "0.1.0",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
@@ -22,7 +22,10 @@
     "mobile:android": "cd mobile && npx cap open android",
     "mobile:apk": "npm run mobile:sync && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-debug.ps1",
     "mobile:release": "npm run mobile:sync && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-release.ps1",
-    "release:github": "node scripts/reset-github-release.cjs"
+    "release:github": "node scripts/reset-github-release.cjs",
+    "release": "node scripts/release-all.cjs",
+    "release:build": "node scripts/release-all.cjs --build",
+    "release:linux": "node scripts/release-all.cjs --skip-build --skip-linux"
   },
   "keywords": [],
   "author": "",

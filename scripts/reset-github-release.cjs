@@ -1,4 +1,4 @@
-const { createReadStream, existsSync, readFileSync, readdirSync, statSync, mkdirSync } = require("fs");
+const { createReadStream, existsSync, readFileSync, statSync, mkdirSync, readdirSync } = require("fs");
 const { basename, join, resolve } = require("path");
 const https = require("https");
 
@@ -7,35 +7,37 @@ const repo = "Hpp";
 const version = require("../package.json").version;
 const tag = `v${version}`;
 const releaseDir = resolve("release", tag);
-const releaseNotesRoot = resolve("docs", "release-notes");
-const releaseNotesPath = join(releaseNotesRoot, `${tag}.md`);
+const releaseNotesPath = resolve("docs", "release-notes", `${tag}.md`);
 const token = process.env.GH_TOKEN;
 
 if (!token) throw new Error("GH_TOKEN is required.");
+
+// ---- Validate release notes ----
 if (!existsSync(releaseNotesPath)) {
-  mkdirSync(releaseNotesRoot, { recursive: true });
+  mkdirSync(resolve("docs", "release-notes"), { recursive: true });
   const template = [
     `# Hpp ${tag} 发布说明`,
     "",
-    "> 每次发布前必须基于最近改动重新编辑此文件。发布脚本会直接读取本文件作为 GitHub Release Body，",
+    "> 每次发布前必须基于最近改动重新编辑此文件。",
     "> 禁止复用旧版本说明。修改完成后再执行发布命令。",
     "",
     "## 本次版本主要改动",
     "",
-    "- TODO: 根据最近提交和用户反馈逐项填写。可参考 `git log v<上一版本>..HEAD --oneline`。",
+    "- TODO: 根据最近提交和用户反馈逐项填写。",
     "",
   ].join("\n");
   throw new Error(
-    `Release notes file not found at ${releaseNotesPath}. `
-    + `A template skeleton has been prepared. Fill it in with the actual changes for ${tag}, then rerun the release command.`,
+    `Release notes not found: ${releaseNotesPath}. ` +
+    `A skeleton template was created. Fill it with actual changes for ${tag}, then rerun.`
   );
 }
 const releaseNotes = readFileSync(releaseNotesPath, "utf8").replace(/\r\n/g, "\n").trim();
-if (!releaseNotes) throw new Error(`Release notes file ${releaseNotesPath} is empty.`);
+if (!releaseNotes) throw new Error("Release notes is empty.");
 if (/TODO|TBD|待填写|示例|样例/.test(releaseNotes)) {
-  throw new Error(`Release notes file ${releaseNotesPath} still contains placeholder text. Replace it with the actual changes for ${tag}.`);
+  throw new Error("Release notes still contains placeholder text (TODO/TBD/etc). Replace with actual changes.");
 }
 
+// ---- HTTP helpers ----
 const apiHeaders = {
   Authorization: `Bearer ${token}`,
   Accept: "application/vnd.github+json",
@@ -59,15 +61,14 @@ function requestJson(method, path, body) {
       response.on("data", (chunk) => { text += chunk; });
       response.on("end", () => {
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`${method} ${path} failed: ${response.statusCode} ${text.slice(0, 1000)}`));
+          reject(new Error(`${method} ${path} HTTP ${response.statusCode}: ${text.slice(0, 500)}`));
           return;
         }
         resolvePromise(text ? JSON.parse(text) : undefined);
       });
     });
     request.on("error", reject);
-    if (payload) request.end(payload);
-    else request.end();
+    request.end(payload);
   });
 }
 
@@ -92,40 +93,67 @@ function uploadFile(uploadUrl, filePath, contentType, label) {
       response.on("data", (chunk) => { text += chunk; });
       response.on("end", () => {
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`Upload ${fileName} failed: ${response.statusCode} ${text.slice(0, 1000)}`));
+          reject(new Error(`Upload ${fileName} HTTP ${response.statusCode}: ${text.slice(0, 500)}`));
           return;
         }
         resolvePromise(JSON.parse(text));
       });
     });
     request.on("error", reject);
-    const stream = createReadStream(filePath);
-    stream.on("error", reject);
-    stream.pipe(request);
+    createReadStream(filePath).pipe(request);
   });
 }
 
+// ---- Main ----
 async function main() {
+  // 1. Find or create the release (NON-destructive!)
+  let release;
+  try {
+    release = await requestJson("GET", `/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`);
+    console.log(`Found existing release ${tag}, id=${release.id}`);
+  } catch (e) {
+    console.log(`Release ${tag} not found, creating...`);
+    release = await requestJson("POST", `/repos/${owner}/${repo}/releases`, {
+      tag_name: tag,
+      target_commitish: "main",
+      name: `Hpp ${tag}`,
+      body: releaseNotes,
+      draft: false,
+      prerelease: false,
+      make_latest: "true",
+    });
+    console.log(`Created release ${tag}, id=${release.id}`);
+  }
+
+  // 2. Update release body (notes) — always sync from local file
+  console.log("Updating release notes...");
+  release = await requestJson("PATCH", `/repos/${owner}/${repo}/releases/${release.id}`, {
+    body: releaseNotes,
+    name: `Hpp ${tag}`,
+  });
+
+  // 3. Gather local assets
   const androidMetadataPath = join(releaseDir, "android-latest.json");
   const androidMetadata = existsSync(androidMetadataPath)
     ? JSON.parse(readFileSync(androidMetadataPath, "utf8"))
     : null;
-  if (androidMetadata && (!Number.isSafeInteger(androidMetadata.versionCode) || androidMetadata.versionCode <= 0)) {
-    throw new Error("android-latest.json contains an invalid versionCode");
-  }
+
   const pluginDir = join(releaseDir, "agent-plugins");
-  const pluginAssets = readdirSync(pluginDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => [
-      join(pluginDir, entry.name),
-      entry.name.endsWith(".zip") ? "application/zip" : "application/json",
-  ]);
-  const assets = [
+  let pluginAssets = [];
+  if (existsSync(pluginDir)) {
+    pluginAssets = readdirSync(pluginDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && (entry.name.endsWith(".zip") || entry.name === "agent-plugins.json"))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((entry) => [
+        join(pluginDir, entry.name),
+        entry.name.endsWith(".zip") ? "application/zip" : "application/json",
+      ]);
+  }
+
+  const localAssets = [
     [join(releaseDir, `hpp-Setup-${version}.exe`), "application/vnd.microsoft.portable-executable"],
     [join(releaseDir, `hpp-Setup-${version}.exe.blockmap`), "application/octet-stream"],
     [join(releaseDir, "latest.yml"), "text/yaml"],
-    [join(releaseDir, `Hpp-Linux-${version}-x86_64.AppImage`), "application/vnd.appimage"],
     ...(androidMetadata ? [[
       join(releaseDir, "Hpp-Android.apk"),
       "application/vnd.android.package-archive",
@@ -133,46 +161,48 @@ async function main() {
     ], [androidMetadataPath, "application/json"]] : []),
     ...pluginAssets,
   ];
-  const preparedAssets = assets.filter(([relativePath]) => existsSync(resolve(relativePath))).map(([relativePath, contentType, label]) => {
-    const filePath = resolve(relativePath);
-    return { filePath, contentType, label, size: statSync(filePath).size };
-  });
-  console.log(`Validated ${preparedAssets.length} local release assets`);
 
-  const releases = await requestJson("GET", `/repos/${owner}/${repo}/releases?per_page=100`);
-  const existingRelease = releases.find((release) => release.tag_name === tag);
-  if (existingRelease) {
-    console.log(`Deleting existing release ${tag}`);
-    await requestJson("DELETE", `/repos/${owner}/${repo}/releases/${existingRelease.id}`);
+  const preparedAssets = localAssets
+    .filter(([p]) => existsSync(p))
+    .map(([p, ct, label]) => ({ filePath: resolve(p), contentType: ct, label, size: statSync(resolve(p)).size }));
+
+  if (preparedAssets.length === 0) {
+    console.warn(`No assets found in ${releaseDir}. Build first!`);
+    return;
+  }
+  console.log(`Found ${preparedAssets.length} assets to upload.`);
+
+  // 4. Get existing release asset IDs for deletion (to avoid duplicates)
+  const existingAssetIds = new Map();
+  for (const asset of (release.assets || [])) {
+    existingAssetIds.set(asset.name, asset.id);
   }
 
-  const refs = await requestJson("GET", `/repos/${owner}/${repo}/git/matching-refs/tags/${encodeURIComponent(tag)}`);
-  for (const ref of refs) {
-    if (ref.ref !== `refs/tags/${tag}`) continue;
-    const refName = ref.ref.replace(/^refs\//, "");
-    console.log(`Deleting tag ${refName}`);
-    await requestJson("DELETE", `/repos/${owner}/${repo}/git/refs/${refName}`);
-  }
-
-  const release = await requestJson("POST", `/repos/${owner}/${repo}/releases`, {
-    tag_name: tag,
-    target_commitish: "main",
-    name: `Hpp ${tag}`,
-    body: releaseNotes,
-    draft: false,
-    prerelease: false,
-    make_latest: "true",
-  });
-
+  // 5. Upload each asset (delete old one with same name first if exists)
   for (const { filePath, contentType, label, size } of preparedAssets) {
-    console.log(`Streaming ${basename(filePath)} (${size} bytes)`);
+    const fileName = basename(filePath);
+    console.log(`Uploading ${fileName} (${size.toLocaleString()} bytes)...`);
+
+    // Delete existing asset with same name to avoid duplicates
+    const existingId = existingAssetIds.get(fileName);
+    if (existingId) {
+      console.log(`  Replacing existing asset (id=${existingId})`);
+      try {
+        await requestJson("DELETE", `/repos/${owner}/${repo}/releases/assets/${existingId}`);
+      } catch (e) {
+        console.warn(`  Warning: could not delete old asset: ${e.message}`);
+      }
+    }
+
     await uploadFile(release.upload_url, filePath, contentType, label);
+    console.log(`  Done.`);
   }
 
-  console.log(`Published ${release.html_url}`);
+  console.log(`\nPublished: ${release.html_url}`);
+  console.log(`Tag: ${tag} | Assets: ${preparedAssets.length}`);
 }
 
 main().catch((error) => {
-  console.error(error);
+  console.error("ERROR:", error.message);
   process.exitCode = 1;
 });
