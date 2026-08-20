@@ -31,7 +31,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: main
 
       - name: Sync version from tag
         run: |
