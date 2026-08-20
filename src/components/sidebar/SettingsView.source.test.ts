@@ -9,9 +9,9 @@ describe("desktop general settings layout", () => {
     const source = readWorkspaceFile("src/components/sidebar/SettingsView.tsx");
     const quickActions = source.slice(
       source.indexOf('<div className="settings-quick-buttons">'),
-      source.indexOf("{showShortcutModal"),
+      source.indexOf("{ showShortcutModal"),
     );
-    const generalSettings = source.slice(source.indexOf("{showGeneralModal"));
+    const generalSettings = source.slice(source.indexOf("{ showGeneralModal"));
 
     expect(quickActions).toContain("Agent");
     expect(source).not.toContain("Agent 设置");
