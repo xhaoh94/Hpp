@@ -387,6 +387,11 @@ export function createAgentEventController({
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
+    // 上下文压缩本身就是有明确状态的运行阶段，不应再显示“暂时没有新输出”。
+    if (useChatStore.getState().compactingSessions[sessionId] === true) {
+      completeIdleNotice(sessionId);
+      return;
+    }
     const agentName = getSessionAgentName(sessionId);
     runtime.streamIdleSince ??= Date.now();
     const idleSince = runtime.streamIdleSince;

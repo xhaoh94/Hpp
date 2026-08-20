@@ -7,7 +7,7 @@ const repo = "Hpp";
 const version = require("../package.json").version;
 const tag = `v${version}`;
 const releaseDir = resolve("release", tag);
-const releaseNotesRoot = resolve("release-notes");
+const releaseNotesRoot = resolve("docs", "release-notes");
 const releaseNotesPath = join(releaseNotesRoot, `${tag}.md`);
 const token = process.env.GH_TOKEN;
 

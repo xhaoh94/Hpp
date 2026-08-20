@@ -65,6 +65,19 @@ describe("editor pane (CodeMirror wrapper)", () => {
     expect(minimapSource).toContain("this.text.destroy()");
   });
 
+  it("keeps a visible horizontal scrollbar for lines wider than the editor", () => {
+    const scrollbarStyles = editorCss.slice(
+      editorCss.indexOf("/* ===== Editor scrollbars"),
+      editorCss.indexOf("/* Tweak the minimap"),
+    );
+    expect(scrollbarStyles).toContain("scrollbar-width: auto");
+    expect(scrollbarStyles).toContain(".cm-editor .cm-scroller::-webkit-scrollbar");
+    expect(scrollbarStyles).toContain("height: 8px");
+    expect(scrollbarStyles).toContain("::-webkit-scrollbar-thumb:horizontal");
+    expect(scrollbarStyles).not.toContain("scrollbar-width: none");
+    expect(scrollbarStyles).not.toContain("display: none");
+  });
+
   it("switches to read-only via a Compartment for binary/error files", () => {
     expect(paneSource).toContain("new Compartment()");
     expect(paneSource).toContain("readOnlyCompartment.of(EditorState.readOnly.of(false))");

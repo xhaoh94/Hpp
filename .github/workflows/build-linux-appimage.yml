@@ -1,14 +1,15 @@
-name: Build Linux AppImage
+name: Build & Publish Linux AppImage
 
+# 自动触发：release:github 创建 Release 时自动构建 AppImage 并上传。
+# 也可手动触发（workflow_dispatch），填入目标 Release 标签。
 on:
-  push:
-    branches:
-      - main
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "已有 GitHub Release 标签（留空则仅上传构建产物）"
-        required: false
+        description: "目标 Release 标签，例如 v0.1.15（Release 不存在则自动创建）"
+        required: true
         type: string
 
 permissions:
@@ -18,8 +19,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Sync version from tag
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${TAG#v}"
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.version='$VERSION'; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
+          echo "Synced package.json version to $VERSION"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -41,24 +60,15 @@ jobs:
       - name: Build AppImage
         run: npx electron-builder --linux AppImage --x64 --publish never --config.directories.output=linux-release
 
-      - name: Upload AppImage artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: hpp-linux-appimage
-          path: |
-            linux-release/Hpp-Linux-*-x86_64.AppImage
-            linux-release/latest-linux.yml
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload AppImage to release
-        if: inputs.release_tag != '' || contains(github.event.head_commit.message, '[build-appimage]')
+      - name: Upload to Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [ -z "$RELEASE_TAG" ]; then RELEASE_TAG="v$(node -e 'process.stdout.write(require("./package.json").version)')"; fi
-          gh release upload "$RELEASE_TAG" \
+          TAG="${{ steps.tag.outputs.tag }}"
+          # Release 不存在则自动创建（发布状态，非 draft）
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Automated Linux AppImage build"
+          gh release upload "$TAG" \
             linux-release/Hpp-Linux-*-x86_64.AppImage \
             linux-release/latest-linux.yml \
             --clobber --repo "$GITHUB_REPOSITORY"

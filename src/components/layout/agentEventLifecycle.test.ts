@@ -1025,6 +1025,25 @@ describe("agent event terminal reconciliation", () => {
     expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("error");
   });
 
+  it("does not show a stream idle notice while context compaction is running", async () => {
+    vi.useFakeTimers();
+    agentGetSessionState.mockResolvedValue({ success: true, idle: false });
+    const harness = createHarness();
+    startRunningProcess(harness);
+
+    harness.controller.appendContextCompactionDivider(SESSION_ID, "compact-no-idle-notice", "started");
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBe(true);
+
+    harness.controller.refreshStreamWatchdog(SESSION_ID);
+    await vi.advanceTimersByTimeAsync(45_000);
+
+    const idleEntries = getMessages()
+      .flatMap((message) => message.process?.entries || [])
+      .filter((entry) => entry.toolKind === "stream_idle_notice");
+    expect(idleEntries).toHaveLength(0);
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it.each(["completed", "interrupted"] as const)(
     "returns an idle compaction to idle after %s",
     (phase) => {

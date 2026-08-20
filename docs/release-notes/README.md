@@ -4,7 +4,7 @@
 
 ## 规则（强制执行）
 
-1. **每个版本独立文件**：命名为 `release-notes/v<版本号>.md`，例如 `release-notes/v0.1.15.md`。
+1. **每个版本独立文件**：命名为 `docs/release-notes/v<版本号>.md`，例如 `docs/release-notes/v0.1.15.md`。
 2. **每次发布都必须重新编辑**：`scripts/reset-github-release.cjs` 发布时会直接读取对应版本的 md 作为 GitHub Release Body。**禁止复制粘贴旧版本说明作为本次内容**，必须基于最近的实际改动和用户反馈重写。
 3. **占位符检查**：脚本会扫描内容中是否出现 `TODO / TBD / 待填写 / 示例 / 样例`，一旦命中会拒绝发布，避免发布空白或占位说明。
 4. **如果文件不存在**：脚本会在该目录下自动生成一个带 `TODO` 的骨架模板（并报错中止），按模板内容替换填写后再执行发布即可。
@@ -65,7 +65,7 @@ npm run dist:publish
 npm run mobile:release
 
 # 5. 编辑本次版本说明（强制）
-code release-notes\vX.Y.Z.md
+code docs\release-notes\vX.Y.Z.md
 
 # 6. 清理旧 tag / 旧 release 并重新上传所有产物 + 新说明
 npm run release:github

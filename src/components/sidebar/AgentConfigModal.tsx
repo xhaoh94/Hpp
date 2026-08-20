@@ -407,6 +407,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const performAutoSaveRef = useRef(() => Promise.resolve());
   const pendingProviderEditor = useRef<{ agentId: string; providerId: string } | null>(null);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // HTML5 drag/drop 在 Electron 中可能先触发 dragend 再完成 drop；用 ref 保留来源，
+  // 避免 React state 清空后 drop 无法确定被拖动的渠道。
+  const dragProviderIdRef = useRef("");
+  const dragOverProviderIdRef = useRef("");
+  const dragOverProviderPositionRef = useRef<"before" | "after">("before");
+  const dragLastValidProviderIdRef = useRef("");
+  const dragLastValidProviderPositionRef = useRef<"before" | "after">("before");
+  const dragReorderCommittedRef = useRef(false);
+  const dragProviderCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const providerScrollRef = useRef<HTMLDivElement>(null);
   const { update: updateProviderAutoScroll, stop: stopProviderAutoScroll } = useDragAutoScroll(providerScrollRef);
 
@@ -590,6 +599,16 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         clearTimeout(autoSaveTimer.current);
         autoSaveTimer.current = null;
       }
+      if (dragProviderCleanupTimerRef.current) {
+        clearTimeout(dragProviderCleanupTimerRef.current);
+        dragProviderCleanupTimerRef.current = null;
+      }
+      dragProviderIdRef.current = "";
+      dragOverProviderIdRef.current = "";
+      dragOverProviderPositionRef.current = "before";
+      dragLastValidProviderIdRef.current = "";
+      dragLastValidProviderPositionRef.current = "before";
+      dragReorderCommittedRef.current = false;
       // 关闭整个配置弹窗时冲刷防抖窗口内的改动，避免丢失。
       void performAutoSaveRef.current();
     };
@@ -1021,63 +1040,21 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setDeleteError("");
   }, [deletingProviderId]);
 
-  const handleProviderDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
-    if (config.providers.length < 2 || reorderingProviderId) {
-      event.preventDefault();
-      return;
-    }
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", providerId);
-    setDragProviderId(providerId);
-    stopProviderAutoScroll();
-    setDragOverProviderId("");
-    setDragOverProviderPosition("before");
-  }, [config.providers.length, reorderingProviderId, stopProviderAutoScroll]);
-
-  const handleProviderDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
-    if (!dragProviderId || dragProviderId === providerId || reorderingProviderId) return;
-    const targetRect = event.currentTarget.getBoundingClientRect();
-    const position = event.clientY >= targetRect.top + targetRect.height / 2 ? "after" : "before";
-    if (getProviderMoveTargetIndex(config.providers, dragProviderId, providerId, position) === null) {
-      setDragOverProviderId((current) => current === providerId ? "" : current);
-      return;
-    }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    setDragOverProviderId(providerId);
-    setDragOverProviderPosition(position);
-  }, [config.providers, dragProviderId, reorderingProviderId]);
-
-  const handleProviderDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
-    const relatedTarget = event.relatedTarget;
-    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
-    setDragOverProviderId((current) => current === providerId ? "" : current);
-  }, []);
-
-  const handleProviderDragEnd = useCallback(() => {
-    stopProviderAutoScroll();
-    setDragProviderId("");
-    setDragOverProviderId("");
-    setDragOverProviderPosition("before");
-  }, [stopProviderAutoScroll]);
-
-  const handleProviderDrop = useCallback(async (event: ReactDragEvent<HTMLDivElement>, targetProviderId: string) => {
-    event.preventDefault();
-    stopProviderAutoScroll();
-    const sourceProviderId = event.dataTransfer.getData("text/plain") || dragProviderId;
-    setDragProviderId("");
-    setDragOverProviderId("");
-    setDragOverProviderPosition("before");
+  const commitProviderReorder = useCallback(async (
+    sourceProviderId: string,
+    targetProviderId: string,
+    position: "before" | "after",
+  ) => {
+    if (dragReorderCommittedRef.current) return;
     if (!sourceProviderId || sourceProviderId === targetProviderId || reorderingProviderId) return;
-
     if (!config.providers.some((provider) => provider.providerId === sourceProviderId)
       || !config.providers.some((provider) => provider.providerId === targetProviderId)) return;
 
-    const targetRect = event.currentTarget.getBoundingClientRect();
-    const dropPosition = event.clientY >= targetRect.top + targetRect.height / 2 ? "after" : "before";
-    const targetIndex = getProviderMoveTargetIndex(config.providers, sourceProviderId, targetProviderId, dropPosition);
+    const targetIndex = getProviderMoveTargetIndex(config.providers, sourceProviderId, targetProviderId, position);
     if (targetIndex === null) return;
 
+    // drop 和 dragend 可能先后都到达，整个拖拽会话只允许提交一次。
+    dragReorderCommittedRef.current = true;
     const previousConfig = config;
     const nextProviders = [...config.providers];
     const fromIndex = nextProviders.findIndex((provider) => provider.providerId === sourceProviderId);
@@ -1093,18 +1070,22 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
     try {
       const result = await window.electronAPI.agentConfigReorder(agentId, nextProviderIds);
-      if (!result.success || !result.config) {
+      if (!result.config) {
         setConfig(previousConfig);
         setStatus({ type: "error", text: result.error || "保存渠道顺序失败" });
         return;
       }
+      // 顺序写盘成功后，即使运行时重载失败，也必须保留服务端返回的新顺序，
+      // 否则用户会看到拖动没有生效，而实际配置已经被改写。
       setConfig(result.config);
       if (result.models) {
         onModelsUpdated(agentId, result.models);
       }
       setStatus({
-        type: "success",
-        text: result.error || "渠道顺序已保存",
+        type: result.success ? "success" : "error",
+        text: result.success
+          ? (result.error || "渠道顺序已保存")
+          : `渠道顺序已保存，但${result.error || "Agent 重载失败，当前运行会话暂未更新"}`,
       });
     } catch (error) {
       setConfig(previousConfig);
@@ -1112,7 +1093,113 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setReorderingProviderId("");
     }
-  }, [agentId, config, dragProviderId, onModelsUpdated, reorderingProviderId, stopProviderAutoScroll]);
+  }, [agentId, config, onModelsUpdated, reorderingProviderId]);
+
+  const clearProviderDragVisuals = useCallback(() => {
+    stopProviderAutoScroll();
+    setDragProviderId("");
+    setDragOverProviderId("");
+    setDragOverProviderPosition("before");
+    dragOverProviderIdRef.current = "";
+    dragOverProviderPositionRef.current = "before";
+  }, [stopProviderAutoScroll]);
+
+  const handleProviderDragStart = useCallback((event: ReactDragEvent<HTMLElement>, providerId: string) => {
+    if (config.providers.length < 2 || reorderingProviderId) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", providerId);
+    if (dragProviderCleanupTimerRef.current) {
+      clearTimeout(dragProviderCleanupTimerRef.current);
+      dragProviderCleanupTimerRef.current = null;
+    }
+    dragProviderIdRef.current = providerId;
+    dragReorderCommittedRef.current = false;
+    setDragProviderId(providerId);
+    stopProviderAutoScroll();
+    dragOverProviderIdRef.current = "";
+    dragOverProviderPositionRef.current = "before";
+    dragLastValidProviderIdRef.current = "";
+    dragLastValidProviderPositionRef.current = "before";
+    setDragOverProviderId("");
+    setDragOverProviderPosition("before");
+  }, [config.providers.length, reorderingProviderId, stopProviderAutoScroll]);
+
+  const handleProviderDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
+    const sourceProviderId = dragProviderIdRef.current || dragProviderId;
+    if (!sourceProviderId || sourceProviderId === providerId || reorderingProviderId) return;
+    // 必须在所有有效拖动经过目标时取消默认行为，否则 Electron 不会派发 drop。
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY >= targetRect.top + targetRect.height / 2 ? "after" : "before";
+    if (getProviderMoveTargetIndex(config.providers, sourceProviderId, providerId, position) === null) {
+      dragOverProviderIdRef.current = "";
+      dragOverProviderPositionRef.current = "before";
+      setDragOverProviderId("");
+      return;
+    }
+    dragOverProviderIdRef.current = providerId;
+    dragOverProviderPositionRef.current = position;
+    dragLastValidProviderIdRef.current = providerId;
+    dragLastValidProviderPositionRef.current = position;
+    setDragOverProviderId(providerId);
+    setDragOverProviderPosition(position);
+  }, [config.providers, dragProviderId, reorderingProviderId]);
+
+  const handleProviderDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>, providerId: string) => {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+    if (dragOverProviderIdRef.current === providerId) {
+      dragOverProviderIdRef.current = "";
+      dragOverProviderPositionRef.current = "before";
+      setDragOverProviderId("");
+      setDragOverProviderPosition("before");
+    }
+  }, []);
+
+  const handleProviderDragEnd = useCallback(() => {
+    // 某些 Electron 场景只派发 dragend，不派发 drop；用最后一次有效目标完成排序。
+    const sourceProviderId = dragProviderIdRef.current || dragProviderId;
+    const targetProviderId = dragOverProviderIdRef.current || dragLastValidProviderIdRef.current;
+    const position = dragOverProviderIdRef.current
+      ? dragOverProviderPositionRef.current
+      : dragLastValidProviderPositionRef.current;
+    if (sourceProviderId && targetProviderId && !dragReorderCommittedRef.current) {
+      void commitProviderReorder(sourceProviderId, targetProviderId, position);
+    }
+    clearProviderDragVisuals();
+    // drop 可能紧随 dragend 到达，延后一拍清理来源；已提交时后续 drop 会被会话锁拦截。
+    if (dragProviderCleanupTimerRef.current) clearTimeout(dragProviderCleanupTimerRef.current);
+    dragProviderCleanupTimerRef.current = setTimeout(() => {
+      dragProviderCleanupTimerRef.current = null;
+      dragProviderIdRef.current = "";
+      dragLastValidProviderIdRef.current = "";
+      dragLastValidProviderPositionRef.current = "before";
+    }, 0);
+  }, [clearProviderDragVisuals, commitProviderReorder, dragProviderId]);
+
+  const handleProviderDrop = useCallback(async (event: ReactDragEvent<HTMLDivElement>, targetProviderId: string) => {
+    event.preventDefault();
+    const sourceProviderId = event.dataTransfer.getData("text/plain")
+      || dragProviderIdRef.current
+      || dragProviderId;
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    const dropPosition = event.clientY >= targetRect.top + targetRect.height / 2 ? "after" : "before";
+    await commitProviderReorder(sourceProviderId, targetProviderId, dropPosition);
+    clearProviderDragVisuals();
+    if (dragProviderCleanupTimerRef.current) {
+      clearTimeout(dragProviderCleanupTimerRef.current);
+      dragProviderCleanupTimerRef.current = null;
+    }
+    dragProviderIdRef.current = "";
+    dragOverProviderIdRef.current = "";
+    dragOverProviderPositionRef.current = "before";
+    dragLastValidProviderIdRef.current = "";
+    dragLastValidProviderPositionRef.current = "before";
+  }, [clearProviderDragVisuals, commitProviderReorder, dragProviderId]);
 
   const handleCopyApiKey = useCallback(async () => {
     const apiKey = draft?.apiKey || "";

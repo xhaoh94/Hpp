@@ -199,17 +199,32 @@
   color: #e74c3c;
 }
 
-/* ===== Editor scrollbars — hidden; minimap overlay acts as the scroll indicator =====
-   The right-gutter minimap (showMinimap) renders a viewport rectangle that you can
-   drag to scroll, so the native scrollbar is redundant and is suppressed. */
+/* ===== Editor scrollbars =====
+   The minimap provides the vertical overview/position indicator, while the native
+   horizontal scrollbar remains available for lines that exceed the editor width. */
 .cm-editor .cm-scroller {
-  scrollbar-width: none;
+  /* Firefox fallback: keep native scrolling usable without WebKit axis selectors. */
+  scrollbar-width: auto;
 }
 
+/* Electron/Chromium: show only the horizontal scrollbar; the minimap handles the
+   vertical position indicator without adding a duplicate vertical scrollbar. */
 .cm-editor .cm-scroller::-webkit-scrollbar {
   width: 0;
-  height: 0;
-  display: none;
+  height: 8px;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-track:horizontal {
+  background: transparent;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb:horizontal {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb:horizontal:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 /* Tweak the minimap gutter + viewport overlay to fit the editor palette. */

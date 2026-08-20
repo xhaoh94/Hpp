@@ -58,6 +58,7 @@ describe("agent provider config", () => {
   let getConfiguredAgentModels: typeof import("./agent-config").getConfiguredAgentModels;
   let getAgentModelVisibility: typeof import("./agent-config").getAgentModelVisibility;
   let listAgentConfig: typeof import("./agent-config").listAgentConfig;
+  let reorderAgentProviderConfigs: typeof import("./agent-config").reorderAgentProviderConfigs;
   let saveAgentProviderConfig: typeof import("./agent-config").saveAgentProviderConfig;
   let setAgentBackendModelsVisible: typeof import("./agent-config").setAgentBackendModelsVisible;
   let activateAgentProviderConfig: typeof import("./agent-config").activateAgentProviderConfig;
@@ -95,6 +96,7 @@ describe("agent provider config", () => {
       getAgentModelVisibility,
       getConfiguredAgentModels,
       listAgentConfig,
+      reorderAgentProviderConfigs,
       saveAgentProviderConfig,
       setAgentBackendModelsVisible,
     } = await import("./agent-config"));
@@ -103,6 +105,20 @@ describe("agent provider config", () => {
 
   afterEach(async () => {
     await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("persists the requested provider order and keeps the active provider", async () => {
+    await expect(reorderAgentProviderConfigs("test-agent", ["provider-b", "provider-a"])).resolves.toMatchObject({
+      success: true,
+      config: {
+        activeProviderId: "provider-a",
+        providers: [{ providerId: "provider-b" }, { providerId: "provider-a" }],
+      },
+    });
+
+    const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
+    expect(settings.agentConfigs["test-agent"].providers.map((item: { providerId: string }) => item.providerId))
+      .toEqual(["provider-b", "provider-a"]);
   });
 
   it("deletes only the provider with the exact id", async () => {

@@ -1018,7 +1018,7 @@ export function EditorPane({
           ]),
           basicSetup,
           // 代码缩略图（minimap）：右侧以彩色微缩文本渲染整个文档，
-          // 自带 viewport 覆盖层充当滚动条，所以隐藏常规滚动条。
+          // viewport 覆盖层负责纵向定位；超长单行仍使用底部原生横向滚动条。
           showMinimap.of({
             create: () => ({ dom: document.createElement("div") }),
             displayText: "characters",
