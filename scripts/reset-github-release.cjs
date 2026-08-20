@@ -1,4 +1,4 @@
-const { createReadStream, existsSync, readFileSync, readdirSync, statSync } = require("fs");
+const { createReadStream, existsSync, readFileSync, readdirSync, statSync, mkdirSync } = require("fs");
 const { basename, join, resolve } = require("path");
 const https = require("https");
 
@@ -7,9 +7,34 @@ const repo = "Hpp";
 const version = require("../package.json").version;
 const tag = `v${version}`;
 const releaseDir = resolve("release", tag);
+const releaseNotesRoot = resolve("release-notes");
+const releaseNotesPath = join(releaseNotesRoot, `${tag}.md`);
 const token = process.env.GH_TOKEN;
 
 if (!token) throw new Error("GH_TOKEN is required.");
+if (!existsSync(releaseNotesPath)) {
+  mkdirSync(releaseNotesRoot, { recursive: true });
+  const template = [
+    `# Hpp ${tag} 发布说明`,
+    "",
+    "> 每次发布前必须基于最近改动重新编辑此文件。发布脚本会直接读取本文件作为 GitHub Release Body，",
+    "> 禁止复用旧版本说明。修改完成后再执行发布命令。",
+    "",
+    "## 本次版本主要改动",
+    "",
+    "- TODO: 根据最近提交和用户反馈逐项填写。可参考 `git log v<上一版本>..HEAD --oneline`。",
+    "",
+  ].join("\n");
+  throw new Error(
+    `Release notes file not found at ${releaseNotesPath}. `
+    + `A template skeleton has been prepared. Fill it in with the actual changes for ${tag}, then rerun the release command.`,
+  );
+}
+const releaseNotes = readFileSync(releaseNotesPath, "utf8").replace(/\r\n/g, "\n").trim();
+if (!releaseNotes) throw new Error(`Release notes file ${releaseNotesPath} is empty.`);
+if (/TODO|TBD|待填写|示例|样例/.test(releaseNotes)) {
+  throw new Error(`Release notes file ${releaseNotesPath} still contains placeholder text. Replace it with the actual changes for ${tag}.`);
+}
 
 const apiHeaders = {
   Authorization: `Bearer ${token}`,
@@ -129,34 +154,11 @@ async function main() {
     await requestJson("DELETE", `/repos/${owner}/${repo}/git/refs/${refName}`);
   }
 
-  const releaseNotes = [
-    `Hpp ${version}`,
-    "",
-    "- 资源管理器支持状态保留、多选、右键操作、搜索定位预览、拖入聊天和文件夹引用。",
-    "- 优化聊天消息折叠、时间显示、附件卡片、中间过程归档、项目卡片排序与会话收起。",
-    "- 新增 Agent CLI/SDK 版本管理、历史版本安装和一键回退。",
-    "- 思考等级改为匹配当前 Agent 与模型的实际能力，不再固定显示六档。",
-    "- 改进 Pi、Codex 及其他 Agent 的过程输出、Shell 回退、失败恢复和子 Agent 状态展示。",
-    "- 完善 Web 与移动端运行状态、消息同步、上下文压缩和输入交互。",
-    "- 默认消息切换快捷键改为上、下方向键。",
-  ].join("\n");
-
   const release = await requestJson("POST", `/repos/${owner}/${repo}/releases`, {
     tag_name: tag,
     target_commitish: "main",
     name: `Hpp ${tag}`,
     body: releaseNotes,
-    /* body: [
-      `Hpp ${version}`,
-      "",
-      "- 增强资源管理器：状态保留、多选与右键操作、搜索定位预览、拖入聊天和文件夹引用。",
-      "- 优化聊天体验：消息折叠与时间、附件卡片、中间过程归档、项目卡片排序与会话收起。",
-      "- 新增 Agent CLI/SDK 版本管理、历史版本安装及一键回退。",
-      "- 思考等级改为匹配当前 Agent 与模型的实际能力，不再固定显示六档。",
-      "- 改进 Pi、Codex 及其他 Agent 的过程输出、Shell 回退、失败恢复与子 Agent 状态展示。",
-      "- 完善 Web 与移动端运行状态、消息信息和输入交互。",
-      "- 消息历史切换默认快捷键改为上、下方向键。",
-    ].join("\n"), */
     draft: false,
     prerelease: false,
     make_latest: "true",

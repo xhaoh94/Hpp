@@ -110,6 +110,21 @@ describe("mobile capability source constraints", () => {
     expect(appSource).toContain("if (!queued) {");
   });
 
+  it("keeps guided queue items until the desktop confirms the response started", () => {
+    const guideSource = appSource.slice(
+      appSource.indexOf("const guideQueuedMessage"),
+      appSource.indexOf("const removeQueuedMessage"),
+    );
+    const successBranch = guideSource.slice(
+      guideSource.indexOf("try {"),
+      guideSource.indexOf("} catch (error)", guideSource.indexOf("try {")),
+    );
+    expect(successBranch).toContain('await runCommand("session.queue.guide"');
+    expect(successBranch).toContain("showFloatingToast(\"已转为引导\")");
+    expect(successBranch).not.toContain("filter((queued) => queued.id !== item.id)");
+    expect(appSource).toContain('name === "session.queue.updated" && Array.isArray(data.queue)');
+  });
+
   it("reloads stale sessions after reconnects and revision gaps", () => {
     expect(appSource).toContain("const staleSessionIdsRef = useRef(new Set<string>())");
     expect(appSource).toContain("staleSessionIdsRef.current.add(sessionId)");

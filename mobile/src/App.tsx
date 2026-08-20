@@ -4043,10 +4043,8 @@ export default function App() {
         sessionId: selected.session.id,
         queueItemId: item.id,
       });
-      setQueues((current) => ({
-        ...current,
-        [selected.session.id]: (current[selected.session.id] || []).filter((queued) => queued.id !== item.id),
-      }));
+      // 命令成功只代表引导已被接收；与桌面端一致，保留 sending 状态，
+      // 等 Agent 真正开始响应后由 session.queue.updated 事件移除队列项。
       showFloatingToast("已转为引导");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
