@@ -128,17 +128,18 @@ describe("Droid lifecycle", () => {
     expect(internals.waitForExit).toHaveBeenNthCalledWith(2, child, 500);
   });
 
-  it("emits guidance_response_started only when the guidance message enters the conversation", async () => {
+  it("confirms delivered guidance after the previous Droid turn settles", async () => {
     const events: Array<{ type: string }> = [];
     const agent = new DroidAgent("hpp-session", (event) => events.push(event as { type: string }));
     const internals = agent as unknown as DroidInternals;
     internals.process = (new FakeDroidProcess() as unknown) as ChildProcess;
     internals.isReady = true;
+    internals.turnActive = true;
+    internals.activeClientMessageId = "hpp-original";
     internals.sendRpcAsync = vi.fn(async () => ({ result: {} }));
 
-    // Droid accepts a second add_user_message while a turn is active (mid-turn
-    // guidance). sendGuidance resolves on the RPC ack and arms the response
-    // signal.
+    // The RPC acknowledgement only queues the guidance. Droid continues the
+    // old assistant message and must not confirm yet.
     await internals.sendGuidance("steer this turn");
     expect(internals.guidancePendingResponse).toBe(true);
     expect(internals.sendRpcAsync).toHaveBeenCalledWith(
@@ -150,17 +151,23 @@ describe("Droid lifecycle", () => {
     const guidanceRequestId = internals.guidanceRequestId;
     expect(typeof guidanceRequestId).toBe("string");
 
-    // Assistant content streaming before the guidance message enters must NOT
-    // signal the response started (mirrors the pi/codex fix).
     internals.handleNotification("droid.session_notification", {
       notification: { type: "assistant_text_delta", messageId: "old", blockIndex: 0, textDelta: "old" },
     });
     expect(events.some((event) => event.type === "guidance_response_started")).toBe(false);
+
+    // Real Droid emits a brief idle between the old response and the queued
+    // guidance turn. That clears ordinary client-message metadata.
+    internals.handleNotification("droid.session_notification", {
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+    });
+    expect(internals.activeClientMessageId).toBeNull();
+    expect(internals.clientMessageIdsByRequestId.size).toBe(0);
     expect(internals.guidancePendingResponse).toBe(true);
 
-    // When the guidance user message is committed (create_message with the
-    // guidance requestId), Droid is about to reply to it -> emit the signal.
-    internals.clientMessageIdsByRequestId.set(String(guidanceRequestId), "hpp-guidance");
+    // create_message(user) for the matching request is delayed until Droid
+    // actually starts the guidance turn. Confirmation must not depend on the
+    // metadata that the preceding idle notification cleared.
     internals.handleNotification("droid.session_notification", {
       notification: {
         type: "create_message",

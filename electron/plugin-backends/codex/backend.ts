@@ -114,7 +114,7 @@ export class CodexAgent {
   private initKey: string | null = null;
   private intentionalExits = new WeakSet<ChildProcess>();
   private hostSystemPrompt = "";
-  private guidancePendingResponse = false;
+  private guidancePendingId: string | null = null;
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -256,6 +256,7 @@ export class CodexAgent {
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
     this.isAborting = false;
+    this.guidancePendingId = null;
     const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptIds.add(promptId);
     this.emitEvent({ type: "message_start", role: "user", content: options?.displayMessage || message });
@@ -306,8 +307,8 @@ export class CodexAgent {
         hostSystemPrompt: options?.hostSystemPrompt,
       }, (data) => {
         clearTimeout(timeout);
-        if (data.type === "accepted" || data.type === "guidance_done") {
-          if (data.type === "guidance_done") this.guidancePendingResponse = true;
+        if (data.type === "guidance_done") {
+          this.guidancePendingId = guidanceId;
           resolve();
         } else {
           reject(new Error(optionalString(data.error) || "Codex guidance failed"));
@@ -348,6 +349,7 @@ export class CodexAgent {
 
   async abort(): Promise<void> {
     this.isAborting = true;
+    this.guidancePendingId = null;
     this.eventBuffer.clear();
     for (const [id, handler] of this.pendingResponses.entries()) {
       handler({ type: "error", id, error: "Codex request interrupted" });
@@ -459,6 +461,7 @@ export class CodexAgent {
     }
     this.pendingResponses.clear();
     this.activePromptIds.clear();
+    this.guidancePendingId = null;
     this.isAborting = false;
     if (wasActive) {
       this.emitEvent({ type: "stream_end", content: "", force: true });
@@ -527,14 +530,16 @@ export class CodexAgent {
       case "agent_start":
         this.emitEvent({ type: "agent_start" });
         break;
-      // The worker emits guidance_delivered when the steer message really
-      // starts producing new output (its first new item) instead of when the
-      // turn/steer command resolves (which only injects the input). Emitting
-      // the response start only then keeps the guidance bubble from landing
-      // in the middle of pre-guidance output.
+      // The worker correlates this event with the delayed userMessage item
+      // whose client id was supplied to turn/steer. That item appears after
+      // the previous model response and immediately before Codex processes the
+      // guidance, rather than at RPC acceptance time.
       case "guidance_delivered":
-        if (this.guidancePendingResponse) {
-          this.guidancePendingResponse = false;
+        if (
+          this.guidancePendingId &&
+          (!messageId || messageId === this.guidancePendingId)
+        ) {
+          this.guidancePendingId = null;
           this.emitEvent({ type: "guidance_response_started" });
         }
         break;
@@ -583,6 +588,7 @@ export class CodexAgent {
         break;
       case "agent_end":
         this.activePromptIds.clear();
+        this.guidancePendingId = null;
         this.emitEvent(record);
         break;
       case "prompt_done":
@@ -592,10 +598,12 @@ export class CodexAgent {
       case "aborted":
         if (record.promptId) this.activePromptIds.delete(String(record.promptId));
         else this.activePromptIds.clear();
+        this.guidancePendingId = null;
         this.emitEvent({ type: "aborted", promptId: record.promptId });
         break;
       case "agent_disconnected":
         this.activePromptIds.clear();
+        this.guidancePendingId = null;
         this.emitEvent({
           type: "agent_disconnected",
           detail: optionalString(record.detail) || optionalString(record.error),
@@ -620,6 +628,7 @@ export class CodexAgent {
           });
           break;
         }
+        this.guidancePendingId = null;
         this.emitEvent({
           type: "process_event",
           entryType: "error",
@@ -684,6 +693,7 @@ export class CodexAgent {
     this.pendingResponses.clear();
     for (const handler of handlers) handler({ type: "error", error: detail });
     this.activePromptIds.clear();
+    this.guidancePendingId = null;
     if (intentional || this.isAborting) return;
     if (wasActive) {
       this.emitPromptFailure(title, detail, true);

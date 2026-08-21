@@ -128,24 +128,28 @@ describe("Codex lifecycle", () => {
     await agent.dispose();
   });
 
-  it("emits guidance_response_started when the steered turn produces new output", async () => {
+  it("emits guidance_response_started only for the delivered steer request", async () => {
     const child = new FakeCodexProcess();
-    respondToLifecycle(child);
+    const commands: Record<string, unknown>[] = [];
+    respondToLifecycle(child, (command) => commands.push(command));
     spawnMock.mockReturnValue(child);
     const events: AgentEvent[] = [];
     const agent = new CodexAgent("session-1", (event) => events.push(event as AgentEvent));
     await agent.init("C:\\project");
     await agent.sendMessage("work", undefined, { clientMessageId: "prompt-1" });
 
-    // Steer resolves (injects input) but must not report the guidance as
-    // started yet.
+    // turn/steer acceptance and unrelated old output must not report the
+    // guidance as started yet.
     await agent.sendGuidance("steer this turn");
     child.stdout.write(`${JSON.stringify({ type: "stream_delta", delta: "still finishing" })}\n`);
+    child.stdout.write(`${JSON.stringify({ type: "guidance_delivered", id: "unrelated-guidance" })}\n`);
     expect(events.some((event) => event.type === "guidance_response_started")).toBe(false);
 
-    // The worker emits guidance_delivered alongside the first new item after
-    // the steer, right before the guidance output begins.
-    child.stdout.write(`${JSON.stringify({ type: "guidance_delivered" })}\n`);
+    // The worker reports delivery with the same command id after matching the
+    // delayed Codex userMessage item.
+    const guidanceCommand = commands.find((command) => command.type === "guidance");
+    expect(guidanceCommand?.id).toEqual(expect.any(String));
+    child.stdout.write(`${JSON.stringify({ type: "guidance_delivered", id: guidanceCommand?.id })}\n`);
     expect(events.some((event) => event.type === "guidance_response_started")).toBe(true);
     await agent.dispose();
   });

@@ -24,6 +24,14 @@ let activeQueryPermissionMode = null;
 let queryGeneration = 0;
 let inputQueue = null;
 let activePromptId = null;
+let activeSDKCommandId = null;
+// Claude Code treats streaming-input user messages as asynchronous commands.
+// Keep their caller-provided UUIDs until command_lifecycle reports that each
+// command has really started, which is the guidance response boundary.
+let guidanceCommands = new Map();
+let deferredSDKResult = null;
+let accumulatedResultUsage = {};
+let accumulatedResultCostUsd = 0;
 let pendingPermissions = new Map();
 let toolUses = new Map();
 let streamBlockTypes = new Map();
@@ -480,6 +488,87 @@ const handleUserToolResults = (message) => {
   }
 };
 
+const resetCommandTracking = () => {
+  activeSDKCommandId = null;
+  guidanceCommands.clear();
+  deferredSDKResult = null;
+  accumulatedResultUsage = {};
+  accumulatedResultCostUsd = 0;
+};
+
+const recordResultUsage = (message) => {
+  const usage = asRecord(message.usage);
+  for (const [key, value] of Object.entries(usage)) {
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    accumulatedResultUsage[key] = (Number(accumulatedResultUsage[key]) || 0) + value;
+  }
+  const cost = Number(message.total_cost_usd);
+  if (Number.isFinite(cost)) accumulatedResultCostUsd += cost;
+};
+
+const finishSDKPromptFromResult = () => {
+  if (!activePromptId || !deferredSDKResult) return;
+  const promptId = activePromptId;
+  const result = deferredSDKResult;
+  if (result.subtype !== "success" || result.is_error) {
+    const detail = Array.isArray(result.errors) ? result.errors.join("\n") : result.result || result.stop_reason;
+    send({ type: "error", id: promptId, error: redact(detail || "Claude Code request failed") });
+  } else {
+    send({
+      type: "prompt_done",
+      id: promptId,
+      usage: accumulatedResultUsage,
+      totalCostUsd: accumulatedResultCostUsd,
+    });
+  }
+  activePromptId = null;
+  resetCommandTracking();
+};
+
+const maybeEmitGuidanceLifecycle = (guidance) => {
+  if ((guidance.queued || guidance.started) && !guidance.acceptanceEmitted) {
+    guidance.acceptanceEmitted = true;
+    send({ type: "guidance_done", id: guidance.id });
+  }
+  if (guidance.acceptanceEmitted && guidance.started && !guidance.deliveryEmitted) {
+    guidance.deliveryEmitted = true;
+    send({ type: "guidance_delivered", id: guidance.id });
+  }
+};
+
+const handleCommandLifecycle = (message) => {
+  const commandId = stringValue(message.command_uuid);
+  const state = stringValue(message.state);
+  if (!commandId || !state) return;
+  if (state === "started") activeSDKCommandId = commandId;
+
+  const guidance = guidanceCommands.get(commandId);
+  if (!guidance) return;
+  if (state === "queued") guidance.queued = true;
+  if (state === "started") guidance.started = true;
+  maybeEmitGuidanceLifecycle(guidance);
+
+  if (["cancelled", "failed"].includes(state)) {
+    guidanceCommands.delete(commandId);
+    if (activeSDKCommandId === commandId) activeSDKCommandId = null;
+    if (guidanceCommands.size === 0) finishSDKPromptFromResult();
+  }
+};
+
+const handleSDKResult = (message) => {
+  recordResultUsage(message);
+  const completedCommandId = activeSDKCommandId;
+  if (completedCommandId && guidanceCommands.has(completedCommandId)) {
+    guidanceCommands.delete(completedCommandId);
+  }
+  activeSDKCommandId = null;
+  deferredSDKResult = message;
+  // priority:"now" closes the interrupted model request with a result before
+  // the queued guidance command starts. Keep the Hpp turn alive until the last
+  // accepted async user command has produced its own result.
+  if (guidanceCommands.size === 0) finishSDKPromptFromResult();
+};
+
 const handleSDKMessage = (message) => {
   if (message?.session_id && (message.session_id !== sessionFilePath || deferredFork || isNewSession)) {
     actualSessionId = message.session_id;
@@ -496,6 +585,7 @@ const handleSDKMessage = (message) => {
   if (message.type === "stream_event") handleStreamEvent(message);
   else if (message.type === "assistant") handleAssistant(message);
   else if (message.type === "user") handleUserToolResults(message);
+  else if (message.type === "command_lifecycle") handleCommandLifecycle(message);
   else if (message.type === "system" && message.subtype === "compact_boundary") {
     // Claude Agent SDK exposes the completed compact boundary, but no matching
     // compaction-start notification. Mark it explicitly as a completed event.
@@ -503,13 +593,7 @@ const handleSDKMessage = (message) => {
   } else if (message.type === "system" && message.subtype === "local_command_output") {
     send({ type: "text_delta", delta: String(message.content || "") });
   } else if (message.type === "result") {
-    if (message.subtype !== "success" || message.is_error) {
-      const detail = Array.isArray(message.errors) ? message.errors.join("\n") : message.result || message.stop_reason;
-      send({ type: "error", id: activePromptId, error: redact(detail || "Claude Code request failed") });
-    } else {
-      send({ type: "prompt_done", id: activePromptId, usage: message.usage, totalCostUsd: message.total_cost_usd });
-    }
-    activePromptId = null;
+    handleSDKResult(message);
   }
 };
 
@@ -597,6 +681,7 @@ const startQuery = async () => {
     // emits a definitive disconnect instead of remaining permanently busy.
     const promptId = activePromptId;
     activePromptId = null;
+    resetCommandTracking();
     queryGeneration += 1;
     activeQuery = null;
     activeQueryPermissionMode = null;
@@ -618,6 +703,7 @@ const startQuery = async () => {
 
 const restartQuery = async () => {
   if (activePromptId) throw new Error("SESSION_BUSY");
+  resetCommandTracking();
   dismissPermissions("Claude Code 会话正在重新配置");
   inputQueue?.close();
   activeQuery?.close();
@@ -636,6 +722,7 @@ const abortAndRestartQuery = async () => {
   activeQueryPermissionMode = null;
   inputQueue = null;
   activePromptId = null;
+  resetCommandTracking();
   queue?.close();
   if (query) {
     await Promise.race([
@@ -731,16 +818,47 @@ const handleCommand = async (command) => {
         ]);
         if (activeQueryPermissionMode !== queryModeKey) await restartQuery();
         command.message = await buildActionMessage(command.action, command.message);
+        resetCommandTracking();
         activePromptId = command.id;
         inputQueue.push({
           type: "user",
           message: { role: "user", content: buildPromptContent(command.message, command.images) },
           parent_tool_use_id: null,
           session_id: actualSessionId,
+          uuid: command.id,
           origin: { kind: "human" },
         });
         send({ type: "accepted", id: command.id });
         break;
+      case "guidance": {
+        if (!activeQuery || !inputQueue) throw new Error("Claude Agent SDK session is not initialized");
+        if (!activePromptId) throw new Error("SESSION_NOT_RUNNING");
+        if (guidanceCommands.size > 0) throw new Error("GUIDANCE_BUSY");
+        const guidance = {
+          id: command.id,
+          queued: false,
+          started: false,
+          acceptanceEmitted: false,
+          deliveryEmitted: false,
+        };
+        guidanceCommands.set(command.id, guidance);
+        try {
+          inputQueue.push({
+            type: "user",
+            message: { role: "user", content: buildPromptContent(command.message, command.images) },
+            parent_tool_use_id: null,
+            session_id: actualSessionId,
+            uuid: command.id,
+            priority: "now",
+            origin: { kind: "human" },
+          });
+        } catch (error) {
+          guidanceCommands.delete(command.id);
+          if (guidanceCommands.size === 0) finishSDKPromptFromResult();
+          throw error;
+        }
+        break;
+      }
       case "listActions":
         send({ type: "actions", id: command.id, actions: await listActions(command.reload === true) });
         break;
@@ -777,6 +895,7 @@ const handleCommand = async (command) => {
         break;
       case "dispose":
         queryGeneration += 1;
+        resetCommandTracking();
         dismissPermissions("会话已关闭");
         inputQueue?.close();
         activeQuery?.close();

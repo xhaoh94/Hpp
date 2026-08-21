@@ -75,10 +75,12 @@ let activePermissionMode = "auto";
 let activePromptId = null;
 let activeTurnId = null;
 let activeThreadId = null;
-// Set after a guidance command resolves (turn/steer only injects the input).
-// Cleared when the agent starts a new item (the first output that responds
-// to the guidance), which the backend uses to place the guidance bubble.
-let steerResponsePending = false;
+// Correlate the queued steer input with Codex's delayed userMessage item.
+// Acceptance and delivery are tracked separately because app-server
+// notifications may arrive before the turn/steer RPC response.
+let pendingSteerGuidanceId = null;
+let steerAccepted = false;
+let steerResponseStarted = false;
 let promptRunning = false;
 let aborting = false;
 let abortRequested = false;
@@ -107,6 +109,19 @@ let skillPathsByName = new Map();
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
+};
+
+const clearPendingSteer = () => {
+  pendingSteerGuidanceId = null;
+  steerAccepted = false;
+  steerResponseStarted = false;
+};
+
+const maybeEmitSteerDelivered = () => {
+  if (!pendingSteerGuidanceId || !steerAccepted || !steerResponseStarted) return;
+  const guidanceId = pendingSteerGuidanceId;
+  clearPendingSteer();
+  send({ type: "guidance_delivered", id: guidanceId });
 };
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -937,6 +952,7 @@ const sendTurnMetadata = (turnId) => {
 };
 
 const resetTurnState = () => {
+  clearPendingSteer();
   streamStarted = false;
   finalResponse = "";
   activeTurnId = null;
@@ -1834,10 +1850,6 @@ const handleServerNotification = (method, params) => {
       if (threadId) send({ type: "session_file_path", sessionFilePath: threadId, threadId });
       break;
     case "turn/started":
-      if (steerResponsePending) {
-        steerResponsePending = false;
-        send({ type: "guidance_delivered" });
-      }
       handleTurnStarted(params);
       break;
     case "turn/completed":
@@ -1878,14 +1890,20 @@ const handleServerNotification = (method, params) => {
       }
       break;
     case "item/started":
-      // A steered turn keeps streaming the same turn; the first new item
-      // after turn/steer is the first output that answers the guidance.
-      // Emit before handleItem so the guidance bubble precedes the item.
-      if (steerResponsePending) {
-        steerResponsePending = false;
-        send({ type: "guidance_delivered" });
-      }
       if (!promptRunning || abortRequested) return;
+      // turn/steer returns as soon as the input is queued. Codex delays the
+      // corresponding userMessage item until the previous model response has
+      // finished and it is about to make the next model request. Match the
+      // caller-provided client id so old reasoning/tool/assistant items cannot
+      // prematurely move the guidance bubble.
+      if (
+        pendingSteerGuidanceId &&
+        params.item?.type === "userMessage" &&
+        String(params.item.clientId || params.item.client_id || "") === pendingSteerGuidanceId
+      ) {
+        steerResponseStarted = true;
+        maybeEmitSteerDelivered();
+      }
       handleItem(params.item, "started", params);
       break;
     case "item/completed":
@@ -2008,6 +2026,7 @@ const handleServerNotification = (method, params) => {
 const finishPrompt = () => {
   if (!promptRunning || pendingUIRequest || abortRequested) return;
   const promptId = activePromptId;
+  clearPendingSteer();
   send({ type: "stream_end", content: finalResponse, force: true });
   send({ type: "agent_end" });
   send({ type: "prompt_done", id: promptId });
@@ -2116,8 +2135,13 @@ const runGuidance = async (command) => {
 
   const imagePayload = await materializeImages(command.images);
   let cleanupRegistered = false;
+  clearPendingSteer();
+  pendingSteerGuidanceId = command.id;
   try {
-    if (!promptRunning || abortRequested) return;
+    if (!promptRunning || abortRequested) {
+      clearPendingSteer();
+      return;
+    }
     const result = await rpcRequest("turn/steer", {
       threadId: currentThreadId,
       clientUserMessageId: command.id,
@@ -2127,11 +2151,21 @@ const runGuidance = async (command) => {
     }, 25000);
     registerActiveImageCleanup(imagePayload.cleanup);
     cleanupRegistered = true;
-    if (!promptRunning || abortRequested) return;
+    if (!promptRunning || abortRequested) {
+      clearPendingSteer();
+      return;
+    }
     activeTurnId = result?.turnId || activeTurnId;
     sendTurnMetadata(activeTurnId);
+    // Always put acceptance on the worker pipe before delivery. If the
+    // matching userMessage notification raced ahead of the RPC response,
+    // maybeEmitSteerDelivered flushes the latched delivery immediately after.
     send({ type: "guidance_done", id: command.id });
-    steerResponsePending = true;
+    steerAccepted = true;
+    maybeEmitSteerDelivered();
+  } catch (error) {
+    if (pendingSteerGuidanceId === command.id) clearPendingSteer();
+    throw error;
   } finally {
     if (!cleanupRegistered) await imagePayload.cleanup();
   }
@@ -2144,6 +2178,7 @@ const abortPrompt = async (command) => {
   }
   aborting = true;
   abortRequested = true;
+  clearPendingSteer();
   abortedPromptId = activePromptId;
   if (abortedPromptId) interruptedPromptIds.add(abortedPromptId);
   const turnId = activeTurnId;

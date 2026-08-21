@@ -579,6 +579,8 @@ export class DroidAgent {
     this.turnActive = false;
     this.clientMessageIdsByRequestId.clear();
     this.activeClientMessageId = null;
+    this.guidancePendingResponse = false;
+    this.guidanceRequestId = null;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
     this.actionKeys.clear();
@@ -791,6 +793,8 @@ export class DroidAgent {
     this.activeClientMessageId = null;
     this.pendingAskUserRequest = null;
     this.pendingPermissionRequestId = null;
+    this.guidancePendingResponse = false;
+    this.guidanceRequestId = null;
     this.turnActive = false;
     this.isAborting = false;
     this.runningToolUses.clear();
@@ -1040,6 +1044,21 @@ export class DroidAgent {
           }
           if (message.id.startsWith("context-")) break;
           const requestId = typeof notifData.requestId === "string" ? notifData.requestId : "";
+          if (
+            this.guidancePendingResponse &&
+            this.guidanceRequestId &&
+            requestId === this.guidanceRequestId
+          ) {
+            // Droid acknowledges add_user_message immediately, but while an
+            // assistant is still streaming it delays this create_message(user)
+            // until the old response has completed and the queued guidance is
+            // entering its own agent turn. This is the same delivery boundary
+            // as Pi's message_start(user), so confirm before optional Hpp turn
+            // metadata lookup (the intervening idle event clears that lookup).
+            this.guidancePendingResponse = false;
+            this.guidanceRequestId = null;
+            this.emitEvent({ type: "guidance_response_started" });
+          }
           let clientMessageId = requestId ? this.clientMessageIdsByRequestId.get(requestId) : undefined;
           if (!clientMessageId && this.clientMessageIdsByRequestId.size === 1) {
             clientMessageId = this.clientMessageIdsByRequestId.values().next().value;
@@ -1058,21 +1077,6 @@ export class DroidAgent {
             }
           }
           this.emitTurnMetadata(message.id, clientMessageId);
-          // A guidance message is Droid's second add_user_message into the
-          // active turn. When its create_message (user) notification arrives,
-          // the guidance has truly entered the conversation and the assistant
-          // is about to reply to it — emit the response-start signal there so
-          // the guidance bubble lands right at the start of that reply.
-          if (
-            this.guidancePendingResponse &&
-            this.guidanceRequestId &&
-            requestId &&
-            requestId === this.guidanceRequestId
-          ) {
-            this.guidancePendingResponse = false;
-            this.guidanceRequestId = null;
-            this.emitEvent({ type: "guidance_response_started" });
-          }
         }
         break;
       case "assistant_text_delta":
@@ -1160,6 +1164,8 @@ export class DroidAgent {
         this.clientMessageIdsByRequestId.clear();
         this.pendingAskUserRequest = null;
         this.pendingPermissionRequestId = null;
+        this.guidancePendingResponse = false;
+        this.guidanceRequestId = null;
         this.runningToolUses.clear();
         this.completedToolUses.clear();
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${notifData.message || "未知错误"}` });
@@ -1292,6 +1298,8 @@ export class DroidAgent {
     this.activeClientMessageId = null;
     this.pendingAskUserRequest = null;
     this.pendingPermissionRequestId = null;
+    this.guidancePendingResponse = false;
+    this.guidanceRequestId = null;
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
@@ -1314,6 +1322,8 @@ export class DroidAgent {
     this.activeClientMessageId = null;
     this.pendingAskUserRequest = null;
     this.pendingPermissionRequestId = null;
+    this.guidancePendingResponse = false;
+    this.guidanceRequestId = null;
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();

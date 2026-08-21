@@ -1155,6 +1155,10 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
     if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
     if (item.status === "sending") throw new Error("QUEUE_ITEM_BUSY");
     if (item.action) throw new Error("GUIDANCE_NOT_SUPPORTED_FOR_ACTION");
+    // The renderer confirmation state is session-scoped, so a second
+    // outstanding guidance would overwrite the first and strand its sending
+    // queue item when the first delivery event arrives.
+    if (pendingGuidanceConfirmations.has(sessionId)) throw new Error("GUIDANCE_BUSY");
     const pending: PendingGuidanceData = {
       guidanceEntryId: `guidance-${item.id}`,
       queueItemId,

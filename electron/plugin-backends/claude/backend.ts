@@ -66,6 +66,12 @@ interface AgentForkResult {
 
 type WorkerCommand = UnknownRecord & { type: string; id?: string };
 
+type PendingClaudeGuidance = {
+  id: string;
+  accepted: boolean;
+  responseStarted: boolean;
+};
+
 const CLAUDE_WORKER_INIT_TIMEOUT_MS = 120_000;
 const FORK_DESCRIPTOR_PREFIX = "hpp-claude-fork:v1:";
 
@@ -112,6 +118,7 @@ export class ClaudeSDKAgent {
   private isReady = false;
   private models: AgentModel[] = [];
   private secretValues: string[] = [];
+  private pendingGuidance: PendingClaudeGuidance | null = null;
 
   constructor(sessionId = "default", emit?: (event: UnknownRecord) => void, context?: ClaudeBackendContext) {
     this.eventBuffer = new AgentEventBuffer(sessionId, emit);
@@ -214,6 +221,7 @@ export class ClaudeSDKAgent {
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions) {
     if (!this.process || !this.isReady) throw new Error("Claude Agent SDK worker is not running");
     if (!this.isIdle()) throw new Error("SESSION_BUSY");
+    this.pendingGuidance = null;
     const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptId = promptId;
     this.turnActive = true;
@@ -246,6 +254,51 @@ export class ClaudeSDKAgent {
     }
   }
 
+  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
+    if (!this.process || !this.isReady) throw new Error("Claude Agent SDK worker is not running");
+    if (!this.turnActive || !this.activePromptId) throw new Error("SESSION_NOT_RUNNING");
+    if (this.pendingGuidance) throw new Error("GUIDANCE_BUSY");
+
+    const guidanceId = this.createCommandId();
+    const pending: PendingClaudeGuidance = {
+      id: guidanceId,
+      accepted: false,
+      responseStarted: false,
+    };
+    this.pendingGuidance = pending;
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(guidanceId);
+        if (this.pendingGuidance === pending) this.pendingGuidance = null;
+        reject(new Error("Claude SDK guidance timed out"));
+      }, 12_000);
+      try {
+        this.sendWorkerCommand({
+          id: guidanceId,
+          type: "guidance",
+          message,
+          images,
+          hostSystemPrompt: options?.hostSystemPrompt,
+        }, (data) => {
+          clearTimeout(timeout);
+          if (data.type !== "guidance_done") {
+            if (this.pendingGuidance === pending) this.pendingGuidance = null;
+            reject(new Error(optionalString(data.error) || "Claude SDK guidance failed"));
+            return;
+          }
+          pending.accepted = true;
+          this.maybeConfirmGuidance(pending);
+          resolve();
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        if (this.pendingGuidance === pending) this.pendingGuidance = null;
+        reject(error);
+      }
+    });
+  }
+
   async forkSession(target: AgentForkTarget): Promise<AgentForkResult> {
     const sourceSessionId = target.sourceSessionFilePath || this._sessionFilePath;
     if (!sourceSessionId) return { supported: true, success: false, reason: "missing Claude source session ID" };
@@ -259,6 +312,7 @@ export class ClaudeSDKAgent {
   }
 
   async abort() {
+    this.cancelPendingGuidance("Claude guidance interrupted");
     this.pendingUIRequestIds.clear();
     try {
       if (this.process) {
@@ -348,6 +402,7 @@ export class ClaudeSDKAgent {
     }
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
+    this.pendingGuidance = null;
     this.activePromptId = null;
     this.turnActive = false;
     this.eventBuffer.clear();
@@ -371,7 +426,11 @@ export class ClaudeSDKAgent {
   private handleWorkerMessage(value: unknown) {
     const data = asRecord(value);
     const id = data.id === undefined || data.id === null ? "" : String(data.id);
-    if (id) {
+    // guidance_delivered is an asynchronous lifecycle event correlated by the
+    // same command id, not the response to the guidance control request. Do
+    // not consume the pending response callback if it races ahead of
+    // guidance_done.
+    if (id && data.type !== "guidance_delivered") {
       const callback = this.pendingResponses.get(id);
       if (callback) {
         this.pendingResponses.delete(id);
@@ -406,6 +465,14 @@ export class ClaudeSDKAgent {
       case "thinking_end":
         this.emitEvent({ type: "thinking_end" });
         break;
+      case "guidance_delivered": {
+        const pending = this.pendingGuidance;
+        if (pending && id === pending.id) {
+          pending.responseStarted = true;
+          this.maybeConfirmGuidance(pending);
+        }
+        break;
+      }
       case "message_end":
         if (!this.streamedText && optionalString(data.text)) {
           this.emitEvent({ type: "stream_delta", delta: data.text });
@@ -491,8 +558,29 @@ export class ClaudeSDKAgent {
     }
   }
 
+  private cancelPendingGuidance(error?: string) {
+    const pending = this.pendingGuidance;
+    this.pendingGuidance = null;
+    if (!pending || !error) return;
+    const callback = this.pendingResponses.get(pending.id);
+    if (!callback) return;
+    this.pendingResponses.delete(pending.id);
+    callback({ type: "error", id: pending.id, error });
+  }
+
+  private maybeConfirmGuidance(pending: PendingClaudeGuidance) {
+    if (this.pendingGuidance !== pending || !pending.accepted || !pending.responseStarted) return;
+    this.pendingGuidance = null;
+    // message_end from the interrupted Assistant has already supplied its
+    // fallback text. Start fallback tracking afresh for Claude's response to
+    // the newly-started async user command.
+    this.streamedText = false;
+    this.emitEvent({ type: "guidance_response_started" });
+  }
+
   private finishTurn(force = false) {
     if (!this.turnActive) return;
+    this.cancelPendingGuidance("Claude turn ended before guidance started");
     this.eventBuffer.flush();
     this.emitEvent({ type: "stream_end", content: "", force });
     this.emitEvent({ type: "agent_end" });
@@ -572,6 +660,7 @@ export class ClaudeSDKAgent {
     for (const callback of this.pendingResponses.values()) callback({ type: "error", error: redactedDetail });
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
+    this.pendingGuidance = null;
     if (this.turnActive) {
       this.emitEvent({ type: "process_event", entryType: "error", kind: "error", title: "Claude Code 已断开", detail: redactedDetail, state: "error" });
       this.activePromptId = null;

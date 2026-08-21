@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "claude",
   "name": "Claude Code",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "minHppVersion": "0.1.0",
   "description": "Anthropic Claude Code Agent SDK",
   "entry": "agent.mjs",
@@ -15,7 +15,7 @@
   "capabilities": {
     "planMode": "native",
     "permissions": true,
-    "guidance": false,
+    "guidance": true,
     "fork": true,
     "actions": true,
     "configuration": {

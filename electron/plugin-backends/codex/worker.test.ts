@@ -95,6 +95,10 @@ input.on("line", async (line) => {
       write({ method: "error", params: { message: "fatal turn failure", willRetry: false } });
       return;
     }
+    if (promptText === "guidance") {
+      // Keep the turn open until turn/steer arrives.
+      return;
+    }
     if (promptText === "commentary") {
       write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "commentary-1", type: "agentMessage", phase: "commentary", text: "" } } });
       write({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "commentary-1", delta: "Working on it" } });
@@ -194,6 +198,35 @@ input.on("line", async (line) => {
     write({ method: "thread/compacted", params: { threadId: "thread-1", turnId: "turn-1" } });
     write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "plan-1", type: "plan", text: "draft plan" } } });
     write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+  }
+  if (message.method === "turn/steer") {
+    // An old Assistant item may start after steer was requested. It must not
+    // be mistaken for the guidance boundary.
+    write({ method: "item/started", params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "old-tail", type: "agentMessage", phase: null, text: "old tail" },
+    } });
+    // Exercise the notification-before-RPC-response race. The worker must
+    // latch this exact client id, report guidance_done first, then delivery.
+    write({ method: "item/started", params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "guidance-user",
+        type: "userMessage",
+        clientId: message.params?.clientUserMessageId,
+        content: message.params?.input || [],
+      },
+    } });
+    write({ id: message.id, result: { turnId: "turn-1" } });
+    setTimeout(() => {
+      write({ method: "item/started", params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "guided-answer", type: "agentMessage", phase: null, text: "guided output" },
+      } });
+    }, 10);
   }
 });
 `;
@@ -408,6 +441,45 @@ describe("Codex worker protocol", () => {
     });
     expect(turnStart?.params?.input?.find((item: { type?: string }) => item.type === "text")?.text)
       .not.toContain("[HPP 语言规则]");
+  });
+
+  it("confirms guidance at its matching user item across the RPC race", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "prompt-guidance", type: "prompt", message: "guidance" });
+    await worker.waitFor((message) => (
+      message.type === "turn_metadata" && message.nativeTurnId === "turn-1"
+    ));
+
+    worker.send({ id: "guidance-1", type: "guidance", message: "steer this turn" });
+    await worker.waitFor((message) => message.type === "stream_delta" && message.delta === "guided output");
+
+    const oldTailIndex = worker.messages.findIndex((message) => (
+      message.type === "stream_delta" && message.delta === "old tail"
+    ));
+    const acceptedIndex = worker.messages.findIndex((message) => (
+      message.type === "guidance_done" && message.id === "guidance-1"
+    ));
+    const deliveredIndex = worker.messages.findIndex((message) => (
+      message.type === "guidance_delivered" && message.id === "guidance-1"
+    ));
+    const guidedOutputIndex = worker.messages.findIndex((message) => (
+      message.type === "stream_delta" && message.delta === "guided output"
+    ));
+    expect(oldTailIndex).toBeGreaterThanOrEqual(0);
+    expect(acceptedIndex).toBeGreaterThan(oldTailIndex);
+    expect(deliveredIndex).toBeGreaterThan(acceptedIndex);
+    expect(guidedOutputIndex).toBeGreaterThan(deliveredIndex);
+    expect(worker.messages.filter((message) => message.type === "guidance_delivered")).toHaveLength(1);
+
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls.find((call) => call.method === "turn/steer")?.params).toMatchObject({
+      expectedTurnId: "turn-1",
+      clientUserMessageId: "guidance-1",
+      input: [{ type: "text", text: "steer this turn", text_elements: [] }],
+    });
   });
 
   it("falls back to native host developer instructions when config/read is unavailable", async () => {

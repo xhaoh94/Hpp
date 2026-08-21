@@ -332,6 +332,43 @@ describe("SessionCommandCoordinator", () => {
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
   });
 
+  it("keeps the first pending guidance when another queue item is guided", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.getState().addMessage({
+      id: "assistant-guidance-busy",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      isStreaming: true,
+      process: { startedAt: 1, expanded: true, entries: [] },
+    }, "session-one");
+    for (const [id, content] of [["guidance-first", "first"], ["guidance-second", "second"]]) {
+      useChatStore.getState().upsertQueuedMessage({
+        id,
+        sessionId: "session-one",
+        displayContent: content,
+        sendContent: content,
+        createdAt: 2,
+        status: "queued",
+      });
+    }
+
+    await SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-first");
+    await expect(SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-second"))
+      .rejects.toThrow("GUIDANCE_BUSY");
+
+    expect(electronAPI.agentSendGuidance).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "guidance-first", status: "sending" }),
+      expect.objectContaining({ id: "guidance-second", status: "queued" }),
+    ]));
+
+    confirmGuidanceResponse("session-one");
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({ id: "guidance-second", status: "queued" }),
+    ]);
+  });
+
   it("keeps an OpenCode response-start event that arrives before guidance IPC resolves", async () => {
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     useChatStore.getState().addMessage({

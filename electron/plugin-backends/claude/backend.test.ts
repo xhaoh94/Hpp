@@ -11,6 +11,7 @@ type MutableClaudeAgent = {
   turnActive: boolean;
   pendingResponses: Map<string, (message: Record<string, unknown>) => void>;
   pendingUIRequestIds: Set<string>;
+  pendingGuidance: { id: string; accepted: boolean; responseStarted: boolean } | null;
   handleWorkerMessage: (message: Record<string, unknown>) => void;
   handleWorkerTermination: (child: object, detail: string) => void;
 };
@@ -54,6 +55,77 @@ describe("ClaudeSDKAgent busy lifecycle", () => {
     expect(mutable(agent).activePromptId).toBe("prompt-one");
     expect(agent.isIdle()).toBe(false);
     expect(write).not.toHaveBeenCalled();
+  });
+
+  it("confirms an active-turn guidance only after acceptance and matching delivery", async () => {
+    const events: Record<string, unknown>[] = [];
+    const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));
+    const write = vi.fn();
+    Object.assign(mutable(agent), {
+      process: { stdin: { writable: true, write } },
+      isReady: true,
+      activePromptId: "prompt-one",
+      turnActive: true,
+      streamedText: true,
+    });
+
+    const sending = agent.sendGuidance("steer this turn");
+    const command = JSON.parse(String(write.mock.calls[0][0])) as { id: string; type: string };
+    expect(command).toMatchObject({ type: "guidance" });
+
+    // Exercise the same event-before-RPC race handled by the renderer-level
+    // two-phase confirmation. Delivery is latched but cannot render yet.
+    mutable(agent).handleWorkerMessage({ type: "guidance_delivered", id: command.id });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+
+    mutable(agent).handleWorkerMessage({ type: "guidance_done", id: command.id });
+    await sending;
+    expect(events.filter((event) => event.type === "guidance_response_started")).toHaveLength(1);
+    expect(mutable(agent).pendingGuidance).toBeNull();
+
+    // Fallback text belongs to the guided Assistant message even when the old
+    // interrupted message had already streamed text.
+    mutable(agent).handleWorkerMessage({
+      type: "message_end",
+      text: "guided fallback",
+      nativeTurnId: "assistant-guided",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "stream_delta",
+      delta: "guided fallback",
+    }));
+  });
+
+  it("settles an unaccepted guidance request when the turn is aborted", async () => {
+    const agent = new ClaudeSDKAgent("session-one");
+    const write = vi.fn();
+    Object.assign(mutable(agent), {
+      process: { stdin: { writable: true, write } },
+      isReady: true,
+      activePromptId: "prompt-one",
+      turnActive: true,
+    });
+
+    const sending = agent.sendGuidance("steer");
+    const rejection = expect(sending).rejects.toThrow("Claude guidance interrupted");
+    const aborting = agent.abort();
+    const abortCommand = JSON.parse(String(write.mock.calls[1][0])) as { id: string };
+    mutable(agent).handleWorkerMessage({ type: "aborted", id: abortCommand.id });
+
+    await rejection;
+    await aborting;
+    expect(mutable(agent).pendingGuidance).toBeNull();
+  });
+
+  it("rejects guidance when Claude has no active command", async () => {
+    const agent = new ClaudeSDKAgent("session-one");
+    Object.assign(mutable(agent), {
+      process: { stdin: { writable: true, write: vi.fn() } },
+      isReady: true,
+    });
+
+    await expect(agent.sendGuidance("steer"))
+      .rejects.toThrow("SESSION_NOT_RUNNING");
   });
 
   it("does not finish the active turn for an unrelated worker error", () => {

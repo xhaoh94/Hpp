@@ -42,6 +42,9 @@ class FakeQuery {
     for await (const user of prompt) {
       this.transportReady = true;
       persistedSessions.add(this.sessionId);
+      const commandUuid = user.uuid || "generated-command";
+      this.enqueue({ type: "command_lifecycle", command_uuid: commandUuid, state: "queued", uuid: "lifecycle-queued-" + commandUuid, session_id: this.sessionId });
+      this.enqueue({ type: "command_lifecycle", command_uuid: commandUuid, state: "started", uuid: "lifecycle-started-" + commandUuid, session_id: this.sessionId });
       const content = Array.isArray(user.message.content) ? user.message.content : [];
       const text = content.filter((part) => part.type === "text").map((part) => part.text).join("");
       const imageCount = content.filter((part) => part.type === "image").length;
@@ -77,13 +80,22 @@ class FakeQuery {
       } else if (text === "compact") {
         this.enqueue({ type: "system", subtype: "compact_boundary", uuid: "compact-1", session_id: this.sessionId });
         this.enqueue({ type: "assistant", uuid: "assistant-compact", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: "compacted" }] } });
+      } else if (text === "guidance-old") {
+        this.enqueue({ type: "stream_event", uuid: "stream-old", session_id: this.sessionId, parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "old tail" } } });
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+        this.enqueue({ type: "assistant", uuid: "assistant-old", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: "old tail" }] } });
+      } else if (text === "steer this turn") {
+        const details = "guided:" + user.priority + ":" + user.uuid;
+        this.enqueue({ type: "stream_event", uuid: "stream-guided", session_id: this.sessionId, parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: details } } });
+        this.enqueue({ type: "assistant", uuid: "assistant-guided", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: details }] } });
       } else if (text.startsWith("/review")) {
         this.enqueue({ type: "assistant", uuid: "assistant-action", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text }] } });
       } else {
         this.enqueue({ type: "stream_event", uuid: "stream-1", session_id: this.sessionId, parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: imageCount ? "image:1" : "hello" } } });
         this.enqueue({ type: "assistant", uuid: "assistant-1", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: imageCount ? "image:1" : "hello" }] } });
       }
-      this.enqueue({ type: "result", subtype: "success", is_error: false, uuid: "result-1", session_id: this.sessionId, usage: {}, total_cost_usd: 0 });
+      this.enqueue({ type: "result", subtype: "success", is_error: false, uuid: "result-" + commandUuid, session_id: this.sessionId, usage: {}, total_cost_usd: 0 });
+      this.enqueue({ type: "command_lifecycle", command_uuid: commandUuid, state: "completed", uuid: "lifecycle-completed-" + commandUuid, session_id: this.sessionId });
     }
   }
   async interrupt() {}
@@ -240,6 +252,69 @@ describe("Claude Agent SDK worker", () => {
     expect(worker.messages).toContainEqual(expect.objectContaining({ type: "text_delta", delta: "image:1" }));
     expect(worker.messages).toContainEqual(expect.objectContaining({ type: "message_end", nativeTurnId: "assistant-1" }));
     expect(JSON.stringify(worker.messages)).not.toContain("secret-key");
+  });
+
+  it("steers the active Claude command with a priority-now user message", async () => {
+    const worker = await initialize();
+    worker.send({
+      id: "prompt-guidance",
+      type: "prompt",
+      message: "guidance-old",
+      permissionMode: "full-access",
+    });
+    await worker.waitFor((message) => message.type === "text_delta" && message.delta === "old tail");
+
+    worker.send({ id: "guidance-1", type: "guidance", message: "steer this turn" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-guidance");
+
+    const oldTailIndex = worker.messages.findIndex((message) => (
+      message.type === "text_delta" && message.delta === "old tail"
+    ));
+    const acceptedIndex = worker.messages.findIndex((message) => (
+      message.type === "guidance_done" && message.id === "guidance-1"
+    ));
+    const deliveredIndex = worker.messages.findIndex((message) => (
+      message.type === "guidance_delivered" && message.id === "guidance-1"
+    ));
+    const guidedIndex = worker.messages.findIndex((message) => (
+      message.type === "text_delta" && message.delta === "guided:now:guidance-1"
+    ));
+    const promptDoneIndexes = worker.messages.flatMap((message, index) => (
+      message.type === "prompt_done" && message.id === "prompt-guidance" ? [index] : []
+    ));
+
+    expect(oldTailIndex).toBeGreaterThanOrEqual(0);
+    expect(acceptedIndex).toBeGreaterThan(oldTailIndex);
+    expect(deliveredIndex).toBeGreaterThan(acceptedIndex);
+    expect(guidedIndex).toBeGreaterThan(deliveredIndex);
+    expect(promptDoneIndexes).toHaveLength(1);
+    expect(promptDoneIndexes[0]).toBeGreaterThan(guidedIndex);
+  });
+
+  it("rejects guidance without an active Claude command", async () => {
+    const worker = await initialize();
+    worker.send({ id: "guidance-idle", type: "guidance", message: "steer" });
+    await expect(worker.waitFor((message) => message.type === "error" && message.id === "guidance-idle"))
+      .resolves.toMatchObject({ error: "SESSION_NOT_RUNNING" });
+  });
+
+  it("drops pending guidance when the active Claude query is aborted", async () => {
+    const worker = await initialize();
+    worker.send({ id: "prompt-abort-guidance", type: "prompt", message: "guidance-old", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "text_delta" && message.delta === "old tail");
+
+    worker.send({ id: "guidance-aborted", type: "guidance", message: "steer this turn" });
+    worker.send({ id: "abort-guidance", type: "abort" });
+    await worker.waitFor((message) => message.type === "aborted" && message.id === "abort-guidance");
+
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({
+      type: "guidance_delivered",
+      id: "guidance-aborted",
+    }));
+    worker.send({ id: "prompt-after-guidance-abort", type: "prompt", message: "photo", permissionMode: "full-access" });
+    await expect(worker.waitFor((message) => (
+      message.type === "prompt_done" && message.id === "prompt-after-guidance-abort"
+    ))).resolves.toMatchObject({ type: "prompt_done" });
   });
 
   it("reports Claude's compact boundary as completed before the prompt settles", async () => {
