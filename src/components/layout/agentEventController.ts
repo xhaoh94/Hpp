@@ -1,5 +1,6 @@
 import { getAgentName } from "@/lib/agents";
 import { formatModelRequestFailure, uiText } from "@/i18n/text";
+import { cancelPendingGuidance } from "@/lib/session-command-coordinator";
 import {
   ASSISTANT_NARRATION_PROCESS_KIND,
 } from "@shared/process-view";
@@ -860,6 +861,7 @@ export function createAgentEventController({
   };
 
   const finishAbortedTurn = (currentSessionId: string) => {
+    cancelPendingGuidance(currentSessionId);
     settleAssistantTurn(currentSessionId, {
       finalState: "interrupted",
       planSignal: "cancelled",

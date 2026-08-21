@@ -494,6 +494,14 @@ export class OpenCodeAgent {
   private activeClientMessageId: string | null = null;
   private activeAssistantMessageId: string | null = null;
   private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
+  private guidancePendingResponse = false;
+  private guidanceUserMessageId: string | null = null;
+  // OpenCode encodes a context compaction as ordinary messages (a user message
+  // whose parts include a `compaction` part and an assistant message with
+  // `info.summary === true`) instead of a dedicated compaction event. Track the
+  // message currently being streamed so its body is rendered as a compaction
+  // divider rather than conversation text.
+  private activeMessageIsCompaction = false;
   private permissionMode: AgentPermissionMode = "auto";
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
@@ -742,6 +750,51 @@ export class OpenCodeAgent {
     }
   }
 
+  /**
+   * Inject a steer message into the currently running opencode turn. Requires
+   * opencode >= 1.18.18 where prompts admitted while the session is running are
+   * steered into the current turn at the next safe provider-turn boundary
+   * instead of being rejected or deferred.
+   */
+  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
+    if (!this.turnActive) throw new Error("SESSION_NOT_RUNNING");
+    if (!this.sessionId) throw new Error("SESSION_NOT_READY");
+    if (!this.eventSource) await this.startSSEListener();
+    this.permissionMode = options?.permissionMode || "auto";
+    const parts: OpenCodePromptPart[] = [{ type: "text", text: message }];
+    if (images?.length) {
+      images.forEach((image, index) => {
+        const mimeType = image.mimeType || "image/png";
+        parts.push({
+          type: "file",
+          mime: mimeType,
+          filename: `image-${index + 1}.${imageExtension(mimeType)}`,
+          url: `data:${mimeType};base64,${image.data}`,
+        });
+      });
+    }
+    const body: OpenCodePromptBody = { parts };
+    const hostSystemPrompt = String(options?.hostSystemPrompt ?? this.hostSystemPrompt).trim();
+    this.hostSystemPrompt = hostSystemPrompt;
+    if (hostSystemPrompt) body.system = hostSystemPrompt;
+    body.agent = options?.planModeEnabled ? "plan" : "build";
+    if (this.currentModelId && this.currentProviderId) {
+      body.model = { providerID: this.currentProviderId, modelID: this.currentModelId };
+      const variants = this.modelVariants.get(`${this.currentProviderId}:${this.currentModelId}`) || [];
+      const variant = selectThinkingVariant(this.currentThinkingLevel, variants);
+      if (variant) body.variant = variant;
+    }
+    this.guidancePendingResponse = true;
+    this.guidanceUserMessageId = null;
+    try {
+      await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
+    } catch (error) {
+      this.guidancePendingResponse = false;
+      this.guidanceUserMessageId = null;
+      throw error;
+    }
+  }
+
   async listActions(_options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
     const [skillsResult, commandsResult] = await Promise.allSettled([
       this.httpGet("/skill"),
@@ -960,12 +1013,49 @@ export class OpenCodeAgent {
         }
         break;
       case "message.updated":
-        if (info.role === "assistant") this.recordAssistantMessageId(info.id);
+        if (info.role === "assistant") {
+          if (info.summary) {
+            // OpenCode 把上下文压缩摘要作为一条 summary 消息发送，应渲染为
+            // 上下文压缩分隔符而不是对话正文。
+            this.activeMessageIsCompaction = true;
+            this.emitEvent({ type: "context_compaction", id: info.id, phase: "completed" });
+            break;
+          }
+          this.activeMessageIsCompaction = false;
+          this.recordAssistantMessageId(info.id);
+          if (
+            this.guidancePendingResponse
+            && this.guidanceUserMessageId
+            && info.parentID === this.guidanceUserMessageId
+          ) {
+            // prompt_async 会立刻创建并发布 steer 的 user 消息；这只表示消息已
+            // 入队，不能据此移动引导气泡。OpenCode 真正开始处理该引导时会创建
+            // 一条 parentID 指向该 user 消息的新 assistant 消息，这才与 Pi 的
+            // guidance_delivered / message_start(user) 时机等价。
+            this.guidancePendingResponse = false;
+            this.guidanceUserMessageId = null;
+            this.emitEvent({ type: "guidance_response_started" });
+          }
+        } else if (info.role === "user") {
+          const parts = Array.isArray(props.parts) ? props.parts : [];
+          if (parts.some((part) => asRecord(part).type === "compaction")) {
+            // 压缩触发消息：标记上下文压缩边界，不当普通用户输入渲染。
+            this.activeMessageIsCompaction = true;
+            this.emitEvent({ type: "context_compaction", id: info.id, phase: "completed" });
+            break;
+          }
+          if (this.guidancePendingResponse && !this.guidanceUserMessageId && typeof info.id === "string") {
+            // 这里只记录 prompt_async 立即创建的引导 user 消息。必须继续等待它
+            // 对应的新 assistant 消息，旧 assistant 的尾部输出不能触发确认。
+            this.guidanceUserMessageId = info.id;
+          }
+        }
         break;
       case "message.part.added":
       case "message.part.updated": {
         this.rememberPartType(part);
         this.emitPartTokenUsageDelta(part);
+        if (this.activeMessageIsCompaction || info.summary) break;
         if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
           if (this.completedToolParts.has(tool.toolCallId)) break;
@@ -1111,6 +1201,9 @@ export class OpenCodeAgent {
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
     this.pendingUIRequests.clear();
+    this.guidancePendingResponse = false;
+    this.guidanceUserMessageId = null;
+    this.activeMessageIsCompaction = false;
     this.partTokenUsage.clear();
     this.idleObservedWhileWaitingForUI = false;
     this.clearActiveTurn();

@@ -109,6 +109,11 @@ const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   compaction: "none",
 };
 
+// OpenCode 从 v1.18.18 起，运行中的会话收到新 prompt 默认以 steer 方式在
+// 下一个安全 provider-turn 边界注入当前 turn；更早版本不支持运行中注入，
+// 引导按钮应保持隐藏（capabilities.guidance 仍为 false）。
+const MIN_OPENCODE_GUIDANCE_VERSION = "1.18.18";
+
 function getDataDir() {
   return join(app.getPath("userData"), "hpp-data");
 }
@@ -277,6 +282,31 @@ function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
             : undefined,
         },
   };
+}
+
+// OpenCode 安装版本缓存：首次查询运行一次 `opencode --version`，后续复用，
+// 避免 listAgents/getCapabilities 每次被调用都启动子进程。
+let opencodeVersionPromise: Promise<string | undefined> | undefined;
+function getOpenCodeInstalledVersion(): Promise<string | undefined> {
+  if (!opencodeVersionPromise) {
+    opencodeVersionPromise = getCommandVersion("opencode")
+      .then((result) => result.version)
+      .catch(() => undefined);
+  }
+  return opencodeVersionPromise;
+}
+
+// OpenCode 的 steer 支持依赖运行版本，capabilities.guidance 据此动态计算：
+// 版本满足门槛才对外暴露引导能力，否则保持插件清单中的 false（隐藏按钮）。
+async function resolveEffectiveCapabilities(descriptor: AgentDescriptor): Promise<AgentCapabilities> {
+  const capabilities = cloneCapabilities(descriptor.capabilities);
+  if (descriptor.id === "opencode") {
+    const version = await getOpenCodeInstalledVersion();
+    if (version && compareVersions(version, MIN_OPENCODE_GUIDANCE_VERSION) >= 0) {
+      capabilities.guidance = true;
+    }
+  }
+  return capabilities;
 }
 
 function ensureAgentId(id: string) {
@@ -737,13 +767,17 @@ export class AgentPluginRegistry {
       .sort((left, right) => {
         return left.order - right.order || left.name.localeCompare(right.name);
       });
-    return plugins.map((agent) => ({ ...agent, capabilities: cloneCapabilities(agent.capabilities) }));
+    return Promise.all(plugins.map(async (agent) => ({
+      ...agent,
+      capabilities: await resolveEffectiveCapabilities(agent),
+    })));
   }
 
   async getDescriptor(agentId: string): Promise<AgentDescriptor | undefined> {
     await this.ensureLoaded();
     const plugin = this.pluginRecords.get(agentId)?.descriptor;
-    return plugin ? { ...plugin, capabilities: cloneCapabilities(plugin.capabilities) } : undefined;
+    if (!plugin) return undefined;
+    return { ...plugin, capabilities: await resolveEffectiveCapabilities(plugin) };
   }
 
   async getCapabilities(agentId: string): Promise<AgentCapabilities> {

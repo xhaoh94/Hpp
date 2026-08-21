@@ -9,6 +9,7 @@ import {
 } from "@/hooks/useDataPersistence";
 import { createComposerDocument } from "@shared/composer-document";
 import {
+  cancelPendingGuidance,
   confirmGuidanceResponse,
   SessionCommandCoordinator,
   classifyBackendSessionState,
@@ -329,6 +330,114 @@ describe("SessionCommandCoordinator", () => {
       guidanceImages: [{ id: "image-1", src: "data:image/png;base64,abc", name: "screen.png" }],
     })]);
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
+  });
+
+  it("keeps an OpenCode response-start event that arrives before guidance IPC resolves", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.getState().addMessage({
+      id: "assistant-early-guidance",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      isStreaming: true,
+      process: { startedAt: 1, expanded: true, entries: [] },
+    }, "session-one");
+    useChatStore.getState().upsertQueuedMessage({
+      id: "queued-early-guidance",
+      sessionId: "session-one",
+      displayContent: "提前确认的引导",
+      sendContent: "提前确认的引导",
+      createdAt: 2,
+      status: "queued",
+    });
+    electronAPI.agentSendGuidance.mockImplementationOnce(async () => {
+      // OpenCode can finish the old output and create the steer response's
+      // assistant message before prompt_async returns its HTTP 204, so the
+      // response-start event may reach the renderer while IPC is still pending.
+      confirmGuidanceResponse("session-one");
+      return { success: true };
+    });
+
+    await expect(SessionCommandCoordinator.guideQueuedMessage("session-one", "queued-early-guidance"))
+      .resolves.toEqual({ success: true, queueItemId: "queued-early-guidance" });
+
+    const assistant = useChatStore.getState().sessionMessages["session-one"]
+      .find((item) => item.id === "assistant-early-guidance");
+    expect(assistant?.process?.entries).toEqual([expect.objectContaining({
+      id: "guidance-queued-early-guidance",
+      kind: "user_guidance",
+      detail: "提前确认的引导",
+    })]);
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
+  });
+
+  it("drops a queued guidance message when the turn is interrupted while sending", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.getState().addMessage({
+      id: "assistant-aborted-guidance",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      isStreaming: true,
+      process: { startedAt: 1, expanded: true, entries: [] },
+    }, "session-one");
+    useChatStore.getState().upsertQueuedMessage({
+      id: "queued-aborted-guidance",
+      sessionId: "session-one",
+      displayContent: "被中断的引导",
+      sendContent: "被中断的引导",
+      createdAt: 2,
+      status: "queued",
+    });
+    electronAPI.agentSendGuidance.mockImplementationOnce(async () => {
+      // The turn is interrupted while the guidance request is in flight.
+      useChatStore.getState().finishAllAssistantProcesses(Date.now(), "interrupted", "session-one");
+      useProjectStore.setState({ agentStatuses: { "session-one": "idle" } });
+      return { success: true };
+    });
+
+    await expect(SessionCommandCoordinator.guideQueuedMessage("session-one", "queued-aborted-guidance"))
+      .resolves.toEqual({ success: true, queueItemId: "queued-aborted-guidance" });
+
+    // The queued message is dropped immediately instead of waiting for the
+    // guidance confirmation timeout.
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
+    const assistant = useChatStore.getState().sessionMessages["session-one"].find((item) => item.id === "assistant-aborted-guidance");
+    expect(assistant?.process?.entries).toEqual([]);
+  });
+
+  it("cancels a pending guidance confirmation by removing the queued message", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.getState().addMessage({
+      id: "assistant-cancelled-guidance",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      isStreaming: true,
+      process: { startedAt: 1, expanded: true, entries: [] },
+    }, "session-one");
+    useChatStore.getState().upsertQueuedMessage({
+      id: "queued-cancelled-guidance",
+      sessionId: "session-one",
+      displayContent: "取消的引导",
+      sendContent: "取消的引导",
+      createdAt: 2,
+      status: "queued",
+    });
+    electronAPI.agentSendGuidance.mockResolvedValueOnce({ success: true });
+
+    await SessionCommandCoordinator.guideQueuedMessage("session-one", "queued-cancelled-guidance");
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({ id: "queued-cancelled-guidance" }),
+    ]);
+
+    cancelPendingGuidance("session-one");
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
+
+    // The cancelled confirmation can no longer render a guidance bubble.
+    confirmGuidanceResponse("session-one");
+    const assistant = useChatStore.getState().sessionMessages["session-one"].find((item) => item.id === "assistant-cancelled-guidance");
+    expect(assistant?.process?.entries).toEqual([]);
   });
 
   it("removes an optimistic guidance bubble when guidance fails", async () => {

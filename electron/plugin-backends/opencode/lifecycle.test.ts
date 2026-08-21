@@ -365,4 +365,153 @@ describe("OpenCode lifecycle", () => {
     expect(internals.killProcessTree).toHaveBeenCalledWith(childProcess);
     expect(childProcess.kill).not.toHaveBeenCalled();
   });
+
+  it("defers guidance confirmation until OpenCode starts the steer response", async () => {
+    const server = createServer((request, response) => {
+      if (request.url === "/session/ses_source/prompt_async") {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.host = "127.0.0.1";
+    internals.port = (server.address() as AddressInfo).port;
+    internals.turnActive = true;
+    internals.eventSource = { destroy: vi.fn() };
+
+    await agent.sendGuidance("重点检查 src/main.ts", undefined, { planModeEnabled: false });
+
+    // prompt_async 只把引导排入队列，注入前旧回合的正文输出不得触发确认。
+    internals.handleSSEEvent("message.updated", {
+      properties: { sessionID: "ses_source", info: { id: "msg_old", role: "assistant" } },
+    });
+    internals.handleSSEEvent("message.part.updated", {
+      properties: { sessionID: "ses_source", part: { type: "text", id: "part-old" }, delta: "still finishing" },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+
+    // prompt_async 会立即发布 steer user 消息，但这只表示消息已入队，不能
+    // 提前移动引导气泡。
+    internals.handleSSEEvent("message.updated", {
+      properties: { sessionID: "ses_source", info: { id: "msg_guidance", role: "user" } },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+
+    // 即使 user 消息已经入队，旧 assistant 的尾部更新仍不算开始响应引导。
+    internals.handleSSEEvent("message.updated", {
+      properties: {
+        sessionID: "ses_source",
+        info: { id: "msg_old", role: "assistant", parentID: "msg_original_user" },
+      },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+
+    // OpenCode 在真正处理 steer 时创建 parentID 指向该 user 消息的新 assistant
+    // 消息；此时才确认，引导气泡落在引导响应的开头。
+    internals.handleSSEEvent("message.updated", {
+      properties: {
+        sessionID: "ses_source",
+        info: { id: "msg_guidance_response", role: "assistant", parentID: "msg_guidance" },
+      },
+    });
+    expect(events).toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+  });
+
+  it("keeps a steer response start that arrives before prompt_async resolves", async () => {
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+    const server = createServer((request, response) => {
+      if (request.url === "/session/ses_source/prompt_async") {
+        void promptGate.then(() => {
+          response.writeHead(204);
+          response.end();
+        });
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.host = "127.0.0.1";
+    internals.port = (server.address() as AddressInfo).port;
+    internals.turnActive = true;
+    internals.eventSource = { destroy: vi.fn() };
+
+    // OpenCode 可能在 HTTP 204 返回前完成旧输出并开始 steer 对应的新 assistant
+    // 消息。user 入队事件本身不能确认，但真正的响应开始事件不能因 IPC 时序丢失。
+    const pending = agent.sendGuidance("steer", undefined, { planModeEnabled: false });
+    internals.handleSSEEvent("message.updated", {
+      properties: { sessionID: "ses_source", info: { id: "msg_guidance", role: "user" } },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+
+    internals.handleSSEEvent("message.updated", {
+      properties: {
+        sessionID: "ses_source",
+        info: { id: "msg_guidance_response", role: "assistant", parentID: "msg_guidance" },
+      },
+    });
+    expect(events).toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+
+    releasePrompt();
+    await pending;
+  });
+
+  it("refuses guidance while the session is not running", async () => {
+    const agent = new OpenCodeAgent();
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.turnActive = false;
+
+    await expect(agent.sendGuidance("steer", undefined, {})).rejects.toThrow("SESSION_NOT_RUNNING");
+  });
+
+  it("renders an OpenCode compaction summary as a context compaction divider, not conversation text", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.turnActive = true;
+    internals.eventSource = { destroy: vi.fn() };
+
+    // 压缩触发消息：user 消息的 parts 含 compaction 部分。
+    internals.handleSSEEvent("message.updated", {
+      properties: { sessionID: "ses_source", info: { id: "msg_compact_user", role: "user" }, parts: [{ type: "compaction" }] },
+    });
+    expect(events).toContainEqual(expect.objectContaining({ type: "context_compaction", phase: "completed" }));
+
+    events.length = 0;
+    // 压缩摘要消息：assistant 消息 info.summary === true。
+    internals.handleSSEEvent("message.updated", {
+      properties: { sessionID: "ses_source", info: { id: "msg_compact_summary", role: "assistant", summary: true } },
+    });
+    expect(events).toContainEqual(expect.objectContaining({ type: "context_compaction", phase: "completed", id: "msg_compact_summary" }));
+
+    events.length = 0;
+    // 摘要正文 delta 不应作为对话正文渲染。
+    internals.handleSSEEvent("message.part.updated", {
+      properties: {
+        sessionID: "ses_source",
+        info: { id: "msg_compact_summary", role: "assistant", summary: true },
+        part: { id: "p1", type: "text" },
+        delta: "这是被压缩的摘要内容",
+      },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "stream_delta" }));
+  });
 });

@@ -1079,25 +1079,28 @@ export function prepareSessionReferenceContext(
   };
 }
 
-// Pending guidance confirmations: when guidance IPC succeeds, we store the
-// entry data here. The agentEventDispatcher calls confirmGuidanceResponse
-// when the agent actually starts responding to the guidance.
+// Register guidance before invoking the main-process IPC. Some backends (most
+// notably OpenCode) can emit guidance_response_started before the IPC promise
+// resolves. Tracking transport acceptance and response start separately keeps
+// that early event from being lost without rendering a bubble for a failed send.
 interface PendingGuidanceData {
   guidanceEntryId: string;
   queueItemId: string;
   displayContent: string;
   composerDocument: ComposerDocument | null;
   messageImages: Array<{ id: string; src: string; name: string }> | undefined;
-  fallbackTimer: ReturnType<typeof setTimeout>;
+  sendAccepted: boolean;
+  responseStarted: boolean;
+  fallbackTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const pendingGuidanceConfirmations = new Map<string, PendingGuidanceData>();
 
-export function confirmGuidanceResponse(sessionId: string) {
-  const pending = pendingGuidanceConfirmations.get(sessionId);
-  if (!pending) return;
+function commitPendingGuidanceResponse(sessionId: string, pending: PendingGuidanceData) {
+  if (!pending.sendAccepted || !pending.responseStarted) return;
+  if (pendingGuidanceConfirmations.get(sessionId) !== pending) return;
   pendingGuidanceConfirmations.delete(sessionId);
-  clearTimeout(pending.fallbackTimer);
+  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
   if (!sessionIsOpen(sessionId)) return;
   useChatStore.getState().appendLastAssistantProcessEntry({
     id: pending.guidanceEntryId,
@@ -1117,11 +1120,26 @@ export function confirmGuidanceResponse(sessionId: string) {
   useChatStore.getState().removeQueuedMessage(sessionId, pending.queueItemId);
 }
 
+export function confirmGuidanceResponse(sessionId: string) {
+  const pending = pendingGuidanceConfirmations.get(sessionId);
+  if (!pending) return;
+  pending.responseStarted = true;
+  commitPendingGuidanceResponse(sessionId, pending);
+}
+
 export function clearPendingGuidanceConfirmation(sessionId: string) {
   const pending = pendingGuidanceConfirmations.get(sessionId);
   if (!pending) return;
   pendingGuidanceConfirmations.delete(sessionId);
-  clearTimeout(pending.fallbackTimer);
+  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+}
+
+export function cancelPendingGuidance(sessionId: string) {
+  const pending = pendingGuidanceConfirmations.get(sessionId);
+  if (!pending) return;
+  pendingGuidanceConfirmations.delete(sessionId);
+  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+  useChatStore.getState().removeQueuedMessage(sessionId, pending.queueItemId);
 }
 
 const GUIDANCE_CONFIRM_TIMEOUT_MS = 120_000;
@@ -1137,8 +1155,18 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
     if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
     if (item.status === "sending") throw new Error("QUEUE_ITEM_BUSY");
     if (item.action) throw new Error("GUIDANCE_NOT_SUPPORTED_FOR_ACTION");
-    const guidanceEntryId = `guidance-${item.id}`;
+    const pending: PendingGuidanceData = {
+      guidanceEntryId: `guidance-${item.id}`,
+      queueItemId,
+      displayContent: item.displayContent || "",
+      composerDocument: item.composerDocument ? cloneComposerDocument(item.composerDocument) : null,
+      messageImages: item.messageImages,
+      sendAccepted: false,
+      responseStarted: false,
+      fallbackTimer: null,
+    };
     chat.markQueuedMessageSending(sessionId, queueItemId);
+    pendingGuidanceConfirmations.set(sessionId, pending);
     try {
       const result = await window.electronAPI.agentSendGuidance(
         item.sendContent,
@@ -1147,27 +1175,42 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
         { planModeEnabled: !!item.planModeEnabled, permissionMode: item.permissionMode },
       );
       if (!result.success) throw new Error(result.error || "GUIDANCE_FAILED");
-      // Don't create the guidance entry yet. Wait for the agent to actually
-      // start responding to the guidance. The backend emits a
-      // guidance_response_started event when the first content event arrives
-      // after guidance_done, which the agentEventDispatcher uses to call
-      // confirmGuidanceResponse. A timeout fallback ensures the entry is
-      // created even if the event never arrives.
-      const fallbackTimer = setTimeout(() => {
-        confirmGuidanceResponse(sessionId);
-      }, GUIDANCE_CONFIRM_TIMEOUT_MS);
-      pendingGuidanceConfirmations.set(sessionId, {
-        guidanceEntryId,
-        queueItemId,
-        displayContent: item.displayContent || "",
-        composerDocument: item.composerDocument ? cloneComposerDocument(item.composerDocument) : null,
-        messageImages: item.messageImages,
-        fallbackTimer,
-      });
+      // The turn may have been interrupted while the guidance request was in
+      // flight. In that case the queued message can no longer be steered into
+      // a running turn, so drop it instead of leaving it sitting in the queue
+      // until the confirmation timeout.
+      if (!isRunning(sessionId)) {
+        clearPendingGuidanceConfirmation(sessionId);
+        useChatStore.getState().removeQueuedMessage(sessionId, queueItemId);
+        return { success: true, queueItemId };
+      }
+      // An abort/disconnect handler may already have cancelled this guidance
+      // while the IPC request was in flight. Never recreate it afterward.
+      if (pendingGuidanceConfirmations.get(sessionId) !== pending) {
+        return { success: true, queueItemId };
+      }
+      pending.sendAccepted = true;
+      if (pending.responseStarted) {
+        commitPendingGuidanceResponse(sessionId, pending);
+      } else {
+        // Backends normally emit guidance_response_started once the guidance
+        // enters the agent message flow. The fallback prevents a permanently
+        // stuck queue item if an adapter loses that event.
+        pending.fallbackTimer = setTimeout(() => {
+          confirmGuidanceResponse(sessionId);
+        }, GUIDANCE_CONFIRM_TIMEOUT_MS);
+      }
       return { success: true, queueItemId };
     } catch (error) {
+      if (pendingGuidanceConfirmations.get(sessionId) === pending) {
+        clearPendingGuidanceConfirmation(sessionId);
+      }
       if (sessionIsOpen(sessionId)) {
-        useChatStore.getState().markQueuedMessageFailed(sessionId, queueItemId, getErrorMessage(error));
+        if (!isRunning(sessionId)) {
+          useChatStore.getState().removeQueuedMessage(sessionId, queueItemId);
+        } else {
+          useChatStore.getState().markQueuedMessageFailed(sessionId, queueItemId, getErrorMessage(error));
+        }
       }
       throw error;
     }
