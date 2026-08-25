@@ -2,7 +2,15 @@ export type UnknownRecord = Record<string, unknown>;
 
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
+import type { AgentSubagentCapabilities } from "@shared/agent-subagent";
 export type { AgentCompactionConfig } from "@shared/agent-compaction";
+export type {
+  AgentSubagentCapabilities,
+  AgentSubagentConfig,
+  AgentSubagentModelMode,
+  AgentSubagentProfileConfig,
+  AgentSubagentProfileDescriptor,
+} from "@shared/agent-subagent";
 export type { AgentPermissionMode } from "@shared/agent-permissions";
 export type {
   AgentActionCatalogEntry,
@@ -151,6 +159,7 @@ export interface AgentCompactionCapabilities {
 }
 
 export type AgentCompactionSupport = AgentCompactionCapabilities | "none";
+export type AgentSubagentSupport = AgentSubagentCapabilities | "none";
 
 export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
@@ -161,6 +170,7 @@ export interface AgentCapabilities {
   configuration: AgentConfigurationSupport;
   providerActivation: AgentProviderActivationSupport;
   compaction?: AgentCompactionSupport;
+  subagent?: AgentSubagentSupport;
 }
 
 export interface SessionDataPurgeRequest {

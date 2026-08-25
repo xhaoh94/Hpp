@@ -66,6 +66,49 @@ describe("Pi built-in subagent extension", () => {
     expect(firstRegistration.get("subagent")).toMatchObject({ label: "External Subagent" });
   });
 
+  it("does not register the fallback tool when built-in subagents are disabled", () => {
+    const factory = createHppSubagentExtension({
+      packageRoot: "C:/pi-runtime",
+      agentDir: "C:/pi-agent",
+      subagentConfig: { enabled: false },
+    });
+    const tools: Array<Record<string, unknown>> = [];
+    factory({ registerTool: (tool: Record<string, unknown>) => tools.push(tool) });
+    expect(tools).toEqual([]);
+  });
+
+  it("uses a configured profile model before inheriting the parent model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-model-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\\n"), "utf8");
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir: join(root, "agent"),
+        subagentConfig: {
+          enabled: true,
+          defaultModelMode: "inherit",
+          profiles: { scout: { modelMode: "custom", model: "configured/scout" } },
+        },
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const result = await tools[0].execute(
+        "call-model",
+        { agent: "scout", task: "检查模型" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, model: { provider: "parent", id: "model" }, hasUI: false },
+      );
+      expect(result.content[0].text).toContain("--model|configured/scout");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs an isolated child Pi process and returns capped structured details", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-test-"));
     try {

@@ -546,6 +546,36 @@ const requestedAgentNames = (params) => {
   return new Set(names);
 };
 
+export const normalizeHppSubagentConfig = (value) => {
+  const input = isRecord(value) ? value : {};
+  const rawProfiles = isRecord(input.profiles) ? input.profiles : {};
+  const profiles = {};
+  for (const [name, rawProfile] of Object.entries(rawProfiles)) {
+    if (!/^[A-Za-z0-9._:-]+$/.test(name) || !isRecord(rawProfile)) continue;
+    const modelMode = rawProfile.modelMode === "custom" ? "custom" : "inherit";
+    const model = nonEmptyString(rawProfile.model);
+    profiles[name] = {
+      modelMode,
+      ...(modelMode === "custom" && model ? { model } : {}),
+    };
+  }
+  const defaultModelMode = input.defaultModelMode === "custom" ? "custom" : "inherit";
+  const defaultModel = nonEmptyString(input.defaultModel);
+  return {
+    enabled: input.enabled !== false,
+    defaultModelMode,
+    ...(defaultModelMode === "custom" && defaultModel ? { defaultModel } : {}),
+    profiles,
+  };
+};
+
+const resolveConfiguredModel = (config, agentName, inheritedModel) => {
+  const profile = config.profiles?.[agentName];
+  if (profile?.modelMode === "custom" && profile.model) return profile.model;
+  if (config.defaultModelMode === "custom" && config.defaultModel) return config.defaultModel;
+  return inheritedModel;
+};
+
 export const createHppSubagentExtension = ({
   packageRoot = process.env.PI_SDK_PACKAGE_ROOT || "",
   agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
@@ -555,8 +585,11 @@ export const createHppSubagentExtension = ({
   requestUI,
   dismissUI,
   bridgeExtensionPath = SUBAGENT_BRIDGE_EXTENSION_PATH,
+  subagentConfig,
 } = {}) => (pi) => {
   if (!pi || typeof pi.registerTool !== "function") return;
+  const effectiveSubagentConfig = normalizeHppSubagentConfig(subagentConfig);
+  if (!effectiveSubagentConfig.enabled) return;
 
   pi.registerTool({
     name: "subagent",
@@ -668,10 +701,18 @@ export const createHppSubagentExtension = ({
           update?.(result);
           return Promise.resolve(result);
         }
+        const configuredModel = resolveConfiguredModel(
+          effectiveSubagentConfig,
+          agent.name,
+          dispatchDefaults.model,
+        );
+        const effectiveAgent = agent.model || !configuredModel
+          ? agent
+          : { ...agent, model: configuredModel };
         return runSingleAgent({
           defaultCwd: ctx?.cwd || process.cwd(),
           dispatchDefaults,
-          agent,
+          agent: effectiveAgent,
           task: item.task,
           cwd: item.cwd || (step === undefined ? nonEmptyString(params.cwd) : undefined),
           step,

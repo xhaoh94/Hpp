@@ -42,6 +42,10 @@ import {
   resolveStoredAgentCompactionConfig,
   type AgentCompactionConfig,
 } from "../../shared/agent-compaction";
+import {
+  normalizeAgentSubagentConfig,
+  type AgentSubagentConfig,
+} from "../../shared/agent-subagent";
 import { normalizeAgentPermissionMode } from "../../shared/agent-permissions";
 import type {
   AgentBackend,
@@ -50,7 +54,7 @@ import type {
   AgentModel,
   AgentSendOptions,
 } from "./agent-backend";
-import { getErrorMessage } from "../utils/unknown-value";
+import { getErrorMessage, isRecord } from "../utils/unknown-value";
 import {
   clearAllPendingUIEvents,
   clearPendingUIEvents,
@@ -150,6 +154,18 @@ function normalizeCompactionForSupport(
   };
 }
 
+async function loadSavedAgentSubagentConfig(agentId: string): Promise<AgentSubagentConfig | undefined> {
+  try {
+    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
+    const settingsPath = join(dataDir, "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as { subagentConfigs?: unknown };
+    if (!isRecord(settings.subagentConfigs) || !isRecord(settings.subagentConfigs[agentId])) return undefined;
+    return normalizeAgentSubagentConfig(settings.subagentConfigs[agentId]);
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadSavedAgentCompactionConfig(agentId: string): Promise<AgentCompactionConfig | undefined> {
   try {
     const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
@@ -236,9 +252,13 @@ export class AgentManager {
         const compaction = savedCompaction
           ? normalizeCompactionForSupport(savedCompaction, compactionSupport)
           : undefined;
+        const subagent = capabilities.subagent && capabilities.subagent !== "none"
+          ? await loadSavedAgentSubagentConfig(agentId)
+          : undefined;
         await agent.init(projectPath, existingSessionFilePath, {
           hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
           ...(compaction ? { compaction } : {}),
+          ...(subagent ? { subagent } : {}),
         });
       })(),
       AGENT_SESSION_INIT_TIMEOUT_MS,

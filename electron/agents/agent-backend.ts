@@ -7,6 +7,7 @@ import type {
   AgentSendOptions as BaseAgentSendOptions,
   AgentUIResponse,
 } from "../../src/types/ipc";
+import type { AgentSubagentConfig } from "../../shared/agent-subagent";
 
 export interface AgentModel {
   id: string;
@@ -34,6 +35,8 @@ export interface AgentInitOptions {
   hostSystemPrompt?: string;
   /** 通用 Agent 压缩策略；不支持自定义压缩的适配器可以忽略。 */
   compaction?: AgentCompactionConfig;
+  /** Hpp subagent 配置；不支持该能力的适配器可以忽略。 */
+  subagent?: AgentSubagentConfig;
 }
 
 export interface AgentForkTarget {

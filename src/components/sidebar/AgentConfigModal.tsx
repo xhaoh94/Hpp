@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X, Zap } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Bot, BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -8,6 +9,7 @@ import { getThinkingLevelLabel, normalizeSupportedThinkingLevels, THINKING_LEVEL
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { AgentCompactionModal } from "./AgentCompactionModal";
+import { AgentSubagentModal } from "./AgentSubagentModal";
 import { AgentConfigIO } from "./AgentConfigIO";
 import "./Settings.css";
 
@@ -350,7 +352,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     () => agents.filter((agent) => agent.capabilities.configuration !== "none"),
     [agents]
   );
-  const activeAgent = configurableAgentList.find((agent) => agent.id === agentId);
+  const activeAgent = agents.find((agent) => agent.id === agentId);
   const providerConfiguration = activeAgent?.capabilities.configuration !== "none"
     ? activeAgent?.capabilities.configuration
     : undefined;
@@ -361,6 +363,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const backendModelVisibility = providerConfiguration?.backendModelVisibility;
   const compactionCapabilities = activeAgent?.capabilities.compaction;
   const supportsCompactionConfiguration = !!compactionCapabilities && compactionCapabilities !== "none";
+  const subagentCapabilities = activeAgent?.capabilities.subagent;
+  const supportsSubagentConfiguration = !!subagentCapabilities
+    && subagentCapabilities !== "none"
+    && subagentCapabilities.configurable === true;
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
@@ -388,6 +394,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [compactionModalOpen, setCompactionModalOpen] = useState(false);
+  const [subagentModalOpen, setSubagentModalOpen] = useState(false);
   const [copySourceProvider, setCopySourceProvider] = useState<AgentProviderConfig | null>(null);
   const [copyingTargetAgentId, setCopyingTargetAgentId] = useState("");
   const [copyProviderError, setCopyProviderError] = useState("");
@@ -483,12 +490,29 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
   useEffect(() => {
     setCompactionModalOpen(false);
+    setSubagentModalOpen(false);
   }, [agentId]);
 
   const selectedSavedProvider = useMemo(
     () => config.providers.find((provider) => provider.providerId === selectedProviderId) || null,
     [config.providers, selectedProviderId]
   );
+
+  const subagentModelOptions = useMemo(() => {
+    const seen = new Set<string>();
+    return config.providers.flatMap((provider) => provider.models.flatMap((model) => {
+      const value = `${provider.providerId}/${model.id}`;
+      if (seen.has(value)) return [];
+      seen.add(value);
+      return [{
+        value,
+        id: model.id,
+        name: model.name || model.id,
+        provider: provider.providerId,
+        providerLabel: provider.displayName || provider.providerId,
+      }];
+    }));
+  }, [config.providers]);
 
   const providerCopyTargets = useMemo(() => {
     if (!copySourceProvider) return [];
@@ -1214,8 +1238,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     }
   }, [draft?.apiKey]);
 
-  return (
-    <div className="settings-modal-overlay agent-config-modal-overlay" onMouseDown={onClose}>
+  return createPortal(
+    <div
+      className="settings-modal-overlay agent-config-modal-overlay"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        onClose();
+      }}
+      onClick={(event) => event.stopPropagation()}
+    >
       <div className="settings-modal agent-config-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="settings-modal-header agent-config-header">
           <div className="agent-config-header-main">
@@ -1266,6 +1297,17 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     onChange={(event) => void handleBackendModelsVisibleChange(event.target.checked)}
                   />
                 </label>
+              )}
+              {supportsSubagentConfiguration && (
+                <button
+                  type="button"
+                  className="btn-action"
+                  onClick={() => setSubagentModalOpen(true)}
+                  disabled={loading}
+                >
+                  <Bot size={13} />
+                  SubAgent
+                </button>
               )}
               {supportsCompactionConfiguration && (
                 <button
@@ -1422,7 +1464,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         <span>显示名</span>
                         <strong>{selectedSavedProvider.displayName || selectedSavedProvider.providerId}</strong>
                       </div>
-                      <div className="agent-config-summary-row wide">
+                      <div className="agent-config-summary-row">
                         <span>渠道 URL</span>
                         <strong>{selectedSavedProvider.baseUrl || "未配置"}</strong>
                       </div>
@@ -1444,16 +1486,18 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
                     <div className="agent-config-summary-models">
                       <div className="agent-config-section-title">模型</div>
-                      {selectedSavedProvider.models.length === 0 ? (
-                        <div className="agent-config-empty compact">暂无模型</div>
-                      ) : (
-                        selectedSavedProvider.models.map((model) => (
-                          <div key={model.id} className="agent-config-summary-model">
-                            <span>{model.name || model.id}</span>
-                            <code>{model.id}</code>
-                          </div>
-                        ))
-                      )}
+                      <div className="agent-config-summary-model-list">
+                        {selectedSavedProvider.models.length === 0 ? (
+                          <div className="agent-config-empty compact">暂无模型</div>
+                        ) : (
+                          selectedSavedProvider.models.map((model) => (
+                            <div key={model.id} className="agent-config-summary-model">
+                              <span>{model.name || model.id}</span>
+                              <code>{model.id}</code>
+                            </div>
+                          ))
+                        )}
+                      </div>
                     </div>
                     {usesActivation && (
                       <button
@@ -1826,6 +1870,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           </div>
         </div>
       )}
+      {subagentModalOpen && subagentCapabilities && subagentCapabilities !== "none" && (
+        <AgentSubagentModal
+          agentId={agentId}
+          agentName={activeAgent?.name || getAgentName(agentId)}
+          capabilities={subagentCapabilities}
+          modelOptions={subagentModelOptions}
+          onClose={() => setSubagentModalOpen(false)}
+        />
+      )}
       {compactionModalOpen && compactionCapabilities && compactionCapabilities !== "none" && (
         <AgentCompactionModal
           agentId={agentId}
@@ -1878,6 +1931,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         </div>
       )}
 
-    </div>
+    </div>,
+    document.body,
   );
 }

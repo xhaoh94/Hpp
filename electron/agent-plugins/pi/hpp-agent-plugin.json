@@ -22,6 +22,17 @@
       "customModel": true,
       "thinkingLevel": true
     },
+    "subagent": {
+      "supported": true,
+      "configurable": true,
+      "modelSelection": "inherit-or-custom",
+      "profiles": [
+        { "name": "scout", "label": "Scout", "description": "只读检索代码库" },
+        { "name": "planner", "label": "Planner", "description": "制定实施计划" },
+        { "name": "reviewer", "label": "Reviewer", "description": "审查实现和回归风险" },
+        { "name": "worker", "label": "Worker", "description": "在隔离上下文中完成开发任务" }
+      ]
+    },
     "configuration": {
       "type": "provider",
       "storage": "plugin",

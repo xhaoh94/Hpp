@@ -127,6 +127,32 @@ describe("AgentPluginRegistry", () => {
     ]);
   });
 
+  it("normalizes plugin-declared subagent capabilities for dynamic UI", async () => {
+    const source = await createPluginSource(tempRoot, "subagent-agent", "1.0.0", {
+      planMode: "native",
+      configuration: providerConfiguration,
+      subagent: {
+        supported: true,
+        configurable: true,
+        modelSelection: "inherit-or-custom",
+        profiles: [
+          { name: "scout", label: "Scout", description: "只读检索" },
+          { name: "worker", label: "Worker" },
+        ],
+      },
+    });
+    const result = await registry.installFromPath(source);
+
+    expect(result.agent?.capabilities.subagent).toEqual({
+      configurable: true,
+      modelSelection: "inherit-or-custom",
+      profiles: [
+        { name: "scout", label: "Scout", description: "只读检索" },
+        { name: "worker", label: "Worker", description: undefined },
+      ],
+    });
+  });
+
   it("normalizes plugin-declared context compaction capabilities", async () => {
     const source = await createPluginSource(tempRoot, "compaction-agent", "1.0.0", {
       planMode: "native",

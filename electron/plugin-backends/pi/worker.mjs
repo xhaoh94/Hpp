@@ -13,7 +13,7 @@ import {
   validateShellCommand,
 } from "./shell-environment.mjs";
 import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
-import { createHppSubagentExtension } from "./subagent-extension.mjs";
+import { createHppSubagentExtension, normalizeHppSubagentConfig } from "./subagent-extension.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
@@ -77,6 +77,7 @@ let resourceLoader = null;
 let uiBridge = null;
 let activeSettingsManager = null;
 let activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
+let activeSubagentConfig = normalizeHppSubagentConfig(undefined);
 let unsubscribe = null;
 let projectPath = "";
 let activePromptId = null;
@@ -667,6 +668,7 @@ const disposeSession = async () => {
   resourceLoader = null;
   activeSettingsManager = null;
   activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
+  activeSubagentConfig = normalizeHppSubagentConfig(undefined);
   actionKeys.clear();
   builtinThinkingLevelMaps = null;
   builtinThinkingLevelMapsFailed = false;
@@ -1145,10 +1147,11 @@ const requireSDKFactory = (name) => {
   return factory;
 };
 
-const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig }) => {
+const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig, subagentConfig }) => {
   await disposeSession();
   activeHostSystemPrompt = String(hostSystemPrompt || "").trim();
   activeCompactionConfig = normalizeAgentCompactionConfig(compactionConfig);
+  activeSubagentConfig = normalizeHppSubagentConfig(subagentConfig);
   projectPath = cwd;
   sdk = await loadPiSDK();
   const eventBus = sdk.createEventBus();
@@ -1195,6 +1198,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     getPermissionMode: () => activePermissionMode,
     requestUI: requestSubagentUI,
     dismissUI: dismissSubagentUIRequests,
+    subagentConfig: activeSubagentConfig,
   });
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,

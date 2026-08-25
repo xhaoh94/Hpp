@@ -247,6 +247,32 @@ function normalizeCompactionCapabilities(value: unknown): AgentCapabilities["com
   return customModel || thinkingLevel ? { customModel, thinkingLevel } : "none";
 }
 
+function normalizeSubagentCapabilities(value: unknown): AgentCapabilities["subagent"] {
+  if (!isRecord(value) || value.supported === false) return "none";
+  const modelSelection = value.modelSelection === "inherit"
+    || value.modelSelection === "custom"
+    || value.modelSelection === "inherit-or-custom"
+    ? value.modelSelection
+    : "inherit-or-custom";
+  const profiles = Array.isArray(value.profiles)
+    ? value.profiles.flatMap((rawProfile) => {
+        if (!isRecord(rawProfile)) return [];
+        const name = asString(rawProfile.name);
+        if (!name || !/^[A-Za-z0-9._:-]+$/.test(name)) return [];
+        return [{
+          name,
+          label: asString(rawProfile.label) || undefined,
+          description: asString(rawProfile.description) || undefined,
+        }];
+      })
+    : undefined;
+  return {
+    configurable: value.configurable === true,
+    modelSelection,
+    ...(profiles && profiles.length > 0 ? { profiles } : {}),
+  };
+}
+
 function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
   return {
@@ -258,6 +284,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
     compaction: normalizeCompactionCapabilities(input.compaction),
+    subagent: normalizeSubagentCapabilities(input.subagent),
   };
 }
 
@@ -266,6 +293,12 @@ function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
     ...capabilities,
     compaction: capabilities.compaction && capabilities.compaction !== "none"
       ? { ...capabilities.compaction }
+      : "none",
+    subagent: capabilities.subagent && capabilities.subagent !== "none"
+      ? {
+          ...capabilities.subagent,
+          profiles: capabilities.subagent.profiles?.map((profile) => ({ ...profile })),
+        }
       : "none",
     configuration: capabilities.configuration === "none"
       ? "none"

@@ -25,6 +25,7 @@ import type {
   AgentActionInvocation,
   AgentActionListOptions,
 } from "../../../shared/agent-actions";
+import type { AgentSubagentConfig } from "../../../shared/agent-subagent";
 
 interface AgentModel {
   id: string;
@@ -49,6 +50,7 @@ interface AgentSendOptions {
 interface AgentInitOptions {
   hostSystemPrompt?: string;
   compaction?: AgentCompactionConfig;
+  subagent?: AgentSubagentConfig;
 }
 
 interface AgentForkTarget {
@@ -330,6 +332,7 @@ export class PiSDKAgent {
   private isReady = false;
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
+  private subagentConfig: AgentSubagentConfig | undefined;
   private guidancePendingResponse = false;
   private piSubagentStarts = new Map<string, PiSubagentStart>();
   private piSubagentTerminalStates = new Map<string, NativeSubagentStatus>();
@@ -346,7 +349,8 @@ export class PiSDKAgent {
     const requestedSessionFilePath = existingSessionFilePath || null;
     const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
     const requestedCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
-    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}\n${JSON.stringify(requestedCompactionConfig)}`;
+    const requestedSubagentConfig = options?.subagent;
+    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}\n${JSON.stringify(requestedCompactionConfig)}\n${JSON.stringify(requestedSubagentConfig || null)}`;
     if (this.initPromise && this.initKey === nextInitKey) {
       return this.initPromise;
     }
@@ -357,6 +361,7 @@ export class PiSDKAgent {
       this.projectPath === projectPath &&
       this.hostSystemPrompt === requestedHostSystemPrompt &&
       JSON.stringify(this.compactionConfig) === JSON.stringify(requestedCompactionConfig) &&
+      JSON.stringify(this.subagentConfig || null) === JSON.stringify(requestedSubagentConfig || null) &&
       (!requestedSessionFilePath || this._sessionFilePath === requestedSessionFilePath)
     ) {
       return;
@@ -369,6 +374,7 @@ export class PiSDKAgent {
     this._sessionFilePath = existingSessionFilePath || null;
     this.hostSystemPrompt = requestedHostSystemPrompt;
     this.compactionConfig = requestedCompactionConfig;
+    this.subagentConfig = requestedSubagentConfig;
     this.models = [];
     this.isReady = false;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
@@ -461,6 +467,7 @@ export class PiSDKAgent {
           sessionFilePath: existingSessionFilePath,
           hostSystemPrompt: this.hostSystemPrompt,
           compactionConfig: this.compactionConfig,
+          subagentConfig: this.subagentConfig,
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "ready") {
