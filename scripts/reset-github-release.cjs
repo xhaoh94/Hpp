@@ -1,4 +1,4 @@
-const { existsSync, readFileSync, mkdirSync, readdirSync } = require("fs");
+const { existsSync, readFileSync, mkdirSync, readdirSync, statSync } = require("fs");
 const { join, resolve } = require("path");
 const https = require("https");
 const { spawnSync } = require("child_process");
