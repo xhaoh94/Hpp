@@ -85,7 +85,7 @@ export function ChatToolbar({
     [favoriteModels]
   );
   const selectableModels = useMemo(
-    () => includeCurrentModel(availableModels, currentModel),
+    () => availableModels.length > 0 ? includeCurrentModel(availableModels, currentModel) : [],
     [availableModels, currentModel]
   );
   const modelsByProvider = useMemo(() => {
@@ -194,7 +194,7 @@ export function ChatToolbar({
             <circle cx="15.5" cy="8.5" r="1.5" />
             <path d="M8 14c0 0 1.5 2 4 2s4-2 4-2" />
           </svg> */}
-          <span>{currentModel?.name || "选择模型"}</span>
+          <span>{selectableModels.length > 0 ? (currentModel?.name || "选择模型") : "请先配置渠道"}</span>
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <path d="M6 9l6 6 6-6" />
           </svg>
@@ -218,7 +218,7 @@ export function ChatToolbar({
               </button>
             </div>
             {selectableModels.length === 0 && (
-              <div className="chat-dropdown-empty">暂无可用模型</div>
+              <div className="chat-dropdown-empty">暂无可用模型。</div>
             )}
             {modelProviders.map((provider) => {
               const providerModels = modelsByProvider.get(provider) || [];

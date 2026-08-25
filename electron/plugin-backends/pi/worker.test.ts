@@ -138,7 +138,7 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
-    if (message.startsWith("/skill:review")) {
+    if (message.startsWith("/skill:review") || message.startsWith("/scout-and-plan") || message.startsWith("/implement") || message.startsWith("/implement-and-review")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
@@ -203,6 +203,22 @@ class FakeSession {
         if (result?.block) break;
       }
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result || {}) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "subagent-ui") {
+      this.listener?.({ type: "agent_start" });
+      const tool = this.registeredTools.find((candidate) => candidate.name === "subagent");
+      const result = await tool.execute(
+        "subagent-call",
+        { agent: "worker", task: "检查认证逻辑" },
+        new AbortController().signal,
+        (update) => this.listener?.({ type: "tool_execution_update", toolName: "subagent", toolCallId: "subagent-call", partialResult: update.details }),
+        { cwd: process.cwd(), model: this.model, thinkingLevel: this.thinkingLevel, hasUI: true, ui: this.uiContext },
+      );
+      this.listener?.({ type: "tool_execution_end", toolName: "subagent", toolCallId: "subagent-call", result: result.details, isError: result.isError === true });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result.details) }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -370,10 +386,21 @@ export class DefaultResourceLoader {
   constructor(options = {}) {
     this.extensionFactories = options.extensionFactories || [];
     this.appendSystemPrompt = options.appendSystemPrompt || [];
+    this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths || [];
   }
   async reload() {}
   getSkills() { return { skills: [{ name: "review", description: "Review changes" }] }; }
-  getPrompts() { return { prompts: [{ name: "release", description: "Prepare release", usage: "[version]" }] }; }
+  getPrompts() {
+    const prompts = [{ name: "release", description: "Prepare release", usage: "[version]" }];
+    if (this.additionalPromptTemplatePaths.length > 0) {
+      prompts.push(
+        { name: "implement", description: "scout 调查、planner 规划、worker 在隔离上下文中实施完整任务" },
+        { name: "scout-and-plan", description: "先由 scout 调查代码库，再由 planner 制定计划，不执行修改" },
+        { name: "implement-and-review", description: "worker 实施、reviewer 审查、worker 根据反馈修正" },
+      );
+    }
+    return { prompts };
+  }
   getExtensions() {
     return {
       extensions: [
@@ -988,6 +1015,97 @@ describe("Pi SDK worker protocol", () => {
       });
   });
 
+  it("routes a child subagent permission request through the parent UI protocol", async () => {
+    const cliDir = join(runtimeRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+    await mkdir(cliDir, { recursive: true });
+    await writeFile(join(cliDir, "cli.js"), [
+      "import { createInterface } from 'node:readline';",
+      "const rl = createInterface({input: process.stdin});",
+      "rl.on('line', (line) => { const command = JSON.parse(line);",
+      "if (command.type === 'prompt') { const question = process.env.PI_TEST_SUBAGENT_QUESTION === '1'; const request = question ? {type:'extension_ui_request', id:'child-question-1', method:'select', title:'Child question', options:['Yes','No']} : {type:'extension_ui_request', id:'child-permission-1', method:'confirm', title:'Child permission', message:'Allow edit?'}; process.stdout.write(JSON.stringify(request)+'\\n'); }",
+      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); } });",
+    ].join("\n"), "utf8");
+
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "subagent-ui", type: "prompt", message: "subagent-ui", permissionMode: "ask" });
+    const request = await worker.waitFor((message) => message.type === "extension_ui_request" && (message.request as Record<string, unknown>)?.source === "pi-subagent");
+    expect(request.request).toMatchObject({
+      method: "confirm",
+      source: "pi-subagent",
+      subagentAgent: "worker",
+      subagentTask: "检查认证逻辑",
+    });
+
+    worker.send({
+      id: "subagent-ui-response",
+      type: "uiResponse",
+      response: {
+        id: String((request.request as Record<string, unknown>).id),
+        confirmed: true,
+      },
+    });
+    await worker.waitFor((message) => message.type === "ui_response_done" && message.id === "subagent-ui-response");
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "subagent-ui");
+
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      result: expect.objectContaining({
+        results: [expect.objectContaining({ output: "approved", model: "test/child", exitCode: 0 })],
+      }),
+    }));
+  }, 20_000);
+
+  it("routes a child subagent question through the parent questionnaire protocol", async () => {
+    const cliDir = join(runtimeRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+    await mkdir(cliDir, { recursive: true });
+    await writeFile(join(cliDir, "cli.js"), [
+      "import { createInterface } from 'node:readline';",
+      "const rl = createInterface({input: process.stdin});",
+      "rl.on('line', (line) => { const command = JSON.parse(line);",
+      "if (command.type === 'prompt') { const question = process.env.PI_TEST_SUBAGENT_QUESTION === '1'; const request = question ? {type:'extension_ui_request', id:'child-question-1', method:'select', title:'Child question', options:['Yes','No']} : {type:'extension_ui_request', id:'child-permission-1', method:'confirm', title:'Child permission', message:'Allow edit?'}; process.stdout.write(JSON.stringify(request)+'\\n'); }",
+      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); } });",
+    ].join("\n"), "utf8");
+
+    const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_SUBAGENT_QUESTION: "1" });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "subagent-question", type: "prompt", message: "subagent-ui", permissionMode: "ask" });
+    const request = await worker.waitFor((message) => message.type === "extension_ui_request" && (message.request as Record<string, unknown>)?.source === "pi-subagent");
+    expect(request.request).toMatchObject({
+      method: "select",
+      source: "pi-subagent",
+      subagentAgent: "worker",
+      subagentTask: "检查认证逻辑",
+      options: ["Yes", "No"],
+    });
+
+    worker.send({
+      id: "subagent-question-response",
+      type: "uiResponse",
+      response: {
+        id: String((request.request as Record<string, unknown>).id),
+        value: "Yes",
+      },
+    });
+    await worker.waitFor((message) => message.type === "ui_response_done" && message.id === "subagent-question-response");
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "subagent-question");
+
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      result: expect.objectContaining({
+        results: [expect.objectContaining({ output: "selected:Yes", model: "test/child", exitCode: 0 })],
+      }),
+    }));
+  }, 20_000);
+
   it("uses Pi's tool_call hook for Hpp permission approval", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -1029,6 +1147,9 @@ describe("Pi SDK worker protocol", () => {
         actions: [
           { kind: "skill", name: "review", description: "Review changes" },
           { kind: "command", name: "release", description: "Prepare release", argumentHint: "[version]" },
+          { kind: "command", name: "implement", description: "scout 调查、planner 规划、worker 在隔离上下文中实施完整任务" },
+          { kind: "command", name: "scout-and-plan", description: "先由 scout 调查代码库，再由 planner 制定计划，不执行修改" },
+          { kind: "command", name: "implement-and-review", description: "worker 实施、reviewer 审查、worker 根据反馈修正" },
           { kind: "command", name: "inspect", description: "Inspect project" },
         ],
       });
@@ -1042,6 +1163,16 @@ describe("Pi SDK worker protocol", () => {
     await expect(worker.waitFor((message) => message.type === "message_end" && (message.message as { text?: unknown })?.text === "/skill:review src"))
       .resolves.toMatchObject({ type: "message_end" });
     await worker.waitFor((message) => message.type === "prompt_done" && message.id === "skill-prompt");
+    worker.send({
+      id: "workflow-prompt",
+      type: "prompt",
+      message: "重构认证模块",
+      action: { kind: "command", name: "scout-and-plan" },
+      permissionMode: "full-access",
+    });
+    await expect(worker.waitFor((message) => message.type === "message_end" && (message.message as { text?: unknown })?.text === "/scout-and-plan 重构认证模块"))
+      .resolves.toMatchObject({ type: "message_end" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "workflow-prompt");
     worker.send({ id: "missing-skill", type: "prompt", message: "", action: { kind: "skill", name: "missing" } });
     await expect(worker.waitFor((message) => message.type === "error" && message.id === "missing-skill"))
       .resolves.toMatchObject({ error: "ACTION_NOT_FOUND: missing" });

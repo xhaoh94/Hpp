@@ -1,5 +1,6 @@
 export type AgentRuntimeOperationKind =
   | "update"
+  | "rollback"
   | "uninstall"
   | "session-dispose"
   | "plugin-install"
@@ -24,7 +25,7 @@ export class AgentRuntimeOperationQueue {
     operation: () => Promise<T>,
   ): Promise<T> {
     const previous = this.tail;
-    let release = () => undefined;
+    let release: () => void = () => {};
     this.tail = new Promise<void>((resolve) => {
       release = resolve;
     });

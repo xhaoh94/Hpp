@@ -104,6 +104,7 @@ export function sanitizeRemoteMessage(
         title: entry.title,
         toolKind: entry.toolKind,
         detail: entry.detail,
+        prompt: entry.prompt,
         command: entry.command,
         exitCode: entry.exitCode,
         timestamp: entry.timestamp,
@@ -138,6 +139,8 @@ export function sanitizeRemoteMessage(
           model: subagent.model,
           path: subagent.path,
           message: subagent.message,
+          prompt: subagent.prompt,
+          ...(subagent.usage ? { usage: subagent.usage } : {}),
         })),
       })),
     } : undefined,
@@ -250,14 +253,15 @@ function buildSessionConfig(
   permissionMode: AgentPermissionMode,
 ): RemoteSessionConfig {
   const chatState = useChatStore.getState();
+  const isActiveSession = chatState.activeSessionId === sessionId;
   return {
-    model: getSessionModel(sessionId) || (chatState.activeSessionId === sessionId ? chatState.currentModel : null),
-    thinkingLevel: getSessionThinking(sessionId) || (
-      chatState.activeSessionId === sessionId ? chatState.thinkingLevel : "medium"
-    ),
+    // 活跃会话必须以当前运行时状态为准。持久化模型可能是旧版本在
+    // 跨 Agent 切换时遗留的值，不能在模型目录为空时继续同步给远端客户端。
+    model: isActiveSession ? chatState.currentModel : getSessionModel(sessionId),
+    thinkingLevel: isActiveSession ? chatState.thinkingLevel : (getSessionThinking(sessionId) || "medium"),
     planModeEnabled,
     permissionMode,
-    availableModels: chatState.activeSessionId === sessionId ? chatState.availableModels : undefined,
+    availableModels: isActiveSession ? chatState.availableModels : undefined,
   };
 }
 

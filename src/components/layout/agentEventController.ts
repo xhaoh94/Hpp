@@ -296,6 +296,7 @@ export function createAgentEventController({
         ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
         title: entry.title,
         ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+        ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
         ...(entry.files !== undefined ? { files: entry.files } : {}),
         ...(entry.toolKind !== undefined ? { toolKind: entry.toolKind } : {}),
         ...(entry.command !== undefined ? { command: entry.command } : {}),
@@ -319,6 +320,7 @@ export function createAgentEventController({
       kind: entry.kind,
       title: entry.title,
       detail: entry.detail,
+      prompt: entry.prompt,
       files: entry.files,
       toolKind: entry.toolKind,
       command: entry.command,
@@ -603,14 +605,22 @@ export function createAgentEventController({
 
   const moveFinalAssistantProcessTextToBubble = (sessionId: string, finalContent: string) => {
     const runtime = getRuntime(sessionId);
-    const lastIndex = runtime.processTextHistory.length - 1;
-    if (lastIndex < 0) return;
-    const lastText = runtime.processTextHistory[lastIndex];
-    const lastEntryId = runtime.processTextEntryIds[lastIndex];
-    if (!lastEntryId || normalizeStreamText(lastText) !== normalizeStreamText(finalContent)) return;
-    useChatStore.getState().removeLastAssistantProcessEntries([lastEntryId], sessionId);
-    runtime.processTextEntryIds.splice(lastIndex, 1);
-    runtime.processTextHistory.splice(lastIndex, 1);
+    const normalizedFinalContent = normalizeStreamText(finalContent);
+    if (!normalizedFinalContent) return;
+
+    // Claude 的 Task/subagent 生命周期可能把同一段最终正文切成多个相邻的
+    // narration 节点。最终正文会被迁移到气泡中，因此末尾所有与最终正文
+    // 相同的 narration 节点都必须移除，不能只移除最后一个，否则处理时间线
+    // 还会残留一份正文，形成“最终正文输出两遍”。
+    while (runtime.processTextHistory.length > 0) {
+      const lastIndex = runtime.processTextHistory.length - 1;
+      const lastText = runtime.processTextHistory[lastIndex];
+      const lastEntryId = runtime.processTextEntryIds[lastIndex];
+      if (!lastEntryId || normalizeStreamText(lastText) !== normalizedFinalContent) break;
+      useChatStore.getState().removeLastAssistantProcessEntries([lastEntryId], sessionId);
+      runtime.processTextEntryIds.splice(lastIndex, 1);
+      runtime.processTextHistory.splice(lastIndex, 1);
+    }
   };
 
   const appendThinkingDelta = (sessionId: string, delta: string) => {

@@ -19,11 +19,23 @@ const copyAgentWorkerPlugin = () => ({
       ["electron/plugin-backends/pi/pi-fork-utils.mjs", "pi-fork-utils.mjs"],
       ["electron/plugin-backends/pi/shell-environment.mjs", "shell-environment.mjs"],
       ["electron/plugin-backends/pi/plan-mode-policy.mjs", "plan-mode-policy.mjs"],
+      ["electron/plugin-backends/pi/subagent-extension.mjs", "subagent-extension.mjs"],
+      ["electron/plugin-backends/pi/subagent-bridge-extension.mjs", "subagent-bridge-extension.mjs"],
       ["electron/plugin-backends/claude/worker.mjs", "claude-sdk-worker.mjs"],
       ["electron/plugin-backends/claude/openai-anthropic-adapter.mjs", "openai-anthropic-adapter.mjs"],
     ];
     for (const [source, target] of workers) {
       copyFileSync(resolve(__dirname, source), resolve(targetDir, target));
+    }
+    const subagentPromptSourceDir = resolve(__dirname, "electron/plugin-backends/pi/subagent-prompts");
+    const subagentPromptTargetDir = resolve(targetDir, "subagent-prompts");
+    mkdirSync(subagentPromptTargetDir, { recursive: true });
+    for (const entry of readdirSync(subagentPromptSourceDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      copyFileSync(
+        resolve(subagentPromptSourceDir, entry.name),
+        resolve(subagentPromptTargetDir, entry.name),
+      );
     }
     const backendRoot = resolve(__dirname, "electron/plugin-backends");
     const backendEntryPoints = Object.fromEntries(

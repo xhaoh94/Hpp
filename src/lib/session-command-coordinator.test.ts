@@ -158,6 +158,33 @@ describe("SessionCommandCoordinator", () => {
     expect(useChatStore.getState().currentModel).toEqual(retainedModel);
   });
 
+  it("does not treat a persisted model without a discovered catalog as available", async () => {
+    const staleSession = session("session-stale-model-only");
+    const staleModel = {
+      id: "old-model",
+      name: "Old model",
+      provider: "old-provider",
+      reasoning: false,
+    };
+    useProjectStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        sessions: [...project.sessions, staleSession],
+      })),
+      activeSessionId: staleSession.id,
+      initializedSessionIds: new Set([...state.initializedSessionIds, staleSession.id]),
+    }));
+    useChatStore.setState({
+      activeSessionId: staleSession.id,
+      currentModel: staleModel,
+      availableModels: [],
+    });
+    saveSessionModel(staleSession.id, staleModel);
+    electronAPI.agentGetModels.mockResolvedValue([]);
+
+    await expect(SessionCommandCoordinator.getAvailableModels(staleSession.id)).resolves.toEqual([]);
+  });
+
   it("still clears models when an explicit agent reload confirms an empty catalog", async () => {
     const reloadSession = session("session-explicit-empty-models");
     const previousModel = {

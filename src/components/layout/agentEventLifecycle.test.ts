@@ -305,6 +305,51 @@ describe("agent event terminal reconciliation", () => {
     }));
   });
 
+  it("removes every trailing duplicate of the final narration before showing the answer bubble", () => {
+    const harness = createHarness();
+    useChatStore.getState().addMessage({
+      id: "duplicate-final-user",
+      role: "user",
+      content: "run",
+      timestamp: 90,
+    }, SESSION_ID);
+
+    dispatchAgentEvent({ type: "stream_start", sessionId: SESSION_ID }, harness.controller);
+    dispatchAgentEvent({
+      type: "stream_delta",
+      delta: "子 Agent 成功了。",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+    dispatchAgentEvent({
+      type: "subagent_event",
+      id: "subagent-completed-1",
+      state: "completed",
+      phase: "completed",
+      subagents: [{ id: "subagent-1", label: "General purpose", status: "completed" }],
+      sessionId: SESSION_ID,
+    }, harness.controller);
+
+    const finalContent = "**成功。** 子 Agent 已按要求运行。";
+    dispatchAgentEvent({ type: "stream_delta", delta: finalContent, sessionId: SESSION_ID }, harness.controller);
+    // 第二个 Task 生命周期事件会结束当前 narration 节点；模拟 Claude
+    // 在同一回合再次交付相同最终正文的情况。
+    dispatchAgentEvent({
+      type: "subagent_event",
+      id: "subagent-completed-2",
+      state: "completed",
+      phase: "completed",
+      subagents: [{ id: "subagent-1", label: "General purpose", status: "completed" }],
+      sessionId: SESSION_ID,
+    }, harness.controller);
+    dispatchAgentEvent({ type: "stream_delta", delta: finalContent, sessionId: SESSION_ID }, harness.controller);
+    dispatchAgentEvent({ type: "stream_end", content: "", sessionId: SESSION_ID }, harness.controller);
+
+    const assistant = getMessages().find((message) => message.role === "assistant");
+    expect(assistant?.content).toBe(finalContent);
+    expect(assistant?.process?.entries.filter((entry) => entry.detail === finalContent)).toHaveLength(0);
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it("settles a missing-terminal stream on backend_idle and rejects later output", () => {
     const harness = createHarness();
     useChatStore.getState().addMessage({

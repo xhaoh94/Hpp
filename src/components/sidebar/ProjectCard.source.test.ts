@@ -4,6 +4,7 @@ import projectCardSource from "./ProjectCard.tsx?raw";
 import projectViewSource from "./ProjectView.tsx?raw";
 
 const chatPanelStyles = readFileSync(new URL("../layout/ChatPanel.css", import.meta.url), "utf8");
+const sidebarStyles = readFileSync(new URL("./Sidebar.css", import.meta.url), "utf8");
 
 describe("ProjectCard lifecycle regression constraints", () => {
   it("waits for every backend close and preserves the project when any close truly fails", () => {
@@ -69,5 +70,19 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(titleRule).toContain("font-size: 12px");
     expect(titleRule).toContain("font-weight: 400");
     expect(titleRule).toContain("line-height: 18px");
+  });
+
+  it("prevents the hidden max-content Agent measurement row from creating horizontal overflow", () => {
+    const sidebarContentRule = sidebarStyles.slice(
+      sidebarStyles.indexOf(".sidebar-content {"),
+      sidebarStyles.indexOf("}\n\n.placeholder-text"),
+    );
+    const terminalRule = sidebarStyles.slice(
+      sidebarStyles.indexOf(".project-terminals {"),
+      sidebarStyles.indexOf("}\n\n.project-terminal-measurements"),
+    );
+    expect(sidebarContentRule).toContain("overflow-x: hidden");
+    expect(terminalRule).toContain("overflow-x: hidden");
+    expect(terminalRule).toContain("overflow-y: visible");
   });
 });

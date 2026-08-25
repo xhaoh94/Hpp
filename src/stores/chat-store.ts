@@ -3,7 +3,7 @@ import type { SessionReference } from "./project-store";
 import type { AgentImagePayload } from "@/types";
 import type { DiffLike } from "@shared/diff-summary";
 import type { SharedModel } from "@shared/models";
-import type { ProcessEntryView } from "@shared/process-view";
+import type { ProcessEntryView, ProcessSubagentStopReason, ProcessSubagentUsage } from "@shared/process-view";
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
 import {
@@ -46,6 +46,9 @@ export interface AgentSubagent {
   model?: string;
   path?: string;
   message?: string;
+  prompt?: string;
+  stopReason?: ProcessSubagentStopReason;
+  usage?: ProcessSubagentUsage;
 }
 
 export interface AgentProcessEntry extends ProcessEntryView {
@@ -53,6 +56,7 @@ export interface AgentProcessEntry extends ProcessEntryView {
   type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question" | "subagent";
   title: string;
   detail?: string;
+  prompt?: string;
   files?: AgentProcessFile[];
   toolKind?: string;
   command?: string;
@@ -440,13 +444,14 @@ const mergeProcessEntrySubagents = (
         : subagent.label,
       path: subagent.path || previous.path,
       model: subagent.model || previous.model,
+      prompt: subagent.prompt || previous.prompt,
     });
   }
   return Array.from(merged.values());
 };
 
 const enrichProcessSubagentIdentities = (entries: AgentProcessEntry[]) => {
-  const identities = new Map<string, Pick<AgentSubagent, "id" | "label" | "path" | "model">>();
+  const identities = new Map<string, Pick<AgentSubagent, "id" | "label" | "path" | "model" | "prompt">>();
   for (const entry of entries) {
     for (const subagent of entry.subagents || []) {
       const existing = identities.get(subagent.id);
@@ -456,6 +461,7 @@ const enrichProcessSubagentIdentities = (entries: AgentProcessEntry[]) => {
           label: subagent.label,
           path: subagent.path,
           model: subagent.model,
+          prompt: subagent.prompt,
         });
         continue;
       }
@@ -466,6 +472,7 @@ const enrichProcessSubagentIdentities = (entries: AgentProcessEntry[]) => {
           : existing.label,
         path: subagent.path || existing.path,
         model: subagent.model || existing.model,
+        prompt: subagent.prompt || existing.prompt,
       });
     }
   }
@@ -481,9 +488,10 @@ const enrichProcessSubagentIdentities = (entries: AgentProcessEntry[]) => {
         : subagent.label;
       const path = subagent.path || identity.path;
       const model = subagent.model || identity.model;
-      if (label === subagent.label && path === subagent.path && model === subagent.model) return subagent;
+      const prompt = subagent.prompt || identity.prompt;
+      if (label === subagent.label && path === subagent.path && model === subagent.model && prompt === subagent.prompt) return subagent;
       changed = true;
-      return { ...subagent, label, path, model };
+      return { ...subagent, label, path, model, prompt };
     });
     return changed ? { ...entry, subagents } : entry;
   });
@@ -1443,12 +1451,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: sessionMsgs,
         sessionMessages: nextSessionMessages,
         activeSessionId: sessionId,
+        // 模型目录和当前模型属于会话运行时状态，不能跨会话沿用。
+        // 新会话的模型配置由 useSessionModels 在切换后重新发现。
+        currentModel: null,
+        availableModels: [],
+        thinkingLevel: "medium",
       });
     } else {
       set({
         messages: [],
         sessionMessages: nextSessionMessages,
         activeSessionId: null,
+        currentModel: null,
+        availableModels: [],
+        thinkingLevel: "medium",
       });
     }
   },

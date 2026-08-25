@@ -34,6 +34,8 @@ let accumulatedResultUsage = {};
 let accumulatedResultCostUsd = 0;
 let pendingPermissions = new Map();
 let toolUses = new Map();
+let subagentToolUseIds = new Set();
+let completedSubagentNotifications = new Map();
 let streamBlockTypes = new Map();
 let streamBlockToolIds = new Map();
 let activeAdapter = null;
@@ -44,6 +46,11 @@ const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const asRecord = (value) => isRecord(value) ? value : {};
 const stringValue = (value) => typeof value === "string" ? value : "";
+const isSubagentToolName = (value) => [
+  "agent", "delegate", "delegate_agent", "delegate_task", "run_agent", "run_subagent",
+  "spawn_agent", "spawn_subagent", "spawnagent", "task",
+]
+  .includes(String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_"));
 const redact = (value) => {
   const secret = activeProvider?.apiKey;
   return secret ? String(value || "").split(secret).join("[REDACTED]") : String(value || "");
@@ -95,16 +102,16 @@ const loadSDK = async () => {
   const packageDir = join(packageRoot, "node_modules", "@anthropic-ai", "claude-agent-sdk");
   try {
     const packageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
-    if (packageJson.version !== "0.3.215") {
-      throw new Error(`需要 0.3.215，当前为 ${packageJson.version || "未知"}`);
+    if (typeof packageJson.version !== "string" || !packageJson.version.trim()) {
+      throw new Error("SDK package.json 缺少有效版本");
     }
     const nativePackageName = getNativePackageName();
     if (!nativePackageName) throw new Error(`不支持当前平台：${process.platform}-${process.arch}`);
     const nativePackageDir = join(packageRoot, "node_modules", "@anthropic-ai", nativePackageName);
     const nativePackageJson = JSON.parse(readFileSync(join(nativePackageDir, "package.json"), "utf8"));
     const nativeExecutable = join(nativePackageDir, process.platform === "win32" ? "claude.exe" : "claude");
-    if (nativePackageJson.version !== "0.3.215" || !existsSync(nativeExecutable)) {
-      throw new Error("当前平台的 Claude Code 原生运行组件不完整");
+    if (nativePackageJson.version !== packageJson.version || !existsSync(nativeExecutable)) {
+      throw new Error(`当前平台的 Claude Code 原生运行组件不完整或版本不一致（SDK ${packageJson.version || "未知"}，原生组件 ${nativePackageJson.version || "未知"}）`);
     }
     const rootExport = packageJson.exports?.["."];
     const entry = typeof rootExport === "string" ? rootExport : rootExport?.import || packageJson.module || packageJson.main;
@@ -220,7 +227,7 @@ const prepareSDKProvider = async (provider) => {
     await closeActiveAdapter();
     return provider;
   }
-  const key = [provider.providerId, provider.baseUrl, provider.authMode, provider.apiKey].join("\u0000");
+  const key = [provider.providerId, provider.baseUrl, provider.authMode, provider.apiKey, provider.modelId].join("\u0000");
   if (!activeAdapter || activeAdapterKey !== key) {
     await closeActiveAdapter();
     activeAdapter = await startOpenAIChatAdapter(provider);
@@ -393,6 +400,30 @@ const resolveUIResponse = (response) => {
     : { behavior: "deny", message: "用户拒绝了操作" });
 };
 
+const isToolInputEcho = (value, toolInput) => {
+  if (!isRecord(toolInput)) return false;
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try { candidate = JSON.parse(candidate); } catch { return false; }
+  }
+  if (!isRecord(candidate)) return false;
+  const prompt = stringValue(candidate.prompt);
+  return !!prompt
+    && prompt === stringValue(toolInput.prompt)
+    && candidate.result == null
+    && candidate.output == null
+    && candidate.content == null
+    && candidate.message == null
+    && candidate.summary == null;
+};
+
+const mergeToolResultContent = (toolUseResult, blockContent, resultText, toolInput) => {
+  const fallbackContent = resultText || (!isToolInputEcho(blockContent, toolInput) ? blockContent : undefined);
+  if (!isRecord(toolUseResult)) return toolUseResult || fallbackContent;
+  if (toolUseResult.content != null || fallbackContent == null) return toolUseResult;
+  return { ...toolUseResult, content: fallbackContent };
+};
+
 const sanitizeToolOutput = (value) => {
   if (value == null) return value;
   try {
@@ -412,19 +443,26 @@ const sanitizeToolOutput = (value) => {
 
 const handleStreamEvent = (message) => {
   const event = asRecord(message.event);
+  const parentToolUseId = stringValue(message.parent_tool_use_id);
+  const isSubagentChild = parentToolUseId && subagentToolUseIds.has(parentToolUseId);
   if (event.type === "content_block_start") {
     const block = asRecord(event.content_block);
     streamBlockTypes.set(event.index, block.type);
     if (block.type === "tool_use") {
       const toolUseId = stringValue(block.id);
-      toolUses.set(toolUseId, { toolName: stringValue(block.name), input: {} });
+      const toolName = stringValue(block.name);
+      if (isSubagentToolName(toolName)) subagentToolUseIds.add(toolUseId);
+      toolUses.set(toolUseId, { toolName, input: {}, isSubagent: isSubagentToolName(toolName) });
       streamBlockToolIds.set(event.index, toolUseId);
-      send({ type: "tool_execution_start", toolUseId, toolName: block.name, input: {} });
+      if (!isSubagentChild || isSubagentToolName(toolName)) {
+        send({ type: "tool_execution_start", toolUseId, toolName, input: {}, parentToolUseId: parentToolUseId || undefined });
+      }
     }
     return;
   }
   if (event.type === "content_block_delta") {
     const delta = asRecord(event.delta);
+    if (isSubagentChild) return;
     if (delta.type === "text_delta") send({ type: "text_delta", delta: stringValue(delta.text) });
     else if (delta.type === "thinking_delta") send({ type: "thinking_delta", delta: stringValue(delta.thinking) });
     else if (delta.type === "input_json_delta") {
@@ -451,15 +489,29 @@ const handleStreamEvent = (message) => {
 
 const handleAssistant = (message) => {
   const content = asRecord(message.message).content;
+  const parentToolUseId = stringValue(message.parent_tool_use_id);
+  const isSubagentChild = parentToolUseId && subagentToolUseIds.has(parentToolUseId);
   if (Array.isArray(content)) {
     for (const block of content.filter(isRecord)) {
       if (block.type !== "tool_use") continue;
       const toolUseId = stringValue(block.id);
+      const toolName = stringValue(block.name);
+      const isSubagent = isSubagentToolName(toolName);
       const tracked = toolUses.get(toolUseId);
-      toolUses.set(toolUseId, { toolName: stringValue(block.name), input: asRecord(block.input) });
-      if (!tracked) send({ type: "tool_execution_start", toolUseId, toolName: block.name, input: block.input });
+      if (isSubagent) subagentToolUseIds.add(toolUseId);
+      toolUses.set(toolUseId, { toolName, input: asRecord(block.input), isSubagent });
+      if (!tracked && (!isSubagentChild || isSubagent)) {
+        send({
+          type: "tool_execution_start",
+          toolUseId,
+          toolName,
+          input: block.input,
+          parentToolUseId: parentToolUseId || undefined,
+        });
+      }
     }
   }
+  if (isSubagentChild) return;
   send({
     type: "message_end",
     text: extractText(message.message),
@@ -469,20 +521,79 @@ const handleAssistant = (message) => {
   });
 };
 
-const handleUserToolResults = (message) => {
+const readSubagentResult = async (toolUseResult, attempts = 1) => {
+  const agentId = stringValue(
+    toolUseResult?.agentId || toolUseResult?.agent_id || toolUseResult?.taskId || toolUseResult?.task_id,
+  );
+  const parentSessionId = actualSessionId || sessionFilePath;
+  if (!agentId || !parentSessionId || typeof sdk.getSubagentMessages !== "function") return "";
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const scopedMessages = await sdk.getSubagentMessages(parentSessionId, agentId, { dir: projectPath });
+      const messages = scopedMessages.length > 0
+        ? scopedMessages
+        : await sdk.getSubagentMessages(parentSessionId, agentId);
+      for (const entry of [...messages].reverse()) {
+        if (entry?.type !== "assistant") continue;
+        const text = extractHistoryText(entry.message);
+        if (text) return text;
+      }
+    } catch {
+      // Older/custom SDKs may not expose persisted subagent transcripts.
+      return "";
+    }
+    if (attempt + 1 < attempts) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+  }
+  return "";
+};
+
+const emitSubagentResultWhenAvailable = async (message, status) => {
+  const resultText = await readSubagentResult(message, 41);
+  if (!resultText) return;
+  send({
+    type: "subagent_update",
+    taskId: message.task_id || message.taskId,
+    toolUseId: message.tool_use_id || message.toolUseId,
+    agentId: message.agent_id || message.agentId,
+    description: message.description,
+    prompt: message.prompt,
+    taskType: message.task_type || message.taskType,
+    status,
+    model: message.model,
+    durationMs: message.duration_ms || message.durationMs,
+    totalTokens: message.total_tokens || message.totalTokens,
+    totalToolUseCount: message.tool_uses || message.totalToolUseCount,
+    background: message.run_in_background === true || message.background === true,
+    result: mergeToolResultContent(message.result, undefined, resultText, message),
+  });
+};
+
+const handleUserToolResults = async (message) => {
   const content = asRecord(message.message).content;
   if (!Array.isArray(content)) return;
+  const parentToolUseId = stringValue(message.parent_tool_use_id);
+  if (parentToolUseId && subagentToolUseIds.has(parentToolUseId)) return;
   for (const block of content.filter(isRecord)) {
     if (block.type !== "tool_result") continue;
     const toolUseId = stringValue(block.tool_use_id);
     const tool = toolUses.get(toolUseId) || {};
+    const toolUseResult = message.tool_use_result;
+    const resultText = isSubagentToolName(tool.toolName)
+      ? await readSubagentResult(toolUseResult)
+      : "";
     send({
       type: "tool_execution_end",
       toolUseId,
       toolName: tool.toolName || "工具调用",
       input: tool.input,
-      output: sanitizeToolOutput(message.tool_use_result ?? block.content),
+      output: sanitizeToolOutput(mergeToolResultContent(toolUseResult, block.content, resultText, tool.input)),
+      toolUseResult,
+      agentId: toolUseResult?.agentId ?? toolUseResult?.agent_id,
+      agentType: toolUseResult?.agentType ?? toolUseResult?.agent_type,
       isError: block.is_error === true,
+      parentToolUseId: parentToolUseId || undefined,
     });
     toolUses.delete(toolUseId);
   }
@@ -490,6 +601,8 @@ const handleUserToolResults = (message) => {
 
 const resetCommandTracking = () => {
   activeSDKCommandId = null;
+  subagentToolUseIds.clear();
+  completedSubagentNotifications.clear();
   guidanceCommands.clear();
   deferredSDKResult = null;
   accumulatedResultUsage = {};
@@ -557,6 +670,8 @@ const handleCommandLifecycle = (message) => {
 
 const handleSDKResult = (message) => {
   recordResultUsage(message);
+  const completedSubagents = [...completedSubagentNotifications.values()];
+  completedSubagentNotifications.clear();
   const completedCommandId = activeSDKCommandId;
   if (completedCommandId && guidanceCommands.has(completedCommandId)) {
     guidanceCommands.delete(completedCommandId);
@@ -566,10 +681,15 @@ const handleSDKResult = (message) => {
   // priority:"now" closes the interrupted model request with a result before
   // the queued guidance command starts. Keep the Hpp turn alive until the last
   // accepted async user command has produced its own result.
-  if (guidanceCommands.size === 0) finishSDKPromptFromResult();
+  if (guidanceCommands.size === 0) {
+    finishSDKPromptFromResult();
+    for (const completed of completedSubagents) {
+      void emitSubagentResultWhenAvailable(completed.message, completed.status);
+    }
+  }
 };
 
-const handleSDKMessage = (message) => {
+const handleSDKMessage = async (message) => {
   if (message?.session_id && (message.session_id !== sessionFilePath || deferredFork || isNewSession)) {
     actualSessionId = message.session_id;
     sessionFilePath = actualSessionId;
@@ -584,9 +704,33 @@ const handleSDKMessage = (message) => {
   }
   if (message.type === "stream_event") handleStreamEvent(message);
   else if (message.type === "assistant") handleAssistant(message);
-  else if (message.type === "user") handleUserToolResults(message);
+  else if (message.type === "user") await handleUserToolResults(message);
   else if (message.type === "command_lifecycle") handleCommandLifecycle(message);
-  else if (message.type === "system" && message.subtype === "compact_boundary") {
+  else if (message.type === "system" && ["task_started", "task_notification", "task_progress", "task_completed"].includes(message.subtype)) {
+    const status = message.status || message.state || (message.subtype === "task_started" ? "running" : undefined);
+    const terminal = ["completed", "complete", "done", "success", "succeeded"].includes(String(status || "").toLowerCase());
+    send({
+      type: message.subtype === "task_started" ? "subagent_started" : "subagent_update",
+      taskId: message.task_id || message.taskId,
+      toolUseId: message.tool_use_id || message.toolUseId,
+      agentId: message.agent_id || message.agentId,
+      description: message.description,
+      prompt: message.prompt,
+      taskType: message.task_type || message.taskType,
+      status,
+      model: message.model,
+      durationMs: message.duration_ms || message.durationMs,
+      totalTokens: message.total_tokens || message.totalTokens,
+      totalToolUseCount: message.tool_uses || message.totalToolUseCount,
+      background: message.run_in_background === true || message.background === true,
+      result: message.result,
+    });
+    if (terminal) {
+      const key = String(message.agent_id || message.agentId || message.task_id || message.taskId || message.tool_use_id || message.toolUseId || "");
+      if (key) completedSubagentNotifications.set(key, { message, status });
+      void emitSubagentResultWhenAvailable(message, status);
+    }
+  } else if (message.type === "system" && message.subtype === "compact_boundary") {
     // Claude Agent SDK exposes the completed compact boundary, but no matching
     // compaction-start notification. Mark it explicitly as a completed event.
     send({ type: "context_compaction", uuid: message.uuid, phase: "completed" });
@@ -668,7 +812,7 @@ const startQuery = async () => {
     try {
       for await (const message of queryInstance) {
         if (generation !== queryGeneration) break;
-        handleSDKMessage(message);
+        await handleSDKMessage(message);
       }
     } catch (error) {
       terminalError = error?.message || String(error);
@@ -870,7 +1014,7 @@ const handleCommand = async (command) => {
       case "setModel": {
         if (activePromptId) throw new Error("SESSION_BUSY");
         const nextProvider = normalizeConfig(command.config, command.provider, command.modelId);
-        if (nextProvider.providerId === activeProvider.providerId) {
+        if (nextProvider.providerId === activeProvider.providerId && nextProvider.endpoint !== "chat-completions") {
           await activeQuery?.setModel(command.modelId);
           activeProvider = nextProvider;
           currentModelId = command.modelId;

@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { getPiMessageText, resolvePiForkEntryId } from "./pi-fork-utils.mjs";
 import {
@@ -13,10 +13,12 @@ import {
   validateShellCommand,
 } from "./shell-environment.mjs";
 import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
+import { createHppSubagentExtension } from "./subagent-extension.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
 const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
+const BUILTIN_SUBAGENT_PROMPT_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "subagent-prompts");
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const MUTATING_TOOLS = new Set(["edit", "write"]);
 const PLAN_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -81,6 +83,74 @@ let activePromptId = null;
 let activePermissionMode = "full-access";
 let activePlanMode = false;
 let activeHostSystemPrompt = "";
+const pendingSubagentUIRequests = new Map();
+
+const requestSubagentUI = (request, context = {}) => {
+  const childRequestId = request?.id !== undefined && request?.id !== null
+    ? String(request.id)
+    : randomUUID();
+  const requestId = `pi-subagent-ui-${randomUUID()}`;
+  return new Promise((resolve) => {
+    pendingSubagentUIRequests.set(requestId, {
+      resolve,
+      childRequestId,
+      ownerId: context.ownerId,
+      request,
+    });
+    send({
+      type: "extension_ui_request",
+      request: {
+        ...request,
+        id: requestId,
+        requestId,
+        source: "pi-subagent",
+        subagentAgent: context.agent,
+        subagentTask: context.task,
+        subagentStep: context.step,
+      },
+    });
+  });
+};
+
+const handleSubagentUIResponse = (response) => {
+  const requestId = response?.id !== undefined && response?.id !== null ? String(response.id) : "";
+  const pending = requestId ? pendingSubagentUIRequests.get(requestId) : undefined;
+  if (!pending) return false;
+  pendingSubagentUIRequests.delete(requestId);
+  pending.resolve({
+    ...response,
+    id: pending.childRequestId,
+  });
+  return true;
+};
+
+const dismissSubagentUIRequests = (ownerId, reason = "dismissed") => {
+  for (const [requestId, pending] of [...pendingSubagentUIRequests.entries()]) {
+    if (ownerId && pending.ownerId !== ownerId) continue;
+    pendingSubagentUIRequests.delete(requestId);
+    pending.resolve({
+      id: pending.childRequestId,
+      cancelled: true,
+      reason,
+    });
+    send({
+      type: "process_event",
+      id: requestId,
+      requestId,
+      entryType: "question",
+      kind: "question",
+      title: "子 Agent 交互已取消",
+      detail: {
+        ...pending.request,
+        source: "pi-subagent",
+        reason,
+      },
+      state: "interrupted",
+      phase: "completed",
+    });
+  }
+};
+
 // Set after a guidance command resolves (steer is only queued at that point).
 // Cleared when the steer message actually enters the agent message flow
 // (message_start with a user message), which happens right before the agent
@@ -572,6 +642,7 @@ const disposeSession = async () => {
   planModeToolNames = [];
   activeCompactionId = null;
   completedPromptIds.clear();
+  dismissSubagentUIRequests(undefined, "dispose");
   unsubscribe?.();
   unsubscribe = null;
   uiBridge?.dismissAll("dispose");
@@ -1116,12 +1187,35 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     cwd,
     shellAvailable,
   });
+  const hppSubagentExtension = createHppSubagentExtension({
+    packageRoot: process.env.PI_SDK_PACKAGE_ROOT,
+    agentDir,
+    hostSystemPrompt: activeHostSystemPrompt,
+    nodePath: process.env.PI_NODE_PATH || process.execPath,
+    getPermissionMode: () => activePermissionMode,
+    requestUI: requestSubagentUI,
+    dismissUI: dismissSubagentUIRequests,
+  });
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager: effectiveSettingsManager,
     eventBus,
-    extensionFactories: [hppPermissionExtension, hppRuntimePolicyExtension, hppCompactionExtension],
+    // Keep workflow prompt templates after user/project prompt paths. Pi's
+    // prompt loader keeps the first template with a given name, so an explicit
+    // user or project /implement prompt overrides this built-in fallback.
+    additionalPromptTemplatePaths: existsSync(BUILTIN_SUBAGENT_PROMPT_DIR)
+      ? [BUILTIN_SUBAGENT_PROMPT_DIR]
+      : [],
+    // Pi loads configured extensions before inline factories and resolves
+    // duplicate tool names using the first registration. Keep the built-in
+    // subagent last so a user/project/installed Pi extension wins.
+    extensionFactories: [
+      hppPermissionExtension,
+      hppRuntimePolicyExtension,
+      hppCompactionExtension,
+      hppSubagentExtension,
+    ],
     appendSystemPrompt: [
       FILE_DISCOVERY_GUIDANCE,
       shellEnvironmentContract,
@@ -1553,6 +1647,7 @@ const handleCommand = async (command) => {
       }
       case "abort":
         uiBridge?.dismissAll("abort");
+        dismissSubagentUIRequests(undefined, "abort");
         await session?.abort();
         send({ type: "aborted", id: command.id });
         break;
@@ -1589,7 +1684,7 @@ const handleCommand = async (command) => {
         send({ type: "compaction_config_changed", id: command.id, config: activeCompactionConfig });
         break;
       case "uiResponse":
-        if (!uiBridge?.handleResponse(command.response)) {
+        if (!uiBridge?.handleResponse(command.response) && !handleSubagentUIResponse(command.response)) {
           const responseId = command.response?.id;
           throw new Error(responseId
             ? `Unknown Pi UI request: ${responseId}`

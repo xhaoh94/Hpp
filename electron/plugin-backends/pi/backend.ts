@@ -4,6 +4,16 @@ import { join } from "path";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import {
+  formatSubagentModel,
+  humanizeSubagentLabel,
+  isNativeSubagentToolName,
+  isTerminalNativeSubagentStatus,
+  normalizeNativeSubagentStatus,
+  normalizeNativeSubagentStopReason,
+  type NativeSubagentStatus,
+  type NativeSubagentStopReason,
+} from "../../plugin-runtime/subagent-events";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
 import {
@@ -102,6 +112,196 @@ const PI_WORKER_INIT_TIMEOUT_MS = 120_000;
 // clear its model picker. Wait (bounded) for the compaction to settle before
 // asking the worker for the model list.
 const PI_COMPACTION_MODEL_WAIT_MS = 30_000;
+const PI_SUBAGENT_DETAIL_CAP = 4000;
+
+type PiSubagentStart = {
+  startedAt: number;
+  args: UnknownRecord;
+  action?: "spawnAgent" | "resumeAgent";
+};
+
+const truncatePiSubagentText = (value: unknown, maxLength = PI_SUBAGENT_DETAIL_CAP) => {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return undefined;
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}…`;
+};
+
+const getPiSubagentDetails = (value: unknown): UnknownRecord => {
+  const payload = asRecord(value);
+  if (isRecord(payload.details)) return payload.details;
+  return Array.isArray(payload.results) ? payload : {};
+};
+
+const getPiSubagentTaskItems = (
+  args: UnknownRecord,
+  fallbackStatus: NativeSubagentStatus = "pending",
+) => {
+  const collection = Array.isArray(args.chain)
+    ? args.chain
+    : Array.isArray(args.tasks)
+      ? args.tasks
+      : [args];
+  return collection.flatMap((value, index) => {
+    const item = asRecord(value);
+    const agent = String(item.agent || item.name || "subagent").trim();
+    const task = String(item.task || item.prompt || item.message || "").trim();
+    const prompt = truncatePiSubagentText(task);
+    if (!agent && !prompt) return [];
+    return [{
+      id: `task-${index + 1}`,
+      label: humanizeSubagentLabel(agent || `subagent-${index + 1}`),
+      status: fallbackStatus,
+      model: typeof item.model === "string" ? item.model : undefined,
+      message: undefined,
+      prompt,
+    }];
+  });
+};
+
+const getPiSubagentUsage = (result: UnknownRecord) => {
+  const usage = asRecord(result.usage);
+  const numberValue = (...values: unknown[]) => {
+    for (const value of values) {
+      const number = Number(value);
+      if (Number.isFinite(number) && number >= 0) return number;
+    }
+    return undefined;
+  };
+  const costRecord = asRecord(usage.cost);
+  const parsed = {
+    inputTokens: numberValue(usage.inputTokens, usage.input, usage.promptTokens),
+    outputTokens: numberValue(usage.outputTokens, usage.output, usage.completionTokens),
+    cacheReadTokens: numberValue(usage.cacheReadTokens, usage.cacheRead, usage.cache_read),
+    cacheWriteTokens: numberValue(usage.cacheWriteTokens, usage.cacheWrite, usage.cache_write),
+    totalTokens: numberValue(usage.totalTokens, usage.total_tokens),
+    cost: numberValue(usage.cost, costRecord.total, costRecord.totalUsd, costRecord.usd),
+    turns: numberValue(usage.turns),
+  };
+  const compact = Object.fromEntries(Object.entries(parsed).filter(([, value]) => value !== undefined));
+  return Object.keys(compact).length > 0 ? compact : undefined;
+};
+
+const getPiSubagentResultText = (result: UnknownRecord) => {
+  const direct = [result.output, result.message, result.summary, result.detail, result.errorMessage, result.stderr]
+    .map((value) => truncatePiSubagentText(value))
+    .find(Boolean);
+  if (direct) return direct;
+  if (Array.isArray(result.messages)) {
+    for (let index = result.messages.length - 1; index >= 0; index -= 1) {
+      const message = asRecord(result.messages[index]);
+      if (message.role !== "assistant") continue;
+      const content = Array.isArray(message.content)
+        ? message.content.map((part) => {
+          const item = asRecord(part);
+          return typeof item.text === "string" ? item.text : typeof part === "string" ? part : "";
+        }).filter(Boolean).join("")
+        : typeof message.content === "string" ? message.content : "";
+      const text = truncatePiSubagentText(content);
+      if (text) return text;
+    }
+  }
+  return undefined;
+};
+
+const getPiSubagentResultStatus = (result: UnknownRecord, terminal: boolean): NativeSubagentStatus => {
+  if (result.exitCode === -1) return "running";
+  const stopReason = normalizeNativeSubagentStopReason(result.stopReason);
+  if (stopReason === "timeout") return "error";
+  const explicit = normalizeNativeSubagentStatus(result.status ?? result.state ?? result.stopReason);
+  if (explicit) return explicit;
+  if (result.isError === true || (typeof result.exitCode === "number" && result.exitCode !== 0)) return "error";
+  return terminal ? "completed" : "running";
+};
+
+const getPiSubagentOverallState = (
+  results: Array<{ status: NativeSubagentStatus }>,
+  record: UnknownRecord,
+  terminal: boolean,
+): "running" | "completed" | "error" | "interrupted" => {
+  if (results.some((result) => result.status === "running" || result.status === "pending")) return "running";
+  if (results.some((result) => result.status === "interrupted")) return "interrupted";
+  if (results.some((result) => result.status === "error")) return "error";
+  if (record.isError === true) {
+    const text = `${String(record.error || "")} ${String(record.result || "")}`.toLowerCase();
+    return text.includes("abort") || text.includes("cancel") || text.includes("中断") ? "interrupted" : "error";
+  }
+  return terminal ? "completed" : "running";
+};
+
+const buildPiSubagentEvent = (
+  record: UnknownRecord,
+  start: PiSubagentStart | undefined,
+  terminal: boolean,
+): UnknownRecord => {
+  const toolCallId = String(record.toolCallId || record.callId || record.id || "pi-subagent");
+  const args = asRecord(record.args || start?.args);
+  const action = record.action === "resumeAgent" || record.action === "resume"
+    || start?.action === "resumeAgent"
+    || asRecord(record.result).action === "resumeAgent"
+    ? "resumeAgent"
+    : "spawnAgent";
+  const payload = record.partialResult ?? record.result;
+  const details = getPiSubagentDetails(payload);
+  const rawResults = Array.isArray(details.results) ? details.results : [];
+  const parsedResults = rawResults.map((value, index) => {
+    const result = asRecord(value);
+    const status = getPiSubagentResultStatus(result, terminal);
+    const agent = String(result.agent || result.name || args.agent || `subagent-${index + 1}`).trim();
+    const task = truncatePiSubagentText(String(result.task || "").trim());
+    const usage = getPiSubagentUsage(result);
+    return {
+      id: `${toolCallId}:${index + 1}`,
+      label: humanizeSubagentLabel(agent),
+      status,
+      model: formatSubagentModel(result.model),
+      message: getPiSubagentResultText(result),
+      prompt: task || undefined,
+      ...(normalizeNativeSubagentStopReason(result.stopReason) ? { stopReason: normalizeNativeSubagentStopReason(result.stopReason) } : {}),
+      ...(usage ? { usage } : {}),
+    };
+  });
+  const subagents = parsedResults.length > 0
+    ? parsedResults
+    : getPiSubagentTaskItems(args, terminal ? "completed" : "pending").map((item, index) => ({
+      ...item,
+      id: `${toolCallId}:${index + 1}`,
+    }));
+  const state = getPiSubagentOverallState(subagents, record, terminal);
+  const childStopReason = subagents
+    .map((subagent) => "stopReason" in subagent ? subagent.stopReason : undefined)
+    .find(Boolean);
+  const stopReason = childStopReason
+    || normalizeNativeSubagentStopReason(record.stopReason)
+    || normalizeNativeSubagentStopReason(asRecord(payload).stopReason);
+  const output = truncatePiSubagentText(unwrapToolText(payload));
+  const prompt = getPiSubagentTaskItems(args).map((item) => item.prompt).filter(Boolean).join("\n\n") || undefined;
+  const startedAt = start?.startedAt || Date.now();
+  const completed = state !== "running";
+  return {
+    type: "subagent_event",
+    id: toolCallId,
+    toolCallId,
+    phase: completed ? "completed" : "started",
+    action,
+    tool: action,
+    title: stopReason === "timeout" ? "已超时" : state === "error" ? "工作失败" : state === "interrupted" ? "已中断" : completed ? "已完成" : "正在工作",
+    detail: output,
+    prompt,
+    stopReason,
+    state,
+    subagents: subagents.length > 0 ? subagents : [{
+      id: toolCallId,
+      label: "Subagent",
+      status: state === "running" ? "running" : state,
+    }],
+    timestamp: startedAt,
+    startedAt,
+    completedAt: completed ? Date.now() : undefined,
+    agentThreadId: subagents[0]?.id || toolCallId,
+    receiverThreadIds: subagents.map((subagent) => subagent.id),
+    source: "pi",
+  };
+};
 
 export class PiSDKAgent {
   private process: ChildProcess | null = null;
@@ -131,6 +331,8 @@ export class PiSDKAgent {
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
   private guidancePendingResponse = false;
+  private piSubagentStarts = new Map<string, PiSubagentStart>();
+  private piSubagentTerminalStates = new Map<string, NativeSubagentStatus>();
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -448,6 +650,7 @@ export class PiSDKAgent {
     this.activePromptIds.clear();
     this.turnActive = false;
     this.eventBuffer.clear();
+    this.interruptPiSubagents("用户已中止");
     this.clearTurnFallback();
     this.emitEvent({ type: "thinking_end" });
     this.emitEvent({ type: "stream_end", content: "" });
@@ -623,6 +826,8 @@ export class PiSDKAgent {
     this.isReady = false;
     this.models = [];
     this.pendingAssistantError = "";
+    this.piSubagentStarts.clear();
+    this.piSubagentTerminalStates.clear();
     this.eventBuffer.flush();
     const child = this.process;
     this.process = null;
@@ -637,6 +842,31 @@ export class PiSDKAgent {
     if (await this.waitForExit(child, 1500)) return;
     child.kill("SIGKILL");
     await this.waitForExit(child, 500);
+  }
+
+  private interruptPiSubagents(reason: string) {
+    for (const [toolCallId, start] of this.piSubagentStarts.entries()) {
+      const results = getPiSubagentTaskItems(start.args).map((item) => ({
+        agent: item.label,
+        task: item.prompt,
+        exitCode: 1,
+        status: "interrupted",
+        stopReason: "aborted",
+        errorMessage: reason,
+      }));
+      const event = buildPiSubagentEvent({
+        toolCallId,
+        args: start.args,
+        result: { details: { results } },
+        isError: true,
+        error: reason,
+      }, start, true);
+      this.emitEvent(event);
+    }
+    for (const toolCallId of this.piSubagentStarts.keys()) {
+      this.piSubagentTerminalStates.set(toolCallId, "interrupted");
+    }
+    this.piSubagentStarts.clear();
   }
 
   private waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
@@ -791,12 +1021,36 @@ export class PiSDKAgent {
         }
         this.refreshAgentEndFallback();
         break;
-      case "tool_execution_start":
+      case "tool_execution_start": {
         this.clearTurnFallback();
+        if (isNativeSubagentToolName(record.toolName)) {
+          const toolCallId = String(record.toolCallId || record.callId || record.id || `pi-subagent-${Date.now()}`);
+          if (this.piSubagentTerminalStates.has(toolCallId)) break;
+          this.piSubagentStarts.set(toolCallId, {
+            startedAt: Date.now(),
+            args: asRecord(record.args),
+            action: record.action === "resumeAgent" || record.action === "resume" ? "resumeAgent" : "spawnAgent",
+          });
+          this.emitEvent(buildPiSubagentEvent({ ...record, toolCallId }, this.piSubagentStarts.get(toolCallId), false));
+          break;
+        }
         this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
         break;
+      }
       case "tool_execution_update": {
         this.clearTurnFallback();
+        if (isNativeSubagentToolName(record.toolName)) {
+          const toolCallId = String(record.toolCallId || record.callId || record.id || "pi-subagent");
+          if (this.piSubagentTerminalStates.has(toolCallId)) break;
+          const start = this.piSubagentStarts.get(toolCallId) || {
+            startedAt: Date.now(),
+            args: asRecord(record.args),
+            action: record.action === "resumeAgent" || record.action === "resume" ? "resumeAgent" : "spawnAgent",
+          };
+          this.piSubagentStarts.set(toolCallId, start);
+          this.emitEvent(buildPiSubagentEvent({ ...record, toolCallId }, start, false));
+          break;
+        }
         const detail = unwrapToolText(record.partialResult);
         if (detail) {
           this.emitEvent(normalizeToolEvent("tool_start", {
@@ -811,6 +1065,24 @@ export class PiSDKAgent {
       }
       case "tool_execution_end": {
         this.clearTurnFallback();
+        if (isNativeSubagentToolName(record.toolName)) {
+          const toolCallId = String(record.toolCallId || record.callId || record.id || "pi-subagent");
+          if (this.piSubagentTerminalStates.has(toolCallId)) break;
+          const start = this.piSubagentStarts.get(toolCallId) || {
+            startedAt: Date.now(),
+            args: asRecord(record.args),
+            action: record.action === "resumeAgent" || record.action === "resume" ? "resumeAgent" : "spawnAgent",
+          };
+          const finalEvent = buildPiSubagentEvent({ ...record, toolCallId }, start, true);
+          this.emitEvent(finalEvent);
+          if (finalEvent.state !== "running") {
+            this.piSubagentStarts.delete(toolCallId);
+            if (isTerminalNativeSubagentStatus(finalEvent.state as NativeSubagentStatus)) {
+              this.piSubagentTerminalStates.set(toolCallId, finalEvent.state as NativeSubagentStatus);
+            }
+          }
+          break;
+        }
         const toolEvent = normalizeToolEvent("tool_end", {
           ...record,
           args: record.args,
@@ -1034,6 +1306,8 @@ export class PiSDKAgent {
 
   private prepareNewTurn() {
     this.clearTurnFallback();
+    // Keep non-terminal external/background subagents alive across parent turns;
+    // a new prompt is not evidence that a delegated process has completed.
     this.eventBuffer.flush();
     this.pendingAssistantText = "";
     this.pendingAssistantError = "";
@@ -1061,6 +1335,7 @@ export class PiSDKAgent {
     this.turnActive = false;
     this.agentEndObserved = false;
     this.compactionActive = false;
+    this.piSubagentStarts.clear();
     this.turnToken += 1;
     this.eventBuffer.clear();
     this.clearTurnFallback();
@@ -1071,6 +1346,7 @@ export class PiSDKAgent {
     this.process = null;
     this.isReady = false;
     const error = detail || title;
+    if (!this.isAborting) this.interruptPiSubagents(error);
     const handlers = [...this.pendingResponses.values()];
     this.pendingResponses.clear();
     for (const handler of handlers) handler({ type: "error", error });

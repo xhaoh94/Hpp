@@ -11,7 +11,7 @@ export {
   type TextSearchOptions,
   type IndexedSearchMatch,
 } from "./text-search";
-import type { SearchMatch } from "./text-search";
+import type { IndexedSearchMatch, SearchMatch } from "./text-search";
 
 export interface SyntaxToken {
   text: string;

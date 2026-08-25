@@ -68,6 +68,7 @@ import { PermissionChoicePanel } from "./PermissionChoicePanel";
 import { ProcessBlock } from "./ProcessBlock";
 import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
+import { resolvePreviousUserTargetIndex } from "./previousUserTarget";
 import { useAgentEvents } from "./useAgentEvents";
 import { isSupportedImageAttachment, usePendingImages } from "./usePendingImages";
 import {
@@ -1512,7 +1513,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
 
   return (
     <div
-      className="chat-virtual-content"
+      className="chat-virtual-content chat-message-virtual-content"
       style={{ height: `${virtualizer.getTotalSize()}px` }}
     >
       {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -1630,51 +1631,68 @@ const ChatMessagesView = memo(function ChatMessagesView({
   const handleDiffOpenChange = useCallback((messageId: string, open: boolean) => {
     setActiveDiffMessageId(open ? messageId : null);
   }, []);
-  // 全局「返回上一条发言」按钮：目标 = 视野内最上面完整出现的用户气泡的上一条；
-  // 视野内没有完整用户气泡时回落到最新一条用户消息；第一条用户消息无上一条时隐藏。
+  // 全局「返回上一条发言」按钮：若视口中已有用户气泡，就定位到它的上一条；
+  // 否则定位到视口上方最近的用户发言。这样在对话底部可以返回最后一条发言，
+  // 跳转后即使气泡只剩一部分可见，也会继续正确指向更早的一条。
   const refreshPreviousUserTarget = useCallback(() => {
     const el = scrollRef.current;
     if (!el) {
       setPreviousUserTargetId(null);
       return;
     }
-    const containerRect = el.getBoundingClientRect();
-    // 只把“真实发言”气泡计入定位：UI 应答（问卷提交等）不参与按钮计算。
-    const speechIds = new Set<string>();
-    for (const message of messages) {
-      if (isUserSpeechMessage(message)) speechIds.add(message.id);
-    }
-    let topmostId: string | null = null;
-    let topmostTop = Number.POSITIVE_INFINITY;
-    for (const row of Array.from(el.querySelectorAll<HTMLElement>(".chat-virtual-row"))) {
-      const rowMsgId = row.dataset.msgId;
-      if (!rowMsgId || !speechIds.has(rowMsgId)) continue;
-      const bubble = row.querySelector<HTMLElement>(".chat-bubble.user");
-      if (!bubble) continue;
-      const r = bubble.getBoundingClientRect();
-      if (r.top >= containerRect.top - 1 && r.bottom <= containerRect.bottom + 1 && r.top < topmostTop) {
-        topmostTop = r.top;
-        topmostId = rowMsgId;
-      }
-    }
-    if (topmostId) {
-      const index = messages.findIndex((message) => message.id === topmostId);
-      for (let i = index - 1; i >= 0; i -= 1) {
-        if (isUserSpeechMessage(messages[i])) {
-          setPreviousUserTargetId(messages[i].id);
-          return;
-        }
-      }
+
+    const speechIndexes = messages.reduce<number[]>((indexes, message, index) => {
+      if (isUserSpeechMessage(message)) indexes.push(index);
+      return indexes;
+    }, []);
+    if (speechIndexes.length === 0) {
       setPreviousUserTargetId(null);
       return;
     }
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (isUserSpeechMessage(messages[i])) {
-        setPreviousUserTargetId(messages[i].id);
-        return;
-      }
-    }
-    setPreviousUserTargetId(null);
+
+    const speechIndexSet = new Set(speechIndexes);
+    const containerRect = el.getBoundingClientRect();
+    const viewportTop = containerRect.top + 1;
+    const viewportBottom = containerRect.bottom - 1;
+    const mountedRows = Array.from(el.querySelectorAll<HTMLElement>(
+      ".chat-message-virtual-content > .chat-virtual-row",
+    )).flatMap((row) => {
+      const index = Number(row.dataset.index);
+      if (!Number.isInteger(index) || index > messages.length) return [];
+      return [{ row, index, rect: row.getBoundingClientRect() }];
+    });
+
+    // 部分露在视口顶部的用户气泡也算当前气泡，避免轻微滚动后又把目标
+    // 错误切回这条发言。若同时有多条可见，使用位置最靠上的一条。
+    const visibleSpeechIndex = mountedRows
+      .filter(({ index }) => speechIndexSet.has(index))
+      .flatMap(({ row, index }) => {
+        const bubble = row.querySelector<HTMLElement>(".chat-bubble.user");
+        if (!bubble) return [];
+        const rect = bubble.getBoundingClientRect();
+        if (rect.bottom <= viewportTop || rect.top >= viewportBottom) return [];
+        return [{ index, top: rect.top }];
+      })
+      .sort((left, right) => left.top - right.top)[0]?.index ?? null;
+
+    // 没有用户气泡可见时，按真实 DOM 几何位置确定视口顶部所在的行。
+    // 不直接比较 virtualItem.start 与 scrollTop：前者相对虚拟内容，后者相对
+    // 滚动容器，两者坐标原点不同，会导致目标随滚动位置随机漂移。
+    const rowAtOrAboveViewport = mountedRows
+      .filter(({ rect }) => rect.top <= viewportTop)
+      .sort((left, right) => right.rect.top - left.rect.top)[0];
+    const firstRowBelowViewport = mountedRows
+      .filter(({ rect }) => rect.top > viewportTop)
+      .sort((left, right) => left.rect.top - right.rect.top)[0];
+    const viewportMessageIndex = rowAtOrAboveViewport?.index
+      ?? firstRowBelowViewport?.index
+      ?? null;
+    const targetIndex = resolvePreviousUserTargetIndex(
+      speechIndexes,
+      visibleSpeechIndex,
+      viewportMessageIndex,
+    );
+    setPreviousUserTargetId(targetIndex === null ? null : messages[targetIndex].id);
   }, [messages, scrollRef]);
   const previousUserTarget = previousUserTargetId
     ? messages.find((message) => message.id === previousUserTargetId)
@@ -2117,7 +2135,10 @@ export function ChatPanel({
   }, [projects]);
   const [modelProviderOrder, setModelProviderOrder] = useState<string[]>([]);
   const modelProviders = useMemo(
-    () => getOrderedModelProviders(includeCurrentModel(availableModels, currentModel), modelProviderOrder),
+    () => getOrderedModelProviders(
+      availableModels.length > 0 ? includeCurrentModel(availableModels, currentModel) : [],
+      modelProviderOrder,
+    ),
     [availableModels, currentModel, modelProviderOrder]
   );
 

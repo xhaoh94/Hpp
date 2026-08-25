@@ -4,7 +4,6 @@ import { delimiter, dirname, isAbsolute, join, win32 } from "node:path";
 import { spawn } from "node:child_process";
 
 export const PACKAGE_NAME = "@anthropic-ai/claude-agent-sdk";
-export const SDK_VERSION = "0.3.215";
 export const MIN_NODE_VERSION = "18.0.0";
 export const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 let updateInProgress = false;
@@ -161,6 +160,17 @@ const getCurrentVersion = async (context) => {
   }
 };
 
+const getLatestVersion = async () => {
+  try {
+    const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`);
+    if (!response.ok) return undefined;
+    const value = await response.json();
+    return typeof value.version === "string" ? value.version : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const getNativeRuntimeStatus = async (context, expectedVersion) => {
   const packageName = getNativePackageName();
   if (!packageName) return { packageName: undefined, version: undefined, complete: false };
@@ -188,8 +198,8 @@ const compareVersions = (left, right) => {
 };
 
 export const getStatus = async (context) => {
-  const [currentVersion, nodeVersion, npmVersion] = await Promise.all([
-    getCurrentVersion(context), getCommandVersion("node"), getCommandVersion("npm"),
+  const [currentVersion, latestVersion, nodeVersion, npmVersion] = await Promise.all([
+    getCurrentVersion(context), getLatestVersion(), getCommandVersion("node"), getCommandVersion("npm"),
   ]);
   const nativeRuntime = await getNativeRuntimeStatus(context, currentVersion);
   const nodeOk = !!nodeVersion && compareVersions(nodeVersion, MIN_NODE_VERSION) >= 0;
@@ -197,8 +207,8 @@ export const getStatus = async (context) => {
   return {
     installed,
     currentVersion,
-    latestVersion: SDK_VERSION,
-    updateAvailable: !!currentVersion && !installed,
+    latestVersion,
+    updateAvailable: !!currentVersion && (!installed || (!!latestVersion && compareVersions(currentVersion, latestVersion) < 0)),
     canUpdate: !!npmVersion && nodeOk,
     packageRoot: getRuntimeRoot(context),
     nodeVersion,
@@ -222,26 +232,28 @@ export const update = async (context, options = {}) => {
   if (updateInProgress) return { success: false, error: "Claude Agent SDK 正在安装中。" };
   updateInProgress = true;
   const runtimeRoot = getRuntimeRoot(context);
-  const versionSpec = typeof options.versionSpec === "string" && options.versionSpec.trim()
+  const requestedVersion = typeof options.versionSpec === "string" && options.versionSpec.trim()
     ? options.versionSpec.trim()
-    : SDK_VERSION;
+    : undefined;
+  let targetVersion = requestedVersion;
   try {
     const currentStatus = await getStatus(context);
-    if (currentStatus.installed && currentStatus.currentVersion === versionSpec) {
+    targetVersion = requestedVersion || currentStatus.latestVersion || "latest";
+    if (currentStatus.installed && currentStatus.currentVersion === targetVersion) {
       return { success: true, status: currentStatus };
     }
     await mkdir(runtimeRoot, { recursive: true });
     await writeFile(join(runtimeRoot, "package.json"), `${JSON.stringify({
       name: "hpp-claude-agent-sdk-runtime", private: true,
     }, null, 2)}\n`, "utf8");
-    await run("npm", ["install", `${PACKAGE_NAME}@${versionSpec}`, "--save-exact", "--omit=dev"], {
+    await run("npm", ["install", `${PACKAGE_NAME}@${targetVersion}`, "--save-exact", "--omit=dev"], {
       cwd: runtimeRoot,
       timeout: INSTALL_TIMEOUT_MS,
     });
     return { success: true, status: await getStatus(context) };
   } catch (error) {
     const status = await getStatus(context);
-    if (status.installed && status.currentVersion === versionSpec) {
+    if (targetVersion && targetVersion !== "latest" && status.installed && status.currentVersion === targetVersion) {
       return { success: true, status };
     }
     return { success: false, error: error instanceof Error ? error.message : String(error), status: await getStatus(context) };

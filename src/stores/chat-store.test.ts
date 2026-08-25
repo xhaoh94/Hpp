@@ -626,6 +626,34 @@ describe("chat process entry defaults", () => {
   });
 });
 
+describe("session model isolation", () => {
+  it("clears the previous session model and catalog on session switch", () => {
+    const staleModel = {
+      id: "old-model",
+      name: "Old model",
+      provider: "old-provider",
+      reasoning: false,
+    };
+    useChatStore.setState({
+      activeSessionId: "old-session",
+      messages: [],
+      sessionMessages: {},
+      currentModel: staleModel,
+      availableModels: [staleModel],
+      thinkingLevel: "high",
+    });
+
+    useChatStore.getState().switchSession("new-session");
+
+    expect(useChatStore.getState()).toMatchObject({
+      activeSessionId: "new-session",
+      currentModel: null,
+      availableModels: [],
+      thinkingLevel: "medium",
+    });
+  });
+});
+
 describe("session draft replacement", () => {
   it("atomically clones every composer field", () => {
     const draft = {

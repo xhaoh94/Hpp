@@ -20,6 +20,8 @@ import type {
   AgentPackageStatus,
   AgentPackageVersions,
   AgentPlanModeSupport,
+  AgentProviderAuthMode,
+  AgentProviderAuthOption,
   AgentProviderConfiguration,
   AgentPluginInstallResult,
   AgentPluginManifest,
@@ -182,8 +184,8 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
   if (endpoints.length === 0) return "none";
 
   const defaultEndpoint = asString(value.defaultEndpoint);
-  const seenAuthModes = new Set<string>();
-  const authModes = Array.isArray(value.authModes)
+  const seenAuthModes = new Set<AgentProviderAuthMode>();
+  const authModes: AgentProviderAuthOption[] = Array.isArray(value.authModes)
     ? value.authModes.flatMap((rawAuthMode) => {
         if (!isRecord(rawAuthMode)) return [];
         const id = asString(rawAuthMode.id);
@@ -217,7 +219,7 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
       : endpoints[0].id,
     authModes: authModes.length > 0 ? authModes : undefined,
     defaultAuthMode: authModes.some((mode) => mode.id === defaultAuthMode)
-      ? defaultAuthMode as "bearer" | "x-api-key"
+      ? defaultAuthMode as AgentProviderAuthMode
       : authModes[0]?.id,
     pathLabel: asString(value.pathLabel) || undefined,
     hint: asString(value.hint) || undefined,

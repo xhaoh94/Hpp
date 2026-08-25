@@ -39,4 +39,11 @@ describe("chat toolbar permission selector", () => {
     expect(panelSource).toContain('closest?.("[data-chat-toolbar-overlay]")');
     expect(panelStyles).toContain(".chat-permission-dropdown");
   });
+
+  it("does not expose a previous session model catalog when no models are available", () => {
+    expect(toolbarSource).toContain('selectableModels.length > 0 ? (currentModel?.name || "选择模型") : "请先配置渠道"');
+    expect(toolbarSource).toContain("availableModels.length > 0 ? includeCurrentModel(availableModels, currentModel) : []");
+    expect(panelSource).toContain("availableModels.length > 0 ? includeCurrentModel(availableModels, currentModel) : []");
+    expect(toolbarSource).toContain("暂无可用模型。");
+  });
 });

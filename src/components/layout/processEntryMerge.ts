@@ -67,6 +67,17 @@ const mergeSubagentList = (left: AgentSubagent[] = [], right: AgentSubagent[] = 
   return Array.from(merged.values());
 };
 
+const hasSharedSubagent = (left: AgentProcessEntry, right: AgentProcessEntry) => {
+  const rightIds = new Set((right.subagents || []).map((subagent) => subagent.id));
+  return (left.subagents || []).some((subagent) => rightIds.has(subagent.id));
+};
+
+const isSubagentTerminalLifecycle = (entry: AgentProcessEntry) =>
+  entry.action === "wait" ||
+  entry.action === "closeAgent" ||
+  (entry.phase === "completed" &&
+    (entry.state === "completed" || entry.state === "error" || entry.state === "interrupted"));
+
 export const canMergeAdjacentSubagentEntries = (
   left: AgentProcessEntry | undefined,
   right: AgentProcessEntry | undefined,
@@ -77,6 +88,9 @@ export const canMergeAdjacentSubagentEntries = (
     entry.action === "started" ||
     entry.activityKind === "started" ||
     entry.title === "已开始工作";
+  if (isStartEntry(left) && isSubagentTerminalLifecycle(right) && hasSharedSubagent(left, right)) {
+    return true;
+  }
   return isStartEntry(left) && isStartEntry(right) && left.title === right.title && left.state === right.state;
 };
 
@@ -87,8 +101,14 @@ export const mergeAdjacentSubagentEntries = (
   const details = [left.detail?.trim(), right.detail?.trim()].filter(
     (detail, index, values): detail is string => !!detail && values.indexOf(detail) === index,
   );
+  const terminalUpdate = isSubagentTerminalLifecycle(right);
   return {
     ...left,
+    ...(terminalUpdate ? {
+      title: right.title,
+      state: right.state,
+      ...(right.stopReason ? { stopReason: right.stopReason } : {}),
+    } : {}),
     detail: details.length > 0 ? details.join("\n\n") : undefined,
     subagents: mergeSubagentList(left.subagents, right.subagents),
     expanded: !!left.expanded || !!right.expanded,

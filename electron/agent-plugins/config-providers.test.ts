@@ -92,8 +92,8 @@ describe("official plugin config providers", () => {
     const configuredProvider = {
       ...provider("chat-completions"),
       models: [{
-        id: "deepseek-v4-flash-free",
-        name: "DeepSeek V4 Flash Free",
+        id: "custom-thinking-model",
+        name: "Custom Thinking Model",
         reasoning: true,
         imageInput: false,
         supportedThinkingLevels: ["high", "max", "future-tier"],
@@ -119,7 +119,7 @@ describe("official plugin config providers", () => {
     await expect(pi.readProviderConfig()).resolves.toMatchObject({
       providers: [{
         models: [{
-          id: "deepseek-v4-flash-free",
+          id: "custom-thinking-model",
           supportedThinkingLevels: ["high", "max", "future-tier"],
         }],
       }],

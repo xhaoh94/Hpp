@@ -500,7 +500,7 @@ function MobileModelPicker({
           });
         }}
       >
-        <span>{currentModel?.name || "选择模型"}</span>
+        <span>{models.length > 0 ? (currentModel?.name || "选择模型") : "请先配置渠道"}</span>
         <ChevronDown size={13} />
       </button>
       {open && createPortal(
@@ -846,6 +846,10 @@ function IdleDurationLabel({ entry }: { entry: RemoteProcessEntry }) {
   return <span className="process-idle-duration"> · {idleDuration}</span>;
 }
 
+const isAssistantBodyProcessEntry = (entry: RemoteProcessEntry) => (
+  isAssistantNarrationProcessEntry(entry) || entry.title === "正文输出"
+);
+
 const ProcessEntryRow = memo(function ProcessEntryRow({
   entry,
   receivedMessageDocument,
@@ -856,9 +860,9 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
   if (entry.type === "subagent" && entry.subagents?.length) {
     return <SubagentProcessEntry entry={entry} />;
   }
-  if (isAssistantNarrationProcessEntry(entry)) {
+  if (isAssistantBodyProcessEntry(entry)) {
     return (
-      <MarkdownContent className="message-commentary-item message-content" text={entry.detail || entry.title} />
+      <MarkdownContent className="message-commentary-item message-content assistant-body-segment" text={entry.detail || entry.title} />
     );
   }
   if (isUserGuidanceProcessEntry(entry)) {
@@ -976,7 +980,7 @@ function MessageCommentary({
     <div className="message-commentary message-content" aria-label="处理说明">
       {items.map((item) => (
         <MarkdownContent
-          className={`message-commentary-item${running && item.isStreaming ? " streaming" : ""}`}
+          className={`message-commentary-item assistant-body-segment${running && item.isStreaming ? " streaming" : ""}`}
           text={item.content}
           key={item.id}
         />
@@ -1021,11 +1025,66 @@ function FileOperationGroup({ entries }: { entries: RemoteProcessEntry[] }) {
   );
 }
 
+function formatSubagentUsage(usage: NonNullable<RemoteProcessEntry["subagents"]>[number]["usage"]) {
+  if (!usage) return "";
+  const formatNumber = (value?: number) => typeof value === "number" && Number.isFinite(value)
+    ? value.toLocaleString()
+    : "";
+  const input = formatNumber(usage.inputTokens);
+  const output = formatNumber(usage.outputTokens);
+  const total = formatNumber(usage.totalTokens);
+  const cache = formatNumber(usage.cacheReadTokens);
+  const turns = formatNumber(usage.turns);
+  const cost = typeof usage.cost === "number" && Number.isFinite(usage.cost) && usage.cost > 0
+    ? `$${usage.cost.toFixed(4)}`
+    : "";
+  return [
+    input ? `输入 ${input}` : "",
+    output ? `输出 ${output}` : "",
+    !input && !output && total ? `总计 ${total}` : "",
+    cache ? `缓存 ${cache}` : "",
+    turns ? `${turns} 轮` : "",
+    cost,
+  ].filter(Boolean).join(" / ");
+}
+
+function getSubagentProgress(subagents: NonNullable<RemoteProcessEntry["subagents"]>) {
+  if (subagents.length < 2) return "";
+  const finished = subagents.filter((subagent) =>
+    subagent.status === "completed" || subagent.status === "error" || subagent.status === "interrupted",
+  ).length;
+  return `进度 ${finished}/${subagents.length}`;
+}
+
 function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
+  const ticking = typeof entry.startedAt === "number"
+    && !entry.completedAt
+    && entry.state !== "completed"
+    && entry.state !== "error"
+    && entry.state !== "interrupted";
+  const nowTick = useProcessTicker(ticking);
+  const elapsed = typeof entry.startedAt === "number"
+    ? `耗时 ${formatProcessDuration((entry.completedAt ?? nowTick) - entry.startedAt)}`
+    : "";
+  const progress = getSubagentProgress(entry.subagents || []);
   const messages = (entry.subagents || [])
     .map((subagent) => subagent.message?.trim())
     .filter((message): message is string => !!message && message !== entry.detail?.trim());
-  const detail = [entry.detail?.trim(), ...new Set(messages)].filter(Boolean).join("\n\n");
+  const task = entry.prompt?.trim();
+  const usageDetails = (entry.subagents || [])
+    .map((subagent) => {
+      const usage = formatSubagentUsage(subagent.usage);
+      return usage ? `${subagent.label}：${usage}` : "";
+    })
+    .filter(Boolean);
+  const detail = [
+    task ? `任务：${task}` : "",
+    progress ? `进度：${progress}` : "",
+    elapsed ? `耗时：${elapsed.slice(3)}` : "",
+    entry.detail?.trim(),
+    usageDetails.length > 0 ? `用量：\n${usageDetails.join("\n")}` : "",
+    ...new Set(messages),
+  ].filter(Boolean).join("\n\n");
   const hasDetails = Boolean(detail || entry.files?.length);
   const summary = (
     <>
@@ -1033,8 +1092,8 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
         <span className="subagent-chip-list">
           {entry.subagents!.map((subagent) => {
             const status = subagent.status || "pending";
-            const statusLabel = getSubagentStatusLabel(status);
-            const description = [statusLabel, subagent.model, subagent.path, subagent.message].filter(Boolean).join(" · ");
+            const statusLabel = getSubagentStatusLabel(status, subagent.stopReason);
+            const description = [statusLabel, subagent.model, formatSubagentUsage(subagent.usage), subagent.path, subagent.prompt, subagent.message].filter(Boolean).join(" · ");
             return (
               <span
                 className={`subagent-chip ${status}`}
@@ -1050,6 +1109,8 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
           })}
         </span>
         {entry.title && <span className="subagent-entry-title">{entry.title}</span>}
+        {progress && <span className="subagent-entry-meta">{progress}</span>}
+        {elapsed && <span className="subagent-entry-meta">{elapsed}</span>}
       </span>
       {hasDetails && <ChevronDown className="expand-indicator" size={13} />}
     </>
@@ -1084,7 +1145,11 @@ function getSubagentTone(id: string) {
   return Math.abs(hash) % 4;
 }
 
-function getSubagentStatusLabel(status?: NonNullable<RemoteProcessEntry["subagents"]>[number]["status"]) {
+function getSubagentStatusLabel(
+  status?: NonNullable<RemoteProcessEntry["subagents"]>[number]["status"],
+  stopReason?: NonNullable<RemoteProcessEntry["subagents"]>[number]["stopReason"],
+) {
+  if (stopReason === "timeout") return "已超时";
   switch (status) {
     case "pending": return "等待中";
     case "running": return "工作中";
@@ -1226,9 +1291,8 @@ function MessageProcess({
   if (!process) return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
   const elapsed = formatProcessDuration((process.endedAt ?? nowTick) - process.startedAt);
   const hasPlan = !!process.planSteps?.length;
-  if (!hasPlan && visibleEntries.length === 0 && !process.changeSummary) {
-    return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
-  }
+  const hasNarrativeTimeline = commentary.length > 0 || visibleEntries.some(isAssistantBodyProcessEntry);
+  if (!hasPlan && visibleEntries.length === 0 && !process.changeSummary && !hasNarrativeTimeline) return null;
   return (
     <>
       <details className="process-block" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
@@ -1250,7 +1314,7 @@ function MessageProcess({
             ))}
           </div>
         )}
-        {commentary.length === 0 && visibleEntries.length > 0 && (
+        {!hasNarrativeTimeline && visibleEntries.length > 0 && (
           <div className="process-entries">
             {groupProcessEntries(visibleEntries, { groupFileOperations: true }).map((group) => group.kind === "commands"
               ? <CommandGroup key={`commands-${group.entries[0].id}`} entries={group.entries} />
@@ -1260,11 +1324,11 @@ function MessageProcess({
           </div>
         )}
       </details>
-      {commentary.length > 0 && expanded && (
+      {hasNarrativeTimeline && expanded && (
         <div className="message-turn-timeline">
           {timelineItems.map((item) => item.kind === "commentary" ? (
             <MarkdownContent
-              className={`message-commentary-item message-content${processRunning && item.commentary.isStreaming ? " streaming" : ""}`}
+              className={`message-commentary-item message-content assistant-body-segment${processRunning && item.commentary.isStreaming ? " streaming" : ""}`}
               text={item.commentary.content}
               key={`commentary-${item.id}`}
             />
@@ -1459,7 +1523,7 @@ const MessageItem = memo(function MessageItem({
         </div>
       )}
       {message.role !== "user" && messagePresentation.text && (
-        <MarkdownContent text={messagePresentation.text} />
+        <MarkdownContent className="message-content assistant-body-segment" text={messagePresentation.text} />
       )}
       {showActions && (
         <div className={`message-actions ${message.role}`}>
@@ -2266,7 +2330,7 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
               {item.action && <span className="queue-action-badge">{item.action.kind === "skill" ? "技能" : "命令"} · {item.action.name}</span>}
               <span>{item.displayContent
                 ? renderAttachmentPreview(item.displayContent, 120)
-                : (item.sessionReferences?.length ? `引用会话：${item.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "空消息")}</span>
+                : (item.sessionReferences?.length ? `${item.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "空消息")}</span>
               {item.error && <small>{item.error}</small>}
             </div>
             <div className="queue-controls">
@@ -2374,6 +2438,8 @@ export default function App() {
   const inlineComposerRef = useRef<InlineComposerEditorHandle | null>(null);
   const composerAddMenuRef = useRef<HTMLDivElement | null>(null);
   const messagesViewRef = useRef<HTMLDivElement | null>(null);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
+  const initialBottomSessionRef = useRef<string | null>(null);
   const followMessageBottomRef = useRef(true);
   const returningToBottomRef = useRef(false);
   const forkSessionIdsRef = useRef(new Map<string, string>());
@@ -3502,7 +3568,10 @@ export default function App() {
     ? "error"
     : "completed";
   const selectedModels = useMemo(() => {
-    return includeCurrentModel(selectedConfig?.availableModels || [], selectedConfig?.model);
+    const availableModels = selectedConfig?.availableModels || [];
+    return availableModels.length > 0
+      ? includeCurrentModel(availableModels, selectedConfig?.model)
+      : [];
   }, [selectedConfig]);
   const thinkingLevels = useMemo(
     () => getModelThinkingLevels(selectedConfig?.model),
@@ -3675,6 +3744,12 @@ export default function App() {
     const view = messagesViewRef.current;
     if (!view) return;
     const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight <= 48;
+    if (initialBottomSessionRef.current === selectedSessionRef.current) {
+      if (!atBottom) view.scrollTop = view.scrollHeight;
+      followMessageBottomRef.current = true;
+      setShowReturnToBottom(false);
+      return;
+    }
     if (returningToBottomRef.current) {
       if (atBottom) returningToBottomRef.current = false;
       followMessageBottomRef.current = true;
@@ -3686,6 +3761,7 @@ export default function App() {
   }, []);
 
   const cancelReturnToBottom = useCallback(() => {
+    initialBottomSessionRef.current = null;
     returningToBottomRef.current = false;
   }, []);
 
@@ -3699,12 +3775,43 @@ export default function App() {
   }, []);
 
   useLayoutEffect(() => {
+    const visibleSessionId = selected?.session.id || null;
+    initialBottomSessionRef.current = visibleSessionId;
     followMessageBottomRef.current = true;
     returningToBottomRef.current = false;
     setShowReturnToBottom(false);
     const view = messagesViewRef.current;
     if (view) view.scrollTop = view.scrollHeight;
-  }, [selectedSessionId]);
+  }, [selected?.session.id]);
+
+  useLayoutEffect(() => {
+    const view = messagesViewRef.current;
+    const content = messagesContentRef.current;
+    if (!view || !content || !selected?.session.id) return;
+    let frame = 0;
+    const keepAtBottom = () => {
+      frame = 0;
+      const sessionId = selectedSessionRef.current;
+      if (!sessionId || (
+        initialBottomSessionRef.current !== sessionId &&
+        !followMessageBottomRef.current
+      )) return;
+      view.scrollTop = view.scrollHeight;
+      setShowReturnToBottom(false);
+    };
+    const scheduleKeepAtBottom = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(keepAtBottom);
+    };
+    const observer = new ResizeObserver(scheduleKeepAtBottom);
+    observer.observe(view);
+    observer.observe(content);
+    scheduleKeepAtBottom();
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [selected?.session.id]);
 
   useEffect(() => {
     flushCurrentDraft();
@@ -3811,6 +3918,7 @@ export default function App() {
 
   const openHistoryMessage = useCallback((messageId: string) => {
     setHistoryOpen(false);
+    initialBottomSessionRef.current = null;
     followMessageBottomRef.current = false;
     returningToBottomRef.current = false;
     setShowReturnToBottom(true);
@@ -4131,7 +4239,7 @@ export default function App() {
 
     const displayContent = draft.content.trim()
       || (draft.images.length > 0 ? "请查看附件图片。" : "")
-      || (draft.sessionReferences.length > 0 ? `引用会话：${draft.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "")
+      || (draft.sessionReferences.length > 0 ? `${draft.sessionReferences.map((reference) => reference.sourceTitle).join("、")}` : "")
       || (draft.attachments.length > 0 ? `附件：${draft.attachments.map((attachment) => attachment.name).join("、")}` : "")
       || (draft.action ? `${draft.action.kind === "skill" ? "技能" : "命令"} · ${draft.action.name}` : "");
     setQueues((current) => ({
@@ -4958,25 +5066,28 @@ export default function App() {
               onScroll={handleMessagesScroll}
               onPointerDown={cancelReturnToBottom}
               onWheel={cancelReturnToBottom}
+              onKeyDown={cancelReturnToBottom}
             >
-              {nextBefore[selected.session.id] !== null && nextBefore[selected.session.id] !== undefined && (
-                <button className="load-older" disabled={loadingSession} onClick={() => void loadSession(selected.session.id, false, nextBefore[selected.session.id])}>
-                  {loadingSession ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} 更早消息
-                </button>
-              )}
-              <MessageListView
-                messages={selectedMessages}
-                receivedUserMessages={receivedUserMessages}
-                activeTurnMessageId={activeTurnMessageId}
-                processTerminalState={processTerminalState}
-                actionsDisabled={commandBusy || forkingMessageId !== null}
-                forkingMessageId={forkingMessageId}
-                onEdit={editMessage}
-                onCopy={copyMessage}
-                onFork={forkMessage}
-                onResend={resendMessage}
-              />
-              {loadingSession && selectedMessages.length === 0 && <div className="loading-chat"><LoaderCircle className="spin" size={22} /></div>}
+              <div ref={messagesContentRef} className="messages-content">
+                {nextBefore[selected.session.id] !== null && nextBefore[selected.session.id] !== undefined && (
+                  <button className="load-older" disabled={loadingSession} onClick={() => void loadSession(selected.session.id, false, nextBefore[selected.session.id])}>
+                    {loadingSession ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} 更早消息
+                  </button>
+                )}
+                <MessageListView
+                  messages={selectedMessages}
+                  receivedUserMessages={receivedUserMessages}
+                  activeTurnMessageId={activeTurnMessageId}
+                  processTerminalState={processTerminalState}
+                  actionsDisabled={commandBusy || forkingMessageId !== null}
+                  forkingMessageId={forkingMessageId}
+                  onEdit={editMessage}
+                  onCopy={copyMessage}
+                  onFork={forkMessage}
+                  onResend={resendMessage}
+                />
+                {loadingSession && selectedMessages.length === 0 && <div className="loading-chat"><LoaderCircle className="spin" size={22} /></div>}
+              </div>
             </div>
             {showReturnToBottom && (
               <button

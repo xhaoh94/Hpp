@@ -99,7 +99,12 @@ export function useSessionModels({
           }
           return;
         }
+        // 没有已发现目录时，当前模型可能只是旧会话/旧版本遗留的
+        // 持久化值；先清掉它，再继续重试真正的模型发现。
+        if (useChatStore.getState().availableModels.length === 0) clearModels();
       } catch {
+        // 没有任何已发现目录时，错误也不能让旧 currentModel 继续显示。
+        if (useChatStore.getState().availableModels.length === 0) clearModels();
         // Retry below; final empty state is handled after all attempts.
       }
     }
@@ -108,12 +113,10 @@ export function useSessionModels({
       modelFetchRunIdRef.current === fetchRunId &&
       useProjectStore.getState().activeSessionId === sessionId
     ) {
-      // Only blank the picker when there is genuinely nothing usable left.
-      // A temporarily unreachable backend (for example a Pi worker busy with
-      // a context compaction) must not discard models that are already shown;
-      // the next explicit refresh or compaction-settled refresh restores them.
-      const chat = useChatStore.getState();
-      if (chat.availableModels.length === 0 && !chat.currentModel) clearModels();
+      // getAvailableModels 保留的是已经存在的有效目录；如果所有重试都
+      // 仍然没有目录，说明当前会话确实没有可用模型，也要清掉可能由旧
+      // 会话或旧版本遗留的 currentModel，不能让它继续伪装成可用模型。
+      clearModels();
     }
   }, [clearModels, setAvailableModels, setCurrentModel]);
 
@@ -127,6 +130,12 @@ export function useSessionModels({
     const fetchRunId = ++modelFetchRunIdRef.current;
     void fetchModels(sessionId, fetchRunId);
   }, [fetchModels]);
+
+  // 模型目录是按会话/Agent 作用域的。切换后先同步清空，避免异步发现
+  // 完成前把上一个会话的目录误显示在当前聊天栏。
+  useEffect(() => {
+    clearModels();
+  }, [activeSessionId, activeSessionAgentId, clearModels]);
 
   useEffect(() => {
     const fetchRunId = ++modelFetchRunIdRef.current;
@@ -188,9 +197,22 @@ export function useSessionModels({
   ]);
 
   const switchToSession = useCallback((project: Project, session: ProjectSession) => {
-    const currentModel = useChatStore.getState().currentModel;
-    if (!getSessionModel(session.id) && currentModel) {
-      saveSessionModel(session.id, currentModel);
+    const projectState = useProjectStore.getState();
+    const chatState = useChatStore.getState();
+    const currentSession = projectState.activeSessionId
+      ? projectState.projects
+        .flatMap((candidate) => candidate.sessions)
+        .find((candidate) => candidate.id === projectState.activeSessionId)
+      : undefined;
+    // 只在同一 Agent 内继承模型。跨 Agent 继承会把旧 Agent 的模型/渠道
+    // 写入新会话；目标 Agent（尤其是尚未注册渠道的 Droid）随后会错误地
+    // 把这份旧目录当成自己的可用模型。
+    if (
+      currentSession?.agentId === session.agentId &&
+      !getSessionModel(session.id) &&
+      chatState.currentModel
+    ) {
+      saveSessionModel(session.id, chatState.currentModel);
     }
     useProjectStore.getState().setActiveSession(session.id);
     useChatStore.getState().setActiveAgent(session.agentId);

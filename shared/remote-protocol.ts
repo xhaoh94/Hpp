@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { DiffLike } from "./diff-summary";
 import type { SharedModel } from "./models";
-import type { ProcessEntryView } from "./process-view";
+import type { ProcessEntryView, ProcessSubagentStopReason, ProcessSubagentUsage } from "./process-view";
 import type { QuestionnaireQuestion } from "./questionnaire";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-actions";
 import type { AgentPermissionMode } from "./agent-permissions";
@@ -331,6 +331,7 @@ export interface RemoteProcessEntry extends ProcessEntryView {
   title: string;
   toolKind?: string;
   detail?: string;
+  prompt?: string;
   command?: string;
   exitCode?: number;
   timestamp: number;
@@ -351,6 +352,9 @@ export interface RemoteProcessEntry extends ProcessEntryView {
     model?: string;
     path?: string;
     message?: string;
+    prompt?: string;
+    stopReason?: ProcessSubagentStopReason;
+    usage?: ProcessSubagentUsage;
   }>;
 }
 

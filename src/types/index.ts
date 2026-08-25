@@ -13,6 +13,7 @@ import type {
   AgentPackageStatus,
   AgentPackageVersions,
   AgentPluginInstallResult,
+  AgentProviderAuthMode,
   AgentPluginManifest,
   OfficialAgentPluginCatalogResult,
   OfficialAgentPluginDescriptor,
@@ -21,6 +22,7 @@ import type {
   DiskUsageStats,
   DiskCleanupResult,
 } from "./ipc";
+import type { AgentConfigExportData } from "../../shared/agent-config-io";
 import type {
   RemoteAccessStatus,
   RemotePairingOffer,

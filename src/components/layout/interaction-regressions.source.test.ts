@@ -78,11 +78,12 @@ describe("chat interaction regression constraints", () => {
   });
 
   it("shows one global sticky button that jumps to the previous user bubble", () => {
-    // 返回按钮从“每个处理过程”改为全局一个，常驻吸顶；目标按视野内最上面的用户气泡计算。
+    // 返回按钮从“每个处理过程”改为全局一个，常驻吸顶；目标按主消息行的真实几何位置计算。
     expect(chatPanelSource).toContain("chat-sticky-previous-message");
     expect(chatPanelSource).toContain("refreshPreviousUserTarget");
-    expect(chatPanelSource).toContain('querySelectorAll<HTMLElement>(".chat-virtual-row")');
-    expect(chatPanelSource).toContain('querySelector<HTMLElement>(".chat-bubble.user")');
+    expect(chatPanelSource).toContain("chat-message-virtual-content");
+    expect(chatPanelSource).toContain("visibleSpeechIndex");
+    expect(chatPanelSource).toContain("resolvePreviousUserTargetIndex");
     expect(chatPanelSource).toContain("返回我的上一条发言");
     // 处理过程吸顶条不再携带返回按钮/跳转目标，避免每个处理过程各渲染一个按钮。
     expect(processBlockSource).not.toContain("previousUserMessageId");
@@ -106,8 +107,8 @@ describe("chat interaction regression constraints", () => {
     expect(chatStoreSource).toContain("export const isUserSpeechMessage");
     expect(chatStoreSource).toContain("message.role === \"user\" && !message.uiGenerated");
     expect(chatPanelSource).toContain("state.messages.filter((message) => isUserSpeechMessage(message))");
-    expect(chatPanelSource).toContain("const speechIds = new Set<string>()");
-    expect(chatPanelSource).toContain("isUserSpeechMessage(messages[i])");
+    expect(chatPanelSource).toContain("const speechIndexes = messages.reduce<number[]>(");
+    expect(chatPanelSource).toContain("isUserSpeechMessage(message)");
     expect(pendingUIResponseSource).toContain("uiGenerated: true");
   });
 

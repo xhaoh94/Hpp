@@ -23,6 +23,7 @@
 
 .sidebar-content {
   flex: 1;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 8px;
 }
@@ -455,7 +456,9 @@
   margin-top: 6px;
   width: 100%;
   max-width: 100%;
-  overflow: visible;
+  /* 隐藏的 max-content 测量层不能把侧栏撑出横向滚动范围。 */
+  overflow-x: hidden;
+  overflow-y: visible;
 }
 
 .project-terminal-measurements {

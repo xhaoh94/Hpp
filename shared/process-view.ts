@@ -1,3 +1,15 @@
+export type ProcessSubagentStopReason = "timeout" | "aborted" | "cancelled" | "error";
+
+export type ProcessSubagentUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  totalTokens?: number;
+  cost?: number;
+  turns?: number;
+};
+
 export type ProcessEntryView = {
   id: string;
   type: "status" | "tool" | "diff" | "error" | "info" | "thinking" | "question" | "subagent";
@@ -5,6 +17,7 @@ export type ProcessEntryView = {
   title: string;
   toolKind?: string;
   detail?: string;
+  prompt?: string;
   command?: string;
   exitCode?: number;
   state?: "running" | "completed" | "warning" | "error" | "interrupted";
@@ -13,8 +26,17 @@ export type ProcessEntryView = {
   startedAt?: number;
   completedAt?: number;
   phase?: "started" | "completed";
+  stopReason?: ProcessSubagentStopReason;
   subagents?: Array<{
+    id?: string;
+    label?: string;
     status?: "pending" | "running" | "completed" | "error" | "interrupted";
+    model?: string;
+    path?: string;
+    message?: string;
+    prompt?: string;
+    stopReason?: ProcessSubagentStopReason;
+    usage?: ProcessSubagentUsage;
   }>;
 };
 

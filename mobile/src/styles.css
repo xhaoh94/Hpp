@@ -782,6 +782,7 @@ button:disabled { opacity: 0.48; }
 
 .messages-shell { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .messages-view { width: 100%; height: 100%; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 14px 14px 28px; }
+.messages-content { min-width: 0; width: 100%; }
 .return-bottom-button {
   position: absolute;
   bottom: 16px;
@@ -849,7 +850,9 @@ button:disabled { opacity: 0.48; }
 .message-content td { padding: 6px 8px; border: 1px solid var(--border); }
 
 .message-commentary { min-width: 0; max-width: 100%; overflow-wrap: anywhere; font-size: 13px; line-height: 1.62; color: var(--text); }
-.message-turn-timeline { display: flex; min-width: 0; flex-direction: column; gap: 8px; margin-top: 12px; }
+.assistant-body-segment { box-sizing: border-box; min-width: 0; max-width: 100%; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.message-turn-timeline { display: flex; min-width: 0; flex-direction: column; gap: 0; margin-top: 0; }
+.message-turn-timeline > .assistant-body-segment { margin: 12px 0; }
 .message-commentary-item + .message-commentary-item { margin-top: 12px; }
 .message.assistant > .message-content,
 .message.assistant > .message-commentary,
@@ -991,6 +994,7 @@ button:disabled { opacity: 0.48; }
 .subagent-chip.error .subagent-avatar { color: var(--coral); }
 .subagent-chip.interrupted .subagent-avatar { color: var(--yellow); }
 .subagent-entry-title { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.subagent-entry-meta { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .subagent-entry-detail { margin: 0 8px 8px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--code); color: var(--muted); font-size: 11px; line-height: 1.55; }
 .process-entry > summary::-webkit-details-marker { display: none; }
 .command-group-summary { grid-template-columns: 7px minmax(0, 1fr) 14px; }
@@ -1013,6 +1017,34 @@ button:disabled { opacity: 0.48; }
 .process-entry .command-group-item > pre { box-sizing: border-box; width: calc(100% - 10px); max-width: calc(100% - 10px); margin: 3px 5px 6px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--code); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; overflow-x: hidden; }
 .process-files { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; border-top: 1px solid var(--border); }
 .process-files code { padding: 3px 5px; border-radius: 3px; background: var(--code); color: var(--muted); font-size: 10px; }
+
+/* 正文负责分隔；连续运行节点恢复为一个无缝衔接的卡片组。 */
+.message-turn-timeline > .process-entry,
+.message-turn-timeline > .process-entry:last-child {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface);
+}
+.message-turn-timeline > .process-entry + .process-entry { border-top: 0; }
+.message-turn-timeline > .process-entry:first-child,
+.message-turn-timeline > :not(.process-entry) + .process-entry {
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
+}
+.message-turn-timeline > .process-entry:not(:has(+ .process-entry)) {
+  border-bottom-left-radius: 5px;
+  border-bottom-right-radius: 5px;
+}
+.process-block[open]:has(+ .message-turn-timeline > .process-entry:first-child) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.process-block[open] + .message-turn-timeline > .process-entry:first-child {
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
 
 .queue-strip { box-sizing: border-box; width: 100%; max-width: 860px; margin: 0 auto 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .queue-header { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; font-weight: 650; }
@@ -1194,7 +1226,7 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
 .permission-option.danger > svg:first-child,
 .permission-option.danger b { color: var(--yellow); }
 .permission-check { align-self: center; color: var(--accent); }
-.model-picker { position: relative; z-index: 12; flex: 1 1 auto; min-width: 0; max-width: min(65vw, 320px); }
+.model-picker { position: relative; z-index: 12; flex: 0 1 auto; min-width: 0; max-width: min(65vw, 320px); }
 .model-picker-trigger {
   display: grid;
   width: auto;

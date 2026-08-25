@@ -12,9 +12,9 @@ export function combineAgentModels<T extends { provider: string; id: string }>(
   const enrichConfigured = (model: T): T => {
     const backend = backendByKey.get(`${model.provider}:${model.id}`) || backendById.get(model.id);
     if (!backend) return model;
-    const merged = { ...backend, ...model } as T & Record<string, unknown>;
+    const merged: Record<string, unknown> = { ...backend, ...model };
     for (const [key, value] of Object.entries(backend)) {
-      if ((model as T & Record<string, unknown>)[key] === undefined) merged[key] = value;
+      if ((model as Record<string, unknown>)[key] === undefined) merged[key] = value;
     }
     return merged as T;
   };

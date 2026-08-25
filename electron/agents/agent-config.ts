@@ -17,6 +17,8 @@ export interface AgentCustomModelConfig {
    * 模型声明的思考档位。未知档位保持原值；对自定义模型而言，空值表示不支持思考。
    */
   supportedThinkingLevels?: string[];
+  /** 旧版兼容字段；配置控件当前仅由 isBuiltin 决定是否显示。 */
+  hasThinkingLevels?: boolean;
   /** 该模型是否在 Agent 内置目录中（能力由 Agent 管理，配置弹窗不显示能力控件）。 */
   isBuiltin?: boolean;
 }
@@ -261,9 +263,10 @@ async function enrichWithDiscoveredThinkingLevels(
   try {
     const discovered = await getAgentPluginRegistry().readProviderConfig(agentId);
     if (discovered === undefined) return state;
+    const discoveredState = normalizeState(discovered, await getProviderConfiguration(agentId));
     const discoveredByKey = new Map<string, AgentCustomModelConfig>();
     const discoveredById = new Map<string, AgentCustomModelConfig>();
-    for (const provider of discovered.providers) {
+    for (const provider of discoveredState.providers) {
       for (const model of provider.models) {
         discoveredByKey.set(`${provider.providerId}/${model.id}`, model);
         // 按 modelId 跨 provider 兜底：用户自定义渠道的 providerId 可能与

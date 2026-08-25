@@ -17,8 +17,24 @@ import {
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
   unwrapToolText,
+  type NormalizedToolPayload,
 } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import {
+  buildNativeSubagentEvent,
+  formatSubagentModel,
+  getFirstNonEmptyString,
+  getNonEmptyString,
+  humanizeSubagentLabel,
+  isNativeSubagentToolName,
+  isTerminalNativeSubagentStatus,
+  normalizeNativeSubagentStatus,
+  normalizeNativeSubagentStopReason,
+  type NativeSubagentAction,
+  type NativeSubagentSnapshot,
+  type NativeSubagentStatus,
+  type NativeSubagentUsage,
+} from "../../plugin-runtime/subagent-events";
 
 export interface ClaudeBackendContext {
   getConfigState?: () => Promise<unknown>;
@@ -77,6 +93,66 @@ const FORK_DESCRIPTOR_PREFIX = "hpp-claude-fork:v1:";
 
 const asRecord = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
 const optionalString = (value: unknown) => typeof value === "string" && value ? value : undefined;
+const isClaudeTaskOutputToolName = (value: unknown) => ["taskoutput", "task_output"]
+  .includes(String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_"));
+
+function getClaudeSubagentInput(value: unknown): UnknownRecord {
+  return asRecord(value);
+}
+
+function getClaudeSubagentLabel(input: UnknownRecord, metadata: UnknownRecord): string | undefined {
+  const label = getFirstNonEmptyString(input, ["subagent_type", "subagentType", "agent_type", "agentType", "task_type", "taskType"])
+    || getFirstNonEmptyString(metadata, ["subagent_type", "subagentType", "agent_type", "agentType", "task_type", "taskType"]);
+  return label ? humanizeSubagentLabel(label) : undefined;
+}
+
+function getClaudeSubagentStatus(data: UnknownRecord, fallback: NativeSubagentStatus = "running"): NativeSubagentStatus {
+  const direct = normalizeNativeSubagentStatus(data.status ?? data.state ?? data.subagentStatus);
+  if (direct) return direct;
+  if (data.isError === true || data.is_error === true) return "error";
+  const detail = String(data.error || data.errorText || data.message || "");
+  if (/abort|cancel|interrupt/i.test(detail)) return "interrupted";
+  return fallback;
+}
+
+function getClaudeSubagentMetadata(data: UnknownRecord): UnknownRecord {
+  return {
+    ...asRecord(data.metadata),
+    ...asRecord(data.result),
+    ...asRecord(data.tool_use_result),
+    ...asRecord(data.toolUseResult),
+  };
+}
+
+function getClaudeSubagentUsage(...records: UnknownRecord[]): NativeSubagentUsage | undefined {
+  const sources = records.flatMap((record) => [
+    record,
+    asRecord(record.usage),
+    asRecord(record.result),
+    asRecord(record.toolUseResult),
+    asRecord(record.tool_use_result),
+  ]);
+  const numberValue = (...keys: string[]) => {
+    for (const source of sources) {
+      for (const key of keys) {
+        const number = Number(source[key]);
+        if (Number.isFinite(number) && number >= 0) return number;
+      }
+    }
+    return undefined;
+  };
+  const usage = {
+    inputTokens: numberValue("inputTokens", "input_tokens", "prompt_tokens", "promptTokens"),
+    outputTokens: numberValue("outputTokens", "output_tokens", "completion_tokens", "completionTokens"),
+    cacheReadTokens: numberValue("cacheReadTokens", "cache_read_input_tokens", "cacheReadInputTokens"),
+    cacheWriteTokens: numberValue("cacheWriteTokens", "cache_creation_input_tokens", "cacheWriteInputTokens"),
+    totalTokens: numberValue("totalTokens", "total_tokens"),
+    cost: numberValue("cost", "cost_usd", "total_cost_usd"),
+    turns: numberValue("turns"),
+  };
+  const compact = Object.fromEntries(Object.entries(usage).filter(([, value]) => value !== undefined));
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
 
 function createForkDescriptor(sourceSessionId: string, targetMessageId: string, newSessionId: string) {
   const payload = Buffer.from(JSON.stringify({ sourceSessionId, targetMessageId, newSessionId }), "utf8").toString("base64url");
@@ -119,6 +195,8 @@ export class ClaudeSDKAgent {
   private models: AgentModel[] = [];
   private secretValues: string[] = [];
   private pendingGuidance: PendingClaudeGuidance | null = null;
+  private claudeSubagentsByToolCallId = new Map<string, NativeSubagentSnapshot>();
+  private claudeSubagentToolCallIdByTaskId = new Map<string, string>();
 
   constructor(sessionId = "default", emit?: (event: UnknownRecord) => void, context?: ClaudeBackendContext) {
     this.eventBuffer = new AgentEventBuffer(sessionId, emit);
@@ -222,6 +300,8 @@ export class ClaudeSDKAgent {
     if (!this.process || !this.isReady) throw new Error("Claude Agent SDK worker is not running");
     if (!this.isIdle()) throw new Error("SESSION_BUSY");
     this.pendingGuidance = null;
+    this.claudeSubagentsByToolCallId.clear();
+    this.claudeSubagentToolCallIdByTaskId.clear();
     const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptId = promptId;
     this.turnActive = true;
@@ -314,6 +394,7 @@ export class ClaudeSDKAgent {
   async abort() {
     this.cancelPendingGuidance("Claude guidance interrupted");
     this.pendingUIRequestIds.clear();
+    this.interruptClaudeSubagents("用户已中止");
     try {
       if (this.process) {
         const data = await this.request({ type: "abort" }, 10_000);
@@ -402,6 +483,8 @@ export class ClaudeSDKAgent {
     }
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
+    this.claudeSubagentsByToolCallId.clear();
+    this.claudeSubagentToolCallIdByTaskId.clear();
     this.pendingGuidance = null;
     this.activePromptId = null;
     this.turnActive = false;
@@ -480,12 +563,26 @@ export class ClaudeSDKAgent {
         }
         this.emitEvent({ type: "turn_metadata", nativeTurnId: data.nativeTurnId, clientUserMessageId: this.activePromptId });
         break;
+      case "subagent_started":
+      case "subagent_update":
+        this.handleClaudeSubagentWorkerEvent(data, data.type === "subagent_started" ? "started" : "update");
+        break;
       case "tool_execution_start":
+        if (isClaudeTaskOutputToolName(data.toolName)) break;
+        if (isNativeSubagentToolName(data.toolName)) {
+          this.handleClaudeSubagentWorkerEvent(data, "started");
+          break;
+        }
         this.emitEvent(normalizeToolEvent("tool_start", {
           ...data, toolCallId: data.toolUseId, name: data.toolName, args: data.input,
         }));
         break;
       case "tool_execution_update":
+        if (isClaudeTaskOutputToolName(data.toolName)) break;
+        if (isNativeSubagentToolName(data.toolName) || this.claudeSubagentsByToolCallId.has(String(data.toolUseId || ""))) {
+          this.handleClaudeSubagentWorkerEvent(data, "update");
+          break;
+        }
         this.emitEvent(normalizeToolEvent("tool_start", {
           ...data,
           toolCallId: data.toolUseId,
@@ -496,6 +593,14 @@ export class ClaudeSDKAgent {
         }));
         break;
       case "tool_execution_end": {
+        if (isClaudeTaskOutputToolName(data.toolName)) {
+          this.handleClaudeTaskOutputEvent(data);
+          break;
+        }
+        if (isNativeSubagentToolName(data.toolName) || this.claudeSubagentsByToolCallId.has(String(data.toolUseId || ""))) {
+          this.handleClaudeSubagentWorkerEvent(data, "end");
+          break;
+        }
         const event = normalizeToolEvent("tool_end", {
           ...data,
           toolCallId: data.toolUseId,
@@ -555,6 +660,135 @@ export class ClaudeSDKAgent {
         if (!id || id === this.activePromptId) this.activePromptId = null;
         this.finishTurn(true);
         break;
+    }
+  }
+
+  private handleClaudeTaskOutputEvent(data: UnknownRecord) {
+    const result = asRecord(data.toolUseResult || data.tool_use_result || data.output || data.result);
+    const task = asRecord(result.task);
+    const taskId = getFirstNonEmptyString(task, ["taskId", "task_id"])
+      || getFirstNonEmptyString(result, ["taskId", "task_id"]);
+    if (!taskId) return;
+    const toolCallId = this.claudeSubagentToolCallIdByTaskId.get(taskId);
+    if (!toolCallId) return;
+    this.handleClaudeSubagentWorkerEvent({
+      type: "subagent_update",
+      toolUseId: toolCallId,
+      taskId,
+      agentId: taskId,
+      status: task.status || result.status,
+      result: task,
+      toolUseResult: task,
+    }, "update");
+  }
+
+  private handleClaudeSubagentWorkerEvent(data: UnknownRecord, phase: "started" | "update" | "end") {
+    const metadata = getClaudeSubagentMetadata(data);
+    const input = getClaudeSubagentInput(data.input || data.args || metadata.input);
+    const taskId = getFirstNonEmptyString(data, ["taskId", "task_id", "agentId", "agent_id"])
+      || getFirstNonEmptyString(metadata, ["taskId", "task_id", "agentId", "agent_id"]);
+    const toolCallId = getFirstNonEmptyString(data, ["toolUseId", "toolCallId", "tool_use_id"])
+      || getFirstNonEmptyString(metadata, ["toolUseId", "toolCallId", "tool_use_id"])
+      || (taskId ? this.claudeSubagentToolCallIdByTaskId.get(taskId) : undefined)
+      || (taskId ? `claude-task-${taskId}` : undefined);
+    if (!toolCallId) return;
+
+    const previous = this.claudeSubagentsByToolCallId.get(toolCallId);
+    if (taskId) this.claudeSubagentToolCallIdByTaskId.set(taskId, toolCallId);
+    const background = input.run_in_background === true
+      || input.runInBackground === true
+      || input.background === true
+      || metadata.run_in_background === true
+      || metadata.runInBackground === true
+      || metadata.background === true;
+    const rawResult = data.toolUseResult || data.tool_use_result || data.output || data.result;
+    const resultRecord = typeof rawResult === "object" && rawResult !== null && !Array.isArray(rawResult)
+      ? asRecord(rawResult)
+      : {};
+    const rawStatus = data.status ?? data.state ?? data.subagentStatus
+      ?? metadata.status ?? metadata.state ?? resultRecord.status;
+    const stopReason = normalizeNativeSubagentStopReason(
+      data.stopReason ?? metadata.stopReason ?? resultRecord.stopReason,
+    );
+    let status = getClaudeSubagentStatus({ ...data, status: rawStatus }, phase === "started" ? "running" : "completed");
+    if (stopReason === "timeout") status = "error";
+    if (phase === "end" && background && !isTerminalNativeSubagentStatus(status)) status = "running";
+    if (phase === "end" && background && status === "completed" && (
+      resultRecord.status === "running"
+      || resultRecord.status === "pending"
+      || resultRecord.async === true
+      || resultRecord.background === true
+      || !["completed", "complete", "done", "success", "succeeded"].includes(String(resultRecord.status || "").toLowerCase())
+    )) status = "running";
+    if (previous && isTerminalNativeSubagentStatus(previous.status) && !isTerminalNativeSubagentStatus(status)) {
+      status = previous.status;
+    }
+
+    const action: NativeSubagentAction = input.resume || input.task_id || input.taskId || previous?.action === "resumeAgent"
+      ? "resumeAgent"
+      : "spawnAgent";
+    const prompt = getFirstNonEmptyString(input, ["prompt", "description", "assignment", "task"])
+      || getFirstNonEmptyString(data, ["prompt", "description", "assignment"])
+      || previous?.prompt;
+    const detail = getFirstNonEmptyString(input, ["description", "prompt", "assignment", "task"])
+      || getFirstNonEmptyString(data, ["description", "prompt", "assignment"])
+      || previous?.detail;
+    const subagentId = getFirstNonEmptyString(data, ["agentId", "agent_id", "sessionId", "session_id", "taskId", "task_id"])
+      || getFirstNonEmptyString(metadata, ["agentId", "agent_id", "sessionId", "session_id", "taskId", "task_id"])
+      || previous?.subagentId
+      || `claude-subagent-${toolCallId}`;
+    const model = formatSubagentModel(input.model || data.model || metadata.model || resultRecord.model)
+      || previous?.model;
+    const usage = getClaudeSubagentUsage(data, metadata, resultRecord);
+    const outputRecord = asRecord(data.output);
+    const errorText = getNonEmptyString(data.error || data.errorText || resultRecord.error || resultRecord.errorText);
+    const message = errorText
+      || getNonEmptyString(resultRecord.content)
+      || getNonEmptyString(resultRecord.summary)
+      || getNonEmptyString(resultRecord.result)
+      || getNonEmptyString(resultRecord.output)
+      || getNonEmptyString(outputRecord.content)
+      || getNonEmptyString(outputRecord.summary)
+      || getNonEmptyString(data.result)
+      || getNonEmptyString(data.message)
+      || previous?.message;
+    const snapshot: NativeSubagentSnapshot = {
+      toolCallId,
+      subagentId,
+      label: getClaudeSubagentLabel(input, { ...metadata, ...resultRecord })
+        || previous?.label
+        || "Subagent",
+      status,
+      action,
+      model,
+      detail,
+      prompt,
+      message,
+      stopReason,
+      startedAt: previous?.startedAt
+        || Number(data.startedAt || data.started_at || metadata.startedAt || metadata.started_at)
+        || Date.now(),
+      background,
+      ...(usage || previous?.usage ? { usage: usage || previous?.usage } : {}),
+    };
+    this.claudeSubagentsByToolCallId.set(toolCallId, snapshot);
+    this.emitEvent(buildNativeSubagentEvent(
+      snapshot,
+      "claude",
+      isTerminalNativeSubagentStatus(status) ? Number(data.completedAt || data.completed_at) || Date.now() : undefined,
+    ));
+  }
+
+  private interruptClaudeSubagents(message: string) {
+    for (const [toolCallId, snapshot] of this.claudeSubagentsByToolCallId) {
+      if (isTerminalNativeSubagentStatus(snapshot.status)) continue;
+      const interrupted: NativeSubagentSnapshot = {
+        ...snapshot,
+        status: "interrupted",
+        message,
+      };
+      this.claudeSubagentsByToolCallId.set(toolCallId, interrupted);
+      this.emitEvent(buildNativeSubagentEvent(interrupted, "claude", Date.now()));
     }
   }
 
@@ -627,8 +861,8 @@ export class ClaudeSDKAgent {
     return `claude-sdk-${++this.requestId}`;
   }
 
-  private emitEvent(event: UnknownRecord) {
-    this.eventBuffer.send(event);
+  private emitEvent(event: UnknownRecord | NormalizedToolPayload) {
+    this.eventBuffer.send(event as UnknownRecord);
   }
 
   private emitEventThrottled(event: UnknownRecord) {
@@ -656,10 +890,12 @@ export class ClaudeSDKAgent {
     if (this.process !== child) return;
     this.process = null;
     this.isReady = false;
+    this.claudeSubagentsByToolCallId.clear();
     const redactedDetail = this.redact(detail);
     for (const callback of this.pendingResponses.values()) callback({ type: "error", error: redactedDetail });
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
+    this.claudeSubagentToolCallIdByTaskId.clear();
     this.pendingGuidance = null;
     if (this.turnActive) {
       this.emitEvent({ type: "process_event", entryType: "error", kind: "error", title: "Claude Code 已断开", detail: redactedDetail, state: "error" });

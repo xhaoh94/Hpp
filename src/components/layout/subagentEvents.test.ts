@@ -3,6 +3,7 @@ import type { AgentEvent } from "@/types";
 import {
   getSubagentProcessEntry,
   normalizeSubagentStatus,
+  normalizeSubagentStopReason,
   parseSubagentsFromEvent,
 } from "./subagentEvents";
 
@@ -16,6 +17,7 @@ describe("subagent events", () => {
       tool: "spawnAgent",
       title: "已开始工作",
       detail: "Inspect the backend",
+      prompt: "检查后端实现",
       state: "completed",
       timestamp: 100,
       startedAt: 100,
@@ -24,6 +26,7 @@ describe("subagent events", () => {
         id: "thread-1",
         label: "Backend commentary",
         status: "running",
+        prompt: "检查后端实现",
         model: "gpt-5",
         path: "/root/backend_commentary",
       }],
@@ -34,6 +37,7 @@ describe("subagent events", () => {
       type: "subagent",
       title: "已开始工作",
       detail: "Inspect the backend",
+      prompt: "检查后端实现",
       state: "completed",
       timestamp: 100,
       startedAt: 100,
@@ -45,6 +49,7 @@ describe("subagent events", () => {
         id: "thread-1",
         label: "Backend commentary",
         status: "running",
+        prompt: "检查后端实现",
       })],
     }));
   });
@@ -61,6 +66,25 @@ describe("subagent events", () => {
 
     expect(normalizeSubagentStatus("succeeded")).toBe("completed");
     expect(normalizeSubagentStatus("shutdown")).toBe("interrupted");
+  });
+
+  it("renders timeout as a distinct terminal reason", () => {
+    const entry = getSubagentProcessEntry({
+      type: "subagent_event",
+      id: "timeout-1",
+      phase: "completed",
+      state: "error",
+      stopReason: "timeout",
+      subagents: [{ id: "worker-timeout", label: "Worker", status: "error", stopReason: "timeout" }],
+    } as AgentEvent);
+
+    expect(normalizeSubagentStopReason("deadline-exceeded")).toBe("timeout");
+    expect(entry).toEqual(expect.objectContaining({
+      title: "已超时",
+      state: "error",
+      stopReason: "timeout",
+      subagents: [expect.objectContaining({ stopReason: "timeout", status: "error" })],
+    }));
   });
 
   it("uses an agent path as a readable fallback label", () => {

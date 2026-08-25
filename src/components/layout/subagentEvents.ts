@@ -3,6 +3,7 @@ import type {
   AgentSubagent,
   AgentSubagentStatus,
 } from "@/stores/chat-store";
+import type { ProcessSubagentStopReason } from "@shared/process-view";
 import type { AgentEvent } from "@/types";
 
 type SubagentProcessEntryDraft = Omit<AgentProcessEntry, "id" | "timestamp"> & {
@@ -16,11 +17,44 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const getString = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : undefined;
 
+const getUsageNumber = (...values: unknown[]) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return undefined;
+};
+
+const parseSubagentUsage = (value: unknown): AgentSubagent["usage"] => {
+  if (!isRecord(value)) return undefined;
+  const usage = isRecord(value.usage) ? value.usage : value;
+  const cost = isRecord(usage.cost) ? usage.cost : {};
+  const parsed = {
+    inputTokens: getUsageNumber(usage.inputTokens, usage.input, usage.promptTokens),
+    outputTokens: getUsageNumber(usage.outputTokens, usage.output, usage.completionTokens),
+    cacheReadTokens: getUsageNumber(usage.cacheReadTokens, usage.cacheRead, usage.cache_read),
+    cacheWriteTokens: getUsageNumber(usage.cacheWriteTokens, usage.cacheWrite, usage.cache_write),
+    totalTokens: getUsageNumber(usage.totalTokens, usage.total_tokens),
+    cost: getUsageNumber(usage.cost, cost.total, cost.totalUsd, cost.usd),
+    turns: getUsageNumber(usage.turns),
+  };
+  const compact = Object.fromEntries(Object.entries(parsed).filter(([, item]) => item !== undefined));
+  return Object.keys(compact).length > 0 ? compact : undefined;
+};
+
 const getFirstString = (record: Record<string, unknown>, keys: string[]) => {
   for (const key of keys) {
     const value = getString(record[key]);
     if (value) return value;
   }
+  return undefined;
+};
+
+export const normalizeSubagentStopReason = (value: unknown): ProcessSubagentStopReason | undefined => {
+  const reason = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["timeout", "timed_out", "time_limit", "deadline_exceeded"].includes(reason)) return "timeout";
+  if (["aborted", "abort", "cancelled", "canceled", "cancel", "interrupted"].includes(reason)) return "aborted";
+  if (["error", "failed", "failure", "exception"].includes(reason)) return "error";
   return undefined;
 };
 
@@ -59,14 +93,22 @@ const parseSubagent = (
     || `subagent-${index + 1}`;
   const label = getFirstString(value, ["label", "name", "taskName", "task_name", "agentName", "agent_name"])
     || (path ? getSubagentLabel(path) : getSubagentLabel(id));
+  const usage = parseSubagentUsage(value.usage);
+  const stopReason = normalizeSubagentStopReason(value.stopReason);
+  const status = stopReason === "timeout"
+    ? "error"
+    : normalizeSubagentStatus(value.status ?? value.state) || fallbackStatus;
 
   return {
     id,
     label,
-    status: normalizeSubagentStatus(value.status ?? value.state) || fallbackStatus,
+    status,
     model: getFirstString(value, ["model", "modelName", "model_name"]),
     path,
     message: getFirstString(value, ["message", "detail", "summary"]),
+    prompt: getFirstString(value, ["prompt", "task", "request"]),
+    ...(stopReason ? { stopReason } : {}),
+    ...(usage ? { usage } : {}),
   };
 };
 
@@ -106,6 +148,9 @@ export const parseSubagentsFromEvent = (
       status: event.status || event.state,
       model: event.model,
       message: event.message,
+      prompt: event.prompt,
+      usage: event.usage,
+      stopReason: event.stopReason,
     }, 0, fallbackStatus);
     if (individual && (event.agentThreadId || event.agentPath || event.agentName)) {
       subagents = [individual];
@@ -134,9 +179,10 @@ export const parseSubagentsFromEvent = (
 
 const getEntryState = (event: AgentEvent, subagents: AgentSubagent[]): AgentProcessEntry["state"] => {
   const direct = normalizeSubagentStatus(event.state ?? event.status);
+  if (normalizeSubagentStopReason(event.stopReason) === "timeout") return "error";
   if (direct === "pending" || direct === "running") return "running";
   if (direct === "completed" || direct === "error" || direct === "interrupted") return direct;
-  if (subagents.some((subagent) => subagent.status === "error")) return "error";
+  if (subagents.some((subagent) => subagent.stopReason === "timeout" || subagent.status === "error")) return "error";
   if (subagents.some((subagent) => subagent.status === "interrupted")) return "interrupted";
   if (subagents.some((subagent) => subagent.status === "pending" || subagent.status === "running")) return "running";
   return event.phase === "completed" ? "completed" : "running";
@@ -144,6 +190,7 @@ const getEntryState = (event: AgentEvent, subagents: AgentSubagent[]): AgentProc
 
 const getFallbackTitle = (event: AgentEvent, state: AgentProcessEntry["state"]) => {
   const activity = String(event.activityKind || event.tool || "").trim().toLowerCase();
+  if (normalizeSubagentStopReason(event.stopReason) === "timeout") return "已超时";
   if (state === "error") return "工作失败";
   if (state === "interrupted") return "已中断";
   if (activity.includes("spawn")) return event.phase === "completed" ? "已开始工作" : "正在启动";
@@ -155,13 +202,17 @@ const getFallbackTitle = (event: AgentEvent, state: AgentProcessEntry["state"]) 
 
 export const getSubagentProcessEntry = (event: AgentEvent): SubagentProcessEntryDraft => {
   const directStatus = normalizeSubagentStatus(event.state ?? event.status);
-  const fallbackStatus = directStatus || (event.phase === "completed" ? "completed" : "running");
+  const eventStopReason = normalizeSubagentStopReason(event.stopReason);
+  const fallbackStatus = eventStopReason === "timeout"
+    ? "error"
+    : directStatus || (event.phase === "completed" ? "completed" : "running");
   const subagents = parseSubagentsFromEvent(event, fallbackStatus);
   const state = getEntryState(event, subagents);
   const timestamp = [event.timestamp, event.startedAt].find(
     (value): value is number => typeof value === "number" && Number.isFinite(value),
   );
-  const detail = getString(event.detail) || getString(event.prompt);
+  const detail = getString(event.detail);
+  const prompt = getString(event.prompt);
   const phase = event.phase === "started" || event.phase === "completed" ? event.phase : undefined;
   const action = [
     "spawnAgent",
@@ -193,9 +244,11 @@ export const getSubagentProcessEntry = (event: AgentEvent): SubagentProcessEntry
     type: "subagent",
     title: getString(event.title) || getFallbackTitle(event, state),
     detail,
+    prompt,
     timestamp,
     state,
     expanded: false,
+    stopReason: eventStopReason,
     subagents,
     phase,
     action,

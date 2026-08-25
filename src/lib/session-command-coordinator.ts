@@ -42,7 +42,7 @@ import {
   normalizeThinkingLevelId,
 } from "@shared/models";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "@shared/agent-actions";
-import type { AgentPermissionMode } from "@shared/agent-permissions";
+import { normalizeAgentPermissionMode, type AgentPermissionMode } from "@shared/agent-permissions";
 import { createComposerDraftSnapshot } from "@/lib/composer-history";
 import { cloneComposerDocument, type ComposerDocument } from "@shared/composer-document";
 import { USER_GUIDANCE_PROCESS_KIND } from "@shared/process-view";
@@ -191,8 +191,10 @@ const getRetainedActiveModels = (sessionId: string) => {
   const chat = useChatStore.getState();
   const persisted = getSessionModel(sessionId);
   if (!sameModelSelection(chat.currentModel, persisted)) return [];
+  // 没有已经发现过的目录时，单独的持久化 currentModel 不能证明
+  // 当前 Agent 仍然拥有该模型；尤其是渠道被删除后不能继续把它显示出来。
   if (chat.availableModels.length > 0) return chat.availableModels;
-  return chat.currentModel ? [chat.currentModel] : [];
+  return [];
 };
 
 const applyActiveModels = (
@@ -449,7 +451,16 @@ export async function createSession(input: {
     lastActiveAt: now.toISOString(),
   };
   const currentModel = useChatStore.getState().currentModel;
-  if (currentModel) saveSessionModel(sessionId, currentModel);
+  const activeSession = projectState.activeSessionId
+    ? projectState.projects
+      .flatMap((candidate) => candidate.sessions)
+      .find((candidate) => candidate.id === projectState.activeSessionId)
+    : undefined;
+  // 新建不同 Agent 的会话不能继承当前模型；没有渠道的 Droid
+  // 不应因为创建前的全局 currentModel 而得到上一会话的模型目录。
+  if (activeSession?.agentId === input.agentId && currentModel) {
+    saveSessionModel(sessionId, currentModel);
+  }
   useProjectStore.getState().addSession(project.id, session, input.activate === true);
   return initializeSession(sessionId, { activate: input.activate, recordFailure: true });
 }
@@ -981,7 +992,7 @@ export async function setThinking(
   }
   await initializeSession(sessionId);
   const model = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
-  if (!isModelThinkingLevelSelectable(model, normalizedLevel)) {
+  if (!model || !isModelThinkingLevelSelectable(model, normalizedLevel)) {
     throw new Error("UNSUPPORTED_THINKING_LEVEL");
   }
   const previous = getSessionThinking(sessionId) ||
@@ -1033,10 +1044,12 @@ export async function getActions(sessionId: string, reload = false): Promise<Age
 
 export async function getSessionCommandConfig(sessionId: string, includeModels = false) {
   const chat = useChatStore.getState();
-  const model = getSessionModel(sessionId) || (chat.activeSessionId === sessionId ? chat.currentModel : null);
+  const isActiveSession = chat.activeSessionId === sessionId;
+  // 活跃会话以运行时状态为准，避免把已失效的持久化模型重新发给
+  // Web/移动端；非活跃会话仍可使用其独立保存的模型设置。
+  const model = isActiveSession ? chat.currentModel : getSessionModel(sessionId);
   const storedThinking = (model ? getSessionModelThinking(sessionId, model) : null) ||
-    getSessionThinking(sessionId) ||
-    (chat.activeSessionId === sessionId ? chat.thinkingLevel : "medium");
+    (isActiveSession ? chat.thinkingLevel : getSessionThinking(sessionId) || "medium");
   return {
     model,
     thinkingLevel: normalizeModelThinkingLevel(storedThinking, model),

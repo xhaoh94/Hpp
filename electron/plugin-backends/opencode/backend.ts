@@ -6,6 +6,10 @@ import * as http from "http";
 import { existsSync, readFileSync } from "fs";
 import { rm, writeFile } from "fs/promises";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
+import {
+  normalizeNativeSubagentStopReason,
+  type NativeSubagentStopReason,
+} from "../../plugin-runtime/subagent-events";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "../../plugin-runtime/process-events";
 import {
   getCommandEnv,
@@ -79,6 +83,7 @@ function resolveOpenCodeCommand(): string {
 
 interface PendingOpenCodeUIRequest {
   kind: "question" | "permission";
+  sessionId?: string;
 }
 
 type OpenCodePromptPart =
@@ -172,6 +177,192 @@ function isToolPartComplete(props: unknown) {
     propsRecord.error !== undefined ||
     ["done", "completed", "complete", "success", "error", "failed"].includes(normalizedState)
   );
+}
+
+type OpenCodeSubagentStatus = "pending" | "running" | "completed" | "error" | "interrupted";
+type OpenCodeSubagentAction = "spawnAgent" | "resumeAgent";
+
+interface OpenCodeSubagentSnapshot {
+  toolCallId: string;
+  subagentId: string;
+  sessionId?: string;
+  label: string;
+  status: OpenCodeSubagentStatus;
+  action: OpenCodeSubagentAction;
+  model?: string;
+  detail?: string;
+  prompt?: string;
+  message?: string;
+  startedAt?: number;
+  stopReason?: NativeSubagentStopReason;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    totalTokens?: number;
+    cost?: number;
+    turns?: number;
+  };
+}
+
+const OPENCODE_SUBAGENT_TOOL_NAMES = new Set(["task", "delegate_task"]);
+
+function getNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function getFirstNonEmptyString(record: UnknownRecord, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = getNonEmptyString(record[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function getOpenCodeToolName(props: unknown): string {
+  const propsRecord = asRecord(props);
+  const part = asRecord(propsRecord.part || propsRecord);
+  return normalizeEventName(part.tool || part.toolName || part.name || propsRecord.tool || propsRecord.toolName)
+    .replace(/[\s-]+/g, "_");
+}
+
+function isOpenCodeSubagentToolPart(props: unknown): boolean {
+  if (OPENCODE_SUBAGENT_TOOL_NAMES.has(getOpenCodeToolName(props))) return true;
+  const propsRecord = asRecord(props);
+  const part = asRecord(propsRecord.part || propsRecord);
+  const partType = normalizeEventName(part.type || propsRecord.type);
+  // OpenCode 把子代理建模为 SubtaskPart / AgentPart，或把子会话 id 塞进
+  // task 工具的 metadata.sessionId。无论确切的工具名是什么，这些都意味着
+  // 当前 part 是一个子代理调用。
+  if (partType === "subtask" || partType === "agent") return true;
+  const state = asRecord(part.state);
+  const metadata = asRecord(state.metadata || part.metadata || propsRecord.metadata);
+  return !!getFirstNonEmptyString(metadata, [
+    "sessionId", "sessionID", "session_id", "taskId", "taskID", "task_id",
+  ]);
+}
+
+function humanizeOpenCodeSubagentLabel(value: string): string {
+  const label = value.replace(/^agent[-_:]?/i, "").replace(/[_-]+/g, " ").trim();
+  return label ? `${label.charAt(0).toUpperCase()}${label.slice(1)}` : "Subagent";
+}
+
+function getOpenCodeSubagentLabel(input: UnknownRecord, metadata: UnknownRecord): string | undefined {
+  const value = getFirstNonEmptyString(input, ["subagent_type", "subagentType", "agent", "agentName", "category"])
+    || getFirstNonEmptyString(metadata, ["subagent_type", "subagentType", "agent", "agentName", "category"]);
+  return value ? humanizeOpenCodeSubagentLabel(value) : undefined;
+}
+
+function formatOpenCodeSubagentModel(value: unknown): string | undefined {
+  const direct = getNonEmptyString(value);
+  if (direct) return direct;
+  const model = asRecord(value);
+  const provider = getFirstNonEmptyString(model, ["providerID", "providerId", "provider"]);
+  const modelId = getFirstNonEmptyString(model, ["modelID", "modelId", "id", "name"]);
+  if (provider && modelId) return `${provider}/${modelId}`;
+  return modelId || provider;
+}
+
+function getOpenCodeSubagentUsage(...records: UnknownRecord[]): OpenCodeSubagentSnapshot["usage"] {
+  const sources = records.flatMap((record) => [record, asRecord(record.usage), asRecord(record.metadata), asRecord(record.result), asRecord(record.output)]);
+  const numberValue = (...keys: string[]) => {
+    for (const source of sources) {
+      for (const key of keys) {
+        const number = Number(source[key]);
+        if (Number.isFinite(number) && number >= 0) return number;
+      }
+    }
+    return undefined;
+  };
+  const usage = {
+    inputTokens: numberValue("inputTokens", "input_tokens", "prompt_tokens", "promptTokens"),
+    outputTokens: numberValue("outputTokens", "output_tokens", "completion_tokens", "completionTokens"),
+    cacheReadTokens: numberValue("cacheReadTokens", "cache_read_input_tokens", "cacheReadInputTokens"),
+    cacheWriteTokens: numberValue("cacheWriteTokens", "cache_creation_input_tokens", "cacheWriteInputTokens"),
+    totalTokens: numberValue("totalTokens", "total_tokens"),
+    cost: numberValue("cost", "cost_usd", "total_cost_usd"),
+    turns: numberValue("turns"),
+  };
+  const compact = Object.fromEntries(Object.entries(usage).filter(([, value]) => value !== undefined));
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
+
+function getOpenCodeTaskOutputState(value: unknown): OpenCodeSubagentStatus | undefined {
+  const output = getNonEmptyString(value);
+  if (!output) return undefined;
+  const taskState = output.match(/<task\b[^>]*\bstate=["']?([a-z_-]+)/i)?.[1]?.toLowerCase();
+  if (taskState === "running" || taskState === "pending") return taskState;
+  if (["completed", "complete", "done", "success", "succeeded"].includes(taskState || "")) return "completed";
+  if (["cancelled", "canceled", "interrupted", "stopped"].includes(taskState || "")) return "interrupted";
+  if (["error", "failed", "failure"].includes(taskState || "") || /<task_error>/i.test(output)) return "error";
+  return undefined;
+}
+
+function getOpenCodeSubagentSessionId(
+  part: UnknownRecord,
+  state: UnknownRecord,
+  metadata: UnknownRecord,
+  input: UnknownRecord,
+): string | undefined {
+  const direct = getFirstNonEmptyString(metadata, ["sessionId", "sessionID", "session_id", "taskId", "taskID", "task_id", "jobId"])
+    || getFirstNonEmptyString(state, ["sessionId", "sessionID", "session_id", "taskId", "taskID", "task_id"])
+    || getFirstNonEmptyString(part, ["childSessionId", "childSessionID"])
+    || getFirstNonEmptyString(input, ["task_id", "taskId", "session_id", "sessionId"]);
+  if (direct) return direct;
+
+  const output = getNonEmptyString(state.output ?? part.output ?? state.result ?? part.result);
+  if (!output) return undefined;
+  return output.match(/<task\b[^>]*\bid=["']([^"']+)/i)?.[1]
+    || output.match(/(?:task[_ ]id|session[_ ]id)\*{0,2}\s*[:=]\s*["']?([\w.:-]+)/i)?.[1];
+}
+
+function getOpenCodeSubagentStatus(part: UnknownRecord): OpenCodeSubagentStatus {
+  const state = asRecord(part.state);
+  const metadata = asRecord(state.metadata || part.metadata);
+  const output = state.output ?? part.output ?? state.result ?? part.result;
+  const outputState = getOpenCodeTaskOutputState(output);
+  if (outputState) return outputState;
+
+  const rawStatus = String(state.status || part.status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["pending", "queued", "not_started"].includes(rawStatus)) return "pending";
+  if (["running", "active", "working", "in_progress", "inprogress"].includes(rawStatus)) return "running";
+  if (["error", "failed", "failure", "errored"].includes(rawStatus)) {
+    const errorText = formatProcessDetail(state.error ?? part.error) || "";
+    return metadata.interrupted === true || /abort|cancel|interrupt/i.test(errorText) ? "interrupted" : "error";
+  }
+  if (["cancelled", "canceled", "interrupted", "stopped"].includes(rawStatus)) return "interrupted";
+  if (["completed", "complete", "done", "success", "succeeded"].includes(rawStatus)) {
+    // OpenCode 的后台 task 工具调用会先结束，但子会话仍在运行；它通过
+    // metadata.background 和 output 中的 task state 区分工具结束与任务结束。
+    if (metadata.background === true) return "running";
+    return "completed";
+  }
+  return "running";
+}
+
+function getOpenCodePartTime(part: UnknownRecord, key: "start" | "end"): number | undefined {
+  const value = Number(asRecord(asRecord(part.state).time || part.time)[key]);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function isTerminalOpenCodeSubagentStatus(status: OpenCodeSubagentStatus): boolean {
+  return status === "completed" || status === "error" || status === "interrupted";
+}
+
+function isOpenCodeSubagentInteractionEvent(eventType: string): boolean {
+  return [
+    "question.asked",
+    "question.v2.asked",
+    "question.replied",
+    "question.rejected",
+    "question.v2.replied",
+    "question.v2.rejected",
+    "permission.asked",
+    "permission.v2.asked",
+    "permission.replied",
+    "permission.v2.replied",
+  ].includes(eventType);
 }
 
 const HPP_OPENCODE_COMPACTION_PROVIDER = "hpp-compaction";
@@ -485,6 +676,8 @@ export class OpenCodeAgent {
   private completedToolParts = new Set<string>();
   private pendingQuestionToolParts = new Set<string>();
   private partTypes = new Map<string, string>();
+  private openCodeSubagentsByToolCallId = new Map<string, OpenCodeSubagentSnapshot>();
+  private openCodeSubagentToolCallIdBySessionId = new Map<string, string>();
   // OpenCode 每次模型调用对应一个 step part，tokens 是该次调用用量；
   // 消息级 info.tokens 只反映最后一次调用，不能直接用。按 part id 记差值上报。
   private partTokenUsage = new Map<string, { input: number; output: number; cacheInput: number }>();
@@ -499,9 +692,13 @@ export class OpenCodeAgent {
   // OpenCode encodes a context compaction as ordinary messages (a user message
   // whose parts include a `compaction` part and an assistant message with
   // `info.summary === true`) instead of a dedicated compaction event. Track the
-  // message currently being streamed so its body is rendered as a compaction
-  // divider rather than conversation text.
-  private activeMessageIsCompaction = false;
+  // native message ids because `message.part.delta` does not repeat the
+  // summary flag; a single "currently compacting" boolean would let summary
+  // deltas leak into the normal assistant response.
+  private compactionMessageIds = new Set<string>();
+  private compactionEventIdByMessageId = new Map<string, string>();
+  private activeCompactionId: string | null = null;
+  private settledCompactionIds = new Set<string>();
   private permissionMode: AgentPermissionMode = "auto";
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
@@ -844,6 +1041,8 @@ export class OpenCodeAgent {
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
     this.partTypes.clear();
+    this.openCodeSubagentsByToolCallId.clear();
+    this.openCodeSubagentToolCallIdBySessionId.clear();
     this.partTokenUsage.clear();
 
     return new Promise((resolve, reject) => {
@@ -914,15 +1113,80 @@ export class OpenCodeAgent {
     }
   }
 
+  private normalizeCompactionMessageId(value: unknown): string | undefined {
+    if (typeof value !== "string" && typeof value !== "number") return undefined;
+    const normalized = String(value).trim();
+    return normalized || undefined;
+  }
+
+  private isCompactionMessageId(value: unknown): boolean {
+    const messageId = this.normalizeCompactionMessageId(value);
+    return !!messageId && this.compactionMessageIds.has(messageId);
+  }
+
+  private getCompactionEventId(messageId: unknown, parentId?: unknown): string | undefined {
+    const normalizedMessageId = this.normalizeCompactionMessageId(messageId);
+    const normalizedParentId = this.normalizeCompactionMessageId(parentId);
+    return (normalizedMessageId && this.compactionEventIdByMessageId.get(normalizedMessageId))
+      || (normalizedParentId && this.compactionEventIdByMessageId.get(normalizedParentId))
+      || this.activeCompactionId
+      || normalizedParentId
+      || normalizedMessageId;
+  }
+
+  private rememberCompactionMessage(messageId: unknown, eventId?: unknown) {
+    const normalizedMessageId = this.normalizeCompactionMessageId(messageId);
+    const normalizedEventId = this.normalizeCompactionMessageId(eventId) || normalizedMessageId;
+    if (!normalizedMessageId) return;
+    this.compactionMessageIds.add(normalizedMessageId);
+    if (normalizedEventId) this.compactionEventIdByMessageId.set(normalizedMessageId, normalizedEventId);
+  }
+
+  private emitCompactionStarted(value: unknown) {
+    const id = this.normalizeCompactionMessageId(value);
+    if (!id || this.settledCompactionIds.has(id) || this.activeCompactionId === id) return;
+    this.activeCompactionId = id;
+    this.emitEvent({ type: "context_compaction", id, phase: "started" });
+  }
+
+  private emitCompactionFinished(value: unknown, phase: "completed" | "interrupted" = "completed", detail?: unknown) {
+    const id = this.normalizeCompactionMessageId(value) || this.activeCompactionId;
+    if (!id || this.settledCompactionIds.has(id)) return;
+    this.settledCompactionIds.add(id);
+    this.emitEvent({ type: "context_compaction", id, phase, detail });
+    if (this.activeCompactionId === id) this.activeCompactionId = null;
+  }
+
+  private isOpenCodeMessageFinished(info: UnknownRecord): boolean {
+    const time = asRecord(info.time);
+    return info.finish !== undefined
+      || info.error !== undefined && info.error !== null
+      || info.completed === true
+      || time.completed !== undefined;
+  }
+
   private handleSSEEvent(eventType: string, data: unknown) {
     const dataRecord = asRecord(data);
     const props = asRecord(dataRecord.properties || dataRecord);
     const part = asRecord(props.part || props);
     const info = asRecord(props.info);
     const eventSessionId = String(props.sessionID || part.sessionID || info.sessionID || "");
-    if (this.sessionId && eventSessionId && eventSessionId !== this.sessionId) return;
+    const isForeignSessionEvent = !!(
+      this.sessionId
+      && eventSessionId
+      && eventSessionId !== this.sessionId
+    );
+    if (isForeignSessionEvent) {
+      const isTrackedSubagent = this.handleOpenCodeSubagentSessionEvent(eventType, props, eventSessionId);
+      if (!isTrackedSubagent || !isOpenCodeSubagentInteractionEvent(eventType)) return;
+    }
+    if (eventType === "session.compacted") {
+      this.emitCompactionFinished(this.activeCompactionId);
+      return;
+    }
     if (
-      isContextCompactionLike(
+      !eventType.startsWith("message.")
+      && isContextCompactionLike(
         eventType,
         props.type,
         props.name,
@@ -935,7 +1199,20 @@ export class OpenCodeAgent {
         part.message
       )
     ) {
-      this.emitEvent({ type: "context_compaction", id: part.id || props.partID || props.partId || props.id || dataRecord.id });
+      const messageId = part.messageID || props.messageID || props.messageId || info.id;
+      const rawPhase = normalizeEventName(props.phase || part.phase || props.status || part.status);
+      const compactionId = this.getCompactionEventId(
+        messageId,
+        part.id || props.partID || props.partId || props.id || dataRecord.id,
+      );
+      this.rememberCompactionMessage(messageId, compactionId);
+      if (["started", "starting", "running", "begin", "began"].some((value) => rawPhase.includes(value))) {
+        this.emitCompactionStarted(compactionId);
+      } else if (["interrupted", "error", "failed", "aborted"].some((value) => rawPhase.includes(value))) {
+        this.emitCompactionFinished(compactionId, "interrupted", props.error || part.error || props.message);
+      } else {
+        this.emitCompactionFinished(compactionId);
+      }
       return;
     }
 
@@ -944,7 +1221,7 @@ export class OpenCodeAgent {
       case "question.v2.asked":
         if (typeof props.id === "string") {
           if (this.cancelIdleTimer()) this.idleObservedWhileWaitingForUI = true;
-          this.pendingUIRequests.set(props.id, { kind: "question" });
+          this.pendingUIRequests.set(props.id, { kind: "question", sessionId: eventSessionId || undefined });
           this.emitEvent(normalizeQuestionProcessEvent({
             type: eventType,
             requestId: props.id,
@@ -969,7 +1246,7 @@ export class OpenCodeAgent {
           if (shouldApproveAutomatically) {
             const requestId = props.id;
             const turnRevision = this.turnRevision;
-            this.pendingUIRequests.set(requestId, { kind: "permission" });
+            this.pendingUIRequests.set(requestId, { kind: "permission", sessionId: eventSessionId || undefined });
             void this.httpPost(`/permission/${encodeURIComponent(props.id)}/reply`, { reply: "once" })
               .then(() => this.completePendingUIRequest(requestId, turnRevision))
               .catch((error) => {
@@ -981,7 +1258,7 @@ export class OpenCodeAgent {
               });
             break;
           }
-          this.pendingUIRequests.set(props.id, { kind: "permission" });
+          this.pendingUIRequests.set(props.id, { kind: "permission", sessionId: eventSessionId || undefined });
           this.emitEvent(normalizeQuestionProcessEvent({
             type: eventType,
             requestId: props.id,
@@ -1015,13 +1292,20 @@ export class OpenCodeAgent {
       case "message.updated":
         if (info.role === "assistant") {
           if (info.summary) {
-            // OpenCode 把上下文压缩摘要作为一条 summary 消息发送，应渲染为
-            // 上下文压缩分隔符而不是对话正文。
-            this.activeMessageIsCompaction = true;
-            this.emitEvent({ type: "context_compaction", id: info.id, phase: "completed" });
+            // OpenCode 先创建 summary 消息，再流式写入摘要，最后才补上
+            // finish/time.completed。创建阶段只能标记“开始”，不能提前发
+            // completed，否则前端会结束压缩状态并把后续摘要当普通正文处理。
+            const summaryId = this.normalizeCompactionMessageId(info.id);
+            const parentId = this.normalizeCompactionMessageId(info.parentID);
+            const compactionId = this.getCompactionEventId(summaryId, parentId);
+            this.rememberCompactionMessage(summaryId, compactionId);
+            this.rememberCompactionMessage(parentId, compactionId);
+            this.emitCompactionStarted(compactionId);
+            if (this.isOpenCodeMessageFinished(info)) {
+              this.emitCompactionFinished(compactionId, info.error ? "interrupted" : "completed", info.error);
+            }
             break;
           }
-          this.activeMessageIsCompaction = false;
           this.recordAssistantMessageId(info.id);
           if (
             this.guidancePendingResponse
@@ -1039,9 +1323,11 @@ export class OpenCodeAgent {
         } else if (info.role === "user") {
           const parts = Array.isArray(props.parts) ? props.parts : [];
           if (parts.some((part) => asRecord(part).type === "compaction")) {
-            // 压缩触发消息：标记上下文压缩边界，不当普通用户输入渲染。
-            this.activeMessageIsCompaction = true;
-            this.emitEvent({ type: "context_compaction", id: info.id, phase: "completed" });
+            // 压缩触发消息本身不是用户正文。它标志着压缩开始，摘要
+            // assistant message 完成后才会发出 completed。
+            const messageId = this.normalizeCompactionMessageId(info.id);
+            this.rememberCompactionMessage(messageId, messageId);
+            this.emitCompactionStarted(messageId);
             break;
           }
           if (this.guidancePendingResponse && !this.guidanceUserMessageId && typeof info.id === "string") {
@@ -1055,9 +1341,43 @@ export class OpenCodeAgent {
       case "message.part.updated": {
         this.rememberPartType(part);
         this.emitPartTokenUsageDelta(part);
-        if (this.activeMessageIsCompaction || info.summary) break;
+        if (process.env.HPP_OPENCODE_DEBUG_PARTS) {
+          const dbgPart = asRecord(props.part || props);
+          console.log("[opencode:debug-part]", JSON.stringify({
+            eventType,
+            type: dbgPart.type,
+            tool: dbgPart.tool,
+            toolName: dbgPart.toolName,
+            name: dbgPart.name,
+            partKeys: Object.keys(dbgPart),
+          }));
+        }
+        const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
+        if (normalizeEventName(part.type || props.type) === "compaction") {
+          const compactionId = this.getCompactionEventId(partMessageId);
+          this.rememberCompactionMessage(partMessageId, compactionId);
+          this.emitCompactionStarted(compactionId);
+          break;
+        }
+        if (info.summary === true) {
+          const compactionId = this.getCompactionEventId(partMessageId, info.parentID);
+          this.rememberCompactionMessage(partMessageId, compactionId);
+          this.emitCompactionStarted(compactionId);
+          break;
+        }
+        if (this.isCompactionMessageId(partMessageId)) break;
         if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
+          if (isOpenCodeSubagentToolPart(props)) {
+            this.emitOpenCodeSubagentToolPart(props, tool.toolCallId);
+            if (isToolPartComplete(props)) {
+              this.runningToolParts.delete(tool.toolCallId);
+              this.completedToolParts.add(tool.toolCallId);
+            } else {
+              this.runningToolParts.add(tool.toolCallId);
+            }
+            break;
+          }
           if (this.completedToolParts.has(tool.toolCallId)) break;
 
           if (isAskUserName(tool.toolName)) {
@@ -1100,25 +1420,38 @@ export class OpenCodeAgent {
       case "message.part.removed": {
         const partId = String(part.id || props.partID || props.partId || "");
         const partType = part.type || props.type || this.partTypes.get(partId);
+        const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
+        if (this.isCompactionMessageId(partMessageId) || info.summary === true) {
+          this.emitPartTokenUsageDelta(part);
+          if (partId) {
+            this.partTypes.delete(partId);
+            this.partTokenUsage.delete(partId);
+          }
+          break;
+        }
         if (this.isReasoningPartType(partType)) {
           this.emitEvent({ type: "thinking_end" });
         } else if (isToolLikePart(props)) {
           const tool = summarizeToolPart(props);
-          if (this.completedToolParts.has(tool.toolCallId)) break;
-
-          if (isAskUserName(tool.toolName)) {
+          if (isOpenCodeSubagentToolPart(props)) {
+            this.emitOpenCodeSubagentToolPart(props, tool.toolCallId);
+            this.runningToolParts.delete(tool.toolCallId);
+            this.completedToolParts.add(tool.toolCallId);
+          } else if (this.completedToolParts.has(tool.toolCallId)) {
+            break;
+          } else if (isAskUserName(tool.toolName)) {
             this.runningToolParts.delete(tool.toolCallId);
             this.pendingQuestionToolParts.delete(tool.toolCallId);
             this.completedToolParts.add(tool.toolCallId);
             break;
+          } else {
+            const toolEvent = normalizeToolEvent("tool_end", tool);
+            this.emitEvent(toolEvent);
+            const diffs = buildDiffsFromToolEvent(toolEvent);
+            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+            this.runningToolParts.delete(tool.toolCallId);
+            this.completedToolParts.add(tool.toolCallId);
           }
-
-          const toolEvent = normalizeToolEvent("tool_end", tool);
-          this.emitEvent(toolEvent);
-          const diffs = buildDiffsFromToolEvent(toolEvent);
-          if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
-          this.runningToolParts.delete(tool.toolCallId);
-          this.completedToolParts.add(tool.toolCallId);
         }
         if (partId) this.partTypes.delete(partId);
         // part 结束时再对齐一次最终用量，随后清理追踪记录。
@@ -1135,7 +1468,8 @@ export class OpenCodeAgent {
         const partType = props.field === "thinking"
           ? "thinking"
           : part.type || this.partTypes.get(partId);
-        this.emitPartDelta(partType, props.delta);
+        const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
+        this.emitPartDelta(partType, props.delta, partMessageId);
         if (idleEndWasPending) this.scheduleIdleEnd();
         break;
       }
@@ -1188,6 +1522,173 @@ export class OpenCodeAgent {
     }
   }
 
+  private emitOpenCodeSubagentToolPart(props: UnknownRecord, toolCallId: string) {
+    const part = asRecord(props.part || props);
+    const state = asRecord(part.state);
+    const metadata = asRecord(state.metadata || part.metadata || props.metadata);
+    const input = asRecord(state.input || part.input || props.input);
+    const previous = this.openCodeSubagentsByToolCallId.get(toolCallId);
+    const sessionId = getOpenCodeSubagentSessionId(part, state, metadata, input) || previous?.sessionId;
+    const taskId = getFirstNonEmptyString(input, ["task_id", "taskId", "session_id", "sessionId"]);
+    const action: OpenCodeSubagentAction = taskId || previous?.action === "resumeAgent"
+      ? "resumeAgent"
+      : "spawnAgent";
+    const detail = getFirstNonEmptyString(input, ["prompt", "assignment", "task"])
+      || previous?.detail;
+    const prompt = getFirstNonEmptyString(input, ["prompt", "assignment", "task"])
+      || previous?.prompt;
+    const label = getOpenCodeSubagentLabel(input, metadata)
+      || previous?.label
+      || "Subagent";
+    const background = input.background === true
+      || input.run_in_background === true
+      || input.runInBackground === true
+      || metadata.background === true
+      || metadata.run_in_background === true
+      || metadata.runInBackground === true;
+    const model = formatOpenCodeSubagentModel(metadata.model ?? state.model ?? part.model)
+      || previous?.model;
+    const stopReason = normalizeNativeSubagentStopReason(
+      metadata.stopReason ?? state.stopReason ?? part.stopReason,
+    );
+    const usage = getOpenCodeSubagentUsage(part, state, metadata);
+    const parsedStatus = stopReason === "timeout" ? "error" : getOpenCodeSubagentStatus(part);
+    const status = previous && isTerminalOpenCodeSubagentStatus(previous.status)
+      && !isTerminalOpenCodeSubagentStatus(parsedStatus)
+      ? previous.status
+      : parsedStatus;
+    const errorMessage = status === "error" || status === "interrupted"
+      ? formatProcessDetail(state.error ?? part.error)
+      : undefined;
+    const resultMessage = status === "completed" && !background
+      ? formatProcessDetail(state.output ?? part.output ?? state.result ?? part.result)
+      : undefined;
+    const snapshot: OpenCodeSubagentSnapshot = {
+      toolCallId,
+      subagentId: sessionId || previous?.subagentId || `opencode-subagent-${toolCallId}`,
+      sessionId,
+      label,
+      status,
+      action,
+      model,
+      detail,
+      prompt,
+      message: errorMessage || resultMessage || previous?.message,
+      startedAt: getOpenCodePartTime(part, "start") ?? previous?.startedAt,
+      stopReason: stopReason || previous?.stopReason,
+      ...(usage ? { usage } : {}),
+    };
+
+    if (previous?.sessionId && previous.sessionId !== sessionId) {
+      this.openCodeSubagentToolCallIdBySessionId.delete(previous.sessionId);
+    }
+    this.openCodeSubagentsByToolCallId.set(toolCallId, snapshot);
+    if (sessionId) this.openCodeSubagentToolCallIdBySessionId.set(sessionId, toolCallId);
+    this.emitOpenCodeSubagentSnapshot(snapshot, getOpenCodePartTime(part, "end"));
+  }
+
+  private handleOpenCodeSubagentSessionEvent(
+    eventType: string,
+    props: UnknownRecord,
+    eventSessionId: string,
+  ): boolean {
+    const toolCallId = this.openCodeSubagentToolCallIdBySessionId.get(eventSessionId);
+    if (!toolCallId) return false;
+    const previous = this.openCodeSubagentsByToolCallId.get(toolCallId);
+    if (!previous) return false;
+
+    let status: OpenCodeSubagentStatus | undefined;
+    let message: string | undefined;
+    if (eventType === "message.part.updated") {
+      const part = asRecord(props.part || props);
+      if (part.type === "text") {
+        const fullText = getNonEmptyString(part.text);
+        const delta = getNonEmptyString(props.delta);
+        message = fullText || (delta ? `${previous.message || ""}${delta}` : undefined);
+        if (message) {
+          this.openCodeSubagentsByToolCallId.set(toolCallId, { ...previous, message });
+        }
+      }
+      return true;
+    }
+    if (eventType === "session.status") {
+      const statusType = normalizeEventName(asRecord(props.status).type || props.status);
+      if (["busy", "running", "retry"].includes(statusType)) status = "running";
+      if (statusType === "idle") {
+        const isWaitingForUI = Array.from(this.pendingUIRequests.values())
+          .some((request) => request.sessionId === eventSessionId);
+        if (!isWaitingForUI) status = "completed";
+      }
+    } else if (eventType === "session.idle") {
+      const isWaitingForUI = Array.from(this.pendingUIRequests.values())
+        .some((request) => request.sessionId === eventSessionId);
+      if (!isWaitingForUI) status = "completed";
+    } else if (eventType === "session.error") {
+      const error = asRecord(props.error);
+      const errorData = asRecord(error.data);
+      message = getNonEmptyString(errorData.message)
+        || getNonEmptyString(error.message)
+        || "OpenCode subagent failed";
+      status = /abort|cancel|interrupt/i.test(message) ? "interrupted" : "error";
+    } else if (["session.deleted", "session.interrupted"].includes(eventType)) {
+      status = "interrupted";
+    }
+
+    if (!status || (isTerminalOpenCodeSubagentStatus(previous.status) && status === "running")) return true;
+    if (status === "running") {
+      this.cancelIdleTimer();
+      this.idleObservedWhileWaitingForUI = false;
+    }
+    const next = { ...previous, status, message: message || previous.message };
+    this.openCodeSubagentsByToolCallId.set(toolCallId, next);
+    this.emitOpenCodeSubagentSnapshot(next, isTerminalOpenCodeSubagentStatus(status) ? Date.now() : undefined);
+    return true;
+  }
+
+  private emitOpenCodeSubagentSnapshot(snapshot: OpenCodeSubagentSnapshot, completedAt?: number) {
+    const terminal = isTerminalOpenCodeSubagentStatus(snapshot.status);
+    const state = snapshot.status === "pending" || snapshot.status === "running"
+      ? "running"
+      : snapshot.status;
+    const title = snapshot.stopReason === "timeout"
+      ? "已超时"
+      : snapshot.status === "error"
+        ? "工作失败"
+        : snapshot.status === "interrupted"
+        ? "已中断"
+        : snapshot.action === "resumeAgent"
+          ? "已继续工作"
+          : "已开始工作";
+    this.emitEvent({
+      type: "subagent_event",
+      id: snapshot.toolCallId,
+      toolCallId: snapshot.toolCallId,
+      phase: terminal ? "completed" : "started",
+      action: snapshot.action,
+      tool: snapshot.action,
+      title,
+      detail: snapshot.detail,
+      prompt: snapshot.prompt,
+      state,
+      subagents: [{
+        id: snapshot.subagentId,
+        label: snapshot.label,
+        status: snapshot.status,
+        model: snapshot.model,
+        message: snapshot.message,
+        stopReason: snapshot.stopReason,
+        ...(snapshot.usage ? { usage: snapshot.usage } : {}),
+      }],
+      timestamp: snapshot.startedAt,
+      startedAt: snapshot.startedAt,
+      completedAt: terminal ? completedAt : undefined,
+      agentThreadId: snapshot.sessionId,
+      receiverThreadIds: snapshot.sessionId ? [snapshot.sessionId] : undefined,
+      stopReason: snapshot.stopReason,
+      source: "opencode",
+    });
+  }
+
   private isCurrentTurn(revision: number) {
     return this.turnActive && this.turnRevision === revision;
   }
@@ -1201,9 +1702,14 @@ export class OpenCodeAgent {
     this.completedToolParts.clear();
     this.pendingQuestionToolParts.clear();
     this.pendingUIRequests.clear();
+    this.openCodeSubagentsByToolCallId.clear();
+    this.openCodeSubagentToolCallIdBySessionId.clear();
     this.guidancePendingResponse = false;
     this.guidanceUserMessageId = null;
-    this.activeMessageIsCompaction = false;
+    this.compactionMessageIds.clear();
+    this.compactionEventIdByMessageId.clear();
+    this.activeCompactionId = null;
+    this.settledCompactionIds.clear();
     this.partTokenUsage.clear();
     this.idleObservedWhileWaitingForUI = false;
     this.clearActiveTurn();
@@ -1268,11 +1774,42 @@ export class OpenCodeAgent {
       const messages = await this.httpGet(`/session/${this.sessionId}/message`);
       if (!this.isCurrentTurn(turnRevision)) return;
       if (Array.isArray(messages)) {
-        // Find the last assistant message
-        const assistantMsg = [...messages]
+        const records = messages.map((message) => asRecord(message));
+        // A summary assistant message is the persisted result of compaction,
+        // not the response that should be copied into the chat bubble. Older
+        // OpenCode versions may not stream the final message.updated event, so
+        // recognize and settle it here as a fallback.
+        const summaryIndex = records.findLastIndex((message) => (
+          asRecord(message.info).role === "assistant" && asRecord(message.info).summary === true
+        ));
+        const summaryMsg = summaryIndex >= 0 ? records[summaryIndex] : undefined;
+        const summaryInfo = asRecord(summaryMsg?.info);
+        if (summaryMsg) {
+          const summaryId = this.normalizeCompactionMessageId(summaryInfo.id);
+          const parentId = this.normalizeCompactionMessageId(summaryInfo.parentID);
+          const compactionId = this.getCompactionEventId(summaryId, parentId);
+          this.rememberCompactionMessage(summaryId, compactionId);
+          this.rememberCompactionMessage(parentId, compactionId);
+          this.emitCompactionStarted(compactionId);
+          this.emitCompactionFinished(compactionId, summaryInfo.error ? "interrupted" : "completed", summaryInfo.error);
+        } else if (this.activeCompactionId) {
+          // session.idle is authoritative when the native summary event was
+          // lost; do not leave the renderer in an endless "压缩中" state.
+          this.emitCompactionFinished(this.activeCompactionId);
+        }
+
+        // Find the last non-summary assistant message after the summary. A
+        // pre-compaction response must not be replayed merely because the
+        // summary is the latest assistant message.
+        const visibleAssistantCandidates = summaryIndex >= 0
+          ? records.slice(summaryIndex + 1)
+          : records;
+        const assistantMsg = [...visibleAssistantCandidates]
           .reverse()
-          .map((message) => asRecord(message))
-          .find((message) => asRecord(message.info).role === "assistant");
+          .find((message) => {
+            const info = asRecord(message.info);
+            return info.role === "assistant" && info.summary !== true;
+          });
         this.recordAssistantMessageId(asRecord(assistantMsg?.info).id);
         const assistantParts = Array.isArray(assistantMsg?.parts) ? assistantMsg.parts : [];
         if (assistantParts.length > 0) {
@@ -1294,7 +1831,7 @@ export class OpenCodeAgent {
             typeof error.message === "string" ? error.message :
             "请求失败";
           this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${errMsg}` });
-        } else {
+        } else if (!summaryMsg) {
           this.emitEvent({ type: "stream_delta", delta: "\n\n(无响应内容)" });
         }
       }
@@ -1712,8 +2249,12 @@ export class OpenCodeAgent {
     return normalized === "reasoning" || normalized === "thinking";
   }
 
-  private emitPartDelta(partType: unknown, delta: unknown) {
+  private emitPartDelta(partType: unknown, delta: unknown, messageId?: unknown) {
     if (delta === undefined || delta === null || delta === "") return;
+    // Summary text is an internal compaction artifact. OpenCode's delta event
+    // does not carry `info.summary`, so filter by messageID before marking the
+    // turn as having visible streamed content.
+    if (this.isCompactionMessageId(messageId)) return;
     this.streamedContent = true;
     if (this.isReasoningPartType(partType)) {
       this.emitEvent({ type: "thinking_delta", delta: String(delta) });

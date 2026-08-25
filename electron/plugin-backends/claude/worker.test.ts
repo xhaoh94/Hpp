@@ -9,6 +9,7 @@ type WorkerMessage = Record<string, unknown>;
 
 const fakeSDKSource = `
 const persistedSessions = new Set(["history-session"]);
+let subagentReadCount = 0;
 
 class FakeQuery {
   constructor(prompt, options) {
@@ -63,6 +64,16 @@ class FakeQuery {
         this.enqueue({ type: "assistant", uuid: "assistant-tool", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Edit", input: { file_path: "src/a.ts" } }] } });
         this.enqueue({ type: "user", uuid: "tool-result", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "done" }] }, tool_use_result: { filePath: "src/a.ts", gitDiff: { filename: "src/a.ts", additions: 1, deletions: 1, patch: "--- a/src/a.ts\\n+++ b/src/a.ts\\n@@ -1 +1 @@\\n-old\\n+new" } } });
         this.enqueue({ type: "assistant", uuid: "assistant-edit", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: "edited" }] } });
+      } else if (text === "subagents") {
+        this.enqueue({ type: "assistant", uuid: "assistant-task", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "task-tool-1", name: "Task", input: { description: "Inspect backend", prompt: "Inspect the backend.", subagent_type: "explore" } }] } });
+        this.enqueue({ type: "system", subtype: "task_started", task_id: "task-1", tool_use_id: "task-tool-1", task_type: "explore", description: "Inspect backend", prompt: "Inspect the backend.", session_id: this.sessionId });
+        this.enqueue({ type: "assistant", uuid: "assistant-child", session_id: this.sessionId, parent_tool_use_id: "task-tool-1", message: { role: "assistant", content: [{ type: "text", text: "child text must stay out of the parent stream" }] } });
+        this.enqueue({ type: "system", subtype: "task_notification", task_id: "task-1", tool_use_id: "task-tool-1", status: "completed", total_tokens: 42, session_id: this.sessionId });
+        this.enqueue({ type: "user", uuid: "task-result", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "task-tool-1", content: JSON.stringify({ description: "Inspect backend", prompt: "Inspect the backend.", subagent_type: "explore" }) }] }, tool_use_result: { agentId: "agent-1", agentType: "explore", status: "completed" } });
+      } else if (text === "subagents-no-result") {
+        const input = { description: "No result task", prompt: "Return a marker.", subagent_type: "explore" };
+        this.enqueue({ type: "assistant", uuid: "assistant-task-empty", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "task-tool-empty", name: "Task", input }] } });
+        this.enqueue({ type: "user", uuid: "task-result-empty", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "task-tool-empty", content: JSON.stringify(input) }] }, tool_use_result: { agentId: "agent-empty", agentType: "explore", status: "completed" } });
       } else if (text === "env") {
         const managedProvider = this.options.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST;
         this.enqueue({ type: "assistant", uuid: "assistant-env", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: managedProvider }] } });
@@ -113,6 +124,13 @@ class FakeQuery {
 }
 
 export const query = ({ prompt, options }) => new FakeQuery(prompt, options);
+export const getSubagentMessages = async (_sessionId, agentId) => {
+  if (agentId !== "agent-1" && agentId !== "task-1") return [];
+  subagentReadCount += 1;
+  return subagentReadCount >= 3 ? [
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "HPP_SUBAGENT_RESULT" }] } },
+  ] : [];
+};
 export const getSessionInfo = async (sessionId) => sessionId === "history-session" ? { sessionId } : undefined;
 export const getSessionMessages = async (sessionId) => sessionId === "history-session" ? [
   { type: "user", uuid: "history-user", session_id: sessionId, parent_tool_use_id: null, parent_agent_id: null, message: { role: "user", content: [{ type: "text", text: "old question" }] } },
@@ -132,12 +150,12 @@ const providerConfig = {
   }],
 };
 
-async function writeFakeSDK(runtimeRoot: string) {
+async function writeFakeSDK(runtimeRoot: string, version = "7.8.9", nativeVersion = version) {
   const packageDir = join(runtimeRoot, "node_modules", "@anthropic-ai", "claude-agent-sdk");
   await mkdir(packageDir, { recursive: true });
   await writeFile(join(packageDir, "package.json"), JSON.stringify({
     name: "@anthropic-ai/claude-agent-sdk",
-    version: "0.3.215",
+    version,
     type: "module",
     exports: { ".": { import: "./index.mjs" } },
   }), "utf8");
@@ -152,7 +170,7 @@ async function writeFakeSDK(runtimeRoot: string) {
   const nativePackageDir = join(runtimeRoot, "node_modules", "@anthropic-ai", nativePackageName);
   await mkdir(nativePackageDir, { recursive: true });
   await Promise.all([
-    writeFile(join(nativePackageDir, "package.json"), JSON.stringify({ version: "0.3.215" })),
+    writeFile(join(nativePackageDir, "package.json"), JSON.stringify({ version: nativeVersion })),
     writeFile(join(nativePackageDir, process.platform === "win32" ? "claude.exe" : "claude"), "binary"),
   ]);
 }
@@ -244,6 +262,28 @@ describe("Claude Agent SDK worker", () => {
     return worker;
   }
 
+  it("accepts any complete SDK version without a hard-coded allowlist", async () => {
+    await writeFakeSDK(runtimeRoot, "7.9.0");
+    const worker = await initialize();
+    expect(worker.messages).toContainEqual(expect.objectContaining({ type: "ready" }));
+  });
+
+  it("rejects mismatched native SDK versions", async () => {
+    await writeFakeSDK(runtimeRoot, "7.9.0", "7.8.9");
+    const worker = startWorker(runtimeRoot);
+    children.push(worker.child);
+    worker.send({
+      id: "init-mismatched-sdk",
+      type: "init",
+      projectPath: tempRoot,
+      sessionFilePath: "new-session",
+      isNewSession: true,
+      config: providerConfig,
+    });
+    await expect(worker.waitFor((message) => message.type === "error"))
+      .resolves.toMatchObject({ type: "error", id: "init-mismatched-sdk" });
+  });
+
   it("streams text and image prompts with native turn ids", async () => {
     const worker = await initialize();
     worker.send({ id: "prompt-1", type: "prompt", message: "photo", images: [{ data: "aW1hZ2U=", mimeType: "image/png" }], permissionMode: "full-access" });
@@ -252,6 +292,51 @@ describe("Claude Agent SDK worker", () => {
     expect(worker.messages).toContainEqual(expect.objectContaining({ type: "text_delta", delta: "image:1" }));
     expect(worker.messages).toContainEqual(expect.objectContaining({ type: "message_end", nativeTurnId: "assistant-1" }));
     expect(JSON.stringify(worker.messages)).not.toContain("secret-key");
+  });
+
+  it("forwards Claude Task lifecycle metadata and suppresses child assistant text", async () => {
+    const worker = await initialize();
+    worker.send({ id: "prompt-subagents", type: "prompt", message: "subagents", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-subagents");
+    await worker.waitFor((message) => message.type === "subagent_update" && message.result === "HPP_SUBAGENT_RESULT");
+
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_started",
+      toolUseId: "task-tool-1",
+      taskId: "task-1",
+    }));
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "subagent_update",
+      toolUseId: "task-tool-1",
+      taskId: "task-1",
+      status: "completed",
+      result: "HPP_SUBAGENT_RESULT",
+    }));
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "tool_execution_end",
+      toolUseId: "task-tool-1",
+      toolUseResult: expect.objectContaining({ agentId: "agent-1" }),
+      output: expect.objectContaining({
+        agentId: "agent-1",
+        status: "completed",
+      }),
+    }));
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({
+      type: "text_delta",
+      delta: "child text must stay out of the parent stream",
+    }));
+  });
+
+  it("does not expose an echoed Task input as the subagent result", async () => {
+    const worker = await initialize();
+    worker.send({ id: "prompt-subagent-empty", type: "prompt", message: "subagents-no-result", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-subagent-empty");
+
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "tool_execution_end",
+      toolUseId: "task-tool-empty",
+      output: expect.not.objectContaining({ content: expect.anything() }),
+    }));
   });
 
   it("steers the active Claude command with a priority-now user message", async () => {

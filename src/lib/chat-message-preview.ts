@@ -11,7 +11,7 @@ const compactWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
 const getNodeFallbackLabel = (node: Exclude<ComposerNode, { type: "text" }>) => {
   if (node.type === "path") return `[${node.kind}: ${node.name}]`;
   if (node.type === "snippet") return `[file: ${node.fileName}:${node.startLine}-${node.endLine}]`;
-  if (node.type === "session") return `引用会话：${node.reference.sourceTitle}`;
+  if (node.type === "session") return `${node.reference.sourceTitle}`;
   return "Image";
 };
 

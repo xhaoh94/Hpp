@@ -31,6 +31,39 @@ describe("mobile capability source constraints", () => {
     expect(stylesSource).toContain(".message.assistant .process-block .message-commentary-item.message-content");
   });
 
+  it("keeps runtime body text transparent and joins adjacent process nodes", () => {
+    expect(appSource).toContain("isAssistantBodyProcessEntry");
+    expect(appSource).toContain("const hasNarrativeTimeline = commentary.length > 0 || visibleEntries.some(isAssistantBodyProcessEntry)");
+    expect(appSource).toContain("{hasNarrativeTimeline && expanded && (");
+    expect(appSource).toContain("message-content assistant-body-segment");
+    expect(stylesSource).toContain(".assistant-body-segment {");
+    expect(stylesSource).toContain("background: transparent;");
+    expect(stylesSource).toContain(".message-turn-timeline { display: flex; min-width: 0; flex-direction: column; gap: 0; margin-top: 0; }");
+    expect(stylesSource).toContain(".message-turn-timeline > .process-entry + .process-entry { border-top: 0; }");
+    expect(stylesSource).toContain(".message-turn-timeline > .assistant-body-segment { margin: 12px 0; }");
+    expect(stylesSource).toContain("border: 1px solid var(--border);");
+  });
+
+  it("keeps a newly opened session at the bottom while message layout settles", () => {
+    expect(appSource).toContain("const messagesContentRef = useRef<HTMLDivElement | null>(null)");
+    expect(appSource).toContain("const initialBottomSessionRef = useRef<string | null>(null)");
+    expect(appSource).toContain("const observer = new ResizeObserver(scheduleKeepAtBottom)");
+    expect(appSource).toContain("observer.observe(content)");
+    expect(appSource).toContain("initialBottomSessionRef.current = null");
+    expect(appSource).toContain('ref={messagesContentRef} className="messages-content"');
+    expect(stylesSource).toContain(".messages-content { min-width: 0; width: 100%; }");
+  });
+
+  it("keeps the model and thinking selectors adjacent on wide web layouts", () => {
+    expect(stylesSource).toContain(".model-picker { position: relative; z-index: 12; flex: 0 1 auto;");
+    expect(stylesSource).not.toContain(".model-picker { position: relative; z-index: 12; flex: 1 1 auto;");
+  });
+
+  it("shows a channel prompt instead of a stale model catalog", () => {
+    expect(appSource).toContain('models.length > 0 ? (currentModel?.name || "选择模型") : "请先配置渠道"');
+    expect(appSource).toContain("availableModels.length > 0");
+  });
+
   it("renders mobile thinking details as contained Markdown and keeps final text off the right edge", () => {
     expect(appSource).toContain('entry.type === "thinking"');
     expect(appSource).toContain('className="process-entry-detail message-content"');

@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "../shared/**/*.test.ts",
+    "../shared/**/*.test.tsx",
+    "../shared/**/*.spec.ts",
+    "../shared/**/*.spec.tsx",
+    "dist",
+    "node_modules"
+  ]
+}

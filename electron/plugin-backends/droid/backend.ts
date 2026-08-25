@@ -19,6 +19,21 @@ import {
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
 } from "../../plugin-runtime/process-events";
+import {
+  buildNativeSubagentEvent,
+  formatSubagentModel,
+  getFirstNonEmptyString,
+  getNonEmptyString,
+  humanizeSubagentLabel,
+  isNativeSubagentToolName,
+  isTerminalNativeSubagentStatus,
+  normalizeNativeSubagentStatus,
+  normalizeNativeSubagentStopReason,
+  type NativeSubagentAction,
+  type NativeSubagentSnapshot,
+  type NativeSubagentStatus,
+  type NativeSubagentUsage,
+} from "../../plugin-runtime/subagent-events";
 import type { AgentImagePayload, AgentUIResponse, UnknownRecord } from "../../../src/types/ipc";
 import { isRecord } from "../../../src/types/ipc";
 import type {
@@ -95,6 +110,69 @@ interface PendingDroidAskUserRequest {
 interface RunningDroidTool {
   toolName: string;
   args?: unknown;
+  isSubagent?: boolean;
+}
+
+function getDroidSubagentInput(value: unknown): UnknownRecord {
+  return asRecord(value);
+}
+
+function getDroidSubagentStatus(value: unknown, fallback: NativeSubagentStatus = "running"): NativeSubagentStatus {
+  const direct = normalizeNativeSubagentStatus(value);
+  return direct || fallback;
+}
+
+function getDroidSubagentLabel(input: UnknownRecord, metadata: UnknownRecord): string {
+  const label = getFirstNonEmptyString(input, ["subagent_type", "subagentType", "agent_type", "agentType", "task_type", "taskType", "role", "agent"])
+    || getFirstNonEmptyString(metadata, ["subagent_type", "subagentType", "agent_type", "agentType", "task_type", "taskType", "role", "agent"]);
+  return label ? humanizeSubagentLabel(label) : "Subagent";
+}
+
+function isDroidSubagentTool(toolName: unknown, input: unknown, metadata: unknown): boolean {
+  const normalizedToolName = String(toolName || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalizedToolName !== "task" && isNativeSubagentToolName(toolName)) return true;
+  const inputRecord = asRecord(input);
+  const metadataRecord = asRecord(metadata);
+  return [inputRecord, metadataRecord].some((record) => [
+    "subagent_type", "subagentType", "agent_type", "agentType", "task_id", "taskId", "agentId", "agent_id",
+  ].some((key) => getNonEmptyString(record[key])))
+    || [inputRecord, metadataRecord].some((record) => record.background === true || record.run_in_background === true);
+}
+
+function getDroidResultRecord(value: unknown): UnknownRecord {
+  const direct = asRecord(value);
+  if (Object.keys(direct).length > 0) return direct;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return asRecord(parsed);
+  } catch {
+    return {};
+  }
+}
+
+function getDroidSubagentUsage(...records: UnknownRecord[]): NativeSubagentUsage | undefined {
+  const sources = records.flatMap((record) => [record, asRecord(record.usage), asRecord(record.result), asRecord(record.metadata)]);
+  const numberValue = (...keys: string[]) => {
+    for (const source of sources) {
+      for (const key of keys) {
+        const number = Number(source[key]);
+        if (Number.isFinite(number) && number >= 0) return number;
+      }
+    }
+    return undefined;
+  };
+  const usage = {
+    inputTokens: numberValue("inputTokens", "input_tokens", "prompt_tokens", "promptTokens"),
+    outputTokens: numberValue("outputTokens", "output_tokens", "completion_tokens", "completionTokens"),
+    cacheReadTokens: numberValue("cacheReadTokens", "cache_read_input_tokens", "cacheReadInputTokens"),
+    cacheWriteTokens: numberValue("cacheWriteTokens", "cache_creation_input_tokens", "cacheWriteInputTokens"),
+    totalTokens: numberValue("totalTokens", "total_tokens"),
+    cost: numberValue("cost", "cost_usd", "total_cost_usd"),
+    turns: numberValue("turns"),
+  };
+  const compact = Object.fromEntries(Object.entries(usage).filter(([, value]) => value !== undefined));
+  return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
 const asRecord = (value: unknown): UnknownRecord =>
@@ -271,8 +349,10 @@ export class DroidAgent {
   private isAborting = false;
   private guidancePendingResponse = false;
   private guidanceRequestId: string | null = null;
+  private assistantTextBuffer = "";
   private runningToolUses = new Map<string, RunningDroidTool>();
   private completedToolUses = new Set<string>();
+  private droidSubagentsByToolCallId = new Map<string, NativeSubagentSnapshot>();
   private actionKeys = new Set<string>();
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
@@ -434,6 +514,8 @@ export class DroidAgent {
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
+    this.droidSubagentsByToolCallId.clear();
+    this.assistantTextBuffer = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
     try {
       await this.configureInteractionMode(!!options?.planModeEnabled, options?.permissionMode || "auto");
@@ -581,6 +663,7 @@ export class DroidAgent {
     this.activeClientMessageId = null;
     this.guidancePendingResponse = false;
     this.guidanceRequestId = null;
+    this.interruptDroidSubagents("用户已中止");
     this.runningToolUses.clear();
     this.completedToolUses.clear();
     this.actionKeys.clear();
@@ -1025,8 +1108,15 @@ export class DroidAgent {
           if (typeof message.id !== "string") break;
           const contentBlocks = this.getMessageContentBlocks(message);
           if (message.role === "assistant") {
-            if (this.turnActive) {
-              if (!contentBlocks.some((block) => block.type === "tool_use")) {
+            const hasSubagentTool = contentBlocks.some((block) =>
+              block.type === "tool_use" && isDroidSubagentTool(
+                block.name || block.toolName,
+                block.input || block.args || block.parameters,
+                block.metadata,
+              )
+            );
+            if (this.turnActive || hasSubagentTool) {
+              if (this.turnActive && !contentBlocks.some((block) => block.type === "tool_use")) {
                 this.completeRunningToolUses();
               }
               this.startToolUses(contentBlocks);
@@ -1081,10 +1171,17 @@ export class DroidAgent {
         break;
       case "assistant_text_delta":
         if (!this.turnActive) break;
-        this.emitEvent({ type: "stream_delta", delta: String(notifData.textDelta || notifData.delta || notifData.text || "") });
+        {
+          const delta = String(notifData.textDelta || notifData.delta || notifData.text || "");
+          this.assistantTextBuffer = `${this.assistantTextBuffer}${delta}`.slice(-20_000);
+          this.emitEvent({ type: "stream_delta", delta });
+        }
         break;
       case "assistant_text_complete":
         if (!this.turnActive) break;
+        if (typeof notifData.text === "string" && notifData.text) {
+          this.assistantTextBuffer = notifData.text.slice(-20_000);
+        }
         this.emitTurnMetadata(notifData.messageId);
         break;
       case "thinking_text_delta":
@@ -1097,16 +1194,21 @@ export class DroidAgent {
         break;
       case "tool_progress_update":
         {
-          if (!this.turnActive) break;
           const update = asRecord(notifData.update);
-          const status = String(update.status || "").toLowerCase();
+          const status = String(update.status || notifData.status || "").toLowerCase();
           const isError = update.type === "error" || !!update.error || status === "error" || status === "failed";
           const toolCallId = String(notifData.toolUseId || notifData.toolCallId || notifData.id || notifData.toolName || "");
+          const toolName = notifData.toolName || update.toolName || "tool";
+          const args = update.parameters || notifData.args || notifData.input;
+          const result = update.fullOutput || update.text || update.valueSnippet || notifData.result;
+          const metadata = { ...notifData, ...update, metadata: update.metadata };
+          const isSubagent = isDroidSubagentTool(toolName, args, metadata)
+            || (toolCallId ? this.droidSubagentsByToolCallId.has(toolCallId) : false);
           const normalizedInput = {
-            toolName: notifData.toolName || update.toolName || "tool",
+            toolName,
             toolCallId: toolCallId || undefined,
-            args: update.parameters || notifData.args || notifData.input,
-            result: update.fullOutput || update.text || update.valueSnippet || notifData.result,
+            args,
+            result,
             detail: update.details || update.text || update.status || notifData.message || notifData.status,
             patch: update.patch || notifData.patch || notifData.diff,
             isError,
@@ -1114,6 +1216,32 @@ export class DroidAgent {
           const phase = update.type === "tool_result" || isError || ["completed", "complete", "done", "success"].includes(status)
             ? "tool_end"
             : "tool_start";
+          if (isSubagent) {
+            if (toolCallId && phase === "tool_end" && this.completedToolUses.has(toolCallId)) break;
+            if (toolCallId && phase === "tool_start") {
+              this.runningToolUses.set(toolCallId, { toolName: String(toolName), args, isSubagent: true });
+            }
+            if (toolCallId) {
+              this.handleDroidSubagentToolProgress(
+                toolCallId,
+                String(toolName),
+                args,
+                metadata,
+                phase,
+                result,
+                isError,
+              );
+              if (phase === "tool_end") {
+                const snapshot = this.droidSubagentsByToolCallId.get(toolCallId);
+                if (!(snapshot?.background && snapshot.status === "running")) {
+                  this.runningToolUses.delete(toolCallId);
+                  this.completedToolUses.add(toolCallId);
+                }
+              }
+            }
+            break;
+          }
+          if (!this.turnActive) break;
           if (toolCallId && phase === "tool_end" && this.completedToolUses.has(toolCallId)) break;
           if (toolCallId && phase === "tool_start") {
             this.runningToolUses.set(toolCallId, {
@@ -1145,6 +1273,7 @@ export class DroidAgent {
               // resumes the same agent execution.
               break;
             }
+            this.reconcileDroidSubagentFailuresFromAssistantText();
             const shouldFinishTurn = this.turnActive;
             this.turnActive = false;
             if (shouldFinishTurn) {
@@ -1186,12 +1315,17 @@ export class DroidAgent {
       if (!toolCallId || this.runningToolUses.has(toolCallId) || this.completedToolUses.has(toolCallId)) continue;
       const toolName = String(block.name || block.toolName || "tool");
       const args = block.input || block.args || block.parameters;
-      this.runningToolUses.set(toolCallId, { toolName, args });
-      this.emitEvent(normalizeToolEvent("tool_start", {
-        toolName,
-        toolCallId,
-        args,
-      }));
+      const isSubagent = isDroidSubagentTool(toolName, args, block.metadata);
+      this.runningToolUses.set(toolCallId, { toolName, args, isSubagent });
+      if (isSubagent) {
+        this.handleDroidSubagentToolProgress(toolCallId, toolName, args, block.metadata, "tool_start");
+      } else {
+        this.emitEvent(normalizeToolEvent("tool_start", {
+          toolName,
+          toolCallId,
+          args,
+        }));
+      }
     }
   }
 
@@ -1204,7 +1338,9 @@ export class DroidAgent {
   }
 
   private completeRunningToolUses() {
-    for (const toolCallId of [...this.runningToolUses.keys()]) {
+    for (const [toolCallId, runningTool] of [...this.runningToolUses.entries()]) {
+      const snapshot = this.droidSubagentsByToolCallId.get(toolCallId);
+      if (runningTool.isSubagent && snapshot?.background && snapshot.status === "running") continue;
       this.finishToolUse(toolCallId);
     }
   }
@@ -1212,6 +1348,18 @@ export class DroidAgent {
   private finishToolUse(toolCallId: string, result?: unknown, isError = false) {
     if (!toolCallId || this.completedToolUses.has(toolCallId)) return;
     const runningTool = this.runningToolUses.get(toolCallId);
+    if (runningTool?.isSubagent || this.droidSubagentsByToolCallId.has(toolCallId)) {
+      this.handleDroidSubagentToolProgress(toolCallId, runningTool?.toolName || "task", runningTool?.args, {
+        result,
+        output: result,
+      }, "tool_end", result, isError);
+      const snapshot = this.droidSubagentsByToolCallId.get(toolCallId);
+      if (!(snapshot?.background && snapshot.status === "running")) {
+        this.runningToolUses.delete(toolCallId);
+        this.completedToolUses.add(toolCallId);
+      }
+      return;
+    }
     const toolEvent = normalizeToolEvent("tool_end", {
       toolName: runningTool?.toolName || "tool",
       toolCallId,
@@ -1224,6 +1372,136 @@ export class DroidAgent {
     if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
     this.runningToolUses.delete(toolCallId);
     this.completedToolUses.add(toolCallId);
+  }
+
+  private reconcileDroidSubagentFailuresFromAssistantText() {
+    const text = this.assistantTextBuffer.trim();
+    if (!text || !/(?:task|subagent|sub-agent)[\s\S]{0,160}(?:authentication required|not authenticated|unauthorized|permission denied|failed|failure|error)/i.test(text)) {
+      return;
+    }
+    const message = text.match(/(?:Error:\s*)?Error running task subagent:[^\n]*/i)?.[0]
+      || text.match(/(?:authentication required|not authenticated|unauthorized|permission denied)[^\n.]*(?:\.|$)/i)?.[0]
+      || "Droid subagent failed";
+    for (const [toolCallId, snapshot] of this.droidSubagentsByToolCallId) {
+      if (snapshot.status !== "completed" || snapshot.message) continue;
+      const failed: NativeSubagentSnapshot = {
+        ...snapshot,
+        status: "error",
+        stopReason: "error",
+        message,
+      };
+      this.droidSubagentsByToolCallId.set(toolCallId, failed);
+      this.emitEvent(buildNativeSubagentEvent(failed, "droid", Date.now()));
+    }
+  }
+
+  private handleDroidSubagentToolProgress(
+    toolCallId: string,
+    toolName: string,
+    rawInput: unknown,
+    rawMetadata: unknown,
+    phase: "tool_start" | "tool_end",
+    rawResult?: unknown,
+    isError = false,
+  ) {
+    const input = getDroidSubagentInput(rawInput);
+    const metadata = {
+      ...asRecord(rawMetadata),
+      ...getDroidResultRecord(rawMetadata),
+    };
+    const resultValue = rawResult ?? metadata.result ?? metadata.output;
+    const resultRecord = getDroidResultRecord(resultValue);
+    const resultText = getNonEmptyString(resultValue)
+      || getNonEmptyString(metadata.fullOutput || metadata.text || metadata.valueSnippet || metadata.result || metadata.output);
+    const errorText = getNonEmptyString(
+      resultRecord.error || resultRecord.errorText || metadata.error || metadata.errorText,
+    );
+    const inferredError = isError
+      || resultRecord.isError === true
+      || resultRecord.is_error === true
+      || metadata.isError === true
+      || metadata.is_error === true
+      || !!errorText
+      || /authentication required|not authenticated|unauthorized|forbidden|permission denied|access denied|\b(?:error|failed|failure)\b/i.test(resultText || "");
+    const previous = this.droidSubagentsByToolCallId.get(toolCallId);
+    const taskId = getFirstNonEmptyString(metadata, ["taskId", "task_id", "agentId", "agent_id", "sessionId", "session_id"])
+      || getFirstNonEmptyString(resultRecord, ["taskId", "task_id", "agentId", "agent_id", "sessionId", "session_id"]);
+    const background = input.background === true
+      || input.run_in_background === true
+      || metadata.background === true
+      || metadata.run_in_background === true
+      || resultRecord.background === true;
+    const rawStatus = metadata.status || metadata.state || resultRecord.status || resultRecord.state;
+    const stopReason = normalizeNativeSubagentStopReason(
+      metadata.stopReason ?? resultRecord.stopReason ?? input.stopReason,
+    ) || (inferredError ? "error" : undefined);
+    let status = getDroidSubagentStatus(rawStatus, phase === "tool_end" ? "completed" : "running");
+    if (stopReason === "timeout") status = "error";
+    if (inferredError) status = /abort|cancel|interrupt/i.test(String(errorText || resultText || rawResult || ""))
+      ? "interrupted"
+      : "error";
+    if (phase === "tool_end" && background && ["running", "pending"].includes(status)) status = "running";
+    if (phase === "tool_end" && background && status === "completed" && (
+      resultRecord.status === "running"
+      || resultRecord.status === "pending"
+      || resultRecord.async === true
+      || !["completed", "complete", "done", "success", "succeeded"].includes(String(resultRecord.status || "").toLowerCase())
+    )) status = "running";
+    if (previous && isTerminalNativeSubagentStatus(previous.status) && !isTerminalNativeSubagentStatus(status)) {
+      status = previous.status;
+    }
+    const action: NativeSubagentAction = input.resume || input.task_id || input.taskId || previous?.action === "resumeAgent"
+      ? "resumeAgent"
+      : "spawnAgent";
+    const prompt = getFirstNonEmptyString(input, ["prompt", "description", "assignment", "task"])
+      || getFirstNonEmptyString(metadata, ["prompt", "description", "assignment", "task"])
+      || previous?.prompt;
+    const detail = getFirstNonEmptyString(input, ["description", "prompt", "assignment", "task"])
+      || getFirstNonEmptyString(metadata, ["description", "prompt", "assignment", "task"])
+      || previous?.detail;
+    const subagentId = taskId || previous?.subagentId || `droid-subagent-${toolCallId}`;
+    const model = formatSubagentModel(input.model || metadata.model || resultRecord.model) || previous?.model;
+    const usage = getDroidSubagentUsage(input, metadata, resultRecord);
+    const message = errorText
+      || getNonEmptyString(resultRecord.message || resultRecord.summary || resultRecord.content || resultRecord.result || resultRecord.output)
+      || resultText
+      || previous?.message;
+    const snapshot: NativeSubagentSnapshot = {
+      toolCallId,
+      subagentId,
+      label: getDroidSubagentLabel(input, { ...metadata, ...resultRecord }),
+      status,
+      action,
+      model,
+      detail,
+      prompt,
+      message,
+      stopReason,
+      startedAt: previous?.startedAt
+        || Number(metadata.startedAt || metadata.started_at || resultRecord.startedAt || resultRecord.started_at)
+        || Date.now(),
+      background,
+      ...(usage ? { usage } : {}),
+    };
+    this.droidSubagentsByToolCallId.set(toolCallId, snapshot);
+    this.emitEvent(buildNativeSubagentEvent(
+      snapshot,
+      "droid",
+      isTerminalNativeSubagentStatus(status) ? Date.now() : undefined,
+    ));
+  }
+
+  private interruptDroidSubagents(message: string) {
+    for (const [toolCallId, snapshot] of this.droidSubagentsByToolCallId) {
+      if (isTerminalNativeSubagentStatus(snapshot.status)) continue;
+      const interrupted: NativeSubagentSnapshot = {
+        ...snapshot,
+        status: "interrupted",
+        message,
+      };
+      this.droidSubagentsByToolCallId.set(toolCallId, interrupted);
+      this.emitEvent(buildNativeSubagentEvent(interrupted, "droid", Date.now()));
+    }
   }
 
   private async applySessionResult(result: UnknownRecord, restoreHistory: boolean) {
@@ -1303,6 +1581,7 @@ export class DroidAgent {
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
+    this.droidSubagentsByToolCallId.clear();
     this.actionKeys.clear();
     if (wasReady) this.emitEvent({ type: "agent_disconnected", detail });
   }
@@ -1327,6 +1606,7 @@ export class DroidAgent {
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
+    this.droidSubagentsByToolCallId.clear();
     this.emitEvent({
       type: "process_event",
       entryType: "error",

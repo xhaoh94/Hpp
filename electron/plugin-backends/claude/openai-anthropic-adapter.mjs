@@ -466,6 +466,7 @@ export const startOpenAIChatAdapter = async (provider, fetchImpl = fetch) => {
         return;
       }
       const openAIBody = convertAnthropicRequest(anthropicBody);
+      if (provider.modelId) openAIBody.model = String(provider.modelId);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
       timeout.unref?.();

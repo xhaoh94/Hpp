@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, app } from "electron";
+import { ipcMain, BrowserWindow, dialog, app, type OpenDialogOptions, type SaveDialogOptions } from "electron";
 import { readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
@@ -1031,7 +1031,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
 
   ipcMain.handle("agentPlugin:choosePath", async (event, kind?: "zip" | "directory") => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    const result = await dialog.showOpenDialog(win || undefined, {
+    const options: OpenDialogOptions = {
       properties: kind === "directory" ? ["openDirectory"] : ["openFile"],
       filters: kind === "directory"
         ? undefined
@@ -1039,7 +1039,10 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
             { name: "Agent plugin ZIP", extensions: ["zip"] },
             { name: "All files", extensions: ["*"] },
           ],
-    });
+    };
+    const result = win
+      ? await dialog.showOpenDialog(win, options)
+      : await dialog.showOpenDialog(options);
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, path: "" };
     }
@@ -1589,11 +1592,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         return { success: false, error: "导出数据格式无效。" };
       }
       const win = BrowserWindow.getFocusedWindow();
-      const { canceled, filePath } = await dialog.showSaveDialog(win || undefined, {
+      const options: SaveDialogOptions = {
         title: "导出渠道配置",
         defaultPath: `hpp-agent-config-${new Date().toISOString().slice(0, 10)}.json`,
         filters: [{ name: "HPP 渠道配置", extensions: ["json"] }],
-      });
+      };
+      const { canceled, filePath } = win
+        ? await dialog.showSaveDialog(win, options)
+        : await dialog.showSaveDialog(options);
       if (canceled || !filePath) return { success: false, canceled: true };
       await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
       return { success: true, filePath };
@@ -1605,11 +1611,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agentConfig:importRead", async () => {
     try {
       const win = BrowserWindow.getFocusedWindow();
-      const { canceled, filePaths } = await dialog.showOpenDialog(win || undefined, {
+      const options: OpenDialogOptions = {
         title: "导入渠道配置",
         properties: ["openFile"],
         filters: [{ name: "HPP 渠道配置", extensions: ["json"] }],
-      });
+      };
+      const { canceled, filePaths } = win
+        ? await dialog.showOpenDialog(win, options)
+        : await dialog.showOpenDialog(options);
       if (canceled || !filePaths?.length) return { success: false, canceled: true };
       const raw = await readFile(filePaths[0], "utf8");
       let parsed: unknown;

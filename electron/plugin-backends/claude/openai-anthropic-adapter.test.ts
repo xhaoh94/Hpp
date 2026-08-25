@@ -111,20 +111,21 @@ describe("Claude OpenAI compatibility adapter", () => {
       baseUrl: `http://127.0.0.1:${port}/v1`,
       apiKey: "upstream-secret",
       authMode: "bearer",
+      modelId: "gpt-5.6-luna",
     });
     adapters.push(adapter);
 
     const response = await fetch(`${adapter.baseUrl}/v1/messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${adapter.apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ model: "free-model", max_tokens: 512, stream: true, messages: [{ role: "user", content: "Hello" }] }),
+      body: JSON.stringify({ model: "haiku", max_tokens: 512, stream: true, messages: [{ role: "user", content: "Hello" }] }),
     });
     const stream = await response.text();
 
     expect(response.status).toBe(200);
     expect(upstreamAuthorization).toBe("Bearer upstream-secret");
     expect(upstreamBody).toMatchObject({
-      model: "free-model",
+      model: "gpt-5.6-luna",
       stream: true,
       messages: [{ role: "user", content: "Hello" }],
     });

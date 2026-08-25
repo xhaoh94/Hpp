@@ -58,6 +58,7 @@ export interface AgentEvent {
   title?: string;
   state?: string;
   status?: string;
+  stopReason?: string;
   phase?: string;
   expanded?: boolean;
   command?: string;

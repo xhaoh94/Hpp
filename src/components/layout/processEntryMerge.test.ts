@@ -184,6 +184,40 @@ describe("processEntryMerge", () => {
     ]);
   });
 
+  it("merges a subagent start with its terminal wait update", () => {
+    const entries = [
+      processEntry({
+        id: "spawn-a",
+        type: "subagent",
+        title: "已开始工作",
+        state: "running",
+        action: "spawnAgent",
+        startedAt: 1000,
+        subagents: [{ id: "thread-a", label: "Agent 01a033fd", status: "running" }],
+      }),
+      processEntry({
+        id: "wait-a",
+        type: "subagent",
+        title: "已完成",
+        state: "completed",
+        action: "wait",
+        completedAt: 5000,
+        subagents: [{ id: "thread-a", label: "Agent 01a033fd", status: "completed" }],
+      }),
+    ];
+
+    expect(mergeProcessEntries(entries)).toEqual([
+      expect.objectContaining({
+        id: "spawn-a",
+        title: "已完成",
+        state: "completed",
+        startedAt: 1000,
+        completedAt: 5000,
+        subagents: [expect.objectContaining({ id: "thread-a", status: "completed" })],
+      }),
+    ]);
+  });
+
   it("keeps individual subagent updates as separate timeline rows", () => {
     const entries = [
       processEntry({

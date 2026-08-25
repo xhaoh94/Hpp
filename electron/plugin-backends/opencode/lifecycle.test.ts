@@ -489,29 +489,116 @@ describe("OpenCode lifecycle", () => {
     internals.turnActive = true;
     internals.eventSource = { destroy: vi.fn() };
 
-    // 压缩触发消息：user 消息的 parts 含 compaction 部分。
+    // OpenCode 会先创建 user 消息，再单独发布 compaction part。普通
+    // message.updated 本身不能当成用户正文，也不能误判为压缩已完成。
     internals.handleSSEEvent("message.updated", {
-      properties: { sessionID: "ses_source", info: { id: "msg_compact_user", role: "user" }, parts: [{ type: "compaction" }] },
+      properties: { sessionID: "ses_source", info: { id: "msg_compact_user", role: "user" } },
     });
-    expect(events).toContainEqual(expect.objectContaining({ type: "context_compaction", phase: "completed" }));
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "context_compaction" }));
 
-    events.length = 0;
-    // 压缩摘要消息：assistant 消息 info.summary === true。
-    internals.handleSSEEvent("message.updated", {
-      properties: { sessionID: "ses_source", info: { id: "msg_compact_summary", role: "assistant", summary: true } },
-    });
-    expect(events).toContainEqual(expect.objectContaining({ type: "context_compaction", phase: "completed", id: "msg_compact_summary" }));
-
-    events.length = 0;
-    // 摘要正文 delta 不应作为对话正文渲染。
     internals.handleSSEEvent("message.part.updated", {
       properties: {
         sessionID: "ses_source",
-        info: { id: "msg_compact_summary", role: "assistant", summary: true },
-        part: { id: "p1", type: "text" },
+        part: {
+          id: "part_compaction",
+          messageID: "msg_compact_user",
+          type: "compaction",
+        },
+      },
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "context_compaction",
+      phase: "started",
+      id: "msg_compact_user",
+    }));
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "context_compaction", phase: "completed" }));
+
+    events.length = 0;
+    // OpenCode 先创建 summary 消息，再开始流式输出；创建消息不表示压缩
+    // 已完成，且摘要正文不能进入普通 assistant stream。
+    internals.handleSSEEvent("message.updated", {
+      properties: {
+        sessionID: "ses_source",
+        info: {
+          id: "msg_compact_summary",
+          parentID: "msg_compact_user",
+          role: "assistant",
+          summary: true,
+        },
+      },
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "context_compaction", phase: "completed" }));
+
+    events.length = 0;
+    internals.handleSSEEvent("message.part.delta", {
+      properties: {
+        sessionID: "ses_source",
+        messageID: "msg_compact_summary",
+        partID: "p1",
+        field: "text",
         delta: "这是被压缩的摘要内容",
       },
     });
     expect(events).not.toContainEqual(expect.objectContaining({ type: "stream_delta" }));
+
+    // 只有 summary 消息最终带上 finish 后，才结束压缩状态。
+    internals.handleSSEEvent("message.updated", {
+      properties: {
+        sessionID: "ses_source",
+        info: {
+          id: "msg_compact_summary",
+          parentID: "msg_compact_user",
+          role: "assistant",
+          summary: true,
+          finish: "stop",
+        },
+      },
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "context_compaction",
+      phase: "completed",
+      id: "msg_compact_user",
+    }));
+  });
+
+  it("does not replay a persisted compaction summary through the REST fallback", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.turnActive = true;
+    internals.eventSource = { destroy: vi.fn() };
+    internals.httpGet = vi.fn(async () => [
+      {
+        info: { id: "old-assistant", role: "assistant" },
+        parts: [{ type: "text", text: "旧的普通回复" }],
+      },
+      {
+        info: { id: "msg_compact_user", role: "user" },
+        parts: [{ type: "compaction" }],
+      },
+      {
+        info: {
+          id: "msg_compact_summary",
+          parentID: "msg_compact_user",
+          role: "assistant",
+          summary: true,
+          finish: "stop",
+        },
+        parts: [{ type: "text", text: "这段是内部压缩摘要，不应显示" }],
+      },
+    ]);
+
+    await internals.fetchAssistantMessage();
+
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: "stream_delta",
+      delta: expect.stringContaining("内部压缩摘要"),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "context_compaction",
+      phase: "completed",
+      id: "msg_compact_user",
+    }));
   });
 });
