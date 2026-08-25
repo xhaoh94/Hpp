@@ -9,6 +9,7 @@ import {
   getToolProcessFiles,
   getToolSummary,
   isCommandNonZeroExit,
+  normalizePlanStepsFromToolResult,
   normalizeToolKind,
   type SessionRuntime,
 } from "./agentEventUtils";
@@ -222,6 +223,17 @@ export function handleToolEndEvent(
   } else {
     ctx.updateInferredPlanSteps(currentSessionId, "operate");
   }
+
+  // Some extensions expose a structured task snapshot in their tool result
+  // instead of emitting a separate plan_update event. Promote that snapshot to
+  // HPP's existing native plan UI. The parser is intentionally based on the
+  // result shape (for example `{ details: { tasks } }`), not on a package name,
+  // so other Pi extensions can integrate without an adapter.
+  const planSteps = normalizePlanStepsFromToolResult(effectiveEvent);
+  if (planSteps.length > 0) {
+    ctx.updateProcessPlanSteps(currentSessionId, planSteps, true);
+  }
+
   const toolDetail = getToolDetail(effectiveEvent);
   const toolSummary = getToolSummary({
     ...effectiveEvent,

@@ -7,6 +7,7 @@ import type { AgentEventHandlerContext, ProcessEntryDraft } from "./agentEventTy
 const createContext = () => {
   const entries: ProcessEntryDraft[] = [];
   const updateInferredPlanSteps = vi.fn();
+  const updateProcessPlanSteps = vi.fn();
   const context = {
     getPendingUIResponse: () => null,
     getPendingUIFromEvent: vi.fn(() => ({
@@ -18,11 +19,12 @@ const createContext = () => {
     ensureAssistantContinuation: vi.fn(),
     appendProcessEntry: (_sessionId: string, entry: ProcessEntryDraft) => entries.push(entry),
     updateInferredPlanSteps,
+    updateProcessPlanSteps,
     recordProcessFiles: vi.fn(),
     finishAssistantProcessText: vi.fn(),
     finishThinkingEntry: vi.fn(),
   } as unknown as AgentEventHandlerContext;
-  return { context, entries, updateInferredPlanSteps };
+  return { context, entries, updateInferredPlanSteps, updateProcessPlanSteps };
 };
 
 describe("handleToolEndEvent", () => {
@@ -133,6 +135,30 @@ describe("handleToolEndEvent", () => {
       "read_file",
       runtime,
     )).toBe("provider-end-id");
+  });
+
+  it("maps a Pi todo result snapshot into the native plan UI", () => {
+    const { context, updateProcessPlanSteps } = createContext();
+
+    handleToolEndEvent({
+      type: "tool_end",
+      toolName: "todo",
+      toolKind: "unknown",
+      result: {
+        content: [{ type: "text", text: "Created #1: inspect the renderer" }],
+        details: {
+          tasks: [
+            { id: 1, subject: "Inspect the renderer", status: "in_progress" },
+            { id: 2, subject: "Add compatibility tests", status: "pending" },
+          ],
+        },
+      },
+    } as AgentEvent, "session-1", createSessionRuntime(), context);
+
+    expect(updateProcessPlanSteps).toHaveBeenCalledWith("session-1", [
+      { id: "1", title: "Inspect the renderer", status: "running" },
+      { id: "2", title: "Add compatibility tests", status: "pending" },
+    ], true);
   });
 
   it("renders a non-zero command exit as a warning without failing the inferred plan", () => {

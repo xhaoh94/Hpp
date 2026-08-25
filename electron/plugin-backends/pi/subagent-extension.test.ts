@@ -109,6 +109,100 @@ describe("Pi built-in subagent extension", () => {
     }
   });
 
+  it("loads the installed pi-fff package only for read-only built-in agents", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-fff-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+        packages: ["npm:@ff-labs/pi-fff"],
+      }), "utf8");
+      const fffDir = join(agentDir, "npm", "node_modules", "@ff-labs", "pi-fff");
+      await mkdir(join(fffDir, "src"), { recursive: true });
+      await writeFile(join(fffDir, "package.json"), JSON.stringify({
+        name: "@ff-labs/pi-fff",
+        pi: { extensions: ["./src/index.ts"] },
+      }), "utf8");
+      const extensionPath = join(fffDir, "src", "index.ts");
+      await writeFile(extensionPath, "export default function () {}\n", "utf8");
+
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const scoutResult = await tools[0].execute(
+        "call-fff-scout",
+        { agent: "scout", task: "使用 FFF 检查项目" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      const workerResult = await tools[0].execute(
+        "call-fff-worker",
+        { agent: "worker", task: "不要加载 FFF" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      const scoutArgs = scoutResult.content[0].text;
+      const workerArgs = workerResult.content[0].text;
+      expect(scoutArgs).toContain(`--extension|${extensionPath}`);
+      expect(scoutArgs).toContain("--tools|read,grep,find,ls,fffind,ffgrep,fff-multi-grep");
+      expect(workerArgs).not.toContain(extensionPath);
+      expect(workerArgs).not.toContain("fffind");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses manifest-declared subagent metadata for other Pi packages", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-manifest-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\\n"), "utf8");
+      const agentDir = join(root, "agent");
+      const packageDir = join(agentDir, "npm", "node_modules", "@example", "search-extension");
+      await mkdir(join(packageDir, "src"), { recursive: true });
+      await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+        packages: ["npm:@example/search-extension@1.0.0"],
+      }), "utf8");
+      await writeFile(join(packageDir, "package.json"), JSON.stringify({
+        name: "@example/search-extension",
+        pi: {
+          extensions: ["./src/index.ts"],
+          subagent: { profiles: ["scout"], tools: ["example-search"] },
+        },
+      }), "utf8");
+      const extensionPath = join(packageDir, "src", "index.ts");
+      await writeFile(extensionPath, "export default function () {}\n", "utf8");
+
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const result = await tools[0].execute(
+        "call-manifest-extension",
+        { agent: "scout", task: "使用扩展检查项目" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      expect(result.content[0].text).toContain(`--extension|${extensionPath}`);
+      expect(result.content[0].text).toContain("--tools|read,grep,find,ls,example-search");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs an isolated child Pi process and returns capped structured details", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-test-"));
     try {

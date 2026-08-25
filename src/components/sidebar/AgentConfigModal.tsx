@@ -1457,10 +1457,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
                     <div className="agent-config-summary">
                       <div className="agent-config-summary-row">
-                        <span>渠道 ID</span>
-                        <strong>{selectedSavedProvider.providerId}</strong>
-                      </div>
-                      <div className="agent-config-summary-row">
                         <span>显示名</span>
                         <strong>{selectedSavedProvider.displayName || selectedSavedProvider.providerId}</strong>
                       </div>

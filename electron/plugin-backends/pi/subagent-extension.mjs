@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -13,6 +13,9 @@ const MAX_MESSAGE_COUNT = 80;
 const DEFAULT_TASK_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const SUBAGENT_BRIDGE_EXTENSION_PATH = join(dirname(fileURLToPath(import.meta.url)), "subagent-bridge-extension.mjs");
+const PI_FFF_PACKAGE_NAME = "@ff-labs/pi-fff";
+const PI_FFF_TOOL_NAMES = ["fffind", "ffgrep", "fff-multi-grep"];
+const PI_FFF_SUBAGENT_NAMES = new Set(["scout", "planner", "reviewer"]);
 
 const DEFAULT_AGENTS = [
   {
@@ -218,6 +221,109 @@ const getModelName = (model) => {
   return id || provider;
 };
 
+const OPTIONAL_SUBAGENT_PACKAGE_ADAPTERS = {
+  // @ff-labs/pi-fff 当前尚未在 Pi manifest 中声明 subagent 工具元数据，
+  // 因此只保留这一份兼容适配；其他包优先读取 manifest.pi.subagent。
+  [PI_FFF_PACKAGE_NAME]: {
+    profiles: [...PI_FFF_SUBAGENT_NAMES],
+    tools: PI_FFF_TOOL_NAMES,
+  },
+};
+
+const getNpmPackageName = (spec) => {
+  const value = nonEmptyString(spec);
+  if (!value || !value.startsWith("npm:")) return undefined;
+  const packageSpec = value.slice(4);
+  if (packageSpec.startsWith("@")) {
+    const scopeSeparator = packageSpec.indexOf("/");
+    const versionSeparator = packageSpec.indexOf("@", scopeSeparator + 1);
+    return versionSeparator > 0 ? packageSpec.slice(0, versionSeparator) : packageSpec;
+  }
+  const versionSeparator = packageSpec.indexOf("@");
+  return versionSeparator > 0 ? packageSpec.slice(0, versionSeparator) : packageSpec;
+};
+
+const getConfiguredPiPackageNames = (agentDir) => {
+  const settingsPath = join(agentDir || "", "settings.json");
+  if (!existsSync(settingsPath)) return new Set();
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    return new Set(
+      Array.isArray(settings?.packages)
+        ? settings.packages.map(getNpmPackageName).filter(Boolean)
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+};
+
+const getInstalledPiPackageManifest = (agentDir, packageName) => {
+  const packagePaths = [
+    join(agentDir || "", "npm", "node_modules", ...packageName.split("/"), "package.json"),
+    join(agentDir || "", "node_modules", ...packageName.split("/"), "package.json"),
+  ];
+  for (const packageJsonPath of packagePaths) {
+    if (!existsSync(packageJsonPath)) continue;
+    try {
+      const manifest = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+      if (manifest?.name === packageName) return { manifest, packageDir: dirname(packageJsonPath) };
+    } catch {
+      // Ignore malformed or partially installed optional packages.
+    }
+  }
+  return null;
+};
+
+const getManifestExtensionPaths = (packageInfo) => {
+  if (!packageInfo) return [];
+  const { manifest, packageDir } = packageInfo;
+  const extensionEntries = Array.isArray(manifest?.pi?.extensions)
+    ? manifest.pi.extensions
+    : [];
+  return extensionEntries.flatMap((entry) => {
+    if (typeof entry !== "string" || !entry.trim()) return [];
+    const extensionPath = resolve(packageDir, entry);
+    const packageRelativePath = relative(packageDir, extensionPath);
+    if (!packageRelativePath || packageRelativePath.startsWith("..") || isAbsolute(packageRelativePath)) return [];
+    return existsSync(extensionPath) ? [extensionPath] : [];
+  });
+};
+
+const getSubagentExtensionIntegration = (agentName, agentDir) => {
+  const configuredPackages = getConfiguredPiPackageNames(agentDir);
+  const integrations = [];
+  for (const packageName of configuredPackages) {
+    const packageInfo = getInstalledPiPackageManifest(agentDir, packageName);
+    if (!packageInfo) continue;
+    const manifestMetadata = isRecord(packageInfo.manifest?.pi?.subagent)
+      ? packageInfo.manifest.pi.subagent
+      : undefined;
+    const adapter = OPTIONAL_SUBAGENT_PACKAGE_ADAPTERS[packageName];
+    const profiles = Array.isArray(manifestMetadata?.profiles)
+      ? manifestMetadata.profiles.filter((profile) => typeof profile === "string")
+      : adapter?.profiles || [];
+    if (!profiles.includes(agentName)) continue;
+    const tools = Array.isArray(manifestMetadata?.tools)
+      ? manifestMetadata.tools.filter((tool) => typeof tool === "string")
+      : adapter?.tools || [];
+    const extensionPaths = getManifestExtensionPaths(packageInfo);
+    if (extensionPaths.length === 0) continue;
+    integrations.push({ extensionPaths, tools });
+  }
+  return integrations;
+};
+
+const getSubagentTools = (agent, integrations) => {
+  const tools = Array.isArray(agent?.tools) ? [...agent.tools] : [];
+  for (const integration of integrations) {
+    for (const toolName of integration.tools) {
+      if (!tools.includes(toolName)) tools.push(toolName);
+    }
+  }
+  return tools;
+};
+
 const getPiInvocation = (packageRoot, args, nodePath) => {
   const cliPath = join(packageRoot || "", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
   if (!existsSync(cliPath)) {
@@ -319,13 +425,17 @@ const runSingleAgent = async ({
   }
 
   const interactive = typeof requestUI === "function" && existsSync(bridgeExtensionPath);
+  const extensionIntegrations = getSubagentExtensionIntegration(agent.name, agentDir);
+  const approvedExtensionPaths = extensionIntegrations.flatMap((integration) => integration.extensionPaths);
   const args = interactive
     ? ["--mode", "rpc", "--no-session", "--no-extensions", "--extension", bridgeExtensionPath, "--exclude-tools", "subagent"]
     : ["--mode", "json", "-p", "--no-session", "--no-extensions", "--exclude-tools", "subagent"];
+  for (const extensionPath of approvedExtensionPaths) args.push("--extension", extensionPath);
   const model = agent.model || dispatchDefaults.model;
   if (model) args.push("--model", model);
   if (!agent.model && dispatchDefaults.thinkingLevel) args.push("--thinking", dispatchDefaults.thinkingLevel);
-  if (Array.isArray(agent.tools) && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  const tools = getSubagentTools(agent, extensionIntegrations);
+  if (tools.length > 0) args.push("--tools", tools.join(","));
   if (agent.systemPrompt) args.push("--append-system-prompt", truncateText(agent.systemPrompt, 24 * 1024));
   if (hostSystemPrompt) args.push("--append-system-prompt", truncateText(hostSystemPrompt, 24 * 1024));
   args.push("--append-system-prompt", "当前进程是 Hpp 内置 subagent。不要调用 subagent，不要尝试递归委派；只完成当前任务并返回结构化摘要。\n\nTask 输出建议包含：Goal、Findings、Files Read/Changed、Tests、Risks、Next Steps。\n");

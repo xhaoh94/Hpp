@@ -74,6 +74,10 @@ export interface AgentEvent {
   detail?: unknown;
   args?: UnknownRecord;
   input?: UnknownRecord;
+  result?: unknown;
+  output?: unknown;
+  details?: unknown;
+  toolResult?: unknown;
   questions?: unknown;
   question?: unknown;
   prompt?: unknown;

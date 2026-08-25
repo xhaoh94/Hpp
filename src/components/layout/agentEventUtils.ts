@@ -701,6 +701,7 @@ const normalizePlanStepStatus = (value: unknown): AgentProcessStepStatus => {
   if (
     normalized === "cancelled" ||
     normalized === "canceled" ||
+    normalized === "deleted" ||
     normalized === "skipped" ||
     normalized === "interrupted"
   ) {
@@ -715,6 +716,7 @@ const getPlanStepTitle = (step: UnknownRecord, index: number) => {
     getStringField(step, "title") ||
     getStringField(step, "text") ||
     getStringField(step, "content") ||
+    getStringField(step, "subject") ||
     getStringField(step, "description") ||
     getStringField(step, "name");
   return title?.trim() || getPlanStepFallbackTitle(index);
@@ -802,6 +804,42 @@ export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep
       .map((line) => line.replace(/^[-*]\s*/, "").trim())
       .filter(Boolean);
     const steps = normalizePlanSteps(lines);
+    if (steps.length > 0) return steps;
+  }
+
+  return [];
+};
+
+/**
+ * Extract a structured task snapshot from a completed tool result.
+ *
+ * Pi extensions conventionally return `{ content, details }`; `rpiv-todo`
+ * stores its current task list in `details.tasks`. This deliberately only
+ * accepts a `tasks` field. Treating arbitrary result `items` as plan steps
+ * would make search/list tools appear as task plans in HPP.
+ */
+export const normalizePlanStepsFromToolResult = (event: AgentEvent): AgentProcessStep[] => {
+  const detail = asRecord(event.detail);
+  const eventDetails = asRecord(event.details);
+  const result = asRecord(event.result);
+  const resultDetails = asRecord(result.details);
+  const output = asRecord(event.output);
+  const outputDetails = asRecord(output.details);
+  const toolResult = asRecord(event.toolResult);
+  const toolResultDetails = asRecord(toolResult.details);
+  const candidates = [
+    eventDetails.tasks,
+    detail.tasks,
+    result.tasks,
+    resultDetails.tasks,
+    output.tasks,
+    outputDetails.tasks,
+    toolResult.tasks,
+    toolResultDetails.tasks,
+  ];
+
+  for (const candidate of candidates) {
+    const steps = normalizePlanSteps(candidate);
     if (steps.length > 0) return steps;
   }
 

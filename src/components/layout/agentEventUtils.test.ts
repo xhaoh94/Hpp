@@ -13,6 +13,7 @@ import {
   markSessionRuntimeTurnSettled,
   mergeRuntimeChangeFile,
   normalizePlanStepsFromEvent,
+  normalizePlanStepsFromToolResult,
   resetSessionRuntimeAfterTurn,
   summarizeRuntimeChanges,
 } from "./agentEventUtils";
@@ -181,6 +182,31 @@ describe("agentEventUtils", () => {
         status: "pending",
       },
     ]);
+  });
+
+  it("reads Pi extension task snapshots from tool result details", () => {
+    expect(normalizePlanStepsFromToolResult({
+      type: "tool_end",
+      toolName: "todo",
+      result: {
+        content: [{ type: "text", text: "Created #1: inspect the renderer" }],
+        details: {
+          tasks: [
+            { id: 1, subject: "Inspect the renderer", status: "in_progress" },
+            { id: 2, subject: "Add compatibility tests", status: "pending" },
+          ],
+        },
+      },
+    } as AgentEvent)).toEqual([
+      { id: "1", title: "Inspect the renderer", status: "running" },
+      { id: "2", title: "Add compatibility tests", status: "pending" },
+    ]);
+
+    expect(normalizePlanStepsFromToolResult({
+      type: "tool_end",
+      toolName: "search",
+      result: { items: [{ title: "A search result" }] },
+    } as AgentEvent)).toEqual([]);
   });
 
   it("normalizes confirm UI responses with localized negative answers", () => {

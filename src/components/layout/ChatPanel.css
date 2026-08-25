@@ -3561,7 +3561,7 @@ body.chat-questionnaire-resizing {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 8px auto;
+  margin: 8px auto 0;
   padding: 8px;
   /* 与下方聊天输入框对齐：聊天输入框在 .chat-input-area 内有 16px 左右内边距，
      而队列卡片直接挂在无内边距的 .chat-panel 下，故额外减掉 32px（16px*2），
