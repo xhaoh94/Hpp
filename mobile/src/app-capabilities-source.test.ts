@@ -23,6 +23,48 @@ describe("mobile capability source constraints", () => {
     expect(stylesSource).toContain(".command-group-item[open] > summary .expand-indicator { transform: rotate(180deg); }");
   });
 
+  it("shows the active process step and colored file changes in Web/mobile summaries", () => {
+    expect(appSource).toContain('const getCurrentProcessStep = (steps: RemoteProcess["planSteps"])');
+    expect(appSource).toContain('availableSteps.find((step) => step.status === "running")');
+    expect(appSource).toContain('className={`process-summary-dot ${currentStep.status}`}');
+    expect(appSource).toContain('className="process-summary-add"');
+    expect(appSource).toContain('className="process-summary-del"');
+    expect(appSource).not.toContain("files · +{process.changeSummary.additions} -{process.changeSummary.deletions}");
+    expect(stylesSource).toContain(".process-summary-dot.running");
+    expect(stylesSource).toContain("@keyframes process-step-pulse");
+    expect(stylesSource).toContain(".process-summary-add { color: var(--success); }");
+    expect(stylesSource).toContain(".process-summary-del { color: var(--coral); }");
+    expect(stylesSource).toContain(".process-plan div[data-status=\"running\"] > span:first-child { background: var(--success); animation: process-step-pulse 2.2s ease-in-out infinite; }");
+  });
+
+  it("keeps the mobile process pill and return-to-bottom button in one floating layout", () => {
+    expect(appSource).toContain("const DEMO_CAPSULE_MESSAGES: RemoteChatMessage[] = [");
+    expect(appSource).toContain('demoVariant === "1" ? DEMO_CAPSULE_MESSAGES : DEMO_MESSAGES');
+    expect(appSource).toContain('status: "pending"');
+    expect(appSource).toContain('status: "running"');
+    expect(appSource).toContain('status: "completed"');
+    expect(appSource).toContain('status: "failed"');
+    expect(appSource).toContain('status: "cancelled"');
+    expect(appSource).toContain("const activeProcessWithTodos = useMemo(() =>");
+    expect(appSource).toContain("if (!hasNativeMultiStepProcessPlan(process)) return null;");
+    expect(appSource).toContain("return hasNativeMultiStepProcessPlan(activeMessage?.process) ? activeMessage?.process : undefined;");
+    expect(appSource).toContain('className="chat-floating-status"');
+    expect(appSource).toContain('className="chat-scroll-bottom"');
+    expect(appSource).toContain("<MobileTodoSummaryPill process={activeProcessWithTodos} />");
+    expect(stylesSource).toContain(".messages-view.has-todo-summary { padding-bottom: 50px; }");
+    expect(stylesSource).toContain(".messages-view.has-todo-summary.has-scroll-bottom { padding-bottom: 92px; }");
+    expect(stylesSource).toContain("bottom: 16px;");
+    expect(stylesSource).toContain("height: 34px;");
+    expect(stylesSource).toContain(".chat-floating-status {");
+    expect(stylesSource).toContain("pointer-events: none;");
+    expect(stylesSource).toContain(".chat-todo-summary {");
+    expect(stylesSource).toContain("animation: chat-todo-summary-spin 850ms linear infinite, chat-agent-dot-pulse 1.6s ease-in-out infinite;");
+    expect(stylesSource).toContain(".chat-todo-summary-text.running {");
+    expect(stylesSource).toContain("animation: chat-todo-summary-text-shimmer 4s ease-in-out infinite;");
+    expect(stylesSource).toContain(".chat-todo-summary:hover .chat-todo-summary-popover,");
+    expect(appSource).not.toContain("return-bottom-button");
+  });
+
   it("aligns intermediate and final assistant body text with the process content axis", () => {
     expect(stylesSource).toContain("--message-assistant-body-inset: 10px");
     expect(stylesSource).toContain(".message.assistant > .message-content,");
@@ -191,6 +233,17 @@ describe("mobile capability source constraints", () => {
     expect(appSource).toContain("选择会话");
     expect(appSource).toContain("openSessionCount === 0");
     expect(stylesSource).toContain(".session-picker-row");
+  });
+
+  it("uses a responsive, accessible Agent creation dialog", () => {
+    expect(appSource).toContain("create-session-backdrop");
+    expect(appSource).toContain('aria-labelledby="create-session-title"');
+    expect(appSource).toContain('role="radiogroup"');
+    expect(appSource).toContain('role="radio"');
+    expect(appSource).toContain('className="create-session-footer"');
+    expect(stylesSource).toContain(".history-dialog.create-session-dialog");
+    expect(stylesSource).toContain(".create-session-dialog .agent-picker-list > button.selected");
+    expect(stylesSource).toContain(".create-session-backdrop { align-items: flex-end; padding: 0; }");
   });
 
   it("navigates Android back from Agent to sessions and then to pairing", () => {

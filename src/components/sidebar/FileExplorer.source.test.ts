@@ -88,10 +88,22 @@ describe("file explorer tree commands", () => {
 
     expect(source).toContain('mode: "collapse" | "refresh"');
     expect(source).toContain('mode: "refresh"');
+    expect(source).toContain("childrenLoadedRef.current = false");
     expect(source).toContain("loadChildren(true)");
     expect(source).toContain("setRefreshVersion((current) => current + 1)");
     expect(source).toContain("refreshVersion");
     expect(source).toContain("invalidateProjectFileIndex(activeProject.path, filters)");
+  });
+
+  it("watches the project only while the visible file explorer is open", () => {
+    const source = readSource();
+
+    expect(source).toContain('const explorerVisible = sidebarTab === "files" && !sidebarCollapsed');
+    expect(source).toContain("onFileSystemChange");
+    expect(source).toContain("watchPath(projectPath, true)");
+    expect(source).toContain("unwatchPath(projectPath, true)");
+    expect(source).toContain("startFallbackPolling");
+    expect(source).toContain("[activeProject?.path, explorerVisible, filterKey]");
   });
 
   it("portals the right-click menu to the body so collapsed sidebar styles can't occlude it", () => {

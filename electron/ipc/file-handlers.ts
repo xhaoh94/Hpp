@@ -7,6 +7,7 @@ import { commandExists } from "../utils/command-utils";
 import { reverseApplyPatches } from "./reverse-apply-patches";
 import { isFileEntryExcluded, normalizeFileFilters } from "../../shared/file-filters";
 import { collectProjectFileIndex } from "./project-file-indexer";
+import { startFileWatch, stopFileWatch } from "./file-watchers";
 
 const SEARCH_RESULT_LIMIT = 50;
 const MAX_IMAGE_PREVIEW_BYTES = 25 * 1024 * 1024;
@@ -53,6 +54,14 @@ function getImageMimeType(filePath: string) {
 }
 
 export function registerFileHandlers() {
+  ipcMain.handle("fs:watchPath", (event, targetPath: string, recursive = false) => {
+    return startFileWatch(event.sender, targetPath, recursive === true);
+  });
+
+  ipcMain.handle("fs:unwatchPath", (event, targetPath: string, recursive = false) => {
+    return stopFileWatch(event.sender, targetPath, recursive === true);
+  });
+
   ipcMain.handle("fs:showItemInFolder", async (_event, targetPath: string) => {
     if (typeof targetPath !== "string" || !targetPath.trim()) {
       return { success: false, error: "Path is required" };

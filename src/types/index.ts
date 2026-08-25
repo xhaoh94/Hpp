@@ -21,6 +21,7 @@ import type {
   AppUpdateStatus,
   DiskUsageStats,
   DiskCleanupResult,
+  FileSystemChange,
 } from "./ipc";
 import type { AgentConfigExportData } from "../../shared/agent-config-io";
 import type {
@@ -102,6 +103,7 @@ export type {
   DiskUsageCategoryId,
   DiskUsageStats,
   DiskCleanupResult,
+  FileSystemChange,
 } from "./ipc";
 
 export interface FileEntry {
@@ -246,6 +248,9 @@ export interface ElectronAPI {
 
   // File system
   readDirectory: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
+  watchPath: (targetPath: string, recursive?: boolean) => Promise<{ success: boolean; error?: string }>;
+  unwatchPath: (targetPath: string, recursive?: boolean) => Promise<{ success: boolean; error?: string }>;
+  onFileSystemChange: (callback: (change: FileSystemChange) => void) => () => void;
   showItemInFolder: (targetPath: string) => Promise<{ success: boolean; error?: string }>;
   indexProjectFiles?: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; binary?: boolean; error?: string }>;

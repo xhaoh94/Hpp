@@ -157,7 +157,51 @@ describe("handleToolEndEvent", () => {
 
     expect(updateProcessPlanSteps).toHaveBeenCalledWith("session-1", [
       { id: "1", title: "Inspect the renderer", status: "running" },
-      { id: "2", title: "Add compatibility tests", status: "pending" },
+    ], true);
+  });
+
+  it("accumulates only todo tasks touched during the current turn", () => {
+    const { context, updateProcessPlanSteps } = createContext();
+    const runtime = createSessionRuntime();
+
+    handleToolEndEvent({
+      type: "tool_end",
+      toolName: "todo",
+      result: {
+        content: [{ type: "text", text: "Created #3: current step one" }],
+        details: {
+          tasks: [
+            { id: 1, subject: "Historical task", status: "completed" },
+            { id: 2, subject: "Another historical task", status: "completed" },
+            { id: 3, subject: "Current step one", status: "in_progress" },
+            { id: 4, subject: "Current step two", status: "pending" },
+          ],
+        },
+      },
+    } as AgentEvent, "session-1", runtime, context);
+
+    handleToolEndEvent({
+      type: "tool_end",
+      toolName: "todo",
+      result: {
+        content: [{ type: "text", text: "Created #4: current step two" }],
+        details: {
+          tasks: [
+            { id: 1, subject: "Historical task", status: "completed" },
+            { id: 2, subject: "Another historical task", status: "completed" },
+            { id: 3, subject: "Current step one", status: "completed" },
+            { id: 4, subject: "Current step two", status: "in_progress" },
+          ],
+        },
+      },
+    } as AgentEvent, "session-1", runtime, context);
+
+    expect(updateProcessPlanSteps).toHaveBeenNthCalledWith(1, "session-1", [
+      { id: "3", title: "Current step one", status: "running" },
+    ], true);
+    expect(updateProcessPlanSteps).toHaveBeenNthCalledWith(2, "session-1", [
+      { id: "3", title: "Current step one", status: "completed" },
+      { id: "4", title: "Current step two", status: "running" },
     ], true);
   });
 

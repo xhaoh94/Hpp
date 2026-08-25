@@ -76,6 +76,23 @@ describe("remote renderer serialization", () => {
     expect(JSON.stringify(sanitized)).not.toContain("C:\\\\work");
   });
 
+  it("preserves the native plan source used by the desktop summary pill", () => {
+    const sanitized = sanitizeRemoteMessage({
+      ...message("assistant-native-plan"),
+      process: {
+        startedAt: 1,
+        planStepsSource: "native",
+        planSteps: [{ id: "step", title: "执行计划", status: "running" }],
+        entries: [],
+      },
+    }, "C:\\work\\app");
+
+    expect(sanitized.process?.planStepsSource).toBe("native");
+    expect(sanitized.process?.planSteps).toEqual([
+      { id: "step", title: "执行计划", status: "running" },
+    ]);
+  });
+
   it("preserves subagent lifecycle details for remote timelines", () => {
     const sanitized = sanitizeRemoteMessage({
       ...message("assistant-subagents"),

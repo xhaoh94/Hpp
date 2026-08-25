@@ -96,6 +96,7 @@ export function sanitizeRemoteMessage(
       startedAt: process.startedAt,
       endedAt: process.endedAt,
       planSteps: process.planSteps,
+      planStepsSource: process.planStepsSource,
       changeSummary: process.changeSummary,
       entries: process.entries.map((entry) => ({
         id: entry.id,

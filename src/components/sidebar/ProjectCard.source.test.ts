@@ -52,6 +52,17 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(projectCardSource).not.toContain("setSessionsCollapsed(project.id");
   });
 
+  it("opens the add-project form as a centered modal without pushing the project list", () => {
+    expect(projectViewSource).toContain("createPortal(");
+    expect(projectViewSource).toContain('className="project-modal-overlay"');
+    expect(projectViewSource).toContain('className="project-form project-modal"');
+    expect(projectViewSource).toContain('role="dialog"');
+    expect(projectViewSource).toContain('aria-modal="true"');
+    expect(projectViewSource).toContain('aria-labelledby="add-project-title"');
+    expect(projectViewSource).toContain('event.key !== "Escape"');
+    expect(projectViewSource).toContain("document.body");
+  });
+
   it("does not evaluate message-local debug variables while rendering the project list", () => {
     expect(projectCardSource).not.toContain("JSON.stringify(firstUserMsg");
     expect(projectCardSource).toContain('className="terminal-child-title"');
@@ -70,6 +81,18 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(titleRule).toContain("font-size: 12px");
     expect(titleRule).toContain("font-weight: 400");
     expect(titleRule).toContain("line-height: 18px");
+  });
+
+  it("keeps the project bar scrollable while hiding its scrollbar completely", () => {
+    const sidebarContentRule = sidebarStyles.slice(
+      sidebarStyles.indexOf(".sidebar-content {"),
+      sidebarStyles.indexOf(".project-list {"),
+    );
+    expect(sidebarContentRule).toContain("overflow-y: auto");
+    expect(sidebarContentRule).toContain("scrollbar-width: none");
+    expect(sidebarContentRule).toContain("-ms-overflow-style: none");
+    expect(sidebarContentRule).toContain(".sidebar-content::-webkit-scrollbar");
+    expect(sidebarContentRule).toContain("display: none");
   });
 
   it("prevents the hidden max-content Agent measurement row from creating horizontal overflow", () => {

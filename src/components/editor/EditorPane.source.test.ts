@@ -29,6 +29,18 @@ describe("editor pane (CodeMirror wrapper)", () => {
     expect(paneSource).toContain("onDirtyChangeRef.current(isDirty)");
   });
 
+  it("syncs edited documents into all-files results without navigating", () => {
+    expect(paneSource).toContain("onDocumentChangeRef.current(path, currentContent)");
+    expect(areaSource).toContain("onDocumentChange={handleDocumentChange}");
+    expect(areaSource).toContain("replaceAllFilesSearchResults");
+    const syncStart = areaSource.indexOf("const handleDocumentChange");
+    const syncEnd = areaSource.indexOf("// “所有文件”搜索范围", syncStart);
+    expect(syncStart).toBeGreaterThanOrEqual(0);
+    expect(syncEnd).toBeGreaterThan(syncStart);
+    expect(areaSource.slice(syncStart, syncEnd)).not.toContain("setNavTick");
+    expect(areaSource.slice(syncStart, syncEnd)).not.toContain("runAllFilesSearch");
+  });
+
   it("updates the original content baseline after a successful save", () => {
     expect(paneSource).toContain("originalContentRef.current = content");
   });
@@ -112,6 +124,16 @@ describe("editor pane (CodeMirror wrapper)", () => {
   it("loads the initial file from the readFile bridge (not from React state)", () => {
     expect(paneSource).toContain("window.electronAPI.readFile(path)");
     expect(paneSource).toContain("changes: { from: 0, to: view.state.doc.length");
+  });
+
+  it("syncs clean open files after external changes without overwriting dirty edits", () => {
+    expect(paneSource).toContain("onFileSystemChange");
+    expect(paneSource).toContain("watchPath(path, false)");
+    expect(paneSource).toContain("unwatchPath(path, false)");
+    expect(paneSource).toContain("isSameFileTreePath(change.path, path)");
+    expect(paneSource).toContain("externalConflictContentRef");
+    expect(paneSource).toContain("未覆盖未保存内容");
+    expect(paneSource).toContain("Transaction.addToHistory.of(false)");
   });
 
   it("themes the editor with hardcoded VSCode color palettes for both themes", () => {

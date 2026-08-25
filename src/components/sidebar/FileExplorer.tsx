@@ -223,10 +223,10 @@ const FileTreeItem = memo(function FileTreeItem({
       setExpanded(false);
       return;
     }
-    if (expanded) {
-      childrenLoadedRef.current = false;
-      void loadChildren(true);
-    }
+    // 即使目录当前收起，也要标记子项缓存失效；下次展开时才能看到
+    // 监听期间新增或删除的文件。
+    childrenLoadedRef.current = false;
+    if (expanded) void loadChildren(true);
   }, [entry.path, entry.type, expanded, loadChildren, treeCommand]);
 
   const handleDragStart = useCallback((event: DragEvent<HTMLDivElement>) => {
@@ -322,11 +322,15 @@ export function FileExplorer() {
   const rootRequestRef = useRef(0);
   const searchRequestRef = useRef(0);
   const centeredRevealRequestIdRef = useRef<number | null>(null);
+  const handleRefreshRef = useRef<() => void>(() => undefined);
   const { projects, activeProjectId } = useProjectStore();
+  const sidebarTab = useAppStore((state) => state.sidebarTab);
+  const sidebarCollapsed = useAppStore((state) => state.sidebarCollapsed);
   const revealRequest = useAppStore((state) => state.fileRevealRequest);
   const filters = useFileFilters();
   const filterKey = getFileFilterKey(filters);
   const activeProject = projects.find((p) => p.id === activeProjectId);
+  const explorerVisible = sidebarTab === "files" && !sidebarCollapsed;
   const treeScopeKey = `${activeProject?.path || ""}:${filterKey}`;
   const activeTreeCommand = treeCommand?.scopeKey === treeScopeKey ? treeCommand : null;
 
@@ -478,6 +482,57 @@ export function FileExplorer() {
     if (activeProject?.path) invalidateProjectFileIndex(activeProject.path, filters);
     void loadRootEntries();
   }, [activeProject?.path, filters, loadRootEntries, treeCommand?.requestId, treeScopeKey]);
+  handleRefreshRef.current = handleRefresh;
+
+  // 资源管理器只在当前可见时监听项目目录；切换到其它侧边栏或收起侧边栏后立即停止监听。
+  // fs.watch 的事件做短暂合并，避免编辑器/外部工具一次保存触发多次整树刷新。
+  useEffect(() => {
+    const projectPath = activeProject?.path;
+    if (!explorerVisible || !projectPath) return;
+
+    let disposed = false;
+    let refreshTimer: number | null = null;
+    let fallbackTimer: number | null = null;
+
+    const scheduleRefresh = () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        if (!disposed) handleRefreshRef.current();
+      }, 180);
+    };
+
+    const startFallbackPolling = () => {
+      if (disposed || fallbackTimer !== null) return;
+      fallbackTimer = window.setInterval(() => {
+        if (!disposed) handleRefreshRef.current();
+      }, 2000);
+    };
+
+    const unsubscribe = window.electronAPI.onFileSystemChange((change) => {
+      if (isFileTreePathWithin(change.path, projectPath)) scheduleRefresh();
+    });
+
+    // 显示资源管理器时先补一次全量刷新，覆盖其隐藏期间发生的新增/删除。
+    handleRefreshRef.current();
+    void window.electronAPI.watchPath(projectPath, true).then((result) => {
+      if (disposed) {
+        if (result.success) void window.electronAPI.unwatchPath(projectPath, true);
+        return;
+      }
+      if (!result.success) startFallbackPolling();
+    }).catch(() => {
+      startFallbackPolling();
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
+      void window.electronAPI.unwatchPath(projectPath, true);
+    };
+  }, [activeProject?.path, explorerVisible, filterKey]);
 
   useEffect(() => {
     if (revealRequest) setSearch("");

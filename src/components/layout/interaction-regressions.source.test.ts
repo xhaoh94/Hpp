@@ -373,4 +373,23 @@ describe("chat interaction regression constraints", () => {
     expect(processBlockSource).toContain("useProcessTicker(processRunning)");
     expect(processBlockSource).toContain("visibleEntries.length > 0 || processRunning");
   });
+
+  it("shows the current native todo title without the completed-total counter", () => {
+    expect(chatPanelSource).toContain("const getCurrentTodoStep = (steps: AgentProcessStep[])");
+    expect(chatPanelSource).toContain('steps.find((step) => step.status === "running")');
+    expect(chatPanelSource).toContain('className={`chat-todo-summary-dot ${currentStep?.status || ""}`}');
+    expect(chatPanelSource).toContain('className="chat-todo-summary-text" title={currentStep?.title || "任务处理中"}');
+    expect(chatPanelSource).toContain('className="chat-diff-add"');
+    expect(chatPanelSource).toContain('className="chat-diff-del"');
+    expect(chatPanelSource).not.toContain("步骤 {completedCount}/{steps.length}");
+    expect(chatPanelStyles).toContain(".chat-todo-summary-dot.running {");
+    expect(chatPanelStyles).toContain("animation: chat-todo-summary-spin 850ms linear infinite, chat-agent-dot-pulse 1.6s ease-in-out infinite;");
+    expect(chatPanelStyles).toContain(".chat-todo-summary-dot.completed {");
+    expect(chatPanelStyles).toContain(".chat-todo-summary-dot.failed {");
+    expect(chatPanelStyles).toContain(".chat-todo-summary-dot.cancelled {");
+    expect(chatPanelStyles).toContain("align-items: center;");
+    expect(chatPanelStyles).not.toContain(".chat-todo-summary-dot.completed::after");
+    expect(chatPanelStyles).toContain(".chat-todo-summary-text {");
+    expect(chatPanelStyles).toContain("text-overflow: ellipsis;");
+  });
 });

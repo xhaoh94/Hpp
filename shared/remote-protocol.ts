@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { DiffLike } from "./diff-summary";
 import type { SharedModel } from "./models";
-import type { ProcessEntryView, ProcessSubagentStopReason, ProcessSubagentUsage } from "./process-view";
+import type { ProcessEntryView, ProcessPlanStepsSource, ProcessSubagentStopReason, ProcessSubagentUsage } from "./process-view";
 import type { QuestionnaireQuestion } from "./questionnaire";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-actions";
 import type { AgentPermissionMode } from "./agent-permissions";
@@ -378,6 +378,7 @@ export interface RemoteChatMessage {
     endedAt?: number;
     entries: RemoteProcessEntry[];
     planSteps?: Array<{ id: string; title: string; status: string }>;
+    planStepsSource?: ProcessPlanStepsSource;
     changeSummary?: { filesChanged: number; additions: number; deletions: number };
   };
   commentary?: Array<{

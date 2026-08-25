@@ -26,6 +26,15 @@
   overflow-x: hidden;
   overflow-y: auto;
   padding: 8px;
+  /* 项目栏保留滚动能力，但完全隐藏滚动条。 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sidebar-content::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .placeholder-text {
@@ -61,6 +70,112 @@
   background-color: var(--bg-tertiary);
   border-radius: 4px;
   margin-bottom: 4px;
+}
+
+.project-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--overlay-backdrop);
+}
+
+.project-modal {
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 48px));
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 16px 44px var(--shadow-color);
+  animation: project-modal-in 0.16s ease-out;
+}
+
+.project-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 16px 13px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.project-modal-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.project-modal-header p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.project-modal-close {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.project-modal-close:hover {
+  border-color: var(--border-color);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.project-modal-body {
+  padding: 16px;
+}
+
+.project-modal .input-field {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.project-modal .path-input-row {
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.project-modal .form-actions {
+  gap: 8px;
+}
+
+.project-modal .btn {
+  min-width: 72px;
+  padding: 7px 14px;
+}
+
+@keyframes project-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-modal { animation: none; }
 }
 
 .input-field {

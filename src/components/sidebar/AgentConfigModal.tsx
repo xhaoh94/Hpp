@@ -1457,7 +1457,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
                     <div className="agent-config-summary">
                       <div className="agent-config-summary-row">
-                        <span>显示名</span>
+                        <span>渠道名</span>
                         <strong>{selectedSavedProvider.displayName || selectedSavedProvider.providerId}</strong>
                       </div>
                       <div className="agent-config-summary-row">
@@ -1561,7 +1561,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   />
                 </label>
                 <label>
-                  <span>显示名</span>
+                  <span>渠道名</span>
                   <input
                     value={draft.displayName}
                     onChange={(event) => updateDraft({ displayName: event.target.value })}
@@ -1678,7 +1678,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                       value={model.name}
                       onChange={(event) => updateModel(index, { name: event.target.value })}
                       className="input-field"
-                      placeholder="显示名"
+                      placeholder="渠道名"
                     />
                     {!model.isBuiltin && (
                       <div className="agent-config-model-checks">

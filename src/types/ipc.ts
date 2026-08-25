@@ -1,5 +1,10 @@
 export type UnknownRecord = Record<string, unknown>;
 
+export interface FileSystemChange {
+  path: string;
+  eventType: "rename" | "change";
+}
+
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
 import type { AgentSubagentCapabilities } from "@shared/agent-subagent";

@@ -20,6 +20,8 @@ import { showMinimap } from "../../lib/codemirror-minimap/index.js";
 import { csharp } from "@codemirror/legacy-modes/mode/clike";
 import { EDITOR_GOTO_MATCH_EVENT, EDITOR_REPLACE_MATCH_EVENT, pendingGoto, requestGotoMatch, sharedSearchConfig, type AllFileMatch, type GotoMatchDetail, type ReplaceMatchDetail } from "./searchConfig";
 import { uiText } from "@/i18n/text";
+import { isSameFileTreePath } from "@/lib/file-tree-paths";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { useChatStore } from "@/stores/chat-store";
 import { requestComposerInsert } from "@/lib/composer-insert-event";
 import {
@@ -57,6 +59,8 @@ interface EditorPaneProps {
   visible: boolean;
   /** Report that the document now has unsaved changes. */
   onDirtyChange: (dirty: boolean) => void;
+  /** Report the latest document text so project-level search can stay in sync with unsaved edits. */
+  onDocumentChange: (path: string, content: string) => void;
   /** Called after a successful save. */
   onSaved: (path: string) => void;
   /** Called when a save fails. */
@@ -326,6 +330,7 @@ export function EditorPane({
   path,
   visible,
   onDirtyChange,
+  onDocumentChange,
   onSaved,
   onSaveError,
   registerSave,
@@ -352,6 +357,7 @@ export function EditorPane({
   const readonlyRef = useRef(false);
   const initializingRef = useRef(false);
   const originalContentRef = useRef<string>("");
+  const externalConflictContentRef = useRef<string | null>(null);
   const [status, setStatus] = useState<EditorPaneStatus>("loading");
   const [statusMessage, setStatusMessage] = useState("");
   const [contextMenu, setContextMenu] = useState<EditorContextMenuState | null>(null);
@@ -446,6 +452,8 @@ export function EditorPane({
 
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
+  const onDocumentChangeRef = useRef(onDocumentChange);
+  onDocumentChangeRef.current = onDocumentChange;
   const onSavedRef = useRef(onSaved);
   onSavedRef.current = onSaved;
   const onSaveErrorRef = useRef(onSaveError);
@@ -480,6 +488,7 @@ export function EditorPane({
       const content = view.state.doc.toString();
       const result = await window.electronAPI.writeFile(path, content);
       if (result.success) {
+        externalConflictContentRef.current = null;
         // 保存成功后，将原始内容基准更新为已保存的内容，
         // 这样后续 undo 回到保存点时能正确清除脏标记。
         originalContentRef.current = content;
@@ -1068,6 +1077,7 @@ export function EditorPane({
     if (!container) return;
 
     let disposed = false;
+    externalConflictContentRef.current = null;
     readonlyRef.current = false;
     dirtyRef.current = false;
     savingRef.current = false;
@@ -1179,6 +1189,7 @@ export function EditorPane({
           EditorView.updateListener.of((update) => {
             if (update.docChanged && !initializingRef.current) {
               const currentContent = update.state.doc.toString();
+              onDocumentChangeRef.current(path, currentContent);
               const isDirty = currentContent !== originalContentRef.current;
               if (isDirty !== dirtyRef.current) {
                 dirtyRef.current = isDirty;
@@ -1265,6 +1276,96 @@ export function EditorPane({
     });
     viewRef.current = view;
 
+    let fileChangeUnsubscribe: (() => void) | null = null;
+    let externalSyncTimer: number | null = null;
+    let externalSyncInFlight = false;
+    let externalSyncQueued = false;
+    let fileWatcherStarted = false;
+
+    const scheduleExternalSync = (retryCount = 0) => {
+      if (externalSyncTimer !== null) window.clearTimeout(externalSyncTimer);
+      externalSyncTimer = window.setTimeout(() => {
+        externalSyncTimer = null;
+        void syncExternalFile(retryCount);
+      }, 120);
+    };
+
+    const syncExternalFile = async (retryCount = 0): Promise<void> => {
+      if (disposed) return;
+      if (savingRef.current) {
+        scheduleExternalSync(retryCount);
+        return;
+      }
+      if (externalSyncInFlight) {
+        externalSyncQueued = true;
+        return;
+      }
+      externalSyncInFlight = true;
+      try {
+        const result = await window.electronAPI.readFile(path);
+        if (disposed) return;
+        if (!result.success || result.binary || result.content == null) {
+          if (retryCount < 2) scheduleExternalSync(retryCount + 1);
+          return;
+        }
+
+        const nextContent = result.content;
+        const currentContent = view.state.doc.toString();
+        if (nextContent === currentContent) {
+          originalContentRef.current = nextContent;
+          externalConflictContentRef.current = null;
+          if (dirtyRef.current) {
+            dirtyRef.current = false;
+            onDirtyChangeRef.current(false);
+          }
+          return;
+        }
+
+        // 不覆盖本地未保存编辑；等用户保存或关闭后再重新读取外部内容。
+        if (dirtyRef.current) {
+          if (externalConflictContentRef.current !== nextContent) {
+            externalConflictContentRef.current = nextContent;
+            const fileName = path.split(/[\\/]/).pop() || path;
+            showFloatingToastMessage(`文件已被外部修改，未覆盖未保存内容：${fileName}`);
+          }
+          return;
+        }
+
+        const scrollTop = view.scrollDOM.scrollTop;
+        const scrollLeft = view.scrollDOM.scrollLeft;
+        originalContentRef.current = nextContent;
+        externalConflictContentRef.current = null;
+        initializingRef.current = true;
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: nextContent },
+          annotations: Transaction.addToHistory.of(false),
+        });
+        initializingRef.current = false;
+        dirtyRef.current = false;
+        onDocumentChangeRef.current(path, nextContent);
+        requestAnimationFrame(() => {
+          if (disposed) return;
+          view.scrollDOM.scrollTop = scrollTop;
+          view.scrollDOM.scrollLeft = scrollLeft;
+        });
+      } finally {
+        externalSyncInFlight = false;
+        if (externalSyncQueued && !disposed) {
+          externalSyncQueued = false;
+          scheduleExternalSync();
+        }
+      }
+    };
+
+    const startFileWatcher = () => {
+      if (disposed || fileWatcherStarted) return;
+      fileWatcherStarted = true;
+      fileChangeUnsubscribe = window.electronAPI.onFileSystemChange((change) => {
+        if (isSameFileTreePath(change.path, path)) scheduleExternalSync();
+      });
+      void window.electronAPI.watchPath(path, false).catch(() => undefined);
+    };
+
     void window.electronAPI.readFile(path).then((result) => {
       if (disposed) return;
       if (!result.success) {
@@ -1290,6 +1391,8 @@ export function EditorPane({
         annotations: Transaction.addToHistory.of(false),
       });
       initializingRef.current = false;
+      onDocumentChangeRef.current(path, content);
+      startFileWatcher();
       setStatus("ready");
       // TextMate 高亮：lua/cs 且文件在阈值内时启用（大文件自动回退 StreamLanguage）。
       const tmLanguage = getTextMateLanguage(path);
@@ -1306,6 +1409,9 @@ export function EditorPane({
 
     return () => {
       disposed = true;
+      if (externalSyncTimer !== null) window.clearTimeout(externalSyncTimer);
+      fileChangeUnsubscribe?.();
+      void window.electronAPI.unwatchPath(path, false);
       registerSaveRef.current(path, save)();
       view.destroy();
       viewRef.current = null;

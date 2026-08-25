@@ -8,6 +8,7 @@ import {
   createSessionRuntime,
   getContextCompactionPresentation,
   getThinkingPreviewMarkdown,
+  getTodoPlanStepIdsFromToolResult,
   getToolSummary,
   getUIResponsePayload,
   markSessionRuntimeTurnSettled,
@@ -201,6 +202,21 @@ describe("agentEventUtils", () => {
       { id: "1", title: "Inspect the renderer", status: "running" },
       { id: "2", title: "Add compatibility tests", status: "pending" },
     ]);
+
+    expect(getTodoPlanStepIdsFromToolResult({
+      type: "tool_end",
+      toolName: "todo",
+      result: {
+        content: [{ type: "text", text: "Updated #2 (pending → completed)" }],
+        details: { tasks: [] },
+      },
+    } as AgentEvent)).toEqual(["2"]);
+
+    expect(getTodoPlanStepIdsFromToolResult({
+      type: "tool_end",
+      toolName: "search",
+      result: { items: [{ title: "A search result" }] },
+    } as AgentEvent)).toEqual([]);
 
     expect(normalizePlanStepsFromToolResult({
       type: "tool_end",

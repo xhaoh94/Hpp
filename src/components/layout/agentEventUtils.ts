@@ -74,6 +74,8 @@ export type SessionRuntime = {
   streamRenderFlushTimer: ReturnType<typeof setTimeout> | null;
   streamRenderBufferedChars: number;
   nativePlanSteps: boolean;
+  /** Task ids changed by the current turn's todo calls, excluding history. */
+  nativeTodoPlanStepIds: string[];
   inferredPlanStepsActive: boolean;
   inferredStepSignal: {
     analyzed: boolean;
@@ -161,6 +163,7 @@ export const createSessionRuntime = (): SessionRuntime => ({
   streamRenderFlushTimer: null,
   streamRenderBufferedChars: 0,
   nativePlanSteps: false,
+  nativeTodoPlanStepIds: [],
   inferredPlanStepsActive: false,
   inferredStepSignal: {
     analyzed: false,
@@ -184,6 +187,7 @@ export const createSessionRuntime = (): SessionRuntime => ({
 const MAX_SETTLED_TURN_IDENTITIES = 32;
 
 const ensureSessionRuntimeTurnTracking = (runtime: SessionRuntime) => {
+  runtime.nativeTodoPlanStepIds ||= [];
   runtime.turnEventState ||= "initial";
   runtime.activeTurnRevision ??= null;
   runtime.activeTurnUserMessageId ??= null;
@@ -349,6 +353,7 @@ export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
   runtime.pendingThinkingDetail = "";
   runtime.pendingThinkingTitle = null;
   runtime.nativePlanSteps = false;
+  runtime.nativeTodoPlanStepIds = [];
   runtime.inferredPlanStepsActive = false;
   runtime.inferredStepSignal = {
     analyzed: false,
@@ -818,6 +823,41 @@ export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep
  * accepts a `tasks` field. Treating arbitrary result `items` as plan steps
  * would make search/list tools appear as task plans in HPP.
  */
+export const isTodoPlanToolEvent = (event: AgentEvent) => {
+  const tokens = [event.toolName, event.tool, event.name, event.toolKind]
+    .map((value) => normalizeEventToken(value));
+  return tokens.some((token) => token === "todo" || token.includes("todo"));
+};
+
+/**
+ * Todo extensions commonly return a complete session-wide snapshot while the
+ * result text identifies only the task changed by this call (for example,
+ * `Updated #7`). Keep that changed id so the caller can scope the snapshot to
+ * the current turn instead of re-displaying historical tasks.
+ */
+export const getTodoPlanStepIdsFromToolResult = (event: AgentEvent): string[] => {
+  if (!isTodoPlanToolEvent(event)) return [];
+  let serialized = "";
+  try {
+    serialized = JSON.stringify([
+      event.content,
+      event.outputText,
+      event.result,
+      event.output,
+      event.details,
+      event.toolResult,
+    ]) || "";
+  } catch {
+    serialized = "";
+  }
+  const ids: string[] = [];
+  for (const match of serialized.matchAll(/#([A-Za-z0-9][A-Za-z0-9_-]*)/g)) {
+    const id = match[1];
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+};
+
 export const normalizePlanStepsFromToolResult = (event: AgentEvent): AgentProcessStep[] => {
   const detail = asRecord(event.detail);
   const eventDetails = asRecord(event.details);

@@ -107,6 +107,7 @@ import { collectProcessDiffs } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
 import {
   getActiveAssistantTurnId,
+  hasNativeMultiStepProcessPlan,
   isProcessViewRunning,
   type ProcessTerminalViewState,
 } from "@shared/process-view";
@@ -1359,11 +1360,12 @@ const ChatMessageItem = memo(function ChatMessageItem({
   );
 });
 
-const getCompletedTodoCount = (steps: AgentProcessStep[]) =>
-  steps.filter((step) => step.status === "completed").length;
+const getCurrentTodoStep = (steps: AgentProcessStep[]) =>
+  steps.find((step) => step.status === "running")
+  || steps.find((step) => step.status !== "completed")
+  || steps[steps.length - 1];
 
-const hasNativeTodoSteps = (process?: AgentProcess) =>
-  !!process && process.planStepsSource === "native" && !!process.planSteps?.length;
+const hasNativeTodoSteps = (process?: AgentProcess) => hasNativeMultiStepProcessPlan(process);
 
 const getTodoStatusText = (status: AgentProcessStep["status"]) => {
   switch (status) {
@@ -1378,18 +1380,23 @@ const getTodoStatusText = (status: AgentProcessStep["status"]) => {
 function TodoSummaryPill({ process }: { process: AgentProcess }) {
   const steps = process.planSteps || [];
   if (!hasNativeTodoSteps(process)) return null;
-  const completedCount = getCompletedTodoCount(steps);
+  const currentStep = getCurrentTodoStep(steps);
 
   const changeSummary = process.changeSummary;
-  const changeText = changeSummary && changeSummary.filesChanged > 0
-    ? `${changeSummary.filesChanged} 个文件已更改${changeSummary.additions > 0 ? ` +${changeSummary.additions}` : ""}${changeSummary.deletions > 0 ? ` -${changeSummary.deletions}` : ""}`
-    : "";
 
   return (
     <div className="chat-todo-summary">
-      <span className="chat-todo-summary-dot" />
-      <span className="chat-todo-summary-text">步骤 {completedCount}/{steps.length}</span>
-      {changeText && <span className="chat-todo-summary-change">· {changeText}</span>}
+      <span className={`chat-todo-summary-dot ${currentStep?.status || ""}`} />
+      <span className="chat-todo-summary-text" title={currentStep?.title || "任务处理中"}>
+        {currentStep?.title || "任务处理中"}
+      </span>
+      {changeSummary && changeSummary.filesChanged > 0 && (
+        <span className="chat-todo-summary-change">
+          · {changeSummary.filesChanged} 个文件已更改
+          {changeSummary.additions > 0 && <span className="chat-diff-add"> +{changeSummary.additions}</span>}
+          {changeSummary.deletions > 0 && <span className="chat-diff-del"> -{changeSummary.deletions}</span>}
+        </span>
+      )}
       <div className="chat-todo-summary-popover">
         {steps.map((step) => (
           <div className="chat-todo-summary-row" key={step.id}>

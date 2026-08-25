@@ -7,8 +7,10 @@ import {
   getToolKey,
   getToolName,
   getToolProcessFiles,
+  getTodoPlanStepIdsFromToolResult,
   getToolSummary,
   isCommandNonZeroExit,
+  isTodoPlanToolEvent,
   normalizePlanStepsFromToolResult,
   normalizeToolKind,
   type SessionRuntime,
@@ -229,9 +231,21 @@ export function handleToolEndEvent(
   // HPP's existing native plan UI. The parser is intentionally based on the
   // result shape (for example `{ details: { tasks } }`), not on a package name,
   // so other Pi extensions can integrate without an adapter.
-  const planSteps = normalizePlanStepsFromToolResult(effectiveEvent);
-  if (planSteps.length > 0) {
-    ctx.updateProcessPlanSteps(currentSessionId, planSteps, true);
+  const allPlanSteps = normalizePlanStepsFromToolResult(effectiveEvent);
+  if (allPlanSteps.length > 0) {
+    let planSteps = allPlanSteps;
+    if (isTodoPlanToolEvent(effectiveEvent)) {
+      const changedIds = getTodoPlanStepIdsFromToolResult(effectiveEvent);
+      if (changedIds.length === 0) {
+        planSteps = [];
+      } else {
+        const currentTurnIds = new Set(runtime.nativeTodoPlanStepIds);
+        for (const id of changedIds) currentTurnIds.add(id);
+        runtime.nativeTodoPlanStepIds = Array.from(currentTurnIds);
+        planSteps = allPlanSteps.filter((step) => currentTurnIds.has(step.id));
+      }
+    }
+    if (planSteps.length > 0) ctx.updateProcessPlanSteps(currentSessionId, planSteps, true);
   }
 
   const toolDetail = getToolDetail(effectiveEvent);

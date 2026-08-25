@@ -190,6 +190,7 @@ import {
   formatProcessDuration,
   getActiveAssistantTurnId,
   getProcessGroupState,
+  hasNativeMultiStepProcessPlan,
   getUserGuidanceText,
   getVisibleProcessEntries,
   groupProcessEntries,
@@ -340,9 +341,13 @@ const DEMO_MESSAGES: RemoteChatMessage[] = [
     isStreaming: true,
     process: {
       startedAt: Date.now() - 58_000,
+      planStepsSource: "native",
       planSteps: [
-        { id: "demo-plan-1", title: "压缩会话顶部信息", status: "completed" },
+        { id: "demo-plan-1", title: "等待下一步操作", status: "pending" },
         { id: "demo-plan-2", title: "优化消息与输入区", status: "running" },
+        { id: "demo-plan-3", title: "压缩会话顶部信息", status: "completed" },
+        { id: "demo-plan-4", title: "验证构建结果", status: "failed" },
+        { id: "demo-plan-5", title: "迁移旧版布局", status: "cancelled" },
       ],
       entries: [
         { id: "demo-tool-1", type: "tool", title: "读取移动端布局", timestamp: Date.now() - 55_000, state: "completed", files: [{ file: "mobile/src/App.tsx" }] },
@@ -353,6 +358,33 @@ const DEMO_MESSAGES: RemoteChatMessage[] = [
     },
     diffs: [{ file: "mobile/src/styles.css", patch: "@@ mobile portrait layout\n+ compact toolbar\n+ adaptive composer", additions: 42, deletions: 18 }],
   },
+];
+const DEMO_CAPSULE_MESSAGES: RemoteChatMessage[] = [
+  {
+    id: "demo-capsule-user-1",
+    role: "user",
+    content: "把底部悬浮胶囊的空间压紧一点，同时不能遮挡最后一条消息。",
+    timestamp: Date.now() - 210_000,
+  },
+  {
+    id: "demo-capsule-assistant-1",
+    role: "assistant",
+    content: "我会先保留一组静态消息，让胶囊和消息底部之间的实际间距更容易观察。",
+    timestamp: Date.now() - 195_000,
+  },
+  {
+    id: "demo-capsule-user-2",
+    role: "user",
+    content: "桌面 Web 和移动端都看一下，窄屏时标题和文件变更摘要也不要撑破胶囊。",
+    timestamp: Date.now() - 180_000,
+  },
+  {
+    id: "demo-capsule-assistant-2",
+    role: "assistant",
+    content: "下面这组内容仅用于观察悬浮状态栏的底部预留、扫光文字和绿色运行指示灯。",
+    timestamp: Date.now() - 165_000,
+  },
+  ...DEMO_MESSAGES,
 ];
 const DEMO_CONFIG: RemoteSessionConfig = {
   model: { id: "gpt-5.6", name: "GPT-5.6", provider: "openai", reasoning: true, supportsImages: true },
@@ -1238,6 +1270,62 @@ const MarkdownContent = memo(function MarkdownContent({ text, className }: { tex
   );
 });
 
+type RemoteProcess = NonNullable<RemoteChatMessage["process"]>;
+
+const getCurrentProcessStep = (steps: RemoteProcess["planSteps"]) => {
+  const availableSteps = steps || [];
+  return availableSteps.find((step) => step.status === "running")
+    || availableSteps.find((step) => step.status !== "completed")
+    || availableSteps[availableSteps.length - 1];
+};
+
+const getProcessStepStatusText = (status: string) => {
+  switch (status) {
+    case "running": return "进行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return "待处理";
+  }
+};
+
+function MobileTodoSummaryPill({ process }: { process: RemoteProcess }) {
+  const steps = process.planSteps || [];
+  if (!hasNativeMultiStepProcessPlan(process)) return null;
+  const currentStep = getCurrentProcessStep(steps);
+  const changeSummary = process.changeSummary;
+
+  return (
+    <div
+      className="chat-todo-summary"
+      tabIndex={0}
+      role="status"
+      aria-label={currentStep?.title || "任务处理中"}
+    >
+      <span className={`chat-todo-summary-dot ${currentStep?.status || ""}`} aria-hidden="true" />
+      <span className={`chat-todo-summary-text ${currentStep?.status === "running" ? "running" : ""}`} title={currentStep?.title || "任务处理中"}>
+        {currentStep?.title || "任务处理中"}
+      </span>
+      {changeSummary && changeSummary.filesChanged > 0 && (
+        <span className="chat-todo-summary-change">
+          · {changeSummary.filesChanged} 个文件已更改
+          {changeSummary.additions > 0 && <span className="chat-diff-add"> +{changeSummary.additions}</span>}
+          {changeSummary.deletions > 0 && <span className="chat-diff-del"> -{changeSummary.deletions}</span>}
+        </span>
+      )}
+      <div className="chat-todo-summary-popover">
+        {steps.map((step) => (
+          <div className="chat-todo-summary-row" key={step.id}>
+            <span className={`chat-todo-summary-status ${step.status}`} aria-hidden="true" />
+            <span className="chat-todo-summary-title" title={step.title}>{step.title}</span>
+            <span className="chat-todo-summary-label">{getProcessStepStatusText(step.status)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MessageProcess({
   message,
   receivedUserMessage,
@@ -1290,6 +1378,7 @@ function MessageProcess({
   ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, visibleEntries]);
   if (!process) return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
   const elapsed = formatProcessDuration((process.endedAt ?? nowTick) - process.startedAt);
+  const currentStep = getCurrentProcessStep(process.planSteps);
   const hasPlan = !!process.planSteps?.length;
   const hasNarrativeTimeline = commentary.length > 0 || visibleEntries.some(isAssistantBodyProcessEntry);
   if (!hasPlan && visibleEntries.length === 0 && !process.changeSummary && !hasNarrativeTimeline) return null;
@@ -1297,11 +1386,16 @@ function MessageProcess({
     <>
       <details className="process-block" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary>
-          <span>处理耗时 {elapsed}</span>
+          <span className="process-summary-title" title={currentStep?.title || `处理耗时 ${elapsed}`}>
+            {currentStep && <span className={`process-summary-dot ${currentStep.status}`} aria-hidden="true" />}
+            <span>{currentStep?.title || `处理耗时 ${elapsed}`}</span>
+          </span>
           <span className="process-summary-meta">
-            {process.changeSummary && (
-              <small>
-                {process.changeSummary.filesChanged} files · +{process.changeSummary.additions} -{process.changeSummary.deletions}
+            {process.changeSummary && process.changeSummary.filesChanged > 0 && (
+              <small className="process-summary-changes">
+                {process.changeSummary.filesChanged} 个文件已更改
+                {process.changeSummary.additions > 0 && <span className="process-summary-add"> +{process.changeSummary.additions}</span>}
+                {process.changeSummary.deletions > 0 && <span className="process-summary-del"> -{process.changeSummary.deletions}</span>}
               </small>
             )}
             <ChevronDown className="expand-indicator" size={14} />
@@ -2549,7 +2643,7 @@ export default function App() {
       setAgents(DEMO_AGENTS);
       setSelectedSessionId(demoVariant === "empty" ? null : DEMO_SESSION_ID);
       setMessages({
-        [DEMO_SESSION_ID]: DEMO_MESSAGES,
+        [DEMO_SESSION_ID]: demoVariant === "1" ? DEMO_CAPSULE_MESSAGES : DEMO_MESSAGES,
         "demo-session-2": [],
         "demo-session-3": [
           {
@@ -3543,6 +3637,10 @@ export default function App() {
     () => agents.find((agent) => agent.id === selected?.session.agentId),
     [agents, selected?.session.agentId],
   );
+  const createAgent = useMemo(
+    () => agents.find((agent) => agent.id === createAgentId),
+    [agents, createAgentId],
+  );
   const selectedConfig = selectedSessionId ? configs[selectedSessionId] : undefined;
   const selectedMessages = useMemo(
     () => selectedSessionId ? messages[selectedSessionId] || [] : [],
@@ -3567,6 +3665,11 @@ export default function App() {
   const processTerminalState: ProcessTerminalViewState = selected?.session.status === "error"
     ? "error"
     : "completed";
+  const activeProcessWithTodos = useMemo(() => {
+    if (!activeTurnMessageId) return undefined;
+    const activeMessage = selectedMessages.find((message) => message.id === activeTurnMessageId);
+    return hasNativeMultiStepProcessPlan(activeMessage?.process) ? activeMessage?.process : undefined;
+  }, [activeTurnMessageId, selectedMessages]);
   const selectedModels = useMemo(() => {
     const availableModels = selectedConfig?.availableModels || [];
     return availableModels.length > 0
@@ -4912,32 +5015,79 @@ export default function App() {
       )}
 
       {createProject && (
-        <div className="sheet-backdrop dialog-backdrop-center" onClick={() => { if (!commandBusy) setCreateProject(null); }}>
-          <section className="history-dialog create-session-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="sheet-title history-dialog-title">
-              <div><h2>新建会话</h2><p>{createProject.name}</p></div>
-              <button className="icon-button" disabled={commandBusy} onClick={() => setCreateProject(null)}><X size={19} /></button>
+        <div className="sheet-backdrop dialog-backdrop-center create-session-backdrop" onClick={() => { if (!commandBusy) setCreateProject(null); }}>
+          <section
+            className="history-dialog create-session-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-session-title"
+            aria-describedby="create-session-description"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="create-session-header">
+              <div className="create-session-icon" aria-hidden="true"><WandSparkles size={18} /></div>
+              <div className="create-session-heading">
+                <span className="create-session-eyebrow">新建会话</span>
+                <h2 id="create-session-title">选择 Agent</h2>
+                <p id="create-session-description">为 <strong>{createProject.name}</strong> 开始新的工作</p>
+              </div>
+              <button
+                className="icon-button create-session-close"
+                disabled={commandBusy}
+                onClick={() => setCreateProject(null)}
+                title="关闭"
+                aria-label="关闭新建会话"
+              >
+                <X size={19} />
+              </button>
             </div>
-            <div className="agent-picker-list">
-              {agents.map((agent) => (
-                <button
-                  type="button"
-                  className={createAgentId === agent.id ? "selected" : ""}
-                  aria-pressed={createAgentId === agent.id}
-                  key={agent.id}
-                  disabled={commandBusy}
-                  onClick={() => setCreateAgentId(agent.id)}
-                >
-                  <span className="agent-picker-icon"><Bot size={17} /></span>
-                  <span><strong>{agent.name}</strong></span>
-                  <span className="agent-picker-radio" />
+
+            <div className="create-session-content">
+              <div className="create-session-list-heading">
+                <span>可用 Agent</span>
+                <span className="create-session-count">{agents.length} 个</span>
+              </div>
+              <div className="agent-picker-list" role="radiogroup" aria-label="选择 Agent">
+                {agents.map((agent) => {
+                  const selected = createAgentId === agent.id;
+                  return (
+                    <button
+                      type="button"
+                      className={selected ? "selected" : ""}
+                      role="radio"
+                      aria-checked={selected}
+                      key={agent.id}
+                      disabled={commandBusy}
+                      onClick={() => setCreateAgentId(agent.id)}
+                    >
+                      <span className="agent-picker-icon"><Bot size={18} /></span>
+                      <span className="agent-picker-copy">
+                        <strong>{agent.name}</strong>
+                      </span>
+                      <span className="agent-picker-radio" aria-hidden="true">
+                        {selected && <Check size={14} strokeWidth={2.6} />}
+                      </span>
+                    </button>
+                  );
+                })}
+                {agents.length === 0 && <div className="agent-picker-empty">桌面没有可用的 Agent</div>}
+              </div>
+            </div>
+
+            <div className="create-session-footer">
+              <div className={`create-session-selection${createAgent ? " ready" : ""}`}>
+                <span className="create-session-selection-dot" aria-hidden="true" />
+                <span>{createAgent ? `已选择 ${createAgent.name}` : "请选择一个 Agent"}</span>
+              </div>
+              <div className="create-session-actions">
+                <button className="secondary-command" disabled={commandBusy} onClick={() => setCreateProject(null)}>
+                  取消
                 </button>
-              ))}
-              {agents.length === 0 && <div className="agent-picker-empty">桌面没有可用的 Agent</div>}
+                <button className="primary-command" disabled={commandBusy || !createAgentId} onClick={() => void createRemoteSession()}>
+                  {commandBusy ? <LoaderCircle className="spin" size={18} /> : <Plus size={18} />} 创建会话
+                </button>
+              </div>
             </div>
-            <button className="primary-command" disabled={commandBusy || !createAgentId} onClick={() => void createRemoteSession()}>
-              {commandBusy ? <LoaderCircle className="spin" size={18} /> : <Plus size={18} />} 创建会话
-            </button>
           </section>
         </div>
       )}
@@ -5062,7 +5212,7 @@ export default function App() {
           <div className="messages-shell">
             <div
               ref={messagesViewRef}
-              className="messages-view"
+              className={`messages-view${activeProcessWithTodos ? " has-todo-summary" : ""}${showReturnToBottom ? " has-scroll-bottom" : ""}`}
               onScroll={handleMessagesScroll}
               onPointerDown={cancelReturnToBottom}
               onWheel={cancelReturnToBottom}
@@ -5089,16 +5239,21 @@ export default function App() {
                 {loadingSession && selectedMessages.length === 0 && <div className="loading-chat"><LoaderCircle className="spin" size={22} /></div>}
               </div>
             </div>
-            {showReturnToBottom && (
-              <button
-                type="button"
-                className="return-bottom-button"
-                onClick={returnToMessageBottom}
-                title="返回底部"
-                aria-label="返回底部"
-              >
-                <ArrowDown size={18} />
-              </button>
+            {(showReturnToBottom || activeProcessWithTodos) && (
+              <div className="chat-floating-status">
+                {showReturnToBottom && (
+                  <button
+                    type="button"
+                    className="chat-scroll-bottom"
+                    onClick={returnToMessageBottom}
+                    title="返回底部"
+                    aria-label="返回底部"
+                  >
+                    <ArrowDown size={18} />
+                  </button>
+                )}
+                {activeProcessWithTodos && <MobileTodoSummaryPill process={activeProcessWithTodos} />}
+              </div>
             )}
           </div>
 

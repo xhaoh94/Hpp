@@ -6,6 +6,7 @@ import {
   getActiveAssistantTurnId,
   getProcessGroupState,
   getVisibleProcessEntries,
+  hasNativeMultiStepProcessPlan,
   groupProcessEntries,
   isCommandProcessEntry,
   isProcessInterrupted,
@@ -19,6 +20,15 @@ import {
 const entry = (patch: Partial<ProcessEntryView> & Pick<ProcessEntryView, "id" | "type" | "title">): ProcessEntryView => patch;
 
 describe("shared process view model", () => {
+  it("only treats native plans with multiple steps as floating Todo summaries", () => {
+    expect(hasNativeMultiStepProcessPlan({ planStepsSource: "native", planSteps: [{ status: "running" }] })).toBe(false);
+    expect(hasNativeMultiStepProcessPlan({
+      planStepsSource: "native",
+      planSteps: [{ status: "completed" }, { status: "running" }],
+    })).toBe(true);
+    expect(hasNativeMultiStepProcessPlan({ planStepsSource: "inferred", planSteps: [{ status: "completed" }, { status: "running" }] })).toBe(false);
+  });
+
   it("formats process duration consistently across desktop and mobile", () => {
     expect(formatProcessDuration(-1)).toBe("0s");
     expect(formatProcessDuration(59_999)).toBe("59s");

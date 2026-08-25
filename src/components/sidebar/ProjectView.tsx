@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, type DragEvent } from "react";
+import { createPortal } from "react-dom";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -41,6 +42,18 @@ export function ProjectView() {
     }
   }, [showAddProject]);
 
+  useEffect(() => {
+    if (!showAdd) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setShowAdd(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [showAdd]);
+
   const handleAdd = () => {
     if (!name.trim() || !path.trim()) return;
     addProject(name.trim(), path.trim(), agents.map((agent) => agent.id));
@@ -72,29 +85,69 @@ export function ProjectView() {
         </button>
       </div>
 
-      {showAdd && (
-        <div className="project-form">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="项目名称"
-            autoFocus
-            className="input-field"
-          />
-          <div className="path-input-row">
-            <input
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              placeholder="项目路径"
-              className="input-field path-input"
-            />
-            <button onClick={handleBrowse} className="btn-browse">浏览</button>
-          </div>
-          <div className="form-actions">
-            <button onClick={() => setShowAdd(false)} className="btn btn-cancel">取消</button>
-            <button onClick={handleAdd} className="btn btn-primary">添加</button>
-          </div>
-        </div>
+      {showAdd && createPortal(
+        <div
+          className="project-modal-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowAdd(false);
+          }}
+        >
+          <form
+            className="project-form project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-project-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleAdd();
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-modal-header">
+              <div>
+                <h2 id="add-project-title">添加项目</h2>
+                <p>添加项目目录以开始新的会话</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdd(false)}
+                className="project-modal-close"
+                aria-label="关闭添加项目弹窗"
+                title="关闭"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+            <div className="project-modal-body">
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="项目名称"
+                aria-label="项目名称"
+                autoFocus
+                className="input-field"
+              />
+              <div className="path-input-row">
+                <input
+                  value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  placeholder="项目路径"
+                  aria-label="项目路径"
+                  className="input-field path-input"
+                />
+                <button type="button" onClick={handleBrowse} className="btn-browse">浏览</button>
+              </div>
+              <div className="form-actions">
+                <button type="button" onClick={() => setShowAdd(false)} className="btn btn-cancel">取消</button>
+                <button type="submit" className="btn btn-primary">添加</button>
+              </div>
+            </div>
+          </form>
+        </div>,
+        document.body,
       )}
 
       <div

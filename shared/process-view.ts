@@ -44,6 +44,8 @@ export type ProcessPlanStepView = {
   status: string;
 };
 
+export type ProcessPlanStepsSource = "native" | "inferred";
+
 export type ProcessView<
   TEntry extends ProcessEntryView = ProcessEntryView,
   TStep extends ProcessPlanStepView = ProcessPlanStepView,
@@ -52,9 +54,23 @@ export type ProcessView<
   endedAt?: number;
   entries: TEntry[];
   planSteps?: TStep[];
+  planStepsSource?: ProcessPlanStepsSource;
 };
 
 export type ProcessTerminalViewState = "completed" | "error" | "interrupted";
+
+export const hasNativeProcessPlan = (
+  process?: Pick<ProcessView, "planSteps" | "planStepsSource">,
+) => process?.planStepsSource === "native" && !!process.planSteps?.length;
+
+/**
+ * The floating Todo summary is reserved for plans that actually contain
+ * multiple steps. A single native step is useful inside the process details,
+ * but is not enough to justify a persistent bottom capsule.
+ */
+export const hasNativeMultiStepProcessPlan = (
+  process?: Pick<ProcessView, "planSteps" | "planStepsSource">,
+) => process?.planStepsSource === "native" && (process.planSteps?.length || 0) > 1;
 
 const isFiniteTimestamp = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);

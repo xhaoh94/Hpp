@@ -9,6 +9,12 @@ import { uiText } from "@/i18n/text";
 import { getProjectFileIndex } from "@/lib/project-file-index";
 import { applyPreserveCase, findTextMatches, isRegexValid } from "@/lib/file-preview-code";
 import { searchFilesInWorker } from "./search-worker-client";
+import {
+  ALL_FILES_MAX_MATCHES_PER_FILE,
+  replaceAllFilesSearchResults,
+  searchAllFilesContent,
+  type AllFilesSearchFile,
+} from "./all-files-search";
 import { sharedSearchConfig, requestGotoMatch, requestReplaceMatch, type AllFileMatch } from "./searchConfig";
 import { DEFAULT_FILE_FILTERS, type FileFilterConfig } from "@shared/file-filters";
 import { EditorPane } from "./EditorPane";
@@ -92,12 +98,23 @@ function getRelativePath(projectPath: string, filePath: string): string {
   return filePath;
 }
 
+function getAllFilesSearchFile(root: string, filePath: string): AllFilesSearchFile {
+  const relPath = getRelativePath(root, filePath);
+  return {
+    path: filePath,
+    name: filePath.split(/[\\/]/).pop() || filePath,
+    relPath,
+    dirPath: dirFromPath(relPath),
+  };
+}
+
 // 遍历项目根目录检索：文件读取走异步 IPC（不阻塞），CPU 密集的正则匹配
 // 交给 Web Worker 后台线程执行；Worker 不可用时回退主线程，保证功能可用。
 async function runProjectSearch(
   root: string,
   query: string,
   options: { matchCase: boolean; wholeWord: boolean; regex: boolean },
+  contentOverrides?: ReadonlyMap<string, string>,
 ): Promise<ExpandSearchResult[]> {
   const index = await getProjectFileIndex(root, PROJECT_SEARCH_FILTERS);
   const files = index.filter((item) => !item.isDirectory).map((item) => item.path);
@@ -108,18 +125,16 @@ async function runProjectSearch(
     // 批量读取（异步 IPC，不阻塞主线程），只保留有效文本内容。
     const readFiles = await Promise.all(
       batch.map(async (filePath) => {
+        const override = contentOverrides?.get(filePath);
+        if (override !== undefined) {
+          if (override.length > MAX_FILE_READ_BYTES) return null;
+          return { ...getAllFilesSearchFile(root, filePath), content: override };
+        }
         try {
           const res = await window.electronAPI.readFile(filePath);
           if (!res.success || res.binary || res.content == null) return null;
           if (res.content.length > MAX_FILE_READ_BYTES) return null;
-          const relPath = getRelativePath(root, filePath);
-          return {
-            path: filePath,
-            name: filePath.split(/[\\/]/).pop() || filePath,
-            relPath,
-            dirPath: dirFromPath(relPath),
-            content: res.content,
-          };
+          return { ...getAllFilesSearchFile(root, filePath), content: res.content };
         } catch {
           return null;
         }
@@ -129,7 +144,12 @@ async function runProjectSearch(
     if (validFiles.length === 0) continue;
     // 正则匹配在 Worker 后台线程执行，主线程保持响应。
     try {
-      const batchResults = await searchFilesInWorker(validFiles, query, options);
+      const batchResults = await searchFilesInWorker(
+        validFiles,
+        query,
+        options,
+        ALL_FILES_MAX_MATCHES_PER_FILE,
+      );
       for (const item of batchResults) {
         results.push(item);
         if (results.length >= MAX_RESULTS) break;
@@ -138,19 +158,10 @@ async function runProjectSearch(
       // Worker 不可用（如构建异常）：回退主线程逐文件匹配，保证功能可用。
       for (const file of validFiles) {
         if (results.length >= MAX_RESULTS) break;
-        const lines = file.content.split("\n");
-        const matches = findTextMatches(lines, query, options);
-        for (const match of matches.slice(0, 200)) {
-          results.push({
-            path: file.path,
-            name: file.name,
-            relPath: file.relPath,
-            dirPath: file.dirPath,
-            lineNumber: match.lineNumber,
-            preview: lines[match.lineNumber - 1] ?? "",
-            matchStart: match.startColumn,
-            matchEnd: match.endColumn,
-          });
+        const matches = searchAllFilesContent(file, file.content, query, options);
+        for (const match of matches) {
+          results.push(match);
+          if (results.length >= MAX_RESULTS) break;
         }
       }
     }
@@ -247,10 +258,20 @@ export function EditorArea() {
   const [replacePanelQuery, setReplacePanelQuery] = useState("");
   const [replacePanelPreserveCase, setReplacePanelPreserveCase] = useState(false);
   const saveFnsRef = useRef(new Map<string, () => Promise<boolean>>());
+  // 保留已打开文件的最新内容：所有文件搜索不能因为未保存编辑而退回到磁盘旧内容。
+  const documentContentsRef = useRef(new Map<string, string>());
   const tabsRef = useRef<HTMLDivElement>(null);
   const expandSearchPanelRef = useRef<HTMLDivElement>(null);
   // 结果面板顶部偏移：跟随搜索栏实际高度（展开替换时栏更高），避免遮挡或留空。
   const [panelTop, setPanelTop] = useState<number | null>(null);
+
+  // 关闭标签页后丢弃对应的内容快照，避免同一路径稍后重新打开时复用过期文本。
+  useEffect(() => {
+    const openPaths = new Set(tabs.map((tab) => tab.path));
+    for (const filePath of documentContentsRef.current.keys()) {
+      if (!openPaths.has(filePath)) documentContentsRef.current.delete(filePath);
+    }
+  }, [tabs]);
 
   // 把扩大搜索结果按文件路径分组，保持各匹配的行号顺序；用于 VSCode 风格分组渲染。
   const expandSearchGroups = useMemo(() => {
@@ -286,6 +307,37 @@ export function EditorArea() {
     [expandSearch.results],
   );
 
+  // 编辑已打开文件时，只重算该文件并替换回项目级结果集。
+  // 这里不调用 runAllFilesSearch，也不改动任何导航 tick，因此结果更新不会触发自动跳转。
+  const handleDocumentChange = useCallback((filePath: string, content: string) => {
+    documentContentsRef.current.set(filePath, content);
+    if (!sharedSearchConfig.searchOpen || sharedSearchConfig.searchScope !== "all") return;
+
+    const query = sharedSearchConfig.searchQuery.trim();
+    const root = activeProject?.path ?? dirFromPath(activeKey ?? "");
+    if (!query || !root) return;
+
+    const nextFileResults = content.length > MAX_FILE_READ_BYTES
+      ? []
+      : searchAllFilesContent(
+        getAllFilesSearchFile(root, filePath),
+        content,
+        query,
+        {
+          matchCase: sharedSearchConfig.searchMatchCase,
+          wholeWord: sharedSearchConfig.searchWholeWord,
+          regex: sharedSearchConfig.searchRegex,
+        },
+      );
+    setExpandSearch((state) => {
+      if (state.query !== query) return state;
+      return {
+        ...state,
+        results: replaceAllFilesSearchResults(state.results, filePath, nextFileResults, MAX_RESULTS),
+      };
+    });
+  }, [activeProject?.path, activeKey]);
+
   // “所有文件”搜索范围：以同一关键词遍历整个项目目录检索。
   // openPanel=true 时（下拉框显式选择 / 重新打开按钮）若命中则弹出结果面板；
   // openPanel=false 时（关键词/选项变化重试）按以下规则决定面板可见性：
@@ -319,7 +371,7 @@ export function EditorArea() {
       matchCase: sharedSearchConfig.searchMatchCase,
       wholeWord: sharedSearchConfig.searchWholeWord,
       regex: sharedSearchConfig.searchRegex,
-    })
+    }, documentContentsRef.current)
       .then((results) => {
         if (results.length === 0) {
           // 无匹配：始终不显示面板（也不弹“未找到”空态）；显式搜索才提示 toast。
@@ -687,6 +739,7 @@ export function EditorArea() {
             path={tab.path}
             visible={tab.key === activeKey}
             onDirtyChange={handleDirtyChange(tab.key)}
+            onDocumentChange={handleDocumentChange}
             onSaved={handleSaved}
             onSaveError={handleSaveError}
             registerSave={registerSave}

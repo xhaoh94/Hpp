@@ -12,6 +12,7 @@ import type {
   DiskCleanupResult,
 } from "../src/types/ipc";
 import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
+import type { FileSystemChange } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
 import type {
   RemoteAccessStatus,
@@ -44,6 +45,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // File system
   readDirectory: (dirPath: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:readDirectory", dirPath, filters),
+  watchPath: (targetPath: string, recursive = false) =>
+    ipcRenderer.invoke("fs:watchPath", targetPath, recursive),
+  unwatchPath: (targetPath: string, recursive = false) =>
+    ipcRenderer.invoke("fs:unwatchPath", targetPath, recursive),
+  onFileSystemChange: (callback: (change: FileSystemChange) => void) => {
+    const handler = (_event: unknown, data: unknown) => {
+      if (!data || typeof data !== "object") return;
+      const value = data as Partial<FileSystemChange>;
+      if (
+        typeof value.path !== "string"
+        || (value.eventType !== "change" && value.eventType !== "rename")
+      ) return;
+      callback({ path: value.path, eventType: value.eventType });
+    };
+    ipcRenderer.on("fs:change", handler);
+    return () => ipcRenderer.removeListener("fs:change", handler);
+  },
   showItemInFolder: (targetPath: string) => ipcRenderer.invoke("fs:showItemInFolder", targetPath),
   indexProjectFiles: (dirPath: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:indexProjectFiles", dirPath, filters),
