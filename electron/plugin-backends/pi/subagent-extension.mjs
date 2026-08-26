@@ -10,7 +10,7 @@ const MAX_TASK_OUTPUT_BYTES = 8 * 1024;
 const MAX_TOOL_OUTPUT_BYTES = 32 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_MESSAGE_COUNT = 80;
-const DEFAULT_TASK_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const SUBAGENT_BRIDGE_EXTENSION_PATH = join(dirname(fileURLToPath(import.meta.url)), "subagent-bridge-extension.mjs");
 const PI_FFF_PACKAGE_NAME = "@ff-labs/pi-fff";
@@ -49,7 +49,7 @@ const DEFAULT_AGENTS = [
 
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const nonEmptyString = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-const normalizeTaskTimeout = (value) => {
+export const normalizeTaskTimeout = (value) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TASK_TIMEOUT_MS;
   return Math.min(MAX_TASK_TIMEOUT_MS, Math.max(1000, Math.floor(parsed)));
@@ -438,7 +438,7 @@ const runSingleAgent = async ({
   if (tools.length > 0) args.push("--tools", tools.join(","));
   if (agent.systemPrompt) args.push("--append-system-prompt", truncateText(agent.systemPrompt, 24 * 1024));
   if (hostSystemPrompt) args.push("--append-system-prompt", truncateText(hostSystemPrompt, 24 * 1024));
-  args.push("--append-system-prompt", "当前进程是 Hpp 内置 subagent。不要调用 subagent，不要尝试递归委派；只完成当前任务并返回结构化摘要。\n\nTask 输出建议包含：Goal、Findings、Files Read/Changed、Tests、Risks、Next Steps。\n");
+  args.push("--append-system-prompt", "当前进程是 Hpp 内置 subagent。不要调用 subagent，不要尝试递归委派；只完成当前任务并返回结构化摘要。\n\nTask 输出建议包含：Goal、Findings、Files Read/Changed、Tests、Risks、Next Steps。\n\n超时策略：默认允许运行 30 分钟，最长也是 30 分钟。除非用户明确要求更短的时间，否则不要传入 timeoutMs，也不要把 5 分钟作为默认值。\n");
   if (!interactive) args.push(`Task: ${task}`);
 
   emitUpdate();
@@ -712,14 +712,14 @@ export const createHppSubagentExtension = ({
         task: { type: "string", description: "单任务模式的委派任务" },
         tasks: {
           type: "array",
-          description: "并行任务列表",
+          description: "并行任务列表；除非用户明确要求更短时间，否则不要填写 timeoutMs，未填写时默认 30 分钟",
           items: {
             type: "object",
             properties: {
               agent: { type: "string" },
               task: { type: "string" },
               cwd: { type: "string" },
-              timeoutMs: { type: "number", description: "该任务的超时时间（毫秒）" },
+              timeoutMs: { type: "number", default: 1800000, description: "可选；仅按用户明确要求设置，未填写默认 30 分钟，最长 30 分钟；单位为毫秒" },
             },
             required: ["agent", "task"],
             additionalProperties: false,
@@ -727,14 +727,14 @@ export const createHppSubagentExtension = ({
         },
         chain: {
           type: "array",
-          description: "串行任务列表；后续任务可使用 {previous} 引用上一环输出",
+          description: "串行任务列表；后续任务可使用 {previous} 引用上一环输出；除非用户明确要求更短时间，否则不要填写 timeoutMs，未填写时默认 30 分钟",
           items: {
             type: "object",
             properties: {
               agent: { type: "string" },
               task: { type: "string" },
               cwd: { type: "string" },
-              timeoutMs: { type: "number", description: "该任务的超时时间（毫秒）" },
+              timeoutMs: { type: "number", default: 1800000, description: "可选；仅按用户明确要求设置，未填写默认 30 分钟，最长 30 分钟；单位为毫秒" },
             },
             required: ["agent", "task"],
             additionalProperties: false,
@@ -743,7 +743,7 @@ export const createHppSubagentExtension = ({
         agentScope: { type: "string", enum: ["user", "project", "both"], default: "user" },
         confirmProjectAgents: { type: "boolean", default: true },
         cwd: { type: "string", description: "单任务子进程的工作目录" },
-        timeoutMs: { type: "number", description: "默认任务超时时间（毫秒，最长 30 分钟）" },
+        timeoutMs: { type: "number", default: 1800000, description: "可选；仅在用户明确要求自定义时填写，未填写默认 30 分钟，最长 30 分钟；单位为毫秒" },
       },
       additionalProperties: false,
     },

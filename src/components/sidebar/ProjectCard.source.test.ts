@@ -78,9 +78,9 @@ describe("ProjectCard lifecycle regression constraints", () => {
       chatPanelStyles.indexOf(".chat-process-entry-title {"),
       chatPanelStyles.indexOf(".chat-process-idle-duration {"),
     );
-    expect(titleRule).toContain("font-size: 12px");
+    expect(titleRule).toContain("font-size: 14px");
     expect(titleRule).toContain("font-weight: 400");
-    expect(titleRule).toContain("line-height: 18px");
+    expect(titleRule).toContain("line-height: 21px");
   });
 
   it("keeps the project bar scrollable while hiding its scrollbar completely", () => {

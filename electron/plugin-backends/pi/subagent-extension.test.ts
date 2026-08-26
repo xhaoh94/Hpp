@@ -5,11 +5,17 @@ import { describe, expect, it, vi } from "vitest";
 
 // The project currently has no declarations for worker-side .mjs modules.
 // @ts-expect-error Hpp worker extension is intentionally shipped as ESM.
-import { createHppSubagentExtension } from "./subagent-extension.mjs";
+import { createHppSubagentExtension, normalizeTaskTimeout } from "./subagent-extension.mjs";
 // @ts-expect-error Hpp child bridge is intentionally shipped as ESM.
 import createHppSubagentBridgeExtension from "./subagent-bridge-extension.mjs";
 
 describe("Pi built-in subagent extension", () => {
+  it("defaults subagent tasks to 30 minutes and caps longer values", () => {
+    expect(normalizeTaskTimeout(undefined)).toBe(30 * 60 * 1000);
+    expect(normalizeTaskTimeout(300_000)).toBe(300_000);
+    expect(normalizeTaskTimeout(60 * 60 * 1000)).toBe(30 * 60 * 1000);
+  });
+
   it("answers child-agent questionnaire tools through RPC select dialogs", async () => {
     const tools: Array<Record<string, any>> = [];
     createHppSubagentBridgeExtension({ registerTool: (tool: Record<string, any>) => tools.push(tool), on: () => {} });
@@ -337,6 +343,9 @@ describe("Pi built-in subagent extension", () => {
 
     expect(tools).toHaveLength(1);
     expect(tools[0]).toMatchObject({ name: "subagent", label: "Subagent" });
-    expect(tools[0].parameters).toMatchObject({ type: "object" });
+    expect(tools[0].parameters).toMatchObject({
+      type: "object",
+      properties: { timeoutMs: { default: 30 * 60 * 1000 } },
+    });
   });
 });

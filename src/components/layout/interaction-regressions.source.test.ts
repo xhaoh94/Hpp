@@ -43,6 +43,20 @@ describe("chat interaction regression constraints", () => {
     expect(chatVirtualizerSource).toContain("scrollToEnd");
   });
 
+  it("keeps switched sessions at the bottom while virtual row measurements settle", () => {
+    const settlingSource = chatScrollSource.slice(
+      chatScrollSource.indexOf("const bottomLockSessionRef"),
+      chatScrollSource.indexOf("const scrollToBottom ="),
+    );
+    expect(settlingSource).toContain("bottomLockSessionRef.current = activeSessionId");
+    expect(settlingSource).toContain("if (isBottomLocked())");
+    expect(settlingSource).toContain("const observer = new ResizeObserver(scheduleKeepAtBottom)");
+    expect(settlingSource).toContain("observer.observe(content)");
+    expect(settlingSource).toContain('el.addEventListener("wheel", releaseBottomLock');
+    expect(settlingSource).toContain('el.addEventListener("pointerdown", releaseBottomLock');
+    expect(settlingSource).not.toContain("setTimeout");
+  });
+
   it("keeps history jumps stable while virtual rows are materialized", () => {
     const scrollToMessageSource = chatScrollSource.slice(
       chatScrollSource.indexOf("const scrollToMessage"),

@@ -1298,7 +1298,7 @@
 }
 
 .chat-commentary .md-content {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.7;
 }
 
@@ -1524,6 +1524,7 @@
   background: var(--user-bubble-bg);
   border: 1px solid var(--user-bubble-border);
   color: var(--text-primary);
+  font-size: 15px;
   border-bottom-right-radius: 4px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
@@ -1918,7 +1919,7 @@
   background: none;
   border: none;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 500;
   cursor: pointer;
   padding: 4px 0;
@@ -2029,7 +2030,7 @@
 .chat-process-step-popover-title {
   margin-bottom: 6px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -2045,7 +2046,7 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.35;
 }
 
@@ -2082,7 +2083,7 @@
 
 .chat-process-step-status {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 13px;
   flex-shrink: 0;
 }
 
@@ -2168,7 +2169,7 @@
 .chat-process-empty {
   color: var(--text-secondary);
   opacity: 0.7;
-  font-size: 12px;
+  font-size: 14px;
   padding: 2px 0;
 }
 
@@ -2177,7 +2178,7 @@
   align-items: flex-start;
   gap: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -2203,7 +2204,7 @@
   width: 100%;
   min-width: 0;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.65;
   padding: 6px 0 4px var(--chat-assistant-body-inset);
   max-width: 100%;
@@ -2352,7 +2353,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 400;
   line-height: 1.65;
   display: -webkit-box;
@@ -2447,14 +2448,14 @@
   flex-wrap: wrap;
   gap: 4px;
   color: var(--text-primary);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 14px;
+  line-height: 21px;
 }
 
 .chat-process-received-label {
   flex: 0 0 auto;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .chat-process-received-message .composer-message-entity {
@@ -2495,9 +2496,9 @@
 .chat-process-entry-title {
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 400;
-  line-height: 18px;
+  line-height: 21px;
   overflow-wrap: anywhere;
   white-space: normal;
   word-break: break-word;
@@ -2515,7 +2516,7 @@
   min-width: 0;
   width: 100%;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .chat-subagent-event {
@@ -2603,13 +2604,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 500;
 }
 
 .chat-subagent-event-title {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 15px;
   white-space: nowrap;
 }
 
@@ -2646,7 +2647,7 @@
 
 .chat-subagent-detail .md-content {
   color: inherit;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.55;
 }
 
@@ -2684,7 +2685,7 @@
   gap: 5px;
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.45;
 }
 
@@ -2733,7 +2734,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
-  font-size: 11px;
+  font-size: 13px;
   opacity: 0.78;
 }
 
@@ -2751,7 +2752,7 @@
 
 .chat-process-error-markdown {
   font-family: inherit;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
   white-space: normal;
   color: var(--text-primary);
@@ -2787,7 +2788,7 @@
   background: transparent;
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.55;
   text-align: left;
 }
@@ -2839,7 +2840,7 @@
 .chat-command-lang {
   margin-bottom: 8px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -2850,7 +2851,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
 }
 
@@ -5202,6 +5203,11 @@ body.chat-questionnaire-resizing .chat-bubble {
   min-width: 0;
   max-width: 100%;
   padding-left: var(--chat-assistant-body-inset);
+}
+
+.chat-bubble-content .md-content {
+  font-size: 15px;
+  line-height: 1.7;
 }
 
 .chat-queue-main > .chat-action-badge {

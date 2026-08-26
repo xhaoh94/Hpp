@@ -25,6 +25,7 @@ export function useChatScroll({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoFollowBottomRef = useRef(true);
+  const bottomLockSessionRef = useRef<string | null>(activeSessionId);
   const suppressAutoScrollUntilRef = useRef(0);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
@@ -39,96 +40,130 @@ export function useChatScroll({
     return shouldShow;
   }, [getDistanceFromScrollBottom]);
 
-  const handleMessagesScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
-    const awayFromBottom = updateScrollBottomState(event.currentTarget);
-    autoFollowBottomRef.current = !awayFromBottom;
-  }, [updateScrollBottomState]);
+  const isBottomLocked = useCallback(() => (
+    !!activeSessionId && bottomLockSessionRef.current === activeSessionId
+  ), [activeSessionId]);
 
+  const lockToActiveSessionBottom = useCallback(() => {
+    bottomLockSessionRef.current = activeSessionId;
+    autoFollowBottomRef.current = true;
+  }, [activeSessionId]);
+
+  const keepAtBottom = useCallback((el = scrollRef.current) => {
+    if (!el) return;
+    virtualizerRef?.current?.scrollToEnd("auto");
+    el.scrollTop = el.scrollHeight;
+    setShowScrollBottom(false);
+  }, [virtualizerRef]);
+
+  const shouldKeepAtBottom = useCallback(() => (
+    isBottomLocked() || (
+      autoFollowBottomRef.current &&
+      Date.now() >= suppressAutoScrollUntilRef.current
+    )
+  ), [isBottomLocked]);
+
+  const handleMessagesScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    const awayFromBottom = updateScrollBottomState(el);
+    if (isBottomLocked()) {
+      autoFollowBottomRef.current = true;
+      if (awayFromBottom) keepAtBottom(el);
+      return;
+    }
+    autoFollowBottomRef.current = !awayFromBottom;
+  }, [isBottomLocked, keepAtBottom, updateScrollBottomState]);
+
+  // A freshly selected session remains bottom-locked while virtual rows replace
+  // their estimated heights with measured ones. Only direct user scroll intent
+  // releases the lock; layout-driven scroll events must not do that.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const handleScroll = () => {
-      const awayFromBottom = updateScrollBottomState(el);
-      autoFollowBottomRef.current = !awayFromBottom;
+    const releaseBottomLock = () => {
+      if (bottomLockSessionRef.current === activeSessionId) {
+        bottomLockSessionRef.current = null;
+      }
     };
-    el.addEventListener("scroll", handleScroll, { passive: true });
-    handleScroll();
-    return () => el.removeEventListener("scroll", handleScroll);
-  }, [updateScrollBottomState]);
+    el.addEventListener("pointerdown", releaseBottomLock, { passive: true });
+    el.addEventListener("wheel", releaseBottomLock, { passive: true });
+    el.addEventListener("keydown", releaseBottomLock);
+    return () => {
+      el.removeEventListener("pointerdown", releaseBottomLock);
+      el.removeEventListener("wheel", releaseBottomLock);
+      el.removeEventListener("keydown", releaseBottomLock);
+    };
+  }, [activeSessionId]);
 
   const handleContentChange = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-    updateScrollBottomState(el);
-    if (autoFollowBottomRef.current && getDistanceFromScrollBottom(el) < 100) {
-      el.scrollTop = el.scrollHeight;
-      requestAnimationFrame(() => updateScrollBottomState(el));
-    }
-  }, [getDistanceFromScrollBottom, updateScrollBottomState]);
+    if (shouldKeepAtBottom()) keepAtBottom(el);
+    else updateScrollBottomState(el);
+  }, [keepAtBottom, shouldKeepAtBottom, updateScrollBottomState]);
+
+  useLayoutEffect(() => {
+    bottomLockSessionRef.current = activeSessionId;
+    autoFollowBottomRef.current = true;
+    setShowScrollBottom(false);
+    keepAtBottom();
+  }, [activeSessionId, keepAtBottom]);
 
   useLayoutEffect(() => {
     handleContentChange();
-  }, [activeSessionId, activeSessionInitialized, questionnairePaneHeight, handleContentChange]);
+  }, [activeSessionInitialized, questionnairePaneHeight, handleContentChange]);
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      if (autoFollowBottomRef.current && Date.now() >= suppressAutoScrollUntilRef.current) {
-        el.scrollTop = el.scrollHeight;
-      }
-      updateScrollBottomState(el);
-    });
+    const content = el?.lastElementChild;
+    if (!el || !content || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const keepAtBottomAfterLayout = () => {
+      frame = 0;
+      const current = scrollRef.current;
+      if (!current) return;
+      if (shouldKeepAtBottom()) keepAtBottom(current);
+      else updateScrollBottomState(current);
+    };
+    const scheduleKeepAtBottom = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(keepAtBottomAfterLayout);
+    };
+    const observer = new ResizeObserver(scheduleKeepAtBottom);
     observer.observe(el);
-    const lastChild = el.lastElementChild;
-    if (lastChild) observer.observe(lastChild);
+    observer.observe(content);
+    scheduleKeepAtBottom();
 
     return () => {
       observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
     };
-  }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    autoFollowBottomRef.current = true;
-    requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight;
-      updateScrollBottomState(el);
-    });
-  }, [activeSessionId, activeSessionInitialized, updateScrollBottomState]);
+  }, [activeSessionId, activeSessionInitialized, keepAtBottom, shouldKeepAtBottom, updateScrollBottomState]);
 
   const enableAutoFollow = useCallback(() => {
-    autoFollowBottomRef.current = true;
-  }, []);
+    lockToActiveSessionBottom();
+  }, [lockToActiveSessionBottom]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    autoFollowBottomRef.current = true;
-    setShowScrollBottom(false);
-    virtualizerRef?.current?.scrollToEnd("auto");
-    el.scrollTop = el.scrollHeight;
+    lockToActiveSessionBottom();
+    keepAtBottom(el);
     requestAnimationFrame(() => {
       const current = scrollRef.current;
       if (!current) return;
-      virtualizerRef?.current?.scrollToEnd("auto");
-      current.scrollTop = current.scrollHeight;
+      keepAtBottom(current);
       updateScrollBottomState(current);
     });
-  }, [updateScrollBottomState, virtualizerRef]);
+  }, [keepAtBottom, lockToActiveSessionBottom, updateScrollBottomState]);
 
   const scrollToBottomNow = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    autoFollowBottomRef.current = true;
-    virtualizerRef?.current?.scrollToEnd("auto");
-    el.scrollTop = el.scrollHeight;
+    lockToActiveSessionBottom();
+    keepAtBottom(el);
     updateScrollBottomState(el);
-  }, [updateScrollBottomState, virtualizerRef]);
+  }, [keepAtBottom, lockToActiveSessionBottom, updateScrollBottomState]);
 
   const scrollToMessage = useCallback((msgId: string) => {
     const el = scrollRef.current;
@@ -158,6 +193,7 @@ export function useChatScroll({
 
     // 手动跳转期间禁止底部跟随。目标行可能尚未挂载，虚拟列表会先按索引
     // 定位，之后再等待真实气泡出现并校正顶部位置。
+    bottomLockSessionRef.current = null;
     autoFollowBottomRef.current = false;
     suppressAutoScrollUntilRef.current = Date.now() + 1_200;
     if (messageIndex >= 0) {
@@ -199,6 +235,7 @@ export function useChatScroll({
 
     const anchorTop = anchor?.getBoundingClientRect().top;
     const previousScrollTop = el.scrollTop;
+    bottomLockSessionRef.current = null;
     autoFollowBottomRef.current = false;
     suppressAutoScrollUntilRef.current = Date.now() + 300;
 
@@ -266,6 +303,7 @@ export function useChatScroll({
 
     const anchorTop = anchor?.getBoundingClientRect().top;
     const previousScrollTop = el.scrollTop;
+    bottomLockSessionRef.current = null;
     autoFollowBottomRef.current = false;
     suppressAutoScrollUntilRef.current = Date.now() + 300;
     action();
