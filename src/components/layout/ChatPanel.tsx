@@ -1509,6 +1509,9 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
     estimateSize: (index) => index < messages.length
       ? estimateChatMessageHeight(messages[index])
       : 40,
+    // useChatScroll exclusively owns bottom-following. Start anchoring keeps
+    // virtual row measurement from independently pulling a paused reader down.
+    anchorTo: "start",
   });
   useExposeChatVirtualizer(virtualizerRef, handle);
 
@@ -2848,7 +2851,7 @@ export function ChatPanel({
     setStreaming,
     preserveAssistantProcessCollapse: (sessionId, action) => {
       if (useProjectStore.getState().activeSessionId === sessionId) {
-        preserveScrollDuringAutoLayoutChange(action);
+        preserveScrollDuringAutoLayoutChange(() => flushSync(action));
       } else {
         action();
       }

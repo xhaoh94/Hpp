@@ -33,6 +33,7 @@ import {
   extractHunkPatch,
   linesToPairs,
   parsePatchHunks,
+  splitHunkIndex,
   type DiffLineCell,
   type FullDiffPair,
   type ReviewFileDiff,
@@ -352,7 +353,12 @@ export function CodeReviewDialog({
     if (!active || !projectPath) return;
     const hunkKey = `hunk:${active.displayFile}:${hunkIdx}`;
     if (revertedHunks.has(hunkKey)) return;
-    const hunkPatch = extractHunkPatch(active.patch, hunkIdx);
+    // hunkIdx 是合并补丁中的序号；局部撤销需先定位回单份原始补丁再提取 hunk，
+    // 直接从合并补丁切分会混入后续补丁的文件头，导致 git apply 失败。
+    const located = splitHunkIndex(active.patches, hunkIdx);
+    const hunkPatch = located
+      ? extractHunkPatch(active.patches[located.patchIndex], located.hunkIndex)
+      : null;
     if (!hunkPatch) return;
     setUndoingKey(hunkKey);
     setUndoError(null);

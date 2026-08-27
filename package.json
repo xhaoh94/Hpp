@@ -10,6 +10,7 @@
     "test:watch": "vitest",
     "typecheck:release": "tsc -p tsconfig.release.node.json --pretty false && tsc -p tsconfig.release.web.json --pretty false && tsc -p mobile/tsconfig.release.json --pretty false",
     "verify:pi-package": "node scripts/verify-pi-package.cjs",
+    "offline:build": "node offline-installers/build-offline.cjs",
     "verify:subagents:live-preflight": "node scripts/verify-subagent-live-preflight.cjs",
     "verify:subagent:live": "node scripts/verify-subagent-live-execution.cjs",
     "build": "npm run typecheck:release && electron-vite build && npm run verify:pi-package && node scripts/package-agent-plugins.cjs && npm run mobile:build && node scripts/package-mobile-web.cjs",

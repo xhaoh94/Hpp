@@ -270,6 +270,27 @@ export function extractHunkPatch(patch: string, hunkIndex: number): string | nul
   return [...header, ...hunks[hunkIndex]].join("\n");
 }
 
+/**
+ * 将合并补丁（patches.join("\n")）中的 hunk 下标定位回「具体某份原始补丁 + 补丁内 hunk 下标」。
+ * 合并补丁的 hunk 顺序就是各补丁 hunk 顺序的拼接（文件头行会被解析器跳过），
+ * 因此按各补丁的 hunk 数量累计即可精确还原归属。
+ * 局部撤销必须据此从单份补丁提取 hunk：直接从合并补丁切分会把后续补丁的
+ * 文件头（diff --git / --- / +++ 等）混入前一个 hunk 的正文，git apply 必然失败。
+ */
+export function splitHunkIndex(
+  patches: string[],
+  mergedHunkIndex: number,
+): { patchIndex: number; hunkIndex: number } | null {
+  if (mergedHunkIndex < 0) return null;
+  let remaining = mergedHunkIndex;
+  for (let patchIndex = 0; patchIndex < patches.length; patchIndex += 1) {
+    const count = parsePatchHunks(patches[patchIndex]).length;
+    if (remaining < count) return { patchIndex, hunkIndex: remaining };
+    remaining -= count;
+  }
+  return null;
+}
+
 const REVIEW_STATUS_KEYS: Record<string, ReviewFileStatus> = {
   added: "added",
   deleted: "deleted",

@@ -41,6 +41,11 @@ describe("chat interaction regression constraints", () => {
     expect(chatVirtualizerSource).toContain("anchorTo = \"end\"");
     expect(chatVirtualizerSource).toContain("rangeExtractor");
     expect(chatVirtualizerSource).toContain("scrollToEnd");
+    const messageViewportSource = chatPanelSource.slice(
+      chatPanelSource.indexOf("const VirtualMessagesViewport"),
+      chatPanelSource.indexOf("const ChatMessagesView"),
+    );
+    expect(messageViewportSource).toContain('anchorTo: "start"');
   });
 
   it("keeps switched sessions at the bottom while virtual row measurements settle", () => {
@@ -52,9 +57,33 @@ describe("chat interaction regression constraints", () => {
     expect(settlingSource).toContain("if (isBottomLocked())");
     expect(settlingSource).toContain("const observer = new ResizeObserver(scheduleKeepAtBottom)");
     expect(settlingSource).toContain("observer.observe(content)");
-    expect(settlingSource).toContain('el.addEventListener("wheel", releaseBottomLock');
-    expect(settlingSource).toContain('el.addEventListener("pointerdown", releaseBottomLock');
+    expect(settlingSource).toContain('el.addEventListener("wheel", handleWheel');
+    expect(settlingSource).toContain('el.addEventListener("pointerdown", handlePointerDown');
     expect(settlingSource).not.toContain("setTimeout");
+  });
+
+  it("gives user scrolling ownership over streaming layout changes", () => {
+    const userScrollSource = chatScrollSource.slice(
+      chatScrollSource.indexOf("const startUserScroll"),
+      chatScrollSource.indexOf("const keepAtBottom"),
+    );
+    const scrollEventSource = chatScrollSource.slice(
+      chatScrollSource.indexOf("const handleMessagesScroll"),
+      chatScrollSource.indexOf("// A selected session remains bottom-locked"),
+    );
+    const autoLayoutSource = chatScrollSource.slice(
+      chatScrollSource.indexOf("const preserveScrollDuringAutoLayoutChange"),
+      chatScrollSource.indexOf("return {"),
+    );
+    expect(userScrollSource).toContain("autoFollowBottomRef.current = false");
+    expect(chatScrollSource).toContain('el.addEventListener("scrollend", finishUserScroll)');
+    expect(chatScrollSource).toContain("getDistanceFromScrollBottom(el) <= AUTO_FOLLOW_BOTTOM_EPSILON");
+    expect(chatScrollSource).toContain('el.addEventListener("pointermove", handlePointerMove');
+    expect(scrollEventSource).not.toContain("autoFollowBottomRef.current = !awayFromBottom");
+    expect(autoLayoutSource).toContain("scrollOperationRef.current !== operation");
+    expect(autoLayoutSource).toContain("const userOwnsScroll = userScrollInProgressRef.current");
+    expect(autoLayoutSource).toContain("if (!userOwnsScroll) requestAnimationFrame(correctReadingAnchor)");
+    expect(chatScrollSource).not.toContain("suppressAutoScrollUntilRef");
   });
 
   it("keeps history jumps stable while virtual rows are materialized", () => {
@@ -63,7 +92,8 @@ describe("chat interaction regression constraints", () => {
       chatScrollSource.indexOf("const preserveScrollDuringLayoutChange"),
     );
     expect(scrollToMessageSource).toContain("autoFollowBottomRef.current = false");
-    expect(scrollToMessageSource).toContain("suppressAutoScrollUntilRef.current");
+    expect(scrollToMessageSource).toContain("const operation = stopAutoFollow()");
+    expect(scrollToMessageSource).toContain("scrollOperationRef.current !== operation");
     expect(scrollToMessageSource).toContain('querySelector<HTMLElement>(".chat-bubble.user")');
     expect(scrollToMessageSource).toContain("scrollTargetToTop");
   });
@@ -280,9 +310,14 @@ describe("chat interaction regression constraints", () => {
     expect(chatScrollSource).toContain("document.elementFromPoint");
     expect(chatScrollSource).toContain('candidate.closest<HTMLElement>(".chat-process-output")');
     expect(chatScrollSource).toContain('querySelector<HTMLElement>(".chat-bubble-content")');
+    expect(chatScrollSource).toContain("responseAnchor?.processElement.isConnected");
     expect(chatScrollSource).toContain("targetY - responseAnchor.viewportY");
     expect(chatScrollSource).toContain("anchor.getBoundingClientRect().top - anchorTop");
+    expect(chatScrollSource).toContain("scrollOperationRef.current !== operation");
+    expect(chatScrollSource).toContain("const userOwnsScroll = userScrollInProgressRef.current");
+    expect(chatScrollSource).toContain("correctReadingAnchor();");
     expect(chatPanelSource).toContain("preserveAssistantProcessCollapse");
+    expect(chatPanelSource).toContain("preserveScrollDuringAutoLayoutChange(() => flushSync(action))");
     expect(agentEventsSource).toContain("preserveAssistantProcessCollapse: (sessionId, action)");
   });
 
@@ -319,6 +354,7 @@ describe("chat interaction regression constraints", () => {
   it("keeps the user-message history popup isolated from the conversation scroller", () => {
     expect(chatPanelSource).not.toContain('className="chat-user-history-header"');
     expect(chatPanelSource).toContain('onWheel={(event) => event.stopPropagation()}');
+    expect(chatScrollSource).toContain('target.closest(".chat-user-history-popup")');
     const popupStyles = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-user-history-popup {"),
       chatPanelStyles.indexOf(".chat-header-history-anchor .chat-user-history-popup")

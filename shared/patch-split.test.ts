@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildFullFileDiff, buildReviewDiff, linesToPairs, splitPatch } from "./patch-split";
+import {
+  buildFullFileDiff,
+  buildReviewDiff,
+  extractHunkPatch,
+  linesToPairs,
+  splitHunkIndex,
+  splitPatch,
+} from "./patch-split";
 
 describe("splitPatch", () => {
   it("parses a standard hunk into aligned left/right lines", () => {
@@ -253,5 +260,98 @@ describe("linesToPairs", () => {
       { left: { lineNo: 2, type: "del", text: "d" } },
       { right: { lineNo: 2, type: "add", text: "a" } },
     ]);
+  });
+});
+
+describe("extractHunkPatch", () => {
+  const patch = [
+    "diff --git a/a.txt b/a.txt",
+    "index 1111111..2222222 100644",
+    "--- a/a.txt",
+    "+++ b/a.txt",
+    "@@ -1,3 +1,3 @@",
+    " line1",
+    "-line2",
+    "+line2-A",
+    " line3",
+    "@@ -6,3 +6,3 @@",
+    " line6",
+    "-line7",
+    "+line7-B",
+    " line8",
+  ].join("\n");
+
+  it("extracts a clean single hunk with the file header", () => {
+    expect(extractHunkPatch(patch, 1)).toBe([
+      "diff --git a/a.txt b/a.txt",
+      "index 1111111..2222222 100644",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -6,3 +6,3 @@",
+      " line6",
+      "-line7",
+      "+line7-B",
+      " line8",
+    ].join("\n"));
+  });
+
+  it("returns null for empty patches and out-of-range indices", () => {
+    expect(extractHunkPatch("", 0)).toBeNull();
+    expect(extractHunkPatch(patch, -1)).toBeNull();
+    expect(extractHunkPatch(patch, 2)).toBeNull();
+  });
+});
+
+describe("splitHunkIndex", () => {
+  // 第一份补丁 1 个 hunk，第二份补丁 2 个 hunk（同文件连续两次编辑的增量补丁）。
+  const first = [
+    "--- a/a.txt",
+    "+++ b/a.txt",
+    "@@ -1,3 +1,3 @@",
+    " line1",
+    "-line2",
+    "+line2-A",
+    " line3",
+  ].join("\n");
+  const second = [
+    "--- a/a.txt",
+    "+++ b/a.txt",
+    "@@ -4,3 +4,3 @@",
+    " line4",
+    "-line5",
+    "+line5-A",
+    " line6",
+    "@@ -7,3 +7,3 @@",
+    " line7",
+    "-line8",
+    "+line8-A",
+    " line9",
+  ].join("\n");
+
+  it("maps merged hunk indices back to their source patch", () => {
+    expect(splitHunkIndex([first, second], 0)).toEqual({ patchIndex: 0, hunkIndex: 0 });
+    expect(splitHunkIndex([first, second], 1)).toEqual({ patchIndex: 1, hunkIndex: 0 });
+    expect(splitHunkIndex([first, second], 2)).toEqual({ patchIndex: 1, hunkIndex: 1 });
+  });
+
+  it("returns null for out-of-range indices", () => {
+    expect(splitHunkIndex([first, second], -1)).toBeNull();
+    expect(splitHunkIndex([first, second], 3)).toBeNull();
+    expect(splitHunkIndex([], 0)).toBeNull();
+  });
+
+  it("keeps hunk extraction clean when patches were merged for display", () => {
+    // buildReviewDiff 会把同文件多份补丁 join("\n") 合并展示；此时直接按
+    // 合并序号切 hunk 会把后续补丁的文件头混入正文，必须先定位回单份补丁。
+    const patches = [first, second];
+    const merged = patches.join("\n");
+
+    // 合并补丁中 hunk[0] 属于第一份补丁：从原始补丁提取的结果不含第二份补丁的头部。
+    const located = splitHunkIndex(patches, 0);
+    expect(located).toEqual({ patchIndex: 0, hunkIndex: 0 });
+    const hunk = extractHunkPatch(patches[located!.patchIndex], located!.hunkIndex);
+    expect(hunk).toBe(first);
+    // 对照：直接从合并补丁切 hunk[0] 会带出第二份补丁的文件头（脏补丁）。
+    expect(extractHunkPatch(merged, 0)).not.toBe(first);
   });
 });

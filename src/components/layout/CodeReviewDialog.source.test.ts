@@ -94,6 +94,14 @@ describe("code review dialog", () => {
     expect(dialogSource).not.toContain("reverseApplyPatch(projectPath, [active.patch])");
   });
 
+  it("reverts a single hunk from its own source patch instead of the merged patch", () => {
+    // hunkIdx 是合并补丁的序号，必须先 splitHunkIndex 定位回单份补丁再提取，
+    // 否则切出的 hunk 混入后续补丁的文件头，git apply 会报 patch with only garbage。
+    expect(dialogSource).toContain("splitHunkIndex(active.patches, hunkIdx)");
+    expect(dialogSource).toContain("extractHunkPatch(active.patches[located.patchIndex], located.hunkIndex)");
+    expect(dialogSource).not.toContain("extractHunkPatch(active.patch,");
+  });
+
   it("navigates between diff points from the header toolbar", () => {
     expect(dialogSource).toContain("goNextDiff");
     expect(dialogSource).toContain("goPrevDiff");

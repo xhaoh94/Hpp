@@ -12,7 +12,6 @@ export interface FileMentionReplacement {
 const isWhitespace = (character: string) => /\s/u.test(character);
 const isEmailOrIdentifierCharacter = (character: string) => /[A-Za-z0-9_.+@-]/u.test(character);
 const isHorizontalWhitespace = (character: string) => /[^\S\r\n]/u.test(character);
-const isAsciiPathCharacter = (character: string) => /[A-Za-z0-9_.+\-/\\~()\[\]{}',;!#$%&]/u.test(character);
 
 export function parseActiveFileMention(
   value: string,
@@ -31,41 +30,15 @@ export function parseActiveFileMention(
   if ([...query].some((character) => character === "@" || isWhitespace(character))) return null;
   if (start > 0 && isEmailOrIdentifierCharacter(value[start - 1])) return null;
 
-  // An empty query means the caret sits right after "@": whatever follows is
-  // pre-existing content, not a query continuation. Keep the token at the
-  // caret so selecting a file only replaces the "@" instead of swallowing
-  // the rest of the line (most visible with CJK text, which has no
-  // whitespace separators to stop the forward scan).
-  if (query === "") {
-    return {
-      query,
-      start,
-      end: caret,
-    };
-  }
-
-  // Only continue the token with characters of the same class as the query's
-  // tail. An ASCII search term typed in front of pre-existing CJK text has no
-  // whitespace separator, so scanning ahead blindly would swallow the rest of
-  // the line (e.g. the user types a sentence, moves the caret to the front,
-  // then @-references a file after typing a search term).
-  const lastQueryCharacter = [...query][query.length - 1] ?? "";
-  const asciiQueryTail = isAsciiPathCharacter(lastQueryCharacter);
-
-  let end = caret;
-  while (
-    end < value.length
-    && value[end] !== "@"
-    && !isWhitespace(value[end])
-    && (!asciiQueryTail || isAsciiPathCharacter(value[end]))
-  ) {
-    end += 1;
-  }
-
+  // The active mention is exactly the text the user has typed between "@"
+  // and the caret. Never scan past the caret: text there may have existed
+  // before the mention was started, and there is no reliable delimiter for
+  // either CJK or Latin text. Consuming a same-script suffix would make file
+  // selection delete unrelated composer content.
   return {
     query,
     start,
-    end,
+    end: caret,
   };
 }
 

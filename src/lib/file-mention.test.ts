@@ -30,14 +30,13 @@ describe("parseActiveFileMention", () => {
     });
   });
 
-  it("still covers the typed query after the caret when the query is non-empty", () => {
-    // Caret inside the typed query: the token must still span the whole
-    // "@hello" so replacing it removes the query too.
+  it("does not infer additional Latin query text after the caret", () => {
     const value = "@hello world";
-    expect(parseActiveFileMention(value, value.indexOf("o world"))).toEqual({
+    const caret = value.indexOf("o world");
+    expect(parseActiveFileMention(value, caret)).toEqual({
       query: "hell",
       start: 0,
-      end: 6,
+      end: caret,
     });
   });
 
@@ -68,13 +67,13 @@ describe("parseActiveFileMention", () => {
     expect(parseActiveFileMention("@chat", 2, 5)).toBeNull();
   });
 
-  it("uses text before the caret as the query and covers the complete token", () => {
+  it("uses only text before the caret as the query and replacement range", () => {
     const value = "open @ChatComposer.tsx next";
     const caret = value.indexOf("Composer");
     expect(parseActiveFileMention(value, caret)).toEqual({
       query: "Chat",
       start: 5,
-      end: value.indexOf(" next"),
+      end: caret,
     });
   });
 
@@ -101,14 +100,23 @@ describe("parseActiveFileMention", () => {
     });
   });
 
-  it("still covers a full CJK filename when the query itself is CJK", () => {
-    // Caret inside a Chinese filename: the token must still span the whole
-    // name so replacing it removes the in-progress query too.
-    const value = "@配置文件";
-    expect(parseActiveFileMention(value, 3)).toEqual({
+  it("does not swallow a CJK suffix after a CJK search term", () => {
+    const value = "@配置请先看已有中文";
+    const caret = "@配置".length;
+    expect(parseActiveFileMention(value, caret)).toEqual({
       query: "配置",
       start: 0,
-      end: value.length,
+      end: caret,
+    });
+  });
+
+  it("does not swallow a Latin suffix after a Latin search term", () => {
+    const value = "@ReadkeepExistingLetters";
+    const caret = "@Read".length;
+    expect(parseActiveFileMention(value, caret)).toEqual({
+      query: "Read",
+      start: 0,
+      end: caret,
     });
   });
 
@@ -125,7 +133,7 @@ describe("parseActiveFileMention", () => {
 describe("replaceFileMentionToken", () => {
   it("removes the complete token while preserving surrounding text", () => {
     const value = "请查看 @ChatComposer.tsx 然后修改测试";
-    const caret = value.indexOf("Composer");
+    const caret = value.indexOf(" 然后修改测试");
     const mention = parseActiveFileMention(value, caret);
 
     expect(mention).not.toBeNull();
@@ -142,6 +150,30 @@ describe("replaceFileMentionToken", () => {
     expect(replaceFileMentionToken(value, mention!)).toEqual({
       value: "后续正文",
       caret: 0,
+    });
+  });
+
+  it("preserves existing CJK text after a CJK mention query", () => {
+    const value = "开头 @配置已有中文";
+    const caret = value.indexOf("已有中文");
+    const mention = parseActiveFileMention(value, caret);
+
+    expect(mention).not.toBeNull();
+    expect(replaceFileMentionToken(value, mention!, "配置文件.md")).toEqual({
+      value: "开头 配置文件.md已有中文",
+      caret: "开头 配置文件.md".length,
+    });
+  });
+
+  it("preserves existing Latin text after a Latin mention query", () => {
+    const value = "before @ReadkeepExistingLetters";
+    const caret = value.indexOf("keepExistingLetters");
+    const mention = parseActiveFileMention(value, caret);
+
+    expect(mention).not.toBeNull();
+    expect(replaceFileMentionToken(value, mention!, "README.md")).toEqual({
+      value: "before README.mdkeepExistingLetters",
+      caret: "before README.md".length,
     });
   });
 
