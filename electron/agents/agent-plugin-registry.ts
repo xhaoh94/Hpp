@@ -1268,6 +1268,7 @@ export class AgentPluginRegistry {
     let activeClientMessageId: string | null = null;
     let activeLifecycleTerminalSeen = true;
     let independentCompactionActive = false;
+    const backgroundSubagentOwnerByKey = new Map<string, string>();
     let refreshIdleFromBackend: (initialDelayMs?: number) => Promise<boolean | undefined> = async () => undefined;
     const beginLifecycleRevision = () => {
       activeLifecycleRevision = `${backendId}:${lifecycleInstanceScope}:${++turnSequence}`;
@@ -1299,7 +1300,39 @@ export class AgentPluginRegistry {
     };
     const sendEvent = (event: Record<string, unknown>) => {
       const normalizedEvent = normalizePluginEvent(event);
-      if (normalizedEvent.type === "agent_disconnected") {
+      const isBackgroundSubagent = normalizedEvent.type === "subagent_event"
+        && normalizedEvent.background === true;
+      const backgroundSubagentKey = isBackgroundSubagent
+        ? String(normalizedEvent.toolCallId || normalizedEvent.id || normalizedEvent.agentThreadId || "").trim()
+        : "";
+      const backgroundOwner = backgroundSubagentKey
+        ? backgroundSubagentOwnerByKey.get(backgroundSubagentKey)
+        : undefined;
+      // Once a new prompt owns the session lifecycle, an old background task
+      // cannot be safely routed into that prompt. Drop it rather than
+      // misattributing its progress; it can still be shown by a later
+      // independent lifecycle when the session is idle.
+      if (
+        isBackgroundSubagent &&
+        backgroundOwner &&
+        activeLifecycleRevision &&
+        backgroundOwner !== activeLifecycleRevision &&
+        !activeLifecycleTerminalSeen
+      ) return;
+      if (isBackgroundSubagent) {
+        const startsIndependentLifecycle = activeLifecycleTerminalSeen
+          || (!!backgroundOwner && backgroundOwner !== activeLifecycleRevision);
+        if (startsIndependentLifecycle) {
+          beginLifecycleRevision();
+        } else {
+          ensureActiveLifecycleRevision();
+        }
+        activeLifecycleTerminalSeen = false;
+        if (backgroundSubagentKey && activeLifecycleRevision) {
+          backgroundSubagentOwnerByKey.set(backgroundSubagentKey, activeLifecycleRevision);
+        }
+        markBackendBusy();
+      } else if (normalizedEvent.type === "agent_disconnected") {
         ensureActiveLifecycleRevision();
         independentCompactionActive = false;
         activeLifecycleTerminalSeen = true;

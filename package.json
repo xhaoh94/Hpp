@@ -78,6 +78,7 @@
     "@tanstack/react-virtual": "^3.14.9",
     "adm-zip": "^0.5.18",
     "codemirror": "^6.0.2",
+    "diff": "^8.0.4",
     "electron-updater": "^6.8.9",
     "electron-vite": "^5.0.0",
     "highlight.js": "^11.11.1",

@@ -4,6 +4,7 @@ export type DiffLike = {
   additions?: number;
   deletions?: number;
   status?: string;
+  statusExplicit?: boolean;
 };
 
 export type DiffFileSummary = {
@@ -11,6 +12,8 @@ export type DiffFileSummary = {
   additions: number;
   deletions: number;
   patches: string[];
+  /** 文件变更类型：added / deleted / modified。新建文件需据此在列表中保留。 */
+  status?: string;
 };
 
 type DiffFileAccumulator = DiffFileSummary & {
@@ -19,6 +22,7 @@ type DiffFileAccumulator = DiffFileSummary & {
   metaAdditions: number;
   metaDeletions: number;
   seenChanges: Set<string>;
+  statusExplicit: boolean;
 };
 
 export const isReversiblePatch = (patch: string) => {
@@ -71,6 +75,7 @@ export function buildDiffSummary(diffs: DiffLike[], projectPath?: string) {
       metaDeletions: 0,
       patches: [],
       seenChanges: new Set<string>(),
+      statusExplicit: false,
     };
     if (!existing.seenChanges.has(changeKey)) {
       existing.seenChanges.add(changeKey);
@@ -83,15 +88,28 @@ export function buildDiffSummary(diffs: DiffLike[], projectPath?: string) {
         existing.metaDeletions = Math.max(existing.metaDeletions, Math.max(0, diff.deletions || 0));
       }
     }
+    const nextStatusExplicit = diff.statusExplicit === true;
+    if (diff.status && !(existing.statusExplicit && !nextStatusExplicit)) {
+      existing.status = diff.status;
+    }
+    if (nextStatusExplicit) existing.statusExplicit = true;
     byFile.set(file, existing);
   }
   const files = Array.from(byFile.values())
-    .map(({ seenChanges: _seen, patchAdditions, patchDeletions, metaAdditions, metaDeletions, ...file }) => ({
+    .map(({ seenChanges: _seen, statusExplicit: _statusExplicit, patchAdditions, patchDeletions, metaAdditions, metaDeletions, ...file }) => ({
       ...file,
       additions: file.patches.length > 0 ? patchAdditions : metaAdditions,
       deletions: file.patches.length > 0 ? patchDeletions : metaDeletions,
     }))
-    .filter((file) => file.patches.length > 0 || file.additions > 0 || file.deletions > 0)
+    .filter(
+      (file) =>
+        file.patches.length > 0 ||
+        file.additions > 0 ||
+        file.deletions > 0 ||
+        file.status === "added" ||
+        file.status === "created" ||
+        file.status === "deleted",
+    )
     .sort((left, right) => left.file.localeCompare(right.file));
   return {
     files,
@@ -115,7 +133,17 @@ export function collectProcessDiffs(process?: { entries?: ProcessDiffEntry[] }):
   for (const entry of process.entries) {
     entry.files?.forEach((file, index) => {
       const patch = typeof file.patch === "string" ? file.patch : "";
-      if (!file.file || (!DIFF_ACTIONS.has(file.action || "") && !patch.trim())) return;
+      const fileAction = (file.action || "").toLowerCase();
+      const hasPatch = patch.trim().length > 0;
+      const hasCounts = (file.additions || 0) > 0 || (file.deletions || 0) > 0;
+      // 只有补丁、变更计数、生命周期状态或明确的变更动作才是文件
+      // 变更。读文件以及被 Diff 通道剥离 payload 后仅剩路径的工具条目
+      // 不能被误渲染成一个空的 modified 文件。
+      const isChangeAction = DIFF_ACTIONS.has(fileAction)
+        || ["created", "new", "added", "deleted"].includes(fileAction);
+      const hasLifecycleStatus = !!file.status || file.statusExplicit === true;
+      if (!file.file || (!hasPatch && !hasCounts && !isChangeAction && !hasLifecycleStatus)) return;
+      const derivedStatus = file.status || (fileAction === "created" || fileAction === "new" || fileAction === "added" ? "added" : fileAction === "deleted" ? "deleted" : "modified");
       const key = String(file.changeKey || `${entry.id}:${file.file}:${index}`);
       if (patch.trim()) {
         if (seenPatchKeys.has(key)) return;
@@ -125,7 +153,8 @@ export function collectProcessDiffs(process?: { entries?: ProcessDiffEntry[] }):
           patch,
           additions: Math.max(0, file.additions || 0),
           deletions: Math.max(0, file.deletions || 0),
-          status: file.status || "modified",
+          status: derivedStatus,
+          ...(file.statusExplicit === true ? { statusExplicit: true } : {}),
         });
         return;
       }
@@ -134,14 +163,19 @@ export function collectProcessDiffs(process?: { entries?: ProcessDiffEntry[] }):
         patch: "",
         additions: 0,
         deletions: 0,
-        status: file.status || "modified",
+        status: derivedStatus,
+        ...(file.statusExplicit === true ? { statusExplicit: true } : {}),
         seenKeys: new Set<string>(),
       };
       if (existing.seenKeys.has(key)) return;
       existing.seenKeys.add(key);
       existing.additions = (existing.additions || 0) + Math.max(0, file.additions || 0);
       existing.deletions = (existing.deletions || 0) + Math.max(0, file.deletions || 0);
-      existing.status = file.status || existing.status;
+      const nextExplicit = file.statusExplicit === true;
+      if (!(existing.statusExplicit === true && !nextExplicit)) {
+        existing.status = file.status || existing.status;
+      }
+      if (nextExplicit) existing.statusExplicit = true;
       byFile.set(file.file, existing);
     });
   }

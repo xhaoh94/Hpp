@@ -183,6 +183,35 @@ const source = `
     },
   };
 
+  const createReviewState = (scene) => ({
+    transactionId: "e2e-review",
+    version: 0,
+    files: scene.diffs.map((diff) => ({
+      file: diff.file,
+      status: diff.status || "modified",
+      patch: diff.patch || "",
+      additions: (diff.patch?.match(/^\\+[^+]/gm) || []).length,
+      deletions: (diff.patch?.match(/^-[^-]/gm) || []).length,
+      hunkCount: (diff.patch?.match(/^@@/gm) || []).length,
+      undoable: !!diff.patch,
+      reverted: false,
+    })),
+    canUndoAll: true,
+    allReverted: false,
+  });
+  const installElectronAPI = (scene) => {
+    window.electronAPI = {
+      readFile: async () =>
+        scene.readOk
+          ? { success: true, content: scene.content }
+          : { success: false },
+      loadReviewUndo: async () => ({ success: true, state: createReviewState(scene) }),
+      prepareReviewUndo: async () => ({ success: true, state: createReviewState(scene) }),
+      applyReviewUndo: async () => ({ success: true, state: createReviewState(scene) }),
+      showItemInFolder: async () => {},
+    };
+  };
+
   let __root = null;
   // 模拟真实使用：组件常驻挂载，仅切换 open 开关（不卸载、状态保留）。
   let reopenOpen = true;
@@ -192,27 +221,17 @@ const source = `
       reopenScene = scenes[name];
       reopenOpen = true;
       const scene = reopenScene;
-      window.electronAPI = {
-        readFile: async () =>
-          scene.readOk
-            ? { success: true, content: scene.content }
-            : { success: false },
-        reverseApplyPatch: async () => ({ success: true }),
-        showItemInFolder: async () => {},
-      };
+      installElectronAPI(scene);
       if (!__root) __root = createRoot(document.getElementById("root"));
       __root.render(
         React.createElement(CodeReviewDialog, {
           key: "reopen-fixed",
           open: reopenOpen,
+          reviewId: "review-e2e",
           diffs: scene.diffs,
           projectPath: "C:/proj",
           onClose: () => {},
           onOpenFile: () => {},
-          onRevertAll: () => {},
-          revertState: "idle",
-          revertCanRevert: false,
-          showRevertButton: true,
         }),
       );
       return "mounted";
@@ -224,41 +243,28 @@ const source = `
         React.createElement(CodeReviewDialog, {
           key: "reopen-fixed",
           open: reopenOpen,
+          reviewId: "review-e2e",
           diffs: scene.diffs,
           projectPath: "C:/proj",
           onClose: () => {},
           onOpenFile: () => {},
-          onRevertAll: () => {},
-          revertState: "idle",
-          revertCanRevert: false,
-          showRevertButton: true,
         }),
       );
       return reopenOpen;
     },
     render(name) {
       const scene = scenes[name];
-      window.electronAPI = {
-        readFile: async () =>
-          scene.readOk
-            ? { success: true, content: scene.content }
-            : { success: false },
-        reverseApplyPatch: async () => ({ success: true }),
-        showItemInFolder: async () => {},
-      };
+      installElectronAPI(scene);
       if (!__root) __root = createRoot(document.getElementById("root"));
       __root.render(
         React.createElement(CodeReviewDialog, {
           key: name,
           open: true,
+          reviewId: "review-e2e",
           diffs: scene.diffs,
           projectPath: "C:/proj",
           onClose: () => {},
           onOpenFile: () => {},
-          onRevertAll: () => {},
-          revertState: "idle",
-          revertCanRevert: false,
-          showRevertButton: true,
         }),
       );
       return "rendered";

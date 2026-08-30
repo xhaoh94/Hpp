@@ -50,6 +50,70 @@ describe("OpenCode interaction bridge", () => {
     }));
   });
 
+  it("does not emit tool-level patches before the authoritative turn diff", () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+
+    internals.handleSSEEvent("message.part.updated", {
+      properties: {
+        part: {
+          id: "tool_edit_1",
+          messageID: "message_1",
+          type: "tool",
+          tool: "edit",
+          state: {
+            status: "completed",
+            input: { filePath: "src/app.ts" },
+            output: { patch: "@@ -1 +1 @@\n-old\n+new" },
+          },
+        },
+      },
+    });
+
+    const toolEnd = events.find((event) => event.type === "tool_end");
+    expect(toolEnd).toBeDefined();
+    expect(toolEnd).not.toHaveProperty("patch");
+    expect(toolEnd).not.toHaveProperty("additions");
+    expect(toolEnd?.files?.[0]).not.toHaveProperty("patch");
+    expect(toolEnd?.files?.[0]).not.toHaveProperty("additions");
+    expect(toolEnd?.files?.[0]?.action).toBeUndefined();
+    expect((internals as unknown as { activeToolDiffs: unknown[] }).activeToolDiffs).toEqual([
+      expect.objectContaining({ file: "src/app.ts", patch: expect.stringContaining("-old\n+new") }),
+    ]);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "diff_update" }));
+  });
+
+  it("normalizes native session.diff snapshots for the idle fallback", () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+
+    internals.handleSSEEvent("session.diff", {
+      properties: {
+        sessionID: "ses_source",
+        diff: [{
+          file: "src/app.ts",
+          patch: "Index: src/app.ts\n===================================================================\n--- src/app.ts\t\n+++ src/app.ts\t\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+          additions: 1,
+          deletions: 1,
+          status: "modified",
+        }],
+      },
+    });
+
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "diff_update" }));
+    expect((internals as unknown as { activeTurnDiffs: unknown[] }).activeTurnDiffs).toEqual([
+      expect.objectContaining({
+        file: "src/app.ts",
+        patch: expect.stringContaining("-old\n+new"),
+        additions: 1,
+        deletions: 1,
+      }),
+    ]);
+  });
+
   it("keeps reasoning deltas separate from assistant text", async () => {
     const events: AgentEvent[] = [];
     const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));

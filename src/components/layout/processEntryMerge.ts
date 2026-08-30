@@ -47,6 +47,10 @@ export const mergeProcessFiles = (files: AgentProcessFile[]) => {
       label: existing.label || file.label || getProcessFileName(file.file),
       additions: mergeProcessFileCounts(existing.additions, file.additions),
       deletions: mergeProcessFileCounts(existing.deletions, file.deletions),
+      status: existing.statusExplicit === true && file.statusExplicit !== true
+        ? existing.status
+        : file.status || existing.status,
+      statusExplicit: existing.statusExplicit === true || file.statusExplicit === true,
     });
   }
 

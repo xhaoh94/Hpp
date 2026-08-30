@@ -1,3 +1,6 @@
+import { countPatchChanges, patchDescribesChange } from "./unified-patch";
+import type { ComputedFileDiff } from "./turn-file-diff";
+
 export type NormalizedToolKind =
   | "read_file"
   | "list_dir"
@@ -19,6 +22,8 @@ export interface NormalizedProcessFile {
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";
+  /** true only when the provider explicitly supplied a file lifecycle status. */
+  statusExplicit?: boolean;
 }
 
 export interface NormalizedToolPayload {
@@ -35,6 +40,9 @@ export interface NormalizedToolPayload {
   outputText?: string;
   errorText?: string;
   files?: NormalizedProcessFile[];
+  status?: "added" | "deleted" | "modified";
+  /** true only when the provider explicitly supplied a file lifecycle status. */
+  statusExplicit?: boolean;
   filePath?: string;
   patch?: string;
   additions?: number;
@@ -55,6 +63,7 @@ export interface NormalizedFileDiff {
   additions: number;
   deletions: number;
   status?: "added" | "deleted" | "modified";
+  statusExplicit?: boolean;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -289,11 +298,6 @@ export const extractFilePathFromPatch = (patch: string): string => {
   return "";
 };
 
-const countPatchChanges = (patch: string) => ({
-  additions: (patch.match(/^\+[^+]/gm) || []).length,
-  deletions: (patch.match(/^-[^-]/gm) || []).length,
-});
-
 const getToolKind = (toolName: unknown, command: string, patch: string): NormalizedToolKind => {
   const normalized = normalizeName(toolName);
   for (const [kind, aliases] of Object.entries(TOOL_KIND_ALIASES) as Array<[NormalizedToolKind, string[]]>) {
@@ -369,7 +373,16 @@ const getPatch = (data: unknown, args: unknown, result: unknown): string => {
       ["data", "diff"],
     ]
   );
-  if (directPatch) return directPatch;
+  if (directPatch) {
+    // 部分 provider（如 droid 的结构化 tool_result）会把补丁按 JSON 字符串再编码
+    // 一层，换行以字面 \n 传入。真正可 git apply 的补丁必然含真实换行，
+    // 因此仅在「没有任何真实换行却含字面 \n」时才反转义，避免破坏
+    // 内容里恰好包含反斜杠+n 文本的多行补丁。
+    if (!directPatch.includes("\n") && directPatch.includes("\\n")) {
+      return directPatch.replace(/\\n/g, "\n");
+    }
+    return directPatch;
+  }
 
   const resultRecord = asRecord(result);
   const structuredPatch = Array.isArray(resultRecord.structuredPatch) ? resultRecord.structuredPatch : [];
@@ -415,7 +428,9 @@ const buildFiles = (
   filePath: string,
   patch: string,
   additions?: number,
-  deletions?: number
+  deletions?: number,
+  status?: NormalizedProcessFile["status"],
+  statusExplicit = false,
 ): NormalizedProcessFile[] => {
   if (!filePath) return [];
 
@@ -435,7 +450,8 @@ const buildFiles = (
     patch: patch || undefined,
     additions,
     deletions,
-    status: patch ? "modified" : undefined,
+    status: status || (patch ? "modified" : undefined),
+    statusExplicit,
   }];
 };
 
@@ -513,7 +529,23 @@ export const normalizeToolEvent = (
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
   const outputText = unwrapToolText(result);
   const errorText = dataRecord.isError ? getErrorText(dataRecord, result) : undefined;
-  const files = buildFiles(toolKind, filePath, patch, changes.additions, changes.deletions);
+  const statusCandidate = dataRecord.status
+    ?? asRecord(result).status
+    ?? asRecord(dataRecord.detail).status;
+  const explicitStatus = statusCandidate === "added"
+    || statusCandidate === "deleted"
+    || statusCandidate === "modified"
+    ? statusCandidate
+    : undefined;
+  const files = buildFiles(
+    toolKind,
+    filePath,
+    patch,
+    changes.additions,
+    changes.deletions,
+    explicitStatus,
+    explicitStatus !== undefined,
+  );
   const detail = buildDetail({
     phase,
     toolKind,
@@ -538,6 +570,8 @@ export const normalizeToolEvent = (
     outputText,
     errorText,
     files: files.length > 0 ? files : undefined,
+    status: explicitStatus,
+    statusExplicit: explicitStatus !== undefined,
     filePath: filePath || undefined,
     patch: patch || undefined,
     additions: changes.additions,
@@ -553,15 +587,94 @@ export const normalizeToolEvent = (
   };
 };
 
-export const buildDiffsFromToolEvent = (payload: Pick<NormalizedToolPayload, "patch" | "filePath" | "additions" | "deletions" | "isError">): NormalizedFileDiff[] => {
-  if (payload.isError || !payload.patch || !payload.filePath) return [];
-  return [{
-    file: payload.filePath,
-    patch: payload.patch,
-    additions: payload.additions || 0,
-    deletions: payload.deletions || 0,
-    status: "modified",
-  }];
+export const withoutToolDiffPayload = <T extends object>(event: T): T => {
+  const record = event as UnknownRecord;
+  const files = Array.isArray(record.files)
+    ? record.files.map((rawFile) => {
+        const file = { ...asRecord(rawFile) };
+        delete file.patch;
+        delete file.additions;
+        delete file.deletions;
+        delete file.status;
+        delete file.statusExplicit;
+        if (["edited", "modified", "written"].includes(String(file.action || ""))) file.action = undefined;
+        return file;
+      })
+    : record.files;
+  const sanitized = { ...record, files } as UnknownRecord;
+  delete sanitized.patch;
+  delete sanitized.additions;
+  delete sanitized.deletions;
+  delete sanitized.status;
+  delete sanitized.statusExplicit;
+  return sanitized as T;
+};
+
+/**
+ * 把一次工具事件转成可审核的文件差异。
+ *
+ * `fallback` 由 TurnFileDiffTracker 算出：工具执行前抓磁盘快照、执行后再读一次，
+ * 得到「本轮起点 → 当前内容」的真实差异。
+ *
+ * 优先级：**自算兜底 > provider 补丁 > provider 生命周期声明 > 不出 diff**。
+ *
+ * 兜底之所以排在 provider 补丁前面，是因为它由磁盘真实内容算出，反向应用必然
+ * 成功；而 provider 的补丁常常基于过期上下文——看着有正常的 +/- 行、能骗过
+ * 「是否算变更」的检查，正反向却都 apply 不上，这正是「审核弹窗显示无法撤销」
+ * 的主要成因。有实测数据时，以实测为准。
+ *
+ * 另一个关键点：provider 只回报文件路径 + modified 状态、却不带补丁时，绝不能再
+ * 产出 `{ patch: "", additions: 0, deletions: 0 }` 这种条目。它会让 diff 卡片
+ * 显示 +0 -0，而审核撤销拿到空补丁后只能拒绝，用户看到的就是「改了但撤不掉」。
+ */
+export const buildDiffsFromToolEvent = (
+  payload: Pick<NormalizedToolPayload, "patch" | "filePath" | "additions" | "deletions" | "isError" | "status" | "statusExplicit">,
+  fallback?: ComputedFileDiff | null,
+): NormalizedFileDiff[] => {
+  if (payload.isError || !payload.filePath) return [];
+
+  if (fallback && patchDescribesChange(fallback.patch)) {
+    return [{
+      file: fallback.file,
+      patch: fallback.patch,
+      additions: fallback.additions,
+      deletions: fallback.deletions,
+      status: fallback.status,
+      statusExplicit: fallback.statusExplicit,
+    }];
+  }
+
+  // provider 补丁必须保留原始字节：CRLF 文件补丁的 hunk 行尾携带 \r，
+  // trim() 会剥掉首尾 \r 导致 git apply 逐字节匹配失败。判空用 trim，
+  // 实际使用的补丁只去掉尾随换行符本身。
+  const providerPatchRaw = typeof payload.patch === "string" ? payload.patch : "";
+  const providerPatch = providerPatchRaw.trim() ? providerPatchRaw.replace(/\n+$/, "") : "";
+  if (patchDescribesChange(providerPatch)) {
+    const counts = countPatchChanges(providerPatch);
+    return [{
+      file: payload.filePath,
+      patch: providerPatch,
+      additions: counts.additions || payload.additions || 0,
+      deletions: counts.deletions || payload.deletions || 0,
+      status: payload.status,
+      statusExplicit: payload.statusExplicit === true,
+    }];
+  }
+
+  // provider 明确声明的新建/删除是真实生命周期变更。空文件没有内容差异，
+  // 补丁为空也成立；撤销时要能把它删掉或建回来，所以必须放行。
+  if (payload.statusExplicit === true && (payload.status === "added" || payload.status === "deleted")) {
+    return [{
+      file: payload.filePath,
+      patch: providerPatch,
+      additions: payload.additions || 0,
+      deletions: payload.deletions || 0,
+      status: payload.status,
+      statusExplicit: true,
+    }];
+  }
+
+  return [];
 };
 
 export const normalizeQuestionProcessEvent = (data: unknown) => {

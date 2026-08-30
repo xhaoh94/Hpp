@@ -46,6 +46,14 @@ describe("processEntryMerge", () => {
     ]);
   });
 
+  it("preserves an explicit lifecycle status while merging process files", () => {
+    const files = mergeProcessFiles([
+      fileEntry("src/new.ts", { status: "added", statusExplicit: true }),
+      fileEntry("src/new.ts", { additions: 1 }),
+    ]);
+    expect(files[0]).toMatchObject({ status: "added", statusExplicit: true });
+  });
+
   it("merges consecutive file tool entries with the same kind and state", () => {
     const entries = [
       processEntry({

@@ -131,18 +131,17 @@ describe("Claude subagent bridge", () => {
         description: "Research asynchronously",
         prompt: "Research the issue.",
         subagent_type: "research",
-        run_in_background: true,
       },
       toolUseResult: {
         taskId: "task-background-1",
         status: "running",
-        background: true,
       },
     });
 
     expect(getSubagentEvents(events).at(-1)).toEqual(expect.objectContaining({
       phase: "started",
       state: "running",
+      background: true,
       subagents: [expect.objectContaining({
         id: "task-background-1",
         label: "Research",

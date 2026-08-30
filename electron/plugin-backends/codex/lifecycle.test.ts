@@ -52,6 +52,21 @@ describe("Codex lifecycle", () => {
     spawnMock.mockReset();
   });
 
+  it("ignores output from a replaced Codex worker", () => {
+    const events: AgentEvent[] = [];
+    const agent = new CodexAgent("session-1", (event) => events.push(event as AgentEvent));
+    const oldWorker = new FakeCodexProcess();
+    const currentWorker = new FakeCodexProcess();
+    const internals = agent as unknown as {
+      process: FakeCodexProcess;
+      handleWorkerMessage: (message: Record<string, unknown>, sourceChild?: object) => void;
+    };
+    internals.process = currentWorker;
+    internals.handleWorkerMessage({ type: "stream_delta", delta: "stale" }, oldWorker);
+
+    expect(events).toEqual([]);
+  });
+
   it("waits for worker disposal without emitting a disconnect", async () => {
     const child = new FakeCodexProcess();
     respondToLifecycle(child);

@@ -12,13 +12,35 @@ type MutableClaudeAgent = {
   pendingResponses: Map<string, (message: Record<string, unknown>) => void>;
   pendingUIRequestIds: Set<string>;
   pendingGuidance: { id: string; accepted: boolean; responseStarted: boolean } | null;
-  handleWorkerMessage: (message: Record<string, unknown>) => void;
+  handleWorkerMessage: (message: Record<string, unknown>, sourceChild?: object) => void;
   handleWorkerTermination: (child: object, detail: string) => void;
 };
 
 const mutable = (agent: ClaudeSDKAgent) => agent as unknown as MutableClaudeAgent;
 
 describe("ClaudeSDKAgent busy lifecycle", () => {
+  it("ignores output from a replaced SDK worker", () => {
+    const events: Record<string, unknown>[] = [];
+    const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));
+    const oldWorker = { stdin: { writable: true, write: vi.fn() } };
+    const currentWorker = { stdin: { writable: true, write: vi.fn() } };
+    Object.assign(mutable(agent), {
+      process: currentWorker,
+      isReady: true,
+      activePromptId: "prompt-two",
+      turnActive: true,
+    });
+
+    mutable(agent).handleWorkerMessage({
+      type: "tool_execution_end",
+      toolUseId: "old-tool",
+      toolName: "Write",
+      output: { filePath: "src/old.ts", patch: "@@ -1 +1 @@\\n-old\\n+new" },
+    }, oldWorker);
+
+    expect(events).toEqual([]);
+  });
+
   it("forwards the Hpp host system prompt to the SDK worker", async () => {
     const agent = new ClaudeSDKAgent("session-one");
     const write = vi.fn();

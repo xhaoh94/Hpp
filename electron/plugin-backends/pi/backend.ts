@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { join } from "path";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
-import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText } from "../../plugin-runtime/process-events";
+import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText, withoutToolDiffPayload } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
 import {
   formatSubagentModel,
@@ -184,6 +184,12 @@ const getPiSubagentUsage = (result: UnknownRecord) => {
 };
 
 const getPiSubagentResultText = (result: UnknownRecord) => {
+  // 子 Agent 可能已经完成过一轮工具调用并有旧 output，但当前仍在运行。
+  // 运行中优先展示最近活动，否则摘要会一直停留在上一轮结果。
+  if (result.exitCode === -1) {
+    const activity = truncatePiSubagentText(result.message);
+    if (activity) return activity;
+  }
   const direct = [result.output, result.message, result.summary, result.detail, result.errorMessage, result.stderr]
     .map((value) => truncatePiSubagentText(value))
     .find(Boolean);
@@ -236,7 +242,15 @@ const buildPiSubagentEvent = (
   terminal: boolean,
 ): UnknownRecord => {
   const toolCallId = String(record.toolCallId || record.callId || record.id || "pi-subagent");
-  const args = asRecord(record.args || start?.args);
+  const recordArgs = asRecord(record.args);
+  const startArgs = asRecord(start?.args);
+  const args = Object.keys(recordArgs).length > 0 ? { ...startArgs, ...recordArgs } : startArgs;
+  const resultRecord = asRecord(record.result);
+  const background = record.background === true
+    || args.background === true
+    || args.run_in_background === true
+    || args.runInBackground === true
+    || resultRecord.background === true;
   const action = record.action === "resumeAgent" || record.action === "resume"
     || start?.action === "resumeAgent"
     || asRecord(record.result).action === "resumeAgent"
@@ -299,6 +313,7 @@ const buildPiSubagentEvent = (
     timestamp: startedAt,
     startedAt,
     completedAt: completed ? Date.now() : undefined,
+    ...(background ? { background: true } : {}),
     agentThreadId: subagents[0]?.id || toolCallId,
     receiverThreadIds: subagents.map((subagent) => subagent.id),
     source: "pi",
@@ -336,6 +351,12 @@ export class PiSDKAgent {
   private guidancePendingResponse = false;
   private piSubagentStarts = new Map<string, PiSubagentStart>();
   private piSubagentTerminalStates = new Map<string, NativeSubagentStatus>();
+  // Ordinary tool end notifications can be replayed by an adapter after a
+  // turn is settled. Keep operation ids until the next turn so a replay cannot
+  // create a second process entry or append the same Diff again.
+  private activeToolCallIds = new Set<string>();
+  private completedToolCallIds = new Set<string>();
+  private ignoredToolCallIds = new Set<string>();
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -409,7 +430,7 @@ export class PiSDKAgent {
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (!line.trim()) continue;
         try {
-          this.handleWorkerMessage(JSON.parse(line));
+          this.handleWorkerMessage(JSON.parse(line), child);
         } catch {
           // Ignore non-protocol output from dependencies.
         }
@@ -504,14 +525,10 @@ export class PiSDKAgent {
 
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
-    if (this.isAborting) this.finishAbortState();
-    if (this.compactionActive) throw new Error("SESSION_BUSY");
-
-    if (this.turnActive) {
-      this.completeTurn(true);
-    } else {
-      this.prepareNewTurn();
+    if (this.isAborting || this.compactionActive || this.turnActive || this.activePromptIds.size > 0) {
+      throw new Error("SESSION_BUSY");
     }
+    this.prepareNewTurn();
 
     const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptIds.add(promptId);
@@ -655,6 +672,8 @@ export class PiSDKAgent {
     this.pendingAssistantTextNeedsEmit = false;
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
+    for (const toolCallId of this.activeToolCallIds) this.ignoredToolCallIds.add(toolCallId);
+    this.activeToolCallIds.clear();
     this.turnActive = false;
     this.eventBuffer.clear();
     this.interruptPiSubagents("用户已中止");
@@ -826,6 +845,9 @@ export class PiSDKAgent {
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
+    this.activeToolCallIds.clear();
+    this.completedToolCallIds.clear();
+    this.ignoredToolCallIds.clear();
     this.turnActive = false;
     this.agentEndObserved = false;
     this.compactionActive = false;
@@ -893,7 +915,8 @@ export class PiSDKAgent {
     });
   }
 
-  private handleWorkerMessage(data: unknown) {
+  private handleWorkerMessage(data: unknown, sourceChild?: ChildProcess) {
+    if (sourceChild && this.process !== sourceChild) return;
     const record = asRecord(data);
     const messageId = record.id !== undefined && record.id !== null ? String(record.id) : "";
     if (messageId) {
@@ -1030,6 +1053,7 @@ export class PiSDKAgent {
         break;
       case "tool_execution_start": {
         this.clearTurnFallback();
+        const toolCallId = String(record.toolCallId || record.callId || record.id || "").trim();
         if (isNativeSubagentToolName(record.toolName)) {
           const toolCallId = String(record.toolCallId || record.callId || record.id || `pi-subagent-${Date.now()}`);
           if (this.piSubagentTerminalStates.has(toolCallId)) break;
@@ -1041,6 +1065,11 @@ export class PiSDKAgent {
           this.emitEvent(buildPiSubagentEvent({ ...record, toolCallId }, this.piSubagentStarts.get(toolCallId), false));
           break;
         }
+        if (!this.turnActive && this.activePromptIds.size === 0) break;
+        if (toolCallId && (
+          this.ignoredToolCallIds.has(toolCallId) || this.completedToolCallIds.has(toolCallId)
+        )) break;
+        if (toolCallId) this.activeToolCallIds.add(toolCallId);
         this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
         break;
       }
@@ -1058,6 +1087,12 @@ export class PiSDKAgent {
           this.emitEvent(buildPiSubagentEvent({ ...record, toolCallId }, start, false));
           break;
         }
+        const toolCallId = String(record.toolCallId || record.callId || record.id || "").trim();
+        if (!this.turnActive && this.activePromptIds.size === 0) break;
+        if (toolCallId && (
+          this.ignoredToolCallIds.has(toolCallId) || this.completedToolCallIds.has(toolCallId)
+        )) break;
+        if (toolCallId) this.activeToolCallIds.add(toolCallId);
         const detail = unwrapToolText(record.partialResult);
         if (detail) {
           this.emitEvent(normalizeToolEvent("tool_start", {
@@ -1090,6 +1125,11 @@ export class PiSDKAgent {
           }
           break;
         }
+        const toolCallId = String(record.toolCallId || record.callId || record.id || "").trim();
+        if (!this.turnActive && this.activePromptIds.size === 0) break;
+        if (toolCallId && (
+          this.ignoredToolCallIds.has(toolCallId) || this.completedToolCallIds.has(toolCallId)
+        )) break;
         const toolEvent = normalizeToolEvent("tool_end", {
           ...record,
           args: record.args,
@@ -1097,9 +1137,13 @@ export class PiSDKAgent {
           output: record.result,
           name: record.toolName,
         });
-        this.emitEvent(toolEvent);
+        this.emitEvent(withoutToolDiffPayload(toolEvent));
         const diffs = buildDiffsFromToolEvent(toolEvent);
         if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+        if (toolCallId) {
+          this.activeToolCallIds.delete(toolCallId);
+          this.completedToolCallIds.add(toolCallId);
+        }
         this.refreshAgentEndFallback();
         break;
       }
@@ -1267,6 +1311,8 @@ export class PiSDKAgent {
     if (this.pendingUIRequestIds.size > 0) return;
     if (this.activePromptIds.size > 0) return;
     this.clearTurnFallback();
+    for (const toolCallId of this.activeToolCallIds) this.ignoredToolCallIds.add(toolCallId);
+    this.activeToolCallIds.clear();
     if (this.pendingAssistantError) {
       this.emitEvent({
         type: "process_event",
@@ -1324,6 +1370,9 @@ export class PiSDKAgent {
     this.pendingAssistantTextNeedsEmit = false;
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
+    this.activeToolCallIds.clear();
+    this.completedToolCallIds.clear();
+    this.ignoredToolCallIds.clear();
     this.turnActive = false;
     this.agentEndObserved = false;
     this.turnToken += 1;
@@ -1339,6 +1388,7 @@ export class PiSDKAgent {
     this.pendingAssistantTextNeedsEmit = false;
     this.pendingUIRequestIds.clear();
     this.activePromptIds.clear();
+    this.activeToolCallIds.clear();
     this.turnActive = false;
     this.agentEndObserved = false;
     this.compactionActive = false;

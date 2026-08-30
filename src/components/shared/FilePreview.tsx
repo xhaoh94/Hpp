@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Component, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useChatStore } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import {
@@ -482,7 +483,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
 
   if (!activeFilePath) return null;
 
-  return (
+  return createPortal(
     <div className="fp-overlay" onClick={handleClose}>
       <div className={`fp-modal ${isMarkdown ? "fp-has-toolbar" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="fp-header">
@@ -706,6 +707,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
           </button>
         </div>
       )}
-    </div>
+    </div>,
+    document.body
   );
 }

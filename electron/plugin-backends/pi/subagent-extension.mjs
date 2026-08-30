@@ -79,6 +79,47 @@ const getMessageText = (message) => {
   return getTextFromContent(message.content) || nonEmptyString(message.text) || "";
 };
 
+const CHILD_TOOL_LABELS = {
+  read: "读取文件",
+  grep: "搜索内容",
+  find: "查找文件",
+  ls: "查看目录",
+  bash: "执行命令",
+  edit: "编辑文件",
+  write: "写入文件",
+  fffind: "查找文件",
+  ffgrep: "搜索内容",
+};
+
+const getChildToolInput = (event) => {
+  if (isRecord(event?.args)) return event.args;
+  if (isRecord(event?.input)) return event.input;
+  if (isRecord(event?.parameters)) return event.parameters;
+  return {};
+};
+
+const getChildToolDetail = (event) => {
+  const input = getChildToolInput(event);
+  const value = input.command || input.path || input.filePath || input.file_path
+    || input.pattern || input.query || input.task || input.prompt;
+  if (typeof value === "string" && value.trim()) return truncateText(value.trim(), 180);
+  return "";
+};
+
+const getChildToolActivity = (event, phase) => {
+  const rawName = nonEmptyString(event?.toolName || event?.name || event?.tool) || "工具";
+  const normalizedName = rawName.toLowerCase().replace(/[\s-]+/g, "_");
+  const label = CHILD_TOOL_LABELS[normalizedName] || `使用 ${rawName}`;
+  const detail = getChildToolDetail(event);
+  if (phase === "start") return `正在${label}${detail ? `：${detail}` : ""}`;
+  if (phase === "end") return `已完成${label}，正在分析结果…`;
+  return `正在处理${label}${detail ? `：${detail}` : ""}…`;
+};
+
+const getMessageUpdateEvent = (event) => (
+  isRecord(event?.assistantMessageEvent) ? event.assistantMessageEvent : event
+);
+
 const getFinalOutput = (result) => {
   const direct = nonEmptyString(result?.output);
   if (direct) return direct;
@@ -341,6 +382,9 @@ const toPublicResult = (result) => ({
   task: truncateText(result.task, MAX_TASK_OUTPUT_BYTES),
   exitCode: result.exitCode,
   output: truncateText(getFinalOutput(result), MAX_TASK_OUTPUT_BYTES),
+  // `message` doubles as the live activity while a child is running. Once the
+  // child finishes, output/errorMessage carries the authoritative result.
+  message: truncateText(result.currentActivity || result.message, MAX_TASK_OUTPUT_BYTES),
   stderr: truncateText(result.stderr, MAX_STDERR_BYTES),
   usage: result.usage,
   model: result.model,
@@ -348,6 +392,13 @@ const toPublicResult = (result) => ({
   errorMessage: result.errorMessage,
   step: result.step,
 });
+
+const getPartialResultFromUpdate = (partial) => {
+  const details = isRecord(partial?.details) ? partial.details : {};
+  const results = Array.isArray(details.results) ? details.results : [];
+  if (isRecord(results[0])) return results[0];
+  return isRecord(partial) && typeof partial.exitCode === "number" ? partial : null;
+};
 
 const makeDetails = (mode, agentScope, projectAgentsDir, results) => ({
   version: 1,
@@ -399,6 +450,8 @@ const runSingleAgent = async ({
     exitCode: -1,
     messages: [],
     output: "",
+    currentActivity: `正在启动 ${agent.name}…`,
+    liveOutput: "",
     stderr: "",
     usage: createUsage(),
     // Prefer the child process' actual model once its first assistant message
@@ -407,12 +460,35 @@ const runSingleAgent = async ({
     model: agent.model,
     step,
   };
-  const emitUpdate = () => {
+  let progressUpdateTimer = null;
+  const emitUpdateNow = () => {
     if (!onUpdate) return;
+    if (progressUpdateTimer) {
+      clearTimeout(progressUpdateTimer);
+      progressUpdateTimer = null;
+    }
+    const liveText = result.exitCode === -1
+      ? result.liveOutput || result.currentActivity || getFinalOutput(result)
+      : getFinalOutput(result) || result.currentActivity;
     onUpdate({
-      content: [{ type: "text", text: truncateText(getFinalOutput(result) || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],
+      content: [{ type: "text", text: truncateText(liveText || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],
       details: makeDetails([result]),
     });
+  };
+  const emitProgressUpdate = () => {
+    if (!onUpdate || progressUpdateTimer) return;
+    progressUpdateTimer = setTimeout(() => {
+      progressUpdateTimer = null;
+      emitUpdateNow();
+    }, 150);
+  };
+  const emitUpdate = () => emitUpdateNow();
+  const setCurrentActivity = (value, immediate = false) => {
+    const activity = nonEmptyString(value);
+    if (!activity || activity === result.currentActivity) return;
+    result.currentActivity = activity;
+    if (immediate) emitUpdateNow();
+    else emitProgressUpdate();
   };
 
   if (!agent) return result;
@@ -483,6 +559,12 @@ const runSingleAgent = async ({
         return;
       }
       if (interactive && event.type === "extension_ui_request") {
+        const request = isRecord(event.request) ? event.request : event;
+        const method = String(request.method || request.type || "").toLowerCase();
+        setCurrentActivity(
+          method === "select" || method === "questionnaire" ? "等待用户选择…" : "等待用户确认…",
+          true,
+        );
         void (async () => {
           let response;
           try {
@@ -501,6 +583,7 @@ const runSingleAgent = async ({
         return;
       }
       if (interactive && event.type === "agent_end") {
+        setCurrentActivity("正在整理最终结果…");
         rpcCompleted = true;
         requestRpcExit();
         return;
@@ -513,11 +596,55 @@ const runSingleAgent = async ({
         }
         return;
       }
+      if (event.type === "message_start") {
+        const message = event.message;
+        if (message?.role === "assistant") setCurrentActivity("正在分析任务…");
+        return;
+      }
+      if (event.type === "message_update") {
+        const update = getMessageUpdateEvent(event);
+        const updateType = String(update?.type || "");
+        if (updateType === "text_delta") {
+          const delta = String(update?.delta || "");
+          if (delta) {
+            result.liveOutput = `${result.liveOutput}${delta}`.slice(-MAX_TASK_OUTPUT_BYTES);
+            const preview = result.liveOutput.replace(/\s+/g, " ").trim();
+            const livePreview = preview.length > 180 ? `…${preview.slice(-179)}` : preview;
+            setCurrentActivity(`正在输出：${livePreview}`);
+          } else {
+            setCurrentActivity("正在整理结果…");
+          }
+        } else if (updateType === "thinking_delta") {
+          setCurrentActivity("正在分析任务…");
+        }
+        return;
+      }
+      if (event.type === "tool_execution_start") {
+        setCurrentActivity(getChildToolActivity(event, "start"), true);
+        return;
+      }
+      if (event.type === "tool_execution_update") {
+        setCurrentActivity(getChildToolActivity(event, "update"));
+        return;
+      }
+      if (event.type === "tool_execution_end") {
+        setCurrentActivity(getChildToolActivity(event, "end"));
+        return;
+      }
+      if (event.type === "agent_end") {
+        setCurrentActivity("正在整理最终结果…");
+        return;
+      }
+      if (event.type === "tool_result_end") {
+        setCurrentActivity("已收到工具结果，正在分析…");
+      }
       if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
         if (result.messages.length < MAX_MESSAGE_COUNT) result.messages.push(event.message);
         const message = event.message;
         if (message.role === "assistant") {
           result.output = getMessageText(message) || result.output;
+          result.liveOutput = "";
+          setCurrentActivity(getMessageText(message) ? "已完成一轮输出，继续工作…" : "正在继续分析…");
           result.usage.turns += 1;
           const usage = isRecord(message.usage) ? message.usage : {};
           result.usage.input += Number(usage.input) || 0;
@@ -607,6 +734,9 @@ const runSingleAgent = async ({
       result.errorMessage = result.stderr || "子 Agent 进程异常退出";
     }
     result.output = truncateText(getFinalOutput(result), MAX_TASK_OUTPUT_BYTES);
+    result.currentActivity = result.stopReason
+      ? result.errorMessage || (result.stopReason === "timeout" ? "已超时" : "已停止")
+      : result.output ? "已完成" : "已完成（未返回正文）";
     emitUpdate();
     return result;
   } catch (error) {
@@ -619,6 +749,7 @@ const runSingleAgent = async ({
       result.stopReason = "error";
       result.errorMessage = error instanceof Error ? error.message : String(error);
     }
+    result.currentActivity = result.errorMessage;
     emitUpdate();
     return result;
   } finally {
@@ -848,10 +979,13 @@ export const createHppSubagentExtension = ({
         for (let index = 0; index < chain.length; index += 1) {
           const item = chain[index];
           const current = { ...item, task: item.task.replace(/\{previous\}/g, previous) };
-          const result = await run(current, index + 1, (partial) => onUpdate?.({
-            content: [{ type: "text", text: truncateText(getResultOutput(partial), MAX_TASK_OUTPUT_BYTES) }],
-            details: details([...results, partial]),
-          }), index);
+          const result = await run(current, index + 1, (partial) => {
+            const partialResult = getPartialResultFromUpdate(partial) || partial;
+            onUpdate?.({
+              content: [{ type: "text", text: truncateText(getFinalOutput(partialResult) || partialResult.message || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],
+              details: details([...results, partialResult]),
+            });
+          }, index);
           results.push(result);
           if (isFailedResult(result)) {
             return {
@@ -883,15 +1017,18 @@ export const createHppSubagentExtension = ({
           exitCode: -1,
           messages: [],
           output: "",
+          currentActivity: "等待执行…",
           stderr: "",
           usage: createUsage(),
         }));
         const emitParallelUpdate = () => onUpdate?.({
-          content: [{ type: "text", text: `并行任务：${allResults.filter((result) => result.exitCode !== -1).length}/${allResults.length} 已完成` }],
+          content: [{ type: "text", text: `并行任务：${allResults.filter((result) => typeof result.exitCode === "number" && result.exitCode !== -1).length}/${allResults.length} 已完成` }],
           details: details(allResults),
         });
+        emitParallelUpdate();
         const results = await mapWithConcurrencyLimit(tasks, MAX_CONCURRENCY, (item, index) => run(item, undefined, (partial) => {
-          allResults[index] = partial;
+          const partialResult = getPartialResultFromUpdate(partial);
+          if (partialResult) allResults[index] = partialResult;
           emitParallelUpdate();
         }, index));
         const successCount = results.filter((result) => !isFailedResult(result)).length;
@@ -907,10 +1044,13 @@ export const createHppSubagentExtension = ({
       }
 
       const item = { agent: nonEmptyString(params.agent) || "", task: nonEmptyString(params.task) || "", cwd: nonEmptyString(params.cwd) };
-      const result = await run(item, undefined, onUpdate ? (partial) => onUpdate({
-        content: [{ type: "text", text: truncateText(getFinalOutput(partial) || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],
-        details: details([partial]),
-      }) : undefined);
+      const result = await run(item, undefined, onUpdate ? (partial) => {
+        const partialResult = getPartialResultFromUpdate(partial) || partial;
+        onUpdate({
+          content: [{ type: "text", text: truncateText(getFinalOutput(partialResult) || partialResult.message || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],
+          details: details([partialResult]),
+        });
+      } : undefined);
       if (isFailedResult(result)) {
         return {
           content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}：${truncateText(getResultOutput(result), MAX_TOOL_OUTPUT_BYTES)}` }],

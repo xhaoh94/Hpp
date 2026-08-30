@@ -12,6 +12,12 @@ interface OpenCodeInternals {
   process: ChildProcess | null;
   eventSource: { destroy: () => void } | null;
   streamedContent: boolean;
+  activeOpenCodeUserMessageId: string | null;
+  activeOpenCodeUserMessageIds: Set<string>;
+  activeTurnDiffs: Array<Record<string, unknown>>;
+  activeTurnDiffsAuthoritative: boolean;
+  idleSettlementRevision: number;
+  idleSettlementInFlight: boolean;
   turnActive: boolean;
   turnRevision: number;
   permissionMode: "ask" | "auto" | "full-access";
@@ -19,8 +25,9 @@ interface OpenCodeInternals {
   pendingQuestionToolParts: Set<string>;
   handleSSEEvent: (eventType: string, data: unknown) => void;
   handleSSEDisconnect: (request: { destroy: () => void }, detail: string) => void;
-  fetchAssistantMessage: (turnRevision?: number) => Promise<void>;
-  httpGet: (path: string) => Promise<unknown>;
+  fetchTurnDiff: (userMessageId: string | null, turnRevision: number, settlementRevision?: number) => Promise<void>;
+  fetchAssistantMessage: (turnRevision?: number, settlementRevision?: number) => Promise<void>;
+  httpGet: (path: string, timeoutMs?: number) => Promise<unknown>;
   httpPost: (path: string, data: unknown) => Promise<unknown>;
   killProcess: () => Promise<void>;
   killProcessTree: (childProcess: ChildProcess) => Promise<void>;
@@ -99,6 +106,456 @@ describe("OpenCode lifecycle", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "agent_end" }));
   });
 
+  it("uses diffs embedded in the completed user summary without another REST wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(async () => []);
+      const patch = "Index: src/app.ts\n===\n--- src/app.ts\n+++ src/app.ts\n@@ -1 +1 @@\n-old\n+new";
+
+      internals.handleSSEEvent("message.updated", {
+        properties: {
+          sessionID: "ses_source",
+          info: {
+            id: "msg_user_1",
+            role: "user",
+            summary: { diffs: [{ file: "src/app.ts", patch, additions: 1, deletions: 1 }] },
+          },
+        },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+
+      expect(internals.httpGet).not.toHaveBeenCalled();
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "diff_update",
+        diffs: [expect.objectContaining({
+          file: "src/app.ts",
+          patch: expect.stringContaining("diff --git a/src/app.ts b/src/app.ts"),
+        })],
+      }));
+      expect(agent.isIdle()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("merges authoritative summaries from the initial prompt and guidance", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(async () => []);
+      const patch = (file: string) => `Index: ${file}\n===\n--- ${file}\n+++ ${file}\n@@ -1 +1 @@\n-old\n+new`;
+
+      for (const [id, file] of [["msg_user_1", "first.ts"], ["msg_guidance", "second.ts"]]) {
+        internals.handleSSEEvent("message.updated", {
+          properties: {
+            sessionID: "ses_source",
+            info: {
+              id,
+              role: "user",
+              summary: { diffs: [{ file, patch: patch(file), additions: 1, deletions: 1 }] },
+            },
+          },
+        });
+      }
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+
+      const diffEvent = events.find((event) => event.type === "diff_update");
+      expect(diffEvent?.diffs?.map((diff) => diff.file)).toEqual(["first.ts", "second.ts"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the ordered patch chain when prompt and guidance edit the same file", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(async () => []);
+      const patch = (from: string, to: string) => `Index: same.ts\n===\n--- same.ts\n+++ same.ts\n@@ -1 +1 @@\n-${from}\n+${to}`;
+
+      for (const [id, from, to] of [
+        ["msg_user_1", "old", "middle"],
+        ["msg_guidance", "middle", "new"],
+      ]) {
+        internals.handleSSEEvent("message.updated", {
+          properties: {
+            sessionID: "ses_source",
+            info: {
+              id,
+              role: "user",
+              summary: { diffs: [{ file: "same.ts", patch: patch(from, to), additions: 1, deletions: 1 }] },
+            },
+          },
+        });
+      }
+      internals.handleSSEEvent("session.idle", { properties: { sessionID: "ses_source" } });
+      await vi.advanceTimersByTimeAsync(801);
+
+      const diffs = events.find((event) => event.type === "diff_update")?.diffs || [];
+      expect(diffs).toHaveLength(2);
+      expect(diffs[0]).toMatchObject({
+        file: "same.ts",
+        patch: expect.stringContaining("-old\n+middle"),
+        additions: 1,
+        deletions: 1,
+      });
+      expect(diffs[1]).toMatchObject({
+        file: "same.ts",
+        patch: expect.stringContaining("-middle\n+new"),
+        additions: 1,
+        deletions: 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("loads the message-scoped diff before settling an idle turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(async () => [{
+        file: "src/app.ts",
+        before: "old\n",
+        after: "new\n",
+        additions: 1,
+        deletions: 1,
+      }]);
+
+      internals.handleSSEEvent("message.updated", {
+        properties: {
+          sessionID: "ses_source",
+          info: { id: "msg_user_1", role: "user" },
+        },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+
+      expect(internals.httpGet).toHaveBeenCalledWith(
+        "/session/ses_source/diff?messageID=msg_user_1",
+        2000,
+      );
+      const diffIndex = events.findIndex((event) => event.type === "diff_update");
+      const endIndex = events.findIndex((event) => event.type === "stream_end");
+      expect(diffIndex).toBeGreaterThanOrEqual(0);
+      expect(endIndex).toBeGreaterThan(diffIndex);
+      expect(events[diffIndex]).toMatchObject({
+        diffs: [expect.objectContaining({ patch: expect.stringContaining("-old\n+new") })],
+      });
+      expect(agent.isIdle()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads a persisted user summary when the message-scoped diff is temporarily empty", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      const patch = "Index: src/app.ts\n===\n--- src/app.ts\n+++ src/app.ts\n@@ -1 +1 @@\n-old\n+new";
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn((path) => path.includes("/diff?")
+        ? Promise.resolve([])
+        : Promise.resolve([{
+          info: {
+            id: "msg_user_1",
+            role: "user",
+            summary: { diffs: [{ file: "src/app.ts", patch, additions: 1, deletions: 1 }] },
+          },
+        }]));
+
+      internals.handleSSEEvent("message.updated", {
+        properties: { sessionID: "ses_source", info: { id: "msg_user_1", role: "user" } },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+
+      expect(internals.httpGet).toHaveBeenNthCalledWith(
+        1,
+        "/session/ses_source/diff?messageID=msg_user_1",
+        2000,
+      );
+      expect(internals.httpGet).toHaveBeenNthCalledWith(
+        2,
+        "/session/ses_source/message",
+        2000,
+      );
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "diff_update",
+        diffs: [expect.objectContaining({ file: "src/app.ts" })],
+      }));
+      expect(agent.isIdle()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to the latest non-empty session.diff on older OpenCode versions", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(async () => {
+        throw new Error("not found");
+      });
+
+      internals.handleSSEEvent("message.updated", {
+        properties: { sessionID: "ses_source", info: { id: "msg_user_1", role: "user" } },
+      });
+      internals.handleSSEEvent("session.diff", {
+        properties: {
+          sessionID: "ses_source",
+          diff: [{ file: "old.ts", before: "a\n", after: "b\n", additions: 1, deletions: 1 }],
+        },
+      });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "diff_update" }));
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "diff_update",
+        diffs: [expect.objectContaining({ file: "old.ts", patch: expect.stringContaining("-a\n+b") })],
+      }));
+      expect(agent.isIdle()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not treat an early empty REST diff as more authoritative than a non-empty SSE snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(async () => []);
+
+      internals.handleSSEEvent("message.updated", {
+        properties: { sessionID: "ses_source", info: { id: "msg_user_1", role: "user" } },
+      });
+      internals.handleSSEEvent("session.diff", {
+        properties: {
+          sessionID: "ses_source",
+          diff: [{ file: "old.ts", before: "a", after: "b", additions: 1, deletions: 1 }],
+        },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "diff_update",
+        diffs: [expect.objectContaining({ file: "old.ts" })],
+      }));
+      expect(agent.isIdle()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a stale message-scoped diff mutate a newer turn", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    let resolveDiff!: (value: unknown) => void;
+    internals.sessionId = "ses_source";
+    internals.turnRevision = 1;
+    internals.turnActive = true;
+    internals.httpGet = vi.fn(() => new Promise((resolve) => {
+      resolveDiff = resolve;
+    }));
+
+    const pending = internals.fetchTurnDiff("msg_user_old", 1);
+    await Promise.resolve();
+    internals.turnRevision = 2;
+    internals.turnActive = true;
+    resolveDiff([{ file: "old.ts", before: "a", after: "b", additions: 1, deletions: 1 }]);
+    await pending;
+
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "diff_update" }));
+  });
+
+  it("cancels an in-flight idle diff settlement when the session becomes busy again", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      let resolveDiff!: (value: unknown) => void;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(() => new Promise((resolve) => {
+        resolveDiff = resolve;
+      }));
+
+      internals.handleSSEEvent("message.updated", {
+        properties: { sessionID: "ses_source", info: { id: "msg_user_1", role: "user" } },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+      internals.handleSSEEvent("session.status", {
+        properties: { sessionID: "ses_source", status: { type: "busy" } },
+      });
+      resolveDiff([{ file: "old.ts", before: "a", after: "b", additions: 1, deletions: 1 }]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(agent.isIdle()).toBe(false);
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "diff_update" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "agent_end" }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reschedules idle settlement when a tail delta arrives during the diff request", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      let resolveFirst!: (value: unknown) => void;
+      let calls = 0;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = true;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn(() => {
+        calls += 1;
+        if (calls === 1) return new Promise((resolve) => { resolveFirst = resolve; });
+        return Promise.resolve([]);
+      });
+
+      internals.handleSSEEvent("message.updated", {
+        properties: { sessionID: "ses_source", info: { id: "msg_user_1", role: "user" } },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+      expect(internals.idleSettlementInFlight).toBe(true);
+      internals.handleSSEEvent("message.part.delta", {
+        properties: { sessionID: "ses_source", partID: "tail", field: "text", delta: "tail" },
+      });
+      resolveFirst([]);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(801);
+
+      expect(calls).toBe(3);
+      expect(agent.isIdle()).toBe(true);
+      expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the assistant REST fallback when the session becomes busy again", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: AgentEvent[] = [];
+      const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+      const internals = agent as unknown as OpenCodeInternals;
+      let resolveMessages!: (value: unknown) => void;
+      internals.sessionId = "ses_source";
+      internals.turnRevision = 1;
+      internals.turnActive = true;
+      internals.streamedContent = false;
+      internals.eventSource = { destroy: vi.fn() };
+      internals.httpGet = vi.fn((path) => path.includes("/diff?")
+        ? Promise.resolve([])
+        : new Promise((resolve) => { resolveMessages = resolve; }));
+
+      internals.handleSSEEvent("message.updated", {
+        properties: { sessionID: "ses_source", info: { id: "msg_user_1", role: "user" } },
+      });
+      internals.handleSSEEvent("session.idle", {
+        properties: { sessionID: "ses_source" },
+      });
+      await vi.advanceTimersByTimeAsync(801);
+      await Promise.resolve();
+      internals.handleSSEEvent("session.status", {
+        properties: { sessionID: "ses_source", status: { type: "busy" } },
+      });
+      resolveMessages([{
+        info: { id: "msg_assistant_1", role: "assistant" },
+        parts: [{ type: "text", text: "stale answer" }],
+      }]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(agent.isIdle()).toBe(false);
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "stream_delta", delta: "stale answer" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "agent_end" }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("clears unfinished tool bookkeeping when an idle session settles", async () => {
     vi.useFakeTimers();
     try {
@@ -165,6 +622,35 @@ describe("OpenCode lifecycle", () => {
     }
   });
 
+  it("preserves cached file changes when an active turn is aborted", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.turnRevision = 1;
+    internals.turnActive = true;
+    internals.httpPost = vi.fn(async () => true);
+    internals.handleSSEEvent("session.diff", {
+      properties: {
+        sessionID: "ses_source",
+        diff: [{
+          file: "changed.ts",
+          patch: "Index: changed.ts\n===\n--- changed.ts\n+++ changed.ts\n@@ -1 +1 @@\n-old\n+new",
+          additions: 1,
+          deletions: 1,
+        }],
+      },
+    });
+
+    await agent.abort();
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "diff_update",
+      diffs: [expect.objectContaining({ file: "changed.ts" })],
+    }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "aborted" }));
+  });
+
   it("clears unfinished tool bookkeeping when the session fails", () => {
     const events: AgentEvent[] = [];
     const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
@@ -175,6 +661,17 @@ describe("OpenCode lifecycle", () => {
     internals.turnRevision = 1;
     internals.turnActive = true;
     internals.runningToolParts.add("tool-write");
+    internals.handleSSEEvent("session.diff", {
+      properties: {
+        sessionID: "ses_source",
+        diff: [{
+          file: "changed.ts",
+          patch: "Index: changed.ts\n===\n--- changed.ts\n+++ changed.ts\n@@ -1 +1 @@\n-old\n+new",
+          additions: 1,
+          deletions: 1,
+        }],
+      },
+    });
 
     internals.handleSSEEvent("session.error", {
       properties: {
@@ -185,6 +682,10 @@ describe("OpenCode lifecycle", () => {
 
     expect(eventSource.destroy).toHaveBeenCalledOnce();
     expect(agent.isIdle()).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "diff_update",
+      diffs: [expect.objectContaining({ file: "changed.ts" })],
+    }));
     expect(events).toContainEqual(expect.objectContaining({ type: "stream_end" }));
     expect(events).toContainEqual(expect.objectContaining({ type: "agent_end" }));
   });
@@ -424,6 +925,7 @@ describe("OpenCode lifecycle", () => {
       },
     });
     expect(events).toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+    expect(internals.activeOpenCodeUserMessageId).toBe("msg_guidance");
   });
 
   it("keeps a steer response start that arrives before prompt_async resolves", async () => {
@@ -479,6 +981,27 @@ describe("OpenCode lifecycle", () => {
     internals.turnActive = false;
 
     await expect(agent.sendGuidance("steer", undefined, {})).rejects.toThrow("SESSION_NOT_RUNNING");
+  });
+
+  it("removes a late-recognized compaction message from diff attribution", () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.sessionId = "ses_source";
+    internals.turnActive = true;
+    internals.eventSource = { destroy: vi.fn() };
+
+    internals.handleSSEEvent("message.updated", {
+      properties: { sessionID: "ses_source", info: { id: "msg_compact_user", role: "user" } },
+    });
+    expect(internals.activeOpenCodeUserMessageId).toBe("msg_compact_user");
+    internals.handleSSEEvent("message.part.updated", {
+      properties: {
+        sessionID: "ses_source",
+        part: { id: "part_compaction", messageID: "msg_compact_user", type: "compaction" },
+      },
+    });
+    expect(internals.activeOpenCodeUserMessageId).toBeNull();
   });
 
   it("renders an OpenCode compaction summary as a context compaction divider, not conversation text", async () => {

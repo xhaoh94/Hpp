@@ -17,11 +17,29 @@ describe("diff block viewport constraints", () => {
     expect(diffBlockSource).toContain("initialFile");
   });
 
-  it("opens the review dialog with the clicked file preselected", () => {
-    expect(diffBlockSource).toContain("reviewInitialFile");
-    expect(diffBlockSource).toContain("setReviewInitialFile(file.file)");
-    expect(diffBlockSource).toContain("setReviewOpen(true)");
+  it("opens the file preview (not the review dialog) when a file row is clicked", () => {
+    expect(diffBlockSource).toContain("FilePreview");
+    expect(diffBlockSource).toContain("setPreviewFile(");
+    expect(diffBlockSource).toContain("filePath={previewFile}");
     expect(diffBlockSource).toContain('aria-haspopup="dialog"');
+    // 点击文件不再直接弹审核弹窗；审核弹窗只由「审核」按钮触发。
+    expect(diffBlockSource).not.toContain("setReviewInitialFile(file.file)");
+  });
+
+  it("keeps the audit button as the only entry to the review dialog", () => {
+    expect(diffBlockSource).toContain('className="chat-diff-review-btn"');
+    expect(diffBlockSource).toContain("ScanSearch");
+    expect(diffBlockSource).toContain("<CodeReviewDialog");
+    expect(diffBlockSource).toContain("setReviewOpen(true)");
+    expect(diffBlockSource).toContain("reviewInitialFile");
+  });
+
+  it("uses the message id as the stable persisted review identity", () => {
+    expect(diffBlockSource).toContain("reviewId: string");
+    expect(diffBlockSource).toContain("reviewId={reviewId}");
+    expect(diffBlockSource).toContain("window.electronAPI.loadReviewUndo({");
+    expect(diffBlockSource).toContain("onUndoStateChange={setUndoState}");
+    expect(diffBlockSource).not.toContain("reverseApplyPatch");
   });
 
   it("notifies the virtualized owner while the review dialog is open", () => {
@@ -39,6 +57,15 @@ describe("diff block viewport constraints", () => {
     expect(chatPanelStyles).toContain(".chat-diff-file-list {");
     expect(chatPanelStyles).toContain("padding: 8px 0;");
     expect(chatPanelStyles).toContain("min-height: 28px;");
+  });
+
+  it("does not let a failed undo preparation erase the real change counts", () => {
+    // 撤销状态在「准备失败」时带的是占位 0/0（rebuild-file buildState 的 error 分支）。
+    // 若直接拿它覆盖，卡片会把 +4 -4 显示成 +0 -0 —— 把「无法安全撤销」
+    // 误渲染成「没有改动」。有 error 时必须保留原始 diff 数据。
+    expect(diffBlockSource).toContain("if (!undoFile || undoFile.error) return file;");
+    expect(diffBlockSource).toContain("additions: undoFile.additions");
+    expect(diffBlockSource).toContain("deletions: undoFile.deletions");
   });
 
   it("keeps the edited-file title and totals on one line", () => {

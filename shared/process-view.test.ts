@@ -5,6 +5,9 @@ import {
   getUserGuidanceText,
   getActiveAssistantTurnId,
   getProcessGroupState,
+  getSubagentActivityLabel,
+  getSubagentProgressLabel,
+  getStreamIdleNoticeDuration,
   getVisibleProcessEntries,
   hasNativeMultiStepProcessPlan,
   groupProcessEntries,
@@ -288,6 +291,40 @@ describe("shared process view model", () => {
     ];
     expect(getVisibleProcessEntries(entries).map((item) => item.id)).toEqual(["narration", "stop"]);
     expect(isProcessInterrupted(entries)).toBe(true);
+  });
+
+  it("merges repeated stream idle notices and sums their durations", () => {
+    const durations = [54_000, 137_000, 107_000, 121_000];
+    const entries = durations.map((duration, index) => {
+      const startedAt = index * 200_000;
+      return entry({
+        id: `idle-${index}`,
+        type: "status",
+        title: "Pi 仍在运行，暂时没有新输出",
+        toolKind: "stream_idle_notice",
+        state: "completed",
+        timestamp: startedAt,
+        startedAt,
+        completedAt: startedAt + duration,
+      });
+    });
+
+    const [merged] = getVisibleProcessEntries(entries);
+
+    expect(getVisibleProcessEntries(entries)).toHaveLength(1);
+    expect(merged.id).toBe("idle-3");
+    expect(merged.accumulatedDurationMs).toBe(54_000 + 137_000 + 107_000);
+    expect(getStreamIdleNoticeDuration(merged, 999_999)).toBe(419_000);
+  });
+
+  it("reports subagent completion and latest live activity", () => {
+    const subagents = [
+      { id: "scout", label: "Scout", status: "running" as const, message: "正在读取文件" },
+      { id: "reviewer", label: "Reviewer", status: "completed" as const, message: "已完成" },
+    ];
+
+    expect(getSubagentProgressLabel(subagents)).toBe("进度 1/2");
+    expect(getSubagentActivityLabel(subagents)).toBe("Scout：正在读取文件");
   });
 
   it("recognizes current and legacy guidance process entries", () => {

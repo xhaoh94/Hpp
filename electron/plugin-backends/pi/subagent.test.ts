@@ -37,7 +37,14 @@ describe("Pi subagent lifecycle", () => {
           mode: "parallel",
           results: [
             { agent: "scout", task: "查找认证代码", exitCode: 0, model: "test/scout", output: "src/auth.ts" },
-            { agent: "reviewer", task: "检查相关测试", exitCode: -1, model: "test/reviewer", output: "正在检查" },
+            {
+              agent: "reviewer",
+              task: "检查相关测试",
+              exitCode: -1,
+              model: "test/reviewer",
+              output: "上一轮结果",
+              message: "正在读取测试文件",
+            },
           ],
         },
       },
@@ -76,7 +83,13 @@ describe("Pi subagent lifecycle", () => {
       source: "pi",
       state: "running",
     });
-    expect(subagentEvents[1]).toMatchObject({ state: "running" });
+    expect(subagentEvents[1]).toMatchObject({
+      state: "running",
+      subagents: [
+        {},
+        { message: "正在读取测试文件" },
+      ],
+    });
     expect(subagentEvents[2]).toMatchObject({
       phase: "completed",
       state: "completed",

@@ -13,19 +13,30 @@ export type RunGitApply = (
   reverse: boolean,
 ) => GitApplyResult;
 
-const defaultRunGitApply: RunGitApply = (cwd, patch, reverse) => spawnSync(
+export const defaultRunGitApply: RunGitApply = (cwd, patch, reverse) => spawnSync(
   "git",
-  ["apply", ...(reverse ? ["--reverse"] : []), "--whitespace=nowarn", "-"],
+  [
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "core.filemode=false",
+    "apply",
+    ...(reverse ? ["--reverse"] : []),
+    "--whitespace=nowarn",
+    "-",
+  ],
   {
     cwd,
-    input: `${patch.trimEnd()}\n`,
+    // 补丁最后一行可能以 \r 结尾（CRLF 文件的内容），trimEnd 会把它当
+    // 空白剥掉导致 git apply 失败。只去尾随换行符，再补回单个分隔换行。
+    input: `${patch.replace(/\n+$/, "")}\n`,
     encoding: "utf-8",
     shell: false,
     maxBuffer: 10 * 1024 * 1024,
   },
 );
 
-const getFailureDetail = (result: GitApplyResult) => {
+export const getFailureDetail = (result: GitApplyResult) => {
   if (result.error) return result.error.message;
   const detail = String(result.stderr || result.stdout || "").trim();
   return detail || `git apply exited with code ${result.status}`;

@@ -211,12 +211,14 @@ export function handleToolEndEvent(
       return {
         ...file,
         patch: patch || undefined,
+        statusExplicit: file.statusExplicit === true,
         changeKey: [
           "diff",
           file.file,
           patch,
           typeof file.additions === "number" ? file.additions : "",
           typeof file.deletions === "number" ? file.deletions : "",
+          file.statusExplicit === true ? "explicit-status" : "inferred-status",
         ].join("|"),
       };
     });

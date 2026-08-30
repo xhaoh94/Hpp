@@ -675,3 +675,69 @@ describe("session draft replacement", () => {
     });
   });
 });
+
+describe("appendLastAssistantDiffs per-file upsert", () => {
+  const diffOf = (file: string, patch: string) => ({
+    file,
+    patch,
+    additions: 1,
+    deletions: 1,
+    status: "modified" as const,
+  });
+
+  beforeEach(() => {
+    useChatStore.setState({
+      messages: [],
+      sessionMessages: {},
+      activeSessionId: null,
+      compactingSessions: {},
+    });
+    useChatStore.getState().addMessage({
+      id: "assistant-1",
+      role: "assistant",
+      content: "改动完成",
+      timestamp: 1,
+    });
+  });
+
+  it("同一文件的重复 diff_update 只保留最新一份（累计快照语义）", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantDiffs([
+      diffOf("a.txt", "patch-v1"),
+      diffOf("b.txt", "patch-b"),
+    ]);
+    // 第二次 tool_end：a.txt 的累计补丁更新为 v2
+    store.appendLastAssistantDiffs([diffOf("a.txt", "patch-v2")]);
+
+    const diffs = useChatStore.getState().messages[0].diffs;
+    expect(diffs).toHaveLength(2);
+    // b.txt 不受影响；a.txt 替换为最新累计补丁
+    expect(diffs?.map((diff) => [diff.file, diff.patch])).toEqual([
+      ["a.txt", "patch-v2"],
+      ["b.txt", "patch-b"],
+    ]);
+  });
+
+  it("不同文件依次追加且保持首次出现顺序", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantDiffs([diffOf("a.txt", "patch-a")]);
+    store.appendLastAssistantDiffs([diffOf("c.txt", "patch-c")]);
+    store.appendLastAssistantDiffs([diffOf("b.txt", "patch-b")]);
+
+    expect(useChatStore.getState().messages[0].diffs?.map((diff) => diff.file)).toEqual([
+      "a.txt",
+      "c.txt",
+      "b.txt",
+    ]);
+  });
+
+  it("同批次内同文件重复时后到者胜出", () => {
+    useChatStore.getState().appendLastAssistantDiffs([
+      diffOf("a.txt", "old"),
+      diffOf("a.txt", "new"),
+    ]);
+    const diffs = useChatStore.getState().messages[0].diffs;
+    expect(diffs).toHaveLength(1);
+    expect(diffs?.[0].patch).toBe("new");
+  });
+});

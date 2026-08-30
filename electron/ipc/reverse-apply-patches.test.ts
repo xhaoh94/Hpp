@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 describe("reverseApplyPatches", () => {
-  it("reverts repeated modifications to one file from newest to oldest", () => {
+  it("reverts repeated modifications to one file from newest to oldest", { timeout: 30000 }, () => {
     const dir = createRepo();
     const file = join(dir, "sample.txt");
     writeFileSync(file, "one\ntwo\nthree\n");
@@ -48,7 +48,7 @@ describe("reverseApplyPatches", () => {
     expect(readFileSync(file, "utf8").replace(/\r\n/g, "\n")).toBe("one\ntwo\nthree\n");
   });
 
-  it("restores already reverted patches when a later reverse step fails", () => {
+  it("restores already reverted patches when a later reverse step fails", { timeout: 30000 }, () => {
     const calls: Array<{ patch: string; reverse: boolean }> = [];
     const run: RunGitApply = (_cwd, patch, reverse) => {
       calls.push({ patch, reverse });

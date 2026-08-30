@@ -1297,6 +1297,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           {msg.role !== "user" && renderSessionReferences()}
           {hasDiffs && (
             <DiffBlock
+              reviewId={msg.id}
               diffs={visibleDiffs}
               projectPath={projectPath}
               onOpenChange={(open) => onDiffOpenChange?.(msg.id, open)}

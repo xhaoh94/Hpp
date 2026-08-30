@@ -1383,6 +1383,7 @@ button:disabled { opacity: 0.48; }
 .subagent-chip.interrupted .subagent-avatar { color: var(--yellow); }
 .subagent-entry-title { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .subagent-entry-meta { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.subagent-entry-activity { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .subagent-entry-detail { margin: 0 8px 8px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--code); color: var(--muted); font-size: 11px; line-height: 1.55; }
 .process-entry > summary::-webkit-details-marker { display: none; }
 .command-group-summary { grid-template-columns: 7px minmax(0, 1fr) 14px; }

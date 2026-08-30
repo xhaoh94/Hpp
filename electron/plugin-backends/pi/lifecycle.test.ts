@@ -47,6 +47,21 @@ describe("Pi lifecycle", () => {
     spawnMock.mockReset();
   });
 
+  it("ignores output from a replaced Pi worker", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const oldWorker = new FakePiProcess();
+    const currentWorker = new FakePiProcess();
+    const internals = agent as unknown as {
+      process: FakePiProcess;
+      handleWorkerMessage: (message: Record<string, unknown>, sourceChild?: object) => void;
+    };
+    internals.process = currentWorker;
+    internals.handleWorkerMessage({ type: "stream_delta", delta: "stale" }, oldWorker);
+
+    expect(events).toEqual([]);
+  });
+
   it("does not report a control RPC as an active conversation turn", () => {
     const agent = new PiSDKAgent("hpp-session");
     const internals = agent as unknown as {
@@ -55,6 +70,67 @@ describe("Pi lifecycle", () => {
     internals.pendingResponses.set("models-request", vi.fn());
 
     expect(agent.isIdle()).toBe(true);
+  });
+
+  it("does not start a second prompt before the first prompt has settled", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child);
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+    await agent.init("C:\\project");
+    await agent.sendMessage("first", undefined, { clientMessageId: "prompt-one" });
+
+    await expect(agent.sendMessage("second", undefined, { clientMessageId: "prompt-two" }))
+      .rejects.toThrow("SESSION_BUSY");
+    expect(agent.isIdle()).toBe(false);
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
+  it("keeps tool timeline events free of diff payloads while preserving explicit status", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      process: FakePiProcess;
+      turnActive: boolean;
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.process = new FakePiProcess();
+    internals.turnActive = true;
+    internals.handleWorkerMessage({
+      type: "tool_execution_end",
+      toolName: "Write",
+      toolCallId: "write-1",
+      result: {
+        filePath: "src/new.ts",
+        patch: "@@ -0,0 +1,1 @@\\n+created",
+        status: "added",
+      },
+    });
+
+    const toolEnd = events.find((event) => event.type === "tool_end");
+    expect(toolEnd).toBeDefined();
+    expect(toolEnd).not.toHaveProperty("patch");
+    expect(toolEnd?.files).toEqual([{ file: "src/new.ts", label: "new.ts", action: undefined }]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "diff_update",
+      diffs: [expect.objectContaining({
+        file: "src/new.ts",
+        status: "added",
+        statusExplicit: true,
+      })],
+    }));
+
+    internals.handleWorkerMessage({
+      type: "tool_execution_end",
+      toolName: "Write",
+      toolCallId: "write-1",
+      result: {
+        filePath: "src/new.ts",
+        patch: "@@ -0,0 +1,1 @@\\n+created",
+        status: "added",
+      },
+    });
+    expect(events.filter((event) => event.type === "diff_update")).toHaveLength(1);
   });
 
   it("forwards the host policy during init, prompt, and guidance", async () => {

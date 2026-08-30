@@ -253,6 +253,85 @@ describe("Pi built-in subagent extension", () => {
     }
   });
 
+  it("reports live child activity before the final subagent result", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-progress-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'tool_execution_start', toolName:'grep', args:{pattern:'认证'}})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'message_update', assistantMessageEvent:{type:'thinking_delta', delta:'分析结果'}})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'child summary'}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const updates: Array<Record<string, any>> = [];
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      await tools[0].execute(
+        "call-progress",
+        { agent: "scout", task: "检查认证逻辑" },
+        new AbortController().signal,
+        (update: Record<string, any>) => updates.push(update),
+        { cwd: root, hasUI: false },
+      );
+
+      expect(updates.some((update) => (
+        update.details?.results?.[0]?.message === "正在搜索内容：认证"
+      ))).toBe(true);
+      expect(updates.at(-1)).toMatchObject({
+        details: { results: [expect.objectContaining({ output: "child summary", exitCode: 0 })] },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps parallel completion counts at zero until a child process exits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-parallel-progress-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'child summary'}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const updates: Array<{ text: string; update: Record<string, any> }> = [];
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      await tools[0].execute(
+        "call-parallel-progress",
+        {
+          tasks: [
+            { agent: "scout", task: "检查认证逻辑" },
+            { agent: "reviewer", task: "检查测试" },
+          ],
+        },
+        new AbortController().signal,
+        (update: Record<string, any>) => updates.push({
+          text: update.content?.[0]?.text || "",
+          update,
+        }),
+        { cwd: root, hasUI: false },
+      );
+
+      expect(updates.slice(0, 3).map((item) => item.text)).toEqual([
+        "并行任务：0/2 已完成",
+        "并行任务：0/2 已完成",
+        "并行任务：0/2 已完成",
+      ]);
+      expect(updates[1].update.details.results[0].message).toBe("正在启动 scout…");
+      expect(updates.at(-1)?.text).toBe("并行任务：2/2 已完成");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("forwards RPC child permission requests through the host UI callback", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-rpc-test-"));
     try {

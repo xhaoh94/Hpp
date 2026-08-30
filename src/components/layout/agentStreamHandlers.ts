@@ -254,6 +254,7 @@ export function handleDiffUpdateEvent(
         additions?: number;
         deletions?: number;
         status?: "added" | "deleted" | "modified";
+        statusExplicit?: boolean;
       } => (
         !!diff &&
         typeof diff === "object" &&
@@ -266,12 +267,14 @@ export function handleDiffUpdateEvent(
         additions: typeof diff.additions === "number" ? diff.additions : undefined,
         deletions: typeof diff.deletions === "number" ? diff.deletions : undefined,
         status: diff.status,
+        statusExplicit: diff.statusExplicit === true,
         changeKey: [
           "diff",
           diff.file,
           typeof diff.patch === "string" ? diff.patch : "",
           typeof diff.additions === "number" ? diff.additions : "",
           typeof diff.deletions === "number" ? diff.deletions : "",
+          diff.statusExplicit === true ? "explicit-status" : "inferred-status",
         ].join("|"),
       }));
     ctx.recordProcessFiles(currentSessionId, files, "modify");

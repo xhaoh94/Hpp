@@ -172,7 +172,7 @@ export class CodexAgent {
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (!line.trim()) continue;
         try {
-          this.handleWorkerMessage(JSON.parse(line));
+          this.handleWorkerMessage(JSON.parse(line), child);
         } catch {
           // Ignore non-protocol output from dependencies.
         }
@@ -485,7 +485,8 @@ export class CodexAgent {
     await this.waitForExit(child, 500);
   }
 
-  private handleWorkerMessage(data: unknown) {
+  private handleWorkerMessage(data: unknown, sourceChild?: ChildProcess) {
+    if (sourceChild && this.process !== sourceChild) return;
     const record = asRecord(data);
     const messageId = record.id !== undefined && record.id !== null ? String(record.id) : "";
     if (messageId) {

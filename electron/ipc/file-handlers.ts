@@ -1,10 +1,14 @@
-import { ipcMain, dialog, BrowserWindow, shell } from "electron";
+import { ipcMain, dialog, BrowserWindow, shell, app } from "electron";
 import { readdir, readFile, access, stat, open } from "fs/promises";
 import { writeTextFile } from "./write-text-file";
 import { basename, extname, join } from "path";
 import { homedir } from "os";
 import { commandExists } from "../utils/command-utils";
-import { reverseApplyPatches } from "./reverse-apply-patches";
+import { ReviewUndoService } from "./rebuild-file";
+import type {
+  PrepareReviewUndoRequest,
+  ReviewUndoTarget,
+} from "../../shared/review-undo";
 import { isFileEntryExcluded, normalizeFileFilters } from "../../shared/file-filters";
 import { collectProjectFileIndex } from "./project-file-indexer";
 import { startFileWatch, stopFileWatch } from "./file-watchers";
@@ -54,6 +58,11 @@ function getImageMimeType(filePath: string) {
 }
 
 export function registerFileHandlers() {
+  const reviewUndoService = new ReviewUndoService({
+    stateRoot: join(app.getPath("userData"), "review-undo"),
+    backupRoot: join(app.getPath("userData"), "undo-backups"),
+  });
+
   ipcMain.handle("fs:watchPath", (event, targetPath: string, recursive = false) => {
     return startFileWatch(event.sender, targetPath, recursive === true);
   });
@@ -204,29 +213,25 @@ export function registerFileHandlers() {
     }
   });
 
-  ipcMain.handle("fs:reverseApplyPatch", async (_event, projectPath: string, patches: string[]) => {
-    if (typeof projectPath !== "string" || !projectPath.trim()) {
-      return { success: false, error: "Invalid project path" };
-    }
-    if (!Array.isArray(patches) || patches.length === 0) {
-      return { success: false, error: "No patch content to revert" };
-    }
+  ipcMain.handle(
+    "fs:loadReviewUndo",
+    (_event, request: PrepareReviewUndoRequest) => reviewUndoService.load(request),
+  );
 
-    try {
-      const projectInfo = await stat(projectPath);
-      if (!projectInfo.isDirectory()) {
-        return { success: false, error: "Project path is not a directory" };
-      }
-    } catch (err: unknown) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
-    }
+  ipcMain.handle(
+    "fs:prepareReviewUndo",
+    (_event, request: PrepareReviewUndoRequest) => reviewUndoService.prepare(request),
+  );
 
-    try {
-      return reverseApplyPatches(projectPath, patches);
-    } catch (err: unknown) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  });
+  ipcMain.handle(
+    "fs:applyReviewUndo",
+    (
+      _event,
+      transactionId: string,
+      expectedVersion: number,
+      target: ReviewUndoTarget,
+    ) => reviewUndoService.apply(transactionId, expectedVersion, target),
+  );
 
   ipcMain.handle(
     "fs:searchFiles",

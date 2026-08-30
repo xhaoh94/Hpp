@@ -190,6 +190,9 @@ import {
   formatProcessDuration,
   getActiveAssistantTurnId,
   getProcessGroupState,
+  getStreamIdleNoticeDuration,
+  getSubagentActivityLabel,
+  getSubagentProgressLabel,
   hasNativeMultiStepProcessPlan,
   getUserGuidanceText,
   getVisibleProcessEntries,
@@ -871,8 +874,9 @@ function IdleDurationLabel({ entry }: { entry: RemoteProcessEntry }) {
   // second while an agent turn was running).
   const ticking = entry.toolKind === "stream_idle_notice" && !!entry.startedAt && !entry.completedAt;
   const nowTick = useProcessTicker(ticking);
-  const idleDuration = entry.toolKind === "stream_idle_notice" && entry.startedAt
-    ? formatIdleDuration((entry.completedAt ?? nowTick) - entry.startedAt)
+  const hasIdleTiming = Number.isFinite(entry.startedAt) || Number.isFinite(entry.accumulatedDurationMs);
+  const idleDuration = entry.toolKind === "stream_idle_notice" && hasIdleTiming
+    ? formatIdleDuration(getStreamIdleNoticeDuration(entry, nowTick))
     : null;
   if (!idleDuration) return null;
   return <span className="process-idle-duration"> · {idleDuration}</span>;
@@ -1080,14 +1084,6 @@ function formatSubagentUsage(usage: NonNullable<RemoteProcessEntry["subagents"]>
   ].filter(Boolean).join(" / ");
 }
 
-function getSubagentProgress(subagents: NonNullable<RemoteProcessEntry["subagents"]>) {
-  if (subagents.length < 2) return "";
-  const finished = subagents.filter((subagent) =>
-    subagent.status === "completed" || subagent.status === "error" || subagent.status === "interrupted",
-  ).length;
-  return `进度 ${finished}/${subagents.length}`;
-}
-
 function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
   const ticking = typeof entry.startedAt === "number"
     && !entry.completedAt
@@ -1098,7 +1094,9 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
   const elapsed = typeof entry.startedAt === "number"
     ? `耗时 ${formatProcessDuration((entry.completedAt ?? nowTick) - entry.startedAt)}`
     : "";
-  const progress = getSubagentProgress(entry.subagents || []);
+  const progress = getSubagentProgressLabel(entry.subagents || []);
+  const activity = getSubagentActivityLabel(entry.subagents || [])
+    || (entry.state === "running" ? "正在整理最终结果…" : "");
   const messages = (entry.subagents || [])
     .map((subagent) => subagent.message?.trim())
     .filter((message): message is string => !!message && message !== entry.detail?.trim());
@@ -1143,6 +1141,7 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
         {entry.title && <span className="subagent-entry-title">{entry.title}</span>}
         {progress && <span className="subagent-entry-meta">{progress}</span>}
         {elapsed && <span className="subagent-entry-meta">{elapsed}</span>}
+        {activity && <span className="subagent-entry-meta subagent-entry-activity" title={activity}>{activity}</span>}
       </span>
       {hasDetails && <ChevronDown className="expand-indicator" size={13} />}
     </>

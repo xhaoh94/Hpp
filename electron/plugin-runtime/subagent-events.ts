@@ -137,6 +137,7 @@ export function buildNativeSubagentEvent(
     timestamp: snapshot.startedAt,
     startedAt: snapshot.startedAt,
     completedAt: terminal ? completedAt : undefined,
+    ...(snapshot.background === true ? { background: true } : {}),
     agentThreadId: snapshot.subagentId,
     receiverThreadIds: [snapshot.subagentId],
     source,

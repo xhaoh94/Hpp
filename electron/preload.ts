@@ -15,6 +15,10 @@ import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
 import type { FileSystemChange } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
 import type {
+  PrepareReviewUndoRequest,
+  ReviewUndoTarget,
+} from "../shared/review-undo";
+import type {
   RemoteAccessStatus,
   RemotePairingOffer,
   RemoteRendererCommand,
@@ -73,8 +77,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
     ipcRenderer.invoke("fs:fileExists", filePath),
-  reverseApplyPatch: (projectPath: string, patches: string[]) =>
-    ipcRenderer.invoke("fs:reverseApplyPatch", projectPath, patches),
+  loadReviewUndo: (request: PrepareReviewUndoRequest) =>
+    ipcRenderer.invoke("fs:loadReviewUndo", request),
+  prepareReviewUndo: (request: PrepareReviewUndoRequest) =>
+    ipcRenderer.invoke("fs:prepareReviewUndo", request),
+  applyReviewUndo: (
+    transactionId: string,
+    expectedVersion: number,
+    target: ReviewUndoTarget,
+  ) => ipcRenderer.invoke("fs:applyReviewUndo", transactionId, expectedVersion, target),
   searchFiles: (dirPath: string, query: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:searchFiles", dirPath, query, filters),
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),

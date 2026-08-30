@@ -1382,6 +1382,7 @@ const handleSessionEvent = (event) => {
       finishPrompt(activePromptId);
       break;
     case "message_update": {
+      if (!activePromptId) break;
       const assistantEvent = event.assistantMessageEvent;
       if (assistantEvent?.type === "text_delta") {
         send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: assistantEvent.delta || "" } });
@@ -1391,6 +1392,7 @@ const handleSessionEvent = (event) => {
       break;
     }
     case "message_end": {
+      if (!activePromptId) break;
       const message = event.message;
       if (message?.role === "assistant") {
         const promptId = activePromptId;
@@ -1437,6 +1439,7 @@ const handleSessionEvent = (event) => {
       });
       break;
     case "tool_execution_start":
+      if (!activePromptId) break;
       uiBridge?.cacheInteractArgs(event.toolName, event.args);
       send({
         type: "tool_execution_start",
@@ -1446,6 +1449,7 @@ const handleSessionEvent = (event) => {
       });
       break;
     case "tool_execution_update":
+      if (!activePromptId) break;
       send({
         type: "tool_execution_update",
         toolName: event.toolName,
@@ -1455,6 +1459,7 @@ const handleSessionEvent = (event) => {
       });
       break;
     case "tool_execution_end":
+      if (!activePromptId) break;
       send({
         type: "tool_execution_end",
         toolName: event.toolName,
@@ -1603,6 +1608,7 @@ const handleCommand = async (command) => {
         break;
       case "prompt":
         if (!session) throw new Error("Pi SDK session is not initialized");
+        if (activePromptId && activePromptId !== command.id) throw new Error("SESSION_BUSY");
         setPermissionMode(["ask", "auto", "full-access"].includes(command.permissionMode)
           ? command.permissionMode
           : "auto");
@@ -1625,7 +1631,7 @@ const handleCommand = async (command) => {
         send({ type: "accepted", id: command.id });
         session.prompt(await resolveActionPrompt(command.action, command.message), { images: command.images })
           .then(() => {
-            finishPrompt(command.id);
+            if (activePromptId === command.id) finishPrompt(command.id);
           })
           .catch((error) => {
             if (activePromptId === command.id) activePromptId = null;
@@ -1649,12 +1655,15 @@ const handleCommand = async (command) => {
         send({ type: "fork_session_result", id: command.id, ...result });
         break;
       }
-      case "abort":
+      case "abort": {
         uiBridge?.dismissAll("abort");
         dismissSubagentUIRequests(undefined, "abort");
+        const abortedPromptId = activePromptId;
         await session?.abort();
-        send({ type: "aborted", id: command.id });
+        if (activePromptId === abortedPromptId) activePromptId = null;
+        send({ type: "aborted", id: command.id, promptId: abortedPromptId || undefined });
         break;
+      }
       case "getModels":
         send({ type: "models", id: command.id, models: await getModels() });
         break;

@@ -89,17 +89,63 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("linesToPairs");
   });
 
-  it("reverts every edit of one file as ordered patches instead of one merged patch", () => {
-    expect(dialogSource).toContain("reverseApplyPatch(projectPath, active.patches)");
-    expect(dialogSource).not.toContain("reverseApplyPatch(projectPath, [active.patch])");
+  it("routes file and all undo through one versioned review transaction", () => {
+    expect(dialogSource).toContain("window.electronAPI.prepareReviewUndo({");
+    expect(dialogSource).toContain("window.electronAPI.applyReviewUndo(");
+    expect(dialogSource).toContain('{ kind: "file", file: active.file }');
+    expect(dialogSource).toContain('void applyUndo({ kind: "all" }, "all")');
+    expect(dialogSource).not.toContain("reverseApplyPatch(");
+    expect(dialogSource).not.toContain("rebuildReviewFile(");
   });
 
-  it("reverts a single hunk from its own source patch instead of the merged patch", () => {
-    // hunkIdx 是合并补丁的序号，必须先 splitHunkIndex 定位回单份补丁再提取，
-    // 否则切出的 hunk 混入后续补丁的文件头，git apply 会报 patch with only garbage。
-    expect(dialogSource).toContain("splitHunkIndex(active.patches, hunkIdx)");
-    expect(dialogSource).toContain("extractHunkPatch(active.patches[located.patchIndex], located.hunkIndex)");
-    expect(dialogSource).not.toContain("extractHunkPatch(active.patch,");
+  it("reverts a canonical change point through the same transaction", () => {
+    expect(dialogSource).toContain('{ kind: "hunk", file: active.file, hunkIndex, changeIndex }');
+    expect(dialogSource).toContain("reviewState.transactionId");
+    expect(dialogSource).toContain("reviewState.version");
+    expect(dialogSource).not.toContain("revertedBefore");
+    expect(dialogSource).not.toContain("revertedAfter");
+  });
+
+  it("renders the undo button per change point, not per hunk", () => {
+    // git 会把间距小于上下文窗口的多处修改合并成一个 hunk；按钮若只挂在 hunk
+    // 首行（可能是上下文行），用户悬停在实际改动行上永远看不到按钮，且撤销
+    // 粒度被迫扩大到整个 hunk。按钮必须挂在每个修改点（changeStart）的首个增删行上。
+    expect(dialogSource).toContain("const changeIdx = pair.changeIdx;");
+    expect(dialogSource).toContain("pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined");
+    expect(dialogSource).not.toContain("pair.hunkStart");
+    expect(dialogSource).toContain("const hunkIdx = pair.hunkIdx;");
+    expect(dialogSource).not.toContain("hunkStartMap.get(index)");
+    expect(dialogSource).not.toContain("hunkStartMap");
+    expect(dialogSource).not.toContain("parsePatchHunks(active.patch)");
+  });
+
+  it("keeps canonical hunk fields and derives the reverted state from the transaction", () => {
+    expect(dialogSource).toContain("const fileReverted = !!active?.reverted;");
+    expect(dialogSource).toContain("if (pair.hunkIdx !== undefined) entry.hunkIdx = pair.hunkIdx;");
+    expect(dialogSource).toContain("if (pair.changeIdx !== undefined) entry.changeIdx = pair.changeIdx;");
+    expect(dialogSource).toContain("if (pair.changeStart) entry.changeStart = true;");
+  });
+
+  it("serializes every undo command and disables all undo controls while busy", () => {
+    expect(dialogSource).toContain("activeOperationRef.current");
+    expect(dialogSource).toContain("const undoBusy = preparingUndo || undoingKey !== null;");
+    expect(dialogSource).toContain("disabled={undoBusy || !reviewState?.canUndoAll}");
+    expect(dialogSource).toContain("disabled={undoBusy}");
+  });
+
+  it("ignores async results from an obsolete review generation", () => {
+    expect(dialogSource).toContain("reviewGenerationRef.current += 1;");
+    expect(dialogSource).toContain("reviewGenerationRef.current !== generation");
+    expect(dialogSource).toContain("const isCurrentOperation = () =>");
+    expect(dialogSource).toContain("setFileContent({});");
+    expect(dialogSource).toContain("loadedRef.current.clear()");
+  });
+
+  it("reloads canonical content after each committed review version", () => {
+    expect(dialogSource).toContain("reviewState?.version ?? -1");
+    expect(dialogSource).toContain("[open, active, projectPath, reviewState?.version]");
+    expect(dialogSource).toContain("setReviewState(result.state)");
+    expect(dialogSource).toContain("prepared.patch");
   });
 
   it("navigates between diff points from the header toolbar", () => {

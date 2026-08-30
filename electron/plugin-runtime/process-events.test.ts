@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDiffsFromToolEvent,
   normalizeQuestionProcessEvent,
+  withoutToolDiffPayload,
   normalizeToolEvent,
   unwrapToolText,
 } from "./process-events";
@@ -82,6 +83,7 @@ describe("process event normalization", () => {
         additions: 1,
         deletions: 1,
         status: "modified",
+        statusExplicit: false,
       }],
     });
   });
@@ -94,6 +96,28 @@ describe("process event normalization", () => {
       deletions: 1,
       isError: true,
     })).toEqual([]);
+  });
+
+  it("unescapes JSON-escaped newlines in single-string provider patches", () => {
+    // droid 的结构化 tool_result 可能携带字面 \n 的补丁；不反转义的话
+    // 补丁解析不出 hunk，审核弹窗拿不到可用差异，局部撤销会静默失效。
+    expect(normalizeToolEvent("tool_end", {
+      name: "Edit",
+      args: { file_path: "src/a.ts" },
+      result: { filePath: "src/a.ts", patch: "@@ -1 +1 @@\\n-old\\n+new" },
+    })).toMatchObject({
+      filePath: "src/a.ts",
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      additions: 1,
+      deletions: 1,
+    });
+    // 多行补丁内容里恰好包含字面 \n 文本时不能误伤。
+    const multiline = '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+const s = "a\\nb";';
+    expect(normalizeToolEvent("tool_end", {
+      name: "Edit",
+      args: { file_path: "src/a.ts" },
+      result: { filePath: "src/a.ts", patch: multiline },
+    })).toMatchObject({ patch: multiline });
   });
 
   it("normalizes Claude Code gitDiff and structuredPatch outputs", () => {
@@ -115,6 +139,72 @@ describe("process event normalization", () => {
       patch: "@@ -0,0 +1,1 @@\n+created",
       additions: 1,
       deletions: 0,
+    });
+    expect(buildDiffsFromToolEvent(normalizeToolEvent("tool_end", {
+      name: "Write",
+      result: {
+        filePath: "src/b.ts",
+        structuredPatch: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: ["+created"] }],
+      },
+    }))).toMatchObject([{
+      file: "src/b.ts",
+      status: undefined,
+      statusExplicit: false,
+    }]);
+  });
+
+  it("preserves an explicitly reported file lifecycle status", () => {
+    const patch = "@@ -0,0 +1,1 @@\n+created";
+    const payload = normalizeToolEvent("tool_end", {
+      name: "Write",
+      result: { filePath: "src/new.ts", patch, status: "added" },
+    });
+    expect(payload).toMatchObject({ status: "added", statusExplicit: true });
+    expect(payload.files).toMatchObject([{
+      file: "src/new.ts",
+      status: "added",
+      statusExplicit: true,
+    }]);
+    expect(buildDiffsFromToolEvent(payload)).toMatchObject([{
+      file: "src/new.ts",
+      status: "added",
+      statusExplicit: true,
+    }]);
+    expect(buildDiffsFromToolEvent(normalizeToolEvent("tool_end", {
+      name: "Write",
+      result: { filePath: "src/empty.ts", status: "added" },
+    }))).toEqual([{
+      file: "src/empty.ts",
+      patch: "",
+      additions: 0,
+      deletions: 0,
+      status: "added",
+      statusExplicit: true,
+    }]);
+  });
+
+  it("removes diff payloads from tool timeline events", () => {
+    expect(withoutToolDiffPayload({
+      type: "tool_end",
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      additions: 1,
+      deletions: 1,
+      status: "modified",
+      statusExplicit: true,
+      filePath: "src/a.ts",
+      files: [{
+        file: "src/a.ts",
+        action: "edited",
+        patch: "@@ -1 +1 @@\n-old\n+new",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        statusExplicit: true,
+      }],
+    })).toEqual({
+      type: "tool_end",
+      filePath: "src/a.ts",
+      files: [{ file: "src/a.ts", action: undefined }],
     });
   });
 

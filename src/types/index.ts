@@ -32,6 +32,12 @@ import type {
   RemoteRendererPublish,
 } from "../../shared/remote-protocol";
 import type { FileFilterConfig } from "../../shared/file-filters";
+import type {
+  PrepareReviewUndoRequest,
+  ReviewUndoLoadResult,
+  ReviewUndoResult,
+  ReviewUndoTarget,
+} from "../../shared/review-undo";
 
 export type {
   RemoteAccessStatus,
@@ -259,7 +265,13 @@ export interface ElectronAPI {
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
-  reverseApplyPatch: (projectPath: string, patches: string[]) => Promise<{ success: boolean; error?: string }>;
+  loadReviewUndo: (request: PrepareReviewUndoRequest) => Promise<ReviewUndoLoadResult>;
+  prepareReviewUndo: (request: PrepareReviewUndoRequest) => Promise<ReviewUndoResult>;
+  applyReviewUndo: (
+    transactionId: string,
+    expectedVersion: number,
+    target: ReviewUndoTarget,
+  ) => Promise<ReviewUndoResult>;
   searchFiles: (dirPath: string, query: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
   openAttachmentFolder: () => Promise<{ canceled: boolean; attachment?: PathAttachmentInfo; error?: string }>;

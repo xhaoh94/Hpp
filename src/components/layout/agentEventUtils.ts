@@ -589,7 +589,10 @@ export const getToolProcessFiles = (event: AgentEvent): AgentProcessFile[] => {
     patch: typeof event.patch === "string" ? event.patch : undefined,
     additions: typeof event.additions === "number" ? event.additions : undefined,
     deletions: typeof event.deletions === "number" ? event.deletions : undefined,
-    status: event.patch ? "modified" : undefined,
+    status: event.status === "added" || event.status === "deleted" || event.status === "modified"
+      ? event.status
+      : event.patch ? "modified" : undefined,
+    statusExplicit: event.statusExplicit === true,
   }];
 };
 

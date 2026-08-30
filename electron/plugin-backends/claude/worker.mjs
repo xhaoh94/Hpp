@@ -24,6 +24,10 @@ let activeQueryPermissionMode = null;
 let queryGeneration = 0;
 let inputQueue = null;
 let activePromptId = null;
+let lastSettledPromptId = null;
+let subagentPromptScopes = new Map();
+let retiredSubagentKeys = new Set();
+let subagentResultEmittedKeys = new Set();
 let activeSDKCommandId = null;
 // Claude Code treats streaming-input user messages as asynchronous commands.
 // Keep their caller-provided UUIDs until command_lifecycle reports that each
@@ -549,9 +553,24 @@ const readSubagentResult = async (toolUseResult, attempts = 1) => {
   return "";
 };
 
-const emitSubagentResultWhenAvailable = async (message, status) => {
+const emitSubagentResultWhenAvailable = async (
+  message,
+  status,
+  generation = queryGeneration,
+  promptId = activePromptId,
+  background = message?.run_in_background === true || message?.background === true,
+) => {
   const resultText = await readSubagentResult(message, 41);
-  if (!resultText) return;
+  const resultKey = String(
+    message?.agent_id || message?.agentId || message?.task_id || message?.taskId
+      || message?.tool_use_id || message?.toolUseId || "",
+  );
+  const promptStillRelevant = background || (
+    !!promptId && (activePromptId === promptId || lastSettledPromptId === promptId)
+  );
+  if (generation !== queryGeneration || !promptStillRelevant || !resultText) return;
+  if (resultKey && subagentResultEmittedKeys.has(resultKey)) return;
+  if (resultKey) subagentResultEmittedKeys.add(resultKey);
   send({
     type: "subagent_update",
     taskId: message.task_id || message.taskId,
@@ -565,12 +584,13 @@ const emitSubagentResultWhenAvailable = async (message, status) => {
     durationMs: message.duration_ms || message.durationMs,
     totalTokens: message.total_tokens || message.totalTokens,
     totalToolUseCount: message.tool_uses || message.totalToolUseCount,
-    background: message.run_in_background === true || message.background === true,
+    ...(background ? { background: true } : {}),
     result: mergeToolResultContent(message.result, undefined, resultText, message),
   });
 };
 
-const handleUserToolResults = async (message) => {
+const handleUserToolResults = async (message, generation = queryGeneration) => {
+  const promptId = activePromptId;
   const content = asRecord(message.message).content;
   if (!Array.isArray(content)) return;
   const parentToolUseId = stringValue(message.parent_tool_use_id);
@@ -583,6 +603,7 @@ const handleUserToolResults = async (message) => {
     const resultText = isSubagentToolName(tool.toolName)
       ? await readSubagentResult(toolUseResult)
       : "";
+    if (generation !== queryGeneration || activePromptId !== promptId) return;
     send({
       type: "tool_execution_end",
       toolUseId,
@@ -603,6 +624,15 @@ const resetCommandTracking = () => {
   activeSDKCommandId = null;
   subagentToolUseIds.clear();
   completedSubagentNotifications.clear();
+  for (const [key, scope] of subagentPromptScopes) {
+    if (!scope.background) {
+      retiredSubagentKeys.add(key);
+      subagentPromptScopes.delete(key);
+    }
+  }
+  toolUses.clear();
+  streamBlockTypes.clear();
+  streamBlockToolIds.clear();
   guidanceCommands.clear();
   deferredSDKResult = null;
   accumulatedResultUsage = {};
@@ -622,6 +652,7 @@ const recordResultUsage = (message) => {
 const finishSDKPromptFromResult = () => {
   if (!activePromptId || !deferredSDKResult) return;
   const promptId = activePromptId;
+  lastSettledPromptId = promptId;
   const result = deferredSDKResult;
   if (result.subtype !== "success" || result.is_error) {
     const detail = Array.isArray(result.errors) ? result.errors.join("\n") : result.result || result.stop_reason;
@@ -668,7 +699,28 @@ const handleCommandLifecycle = (message) => {
   }
 };
 
-const handleSDKResult = (message) => {
+const getSubagentPromptScope = (message) => {
+  const rawBackground = message?.run_in_background === true || message?.background === true;
+  const key = String(
+    message?.agent_id || message?.agentId || message?.task_id || message?.taskId
+      || message?.tool_use_id || message?.toolUseId || "",
+  );
+  if (key && retiredSubagentKeys.has(key)) return null;
+  const existing = key ? subagentPromptScopes.get(key) : undefined;
+  const background = rawBackground || existing?.background === true;
+  if (existing && !existing.background && existing.promptId && (
+    existing.promptId !== activePromptId && existing.promptId !== lastSettledPromptId
+  )) return null;
+  if (!existing && !activePromptId && !background) return null;
+  const scope = existing || { promptId: activePromptId, background };
+  if (existing && background && !existing.background) scope.background = true;
+  if (key && !existing) subagentPromptScopes.set(key, scope);
+  return scope;
+};
+
+const handleSDKResult = async (message, generation = queryGeneration) => {
+  if (generation !== queryGeneration) return;
+  const promptId = activePromptId;
   recordResultUsage(message);
   const completedSubagents = [...completedSubagentNotifications.values()];
   completedSubagentNotifications.clear();
@@ -682,14 +734,36 @@ const handleSDKResult = (message) => {
   // the queued guidance command starts. Keep the Hpp turn alive until the last
   // accepted async user command has produced its own result.
   if (guidanceCommands.size === 0) {
+    // Foreground task results belong to this prompt and must be delivered
+    // before prompt_done/agent_end, otherwise the renderer rejects the late
+    // subagent event as output from an already settled turn.
+    await Promise.all(completedSubagents
+      .filter((completed) => completed.background !== true)
+      .map((completed) => emitSubagentResultWhenAvailable(
+        completed.message,
+        completed.status,
+        generation,
+        completed.promptId || promptId,
+        false,
+      )));
+    if (generation !== queryGeneration) return;
     finishSDKPromptFromResult();
     for (const completed of completedSubagents) {
-      void emitSubagentResultWhenAvailable(completed.message, completed.status);
+      if (completed.background === true) {
+        void emitSubagentResultWhenAvailable(
+          completed.message,
+          completed.status,
+          generation,
+          completed.promptId || promptId,
+          true,
+        );
+      }
     }
   }
 };
 
-const handleSDKMessage = async (message) => {
+const handleSDKMessage = async (message, generation = queryGeneration) => {
+  if (generation !== queryGeneration) return;
   if (message?.session_id && (message.session_id !== sessionFilePath || deferredFork || isNewSession)) {
     actualSessionId = message.session_id;
     sessionFilePath = actualSessionId;
@@ -704,9 +778,11 @@ const handleSDKMessage = async (message) => {
   }
   if (message.type === "stream_event") handleStreamEvent(message);
   else if (message.type === "assistant") handleAssistant(message);
-  else if (message.type === "user") await handleUserToolResults(message);
+  else if (message.type === "user") await handleUserToolResults(message, generation);
   else if (message.type === "command_lifecycle") handleCommandLifecycle(message);
   else if (message.type === "system" && ["task_started", "task_notification", "task_progress", "task_completed"].includes(message.subtype)) {
+    const scope = getSubagentPromptScope(message);
+    if (!scope) return;
     const status = message.status || message.state || (message.subtype === "task_started" ? "running" : undefined);
     const terminal = ["completed", "complete", "done", "success", "succeeded"].includes(String(status || "").toLowerCase());
     send({
@@ -722,13 +798,26 @@ const handleSDKMessage = async (message) => {
       durationMs: message.duration_ms || message.durationMs,
       totalTokens: message.total_tokens || message.totalTokens,
       totalToolUseCount: message.tool_uses || message.totalToolUseCount,
-      background: message.run_in_background === true || message.background === true,
+      ...(scope.background ? { background: true } : {}),
       result: message.result,
     });
     if (terminal) {
       const key = String(message.agent_id || message.agentId || message.task_id || message.taskId || message.tool_use_id || message.toolUseId || "");
-      if (key) completedSubagentNotifications.set(key, { message, status });
-      void emitSubagentResultWhenAvailable(message, status);
+      if (key) completedSubagentNotifications.set(key, {
+        message,
+        status,
+        background: scope.background === true,
+        promptId: scope.promptId,
+      });
+      if (scope.background) {
+        void emitSubagentResultWhenAvailable(
+          message,
+          status,
+          generation,
+          scope.promptId,
+          true,
+        );
+      }
     }
   } else if (message.type === "system" && message.subtype === "compact_boundary") {
     // Claude Agent SDK exposes the completed compact boundary, but no matching
@@ -737,7 +826,7 @@ const handleSDKMessage = async (message) => {
   } else if (message.type === "system" && message.subtype === "local_command_output") {
     send({ type: "text_delta", delta: String(message.content || "") });
   } else if (message.type === "result") {
-    handleSDKResult(message);
+    await handleSDKResult(message, generation);
   }
 };
 
@@ -786,6 +875,7 @@ const dismissPermissions = (message) => {
 
 const startQuery = async () => {
   const generation = ++queryGeneration;
+  subagentResultEmittedKeys.clear();
   const queryPermissionMode = permissionMode;
   const queryPlanModeEnabled = planModeEnabled;
   const queryHostSystemPrompt = hostSystemPrompt;
@@ -796,6 +886,11 @@ const startQuery = async () => {
   ]);
   inputQueue = new PushableInput();
   const sdkProvider = await prepareSDKProvider(activeProvider);
+  if (generation !== queryGeneration) {
+    inputQueue.close();
+    inputQueue = null;
+    return;
+  }
   const queryInstance = sdk.query({
     prompt: inputQueue,
     options: createQueryOptions(
@@ -805,6 +900,12 @@ const startQuery = async () => {
       queryHostSystemPrompt,
     ),
   });
+  if (generation !== queryGeneration) {
+    queryInstance.close?.();
+    inputQueue.close();
+    inputQueue = null;
+    return;
+  }
   activeQuery = queryInstance;
   activeQueryPermissionMode = queryModeKey;
   void (async () => {
@@ -812,7 +913,7 @@ const startQuery = async () => {
     try {
       for await (const message of queryInstance) {
         if (generation !== queryGeneration) break;
-        await handleSDKMessage(message);
+        await handleSDKMessage(message, generation);
       }
     } catch (error) {
       terminalError = error?.message || String(error);
@@ -847,6 +948,10 @@ const startQuery = async () => {
 
 const restartQuery = async () => {
   if (activePromptId) throw new Error("SESSION_BUSY");
+  queryGeneration += 1;
+  subagentPromptScopes.clear();
+  retiredSubagentKeys.clear();
+  subagentResultEmittedKeys.clear();
   resetCommandTracking();
   dismissPermissions("Claude Code 会话正在重新配置");
   inputQueue?.close();
@@ -866,6 +971,10 @@ const abortAndRestartQuery = async () => {
   activeQueryPermissionMode = null;
   inputQueue = null;
   activePromptId = null;
+  lastSettledPromptId = null;
+  subagentPromptScopes.clear();
+  retiredSubagentKeys.clear();
+  subagentResultEmittedKeys.clear();
   resetCommandTracking();
   queue?.close();
   if (query) {
@@ -932,6 +1041,9 @@ const init = async (command) => {
   activeProvider = normalizeConfig(command.config);
   currentModelId = activeProvider.modelId;
   hostSystemPrompt = String(command.hostSystemPrompt || "").trim();
+  subagentPromptScopes.clear();
+  retiredSubagentKeys.clear();
+  subagentResultEmittedKeys.clear();
   const historySource = deferredFork?.sourceSessionId || (!isNewSession ? actualSessionId : "");
   const history = await buildHistory(historySource, deferredFork?.targetMessageId);
   if (history.length > 0) send({ type: "history_snapshot", messages: history });
@@ -963,6 +1075,7 @@ const handleCommand = async (command) => {
         if (activeQueryPermissionMode !== queryModeKey) await restartQuery();
         command.message = await buildActionMessage(command.action, command.message);
         resetCommandTracking();
+        lastSettledPromptId = null;
         activePromptId = command.id;
         inputQueue.push({
           type: "user",
@@ -1039,6 +1152,9 @@ const handleCommand = async (command) => {
         break;
       case "dispose":
         queryGeneration += 1;
+        subagentPromptScopes.clear();
+        retiredSubagentKeys.clear();
+        subagentResultEmittedKeys.clear();
         resetCommandTracking();
         dismissPermissions("会话已关闭");
         inputQueue?.close();

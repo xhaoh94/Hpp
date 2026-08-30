@@ -5,6 +5,7 @@ import { createAgentEventController } from "./agentEventController";
 import { dispatchAgentEvent } from "./agentEventDispatcher";
 import type { AgentEvent } from "@/types";
 import type { PendingUIResponse, PendingUIResponseUpdate } from "./agentEventTypes";
+import { getStreamIdleNoticeDuration, getVisibleProcessEntries } from "@shared/process-view";
 import { resetSessionRuntimeAfterTurn, type SessionRuntime } from "./agentEventUtils";
 
 const SESSION_ID = "lifecycle-session";
@@ -1086,6 +1087,38 @@ describe("agent event terminal reconciliation", () => {
       .flatMap((message) => message.process?.entries || [])
       .filter((entry) => entry.toolKind === "stream_idle_notice");
     expect(idleEntries).toHaveLength(0);
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
+  it("merges stream idle notices and accumulates each completed interval", async () => {
+    vi.useFakeTimers();
+    agentGetSessionState.mockResolvedValue({ success: true, idle: false });
+    const harness = createHarness();
+    startRunningProcess(harness);
+    harness.controller.refreshStreamWatchdog(SESSION_ID);
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    const getIdleEntries = () => getMessages()
+      .flatMap((message) => message.process?.entries || [])
+      .filter((entry) => entry.toolKind === "stream_idle_notice");
+    const getVisibleIdleEntries = () => getVisibleProcessEntries(getIdleEntries());
+    expect(getIdleEntries()).toHaveLength(1);
+    expect(getVisibleIdleEntries()).toHaveLength(1);
+
+    dispatchAgentEvent({
+      type: "thinking_delta",
+      delta: "恢复输出",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+    expect(getIdleEntries()).toHaveLength(1);
+    expect(getVisibleIdleEntries()).toHaveLength(1);
+    expect(getStreamIdleNoticeDuration(getVisibleIdleEntries()[0], Date.now())).toBe(45_000);
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(getIdleEntries()).toHaveLength(2);
+    const [mergedIdleNotice] = getVisibleIdleEntries();
+    expect(getVisibleIdleEntries()).toHaveLength(1);
+    expect(getStreamIdleNoticeDuration(mergedIdleNotice, Date.now())).toBe(90_000);
     harness.controller.clearAllStreamWatchdogs();
   });
 

@@ -25,6 +25,8 @@ export type ProcessEntryView = {
   timestamp?: number;
   startedAt?: number;
   completedAt?: number;
+  /** stream_idle_notice 已完成的前序无输出区间总时长（毫秒）。 */
+  accumulatedDurationMs?: number;
   phase?: "started" | "completed";
   stopReason?: ProcessSubagentStopReason;
   subagents?: Array<{
@@ -38,6 +40,33 @@ export type ProcessEntryView = {
     stopReason?: ProcessSubagentStopReason;
     usage?: ProcessSubagentUsage;
   }>;
+};
+
+export type ProcessSubagentView = NonNullable<ProcessEntryView["subagents"]>[number];
+
+const isTerminalProcessSubagentStatus = (status?: ProcessSubagentView["status"]) => (
+  status === "completed" || status === "error" || status === "interrupted"
+);
+
+/** 返回并行 Subagent 的实时完成进度；单任务不显示无意义的分数。 */
+export const getSubagentProgressLabel = (subagents: ProcessSubagentView[]) => {
+  if (subagents.length < 2) return "";
+  const finished = subagents.filter((subagent) => isTerminalProcessSubagentStatus(subagent.status)).length;
+  return `进度 ${finished}/${subagents.length}`;
+};
+
+/** 返回当前正在工作的 Subagent 最近一次活动，供摘要行实时展示。 */
+export const getSubagentActivityLabel = (subagents: ProcessSubagentView[]) => {
+  const active = subagents.find((subagent) => (
+    (subagent.status === "running" || subagent.status === "pending") && subagent.message?.trim()
+  ));
+  if (active) return `${active.label || "Subagent"}：${active.message!.trim()}`;
+
+  const waiting = subagents.find((subagent) => subagent.status === "pending");
+  if (waiting) return `${waiting.label || "Subagent"}：等待启动…`;
+
+  const running = subagents.find((subagent) => subagent.status === "running");
+  return running ? `${running.label || "Subagent"}：正在工作…` : "";
 };
 
 export type ProcessPlanStepView = {
@@ -258,15 +287,67 @@ export const getUserGuidanceText = (entry: ProcessEntryView) => {
   return entry.title === "引导" ? "" : entry.title;
 };
 
+export const getStreamIdleNoticeDuration = (
+  entry: Pick<ProcessEntryView, "toolKind" | "accumulatedDurationMs" | "startedAt" | "completedAt">,
+  now = Date.now(),
+) => {
+  if (entry.toolKind !== "stream_idle_notice") return 0;
+  const accumulated = isFiniteTimestamp(entry.accumulatedDurationMs)
+    ? Math.max(0, entry.accumulatedDurationMs)
+    : 0;
+  const end = isFiniteTimestamp(entry.completedAt) ? entry.completedAt : now;
+  const interval = isFiniteTimestamp(entry.startedAt)
+    ? Math.max(0, end - entry.startedAt)
+    : 0;
+  return accumulated + interval;
+};
+
 export function getVisibleProcessEntries<T extends ProcessEntryView>(entries: T[]) {
-  return entries.filter((entry) => {
+  // 多次暂停/恢复会产生多条空闲提示，但它们属于同一个处理过程。
+  // 合并时保留最新条目的位置和运行状态，把前面的时长折算进同一条，
+  // 这样既能修复旧数据，也能让当前运行中的提示继续实时计时。
+  const latestIdleNoticeIndex = entries.reduce((latest, entry, index) => (
+    entry.toolKind === "stream_idle_notice" ? index : latest
+  ), -1);
+  const idleNoticeCount = entries.reduce(
+    (count, entry) => count + (entry.toolKind === "stream_idle_notice" ? 1 : 0),
+    0,
+  );
+  const mergedIdleNotice = idleNoticeCount > 1 && latestIdleNoticeIndex >= 0
+    ? (() => {
+      const idleEntries = entries.filter((entry) => entry.toolKind === "stream_idle_notice");
+      // 只把前面各区间自身的时长累计到最后一条。这里不读取前面条目
+      // 的 accumulatedDurationMs，避免旧版本/中间版本已经写过累计值时
+      // 被重复相加；该字段只作为合并后条目的视图字段。
+      const accumulatedDurationMs = idleEntries
+        .slice(0, -1)
+        .reduce((total, entry) => total + getStreamIdleNoticeDuration(
+          { ...entry, accumulatedDurationMs: undefined },
+          isFiniteTimestamp(entry.completedAt)
+            ? entry.completedAt
+            : isFiniteTimestamp(entry.startedAt) ? entry.startedAt : 0,
+        ), 0);
+      return {
+        ...entries[latestIdleNoticeIndex],
+        accumulatedDurationMs,
+      } as T;
+    })()
+    : null;
+
+  return entries.flatMap((entry, index) => {
+    if (entry.toolKind === "stream_idle_notice") {
+      if (index !== latestIdleNoticeIndex) return [];
+      return [mergedIdleNotice || entry];
+    }
     // `message_received` used to duplicate the user's bubble inside the
     // process timeline. Keep persisted records intact, but never display the
     // redundant row on either desktop or mobile clients.
     if (entry.toolKind === "message_received" || /^收到消息(?:[:：]|$)/.test(entry.title)) {
-      return false;
+      return [];
     }
-    return !isAssistantNarrationProcessEntry(entry) || Boolean(entry.detail?.trim());
+    return !isAssistantNarrationProcessEntry(entry) || Boolean(entry.detail?.trim())
+      ? [entry]
+      : [];
   });
 }
 

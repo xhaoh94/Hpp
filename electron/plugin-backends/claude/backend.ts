@@ -17,6 +17,10 @@ import {
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
   unwrapToolText,
+} from "../../plugin-runtime/process-events";
+import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
+import {
+  withoutToolDiffPayload,
   type NormalizedToolPayload,
 } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
@@ -190,13 +194,17 @@ export class ClaudeSDKAgent {
   private requestId = 0;
   private activePromptId: string | null = null;
   private turnActive = false;
+  private isAborting = false;
   private streamedText = false;
   private isReady = false;
+  /** provider 未回报补丁时的自算兜底（tool_start 抓快照 → tool_end 出差异）。 */
+  private readonly toolFileDiffFallback = new ToolFileDiffFallback();
   private models: AgentModel[] = [];
   private secretValues: string[] = [];
   private pendingGuidance: PendingClaudeGuidance | null = null;
   private claudeSubagentsByToolCallId = new Map<string, NativeSubagentSnapshot>();
   private claudeSubagentToolCallIdByTaskId = new Map<string, string>();
+  private completedToolUseIds = new Set<string>();
 
   constructor(sessionId = "default", emit?: (event: UnknownRecord) => void, context?: ClaudeBackendContext) {
     this.eventBuffer = new AgentEventBuffer(sessionId, emit);
@@ -241,7 +249,7 @@ export class ClaudeSDKAgent {
         const line = buffer.slice(0, index).replace(/\r$/, "");
         buffer = buffer.slice(index + 1);
         if (!line.trim()) continue;
-        try { this.handleWorkerMessage(JSON.parse(line)); } catch { /* dependency output */ }
+        try { this.handleWorkerMessage(JSON.parse(line), child); } catch { /* dependency output */ }
       }
     });
     child.stdout?.on("end", () => this.handleWorkerTermination(
@@ -300,8 +308,15 @@ export class ClaudeSDKAgent {
     if (!this.process || !this.isReady) throw new Error("Claude Agent SDK worker is not running");
     if (!this.isIdle()) throw new Error("SESSION_BUSY");
     this.pendingGuidance = null;
-    this.claudeSubagentsByToolCallId.clear();
-    this.claudeSubagentToolCallIdByTaskId.clear();
+    // Background Claude tasks can finish after the parent turn. Preserve
+    // their snapshots and only discard foreground task state.
+    for (const [toolCallId, snapshot] of this.claudeSubagentsByToolCallId) {
+      if (snapshot.background !== true) this.claudeSubagentsByToolCallId.delete(toolCallId);
+    }
+    for (const [taskId, toolCallId] of this.claudeSubagentToolCallIdByTaskId) {
+      if (!this.claudeSubagentsByToolCallId.has(toolCallId)) this.claudeSubagentToolCallIdByTaskId.delete(taskId);
+    }
+    this.completedToolUseIds.clear();
     const promptId = options?.clientMessageId || this.createCommandId();
     this.activePromptId = promptId;
     this.turnActive = true;
@@ -392,6 +407,7 @@ export class ClaudeSDKAgent {
   }
 
   async abort() {
+    this.isAborting = true;
     this.cancelPendingGuidance("Claude guidance interrupted");
     this.pendingUIRequestIds.clear();
     this.interruptClaudeSubagents("用户已中止");
@@ -418,11 +434,13 @@ export class ClaudeSDKAgent {
         this.activePromptId = null;
         this.finishTurn(true);
       }
+      this.isAborting = false;
       throw error;
     }
     this.activePromptId = null;
     this.finishTurn(true);
     this.emitEvent({ type: "aborted" });
+    this.isAborting = false;
   }
 
   async getModels() {
@@ -485,9 +503,11 @@ export class ClaudeSDKAgent {
     this.pendingUIRequestIds.clear();
     this.claudeSubagentsByToolCallId.clear();
     this.claudeSubagentToolCallIdByTaskId.clear();
+    this.completedToolUseIds.clear();
     this.pendingGuidance = null;
     this.activePromptId = null;
     this.turnActive = false;
+    this.isAborting = false;
     this.eventBuffer.clear();
     const child = this.process;
     this.process = null;
@@ -506,7 +526,8 @@ export class ClaudeSDKAgent {
     this.secretValues = [];
   }
 
-  private handleWorkerMessage(value: unknown) {
+  private handleWorkerMessage(value: unknown, sourceChild?: ChildProcess) {
+    if (sourceChild && this.process !== sourceChild) return;
     const data = asRecord(value);
     const id = data.id === undefined || data.id === null ? "" : String(data.id);
     // guidance_delivered is an asynchronous lifecycle event correlated by the
@@ -537,15 +558,18 @@ export class ClaudeSDKAgent {
         });
         break;
       case "text_delta": {
+        if (!this.turnActive || this.isAborting) break;
         const delta = optionalString(data.delta) || "";
         if (delta) this.streamedText = true;
         this.emitEventThrottled({ type: "stream_delta", delta });
         break;
       }
       case "thinking_delta":
+        if (!this.turnActive || this.isAborting) break;
         this.emitEventThrottled({ type: "thinking_delta", delta: optionalString(data.delta) || "" });
         break;
       case "thinking_end":
+        if (!this.turnActive || this.isAborting) break;
         this.emitEvent({ type: "thinking_end" });
         break;
       case "guidance_delivered": {
@@ -557,6 +581,7 @@ export class ClaudeSDKAgent {
         break;
       }
       case "message_end":
+        if (!this.turnActive || this.isAborting) break;
         if (!this.streamedText && optionalString(data.text)) {
           this.emitEvent({ type: "stream_delta", delta: data.text });
           this.streamedText = true;
@@ -565,34 +590,53 @@ export class ClaudeSDKAgent {
         break;
       case "subagent_started":
       case "subagent_update":
+        if (this.isAborting) break;
         this.handleClaudeSubagentWorkerEvent(data, data.type === "subagent_started" ? "started" : "update");
         break;
       case "tool_execution_start":
+        if (this.isAborting) break;
+        const startToolUseId = optionalString(data.toolUseId);
+        if (startToolUseId && this.completedToolUseIds.has(startToolUseId)) break;
         if (isClaudeTaskOutputToolName(data.toolName)) break;
         if (isNativeSubagentToolName(data.toolName)) {
           this.handleClaudeSubagentWorkerEvent(data, "started");
           break;
         }
-        this.emitEvent(normalizeToolEvent("tool_start", {
+        if (!this.turnActive || this.isAborting) break;
+        const startEvent = normalizeToolEvent("tool_start", {
           ...data, toolCallId: data.toolUseId, name: data.toolName, args: data.input,
-        }));
+        });
+        // 工具刚开始执行，文件尚未被改写——此刻抓到的才是「修改前」快照。
+        this.toolFileDiffFallback.onToolStart(this.projectPath, startEvent);
+        this.emitEvent(startEvent);
         break;
       case "tool_execution_update":
+        if (this.isAborting) break;
+        const updateToolUseId = optionalString(data.toolUseId);
+        if (updateToolUseId && this.completedToolUseIds.has(updateToolUseId)) break;
         if (isClaudeTaskOutputToolName(data.toolName)) break;
         if (isNativeSubagentToolName(data.toolName) || this.claudeSubagentsByToolCallId.has(String(data.toolUseId || ""))) {
           this.handleClaudeSubagentWorkerEvent(data, "update");
           break;
         }
-        this.emitEvent(normalizeToolEvent("tool_start", {
+        if (!this.turnActive || this.isAborting) break;
+        const updateEvent = normalizeToolEvent("tool_start", {
           ...data,
           toolCallId: data.toolUseId,
           name: data.toolName,
           args: data.input,
           detail: unwrapToolText(data.output),
           result: data.output,
-        }));
+        });
+        // 执行中：文件可能已被部分改写，但快照按「本轮最早」保留，
+        // 重复调用不会覆盖 tool_execution_start 抓到的基线。
+        this.toolFileDiffFallback.onToolStart(this.projectPath, updateEvent);
+        this.emitEvent(updateEvent);
         break;
       case "tool_execution_end": {
+        if (this.isAborting) break;
+        const endToolUseId = optionalString(data.toolUseId);
+        if (endToolUseId && this.completedToolUseIds.has(endToolUseId)) break;
         if (isClaudeTaskOutputToolName(data.toolName)) {
           this.handleClaudeTaskOutputEvent(data);
           break;
@@ -601,6 +645,7 @@ export class ClaudeSDKAgent {
           this.handleClaudeSubagentWorkerEvent(data, "end");
           break;
         }
+        if (!this.turnActive || this.isAborting) break;
         const event = normalizeToolEvent("tool_end", {
           ...data,
           toolCallId: data.toolUseId,
@@ -609,12 +654,15 @@ export class ClaudeSDKAgent {
           result: data.output,
           output: data.output,
         });
-        this.emitEvent(event);
-        const diffs = buildDiffsFromToolEvent(event);
+        this.emitEvent(withoutToolDiffPayload(event));
+        const fallback = this.toolFileDiffFallback.resolve(this.projectPath, event);
+        const diffs = buildDiffsFromToolEvent(event, fallback);
         if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+        if (endToolUseId) this.completedToolUseIds.add(endToolUseId);
         break;
       }
       case "ui_request": {
+        if (!this.turnActive || this.isAborting) break;
         const requestId = optionalString(data.requestId);
         if (!requestId) break;
         this.pendingUIRequestIds.add(requestId);
@@ -700,7 +748,9 @@ export class ClaudeSDKAgent {
       || input.background === true
       || metadata.run_in_background === true
       || metadata.runInBackground === true
-      || metadata.background === true;
+      || metadata.background === true
+      || asRecord(data.toolUseResult || data.tool_use_result).background === true
+      || previous?.background === true;
     const rawResult = data.toolUseResult || data.tool_use_result || data.output || data.result;
     const resultRecord = typeof rawResult === "object" && rawResult !== null && !Array.isArray(rawResult)
       ? asRecord(rawResult)
@@ -821,6 +871,7 @@ export class ClaudeSDKAgent {
     this.turnActive = false;
     this.streamedText = false;
     this.pendingUIRequestIds.clear();
+    this.toolFileDiffFallback.reset();
   }
 
   private request(command: WorkerCommand, timeoutMs: number) {
@@ -896,6 +947,7 @@ export class ClaudeSDKAgent {
     this.pendingResponses.clear();
     this.pendingUIRequestIds.clear();
     this.claudeSubagentToolCallIdByTaskId.clear();
+    this.completedToolUseIds.clear();
     this.pendingGuidance = null;
     if (this.turnActive) {
       this.emitEvent({ type: "process_event", entryType: "error", kind: "error", title: "Claude Code 已断开", detail: redactedDetail, state: "error" });

@@ -100,6 +100,12 @@ let spawnEventIdByThreadId = new Map();
 let activityDisplayEventIdByItemId = new Map();
 let startedActivityEventIdByThreadId = new Map();
 let completedItemIds = new Set();
+let fileChangeDiffsByItemId = new Map();
+let latestTurnDiffFiles = [];
+let diffSourceSequence = 0;
+let latestTurnDiffSequence = 0;
+let itemFileChangeSequenceByPath = new Map();
+let anonymousFileChangeSequence = 0;
 let contextCompactionEmitted = false;
 let pendingUIRequest = null;
 let activeImageCleanups = [];
@@ -158,6 +164,15 @@ const getCodexFinalErrorDetail = (params) => {
   if (detail) return detail;
   return String(params.message || params.additionalDetails || "Unknown error");
 };
+
+const isCodexTurnFailure = (status) => [
+  "failed",
+  "error",
+  "aborted",
+  "interrupted",
+  "cancelled",
+  "canceled",
+].includes(String(status || "").trim().toLowerCase());
 
 const truncate = (value, maxLength = 1200) => {
   const text = String(value || "");
@@ -965,6 +980,12 @@ const resetTurnState = () => {
   activityDisplayEventIdByItemId = new Map();
   startedActivityEventIdByThreadId = new Map();
   completedItemIds = new Set();
+  fileChangeDiffsByItemId = new Map();
+  latestTurnDiffFiles = [];
+  diffSourceSequence = 0;
+  latestTurnDiffSequence = 0;
+  itemFileChangeSequenceByPath = new Map();
+  anonymousFileChangeSequence = 0;
   contextCompactionEmitted = false;
   interruptedTurnIds = new Set();
 };
@@ -1311,6 +1332,23 @@ const countPatchChanges = (patch) => ({
 
 const normalizeDiffPath = (filePath) => String(filePath || "").replace(/\\/g, "/");
 
+/**
+ * 判断一份补丁是否真的表达了变更。
+ *
+ * provider 有时只回报文件路径 + modified 状态却不给补丁。下游拿到空补丁后会
+ * 渲染出「+0 -0」的假改动，而撤销时空补丁无法反向应用，用户看到的就是
+ * 「改了但撤不掉」。这类条目一律拦掉：宁可不出 diff，也不编造无法撤销的改动。
+ */
+const patchDescribesChange = (patch) => {
+  if (typeof patch !== "string") return false;
+  const trimmed = patch.trim();
+  if (!trimmed) return false;
+  // 无 hunk 但声明了生命周期 —— 空文件的新建/删除，属于真实变更。
+  if (/^(?:new file mode|deleted file mode)\s/m.test(trimmed)) return true;
+  if (!trimmed.split("\n").some((line) => line.startsWith("@@"))) return false;
+  return /^\+[^+]/m.test(trimmed) || /^-[^-]/m.test(trimmed);
+};
+
 const toProjectRelativePath = (filePath) => {
   const value = String(filePath || "");
   if (!value || !projectPath || !isAbsolute(value)) return value;
@@ -1335,7 +1373,13 @@ const getChangeFilePath = (change) => toProjectRelativePath(
   ""
 );
 
-const getChangeKind = (change) => change?.kind || change?.type || change?.status || "update";
+const getChangeKind = (change) => {
+  const candidates = [change?.kind, change?.status, change?.type]
+    .map((value) => String(value || "").trim().toLowerCase());
+  if (candidates.some((value) => ["add", "added", "create", "created", "new"].includes(value))) return "add";
+  if (candidates.some((value) => ["delete", "deleted", "remove", "removed"].includes(value))) return "delete";
+  return "update";
+};
 
 const firstChangeString = (change, keys) => {
   for (const key of keys) {
@@ -1408,6 +1452,7 @@ const getFilesFromChanges = (changes) => {
         label: basename(filePath),
         action: kind === "add" ? "written" : "edited",
         status: kind === "add" ? "added" : kind === "delete" ? "deleted" : "modified",
+        statusExplicit: kind === "add" || kind === "delete",
         patch,
         additions: stats.additions,
         deletions: stats.deletions,
@@ -1416,18 +1461,107 @@ const getFilesFromChanges = (changes) => {
     .filter(Boolean);
 };
 
+const parseUnifiedDiffPath = (line, prefix) => {
+  if (!line.startsWith(prefix)) return "";
+  let value = line.slice(prefix.length).split("\t", 1)[0].trim();
+  if (value.startsWith('"') && value.endsWith('"')) {
+    value = value.slice(1, -1).replace(/\\([\\"])/g, "$1");
+  }
+  if (value === "/dev/null") return value;
+  return value.replace(/^[ab]\//, "");
+};
+
+const getFilesFromUnifiedDiff = (patch) => {
+  const lines = String(patch || "").replace(/\r\n?/g, "\n").split("\n");
+  const starts = [];
+  lines.forEach((line, index) => {
+    if (line.startsWith("diff --git ")) starts.push(index);
+  });
+  const sections = starts.length > 0
+    ? starts.map((start, index) => lines.slice(start, starts[index + 1] || lines.length).join("\n"))
+    : [lines.join("\n")];
+  return sections.flatMap((section) => {
+    const sectionLines = section.split("\n");
+    const oldPath = parseUnifiedDiffPath(sectionLines.find((line) => line.startsWith("--- ")) || "", "--- ");
+    const newPath = parseUnifiedDiffPath(sectionLines.find((line) => line.startsWith("+++ ")) || "", "+++ ");
+    const filePath = newPath !== "/dev/null" ? newPath : oldPath !== "/dev/null" ? oldPath : "";
+    const counts = countPatchChanges(section);
+    // A header-only/mode-only or otherwise empty aggregate is not a usable
+    // content snapshot. Keep item-level patches as the fallback instead of
+    // allowing this placeholder to erase them.
+    if (!filePath || !sectionLines.some((line) => line.startsWith("@@")) || counts.additions + counts.deletions === 0) return [];
+    return getFilesFromChanges([{ path: filePath, kind: "update", patch: section }]);
+  });
+};
+
+const getFileChangeDisplayFiles = (files) => files.map((file) => ({
+  file: file.file,
+  label: file.label,
+}));
+
+const cacheFileChangeDiffs = (itemId, changes) => {
+  const files = getFilesFromChanges(changes);
+  if (files.length === 0) return;
+  const key = String(itemId || `anonymous-file-change-${++anonymousFileChangeSequence}`);
+  fileChangeDiffsByItemId.set(key, files);
+  const sequence = ++diffSourceSequence;
+  for (const file of files) itemFileChangeSequenceByPath.set(normalizeDiffPath(file.file), sequence);
+};
+
+const emitCachedFileChangeDiffs = () => {
+  const filesByPath = new Map();
+  for (const file of [...fileChangeDiffsByItemId.values()].flat()) {
+    filesByPath.set(normalizeDiffPath(file.file), file);
+  }
+  // The turn-level event is the latest aggregate for files it includes, while
+  // item snapshots remain necessary for files omitted by partial aggregates
+  // (notably empty adds/deletes). Preserve both sources without duplicating a
+  // file that appears in the aggregate.
+  for (const file of latestTurnDiffFiles) {
+    const itemSequence = itemFileChangeSequenceByPath.get(normalizeDiffPath(file.file)) || 0;
+    if (itemSequence <= latestTurnDiffSequence) {
+      filesByPath.set(normalizeDiffPath(file.file), file);
+    }
+  }
+  const diffs = [...filesByPath.values()].map((file) => ({
+    file: file.file,
+    patch: file.patch || "",
+    additions: file.additions || 0,
+    deletions: file.deletions || 0,
+    status: file.status,
+    statusExplicit: file.statusExplicit === true,
+  })).filter((diff) => (
+    // 只保留真的表达了变更的条目。statusExplicit 单独放行是危险的：provider
+    // 报 modified + 空补丁 + 0/0 时同样会命中它。生命周期（added/deleted）
+    // 才允许没有内容增删。
+    patchDescribesChange(diff.patch)
+    || diff.additions > 0
+    || diff.deletions > 0
+    || (diff.statusExplicit && (diff.status === "added" || diff.status === "deleted"))
+  ));
+  fileChangeDiffsByItemId = new Map();
+  latestTurnDiffFiles = [];
+  diffSourceSequence = 0;
+  latestTurnDiffSequence = 0;
+  itemFileChangeSequenceByPath = new Map();
+  if (diffs.length > 0) send({ type: "diff_update", diffs });
+};
+
 const emitFileChangeItem = (item, phase) => {
   const terminal = phase === "completed" || item.status === "completed" || item.status === "failed";
   const files = getFilesFromChanges(item.changes);
+  // patchUpdated carries the authoritative, latest snapshot. Keep the tool
+  // timeline focused on paths/status and emit the diff once at turn settlement.
+  if (terminal && item.status !== "failed") cacheFileChangeDiffs(item.id, item.changes);
   send({
     type: terminal ? "tool_end" : "tool_start",
     toolName: "file_change",
     toolCallId: item.id,
     toolKind: "edit_file",
     args: { changes: item.changes },
-    result: terminal ? { changes: item.changes, status: item.status } : undefined,
+    result: terminal ? { status: item.status } : undefined,
     detail: files.map((file) => file.file).join("\n"),
-    files,
+    files: getFileChangeDisplayFiles(files),
     isError: item.status === "failed",
   });
 };
@@ -1831,12 +1965,13 @@ const handleTurnCompleted = (params) => {
   }
   const isActiveTurn = !activeTurnId || !turn.id || activeTurnId === turn.id;
   if (!isActiveTurn) return;
+  const turnFailed = isCodexTurnFailure(turn.status);
   send({
     type: "process_event",
-    entryType: turn.status === "failed" ? "error" : "status",
-    title: turn.status === "failed" ? "Codex turn failed" : "Codex completed",
+    entryType: turnFailed ? "error" : "status",
+    title: turnFailed ? "Codex turn failed" : "Codex completed",
     detail: turn.error ? stringifyValue(turn.error) : undefined,
-    state: turn.status === "failed" ? "error" : "completed",
+    state: turnFailed ? "error" : "completed",
   });
   finishPrompt();
 };
@@ -1869,6 +2004,7 @@ const handleServerNotification = (method, params) => {
       break;
     }
     case "turn/plan/updated":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.plan)) {
         send({
@@ -1890,6 +2026,7 @@ const handleServerNotification = (method, params) => {
       }
       break;
     case "item/started":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       // turn/steer returns as soon as the input is queued. Codex delays the
       // corresponding userMessage item until the previous model response has
@@ -1907,10 +2044,12 @@ const handleServerNotification = (method, params) => {
       handleItem(params.item, "started", params);
       break;
     case "item/completed":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       handleItem(params.item, "completed", params);
       break;
     case "item/agentMessage/delta":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       startStream();
       if (params.itemId) {
@@ -1925,6 +2064,7 @@ const handleServerNotification = (method, params) => {
       }
       break;
     case "item/plan/delta":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       startStream();
       if (params.itemId) {
@@ -1935,6 +2075,7 @@ const handleServerNotification = (method, params) => {
       break;
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/textDelta":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       startStream();
       if (params.itemId) {
@@ -1944,31 +2085,47 @@ const handleServerNotification = (method, params) => {
       if (params.delta) send({ type: "thinking_delta", delta: params.delta });
       break;
     case "item/reasoning/summaryPartAdded":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       startStream();
       if (params.text) send({ type: "thinking_delta", delta: params.text });
       break;
     case "item/commandExecution/outputDelta":
     case "command/exec/outputDelta":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       if (params.itemId) {
         commandOutputByItemId.set(params.itemId, `${commandOutputByItemId.get(params.itemId) || ""}${params.delta || ""}`);
       }
       break;
     case "item/fileChange/patchUpdated":
+      if (shouldIgnoreTurnNotification(params)) return;
       if (!promptRunning || abortRequested) return;
       if (Array.isArray(params.changes)) {
-        send({
-          type: "diff_update",
-          diffs: getFilesFromChanges(params.changes).map((file) => ({
-            file: file.file,
-            patch: file.patch || "",
-            additions: file.additions || 0,
-            deletions: file.deletions || 0,
-            status: file.status,
-          })),
-        });
+        cacheFileChangeDiffs(params.itemId || params.item?.id, params.changes);
       }
+      break;
+    case "turn/diff/updated":
+      if (shouldIgnoreTurnNotification(params)) return;
+      if (!promptRunning || abortRequested || typeof params.diff !== "string") return;
+      const turnDiffFiles = getFilesFromUnifiedDiff(params.diff);
+      // Some server versions can publish an empty/partial turn-level update
+      // before the item-level patch is complete. Do not let an unparseable
+      // aggregate erase a valid item snapshot.
+      if (turnDiffFiles.length === 0) return;
+      const explicitStatuses = new Map(
+        [...fileChangeDiffsByItemId.values()]
+          .flat()
+          .filter((file) => file.statusExplicit === true && (file.status === "added" || file.status === "deleted"))
+          .map((file) => [normalizeDiffPath(file.file), file.status]),
+      );
+      latestTurnDiffSequence = ++diffSourceSequence;
+      latestTurnDiffFiles = turnDiffFiles.map((file) => {
+        const explicitStatus = explicitStatuses.get(normalizeDiffPath(file.file));
+        return explicitStatus
+          ? { ...file, status: explicitStatus, statusExplicit: true }
+          : file;
+      });
       break;
     case "thread/compacted": {
       const compactionId = `${params.threadId || threadId || "thread"}:${params.turnId || "turn"}`;
@@ -2027,6 +2184,7 @@ const finishPrompt = () => {
   if (!promptRunning || pendingUIRequest || abortRequested) return;
   const promptId = activePromptId;
   clearPendingSteer();
+  emitCachedFileChangeDiffs();
   send({ type: "stream_end", content: finalResponse, force: true });
   send({ type: "agent_end" });
   send({ type: "prompt_done", id: promptId });
@@ -2194,6 +2352,7 @@ const abortPrompt = async (command) => {
     title: "Codex interrupted",
     state: "interrupted",
   });
+  emitCachedFileChangeDiffs();
   send({ type: "stream_end", content: finalResponse, force: true });
   send({ type: "agent_end" });
   send({ type: "prompt_done", id: abortedPromptId });
@@ -2218,6 +2377,9 @@ const init = async ({ projectPath: cwd, sessionFilePath, hostSystemPrompt }) => 
 };
 
 const disposeSession = async () => {
+  // A session switch/dispose can race the final file-change notification. Flush
+  // the latest observed snapshot before resetTurnState drops turn memory.
+  emitCachedFileChangeDiffs();
   promptRunning = false;
   aborting = true;
   activePromptId = null;

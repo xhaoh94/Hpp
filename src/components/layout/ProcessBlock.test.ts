@@ -219,6 +219,72 @@ describe("ProcessBlock", () => {
     expect(renderNotice("already_running_notice")).not.toContain("· 00:45");
   });
 
+  it("renders live subagent progress and activity in the summary", () => {
+    const html = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-subagent",
+      process: {
+        startedAt: 1_000,
+        expanded: true,
+        entries: [{
+          id: "subagent-event",
+          type: "subagent" as const,
+          title: "正在工作",
+          state: "running" as const,
+          timestamp: 1_000,
+          startedAt: 1_000,
+          subagents: [
+            { id: "scout", label: "Scout", status: "running" as const, message: "正在读取文件" },
+            { id: "reviewer", label: "Reviewer", status: "completed" as const, message: "已完成" },
+          ],
+        }],
+      },
+      running: true,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+    expect(html).toContain("进度 1/2");
+    expect(html).toContain("Scout：正在读取文件");
+    expect(html).toContain("已运行");
+  });
+
+  it("combines repeated idle notices into one row with the summed duration", () => {
+    const durations = [54_000, 137_000, 107_000, 121_000];
+    const process: AgentProcess = {
+      startedAt: 1_000,
+      endedAt: 900_000,
+      expanded: true,
+      entries: durations.map((duration, index) => {
+        const startedAt = 10_000 + index * 200_000;
+        return {
+          id: `idle-${index}`,
+          type: "status" as const,
+          title: "Pi 仍在运行，暂时没有新输出",
+          toolKind: "stream_idle_notice",
+          state: "completed" as const,
+          timestamp: startedAt,
+          startedAt,
+          completedAt: startedAt + duration,
+        };
+      }),
+    };
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-idle-summary",
+      process,
+      commentary: [],
+      running: false,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+    expect(markup.match(/Pi 仍在运行，暂时没有新输出/g)).toHaveLength(1);
+    expect(markup).toContain("· 06:59");
+  });
+
   it("collapses commentary together with process entries", () => {
     const collapsed = renderProcess(false);
     expect(collapsed).not.toContain("我先检查项目里的发布脚本。");

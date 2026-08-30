@@ -142,6 +142,7 @@ describe("Droid lifecycle", () => {
     // old assistant message and must not confirm yet.
     await internals.sendGuidance("steer this turn");
     expect(internals.guidancePendingResponse).toBe(true);
+    await expect(internals.sendGuidance("second guidance")).rejects.toThrow("GUIDANCE_BUSY");
     expect(internals.sendRpcAsync).toHaveBeenCalledWith(
       "droid.add_user_message",
       expect.objectContaining({ text: "steer this turn" }),

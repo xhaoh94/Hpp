@@ -27,13 +27,14 @@ import {
   X,
 } from "lucide-react";
 import type { DiffLike } from "@shared/diff-summary";
+import type {
+  ReviewUndoState,
+  ReviewUndoTarget,
+} from "@shared/review-undo";
 import {
   buildFullFileDiff,
   buildReviewDiff,
-  extractHunkPatch,
   linesToPairs,
-  parsePatchHunks,
-  splitHunkIndex,
   type DiffLineCell,
   type FullDiffPair,
   type ReviewFileDiff,
@@ -50,17 +51,14 @@ export type ReviewViewMode = "split" | "unified";
 
 type CodeReviewDialogProps = {
   open: boolean;
+  reviewId: string;
   diffs: DiffLike[];
   projectPath?: string;
   /** 打开时初始选中的文件（原始路径或展示路径），不传则选中第一个有补丁的文件。 */
   initialFile?: string;
   onClose: () => void;
   onOpenFile?: (path: string, options?: { preview?: boolean }) => void;
-  onRevertAll?: () => void;
-  revertState?: "idle" | "reverting" | "reverted";
-  revertCanRevert?: boolean;
-  revertTitle?: string;
-  showRevertButton?: boolean;
+  onUndoStateChange?: (state: ReviewUndoState | null) => void;
 };
 
 const MAX_RENDER_LINES = 5000;
@@ -77,6 +75,19 @@ type HighlightedCell = {
 type HighlightedPair = {
   left?: HighlightedCell;
   right?: HighlightedCell;
+  /** 透传自 FullDiffPair：该行所属 hunk 的全局序号（用于「已撤销」样式）。 */
+  hunkIdx?: number;
+  /** 该行所属修改点在 hunk 内的序号（局部撤销的粒度）。 */
+  changeIdx?: number;
+  /** 该 pair 是否是其所属修改点的首个 pair（「撤销此段修改」按钮只在这行渲染）。 */
+  changeStart?: boolean;
+};
+
+type DialogReviewFile = ReviewFileDiff & {
+  canonical: boolean;
+  undoable: boolean;
+  reverted: boolean;
+  undoUnavailableReason?: string;
 };
 
 const renderTokens = (tokens: SyntaxToken[]) => {
@@ -104,16 +115,13 @@ function FileStatusIcon({ status }: { status: ReviewFileDiff["status"] }) {
 
 export function CodeReviewDialog({
   open,
+  reviewId,
   diffs,
   projectPath,
   initialFile,
   onClose,
   onOpenFile,
-  onRevertAll,
-  revertState = "idle",
-  revertCanRevert = false,
-  revertTitle,
-  showRevertButton = false,
+  onUndoStateChange,
 }: CodeReviewDialogProps) {
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ReviewViewMode>("split");
@@ -128,12 +136,25 @@ export function CodeReviewDialog({
   const diffPairIndicesRef = useRef<number[]>([]);
   const diffScrollRef = useRef<HTMLDivElement | null>(null);
   const reviewBodyRef = useRef<HTMLDivElement | null>(null);
-  const [revertedHunks, setRevertedHunks] = useState<Set<string>>(new Set());
-  const [revertedFiles, setRevertedFiles] = useState<Set<string>>(new Set());
+  const reviewGenerationRef = useRef(0);
+  const operationCounterRef = useRef(0);
+  const activeOperationRef = useRef<{ id: number; generation: number } | null>(null);
+  const [reviewState, setReviewState] = useState<ReviewUndoState | null>(null);
+  const [preparingUndo, setPreparingUndo] = useState(false);
   const [undoingKey, setUndoingKey] = useState<string | null>(null);
   const [undoError, setUndoError] = useState<string | null>(null);
 
-  const files = useMemo(() => buildReviewDiff(diffs, projectPath), [diffs, projectPath]);
+  const sourceFiles = useMemo(() => buildReviewDiff(diffs, projectPath), [diffs, projectPath]);
+  const reviewSources = useMemo(
+    () => sourceFiles.map((file) => ({
+      file: file.file,
+      patches: file.patches,
+      status: file.status,
+      statusExplicit: file.statusExplicit === true,
+    })),
+    [sourceFiles],
+  );
+  const reviewSourceFingerprint = useMemo(() => JSON.stringify(reviewSources), [reviewSources]);
 
   // 打开时回到初始选中的文件（或第一个有补丁的文件），保持视图为并排对比。
   // useLayoutEffect（声明靠前）确保在默认定位 useLayoutEffect 之前重置 scrolledRef，
@@ -204,6 +225,106 @@ export function CodeReviewDialog({
     setFilesWidth((width) => clampFilesWidth(width + (event.key === "ArrowRight" ? 16 : -16)));
   };
 
+  useLayoutEffect(() => {
+    reviewGenerationRef.current += 1;
+    activeOperationRef.current = null;
+    setUndoingKey(null);
+    setReviewState(null);
+    setPreparingUndo(false);
+    setUndoError(null);
+    setFileContent({});
+    loadedRef.current.clear();
+    scrolledRef.current = null;
+    onUndoStateChange?.(null);
+  }, [reviewId, projectPath, reviewSourceFingerprint]);
+
+  useEffect(() => {
+    const generation = reviewGenerationRef.current;
+    if (!open) {
+      setPreparingUndo(false);
+      return;
+    }
+    if (!projectPath || reviewSources.length === 0) {
+      setReviewState(null);
+      setPreparingUndo(false);
+      return;
+    }
+    let cancelled = false;
+    setReviewState(null);
+    setPreparingUndo(true);
+    setUndoError(null);
+    void window.electronAPI.prepareReviewUndo({
+      reviewId,
+      projectPath,
+      files: reviewSources,
+    }).then(
+      (result) => {
+        if (cancelled || reviewGenerationRef.current !== generation) return;
+        if (!result.success) {
+          setUndoError(result.error || "无法准备安全撤销");
+          return;
+        }
+        setReviewState(result.state);
+        onUndoStateChange?.(result.state);
+      },
+      (error) => {
+        if (!cancelled && reviewGenerationRef.current === generation) {
+          setUndoError(error instanceof Error ? error.message : String(error));
+        }
+      },
+    ).finally(() => {
+      if (!cancelled && reviewGenerationRef.current === generation) setPreparingUndo(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, reviewId, projectPath, reviewSourceFingerprint]);
+
+  const files = useMemo<DialogReviewFile[]>(() => {
+    const preparedByFile = new Map(reviewState?.files.map((file) => [file.file, file]) || []);
+    return sourceFiles.map((source) => {
+      const prepared = preparedByFile.get(source.file);
+      if (!prepared) {
+        return {
+          ...source,
+          canonical: false,
+          undoable: false,
+          reverted: false,
+        };
+      }
+      if (prepared.error) {
+        return {
+          ...source,
+          canonical: false,
+          undoable: false,
+          reverted: false,
+          undoUnavailableReason: prepared.error,
+        };
+      }
+      const parsed = prepared.patch.trim()
+        ? buildReviewDiff([{
+            file: source.file,
+            patch: prepared.patch,
+            status: prepared.status,
+            statusExplicit: true,
+          }], projectPath)[0]
+        : undefined;
+      return {
+        ...source,
+        status: prepared.status,
+        additions: prepared.additions,
+        deletions: prepared.deletions,
+        hasPatch: !!prepared.patch.trim(),
+        patch: prepared.patch,
+        patches: prepared.patch.trim() ? [prepared.patch] : [],
+        lines: parsed?.lines || [],
+        canonical: true,
+        undoable: prepared.undoable,
+        reverted: prepared.reverted,
+      };
+    });
+  }, [sourceFiles, reviewState, projectPath]);
+
   const active = useMemo(() => {
     if (files.length === 0) return null;
     const selected = activeFileKey
@@ -223,13 +344,15 @@ export function CodeReviewDialog({
     return resolveProjectFilePath(active.file, projectPath || "");
   }, [active, projectPath]);
 
-  // 读取当前文件内容，用于还原「修改前 / 修改后」的完整文件对比。
+  // 当前版本参与缓存键。局部或文件撤销成功后版本递增，文件内容会立即重新读取。
   useEffect(() => {
     if (!open || !active) return;
-    if (loadedRef.current.has(active.displayFile)) return;
+    const version = reviewState?.version ?? -1;
+    const cacheKey = `${projectPath || ""}\0${active.displayFile}\0${version}`;
+    if (loadedRef.current.has(cacheKey)) return;
     let cancelled = false;
     const path = resolveProjectFilePath(active.file, projectPath || "");
-    loadedRef.current.add(active.displayFile);
+    loadedRef.current.add(cacheKey);
     void window.electronAPI.readFile(path).then(
       (result) => {
         if (cancelled) return;
@@ -246,12 +369,15 @@ export function CodeReviewDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, active, projectPath]);
+  }, [open, active, projectPath, reviewState?.version]);
 
-  // 完整文件对比行对；文件尚未读取完成时先用补丁内行立即显示，读取完成后自动升级。
+  // 规范化补丁始终表示「基线 → 当前磁盘内容」，因此每次撤销后都能重新构建真实剩余 diff。
+  // 无法安全规范化的原始补丁仅使用 patch-only 回退视图，不参与写盘。
   const pairs = useMemo((): FullDiffPair[] | null => {
     if (!active) return null;
+    if (active.reverted) return [];
     const content = fileContent[active.displayFile];
+    if (!active.canonical) return linesToPairs(active.lines);
     if (content === undefined) return linesToPairs(active.lines);
     if (content !== null && active.patch.trim()) return buildFullFileDiff(content, active.patch);
     return linesToPairs(active.lines);
@@ -271,6 +397,9 @@ export function CodeReviewDialog({
       const entry: HighlightedPair = {};
       if (pair.left) entry.left = { cell: pair.left, tokens: highlightText(pair.left.text, language) };
       if (pair.right) entry.right = { cell: pair.right, tokens: highlightText(pair.right.text, language) };
+      if (pair.hunkIdx !== undefined) entry.hunkIdx = pair.hunkIdx;
+      if (pair.changeIdx !== undefined) entry.changeIdx = pair.changeIdx;
+      if (pair.changeStart) entry.changeStart = true;
       result.push(entry);
     }
     return result;
@@ -293,96 +422,84 @@ export function CodeReviewDialog({
   const totalDiffs = diffPairIndices.length;
   diffPairIndicesRef.current = diffPairIndices;
 
-  // 每个补丁 hunk 在 pairs 中的起始位置，用于定位局部 undo 按钮。
-  const hunkStarts = useMemo(() => {
-    if (!active?.hasPatch || !pairs) return [];
-    const parsed = parsePatchHunks(active.patch);
-    if (parsed.length === 0) return [];
-    const result: { hunkIdx: number; pairIdx: number }[] = [];
-    let searchFrom = 0;
-    for (let h = 0; h < parsed.length; h++) {
-      const hunk = parsed[h];
-      const oldEnd = hunk.oldStart + Math.max(hunk.oldCount, 1);
-      const newEnd = hunk.newStart + Math.max(hunk.newCount, 1);
-      for (let i = searchFrom; i < pairs.length; i++) {
-        const pair = pairs[i];
-        const leftNo = pair.left?.lineNo ?? -1;
-        const rightNo = pair.right?.lineNo ?? -1;
-        if (
-          (leftNo >= hunk.oldStart && leftNo < oldEnd) ||
-          (rightNo >= hunk.newStart && rightNo < newEnd)
-        ) {
-          result.push({ hunkIdx: h, pairIdx: i });
-          searchFrom = i + 1;
-          break;
-        }
-      }
-    }
-    return result;
-  }, [active, pairs]);
+  const fileReverted = !!active?.reverted;
+  const undoBusy = preparingUndo || undoingKey !== null;
 
-  const fileReverted = !!active && revertedFiles.has(active.displayFile);
-
-  // pairIdx → hunkIdx 的查找表，用于在渲染时定位 hunk 起始行。
-  const hunkStartMap = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const { hunkIdx, pairIdx } of hunkStarts) map.set(pairIdx, hunkIdx);
-    return map;
-  }, [hunkStarts]);
-
-  const handleFileUndo = async () => {
-    if (!active || !projectPath || !active.hasPatch || fileReverted) return;
-    const key = `file:${active.displayFile}`;
+  const applyUndo = async (target: ReviewUndoTarget, key: string) => {
+    if (!reviewState || activeOperationRef.current) return;
+    const generation = reviewGenerationRef.current;
+    const operationId = operationCounterRef.current + 1;
+    operationCounterRef.current = operationId;
+    activeOperationRef.current = { id: operationId, generation };
+    const isCurrentOperation = () =>
+      reviewGenerationRef.current === generation
+      && activeOperationRef.current?.id === operationId;
     setUndoingKey(key);
     setUndoError(null);
     try {
-      const result = await window.electronAPI.reverseApplyPatch(projectPath, active.patches);
+      const result = await window.electronAPI.applyReviewUndo(
+        reviewState.transactionId,
+        reviewState.version,
+        target,
+      );
+      if (!isCurrentOperation()) return;
       if (!result.success) {
-        setUndoError(result.error || "撤销失败");
-      } else {
-        setRevertedFiles((prev) => new Set(prev).add(active.displayFile));
+        if (result.stale && projectPath) {
+          const refreshed = await window.electronAPI.prepareReviewUndo({
+            reviewId,
+            projectPath,
+            files: reviewSources,
+          });
+          if (refreshed.success && isCurrentOperation()) {
+            setReviewState(refreshed.state);
+            onUndoStateChange?.(refreshed.state);
+          }
+        }
+        if (isCurrentOperation()) setUndoError(result.error || "撤销失败");
+        return;
       }
-    } catch (err) {
-      setUndoError(err instanceof Error ? err.message : String(err));
+      setFileContent({});
+      setReviewState(result.state);
+      onUndoStateChange?.(result.state);
+      scrolledRef.current = null;
+    } catch (error) {
+      if (isCurrentOperation()) {
+        setUndoError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setUndoingKey(null);
+      if (activeOperationRef.current?.id === operationId) {
+        activeOperationRef.current = null;
+        setUndoingKey(null);
+      }
     }
   };
 
-  const handleHunkUndo = async (hunkIdx: number) => {
-    if (!active || !projectPath) return;
-    const hunkKey = `hunk:${active.displayFile}:${hunkIdx}`;
-    if (revertedHunks.has(hunkKey)) return;
-    // hunkIdx 是合并补丁中的序号；局部撤销需先定位回单份原始补丁再提取 hunk，
-    // 直接从合并补丁切分会混入后续补丁的文件头，导致 git apply 失败。
-    const located = splitHunkIndex(active.patches, hunkIdx);
-    const hunkPatch = located
-      ? extractHunkPatch(active.patches[located.patchIndex], located.hunkIndex)
-      : null;
-    if (!hunkPatch) return;
-    setUndoingKey(hunkKey);
-    setUndoError(null);
-    try {
-      const result = await window.electronAPI.reverseApplyPatch(projectPath, [hunkPatch]);
-      if (!result.success) {
-        setUndoError(result.error || "撤销失败");
-      } else {
-        setRevertedHunks((prev) => new Set(prev).add(hunkKey));
-      }
-    } catch (err) {
-      setUndoError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setUndoingKey(null);
-    }
+  const handleFileUndo = () => {
+    if (!active?.undoable) return;
+    void applyUndo(
+      { kind: "file", file: active.file },
+      `file:${active.displayFile}`,
+    );
   };
 
-  const isHunkReverted = (hunkIdx: number) =>
-    !!active && revertedHunks.has(`hunk:${active.displayFile}:${hunkIdx}`);
+  const handleHunkUndo = (hunkIndex: number, changeIndex: number) => {
+    if (!active?.undoable) return;
+    void applyUndo(
+      { kind: "hunk", file: active.file, hunkIndex, changeIndex },
+      `hunk:${active.displayFile}:${hunkIndex}:${changeIndex}`,
+    );
+  };
 
-  const isHunkUndoing = (hunkIdx: number) =>
-    !!active && undoingKey === `hunk:${active.displayFile}:${hunkIdx}`;
+  const handleUndoAll = () => {
+    if (!reviewState?.canUndoAll) return;
+    void applyUndo({ kind: "all" }, "all");
+  };
+
+  const isHunkUndoing = (hunkIdx: number, changeIdx: number) =>
+    !!active && undoingKey === `hunk:${active.displayFile}:${hunkIdx}:${changeIdx}`;
 
   const fileUndoing = !!active && undoingKey === `file:${active.displayFile}`;
+  const allUndoing = undoingKey === "all";
 
   const scrollToDiff = (cursor: number, smooth = false) => {
     const container = diffScrollRef.current;
@@ -639,22 +756,22 @@ export function CodeReviewDialog({
                   );
                 })}
               </div>
-              {!filesCollapsed && showRevertButton && onRevertAll && (
+              {!filesCollapsed && projectPath && (
                 <div className="chat-review-files-footer">
                   <button
                     type="button"
                     className="chat-review-revert-all-btn"
-                    onClick={onRevertAll}
-                    disabled={!revertCanRevert}
-                    title={revertTitle}
-                    aria-label={revertTitle}
+                    onClick={handleUndoAll}
+                    disabled={undoBusy || !reviewState?.canUndoAll}
+                    title={reviewState?.undoAllReason || "撤销本次全部修改"}
+                    aria-label={reviewState?.undoAllReason || "撤销本次全部修改"}
                   >
-                    {revertState === "reverting" ? (
+                    {preparingUndo || allUndoing ? (
                       <Loader2 className="chat-review-spin" size={14} strokeWidth={2} />
                     ) : (
                       <Undo2 size={14} strokeWidth={2} />
                     )}
-                    <span>{revertState === "reverted" ? "已撤销" : "撤销全部修改"}</span>
+                    <span>{reviewState?.allReverted ? "已撤销" : "撤销全部修改"}</span>
                   </button>
                 </div>
               )}
@@ -674,8 +791,15 @@ export function CodeReviewDialog({
             </aside>
 
             <div className="chat-review-content">
-              {!active ? null : !active.hasPatch ? (
-                <div className="chat-review-empty">{uiText.review.noPatch}</div>
+              {!active ? null : !active.hasPatch && !active.reverted ? (
+                <>
+                  <div className="chat-review-empty">{preparingUndo ? uiText.review.loading : uiText.review.noPatch}</div>
+                  {active.undoUnavailableReason && (
+                    <div className="chat-review-undo-error" role="status">
+                      此文件无法安全撤销：{active.undoUnavailableReason}
+                    </div>
+                  )}
+                </>
               ) : (
                 <>
                   <div className="chat-review-file-head">
@@ -683,12 +807,12 @@ export function CodeReviewDialog({
                       <FileStatusIcon status={active.status} />
                       <span>{active.displayFile}</span>
                     </span>
-                    {active.hasPatch && projectPath && !fileReverted && (
+                    {active.undoable && projectPath && (
                       <button
                         type="button"
                         className="chat-review-file-undo"
                         onClick={handleFileUndo}
-                        disabled={fileUndoing}
+                        disabled={undoBusy}
                         title="撤销此文件的所有修改"
                       >
                         {fileUndoing ? (
@@ -719,37 +843,34 @@ export function CodeReviewDialog({
                             {highlightedPairs.map((pair, index) => {
                               if (!pair.left) return null;
                               const isDiff = pair.left.cell.type === "del";
-                              const hunkIdx = hunkStartMap.get(index);
-                              // 右列默认隐藏删除行时，hunk 起始的删除行在右列不可见，在左列补充撤销按钮。
+                              const hunkIdx = pair.hunkIdx;
+                              const changeIdx = pair.changeIdx;
+                              // 右列默认隐藏删除行时，修改点起始的删除行在右列不可见，在左列补充撤销按钮。
                               const rightHidden =
                                 !pair.right && !!pair.left && pair.left.cell.type === "del" && !showDeletedInRight;
                               return (
                                 <div
-                                  className={`chat-review-col-line ${pair.left.cell.type}${hunkIdx !== undefined && isHunkReverted(hunkIdx) ? " hunk-reverted" : ""}`}
+                                  className={`chat-review-col-line ${pair.left.cell.type}`}
                                   key={index}
                                   data-review-diff-index={isDiff ? index : undefined}
                                 >
                                   <span className="chat-review-line-no">{pair.left.cell.lineNo}</span>
                                   <span className="chat-review-code">{renderTokens(pair.left.tokens)}</span>
-                                  {hunkIdx !== undefined && rightHidden && (
-                                    isHunkReverted(hunkIdx) ? (
-                                      <span className="chat-review-hunk-badge reverted">已撤销</span>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        className="chat-review-hunk-undo"
-                                        onClick={() => handleHunkUndo(hunkIdx)}
-                                        disabled={isHunkUndoing(hunkIdx)}
-                                        title="撤销此段修改"
-                                      >
-                                        {isHunkUndoing(hunkIdx) ? (
-                                          <Loader2 className="chat-review-spin" size={11} />
-                                        ) : (
-                                          <Undo2 size={11} strokeWidth={2.2} />
-                                        )}
-                                        <span>撤销</span>
-                                      </button>
-                                    )
+                                  {pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined && rightHidden && active.undoable && (
+                                    <button
+                                      type="button"
+                                      className="chat-review-hunk-undo"
+                                      onClick={() => handleHunkUndo(hunkIdx, changeIdx)}
+                                      disabled={undoBusy}
+                                      title="撤销此段修改"
+                                    >
+                                      {isHunkUndoing(hunkIdx, changeIdx) ? (
+                                        <Loader2 className="chat-review-spin" size={11} />
+                                      ) : (
+                                        <Undo2 size={11} strokeWidth={2.2} />
+                                      )}
+                                      <span>撤销</span>
+                                    </button>
                                   )}
                                 </div>
                               );
@@ -763,34 +884,31 @@ export function CodeReviewDialog({
                               if (!pair.right && !showDeleted) return null;
                               const cell = pair.right ?? pair.left!;
                               const isDiff = pair.right ? pair.right.cell.type === "add" : cell.cell.type === "del";
-                              const hunkIdx = hunkStartMap.get(index);
+                              const hunkIdx = pair.hunkIdx;
+                              const changeIdx = pair.changeIdx;
                               return (
                                 <div
-                                  className={`chat-review-col-line ${cell.cell.type}${hunkIdx !== undefined && isHunkReverted(hunkIdx) ? " hunk-reverted" : ""}`}
+                                  className={`chat-review-col-line ${cell.cell.type}`}
                                   key={index}
                                   data-review-diff-index={isDiff ? index : undefined}
                                 >
                                   <span className="chat-review-line-no">{cell.cell.lineNo}</span>
                                   <span className="chat-review-code">{renderTokens(cell.tokens)}</span>
-                                  {hunkIdx !== undefined && (
-                                    isHunkReverted(hunkIdx) ? (
-                                      <span className="chat-review-hunk-badge reverted">已撤销</span>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        className="chat-review-hunk-undo"
-                                        onClick={() => handleHunkUndo(hunkIdx)}
-                                        disabled={isHunkUndoing(hunkIdx)}
-                                        title="撤销此段修改"
-                                      >
-                                        {isHunkUndoing(hunkIdx) ? (
-                                          <Loader2 className="chat-review-spin" size={11} />
-                                        ) : (
-                                          <Undo2 size={11} strokeWidth={2.2} />
-                                        )}
-                                        <span>撤销</span>
-                                      </button>
-                                    )
+                                  {pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined && active.undoable && (
+                                    <button
+                                      type="button"
+                                      className="chat-review-hunk-undo"
+                                      onClick={() => handleHunkUndo(hunkIdx, changeIdx)}
+                                      disabled={undoBusy}
+                                      title="撤销此段修改"
+                                    >
+                                      {isHunkUndoing(hunkIdx, changeIdx) ? (
+                                        <Loader2 className="chat-review-spin" size={11} />
+                                      ) : (
+                                        <Undo2 size={11} strokeWidth={2.2} />
+                                      )}
+                                      <span>撤销</span>
+                                    </button>
                                   )}
                                 </div>
                               );
@@ -810,10 +928,11 @@ export function CodeReviewDialog({
                               ? "add"
                               : "context";
                           const text = pair.left ?? pair.right;
-                          const hunkIdx = hunkStartMap.get(index);
+                          const hunkIdx = pair.hunkIdx;
+                          const changeIdx = pair.changeIdx;
                           return (
                             <div
-                              className={`chat-review-line ${type}${hunkIdx !== undefined && isHunkReverted(hunkIdx) ? " hunk-reverted" : ""}`}
+                              className={`chat-review-line ${type}`}
                               key={index}
                               data-review-diff-index={isDiffPair(pair) ? index : undefined}
                             >
@@ -828,25 +947,21 @@ export function CodeReviewDialog({
                               <span className="chat-review-code">
                                 {text ? renderTokens(text.tokens) : <span className="chat-review-code-empty" />}
                               </span>
-                              {hunkIdx !== undefined && (
-                                isHunkReverted(hunkIdx) ? (
-                                  <span className="chat-review-hunk-badge reverted">已撤销</span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="chat-review-hunk-undo"
-                                    onClick={() => handleHunkUndo(hunkIdx)}
-                                    disabled={isHunkUndoing(hunkIdx)}
-                                    title="撤销此段修改"
-                                  >
-                                    {isHunkUndoing(hunkIdx) ? (
-                                      <Loader2 className="chat-review-spin" size={11} />
-                                    ) : (
-                                      <Undo2 size={11} strokeWidth={2.2} />
-                                    )}
-                                    <span>撤销</span>
-                                  </button>
-                                )
+                              {pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined && active.undoable && (
+                                <button
+                                  type="button"
+                                  className="chat-review-hunk-undo"
+                                  onClick={() => handleHunkUndo(hunkIdx, changeIdx)}
+                                  disabled={undoBusy}
+                                  title="撤销此段修改"
+                                >
+                                  {isHunkUndoing(hunkIdx, changeIdx) ? (
+                                    <Loader2 className="chat-review-spin" size={11} />
+                                  ) : (
+                                    <Undo2 size={11} strokeWidth={2.2} />
+                                  )}
+                                  <span>撤销</span>
+                                </button>
                               )}
                             </div>
                           );
@@ -857,8 +972,10 @@ export function CodeReviewDialog({
                       </div>
                     )}
                   </div>
-                  {undoError && (
-                    <div className="chat-review-undo-error" role="status">{undoError}</div>
+                  {(undoError || active.undoUnavailableReason) && (
+                    <div className="chat-review-undo-error" role="status">
+                      {undoError || `此文件无法安全撤销：${active.undoUnavailableReason}`}
+                    </div>
                   )}
                 </>
               )}

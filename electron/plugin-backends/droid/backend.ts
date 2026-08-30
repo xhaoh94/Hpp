@@ -18,7 +18,9 @@ import {
   isContextCompactionLike,
   normalizeQuestionProcessEvent,
   normalizeToolEvent,
+  withoutToolDiffPayload,
 } from "../../plugin-runtime/process-events";
+import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
 import {
   buildNativeSubagentEvent,
   formatSubagentModel,
@@ -111,6 +113,11 @@ interface RunningDroidTool {
   toolName: string;
   args?: unknown;
   isSubagent?: boolean;
+}
+
+function isDroidMutatingTool(toolName: unknown): boolean {
+  const toolKind = normalizeToolEvent("tool_start", { toolName }).toolKind;
+  return toolKind === "write_file" || toolKind === "edit_file";
 }
 
 function getDroidSubagentInput(value: unknown): UnknownRecord {
@@ -330,6 +337,8 @@ async function readDroidSettings(): Promise<UnknownRecord> {
 export class DroidAgent {
   private process: ChildProcess | null = null;
   private projectPath = "";
+  /** provider 未回报补丁时的自算兜底（tool_start 抓快照 → tool_end 出差异）。 */
+  private readonly toolFileDiffFallback = new ToolFileDiffFallback();
   private sessionId: string | null = null;
   private models: AgentModel[] = [];
   private nativeModelIds = new Map<string, string>();
@@ -346,12 +355,20 @@ export class DroidAgent {
   private planModeEnabled = false;
   private permissionMode: import("../../../shared/agent-permissions").AgentPermissionMode = "auto";
   private turnActive = false;
+  private turnGeneration = 0;
+  private activeTurnGeneration = 0;
+  private idleObservedWithPendingMutatingTool = false;
   private isAborting = false;
   private guidancePendingResponse = false;
   private guidanceRequestId: string | null = null;
   private assistantTextBuffer = "";
   private runningToolUses = new Map<string, RunningDroidTool>();
   private completedToolUses = new Set<string>();
+  // Tool ids from an aborted/failed turn remain tombstoned for this backend
+  // process; late notifications must not recreate cancelled work in a new
+  // prompt. Subagent ids get an additional semantic guard below.
+  private invalidatedDroidToolCallIds = new Set<string>();
+  private invalidatedDroidSubagentToolCallIds = new Set<string>();
   private droidSubagentsByToolCallId = new Map<string, NativeSubagentSnapshot>();
   private actionKeys = new Set<string>();
   private hostSystemPrompt = "";
@@ -449,7 +466,7 @@ export class DroidAgent {
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (!line.trim()) continue;
         try {
-          this.handleMessage(JSON.parse(line));
+          this.handleMessage(JSON.parse(line), childProcess);
         } catch {
           console.warn("[droid] Ignored non-JSON stdout line:", line.slice(0, 500));
         }
@@ -509,18 +526,42 @@ export class DroidAgent {
     if (!this.process || !this.isReady) {
       throw new Error("Droid is not ready");
     }
+    if (
+      this.isAborting ||
+      this.turnActive ||
+      this.pendingAskUserRequest ||
+      this.pendingPermissionRequestId ||
+      this.guidancePendingResponse
+    ) {
+      throw new Error("SESSION_BUSY");
+    }
 
+    const turnGeneration = ++this.turnGeneration;
+    this.activeTurnGeneration = turnGeneration;
+    const isCurrentTurn = () => (
+      this.activeTurnGeneration === turnGeneration &&
+      !this.isAborting &&
+      this.turnActive
+    );
     this.turnActive = true;
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
-    this.droidSubagentsByToolCallId.clear();
+    // Background tasks outlive the parent turn; keep their snapshots so a
+    // later completion can still be correlated without attaching it to a new
+    // prompt. Foreground snapshots belong to the turn being replaced.
+    for (const [toolCallId, snapshot] of this.droidSubagentsByToolCallId) {
+      if (snapshot.background !== true) this.droidSubagentsByToolCallId.delete(toolCallId);
+    }
+    this.idleObservedWithPendingMutatingTool = false;
     this.assistantTextBuffer = "";
     this.emitEvent({ type: "stream_start", role: "assistant" });
     try {
       await this.configureInteractionMode(!!options?.planModeEnabled, options?.permissionMode || "auto");
+      if (!isCurrentTurn()) return;
 
       const action = options?.action ? await this.resolveAction(options.action) : null;
+      if (!isCurrentTurn()) return;
       const actionText = action ? `/${action.name}${message ? ` ${message}` : ""}` : message;
       const msgParams: DroidUserMessageParams = { text: actionText };
       if (images && images.length > 0) {
@@ -537,8 +578,10 @@ export class DroidAgent {
         this.clientMessageIdsByRequestId.set(requestId, this.activeClientMessageId);
       }
       await this.sendRpcAsync("droid.add_user_message", msgParams, 30000, requestId);
+      if (!isCurrentTurn()) return;
     } catch (error) {
-      if (this.process) this.failActiveTurn("Droid request failed", getErrorMessage(error));
+      if (!isCurrentTurn()) return;
+      this.failActiveTurn("Droid request failed", getErrorMessage(error));
       throw error;
     }
   }
@@ -546,6 +589,14 @@ export class DroidAgent {
   /** Send a guidance message into the active session (mid-turn steering). */
   async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process || !this.isReady) throw new Error("Droid is not ready");
+    if (!this.turnActive) throw new Error("SESSION_NOT_RUNNING");
+    if (this.guidancePendingResponse) throw new Error("GUIDANCE_BUSY");
+    const turnGeneration = this.activeTurnGeneration;
+    const isCurrentTurn = () => (
+      this.activeTurnGeneration === turnGeneration &&
+      !this.isAborting &&
+      this.turnActive
+    );
 
     // Guidance steers the already-running conversation, so it must not reset
     // the currently streaming turn's state (turnActive / tool sets) the way
@@ -564,7 +615,9 @@ export class DroidAgent {
     this.guidancePendingResponse = true;
     try {
       await this.sendRpcAsync("droid.add_user_message", msgParams, 30000, requestId);
+      if (!isCurrentTurn()) return;
     } catch (error) {
+      if (!isCurrentTurn()) return;
       this.guidancePendingResponse = false;
       this.guidanceRequestId = null;
       throw error;
@@ -634,6 +687,8 @@ export class DroidAgent {
   /** Abort current response */
   async abort() {
     this.isAborting = true;
+    this.turnGeneration += 1;
+    this.activeTurnGeneration = 0;
     let detail = "";
     if (this.pendingPermissionRequestId) {
       try {
@@ -659,11 +714,21 @@ export class DroidAgent {
       }
     }
     this.turnActive = false;
+    this.idleObservedWithPendingMutatingTool = false;
     this.clientMessageIdsByRequestId.clear();
     this.activeClientMessageId = null;
     this.guidancePendingResponse = false;
     this.guidanceRequestId = null;
     this.interruptDroidSubagents("用户已中止");
+    for (const toolCallId of this.droidSubagentsByToolCallId.keys()) {
+      this.invalidatedDroidToolCallIds.add(toolCallId);
+      this.invalidatedDroidSubagentToolCallIds.add(toolCallId);
+    }
+    for (const [toolCallId, runningTool] of this.runningToolUses) {
+      this.invalidatedDroidToolCallIds.add(toolCallId);
+      if (runningTool.isSubagent) this.invalidatedDroidSubagentToolCallIds.add(toolCallId);
+    }
+    this.droidSubagentsByToolCallId.clear();
     this.runningToolUses.clear();
     this.completedToolUses.clear();
     this.actionKeys.clear();
@@ -879,9 +944,13 @@ export class DroidAgent {
     this.guidancePendingResponse = false;
     this.guidanceRequestId = null;
     this.turnActive = false;
+    this.activeTurnGeneration = 0;
+    this.idleObservedWithPendingMutatingTool = false;
     this.isAborting = false;
     this.runningToolUses.clear();
     this.completedToolUses.clear();
+    this.invalidatedDroidToolCallIds.clear();
+    this.invalidatedDroidSubagentToolCallIds.clear();
     this.actionKeys.clear();
     if (wasActive) {
       this.emitEvent({ type: "stream_end", force: true });
@@ -979,7 +1048,8 @@ export class DroidAgent {
     this.process.stdin.write(JSON.stringify(msg) + "\n");
   }
 
-  private handleMessage(data: unknown) {
+  private handleMessage(data: unknown, sourceChild?: ChildProcess) {
+    if (sourceChild && this.process !== sourceChild) return;
     const message = asRecord(data);
     if (typeof message.factoryProtocolVersion === "string" && message.factoryProtocolVersion) {
       this.protocolVersion = message.factoryProtocolVersion;
@@ -1012,6 +1082,16 @@ export class DroidAgent {
   }
 
   private handleServerRequest(method: string, requestId: string, params: unknown) {
+    if (this.isAborting && (method === "droid.request_permission" || method === "droid.ask_user")) {
+      try {
+        this.sendRpcResponse(requestId, method === "droid.ask_user"
+          ? { cancelled: true, answers: [] }
+          : { selectedOption: "cancel" });
+      } catch {
+        // The abort path is already handling a broken transport.
+      }
+      return;
+    }
     const paramsRecord = asRecord(params);
     switch (method) {
       case "droid.request_permission":
@@ -1100,6 +1180,8 @@ export class DroidAgent {
       this.emitEvent({ type: "context_compaction", id: notifData.id || notification.id || paramsRecord.id });
       return;
     }
+
+    if (this.isAborting) return;
 
     switch (notifType) {
       case "create_message":
@@ -1198,6 +1280,7 @@ export class DroidAgent {
           const status = String(update.status || notifData.status || "").toLowerCase();
           const isError = update.type === "error" || !!update.error || status === "error" || status === "failed";
           const toolCallId = String(notifData.toolUseId || notifData.toolCallId || notifData.id || notifData.toolName || "");
+          if (toolCallId && this.invalidatedDroidToolCallIds.has(toolCallId)) break;
           const toolName = notifData.toolName || update.toolName || "tool";
           const args = update.parameters || notifData.args || notifData.input;
           const result = update.fullOutput || update.text || update.valueSnippet || notifData.result;
@@ -1217,6 +1300,8 @@ export class DroidAgent {
             ? "tool_end"
             : "tool_start";
           if (isSubagent) {
+            if (toolCallId && this.invalidatedDroidSubagentToolCallIds.has(toolCallId)) break;
+            if (toolCallId && !this.turnActive && !this.droidSubagentsByToolCallId.has(toolCallId)) break;
             if (toolCallId && phase === "tool_end" && this.completedToolUses.has(toolCallId)) break;
             if (toolCallId && phase === "tool_start") {
               this.runningToolUses.set(toolCallId, { toolName: String(toolName), args, isSubagent: true });
@@ -1250,14 +1335,19 @@ export class DroidAgent {
             });
           }
           const toolEvent = normalizeToolEvent(phase, normalizedInput);
-          this.emitEvent(toolEvent);
+          if (phase === "tool_start") {
+            this.toolFileDiffFallback.onToolStart(this.projectPath, toolEvent);
+          }
+          this.emitEvent(phase === "tool_end" ? withoutToolDiffPayload(toolEvent) : toolEvent);
           if (phase === "tool_end") {
             if (toolCallId) {
               this.runningToolUses.delete(toolCallId);
               this.completedToolUses.add(toolCallId);
             }
-            const diffs = buildDiffsFromToolEvent(toolEvent);
+            const fallback = this.toolFileDiffFallback.resolve(this.projectPath, toolEvent);
+            const diffs = buildDiffsFromToolEvent(toolEvent, fallback);
             if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+            this.finishIfIdleAfterMutationResult();
           }
         }
         break;
@@ -1273,30 +1363,47 @@ export class DroidAgent {
               // resumes the same agent execution.
               break;
             }
-            this.reconcileDroidSubagentFailuresFromAssistantText();
-            const shouldFinishTurn = this.turnActive;
-            this.turnActive = false;
-            if (shouldFinishTurn) {
-              this.emitEvent({ type: "stream_end" });
-              this.emitEvent({ type: "agent_end" });
+            if (this.guidancePendingResponse) {
+              // A queued guidance message can cross a short idle boundary
+              // before Droid creates its user message. Keep the original turn
+              // open until that guidance response is actually delivered, but
+              // clear ordinary message correlation just like the provider does.
+              this.activeClientMessageId = null;
+              this.clientMessageIdsByRequestId.clear();
+              break;
             }
-            this.activeClientMessageId = null;
-            this.clientMessageIdsByRequestId.clear();
+            if (this.hasPendingMutatingToolUse()) {
+              // The tool result may be delivered after the working-state idle
+              // notification. Keep the turn open so its real patch can still
+              // reach the renderer, then finish when that result arrives.
+              this.idleObservedWithPendingMutatingTool = true;
+              break;
+            }
+            this.finishTurnFromIdle();
           } else if (notifData.working === true || state) {
+            this.idleObservedWithPendingMutatingTool = false;
             this.turnActive = true;
           }
         }
         break;
       case "error":
         this.turnActive = false;
+        this.activeTurnGeneration = 0;
+        this.idleObservedWithPendingMutatingTool = false;
         this.activeClientMessageId = null;
         this.clientMessageIdsByRequestId.clear();
         this.pendingAskUserRequest = null;
         this.pendingPermissionRequestId = null;
         this.guidancePendingResponse = false;
         this.guidanceRequestId = null;
+        for (const toolCallId of this.droidSubagentsByToolCallId.keys()) {
+          this.invalidatedDroidToolCallIds.add(toolCallId);
+          this.invalidatedDroidSubagentToolCallIds.add(toolCallId);
+        }
+        for (const toolCallId of this.runningToolUses.keys()) this.invalidatedDroidToolCallIds.add(toolCallId);
         this.runningToolUses.clear();
         this.completedToolUses.clear();
+        this.droidSubagentsByToolCallId.clear();
         this.emitEvent({ type: "stream_delta", delta: `\n\n错误: ${notifData.message || "未知错误"}` });
         this.emitEvent({ type: "stream_end" });
         this.emitEvent({ type: "agent_end" });
@@ -1312,19 +1419,28 @@ export class DroidAgent {
     for (const block of contentBlocks) {
       if (block.type !== "tool_use") continue;
       const toolCallId = String(block.id || block.tool_use_id || block.toolUseId || "");
-      if (!toolCallId || this.runningToolUses.has(toolCallId) || this.completedToolUses.has(toolCallId)) continue;
+      if (
+        !toolCallId ||
+        this.invalidatedDroidSubagentToolCallIds.has(toolCallId) ||
+        this.runningToolUses.has(toolCallId) ||
+        this.completedToolUses.has(toolCallId)
+      ) continue;
       const toolName = String(block.name || block.toolName || "tool");
       const args = block.input || block.args || block.parameters;
       const isSubagent = isDroidSubagentTool(toolName, args, block.metadata);
+      if (isSubagent && !this.turnActive && !this.droidSubagentsByToolCallId.has(toolCallId)) continue;
       this.runningToolUses.set(toolCallId, { toolName, args, isSubagent });
       if (isSubagent) {
         this.handleDroidSubagentToolProgress(toolCallId, toolName, args, block.metadata, "tool_start");
       } else {
-        this.emitEvent(normalizeToolEvent("tool_start", {
+        const startEvent = normalizeToolEvent("tool_start", {
           toolName,
           toolCallId,
           args,
-        }));
+        });
+        // 工具调用刚发出、结果还没回来——文件尚未被改写，抓快照的最佳时机。
+        this.toolFileDiffFallback.onToolStart(this.projectPath, startEvent);
+        this.emitEvent(startEvent);
       }
     }
   }
@@ -1335,18 +1451,58 @@ export class DroidAgent {
       const toolCallId = String(block.tool_use_id || block.toolUseId || block.id || "");
       this.finishToolUse(toolCallId, block.content, block.is_error === true);
     }
+    // Evaluate the delayed idle boundary only after every tool_result in this
+    // message has been processed; a multi-file response must not lose its
+    // second patch because the first result closed the turn early.
+    this.finishIfIdleAfterMutationResult();
   }
 
   private completeRunningToolUses() {
     for (const [toolCallId, runningTool] of [...this.runningToolUses.entries()]) {
       const snapshot = this.droidSubagentsByToolCallId.get(toolCallId);
       if (runningTool.isSubagent && snapshot?.background && snapshot.status === "running") continue;
+      // A working-state/assistant-message boundary can precede the real
+      // tool_result. Never synthesize a terminal event for a file mutation;
+      // doing so marks it completed and drops the later patch-bearing result.
+      if (!runningTool.isSubagent && isDroidMutatingTool(runningTool.toolName)) continue;
       this.finishToolUse(toolCallId);
     }
   }
 
+  private hasPendingMutatingToolUse() {
+    return [...this.runningToolUses.values()].some((runningTool) =>
+      !runningTool.isSubagent && isDroidMutatingTool(runningTool.toolName)
+    );
+  }
+
+  private finishTurnFromIdle() {
+    this.idleObservedWithPendingMutatingTool = false;
+    this.reconcileDroidSubagentFailuresFromAssistantText();
+    const shouldFinishTurn = this.turnActive;
+    this.turnActive = false;
+    this.activeTurnGeneration = 0;
+    this.toolFileDiffFallback.reset();
+    if (shouldFinishTurn) {
+      this.emitEvent({ type: "stream_end" });
+      this.emitEvent({ type: "agent_end" });
+    }
+    this.activeClientMessageId = null;
+    this.clientMessageIdsByRequestId.clear();
+  }
+
+  private finishIfIdleAfterMutationResult() {
+    if (!this.idleObservedWithPendingMutatingTool || this.hasPendingMutatingToolUse()) return;
+    this.finishTurnFromIdle();
+  }
+
   private finishToolUse(toolCallId: string, result?: unknown, isError = false) {
-    if (!toolCallId || this.completedToolUses.has(toolCallId)) return;
+    if (
+      this.isAborting ||
+      !this.turnActive ||
+      !toolCallId ||
+      this.invalidatedDroidToolCallIds.has(toolCallId) ||
+      this.completedToolUses.has(toolCallId)
+    ) return;
     const runningTool = this.runningToolUses.get(toolCallId);
     if (runningTool?.isSubagent || this.droidSubagentsByToolCallId.has(toolCallId)) {
       this.handleDroidSubagentToolProgress(toolCallId, runningTool?.toolName || "task", runningTool?.args, {
@@ -1367,8 +1523,11 @@ export class DroidAgent {
       result,
       isError,
     });
-    this.emitEvent(toolEvent);
-    const diffs = buildDiffsFromToolEvent(toolEvent);
+    this.emitEvent(withoutToolDiffPayload(toolEvent));
+    // 这里不抓基线：tool_result 到达时文件早已改写，此刻读到的只能是改后内容。
+    // 没有 tool_start 快照时 resolve 返回 null，宁可不出 diff 也不编造。
+    const fallback = this.toolFileDiffFallback.resolve(this.projectPath, toolEvent);
+    const diffs = buildDiffsFromToolEvent(toolEvent, fallback);
     if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
     this.runningToolUses.delete(toolCallId);
     this.completedToolUses.add(toolCallId);
@@ -1404,6 +1563,10 @@ export class DroidAgent {
     rawResult?: unknown,
     isError = false,
   ) {
+    if (
+      this.invalidatedDroidSubagentToolCallIds.has(toolCallId) ||
+      (!this.turnActive && !this.droidSubagentsByToolCallId.has(toolCallId))
+    ) return;
     const input = getDroidSubagentInput(rawInput);
     const metadata = {
       ...asRecord(rawMetadata),
@@ -1596,7 +1759,14 @@ export class DroidAgent {
 
   private failActiveTurn(title: string, detail: string) {
     const shouldFinish = this.turnActive;
+    for (const toolCallId of this.droidSubagentsByToolCallId.keys()) {
+      this.invalidatedDroidToolCallIds.add(toolCallId);
+      this.invalidatedDroidSubagentToolCallIds.add(toolCallId);
+    }
+    for (const toolCallId of this.runningToolUses.keys()) this.invalidatedDroidToolCallIds.add(toolCallId);
     this.turnActive = false;
+    this.activeTurnGeneration = 0;
+    this.idleObservedWithPendingMutatingTool = false;
     this.clientMessageIdsByRequestId.clear();
     this.activeClientMessageId = null;
     this.pendingAskUserRequest = null;

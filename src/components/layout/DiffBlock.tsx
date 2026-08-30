@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, FileDiff as FileDiffIcon, ScanSearch } from "lucide-react";
 import { buildDiffSummary, type DiffLike } from "@shared/diff-summary";
+import { buildReviewDiff } from "@shared/patch-split";
+import type { ReviewUndoState } from "@shared/review-undo";
 import { uiText } from "@/i18n/text";
 import { CodeReviewDialog } from "./CodeReviewDialog";
+import { FilePreview } from "@/components/shared/FilePreview";
 
 type DiffBlockProps = {
+  reviewId: string;
   diffs: DiffLike[];
   projectPath?: string;
   onOpenChange?: (open: boolean) => void;
@@ -12,65 +16,73 @@ type DiffBlockProps = {
 
 const DEFAULT_VISIBLE_FILES = 3;
 
-export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) {
+export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBlockProps) {
   const [expanded, setExpanded] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewInitialFile, setReviewInitialFile] = useState<string | null>(null);
-  const [revertState, setRevertState] = useState<"idle" | "reverting" | "reverted">("idle");
-  const [error, setError] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<string | null>(null);
+  const [undoState, setUndoState] = useState<ReviewUndoState | null>(null);
   const summary = useMemo(() => buildDiffSummary(diffs, projectPath), [diffs, projectPath]);
-  const hiddenCount = Math.max(0, summary.files.length - DEFAULT_VISIBLE_FILES);
-  const visibleFiles = expanded ? summary.files : summary.files.slice(0, DEFAULT_VISIBLE_FILES);
-  const canRevert =
-    revertState === "idle" &&
-    !!projectPath &&
-    summary.reversiblePatches.length > 0;
-  const showRevertButton =
-    (!!projectPath && summary.reversiblePatches.length > 0) ||
-    revertState !== "idle";
-  const revertTitle = !projectPath
-    ? "当前会话没有项目路径，无法撤销"
-    : summary.patchCount === 0
-      ? "当前变更没有可撤销补丁"
-      : summary.reversiblePatches.length === 0
-        ? "当前补丁格式无法自动撤销"
-        : revertState === "reverted"
-        ? "已撤销"
-        : "撤销本次文件修改";
+  const reviewSources = useMemo(
+    () => buildReviewDiff(diffs, projectPath).map((file) => ({
+      file: file.file,
+      patches: file.patches,
+      status: file.status,
+      statusExplicit: file.statusExplicit === true,
+    })),
+    [diffs, projectPath],
+  );
+  const reviewSourceFingerprint = useMemo(() => JSON.stringify(reviewSources), [reviewSources]);
+  const undoFilesByPath = useMemo(
+    () => new Map(undoState?.files.map((file) => [file.file, file]) || []),
+    [undoState],
+  );
+  const displayFiles = useMemo(
+    () => summary.files.map((file) => {
+      const undoFile = undoFilesByPath.get(file.file);
+      // 准备失败时，撤销状态里的 additions/deletions 只是 rebuild-file 不支持分支
+      // 写出的占位 0（见 buildState 的 error 分支）。拿它覆盖会把「无法安全撤销」
+      // 误渲染成「没有改动」——卡片应从 +4 -4 变成 +0 -0，而改动其实一直在。
+      if (!undoFile || undoFile.error) return file;
+      return { ...file, additions: undoFile.additions, deletions: undoFile.deletions };
+    }),
+    [summary.files, undoFilesByPath],
+  );
+  const hiddenCount = Math.max(0, displayFiles.length - DEFAULT_VISIBLE_FILES);
+  const visibleFiles = expanded ? displayFiles : displayFiles.slice(0, DEFAULT_VISIBLE_FILES);
+  const allReverted = undoState?.allReverted === true;
+
+  useEffect(() => {
+    setUndoState(null);
+    if (!projectPath || reviewSources.length === 0) return;
+    let cancelled = false;
+    void window.electronAPI.loadReviewUndo({
+      reviewId,
+      projectPath,
+      files: reviewSources,
+    }).then((result) => {
+      if (!cancelled && result.success && result.state) setUndoState(result.state);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [reviewId, projectPath, reviewSourceFingerprint]);
 
   useEffect(() => {
     onOpenChange?.(reviewOpen);
   }, [reviewOpen, onOpenChange]);
 
-  const handleRevert = async () => {
-    if (!canRevert || !projectPath) return;
-    setError(null);
-    setRevertState("reverting");
-    try {
-      const result = await window.electronAPI.reverseApplyPatch(projectPath, summary.reversiblePatches);
-      if (!result.success) {
-        setRevertState("idle");
-        setError(result.error || "撤销失败");
-        return;
-      }
-      setRevertState("reverted");
-    } catch (err) {
-      setRevertState("idle");
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
   if (summary.files.length === 0) return null;
 
   return (
-    <section className={`chat-diff-card ${revertState === "reverted" ? "reverted" : ""}`}>
+    <section className={`chat-diff-card ${allReverted ? "reverted" : ""}`}>
       <div className="chat-diff-card-header">
         <div className="chat-diff-icon-box" aria-hidden="true">
           <FileDiffIcon size={20} strokeWidth={1.9} />
         </div>
         <div className="chat-diff-title-group">
           <div className="chat-diff-title">
-            {revertState === "reverted" ? "已撤销" : `${summary.files.length} 个文件`}
+            {allReverted ? "已撤销" : `${summary.files.length} 个文件`}
           </div>
         </div>
         <button
@@ -97,12 +109,10 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
                 type="button"
                 className="chat-diff-file-row"
                 onClick={() => {
-                  if (!hasPatch) return;
-                  setReviewInitialFile(file.file);
-                  setReviewOpen(true);
+                  const base = projectPath ? projectPath.replace(/[\\/]+$/, "") : "";
+                  setPreviewFile(base ? `${base}/${file.file}` : file.file);
                 }}
-                disabled={!hasPatch}
-                title={hasPatch ? file.file : `${file.file}（没有可查看的 diff）`}
+                title={file.file}
                 aria-haspopup="dialog"
               >
                 <span className="chat-diff-file-path">
@@ -143,23 +153,16 @@ export function DiffBlock({ diffs, projectPath, onOpenChange }: DiffBlockProps) 
         </button>
       )}
 
-      {error && (
-        <div className="chat-diff-error" role="status">
-          {error}
-        </div>
-      )}
+      <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />
 
       <CodeReviewDialog
         open={reviewOpen}
+        reviewId={reviewId}
         diffs={diffs}
         projectPath={projectPath}
         initialFile={reviewInitialFile ?? undefined}
         onClose={() => setReviewOpen(false)}
-        onRevertAll={handleRevert}
-        revertState={revertState}
-        revertCanRevert={canRevert}
-        revertTitle={revertTitle}
-        showRevertButton={showRevertButton}
+        onUndoStateChange={setUndoState}
       />
     </section>
   );

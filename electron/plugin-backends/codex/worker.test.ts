@@ -99,6 +99,78 @@ input.on("line", async (line) => {
       // Keep the turn open until turn/steer arrives.
       return;
     }
+    if (promptText === "turn-diff") {
+      const diff = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1 +1 @@",
+        "-a",
+        "+b",
+        "diff --git a/src/b.ts b/src/b.ts",
+        "--- a/src/b.ts",
+        "+++ b/src/b.ts",
+        "@@ -1 +1 @@",
+        "-c",
+        "+d",
+      ].join("\\n");
+      write({ method: "turn/diff/updated", params: { threadId: "thread-1", turnId: "turn-1", diff } });
+      write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      return;
+    }
+    if (promptText === "file-change") {
+      const patchOne = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+first",
+      ].join("\\n");
+      const patchTwo = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1 +1 @@",
+        "-first",
+        "+second",
+      ].join("\\n");
+      const item = (patch) => ({ id: "file-change-1", type: "fileChange", status: "inProgress", changes: [{ path: "src/a.ts", kind: "update", patch }] });
+      write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: item(patchOne) } });
+      write({ method: "item/fileChange/patchUpdated", params: { threadId: "thread-1", turnId: "turn-1", itemId: "file-change-1", changes: item(patchOne).changes } });
+      write({ method: "item/fileChange/patchUpdated", params: { threadId: "thread-1", turnId: "turn-1", itemId: "file-change-1", changes: item(patchTwo).changes } });
+      write({ method: "turn/diff/updated", params: { threadId: "thread-1", turnId: "turn-1", diff: "" } });
+      write({ method: "turn/diff/updated", params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        diff: "diff --git a/src/a.ts b/src/a.ts\\nnew file mode 100644",
+      } });
+      write({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { ...item(patchTwo), status: "completed" } } });
+      write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      return;
+    }
+    if (promptText === "file-change-abort") {
+      const patch = [
+        "diff --git a/src/abort.ts b/src/abort.ts",
+        "--- a/src/abort.ts",
+        "+++ b/src/abort.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+aborted",
+      ].join("\\n");
+      write({ method: "item/started", params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "file-change-abort-1", type: "fileChange", status: "inProgress", changes: [] },
+      } });
+      write({ method: "item/fileChange/patchUpdated", params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "file-change-abort-1",
+        changes: [{ path: "src/abort.ts", kind: "update", patch }],
+      } });
+      return;
+    }
     if (promptText === "commentary") {
       write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "commentary-1", type: "agentMessage", phase: "commentary", text: "" } } });
       write({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "commentary-1", delta: "Working on it" } });
@@ -441,6 +513,61 @@ describe("Codex worker protocol", () => {
     });
     expect(turnStart?.params?.input?.find((item: { type?: string }) => item.type === "text")?.text)
       .not.toContain("[HPP 语言规则]");
+  });
+
+  it("supports the turn-level aggregated diff notification", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "turn-diff-prompt", type: "prompt", message: "turn-diff" });
+    const diff = await worker.waitFor((message) => message.type === "diff_update");
+    expect(diff.diffs).toEqual([
+      expect.objectContaining({ file: "src/a.ts", patch: expect.stringContaining("+b") }),
+      expect.objectContaining({ file: "src/b.ts", patch: expect.stringContaining("+d") }),
+    ]);
+    expect(worker.messages.filter((message) => message.type === "diff_update")).toHaveLength(1);
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "turn-diff-prompt");
+  });
+
+  it("emits only the latest file-change snapshot and keeps tool_end diff-free", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "file-change-prompt", type: "prompt", message: "file-change" });
+    const diff = await worker.waitFor((message) => message.type === "diff_update");
+
+    expect(diff.diffs).toEqual([expect.objectContaining({
+      file: "src/a.ts",
+      patch: expect.stringContaining("+second"),
+    })]);
+    expect(String(diff.diffs?.[0]?.patch || "")).not.toContain("+first");
+    expect(worker.messages.filter((message) => message.type === "diff_update")).toHaveLength(1);
+    const toolEnd = worker.messages.find((message) => message.type === "tool_end");
+    expect(toolEnd?.files).toEqual([{ file: "src/a.ts", label: "a.ts" }]);
+    expect(toolEnd).not.toHaveProperty("patch");
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "file-change-prompt");
+  });
+
+  it("flushes an already observed file change when the turn is aborted", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "abort-file-change-prompt", type: "prompt", message: "file-change-abort" });
+    await worker.waitFor((message) => message.type === "tool_start" && message.toolCallId === "file-change-abort-1");
+
+    worker.send({ id: "abort-file-change", type: "abort" });
+    await worker.waitFor((message) => message.type === "aborted");
+    const diff = worker.messages.find((message) => message.type === "diff_update");
+    expect(diff?.diffs).toEqual([expect.objectContaining({
+      file: "src/abort.ts",
+      patch: expect.stringContaining("+aborted"),
+    })]);
   });
 
   it("confirms guidance at its matching user item across the RPC race", async () => {

@@ -11,6 +11,8 @@ import {
   type NativeSubagentStopReason,
 } from "../../plugin-runtime/subagent-events";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent } from "../../plugin-runtime/process-events";
+import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
+import { normalizeOpenCodeSessionDiffResult, normalizeOpenCodeSessionDiffs } from "./session-diff";
 import {
   getCommandEnv,
   getNpmPackageBinTarget,
@@ -653,6 +655,29 @@ function normalizeOpenCodeCatalog(value: unknown, kind: "skill" | "command"): Ag
   });
 }
 
+function withoutToolDiffPayload<T extends object>(event: T): T {
+  const record = event as UnknownRecord;
+  const files = Array.isArray(record.files)
+    ? record.files.map((rawFile) => {
+        const file = { ...asRecord(rawFile) };
+        delete file.patch;
+        delete file.additions;
+        delete file.deletions;
+        delete file.status;
+        delete file.statusExplicit;
+        if (["edited", "modified", "written"].includes(String(file.action || ""))) file.action = undefined;
+        return file;
+      })
+    : record.files;
+  const sanitized = { ...record, files } as unknown as T & UnknownRecord;
+  delete sanitized.patch;
+  delete sanitized.additions;
+  delete sanitized.deletions;
+  delete sanitized.status;
+  delete sanitized.statusExplicit;
+  return sanitized;
+}
+
 // ============================================================
 // OpenCode Agent - communicates with opencode serve via HTTP/SSE
 // ============================================================
@@ -672,6 +697,8 @@ export class OpenCodeAgent {
   private sseBuffer = "";
   private streamedContent = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleSettlementInFlight = false;
+  private idleSettlementRevision = 0;
   private runningToolParts = new Set<string>();
   private completedToolParts = new Set<string>();
   private pendingQuestionToolParts = new Set<string>();
@@ -685,6 +712,18 @@ export class OpenCodeAgent {
   private turnRevision = 0;
   private idleObservedWhileWaitingForUI = false;
   private activeClientMessageId: string | null = null;
+  private activeOpenCodeUserMessageId: string | null = null;
+  private activeOpenCodeUserMessageIds = new Set<string>();
+  private activeTurnDiffByMessageId = new Map<string, ReturnType<typeof normalizeOpenCodeSessionDiffs>>();
+  private activeTurnDiffs: ReturnType<typeof normalizeOpenCodeSessionDiffs> = [];
+  private activeToolDiffs: ReturnType<typeof buildDiffsFromToolEvent> = [];
+  private activeTurnDiffsAuthoritative = false;
+  /**
+   * provider 未回报补丁时的自算兜底：tool_start 抓修改前快照，tool_end 出差异。
+   * 快照按「本轮最早观测」保留，因此同一文件被连续编辑时得到的是累计差异，
+   * 与 OpenCode session diff 的语义一致。
+   */
+  private readonly toolFileDiffFallback = new ToolFileDiffFallback();
   private activeAssistantMessageId: string | null = null;
   private pendingUIRequests = new Map<string, PendingOpenCodeUIRequest>();
   private guidancePendingResponse = false;
@@ -858,10 +897,10 @@ export class OpenCodeAgent {
   /** Send a message to the opencode session */
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     const turnRevision = ++this.turnRevision;
+    this.clearActiveTurn();
     this.turnActive = true;
     this.permissionMode = options?.permissionMode || "auto";
     this.idleObservedWhileWaitingForUI = false;
-    this.clearActiveTurn();
     this.activeClientMessageId = options?.clientMessageId?.trim() || null;
     if (!this.sessionId) {
       await this.createSession();
@@ -1316,19 +1355,38 @@ export class OpenCodeAgent {
             // 入队，不能据此移动引导气泡。OpenCode 真正开始处理该引导时会创建
             // 一条 parentID 指向该 user 消息的新 assistant 消息，这才与 Pi 的
             // guidance_delivered / message_start(user) 时机等价。
+            this.activeOpenCodeUserMessageIds.add(this.guidanceUserMessageId);
+            this.activeOpenCodeUserMessageId = this.guidanceUserMessageId;
             this.guidancePendingResponse = false;
             this.guidanceUserMessageId = null;
             this.emitEvent({ type: "guidance_response_started" });
           }
         } else if (info.role === "user") {
+          const summaryDiff = normalizeOpenCodeSessionDiffResult(asRecord(info.summary).diffs);
+          if (typeof info.id === "string" && summaryDiff.recognized) {
+            this.activeOpenCodeUserMessageIds.add(info.id);
+            this.activeTurnDiffByMessageId.set(info.id, summaryDiff.diffs);
+            this.activeTurnDiffs = this.mergeTurnDiffs();
+            this.activeTurnDiffsAuthoritative = true;
+          }
           const parts = Array.isArray(props.parts) ? props.parts : [];
           if (parts.some((part) => asRecord(part).type === "compaction")) {
             // 压缩触发消息本身不是用户正文。它标志着压缩开始，摘要
             // assistant message 完成后才会发出 completed。
             const messageId = this.normalizeCompactionMessageId(info.id);
+            if (messageId === this.activeOpenCodeUserMessageId) this.activeOpenCodeUserMessageId = null;
+            if (messageId) {
+              this.activeOpenCodeUserMessageIds.delete(messageId);
+              this.activeTurnDiffByMessageId.delete(messageId);
+              this.activeTurnDiffs = this.mergeTurnDiffs();
+            }
             this.rememberCompactionMessage(messageId, messageId);
             this.emitCompactionStarted(messageId);
             break;
+          }
+          if (!this.guidancePendingResponse && typeof info.id === "string") {
+            this.activeOpenCodeUserMessageIds.add(info.id);
+            this.activeOpenCodeUserMessageId = info.id;
           }
           if (this.guidancePendingResponse && !this.guidanceUserMessageId && typeof info.id === "string") {
             // 这里只记录 prompt_async 立即创建的引导 user 消息。必须继续等待它
@@ -1354,6 +1412,13 @@ export class OpenCodeAgent {
         }
         const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
         if (normalizeEventName(part.type || props.type) === "compaction") {
+          const normalizedPartMessageId = this.normalizeCompactionMessageId(partMessageId);
+          if (normalizedPartMessageId === this.activeOpenCodeUserMessageId) this.activeOpenCodeUserMessageId = null;
+          if (normalizedPartMessageId) {
+            this.activeOpenCodeUserMessageIds.delete(normalizedPartMessageId);
+            this.activeTurnDiffByMessageId.delete(normalizedPartMessageId);
+            this.activeTurnDiffs = this.mergeTurnDiffs();
+          }
           const compactionId = this.getCompactionEventId(partMessageId);
           this.rememberCompactionMessage(partMessageId, compactionId);
           this.emitCompactionStarted(compactionId);
@@ -1398,16 +1463,34 @@ export class OpenCodeAgent {
 
           if (!this.runningToolParts.has(tool.toolCallId)) {
             this.runningToolParts.add(tool.toolCallId);
-            this.emitEvent(normalizeToolEvent("tool_start", tool));
+            const startEvent = normalizeToolEvent("tool_start", tool);
+            // 工具尚未完成，此刻文件通常还是修改前的状态——抓快照的最佳时机。
+            this.toolFileDiffFallback.onToolStart(this.projectPath, startEvent);
+            this.emitEvent(startEvent);
           } else if (tool.detail) {
-            this.emitEvent(normalizeToolEvent("tool_start", tool));
+            const startEvent = normalizeToolEvent("tool_start", tool);
+            this.toolFileDiffFallback.onToolStart(this.projectPath, startEvent);
+            this.emitEvent(startEvent);
           }
 
           if (isToolPartComplete(props)) {
             const toolEvent = normalizeToolEvent("tool_end", tool);
-            this.emitEvent(toolEvent);
-            const diffs = buildDiffsFromToolEvent(toolEvent);
-            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+            const fallback = this.toolFileDiffFallback.resolve(this.projectPath, toolEvent);
+            const toolDiffs = buildDiffsFromToolEvent(toolEvent, fallback);
+            this.activeToolDiffs = this.toolFileDiffFallback.mergeDiffs(
+              this.activeToolDiffs, toolDiffs, fallback,
+            );
+            this.emitEvent(withoutToolDiffPayload(toolEvent));
+            // 立即把兜底差异发出去：用户从 AI 回复完毕到 OpenCode delayed idle
+            // 触发之间常会立刻打开审核弹窗，这段时间里若不主动发，弹窗拿到的
+            // 就只有 provider 的过期快照——那正是「无法安全撤销」的成因。
+            // turn 结束时会再发一次，但 frontend 按 patch 字符串去重，不会重复计数。
+            if (fallback && toolDiffs.length > 0) {
+              this.emitEvent({ type: "diff_update", diffs: toolDiffs });
+            }
+            // OpenCode 的工具结果 patch 与 message-scoped session diff 是同一
+            // 改动的不同表示。只保留 idle 时的最终快照，避免增量+累计混入
+            // 通用审核事务后重复计数或无法重建。
             this.runningToolParts.delete(tool.toolCallId);
             this.completedToolParts.add(tool.toolCallId);
           }
@@ -1446,9 +1529,21 @@ export class OpenCodeAgent {
             break;
           } else {
             const toolEvent = normalizeToolEvent("tool_end", tool);
-            this.emitEvent(toolEvent);
-            const diffs = buildDiffsFromToolEvent(toolEvent);
-            if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
+            // 这里不走 onToolStart：part.done 时文件早已写盘，此刻抓到的快照
+            // 是改后内容，当基线用只会算出空差异。没有 tool_start 快照时
+            // resolve 直接返回 null，宁可不出 diff 也不编造。
+            const fallback = this.toolFileDiffFallback.resolve(this.projectPath, toolEvent);
+            const toolDiffs = buildDiffsFromToolEvent(toolEvent, fallback);
+            this.activeToolDiffs = this.toolFileDiffFallback.mergeDiffs(
+              this.activeToolDiffs, toolDiffs, fallback,
+            );
+            this.emitEvent(withoutToolDiffPayload(toolEvent));
+            // part.done 时文件早已写盘，工具事件里若没有 patch 就直接走 tool_end
+            // 路径：兜底同样能算（如果 baseline 是在 message.part.updated 流里
+            // 抓到的），还是立即发出去避免 idle 延迟窗口里弹窗拿不到。
+            if (fallback && toolDiffs.length > 0) {
+              this.emitEvent({ type: "diff_update", diffs: toolDiffs });
+            }
             this.runningToolParts.delete(tool.toolCallId);
             this.completedToolParts.add(tool.toolCallId);
           }
@@ -1463,7 +1558,8 @@ export class OpenCodeAgent {
         // session.idle can be followed by one or more trailing deltas. Treat
         // the timer as a debounce: restart it after the delta instead of
         // cancelling the only terminal signal and leaving the turn busy.
-        const idleEndWasPending = this.cancelIdleTimer();
+        const idleEndWasPending = this.idleTimer !== null || this.idleSettlementInFlight;
+        this.cancelIdleTimer();
         const partId = String(props.partID || props.partId || part.id || "");
         const partType = props.field === "thinking"
           ? "thinking"
@@ -1507,10 +1603,12 @@ export class OpenCodeAgent {
         break;
       }
       case "session.diff": {
-        const diffs = props.diff;
-        if (Array.isArray(diffs) && diffs.length > 0) {
-          this.emitEvent({ type: "diff_update", diffs });
-        }
+        // 新版 OpenCode 在 summarize 开始时先发布空 session.diff，最终的
+        // per-turn diff 保存在 user message summary 中；SSE 事件本身可能不再
+        // 携带结果。非空事件仍兼容旧版服务，并缓存到 idle 前统一发出，避免
+        // 同一累计快照被工具事件和 REST fallback 重复附加。
+        const diffs = normalizeOpenCodeSessionDiffs(props.diff);
+        if (diffs.length > 0 && !this.activeTurnDiffsAuthoritative) this.activeTurnDiffs = diffs;
         break;
       }
       case "session.idle": {
@@ -1696,6 +1794,7 @@ export class OpenCodeAgent {
   private clearTurnRuntime() {
     this.turnActive = false;
     this.stopSSEListener();
+    this.toolFileDiffFallback.reset();
     this.sseBuffer = "";
     this.streamedContent = false;
     this.runningToolParts.clear();
@@ -1717,11 +1816,30 @@ export class OpenCodeAgent {
 
   private finishTurn(revision = this.turnRevision) {
     if (!this.isCurrentTurn(revision)) return false;
+    this.emitCachedTurnDiffs();
     this.turnRevision += 1;
     this.clearTurnRuntime();
     this.emitEvent({ type: "stream_end" });
     this.emitEvent({ type: "agent_end" });
     return true;
+  }
+
+  private emitCachedTurnDiffs() {
+    const base = this.activeTurnDiffs.length > 0 ? this.activeTurnDiffs : this.activeToolDiffs;
+    // 自算兜底由磁盘真实内容算出，反向应用必然成功；provider 的累计快照可能因
+    // 上下文过期而 apply 不上。同一文件以兜底为准，其余仍用 provider 数据。
+    const diffs = this.toolFileDiffFallback.mergeWithProviderDiffs(base);
+    if (diffs.length === 0) {
+      // 没有待发的差异，但也要把兜底缓存清掉，避免下轮沿用上轮的 baseline。
+      this.toolFileDiffFallback.reset();
+      return;
+    }
+    this.emitEvent({ type: "diff_update", diffs });
+    this.activeTurnDiffs = [];
+    this.activeToolDiffs = [];
+    this.activeTurnDiffsAuthoritative = true;
+    // 兜底在 tool_end 立即发出过；turn 结束时清空缓存，避免下轮误用上一轮的快照。
+    this.toolFileDiffFallback.reset();
   }
 
   private completePendingUIRequest(requestId: string, turnRevision = this.turnRevision) {
@@ -1733,6 +1851,7 @@ export class OpenCodeAgent {
   }
 
   private cancelIdleTimer() {
+    this.idleSettlementRevision += 1;
     const hadTimer = this.idleTimer !== null;
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
@@ -1750,21 +1869,122 @@ export class OpenCodeAgent {
     }
     this.idleObservedWhileWaitingForUI = false;
     const turnRevision = this.turnRevision;
+    const settlementRevision = this.idleSettlementRevision;
+    const userMessageId = this.activeOpenCodeUserMessageId;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      if (!this.isCurrentTurn(turnRevision)) return;
-      if (this.streamedContent) {
-        this.finishTurn(turnRevision);
-      } else {
-        // Fallback: fetch final message via REST (for older opencode versions)
-        void this.fetchAssistantMessage(turnRevision);
-      }
+      if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
+      this.idleSettlementInFlight = true;
+      void this.finishIdleTurn(turnRevision, settlementRevision, userMessageId)
+        .finally(() => {
+          if (this.idleSettlementRevision === settlementRevision) this.idleSettlementInFlight = false;
+        });
     }, 800);
   }
 
+  private isCurrentIdleSettlement(turnRevision: number, settlementRevision: number) {
+    return this.isCurrentTurn(turnRevision) && this.idleSettlementRevision === settlementRevision;
+  }
+
+  private async finishIdleTurn(
+    turnRevision: number,
+    settlementRevision: number,
+    userMessageId: string | null,
+  ) {
+    await this.fetchTurnDiff(userMessageId, turnRevision, settlementRevision);
+    if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
+    if (this.streamedContent) {
+      this.finishTurn(turnRevision);
+    } else {
+      // Fallback: fetch final message via REST (for older opencode versions)
+      await this.fetchAssistantMessage(turnRevision, settlementRevision);
+    }
+  }
+
+  private captureTurnSummaryDiffs(value: unknown, preferredMessageId?: string | null) {
+    if (!Array.isArray(value)) return false;
+    const messageIds = new Set(this.activeOpenCodeUserMessageIds);
+    if (preferredMessageId) messageIds.add(preferredMessageId);
+    let foundSummary = false;
+    for (const rawMessage of value) {
+      const message = asRecord(rawMessage);
+      const info = asRecord(message.info);
+      const messageId = typeof info.id === "string" ? info.id : "";
+      if (!messageId || info.role !== "user" || !messageIds.has(messageId)) continue;
+      const summaryDiff = normalizeOpenCodeSessionDiffResult(asRecord(info.summary).diffs);
+      if (!summaryDiff.recognized) continue;
+      foundSummary = true;
+      this.activeOpenCodeUserMessageIds.add(messageId);
+      this.activeTurnDiffByMessageId.set(messageId, summaryDiff.diffs);
+    }
+    if (foundSummary) {
+      this.activeTurnDiffs = this.mergeTurnDiffs();
+      this.activeTurnDiffsAuthoritative = true;
+    }
+    return foundSummary;
+  }
+
+  private async fetchTurnDiff(
+    userMessageId: string | null,
+    turnRevision: number,
+    settlementRevision = this.idleSettlementRevision,
+  ) {
+    if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
+    if (this.activeTurnDiffsAuthoritative) {
+      this.emitCachedTurnDiffs();
+      return;
+    }
+    if (!this.sessionId || !userMessageId) return;
+    try {
+      const result = await this.httpGet(
+        `/session/${encodeURIComponent(this.sessionId)}/diff?messageID=${encodeURIComponent(userMessageId)}`,
+        2000,
+      );
+      if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
+      const normalized = normalizeOpenCodeSessionDiffResult(result);
+      if (normalized.recognized && normalized.diffs.length > 0) {
+        this.activeTurnDiffs = normalized.diffs;
+        this.activeTurnDiffsAuthoritative = true;
+        this.emitCachedTurnDiffs();
+        return;
+      }
+      if (this.activeTurnDiffs.length > 0 || this.activeToolDiffs.length > 0) {
+        // OpenCode 1.18 在 summary 计算完成前也返回 []；已有非空 SSE
+        // 快照比这个暧昧空值更可靠。
+        this.emitCachedTurnDiffs();
+        return;
+      }
+      if (!normalized.recognized) return;
+
+      // 空的 message-scoped diff 既可能表示确实没有改动，也可能只是
+      // summary 尚未写回。再读取一次消息列表，从已持久化的 user summary
+      // 获取权威补丁，避免在 SSE 顺序稍晚时过早结束并丢失 diff。
+      const messages = await this.httpGet(
+        `/session/${encodeURIComponent(this.sessionId)}/message`,
+        2000,
+      );
+      if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
+      if (this.captureTurnSummaryDiffs(messages, userMessageId)) {
+        this.emitCachedTurnDiffs();
+      }
+    } catch {
+      // OpenCode 旧版本没有 message-scoped diff endpoint；使用此前非空
+      // session.diff SSE 的快照，不能因 REST 获取失败丢弃正常回复。
+      if (this.isCurrentIdleSettlement(turnRevision, settlementRevision)) {
+        this.emitCachedTurnDiffs();
+      }
+    }
+  }
+
   /** Fetch the latest assistant message content via REST after session.idle */
-  private async fetchAssistantMessage(turnRevision = this.turnRevision) {
-    if (!this.isCurrentTurn(turnRevision)) return;
+  private async fetchAssistantMessage(
+    turnRevision = this.turnRevision,
+    settlementRevision?: number,
+  ) {
+    const isCurrent = () => settlementRevision === undefined
+      ? this.isCurrentTurn(turnRevision)
+      : this.isCurrentIdleSettlement(turnRevision, settlementRevision);
+    if (!isCurrent()) return;
     if (!this.sessionId) {
       this.finishTurn(turnRevision);
       return;
@@ -1772,7 +1992,7 @@ export class OpenCodeAgent {
 
     try {
       const messages = await this.httpGet(`/session/${this.sessionId}/message`);
-      if (!this.isCurrentTurn(turnRevision)) return;
+      if (!isCurrent()) return;
       if (Array.isArray(messages)) {
         const records = messages.map((message) => asRecord(message));
         // A summary assistant message is the persisted result of compaction,
@@ -1836,10 +2056,11 @@ export class OpenCodeAgent {
         }
       }
     } catch (e) {
-      if (!this.isCurrentTurn(turnRevision)) return;
+      if (!isCurrent()) return;
       this.emitEvent({ type: "stream_delta", delta: `\n\n获取响应失败: ${e}` });
     }
 
+    if (!isCurrent()) return;
     this.finishTurn(turnRevision);
   }
 
@@ -1864,6 +2085,7 @@ export class OpenCodeAgent {
     // A slow abort reply must never settle a newer turn that started after an
     // independent disconnect/error already completed this one.
     if (turnRevision !== this.turnRevision) return;
+    this.emitCachedTurnDiffs();
     this.turnRevision += 1;
     this.clearTurnRuntime();
     this.emitEvent({ type: "aborted", detail: errorMessage || undefined });
@@ -2102,11 +2324,11 @@ export class OpenCodeAgent {
 
   // ---- HTTP helpers ----
 
-  private httpGet(path: string): Promise<unknown> {
+  private httpGet(path: string, timeoutMs = 10000): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const req = http.get(
         `http://${this.host}:${this.port}${path}`,
-        { timeout: 10000 },
+        { timeout: timeoutMs },
         (res) => {
           let body = "";
           res.on("data", (chunk) => (body += chunk));
@@ -2263,8 +2485,24 @@ export class OpenCodeAgent {
     this.emitEvent({ type: "stream_delta", delta: String(delta) });
   }
 
+  private mergeTurnDiffs() {
+    // 每条 user message 的 summary.diff 是一段独立的增量补丁。不能按文件
+    // last-write-wins，也不能把两个完整 unified patch 拼成一个字符串：后者
+    // 会丢失前一段改动，或让审核事务把多个文件头误判为不安全补丁。
+    return [...this.activeOpenCodeUserMessageIds].flatMap((messageId) => (
+      this.activeTurnDiffByMessageId.get(messageId) || []
+    ));
+  }
+
   private clearActiveTurn() {
     this.activeClientMessageId = null;
+    this.activeOpenCodeUserMessageId = null;
+    this.activeOpenCodeUserMessageIds.clear();
+    this.activeTurnDiffByMessageId.clear();
+    this.activeTurnDiffs = [];
+    this.activeToolDiffs = [];
+    this.activeTurnDiffsAuthoritative = false;
+    this.idleSettlementInFlight = false;
     this.activeAssistantMessageId = null;
     this.partTypes.clear();
   }

@@ -375,8 +375,11 @@ export function createAgentEventController({
   const completeIdleNotice = (sessionId: string) => {
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
-    if (runtime.streamIdleNoticeEntryId) {
-      useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
+    const entryId = runtime.streamIdleNoticeEntryId;
+    if (entryId) {
+      // 每个无输出区间保留自己的开始/结束时间，渲染层会把同一处理过程
+      // 中的所有区间合并后显示总时长。
+      useChatStore.getState().updateLastAssistantProcessEntry(entryId, {
         state: "completed",
         completedAt: Date.now(),
         expanded: false,

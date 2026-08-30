@@ -31,6 +31,9 @@ import { relativeRemotePath } from "@/lib/project-file-path";
 import {
   formatProcessDuration,
   getProcessGroupState,
+  getStreamIdleNoticeDuration,
+  getSubagentActivityLabel,
+  getSubagentProgressLabel,
   groupProcessEntries,
   getVisibleProcessEntries,
   getUserGuidanceText,
@@ -386,13 +389,21 @@ const getSubagentTooltip = (subagent: AgentSubagent) => [
 function SubagentEntryRow({
   messageId,
   entry,
+  now,
   onToggleEntry,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
+  now: number;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
 }) {
   const subagents = entry.subagents || [];
+  const progress = getSubagentProgressLabel(subagents);
+  const activity = getSubagentActivityLabel(subagents)
+    || (entry.state === "running" ? "正在整理最终结果…" : "");
+  const elapsed = typeof entry.startedAt === "number"
+    ? `已运行 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
+    : "";
   const messages = subagents
     .map((subagent) => subagent.message?.trim())
     .filter((message): message is string => !!message && message !== entry.detail?.trim());
@@ -423,6 +434,13 @@ function SubagentEntryRow({
           ))}
         </span>
         <span className="chat-subagent-event-title">{entry.title}</span>
+        {progress && <span className="chat-subagent-event-meta">{progress}</span>}
+        {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
+        {activity && (
+          <span className="chat-subagent-event-activity" title={activity} aria-live="polite">
+            {activity}
+          </span>
+        )}
         {canExpand && (
           <svg
             className="chat-subagent-chevron"
@@ -478,8 +496,9 @@ function ProcessEntryRow({
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
   const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
-  const idleDuration = entry.toolKind === "stream_idle_notice" && entry.startedAt
-    ? formatIdleDuration((entry.completedAt ?? now) - entry.startedAt)
+  const hasIdleTiming = Number.isFinite(entry.startedAt) || Number.isFinite(entry.accumulatedDurationMs);
+  const idleDuration = entry.toolKind === "stream_idle_notice" && hasIdleTiming
+    ? formatIdleDuration(getStreamIdleNoticeDuration(entry, now))
     : null;
   const errorDetailMarkdown =
     detailVisible && (entry.type === "error" || entry.state === "error")
@@ -497,6 +516,7 @@ function ProcessEntryRow({
       <SubagentEntryRow
         messageId={messageId}
         entry={entry}
+        now={now}
         onToggleEntry={onToggleEntry}
       />
     );

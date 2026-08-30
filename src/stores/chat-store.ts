@@ -19,6 +19,7 @@ export interface FileDiff extends DiffLike {
   additions: number;
   deletions: number;
   status?: "added" | "deleted" | "modified";
+  statusExplicit?: boolean;
 }
 
 export interface AgentProcessFile {
@@ -29,6 +30,7 @@ export interface AgentProcessFile {
   additions?: number;
   deletions?: number;
   status?: "added" | "deleted" | "modified";
+  statusExplicit?: boolean;
   changeKey?: string;
 }
 
@@ -770,7 +772,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (index >= 0) {
         const msg = msgs[index];
         const existing = msg.diffs || [];
-        msgs[index] = { ...msg, diffs: [...existing, ...diffs] };
+        // 每条 diff_update 携带的是该文件「本轮起点 → 当前磁盘」的累计快照。
+        // 纯追加会让同一文件堆出多份过期补丁：diff 卡片把一次改动重复计数，
+        // 审核撤销则拿到一组互相对不上的补丁，逐份探测后整体拒绝。
+        // 同一文件只保留最新一份（后到的覆盖先到的），不同文件保持顺序。
+        const byFile = new Map<string, FileDiff>();
+        for (const diff of existing) {
+          byFile.set(diff.file.replace(/\\/g, "/"), diff);
+        }
+        for (const diff of diffs) {
+          byFile.set(diff.file.replace(/\\/g, "/"), diff);
+        }
+        msgs[index] = { ...msg, diffs: [...byFile.values()] };
       }
       return msgs;
       });

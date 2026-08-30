@@ -18,6 +18,7 @@ interface DroidInternals {
   handleProcessTermination: (childProcess: object, title: string, detail: string) => void;
   handleServerRequest: (method: string, requestId: string, params: unknown) => void;
   handleNotification: (method: string, params: unknown) => void;
+  handleMessage: (data: unknown, sourceChild?: object) => void;
   applySessionResult: (result: Record<string, unknown>, restoreHistory: boolean) => Promise<void>;
 }
 
@@ -37,6 +38,17 @@ describe("Droid protocol adapter", () => {
     internals.pendingResponses.set("models-request", {});
 
     expect(agent.isIdle()).toBe(true);
+  });
+
+  it("rejects a new prompt while the current Droid turn is active", async () => {
+    const agent = new DroidAgent("hpp-session");
+    const internals = agent as unknown as DroidInternals;
+    internals.process = { stdin: { writable: true, write: vi.fn() } };
+    internals.isReady = true;
+    internals.turnActive = true;
+
+    await expect(agent.sendMessage("second")).rejects.toThrow("SESSION_BUSY");
+    expect(agent.isIdle()).toBe(false);
   });
 
   it("uses live model metadata and restores session history", async () => {
@@ -141,6 +153,170 @@ describe("Droid protocol adapter", () => {
     await expect(agent.sendMessage("again")).rejects.toThrow("invalid model");
     expect(agent.isIdle()).toBe(true);
     expect(events).toContainEqual(expect.objectContaining({ type: "stream_end" }));
+  });
+
+  it("ignores messages from a replaced Droid process", () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    const oldProcess = { stdin: { writable: true, write: vi.fn() } };
+    const currentProcess = { stdin: { writable: true, write: vi.fn() } };
+    internals.process = currentProcess;
+    internals.handleMessage({
+      type: "notification",
+      method: "droid.session_notification",
+      params: { notification: { type: "assistant_text_delta", textDelta: "stale" } },
+    }, oldProcess);
+
+    expect(events).toEqual([]);
+  });
+
+  it("does not let an aborted in-flight prompt mutate the settled state", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = { stdin: { writable: true, write: vi.fn() } };
+    internals.isReady = true;
+    let resolveMessage!: (value: unknown) => void;
+    internals.sendRpcAsync = vi.fn((method: string) => method === "droid.add_user_message"
+      ? new Promise((resolve) => { resolveMessage = resolve; })
+      : Promise.resolve({ result: {} }));
+
+    const sending = agent.sendMessage("first", undefined, { clientMessageId: "prompt-one" });
+    await vi.waitFor(() => expect(internals.sendRpcAsync).toHaveBeenCalledWith(
+      "droid.add_user_message",
+      { text: "first" },
+      30000,
+      expect.any(String),
+    ));
+
+    await agent.abort();
+    resolveMessage({ result: {} });
+    await expect(sending).resolves.toBeUndefined();
+    expect(agent.isIdle()).toBe(true);
+    expect(events.filter((event) => event.type === "agent_end")).toHaveLength(0);
+  });
+
+  it("cancels server UI requests that arrive during abort", () => {
+    const events: AgentEvent[] = [];
+    const writes: Record<string, unknown>[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals & { isAborting: boolean };
+    internals.process = {
+      stdin: {
+        writable: true,
+        write: (line: string) => writes.push(JSON.parse(line)),
+      },
+    };
+    internals.isAborting = true;
+
+    internals.handleServerRequest("droid.ask_user", "late-question", { questions: [] });
+    internals.handleServerRequest("droid.request_permission", "late-permission", {});
+
+    expect(writes).toEqual([
+      expect.objectContaining({ id: "late-question", result: { cancelled: true, answers: [] } }),
+      expect.objectContaining({ id: "late-permission", result: { selectedOption: "cancel" } }),
+    ]);
+    expect(events).toEqual([]);
+  });
+
+  it("does not resurrect an aborted background subagent from a late notification", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = { stdin: { writable: true, write: vi.fn() } };
+    internals.isReady = true;
+    internals.turnActive = true;
+
+    internals.handleNotification("droid.session_notification", {
+      notification: {
+        type: "create_message",
+        message: {
+          id: "assistant-background-abort",
+          role: "assistant",
+          content: [{
+            type: "tool_use",
+            id: "background-abort-1",
+            name: "Task",
+            input: { prompt: "Research", background: true, subagent_type: "research" },
+          }],
+        },
+      },
+    });
+    internals.sendRpcAsync = vi.fn(async () => ({ result: {} }));
+    await agent.abort();
+    const subagentEventCount = events.filter((event) => event.type === "subagent_event").length;
+
+    internals.handleNotification("droid.session_notification", {
+      notification: {
+        type: "tool_progress_update",
+        toolUseId: "background-abort-1",
+        toolName: "Task",
+        update: { type: "tool_result", status: "completed", background: true, result: "late" },
+      },
+    });
+
+    expect(events.filter((event) => event.type === "subagent_event")).toHaveLength(subagentEventCount);
+  });
+
+  it("waits for the real file tool result after an early working-state boundary", () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.turnActive = true;
+
+    internals.handleNotification("droid.session_notification", {
+      notification: {
+        type: "create_message",
+        message: {
+          id: "assistant-edit-1",
+          role: "assistant",
+          content: [{
+            type: "tool_use",
+            id: "edit-1",
+            name: "Edit",
+            input: { file_path: "src/a.ts" },
+          }],
+        },
+      },
+    });
+    internals.handleNotification("droid.session_notification", {
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+    });
+
+    expect(events.some((event) => event.type === "tool_end")).toBe(false);
+    expect(agent.isIdle()).toBe(false);
+
+    internals.handleNotification("droid.session_notification", {
+      notification: {
+        type: "create_message",
+        message: {
+          id: "tool-result-1",
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "edit-1",
+            content: {
+              filePath: "src/a.ts",
+              patch: "@@ -1 +1 @@\\n-old\\n+new",
+              status: "modified",
+            },
+          }],
+        },
+      },
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool_end",
+      toolCallId: "edit-1",
+      files: [{ file: "src/a.ts", label: "a.ts", action: undefined }],
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "diff_update",
+      diffs: [expect.objectContaining({ file: "src/a.ts", patch: expect.stringContaining("+new") })],
+    }));
+    expect(agent.isIdle()).toBe(true);
+    expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
   });
 
   it("finishes an active turn when the Droid input process terminates", () => {
