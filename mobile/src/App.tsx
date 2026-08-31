@@ -198,6 +198,8 @@ import {
   getVisibleProcessEntries,
   groupProcessEntries,
   isAssistantNarrationProcessEntry,
+  isCommandProcessEntry,
+  isFileOperationProcessEntry,
   isProcessViewRunning,
   isUserGuidanceProcessEntry,
   normalizeProcessForView,
@@ -1375,6 +1377,52 @@ function MessageProcess({
       commentary: item,
     })),
   ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, visibleEntries]);
+  // 叙事时间线中，相邻的同类型条目（已读取/已编辑/已运行等）合并展示，
+  // 中间穿插的正文/说明会打断合并，保持原有时间顺序与可读性。
+  const groupedTimelineItems = useMemo(() => {
+    const result: Array<
+      | { kind: "entry"; id: string; entry: RemoteProcessEntry }
+      | { kind: "commentary"; id: string; commentary: NonNullable<RemoteChatMessage["commentary"]>[number] }
+      | { kind: "commands"; id: string; entries: RemoteProcessEntry[] }
+      | { kind: "files"; id: string; entries: RemoteProcessEntry[] }
+    > = [];
+    let commands: RemoteProcessEntry[] = [];
+    let files: RemoteProcessEntry[] = [];
+    const flushCommands = () => {
+      if (commands.length === 0) return;
+      result.push({ kind: "commands", id: `commands-${commands[0].id}`, entries: commands });
+      commands = [];
+    };
+    const flushFiles = () => {
+      if (files.length === 0) return;
+      result.push({ kind: "files", id: `files-${files[0].id}`, entries: files });
+      files = [];
+    };
+    for (const item of timelineItems) {
+      if (item.kind === "commentary") {
+        flushCommands();
+        flushFiles();
+        result.push({ kind: "commentary", id: item.id, commentary: item.commentary });
+        continue;
+      }
+      const entry = item.entry;
+      if (isCommandProcessEntry(entry)) {
+        flushFiles();
+        commands.push(entry);
+      } else if (isFileOperationProcessEntry(entry)) {
+        flushCommands();
+        if (files.length > 0 && files[0].toolKind !== entry.toolKind) flushFiles();
+        files.push(entry);
+      } else {
+        flushCommands();
+        flushFiles();
+        result.push({ kind: "entry", id: item.id, entry });
+      }
+    }
+    flushCommands();
+    flushFiles();
+    return result;
+  }, [timelineItems]);
   if (!process) return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
   const elapsed = formatProcessDuration((process.endedAt ?? nowTick) - process.startedAt);
   const currentStep = getCurrentProcessStep(process.planSteps);
@@ -1419,12 +1467,16 @@ function MessageProcess({
       </details>
       {hasNarrativeTimeline && expanded && (
         <div className="message-turn-timeline">
-          {timelineItems.map((item) => item.kind === "commentary" ? (
+          {groupedTimelineItems.map((item) => item.kind === "commentary" ? (
             <MarkdownContent
               className={`message-commentary-item message-content assistant-body-segment${processRunning && item.commentary.isStreaming ? " streaming" : ""}`}
               text={item.commentary.content}
               key={`commentary-${item.id}`}
             />
+          ) : item.kind === "commands" ? (
+            <CommandGroup key={item.id} entries={item.entries} />
+          ) : item.kind === "files" ? (
+            <FileOperationGroup key={item.id} entries={item.entries} />
           ) : (
             <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} />
           ))}

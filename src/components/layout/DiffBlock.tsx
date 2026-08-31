@@ -6,6 +6,7 @@ import type { ReviewUndoState } from "@shared/review-undo";
 import { uiText } from "@/i18n/text";
 import { CodeReviewDialog } from "./CodeReviewDialog";
 import { FilePreview } from "@/components/shared/FilePreview";
+import { useEditorStore } from "@/stores/editor-store";
 
 type DiffBlockProps = {
   reviewId: string;
@@ -110,7 +111,13 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
                 className="chat-diff-file-row"
                 onClick={() => {
                   const base = projectPath ? projectPath.replace(/[\\/]+$/, "") : "";
-                  setPreviewFile(base ? `${base}/${file.file}` : file.file);
+                  const fullPath = base ? `${base}/${file.file}` : file.file;
+                  // 编辑器模式：直接打开到编辑器 tab；非编辑器模式：弹文件预览。
+                  if (useEditorStore.getState().mode) {
+                    useEditorStore.getState().openFile(fullPath);
+                  } else {
+                    setPreviewFile(fullPath);
+                  }
                 }}
                 title={file.file}
                 aria-haspopup="dialog"

@@ -123,6 +123,7 @@ import {
 } from "@/lib/composer-history";
 import { matchShortcut } from "@/lib/shortcuts";
 import { COMPOSER_INSERT_EVENT, type ComposerInsertEventDetail } from "@/lib/composer-insert-event";
+import { writeComposerClipboard } from "@/lib/composer-clipboard";
 import {
   composerDocumentHasContent,
   createComposerDocument,
@@ -170,6 +171,23 @@ const copyMessageText = async (content: string) => {
   } catch {
     showFloatingToastMessage("复制失败");
   }
+};
+
+/**
+ * 复制用户发言气泡：纯文本照常写入系统剪贴板，同时把发送时的 composer 文档
+ * （文本 + 代码片段 / 路径 / 会话引用 / 图片芯片）留作渲染进程内存副本并
+ * 尝试写入自定义剪贴板格式；粘贴回输入框时原样还原这些芯片。
+ */
+const copyUserMessage = async (
+  document: ComposerDocument | undefined,
+  fallbackText: string,
+) => {
+  if (document && document.nodes.length > 0) {
+    await writeComposerClipboard(document, fallbackText);
+    showFloatingToastMessage("已复制");
+    return;
+  }
+  await copyMessageText(fallbackText);
 };
 
 type SendPayloadNow = (
@@ -1281,7 +1299,10 @@ const ChatMessageItem = memo(function ChatMessageItem({
                   </button>
                   <button
                     className="chat-copy-btn"
-                    onClick={() => void copyMessageText(msg.content)}
+                    onClick={() => void copyUserMessage(
+                      sourceComposerDocument,
+                      msg.content,
+                    )}
                     title="复制"
                     disabled={!hasRawContent}
                   >

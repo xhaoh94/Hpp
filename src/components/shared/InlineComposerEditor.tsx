@@ -1,4 +1,5 @@
 import {
+  $createLineBreakNode,
   $createParagraphNode,
   $createRangeSelection,
   $createTextNode,
@@ -18,10 +19,12 @@ import {
   KEY_DELETE_COMMAND,
   KEY_DOWN_COMMAND,
   COMMAND_PRIORITY_CRITICAL,
+  PASTE_COMMAND,
   SELECTION_CHANGE_COMMAND,
   type LexicalEditor,
   type LexicalNode,
   type NodeKey,
+  type PasteCommandType,
   type SerializedLexicalNode,
   type Spread,
 } from "lexical";
@@ -42,6 +45,10 @@ import {
   type ComposerNode,
   type ComposerTextNode,
 } from "@shared/composer-document";
+import {
+  COMPOSER_CLIPBOARD_MIME,
+  readCopiedComposer,
+} from "../../lib/composer-clipboard";
 import { ComposerEntityIcon } from "./ComposerEntityIcon";
 import {
   createContext,
@@ -53,7 +60,7 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
-  type ClipboardEvent,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
   type ReactNode,
@@ -308,6 +315,112 @@ type SelectionSnapshot = {
   focusType: SelectionPointType;
 };
 
+/**
+ * 把 composer 文档节点转为可插入的 Lexical 节点序列。
+ * 文本节点里的换行转为 LineBreakNode，附件芯片转为 ComposerEntityNode。
+ */
+function $buildComposerLexicalNodes(documentValue: ComposerDocument): LexicalNode[] {
+  const nodes: LexicalNode[] = [];
+  for (const node of documentValue.nodes) {
+    if (node.type === "text") {
+      const parts = node.text.split("\n");
+      parts.forEach((part, index) => {
+        if (part) nodes.push($createTextNode(part));
+        if (index < parts.length - 1) nodes.push($createLineBreakNode());
+      });
+      continue;
+    }
+    // 重新分配节点 id：同一气泡可以多次粘贴，不沿用来源文档的 id。
+    nodes.push($createComposerEntityNode({ ...node, id: createNodeId() }));
+  }
+  return nodes;
+}
+
+/**
+ * 在当前光标处插入一组节点；光标不可用（失焦等）时恢复 selectionRef 里的快照，
+ * 仍不可用则追加到编辑器末尾。insertNode（外部插入芯片）与剪贴板粘贴共用。
+ */
+function $insertComposerLexicalNodes(
+  nodes: LexicalNode[],
+  snapshot: SelectionSnapshot | null,
+): boolean {
+  if (nodes.length === 0) return false;
+  let selection = $getSelection();
+  const root = $getRoot();
+  const isValidPoint = (key: NodeKey, offset: number, type: SelectionPointType) => {
+    const target = $getNodeByKey(key);
+    if (type === "text") return $isTextNode(target) && offset <= target.getTextContentSize();
+    return $isElementNode(target) && offset <= target.getChildrenSize();
+  };
+  const isUsableRangeSelection = (candidate: typeof selection) => (
+    $isRangeSelection(candidate)
+    && candidate.anchor.key !== root.getKey()
+    && candidate.focus.key !== root.getKey()
+    && isValidPoint(candidate.anchor.key, candidate.anchor.offset, candidate.anchor.type)
+    && isValidPoint(candidate.focus.key, candidate.focus.offset, candidate.focus.type)
+  );
+  if (!$isRangeSelection(selection) && snapshot) {
+    if (
+      snapshot.anchorKey !== root.getKey()
+      && snapshot.focusKey !== root.getKey()
+      && isValidPoint(snapshot.anchorKey, snapshot.anchorOffset, snapshot.anchorType)
+      && isValidPoint(snapshot.focusKey, snapshot.focusOffset, snapshot.focusType)
+    ) {
+      const restored = $createRangeSelection();
+      restored.anchor.set(snapshot.anchorKey, snapshot.anchorOffset, snapshot.anchorType);
+      restored.focus.set(snapshot.focusKey, snapshot.focusOffset, snapshot.focusType);
+      $setSelection(restored);
+      selection = restored;
+    }
+  }
+  if (isUsableRangeSelection(selection)) {
+    $insertNodes(nodes);
+    return true;
+  }
+  const children = root.getChildren();
+  if (children.length > 0 && children.every((child) => child.getTextContentSize() === 0)) {
+    root.clear();
+  }
+  const lastChild = root.getLastChild();
+  const container = lastChild && $isElementNode(lastChild) ? lastChild : $createParagraphNode();
+  if (!lastChild || !$isElementNode(lastChild)) root.append(container);
+  for (const node of nodes) container.append(node);
+  nodes.at(-1)?.selectNext(0, 0);
+  return true;
+}
+
+/**
+ * 识别「复制发言气泡」的剪贴板内容：优先读系统剪贴板里的自定义格式（跨窗口），
+ * 否则用纯文本指纹匹配渲染进程内存里的文档副本（同窗口复制后原样粘贴）。
+ * 命中时阻止 Lexical 的默认粘贴（否则纯文本会被重复插入），
+ * 把文档里的文本与附件芯片原样还原进输入框。
+ */
+function ComposerClipboardPastePlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => editor.registerCommand(
+    PASTE_COMMAND,
+    (event: PasteCommandType) => {
+      if (!(event instanceof globalThis.ClipboardEvent)) return false;
+      const data = event.clipboardData;
+      if (!data) return false;
+      const plainText = data.getData("text/plain");
+      const documentValue = readCopiedComposer(
+        plainText,
+        data.getData(COMPOSER_CLIPBOARD_MIME),
+      );
+      if (!documentValue) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      editor.update(() => {
+        $insertComposerLexicalNodes($buildComposerLexicalNodes(documentValue), null);
+      }, { discrete: true });
+      return true;
+    },
+    COMMAND_PRIORITY_CRITICAL,
+  ), [editor]);
+  return null;
+}
+
 function CaptureEditorPlugin({
   editorRef,
   selectionRef,
@@ -378,7 +491,7 @@ export type InlineComposerEditorProps = {
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
   onKeyUp?: (event: KeyboardEvent<HTMLDivElement>) => void;
   onClick?: () => void;
-  onPaste?: (event: ClipboardEvent<HTMLDivElement>) => void;
+  onPaste?: (event: ReactClipboardEvent<HTMLDivElement>) => void;
   onDrop?: (event: DragEvent<HTMLDivElement>) => void;
   onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
   onCompositionStart?: (event: React.CompositionEvent<HTMLDivElement>) => void;
@@ -453,51 +566,7 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
       if (!editor) return false;
       let inserted = false;
       editor.update(() => {
-        const entityNode = $createComposerEntityNode(node);
-        let selection = $getSelection();
-        const snapshot = selectionRef.current;
-        const root = $getRoot();
-        const isValidPoint = (key: NodeKey, offset: number, type: SelectionPointType) => {
-          const target = $getNodeByKey(key);
-          if (type === "text") return $isTextNode(target) && offset <= target.getTextContentSize();
-          return $isElementNode(target) && offset <= target.getChildrenSize();
-        };
-        const isUsableRangeSelection = (candidate: typeof selection) => (
-          $isRangeSelection(candidate)
-          && candidate.anchor.key !== root.getKey()
-          && candidate.focus.key !== root.getKey()
-          && isValidPoint(candidate.anchor.key, candidate.anchor.offset, candidate.anchor.type)
-          && isValidPoint(candidate.focus.key, candidate.focus.offset, candidate.focus.type)
-        );
-        if (!$isRangeSelection(selection) && snapshot) {
-          if (
-            snapshot.anchorKey !== root.getKey()
-            && snapshot.focusKey !== root.getKey()
-            && isValidPoint(snapshot.anchorKey, snapshot.anchorOffset, snapshot.anchorType)
-            && isValidPoint(snapshot.focusKey, snapshot.focusOffset, snapshot.focusType)
-          ) {
-            const restored = $createRangeSelection();
-            restored.anchor.set(snapshot.anchorKey, snapshot.anchorOffset, snapshot.anchorType);
-            restored.focus.set(snapshot.focusKey, snapshot.focusOffset, snapshot.focusType);
-            $setSelection(restored);
-            selection = restored;
-          }
-        }
-        if (isUsableRangeSelection(selection)) {
-          $insertNodes([entityNode]);
-          inserted = true;
-        } else {
-          const children = root.getChildren();
-          if (children.length > 0 && children.every((child) => child.getTextContentSize() === 0)) {
-            root.clear();
-          }
-          const lastChild = root.getLastChild();
-          const container = lastChild && $isElementNode(lastChild) ? lastChild : $createParagraphNode();
-          if (!lastChild || !$isElementNode(lastChild)) root.append(container);
-          container.append(entityNode);
-          entityNode.selectNext(0, 0);
-          inserted = true;
-        }
+        inserted = $insertComposerLexicalNodes([$createComposerEntityNode(node)], selectionRef.current);
       }, { discrete: true });
       requestAnimationFrame(() => editor.focus());
       return inserted;
@@ -590,6 +659,7 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
           />
           <HistoryPlugin />
           <SyncDocumentPlugin value={value} onChange={onChange} />
+          <ComposerClipboardPastePlugin />
           <CaptureEditorPlugin editorRef={editorRef} selectionRef={selectionRef} />
         </div>
       </LexicalComposer>
