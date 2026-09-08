@@ -170,6 +170,7 @@ describe("Pi lifecycle", () => {
     spawnMock.mockReturnValue(child);
     const agent = new PiSDKAgent("hpp-session");
     const initialConfig = {
+      enabled: true,
       thinkingLevel: "low" as const,
       modelMode: "current" as const,
       customModel: {

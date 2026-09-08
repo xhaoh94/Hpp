@@ -33,6 +33,7 @@ const FILE_DISCOVERY_GUIDANCE = [
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const AGENT_COMPACTION_THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_AGENT_COMPACTION_CONFIG = {
+  enabled: true,
   thinkingLevel: "low",
   modelMode: "current",
   customModel: {
@@ -46,11 +47,16 @@ const DEFAULT_AGENT_COMPACTION_CONFIG = {
 const normalizeAgentCompactionConfig = (value) => {
   const config = isRecord(value) ? value : {};
   const customModel = isRecord(config.customModel) ? config.customModel : {};
+  const modelMode = config.modelMode === "custom" ? "custom" : "current";
+  const model = typeof config.model === "string" ? config.model.trim() : "";
   return {
+    // 存量配置没有 enabled 字段，缺省视为启用。
+    enabled: config.enabled !== false,
     thinkingLevel: AGENT_COMPACTION_THINKING_LEVELS.has(config.thinkingLevel)
       ? config.thinkingLevel
       : DEFAULT_AGENT_COMPACTION_CONFIG.thinkingLevel,
-    modelMode: config.modelMode === "custom" ? "custom" : "current",
+    modelMode,
+    ...(modelMode === "custom" && model ? { model } : {}),
     customModel: {
       baseUrl: String(customModel.baseUrl || "").trim(),
       apiKey: String(customModel.apiKey || "").trim(),
@@ -842,9 +848,35 @@ const getCompactionThinkingLevel = (config, model, inheritedLevel) => {
     .find((level) => isCompactionThinkingLevelSupported(model, level)) || "off";
 };
 
-const createCustomCompactionTarget = (config) => {
+const createCustomCompactionTarget = async (config) => {
+  if (config.modelMode !== "custom") return null;
+  return (await resolveChannelCompactionTarget(config)) || createManualCompactionTarget(config);
+};
+
+// 从已配置渠道解析压缩模型：配置值形如 "providerId/modelId"（同 SubAgent）。
+// 渠道或模型被删除时抛错，由调用方回退到当前模型。
+const resolveChannelCompactionTarget = async (config) => {
+  const ref = typeof config.model === "string" ? config.model.trim() : "";
+  const separator = ref.indexOf("/");
+  if (separator <= 0 || separator === ref.length - 1) return null;
+  const provider = ref.slice(0, separator);
+  const modelId = ref.slice(separator + 1);
+  const model = modelRegistry?.find?.(provider, modelId);
+  if (!model) {
+    throw new Error(`已配置的压缩模型不可用：${ref}（渠道或模型可能已被删除）`);
+  }
+  if (!modelRegistry?.getApiKeyAndHeaders) {
+    throw new Error("当前 Agent 运行时不支持解析压缩模型凭据");
+  }
+  const auth = await modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth?.ok) throw new Error(auth?.error || `压缩模型认证失败：${ref}`);
+  return { model, auth };
+};
+
+// 旧配置：手工填写的 OpenAI 兼容模型（Base URL / 模型 ID / 协议 / Key）。
+const createManualCompactionTarget = (config) => {
   const custom = config.customModel;
-  if (config.modelMode !== "custom" || !custom.baseUrl || !custom.modelId) return null;
+  if (!custom.baseUrl || !custom.modelId) return null;
   return {
     model: {
       id: custom.modelId,
@@ -912,7 +944,27 @@ const runConfiguredCompaction = async (event, context, target, config) => {
 const hppCompactionExtension = (pi) => {
   pi.on("session_before_compact", async (event, context) => {
     const config = normalizeAgentCompactionConfig(activeCompactionConfig);
-    const customTarget = createCustomCompactionTarget(config);
+    if (!config.enabled) {
+      // 用户在渠道配置里关闭了上下文压缩：取消本次压缩（含阈值自动触发与
+      // 溢出恢复），由 SDK 按未压缩流程继续——上下文超限时会话将直接报错。
+      return { cancel: true };
+    }
+    // 渠道模型可能已被删除或凭据失效：解析失败时按「自定义模型不可用」处理，
+    // 回退当前模型，绝不能让 hook 抛错而卡住整个压缩流程。
+    let customTarget = null;
+    try {
+      customTarget = await createCustomCompactionTarget(config);
+    } catch (error) {
+      if (!event.signal?.aborted) {
+        send({
+          type: "status",
+          id: `hpp-compaction-custom-model-fallback-${randomUUID()}`,
+          status: "warning",
+          title: "自定义压缩模型不可用，已回退当前模型",
+          detail: error?.message || String(error),
+        });
+      }
+    }
     if (customTarget) {
       try {
         return { compaction: await runConfiguredCompaction(event, context, customTarget, config) };
@@ -1672,7 +1724,19 @@ const handleCommand = async (command) => {
         break;
       case "setModel": {
         if (!session) throw new Error("Pi SDK session is not initialized");
-        const registeredModel = modelRegistry?.find?.(command.provider, command.modelId);
+        let registeredModel = modelRegistry?.find?.(command.provider, command.modelId);
+        if (!registeredModel) {
+          // 渠道弹窗在会话运行期间改写的 models.json 不会自动进入注册表
+          //（SDK 只在 registerProvider 等 API 调用时刷新，不 watch 文件），
+          // 导致「刚添加/刚修改的模型必须重启会话才能切换」。
+          // 宣判不可用之前先重读一次磁盘配置（仅本地，不走网络）。
+          try {
+            await modelRegistry?.refresh?.({ allowNetwork: false });
+          } catch {
+            // 刷新失败不覆盖下方原始的「模型不可用」诊断。
+          }
+          registeredModel = modelRegistry?.find?.(command.provider, command.modelId);
+        }
         if (!registeredModel) {
           const loadError = modelRegistry?.getError?.();
           throw new Error(

@@ -15,7 +15,9 @@ vi.mock("electron", () => ({
     getPath: () => electronState.userDataDir,
     getAppPath: () => process.cwd(),
     getVersion: () => electronState.appVersion,
-    isPackaged: false,
+    // 测试模拟的是"已安装"环境（用 temp userData 控制安装目录）；
+    // 真实 dev 模式 `getPluginInstallDir()` 会短路到源码目录。
+    isPackaged: true,
   },
   BrowserWindow: {
     fromWebContents: vi.fn(),
@@ -115,6 +117,7 @@ describe("AgentPluginRegistry", () => {
     const result = await registry.installFromPath(source);
 
     expect(result.success).toBe(true);
+    expect(result.installedPath).toBe(join(electronState.userDataDir, "hpp-data", "agent-plugins", "fake-agent"));
     expect(result.agent?.id).toBe("fake-agent");
     expect(result.agent?.capabilities.providerActivation).toBe("none");
     expect(result.agent?.capabilities.compaction).toBe("none");
@@ -164,6 +167,24 @@ describe("AgentPluginRegistry", () => {
     expect(result.agent?.capabilities.compaction).toEqual({
       customModel: true,
       thinkingLevel: false,
+      toggle: false,
+      channelModel: false,
+    });
+  });
+
+  it("passes through the compaction toggle capability declared by a plugin", async () => {
+    const source = await createPluginSource(tempRoot, "compaction-toggle-agent", "1.0.0", {
+      planMode: "native",
+      configuration: providerConfiguration,
+      compaction: { customModel: true, thinkingLevel: true, toggle: true },
+    });
+    const result = await registry.installFromPath(source);
+
+    expect(result.agent?.capabilities.compaction).toEqual({
+      customModel: true,
+      thinkingLevel: true,
+      toggle: true,
+      channelModel: false,
     });
   });
 

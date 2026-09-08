@@ -1491,7 +1491,16 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       const reloadResult = await agentManager.reloadConfig(agentId);
       return { ...reloadResult, config: saveResult.config };
     } catch (err: unknown) {
-      return { success: false, error: getErrorMessage(err), config: saveResult.config, reloadedSessionIds: [] };
+      // 配置已成功落盘，只是会话重载失败：不能把整次保存判为失败，否则
+      // 渲染端会误报“保存失败”且不再刷新模型列表。与 copy/delete/reorder
+      // 的重载失败分支保持一致的降级语义。
+      const models = await mergeModelsWithConfiguredAgentModels(agentId, []).catch(() => []);
+      return {
+        ...saveResult,
+        models,
+        error: `配置已保存到本地文件；Agent 会话重载失败：${getErrorMessage(err)}`,
+        reloadedSessionIds: [],
+      };
     }
   });
 

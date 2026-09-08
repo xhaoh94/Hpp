@@ -121,6 +121,12 @@ function getDataDir() {
 }
 
 function getPluginInstallDir() {
+  // dev 模式：源码即真理——agent-plugin 走源码目录，HMR 拉不到 plugin host
+  // 子进程，缓存的 manifest 又是只读一次的模块级单例，因此源码改了必须
+  // 立即被读到。打包模式仍然走 userData 安装目录（与发布目录一致）。
+  if (!app.isPackaged && process.env.NODE_ENV !== "production" && process.env.NODE_ENV !== "test") {
+    return join(app.getAppPath(), "electron", "agent-plugins");
+  }
   return join(getDataDir(), "agent-plugins");
 }
 
@@ -244,7 +250,11 @@ function normalizeCompactionCapabilities(value: unknown): AgentCapabilities["com
   if (!isRecord(value)) return "none";
   const customModel = value.customModel === true;
   const thinkingLevel = value.thinkingLevel === true;
-  return customModel || thinkingLevel ? { customModel, thinkingLevel } : "none";
+  const toggle = value.toggle === true;
+  const channelModel = value.channelModel === true;
+  return customModel || thinkingLevel || toggle || channelModel
+    ? { customModel, thinkingLevel, toggle, channelModel }
+    : "none";
 }
 
 function normalizeSubagentCapabilities(value: unknown): AgentCapabilities["subagent"] {

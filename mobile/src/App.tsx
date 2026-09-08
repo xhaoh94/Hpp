@@ -191,7 +191,6 @@ import {
   getActiveAssistantTurnId,
   getProcessGroupState,
   getStreamIdleNoticeDuration,
-  getSubagentActivityLabel,
   getSubagentProgressLabel,
   hasNativeMultiStepProcessPlan,
   getUserGuidanceText,
@@ -1097,8 +1096,6 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
     ? `耗时 ${formatProcessDuration((entry.completedAt ?? nowTick) - entry.startedAt)}`
     : "";
   const progress = getSubagentProgressLabel(entry.subagents || []);
-  const activity = getSubagentActivityLabel(entry.subagents || [])
-    || (entry.state === "running" ? "正在整理最终结果…" : "");
   const messages = (entry.subagents || [])
     .map((subagent) => subagent.message?.trim())
     .filter((message): message is string => !!message && message !== entry.detail?.trim());
@@ -1143,7 +1140,6 @@ function SubagentProcessEntry({ entry }: { entry: RemoteProcessEntry }) {
         {entry.title && <span className="subagent-entry-title">{entry.title}</span>}
         {progress && <span className="subagent-entry-meta">{progress}</span>}
         {elapsed && <span className="subagent-entry-meta">{elapsed}</span>}
-        {activity && <span className="subagent-entry-meta subagent-entry-activity" title={activity}>{activity}</span>}
       </span>
       {hasDetails && <ChevronDown className="expand-indicator" size={13} />}
     </>

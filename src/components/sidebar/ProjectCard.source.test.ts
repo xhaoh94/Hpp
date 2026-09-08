@@ -73,6 +73,22 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(projectCardSource).not.toContain("content={firstUserMsg.content}");
   });
 
+  // 页签标题被 CSS + maxLength={30} 双重截断，悬浮 tips 必须是未截断的完整
+  // 首条内容，否则长提示语的会话之间没法区分。
+  it("shows the untruncated first message as the session tab tooltip", () => {
+    const tabBlock = projectCardSource.slice(
+      projectCardSource.indexOf("{openSessions.map((session) => {"),
+      projectCardSource.indexOf("{(session.forkedFrom || session.forkContext) && ("),
+    );
+
+    expect(tabBlock).toContain("const tabPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : \"\"");
+    expect(tabBlock).toContain("const tabLabel = tabPreview || session.title;");
+    expect(tabBlock).toContain("title={tabLabel}");
+    // 展示仍用 30 字符截断版本，只有 tips 是完整的
+    expect(tabBlock).toContain("maxLength={30}");
+    expect(tabBlock).not.toContain("title={tabPreview.slice(0, 30)}");
+  });
+
   it("uses one explicit title typography for command and file process summaries", () => {
     const titleRule = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-process-entry-title {"),

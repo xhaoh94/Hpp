@@ -956,9 +956,10 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
-  width: max-content;
+  width: clamp(300px, 42vw, 620px);
   min-width: min(280px, calc(100vw - 64px));
-  max-width: min(620px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+  box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-radius: 10px;
@@ -979,9 +980,10 @@
 
 .chat-todo-summary-row {
   display: grid;
-  grid-template-columns: 16px minmax(180px, auto) auto;
+  grid-template-columns: 16px minmax(0, 1fr) max-content;
   align-items: center;
   gap: 8px;
+  width: 100%;
   min-width: 0;
   font-size: 13px;
   line-height: 20px;
@@ -1097,19 +1099,21 @@
 
 .chat-todo-summary-title {
   min-width: 0;
-  max-width: 480px;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   line-height: 20px;
 }
 
 .chat-todo-summary-label {
   align-self: center;
+  justify-self: end;
+  min-width: 3em;
   color: var(--text-secondary);
   font-size: 11px;
   white-space: nowrap;
   line-height: 20px;
+  text-align: right;
 }
 
 .chat-scroll-bottom:hover {

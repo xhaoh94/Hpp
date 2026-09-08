@@ -125,19 +125,6 @@
   color: var(--accent-color);
 }
 
-.file-tree-item.is-file {
-  cursor: grab;
-}
-
-.file-tree-item.is-file:active {
-  cursor: grabbing;
-}
-
-.file-tree-item.is-file:hover {
-  background-color: var(--bg-hover);
-  border-left: 2px solid var(--accent-color);
-}
-
 .file-tree-item.highlighted {
   background-color: rgba(0, 120, 212, 0.3);
   border-left: 2px solid var(--accent-color);

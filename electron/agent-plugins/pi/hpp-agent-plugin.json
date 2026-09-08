@@ -20,7 +20,9 @@
     "actions": true,
     "compaction": {
       "customModel": true,
-      "thinkingLevel": true
+      "thinkingLevel": true,
+      "toggle": true,
+      "channelModel": true
     },
     "subagent": {
       "supported": true,

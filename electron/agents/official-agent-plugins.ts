@@ -130,7 +130,11 @@ function normalizeCompactionCapabilities(value: unknown): AgentCapabilities["com
   if (!isRecord(value)) return "none";
   const customModel = value.customModel === true;
   const thinkingLevel = value.thinkingLevel === true;
-  return customModel || thinkingLevel ? { customModel, thinkingLevel } : "none";
+  const toggle = value.toggle === true;
+  const channelModel = value.channelModel === true;
+  return customModel || thinkingLevel || toggle || channelModel
+    ? { customModel, thinkingLevel, toggle, channelModel }
+    : "none";
 }
 
 function normalizeCapabilities(value: unknown): AgentCapabilities {

@@ -141,10 +141,15 @@ function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; nam
   const chatStore = useChatStore.getState();
   chatStore.setAvailableModels(models);
   const currentModel = chatStore.currentModel;
-  const matchingCurrentModel = currentModel ? models.find((model) =>
-    model.id === currentModel.id && model.provider === currentModel.provider
-  ) : undefined;
-  chatStore.setCurrentModel(matchingCurrentModel || models[0]);
+  // 仅刷新模型目录；当前模型仍在目录中则保留，否则保持原值。
+  // 自动保存刷新目录时不能把会话模型重置成列表第一个，否则每次
+  // 编辑字段都会把当前模型“跳”回 models[0]。
+  if (currentModel) {
+    const matchingCurrentModel = models.find((model) =>
+      model.id === currentModel.id && model.provider === currentModel.provider
+    );
+    if (matchingCurrentModel) chatStore.setCurrentModel(matchingCurrentModel);
+  }
 }
 
 export function SettingsView() {

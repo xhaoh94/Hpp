@@ -110,6 +110,8 @@ describe("official agent plugins", () => {
     expect(plugins[0].capabilities.compaction).toEqual({
       customModel: true,
       thinkingLevel: true,
+      toggle: false,
+      channelModel: false,
     });
   });
 

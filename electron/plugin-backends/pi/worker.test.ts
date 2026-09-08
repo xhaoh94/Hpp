@@ -160,6 +160,7 @@ class FakeSession {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "compaction_start", reason: "threshold" });
       let compaction;
+      let cancelled = false;
       for (const handler of this.sessionBeforeCompactHandlers) {
         const result = await handler({
           type: "session_before_compact",
@@ -183,11 +184,12 @@ class FakeSession {
           hasUI: true,
           ui: this.uiContext,
         });
+        if (result?.cancel) cancelled = true;
         if (result?.compaction) compaction = result.compaction;
       }
       await new Promise((resolve) => setTimeout(resolve, message === "slow-compact" ? 200 : 20));
-      this.listener?.({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: true });
-      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: compaction?.summary || "continued" }], stopReason: "stop" } });
+      this.listener?.({ type: "compaction_end", reason: "threshold", aborted: cancelled, willRetry: true });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: compaction?.summary || (cancelled ? "compaction-cancelled" : "continued") }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -309,11 +311,23 @@ const configuredTerraModel = {
   reasoning: true,
   input: ["text"],
 };
+// 运行期间新写入渠道的模型：只在 refresh 之后对 find 可见。
+const refreshAddedModel = {
+  id: "gpt-5.6-sol",
+  name: "GPT-5.6 Sol",
+  provider: "tanwan",
+  api: "openai-responses",
+  reasoning: false,
+  input: ["text"],
+};
 export const ModelRuntime = process.env.PI_TEST_BUILTIN_FALLBACK === "1" || process.env.PI_TEST_BUILTIN_ID_FALLBACK === "1"
   ? { create: async (options = {}) => ({ modelsPath: options.modelsPath }) }
   : undefined;
 export class ModelRegistry {
-  constructor(runtime) { this.runtime = runtime; }
+  constructor(runtime) { this.runtime = runtime; this.refreshCount = 0; }
+  // 模拟「渠道弹窗在会话运行期间写入 models.json」：init 时的快照里没有
+  // tanwan/gpt-5.6-sol，refresh（重读磁盘配置）之后才能 find 到。
+  async refresh() { this.refreshCount += 1; }
   getAvailable() {
     return [
       ...availableModels,
@@ -334,7 +348,8 @@ export class ModelRegistry {
   find(provider, id) { return availableModels.find((model) => model.provider === provider && model.id === id)
     || (provider === configuredDeepSeekModel.provider && id === configuredDeepSeekModel.id ? configuredDeepSeekModel : undefined)
     || (provider === configuredTerraModel.provider && id === configuredTerraModel.id ? configuredTerraModel : undefined)
-    || (provider === proxyModel.provider && id === proxyModel.id ? proxyModel : undefined); }
+    || (provider === proxyModel.provider && id === proxyModel.id ? proxyModel : undefined)
+    || (this.refreshCount > 0 && provider === refreshAddedModel.provider && id === refreshAddedModel.id ? refreshAddedModel : undefined); }
   getError() { return undefined; }
   hasConfiguredAuth() { return true; }
   async getApiKeyAndHeaders() { return { ok: true, apiKey: "test-api-key", headers: { "x-test": "1" } }; }
@@ -618,6 +633,35 @@ describe("Pi SDK worker protocol", () => {
     })]));
   });
 
+  it("reloads model config from disk before declaring a model unavailable", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    // 模拟渠道弹窗在会话运行期间写入 models.json：init 时的注册表快照没有
+    // tanwan/gpt-5.6-sol（fake registry 只在 refresh 后才让 find 命中）。
+    // setModel 必须先重读磁盘配置再宣判不可用，否则新加的模型永远切不上。
+    worker.send({ id: "switch", type: "setModel", provider: "tanwan", modelId: "gpt-5.6-sol" });
+    await expect(worker.waitFor((message) => message.id === "switch"))
+      .resolves.toMatchObject({
+        type: "model_changed",
+        model: { id: "gpt-5.6-sol", provider: "tanwan" },
+      });
+  });
+
+  it("still reports an unavailable model when a config reload does not reveal it", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "switch", type: "setModel", provider: "tanwan", modelId: "nonexistent-model" });
+    await expect(worker.waitFor((message) => message.id === "switch"))
+      .resolves.toMatchObject({
+        type: "error",
+        error: "Pi model is not available: tanwan/nonexistent-model",
+      });
+  });
+
   it("emits prompt_done only after the final settled retry", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -700,6 +744,85 @@ describe("Pi SDK worker protocol", () => {
       apiKey: "summary-key",
       thinkingLevel: "low",
     });
+  });
+
+  it("uses a configured channel model for Agent compaction", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      // 渠道弹窗里从已配置渠道选的压缩模型："providerId/modelId"。
+      compactionConfig: { modelMode: "custom", model: "test-provider/single-level-model" },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-channel", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-channel");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({
+      id: "single-level-model",
+      provider: "test-provider",
+      apiKey: "test-api-key",
+    });
+  });
+
+  it("falls back to the current model when the configured channel model is gone", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      // 渠道或模型已被删除：注册表 find 不到，应回退当前模型而不是中断压缩。
+      compactionConfig: { modelMode: "custom", model: "deleted-provider/summary-model" },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-missing", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-missing");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({ id: "pi-model", provider: "test-provider" });
+    expect(worker.messages.some((item) => item.type === "status"
+      && String(item.detail || "").includes("已配置的压缩模型不可用"))).toBe(true);
+  });
+
+  it("cancels compaction when the channel config disables it", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      // 渠道弹窗「启用上下文压缩」关闭后的配置形态：其余字段缺省。
+      compactionConfig: { enabled: false },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-off", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-off");
+
+    // 处理器应返回 { cancel: true }：fake session 不走 compact()，正文为取消标记。
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    expect((message?.message as { text?: unknown })?.text).toBe("compaction-cancelled");
+  });
+
+  it("applies a hot-updated compaction toggle to the next compaction", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    // 运行期间通过 setCompactionConfig 热更新关闭（弹窗「应用压缩设置」走的路径）。
+    worker.send({ id: "cfg", type: "setCompactionConfig", config: { enabled: false } });
+    await expect(worker.waitFor((message) => message.id === "cfg"))
+      .resolves.toMatchObject({ type: "compaction_config_changed", config: { enabled: false } });
+
+    worker.send({ id: "compact-hot", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-hot");
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    expect((message?.message as { text?: unknown })?.text).toBe("compaction-cancelled");
   });
 
   it("waits for an active post-turn compaction to settle before worker exit", async () => {

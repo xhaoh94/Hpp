@@ -219,7 +219,7 @@ describe("ProcessBlock", () => {
     expect(renderNotice("already_running_notice")).not.toContain("· 00:45");
   });
 
-  it("renders live subagent progress and activity in the summary", () => {
+  it("renders live subagent progress and elapsed time without per-agent activity in the summary", () => {
     const html = renderToStaticMarkup(createElement(ProcessBlock, {
       messageId: "assistant-subagent",
       process: {
@@ -246,8 +246,11 @@ describe("ProcessBlock", () => {
     }));
 
     expect(html).toContain("进度 1/2");
-    expect(html).toContain("Scout：正在读取文件");
     expect(html).toContain("已运行");
+    // 摘要行本身不再输出 Subagent 实时描述 / 活动标签，仅保留进度 + 耗时
+    expect(html).not.toContain("chat-subagent-event-activity");
+    expect(html).not.toContain("Scout：正在工作…");
+    expect(html).not.toContain("正在整理最终结果…");
   });
 
   it("combines repeated idle notices into one row with the summed duration", () => {

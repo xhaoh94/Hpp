@@ -198,7 +198,11 @@ function normalizeCompactionCapabilities(value) {
   if (!input) return "none";
   const customModel = input.customModel === true;
   const thinkingLevel = input.thinkingLevel === true;
-  return customModel || thinkingLevel ? { customModel, thinkingLevel } : "none";
+  const toggle = input.toggle === true;
+  const channelModel = input.channelModel === true;
+  return customModel || thinkingLevel || toggle || channelModel
+    ? { customModel, thinkingLevel, toggle, channelModel }
+    : "none";
 }
 
 function normalizeCapabilities(value) {

@@ -456,11 +456,17 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
           {openSessions.map((session) => {
             const status = agentStatuses[session.id];
             const agentBadgeLabel = getSessionAgentBadgeLabel(session.agentId);
+            const firstUserMsg = sessionMessages[session.id]?.find((m) => isUserSpeechMessage(m));
+            // 页签标题被 CSS 截断（且预览只取 30 字符），悬浮时给出未截断的
+            // 完整首条内容，方便在多个同名/长提示语的会话之间辨认。
+            const tabPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
+            const tabLabel = tabPreview || session.title;
             return (
               <div
                 key={session.id}
                 className={`project-terminal-child ${session.id === activeSessionId ? "active" : ""}`}
                 onClick={() => handleSelectSession(session)}
+                title={tabLabel}
               >
                 {status === "running" && <BrailleSpinner />}
                 <span
@@ -470,14 +476,9 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
                   {agentBadgeLabel}
                 </span>
                 <span className="terminal-child-title">
-                  {(() => {
-                    const msgs = sessionMessages[session.id];
-                    const firstUserMsg = msgs?.find((m) => isUserSpeechMessage(m));
-                    const preview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
-                    return preview
-                      ? <AttachmentPreviewText content={preview} maxLength={30} />
-                      : session.title;
-                  })()}
+                  {tabPreview
+                    ? <AttachmentPreviewText content={tabPreview} maxLength={30} />
+                    : session.title}
                 </span>
                 {(session.forkedFrom || session.forkContext) && (
                   <span

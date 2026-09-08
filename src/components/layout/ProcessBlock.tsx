@@ -32,7 +32,6 @@ import {
   formatProcessDuration,
   getProcessGroupState,
   getStreamIdleNoticeDuration,
-  getSubagentActivityLabel,
   getSubagentProgressLabel,
   groupProcessEntries,
   getVisibleProcessEntries,
@@ -399,8 +398,6 @@ function SubagentEntryRow({
 }) {
   const subagents = entry.subagents || [];
   const progress = getSubagentProgressLabel(subagents);
-  const activity = getSubagentActivityLabel(subagents)
-    || (entry.state === "running" ? "正在整理最终结果…" : "");
   const elapsed = typeof entry.startedAt === "number"
     ? `已运行 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
     : "";
@@ -436,11 +433,6 @@ function SubagentEntryRow({
         <span className="chat-subagent-event-title">{entry.title}</span>
         {progress && <span className="chat-subagent-event-meta">{progress}</span>}
         {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
-        {activity && (
-          <span className="chat-subagent-event-activity" title={activity} aria-live="polite">
-            {activity}
-          </span>
-        )}
         {canExpand && (
           <svg
             className="chat-subagent-chevron"

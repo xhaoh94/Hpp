@@ -71,7 +71,12 @@ describe("official plugin config providers", () => {
       ["pi", "opencode", "droid", "codex", "claude"].map(readManifest),
     );
 
-    expect(pi.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: true });
+    expect(pi.capabilities.compaction).toEqual({
+      customModel: true,
+      thinkingLevel: true,
+      toggle: true,
+      channelModel: true,
+    });
     expect(opencode.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: true });
     expect(droid.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: false });
     expect(codex.capabilities.compaction).toBeUndefined();

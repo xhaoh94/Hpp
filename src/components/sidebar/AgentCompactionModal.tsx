@@ -1,20 +1,24 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { BrainCircuit, X } from "lucide-react";
 import type { AgentCompactionCapabilities } from "@/types";
 import {
   isCustomAgentCompactionModelConfigured,
   normalizeAgentCompactionConfig,
+  parseAgentCompactionModelRef,
   resolveStoredAgentCompactionConfig,
   setStoredAgentCompactionConfig,
   type AgentCompactionConfig,
 } from "@shared/agent-compaction";
+import { AgentSubagentModelPicker, type AgentSubagentModelOption } from "./AgentSubagentModal";
 import "./Settings.css";
 
 type AgentCompactionModalProps = {
   agentId: string;
   agentName: string;
   capabilities: AgentCompactionCapabilities;
+  /** 已配置渠道里的可选模型（providerId/modelId），与 SubAgent 共用一份。 */
+  modelOptions?: AgentSubagentModelOption[];
   onClose: () => void;
 };
 
@@ -31,8 +35,12 @@ function normalizeForCapabilities(
   const normalized = normalizeAgentCompactionConfig(value);
   return {
     ...normalized,
+    // 插件未声明启停能力时强制保持启用，避免遗留的 disabled 配置被误存。
+    enabled: capabilities.toggle === true ? normalized.enabled : true,
     thinkingLevel: capabilities.thinkingLevel ? normalized.thinkingLevel : "inherit",
     modelMode: capabilities.customModel ? normalized.modelMode : "current",
+    // 只有声明了渠道选择能力的插件才能保存渠道模型引用。
+    model: capabilities.channelModel === true ? normalized.model : undefined,
     customModel: {
       ...normalized.customModel,
       reasoning: capabilities.thinkingLevel && normalized.customModel.reasoning,
@@ -40,10 +48,28 @@ function normalizeForCapabilities(
   };
 }
 
+// 渠道被删除后，已保存的模型引用不再出现在选项里；保留成占位项，
+// 避免弹窗显示空白、用户无从得知当前选的是哪个（同 SubAgent）。
+function withStoredModel(
+  options: AgentSubagentModelOption[],
+  model?: string,
+): AgentSubagentModelOption[] {
+  if (!model || options.some((option) => option.value === model)) return options;
+  const parsed = parseAgentCompactionModelRef(model);
+  return [...options, {
+    value: model,
+    id: parsed?.modelId || model,
+    name: model,
+    provider: parsed?.provider || "已保存模型",
+    providerLabel: parsed?.provider || "已保存模型",
+  }];
+}
+
 export function AgentCompactionModal({
   agentId,
   agentName,
   capabilities,
+  modelOptions,
   onClose,
 }: AgentCompactionModalProps) {
   const [config, setConfig] = useState<AgentCompactionConfig>(() => normalizeForCapabilities(undefined, capabilities));
@@ -51,6 +77,11 @@ export function AgentCompactionModal({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const canSelectChannelModel = capabilities.channelModel === true;
+  const availableModels = useMemo(
+    () => withStoredModel(modelOptions || [], config.model),
+    [config.model, modelOptions],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -93,10 +124,23 @@ export function AgentCompactionModal({
     setStatus(null);
   };
 
+  const handleCompactionModelChange = (model: string) => {
+    updateConfig({
+      ...config,
+      modelMode: model ? "custom" : "current",
+      model: model || undefined,
+    });
+  };
+
   const handleSave = async () => {
     const normalized = normalizeForCapabilities(config, capabilities);
     if (normalized.modelMode === "custom" && !isCustomAgentCompactionModelConfigured(normalized)) {
-      setStatus({ type: "error", text: "自定义压缩模型需要填写 Base URL 和模型 ID" });
+      setStatus({
+        type: "error",
+        text: canSelectChannelModel
+          ? "请从已配置渠道中选择压缩模型"
+          : "自定义压缩模型需要填写 Base URL 和模型 ID",
+      });
       return;
     }
 
@@ -181,6 +225,24 @@ export function AgentCompactionModal({
             <div className="agent-config-empty">读取压缩设置中...</div>
           ) : (
             <div className="settings-compaction-body">
+              {capabilities.toggle === true && (
+                <label className="settings-general-row settings-general-toggle settings-compaction-row">
+                  <span className="settings-general-row-main">
+                    <strong>启用上下文压缩</strong>
+                    <span>关闭后不再自动压缩上下文，上下文超限时会话将直接报错</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={config.enabled}
+                    onChange={(event) => updateConfig({
+                      ...config,
+                      enabled: event.target.checked,
+                    })}
+                    aria-label="启用上下文压缩"
+                  />
+                </label>
+              )}
+
               {capabilities.thinkingLevel ? (
                 <div className="settings-general-row settings-compaction-row">
                   <span className="settings-general-row-main">
@@ -221,23 +283,38 @@ export function AgentCompactionModal({
                   <div className="settings-general-row settings-compaction-row">
                     <span className="settings-general-row-main">
                       <strong>压缩模型</strong>
-                      <span>可沿用当前 Agent 模型，或调用独立的 OpenAI 兼容模型</span>
+                      <span>
+                        {canSelectChannelModel
+                          ? "可沿用当前 Agent 模型，或从已配置渠道中选择专用模型"
+                          : "可沿用当前 Agent 模型，或调用独立的 OpenAI 兼容模型"}
+                      </span>
                     </span>
-                    <select
-                      className="settings-compaction-select"
-                      value={config.modelMode}
-                      onChange={(event) => updateConfig({
-                        ...config,
-                        modelMode: event.target.value === "custom" ? "custom" : "current",
-                      })}
-                      aria-label="压缩模型来源"
-                    >
-                      <option value="current">当前 Agent 模型</option>
-                      <option value="custom">自定义模型</option>
-                    </select>
+                    {canSelectChannelModel ? (
+                      <AgentSubagentModelPicker
+                        value={config.modelMode === "custom" ? config.model || "" : ""}
+                        options={availableModels}
+                        disabled={!config.enabled}
+                        emptyLabel="跟随当前 Agent 模型"
+                        onChange={handleCompactionModelChange}
+                        ariaLabel="压缩模型"
+                      />
+                    ) : (
+                      <select
+                        className="settings-compaction-select"
+                        value={config.modelMode}
+                        onChange={(event) => updateConfig({
+                          ...config,
+                          modelMode: event.target.value === "custom" ? "custom" : "current",
+                        })}
+                        aria-label="压缩模型来源"
+                      >
+                        <option value="current">当前 Agent 模型</option>
+                        <option value="custom">自定义模型</option>
+                      </select>
+                    )}
                   </div>
 
-                  {config.modelMode === "custom" && (
+                  {!canSelectChannelModel && config.modelMode === "custom" && (
                     <div className="settings-compaction-custom-model">
                       <label className="settings-compaction-field">
                         <span>Base URL</span>

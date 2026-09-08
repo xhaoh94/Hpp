@@ -406,10 +406,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   // 渠道自动保存：防抖计时器、并发保护与最近一次已保存的 payload 指纹。
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSaveInFlight = useRef(false);
+  const autoSaveCompletion = useRef<Promise<void> | null>(null);
   const autoSavePending = useRef(false);
   const lastSavedPayload = useRef("");
   const draftRef = useRef<AgentProviderConfig | null>(null);
   const editorOriginalProviderIdRef = useRef("");
+  // 保存请求可能跨越切换 Agent、关闭编辑器或打开另一个渠道；序号用于
+  // 防止旧请求返回时把旧配置重新写回当前弹窗。
+  const editorScope = useRef(0);
+  const editorAgentIdRef = useRef(agentId);
   // 保存最新自动保存函数的引用，供卸载清理（早于定义处）调用。
   const performAutoSaveRef = useRef(() => Promise.resolve());
   const pendingProviderEditor = useRef<{ agentId: string; providerId: string } | null>(null);
@@ -485,8 +490,17 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, [loadAgents]);
 
   useEffect(() => {
+    editorScope.current += 1;
+    editorAgentIdRef.current = initialAgentId;
     setAgentId(initialAgentId);
   }, [initialAgentId]);
+
+  const changeAgent = useCallback((nextAgentId: string) => {
+    if (nextAgentId === agentId) return;
+    editorScope.current += 1;
+    editorAgentIdRef.current = nextAgentId;
+    setAgentId(nextAgentId);
+  }, [agentId]);
 
   useEffect(() => {
     setCompactionModalOpen(false);
@@ -498,7 +512,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     [config.providers, selectedProviderId]
   );
 
-  const subagentModelOptions = useMemo(() => {
+  // 已配置渠道里的全部模型，SubAgent / 上下文压缩的模型选择共用。
+  const providerModelOptions = useMemo(() => {
     const seen = new Set<string>();
     return config.providers.flatMap((provider) => provider.models.flatMap((model) => {
       const value = `${provider.providerId}/${model.id}`;
@@ -537,6 +552,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, [activeAgentId, agentId, currentModelProvider]);
 
   const loadConfig = useCallback(async () => {
+    editorScope.current += 1;
+    editorAgentIdRef.current = agentId;
     setLoading(true);
     setStatus(null);
     setActivatingProviderId("");
@@ -672,6 +689,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   );
 
   const handleReload = useCallback(async () => {
+    // 重载前先冲刷防抖窗口内/在途的自动保存，否则重载会读到未含最新
+    // 改动（甚至已回滚用户草稿）的磁盘配置，造成“保存了却不生效”。
+    if (autoSaveTimer.current) {
+      clearTimeout(autoSaveTimer.current);
+      autoSaveTimer.current = null;
+    }
+    if (autoSaveCompletion.current) {
+      try {
+        await autoSaveCompletion.current;
+      } catch {
+        // 保存失败已由自动保存路径降级提示，这里继续重载磁盘上的旧配置。
+      }
+    }
+    await performAutoSaveRef.current();
     setReloading(true);
     setStatus(null);
     try {
@@ -785,7 +816,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         }
       } else if (copiedProvider) {
         pendingProviderEditor.current = { agentId: targetAgentId, providerId: copiedProviderId };
-        setAgentId(targetAgentId);
+        changeAgent(targetAgentId);
       }
       setCopySourceProvider(null);
       setStatus({
@@ -801,7 +832,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       setCopyingTargetAgentId("");
     }
-  }, [agentId, configurableAgentList, copyingTargetAgentId, copySourceProvider, handleEditProvider, onModelsUpdated]);
+  }, [agentId, changeAgent, configurableAgentList, copyingTargetAgentId, copySourceProvider, handleEditProvider, onModelsUpdated]);
 
   const updateDraft = useCallback((patch: Partial<AgentProviderConfig>) => {
     setDraft((current) => current ? { ...current, ...patch } : current);
@@ -928,6 +959,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const performAutoSave = useCallback(async () => {
     const currentDraft = draftRef.current;
     if (!currentDraft) return;
+    const scope = editorScope.current;
+    const saveAgentId = editorAgentIdRef.current;
     const payload = buildNormalizedProviderPayload(currentDraft, editorOriginalProviderIdRef.current);
     // 草稿不完整（新建渠道填写中）时静默跳过，不弹错误。
     if (!isProviderPayloadSavable(payload)) return;
@@ -939,8 +972,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       return;
     }
     autoSaveInFlight.current = true;
-    try {
-      const result = await window.electronAPI.agentConfigSave(agentId, payload as AgentProviderConfig);
+    const savePromise = (async () => {
+      const result = await window.electronAPI.agentConfigSave(saveAgentId, payload as AgentProviderConfig);
+      if (scope !== editorScope.current || saveAgentId !== editorAgentIdRef.current) return;
       if (!result.success || !result.config) {
         setStatus({ type: "error", text: result.error || "保存配置失败" });
         return;
@@ -952,17 +986,30 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       // 同时保证已有渠道的标题保持“编辑渠道”。
       editorOriginalProviderIdRef.current = payload.providerId;
       setEditorOriginalProviderId(payload.providerId);
-      if (result.models) onModelsUpdated(agentId, result.models);
+      // 自动保存只是把改动落盘，不能隐式把会话模型切到本渠道第一个模型
+      //（只有用户显式“启用渠道”时才切换，见 handleActivate 的三参调用）。
+      if (result.models) onModelsUpdated(saveAgentId, result.models);
+      if (result.error) {
+        // 配置已保存，但会话忙碌/重载失败，改动尚未应用到运行中的会话。
+        setStatus({ type: "success", text: `已保存；${result.error}` });
+      }
+    })();
+    autoSaveCompletion.current = savePromise;
+    try {
+      await savePromise;
     } catch (error) {
-      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      if (scope === editorScope.current && saveAgentId === editorAgentIdRef.current) {
+        setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      }
     } finally {
+      if (autoSaveCompletion.current === savePromise) autoSaveCompletion.current = null;
       autoSaveInFlight.current = false;
       if (autoSavePending.current) {
         autoSavePending.current = false;
         void performAutoSave();
       }
     }
-  }, [agentId, onModelsUpdated]);
+  }, [onModelsUpdated]);
 
   useEffect(() => {
     performAutoSaveRef.current = performAutoSave;
@@ -1265,7 +1312,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                       role="tab"
                       aria-selected={active}
                       className={`agent-config-tab ${active ? "active" : ""}`}
-                      onClick={() => setAgentId(agent.id)}
+                      onClick={() => changeAgent(agent.id)}
                     >
                       {agent.name}
                     </button>
@@ -1871,7 +1918,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           agentId={agentId}
           agentName={activeAgent?.name || getAgentName(agentId)}
           capabilities={subagentCapabilities}
-          modelOptions={subagentModelOptions}
+          modelOptions={providerModelOptions}
           onClose={() => setSubagentModalOpen(false)}
         />
       )}
@@ -1880,6 +1927,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           agentId={agentId}
           agentName={activeAgent?.name || getAgentName(agentId)}
           capabilities={compactionCapabilities}
+          modelOptions={providerModelOptions}
           onClose={() => setCompactionModalOpen(false)}
         />
       )}

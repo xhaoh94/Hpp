@@ -11,6 +11,7 @@ const testState = vi.hoisted(() => ({
   listOfficialAgentPlugins: vi.fn(),
   removePlugin: vi.fn(),
   reloadRegistry: vi.fn(),
+  saveAgentProviderConfig: vi.fn(),
   shutdownRegistry: vi.fn(),
   updateAgent: vi.fn(),
   handlers: new Map<string, (...args: any[]) => any>(),
@@ -59,7 +60,7 @@ vi.mock("./agent-config", () => ({
   listAgentConfig: vi.fn(),
   reorderAgentProviderConfigs: vi.fn(),
   restoreNativeConfigSnapshots: vi.fn(),
-  saveAgentProviderConfig: vi.fn(),
+  saveAgentProviderConfig: testState.saveAgentProviderConfig,
   setAgentBackendModelsVisible: vi.fn(),
   setActiveAgentProviderConfig: vi.fn(),
   shouldShowAgentBackendModels: vi.fn(),
@@ -384,7 +385,51 @@ describe("AgentManager plugin removal", () => {
       success: true,
       appliedSessionIds: ["compaction-session"],
     });
-    expect(backend.setCompactionConfig).toHaveBeenCalledWith(config);
+    // 归一化会补上缺省 enabled: true（存量配置缺省视为启用）。
+    expect(backend.setCompactionConfig).toHaveBeenCalledWith({ ...config, enabled: true });
+  });
+
+  it("reports a save as successful with models when only the session reload fails", async () => {
+    // 配置已落盘，但会话重载（重建 backend）失败：整次保存不能判失败，
+    // 否则渲染端的自动保存会误报“保存失败”且不再刷新模型列表。
+    testState.saveAgentProviderConfig.mockResolvedValueOnce({
+      success: true,
+      config: {
+        activeProviderId: "custom-1",
+        providers: [{
+          providerId: "custom-1",
+          displayName: "Custom",
+          baseUrl: "https://custom.example/v1",
+          apiKey: "key",
+          authMode: "bearer",
+          endpoint: "responses",
+          models: [],
+        }],
+      },
+    });
+    const idleBackend = createBackend(true);
+    const failingReplacement = createBackend(true);
+    failingReplacement.init.mockRejectedValueOnce(new Error("replacement init failed"));
+    testState.createBackend
+      .mockResolvedValueOnce(idleBackend)
+      .mockResolvedValueOnce(failingReplacement);
+
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "save-reload-fail");
+    const result = await getHandler("agentConfig:save")({}, "pi", {
+      providerId: "custom-1",
+      displayName: "Custom",
+      baseUrl: "https://custom.example/v1",
+      apiKey: "key",
+      authMode: "bearer",
+      endpoint: "responses",
+      models: [],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.config).toEqual(expect.objectContaining({ activeProviderId: "custom-1" }));
+    expect(result.error).toContain("配置已保存到本地文件");
+    expect(result.reloadedSessionIds).toEqual([]);
+    expect(Array.isArray(result.models)).toBe(true);
   });
 
   it("applies scoped compaction only to sessions whose plugin declares support", async () => {
@@ -423,7 +468,7 @@ describe("AgentManager plugin removal", () => {
       success: true,
       appliedSessionIds: ["full-compaction-session"],
     });
-    expect(fullSupportBackend.setCompactionConfig).toHaveBeenCalledWith(config);
+    expect(fullSupportBackend.setCompactionConfig).toHaveBeenCalledWith({ ...config, enabled: true });
     expect(modelOnlyBackend.setCompactionConfig).not.toHaveBeenCalled();
 
     await expect(getHandler("agent:setAgentCompactionConfig")({}, "model-only", {

@@ -10,7 +10,7 @@ import { groupModelsByProvider } from "@shared/models";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import "./Settings.css";
 
-type AgentSubagentModelOption = {
+export type AgentSubagentModelOption = {
   value: string;
   id: string;
   name: string;
@@ -66,7 +66,7 @@ function withStoredModels(
   return [...map.values()];
 }
 
-function AgentSubagentModelPicker({
+export function AgentSubagentModelPicker({
   value,
   options,
   disabled = false,

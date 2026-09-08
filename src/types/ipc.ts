@@ -165,6 +165,10 @@ export type AgentConfigurationSupport = AgentProviderConfiguration | "none";
 export interface AgentCompactionCapabilities {
   customModel: boolean;
   thinkingLevel: boolean;
+  /** 插件支持「启用/关闭上下文压缩」开关（后端能真正取消压缩）。 */
+  toggle?: boolean;
+  /** 压缩模型可直接从已配置渠道选择（`providerId/modelId`）。 */
+  channelModel?: boolean;
 }
 
 export type AgentCompactionSupport = AgentCompactionCapabilities | "none";

@@ -107,46 +107,50 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
             <p className="session-empty">暂无会话记录</p>
           ) : (
             <div className="session-list">
-              {sessions.map((session) => (
-                <div key={session.id} className="session-item">
-                  <div className="session-item-header">
-                    <div className="session-item-meta">
-                      <span className="session-time">{formatTime(session.lastActiveAt || session.createdAt)}</span>
-                      <span className="session-agent-badge" title={getAgentName(session.agentId)}>
-                        {getAgentName(session.agentId)}
-                      </span>
+              {sessions.map((session) => {
+                // 预览区是单行 ellipsis，悬浮时给出未截断的完整内容。
+                const previewText = getSessionPreviewText(session, sessionMessages);
+                return (
+                  <div key={session.id} className="session-item">
+                    <div className="session-item-header">
+                      <div className="session-item-meta">
+                        <span className="session-time">{formatTime(session.lastActiveAt || session.createdAt)}</span>
+                        <span className="session-agent-badge" title={getAgentName(session.agentId)}>
+                          {getAgentName(session.agentId)}
+                        </span>
+                      </div>
+                      <div className="session-actions">
+                        <button
+                          onClick={() => onResume(session)}
+                          className="session-btn resume"
+                        >
+                          恢复
+                        </button>
+                        <button
+                          onClick={() => setConfirmDelete({ kind: "session", sessionId: session.id })}
+                          className="session-btn delete"
+                        >
+                          彻底删除
+                        </button>
+                      </div>
                     </div>
-                    <div className="session-actions">
-                      <button
-                        onClick={() => onResume(session)}
-                        className="session-btn resume"
-                      >
-                        恢复
-                      </button>
-                      <button
-                        onClick={() => setConfirmDelete({ kind: "session", sessionId: session.id })}
-                        className="session-btn delete"
-                      >
-                        彻底删除
-                      </button>
+                    <div className="session-preview" title={previewText}>
+                      {isForkedSession(session) && (
+                        <span
+                          className="session-fork-badge"
+                          title={`Fork 自 ${session.forkedFrom?.sourceTitle || session.forkContext?.sourceTitle || "原会话"}`}
+                        >
+                          <GitBranch size={12} strokeWidth={2} />
+                        </span>
+                      )}
+                      <AttachmentPreviewText
+                        content={previewText}
+                        className="session-preview-text"
+                      />
                     </div>
                   </div>
-                  <div className="session-preview">
-                    {isForkedSession(session) && (
-                      <span
-                        className="session-fork-badge"
-                        title={`Fork 自 ${session.forkedFrom?.sourceTitle || session.forkContext?.sourceTitle || "原会话"}`}
-                      >
-                        <GitBranch size={12} strokeWidth={2} />
-                      </span>
-                    )}
-                    <AttachmentPreviewText
-                      content={getSessionPreviewText(session, sessionMessages)}
-                      className="session-preview-text"
-                    />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
