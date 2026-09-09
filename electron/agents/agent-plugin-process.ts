@@ -49,7 +49,11 @@ export interface PluginHostCapabilities {
 
 export class AgentPluginProcess {
   private child: ChildProcessWithoutNullStreams | null = null;
-  private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private pending = new Map<string, {
+    backendId?: string;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+  }>();
   private eventHandlers = new Map<string, (event: unknown) => void>();
   private backendSessionIds = new Map<string, string>();
   private configHandlers = new Map<string, () => Promise<unknown>>();
@@ -112,27 +116,28 @@ export class AgentPluginProcess {
     }
   }
 
-  backendCall(backendId: string, method: string, args: unknown[] = []): Promise<unknown> {
-    return this.call("backendCall", { backendId, method, args });
+  backendCall(backendId: string, method: string, args: unknown[] = [], timeoutMs?: number): Promise<unknown> {
+    return this.call("backendCall", { backendId, method, args }, timeoutMs);
   }
 
   async disposeBackend(backendId: string): Promise<void> {
     const sessionId = this.backendSessionIds.get(backendId);
+    // A backend disposal can race with a long-running backendCall (for
+    // example sendMessage). Do not leave that RPC in the host pending map
+    // until the whole plugin host happens to shut down.
+    this.rejectBackendPending(backendId, new Error("Plugin backend disposed."));
     this.eventHandlers.delete(backendId);
     this.configHandlers.delete(backendId);
     this.backendSessionIds.delete(backendId);
     if (sessionId) clearPendingUIEvents(sessionId, backendId);
     if (!this.child?.stdin.writable) return;
-    let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
-      await Promise.race([
-        this.request("disposeBackend", { backendId }),
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("Plugin backend dispose timed out.")), 5000);
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
+      await this.request("disposeBackend", { backendId }, 5000);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Plugin host request timed out: disposeBackend") {
+        throw new Error("Plugin backend dispose timed out.");
+      }
+      throw error;
     }
   }
 
@@ -285,7 +290,12 @@ export class AgentPluginProcess {
         clearTimeout(timeout);
         timeout = null;
       };
+      const backendId = typeof params === "object" && params !== null && !Array.isArray(params)
+        && typeof (params as { backendId?: unknown }).backendId === "string"
+        ? (params as { backendId: string }).backendId
+        : undefined;
       this.pending.set(id, {
+        backendId,
         resolve: (value) => {
           clearRequestTimeout();
           resolve(value);
@@ -393,6 +403,14 @@ export class AgentPluginProcess {
   private rejectPending(error: Error): void {
     for (const callback of this.pending.values()) callback.reject(error);
     this.pending.clear();
+  }
+
+  private rejectBackendPending(backendId: string, error: Error): void {
+    for (const [requestId, callback] of this.pending) {
+      if (callback.backendId !== backendId) continue;
+      this.pending.delete(requestId);
+      callback.reject(error);
+    }
   }
 
   private waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {

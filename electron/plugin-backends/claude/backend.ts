@@ -185,6 +185,9 @@ function normalizeModels(value: unknown): AgentModel[] {
 
 export class ClaudeSDKAgent {
   private process: ChildProcess | null = null;
+  // stdout/input can fail before the worker exits; retain the child for the
+  // next dispose() so a transport failure cannot orphan it.
+  private processForCleanup: ChildProcess | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private readonly eventBuffer: AgentEventBuffer;
@@ -509,8 +512,9 @@ export class ClaudeSDKAgent {
     this.turnActive = false;
     this.isAborting = false;
     this.eventBuffer.clear();
-    const child = this.process;
+    const child = this.process || this.processForCleanup;
     this.process = null;
+    this.processForCleanup = null;
     if (!child) {
       this.secretValues = [];
       return;
@@ -939,6 +943,7 @@ export class ClaudeSDKAgent {
 
   private handleWorkerTermination(child: ChildProcess, detail: string) {
     if (this.process !== child) return;
+    this.processForCleanup = child;
     this.process = null;
     this.isReady = false;
     this.claudeSubagentsByToolCallId.clear();

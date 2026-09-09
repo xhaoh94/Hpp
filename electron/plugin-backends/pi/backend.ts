@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "child_process";
+import { execFile, spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { join } from "path";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
@@ -322,6 +322,9 @@ const buildPiSubagentEvent = (
 
 export class PiSDKAgent {
   private process: ChildProcess | null = null;
+  // Keep ownership after a pipe failure until dispose() gets a chance to reap
+  // a child that is still alive even though its transport is already closed.
+  private processForCleanup: ChildProcess | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
@@ -509,8 +512,9 @@ export class PiSDKAgent {
     try {
       await initPromise;
     } catch (error) {
-      if (this.process === child) {
+      if (this.process === child || this.processForCleanup === child) {
         this.process = null;
+        this.processForCleanup = null;
         this.isReady = false;
         child.kill();
       }
@@ -858,8 +862,9 @@ export class PiSDKAgent {
     this.piSubagentStarts.clear();
     this.piSubagentTerminalStates.clear();
     this.eventBuffer.flush();
-    const child = this.process;
+    const child = this.process || this.processForCleanup;
     this.process = null;
+    this.processForCleanup = null;
     if (!child) return;
     if (child.stdin?.writable) {
       try {
@@ -869,7 +874,13 @@ export class PiSDKAgent {
       }
     }
     if (await this.waitForExit(child, 1500)) return;
-    child.kill("SIGKILL");
+    if (process.platform === "win32" && child.pid) {
+      await new Promise<void>((resolve) => {
+        execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => resolve());
+      });
+    } else {
+      child.kill("SIGKILL");
+    }
     await this.waitForExit(child, 500);
   }
 
@@ -1400,6 +1411,7 @@ export class PiSDKAgent {
 
   private handleWorkerTermination(child: ChildProcess, title: string, detail: string) {
     if (this.process !== child) return;
+    this.processForCleanup = child;
     this.process = null;
     this.isReady = false;
     const error = detail || title;

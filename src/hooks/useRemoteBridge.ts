@@ -424,6 +424,67 @@ export function flushPendingMessageUpdates(
   pendingUpdates.clear();
 }
 
+type RemoteMessagePublishIntent =
+  | { type: "session.message.upsert"; sessionId: string; message: ChatMessage }
+  | { type: "session.messages.replace"; sessionId: string; messages: ChatMessage[] };
+
+function coalescePendingMessageIntent(
+  pending: RemoteMessagePublishIntent | undefined,
+  update: RemoteMessagePublishIntent,
+): { pending: RemoteMessagePublishIntent; flush?: RemoteMessagePublishIntent } {
+  if (!pending) return { pending: update };
+  if (pending.sessionId !== update.sessionId) return { pending: update, flush: pending };
+  // A replacement already contains all preceding updates. Keeping only the
+  // latest raw snapshot avoids sanitizing/allocating the entire history while
+  // the 100ms bridge debounce is still open.
+  if (update.type === "session.messages.replace") return { pending: update };
+  // The upsert may be newer than the replacement snapshot. Publish the
+  // authoritative replacement now, then keep the upsert queued so it cannot
+  // be lost while avoiding a full-history clone on every normal delta.
+  if (pending.type === "session.messages.replace") return { pending: update, flush: pending };
+  if (pending.message.id !== update.message.id) return { pending: update, flush: pending };
+  return { pending: update };
+}
+
+function materializeRemoteMessageIntent(
+  intent: RemoteMessagePublishIntent,
+): RemoteMessagePublish | null {
+  const projects = useProjectStore.getState().projects;
+  const project = getProjectForSession(projects, intent.sessionId);
+  if (!project) return null;
+  const state = useChatStore.getState();
+  const sessionStatus = useProjectStore.getState().agentStatuses[intent.sessionId] || "idle";
+  if (intent.type === "session.messages.replace") {
+    return {
+      type: "session.messages.replace",
+      sessionId: intent.sessionId,
+      messages: sanitizeRemoteMessages(intent.messages, project.path, sessionStatus),
+    };
+  }
+  const messages = state.sessionMessages[intent.sessionId] || [];
+  const activeTurnId = getActiveAssistantTurnId(messages, sessionStatus === "running");
+  const terminalState: ProcessTerminalViewState = sessionStatus === "error" ? "error" : "completed";
+  return {
+    type: "session.message.upsert",
+    sessionId: intent.sessionId,
+    message: sanitizeRemoteMessage(intent.message, project.path, {
+      turnRunning: intent.message.id === activeTurnId,
+      terminalState,
+    }),
+  };
+}
+
+function flushPendingMessageIntents(
+  pendingUpdates: Map<string, RemoteMessagePublishIntent>,
+  publish: (update: RemoteMessagePublish) => void,
+) {
+  for (const intent of pendingUpdates.values()) {
+    const update = materializeRemoteMessageIntent(intent);
+    if (update) publish(update);
+  }
+  pendingUpdates.clear();
+}
+
 export function useRemoteBridge({
   pendingInteractions,
   getPendingInteraction,
@@ -440,7 +501,7 @@ export function useRemoteBridge({
   const permissionModeRef = useRef<AgentPermissionMode>("auto");
   const remoteAgentsRef = useRef<RemoteAgent[]>([]);
   const messageTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const pendingMessageUpdatesRef = useRef(new Map<string, RemoteMessagePublish>());
+  const pendingMessageUpdatesRef = useRef(new Map<string, RemoteMessagePublishIntent>());
 
   planModeRef.current = planModeEnabled;
   permissionModeRef.current = permissionMode;
@@ -639,17 +700,22 @@ export function useRemoteBridge({
     let previousCurrentModel = useChatStore.getState().currentModel;
     let previousThinking = useChatStore.getState().thinkingLevel;
     let previousModels = useChatStore.getState().availableModels;
-    const scheduleMessagePublish = (sessionId: string, update: RemoteMessagePublish) => {
+    const scheduleMessagePublish = (sessionId: string, update: RemoteMessagePublishIntent) => {
       const pending = pendingMessageUpdatesRef.current.get(sessionId);
-      const coalesced = coalescePendingMessageUpdate(pending, update);
-      if (coalesced.flush) publish(coalesced.flush);
+      const coalesced = coalescePendingMessageIntent(pending, update);
+      if (coalesced.flush) {
+        const flushed = materializeRemoteMessageIntent(coalesced.flush);
+        if (flushed) publish(flushed);
+      }
       pendingMessageUpdatesRef.current.set(sessionId, coalesced.pending);
       if (messageTimersRef.current.has(sessionId)) return;
       const timer = setTimeout(() => {
         messageTimersRef.current.delete(sessionId);
         const pending = pendingMessageUpdatesRef.current.get(sessionId);
         pendingMessageUpdatesRef.current.delete(sessionId);
-        if (pending) publish(pending);
+        if (!pending) return;
+        const flushed = materializeRemoteMessageIntent(pending);
+        if (flushed) publish(flushed);
       }, 100);
       messageTimersRef.current.set(sessionId, timer);
     };
@@ -668,22 +734,17 @@ export function useRemoteBridge({
           const project = getProjectForSession(projects, sessionId);
           if (!project) continue;
           const sessionStatus = useProjectStore.getState().agentStatuses[sessionId] || "idle";
-          const activeTurnId = getActiveAssistantTurnId(next, sessionStatus === "running");
-          const terminalState: ProcessTerminalViewState = sessionStatus === "error" ? "error" : "completed";
           if (!shouldPublishRemoteMessagesReplace(previous, next, sessionStatus)) {
             scheduleMessagePublish(sessionId, {
               type: "session.message.upsert",
               sessionId,
-              message: sanitizeRemoteMessage(next[next.length - 1], project.path, {
-                turnRunning: next[next.length - 1].id === activeTurnId,
-                terminalState,
-              }),
+              message: next[next.length - 1],
             });
           } else {
             scheduleMessagePublish(sessionId, {
               type: "session.messages.replace",
               sessionId,
-              messages: sanitizeRemoteMessages(next, project.path, sessionStatus),
+              messages: next,
             });
           }
         }
@@ -722,7 +783,7 @@ export function useRemoteBridge({
       unsubscribe();
       for (const timer of messageTimersRef.current.values()) clearTimeout(timer);
       messageTimersRef.current.clear();
-      flushPendingMessageUpdates(pendingMessageUpdatesRef.current, publish);
+      flushPendingMessageIntents(pendingMessageUpdatesRef.current, publish);
     };
   }, [publish]);
 

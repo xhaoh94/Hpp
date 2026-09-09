@@ -60,6 +60,7 @@ const SESSION_CREATE_TIMEOUT_MS = 60_000;
 const PAIRING_TTL_MS = 5 * 60_000;
 const PAIR_RATE_LIMIT_WINDOW_MS = 60_000;
 const PAIR_RATE_LIMIT_MAX = 5;
+const MAX_REMOTE_SOCKET_BUFFERED_BYTES = 4 * 1024 * 1024;
 const IDEMPOTENCY_LIMIT = 500;
 
 const jsonHeaders = {
@@ -718,7 +719,7 @@ class RemoteAccessServer {
     return revision;
   }
 
-  private sendResponse(socket: WebSocket, requestId: string, name: string, payload: unknown) {
+  private sendResponse(socket: AuthenticatedSocket, requestId: string, name: string, payload: unknown) {
     const envelope: RemoteServerEnvelope = {
       version: REMOTE_PROTOCOL_VERSION,
       kind: "response",
@@ -728,10 +729,10 @@ class RemoteAccessServer {
       payload,
       hostEpoch: this.hostEpoch,
     };
-    socket.send(JSON.stringify(envelope));
+    this.sendToSocket(socket, JSON.stringify(envelope));
   }
 
-  private sendError(socket: WebSocket, requestId: string, name: string, code: string, message: string) {
+  private sendError(socket: AuthenticatedSocket, requestId: string, name: string, code: string, message: string) {
     const envelope: RemoteServerEnvelope = {
       version: REMOTE_PROTOCOL_VERSION,
       kind: "response",
@@ -741,7 +742,25 @@ class RemoteAccessServer {
       error: { code, message },
       hostEpoch: this.hostEpoch,
     };
-    socket.send(JSON.stringify(envelope));
+    this.sendToSocket(socket, JSON.stringify(envelope));
+  }
+
+  private sendToSocket(socket: AuthenticatedSocket, serialized: string) {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    // ws queues writes in memory when the peer is slow. Bound that queue and
+    // force a reconnect instead of allowing a remote client to retain every
+    // streamed update indefinitely.
+    if (socket.bufferedAmount > MAX_REMOTE_SOCKET_BUFFERED_BYTES) {
+      this.sockets.delete(socket);
+      socket.terminate();
+      return;
+    }
+    try {
+      socket.send(serialized);
+    } catch {
+      this.sockets.delete(socket);
+      socket.terminate();
+    }
   }
 
   private broadcast(name: RemoteEventName, payload: unknown, revision?: number) {
@@ -755,7 +774,7 @@ class RemoteAccessServer {
     };
     const serialized = JSON.stringify(envelope);
     for (const socket of this.sockets) {
-      if (socket.authenticated && socket.readyState === WebSocket.OPEN) socket.send(serialized);
+      if (socket.authenticated) this.sendToSocket(socket, serialized);
     }
   }
 

@@ -1660,7 +1660,7 @@ export class AgentPluginRegistry {
       sendEvent(event as Record<string, unknown>);
     }
     const queryIdleFromBackend = async (expectedRevision: number) => {
-      const value = await pluginProcess.backendCall(backendId, "isIdle");
+      const value = await queryBackendIdle(expectedRevision);
       if (typeof value !== "boolean") {
         backendIdleSupported = false;
         // Missing optional isIdle() is not evidence that an asynchronous turn
@@ -1726,6 +1726,21 @@ export class AgentPluginRegistry {
       return runIdleRefresh(expectedRevision, 0);
     };
     let sessionFilePath: string | null = null;
+    let idleQueryPromise: Promise<boolean | undefined> | null = null;
+    let idleQueryRevision: number | null = null;
+    const queryBackendIdle = (expectedRevision: number) => {
+      if (idleQueryPromise && idleQueryRevision === expectedRevision) return idleQueryPromise;
+      idleQueryRevision = expectedRevision;
+      idleQueryPromise = pluginProcess.backendCall(backendId, "isIdle", [], 5000)
+        .then((value) => typeof value === "boolean" ? value : undefined)
+        .finally(() => {
+          if (idleQueryRevision === expectedRevision) {
+            idleQueryPromise = null;
+            idleQueryRevision = null;
+          }
+        });
+      return idleQueryPromise;
+    };
 
     const wrapped: AgentBackend = {
       setWindow(win: BrowserWindow) {

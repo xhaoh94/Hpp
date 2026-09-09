@@ -102,6 +102,9 @@ const CODEX_WORKER_INIT_TIMEOUT_MS = 120_000;
 
 export class CodexAgent {
   private process: ChildProcess | null = null;
+  // A closed stdout pipe does not guarantee that the worker has exited.
+  // Retain ownership until dispose() can reap that child and its descendants.
+  private processForCleanup: ChildProcess | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
   private eventBuffer: AgentEventBuffer;
@@ -469,8 +472,9 @@ export class CodexAgent {
     } else {
       this.eventBuffer.flush();
     }
-    const child = this.process;
+    const child = this.process || this.processForCleanup;
     this.process = null;
+    this.processForCleanup = null;
     if (!child) return;
     this.intentionalExits.add(child);
     if (child.stdin?.writable) {
@@ -687,6 +691,7 @@ export class CodexAgent {
 
   private handleWorkerTermination(child: ChildProcess, title: string, detail: string): void {
     if (this.process !== child) return;
+    this.processForCleanup = child;
     this.process = null;
     const wasActive = this.activePromptIds.size > 0;
     const intentional = this.intentionalExits.has(child);

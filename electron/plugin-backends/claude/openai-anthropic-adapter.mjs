@@ -345,26 +345,34 @@ const translateEventStream = async (upstream, response, requestBody) => {
   const decoder = new TextDecoder();
   let buffer = "";
   let doneEvent = false;
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    let newline;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newline).replace(/\r$/, "");
-      buffer = buffer.slice(newline + 1);
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data) continue;
-      if (data === "[DONE]") {
-        doneEvent = true;
-        break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/, "");
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+        if (data === "[DONE]") {
+          doneEvent = true;
+          break;
+        }
+        state.pushChunk(JSON.parse(data));
       }
-      state.pushChunk(JSON.parse(data));
+      if (done || doneEvent) break;
     }
-    if (done || doneEvent) break;
+    state.finish();
+    response.end();
+  } finally {
+    // Aborting the HTTP response does not necessarily cancel a Fetch
+    // ReadableStream reader. Release it explicitly so a stalled upstream does
+    // not keep the provider connection and adapter alive after disconnect.
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  state.finish();
-  response.end();
 };
 
 const streamJSONResponse = (body, response, requestBody) => {

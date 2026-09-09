@@ -37,6 +37,29 @@ describe("AgentPluginProcess requests", () => {
     );
     expect(internals.pending.size).toBe(0);
   });
+
+  it("rejects backend calls when that backend is disposed", async () => {
+    const pluginProcess = new AgentPluginProcess("C:\\plugin\\index.mjs", {}, {});
+    const internals = pluginProcess as unknown as {
+      child: { stdin: { writable: boolean; write: ReturnType<typeof vi.fn> } };
+      pending: Map<string, { backendId?: string; reject: (error: Error) => void }>;
+      backendSessionIds: Map<string, string>;
+      request: ReturnType<typeof vi.fn>;
+    };
+    internals.child = {
+      stdin: { writable: true, write: vi.fn() },
+    };
+    internals.backendSessionIds.set("backend-1", "session-1");
+    const reject = vi.fn();
+    internals.pending.set("request-1", { backendId: "backend-1", reject });
+    internals.request = vi.fn().mockResolvedValue(undefined);
+
+    await pluginProcess.disposeBackend("backend-1");
+
+    expect(reject).toHaveBeenCalledWith(expect.objectContaining({ message: "Plugin backend disposed." }));
+    expect(internals.pending.has("request-1")).toBe(false);
+    expect(internals.request).toHaveBeenCalledWith("disposeBackend", { backendId: "backend-1" }, 5000);
+  });
 });
 
 describe("AgentPluginProcess pending UI capture", () => {

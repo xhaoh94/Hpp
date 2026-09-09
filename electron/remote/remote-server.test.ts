@@ -18,7 +18,9 @@ import { remoteAccessServer } from "./remote-server";
 type TestSocket = {
   authenticated: boolean;
   readyState: number;
+  bufferedAmount?: number;
   send: ReturnType<typeof vi.fn>;
+  terminate?: ReturnType<typeof vi.fn>;
 };
 
 type TestServer = {
@@ -40,6 +42,7 @@ type TestServer = {
   rendererReady: boolean;
   commandResults: Map<string, Map<string, unknown>>;
   inFlightCommandResults: Map<string, Map<string, Promise<unknown>>>;
+  sendToSocket: (socket: TestSocket, serialized: string) => void;
 };
 
 const server = remoteAccessServer as unknown as TestServer;
@@ -157,6 +160,23 @@ describe("remote renderer snapshot publishing", () => {
       config: snapshot.type === "snapshot" ? snapshot.configs["session-1"] : null,
     });
     expect(server.revisions.get("session-1")).toBe(9);
+  });
+
+  it("terminates a slow client instead of growing its outbound queue", () => {
+    const socket: TestSocket = {
+      authenticated: true,
+      readyState: 1,
+      bufferedAmount: 5 * 1024 * 1024,
+      send: vi.fn(),
+      terminate: vi.fn(),
+    };
+
+    server.sockets.add(socket);
+    server.sendToSocket(socket, "{}");
+
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    expect(server.sockets.has(socket)).toBe(false);
   });
 
   it("publishes the authoritative empty catalog and drops deleted session snapshots", () => {

@@ -113,6 +113,31 @@ afterEach(() => {
 });
 
 describe("agent event terminal reconciliation", () => {
+  it("does not flush a pending stream render for unrelated turn activity", () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    dispatchAgentEvent({ type: "stream_start", sessionId: SESSION_ID }, harness.controller);
+    dispatchAgentEvent({ type: "stream_delta", sessionId: SESSION_ID, delta: "first" }, harness.controller);
+    dispatchAgentEvent({ type: "stream_delta", sessionId: SESSION_ID, delta: "second" }, harness.controller);
+
+    const beforeActivity = getMessages();
+    const processEntryBefore = beforeActivity.at(-1)?.process?.entries.at(-1);
+    expect(processEntryBefore?.detail).toBe("first");
+
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      inputTokens: 10,
+      outputTokens: 2,
+    }, harness.controller);
+
+    const afterActivity = getMessages();
+    expect(afterActivity.at(-1)?.process?.entries.at(-1)?.detail).toBe("first");
+    vi.advanceTimersByTime(120);
+    expect(getMessages().at(-1)?.process?.entries.at(-1)?.detail).toBe("firstsecond");
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it.each([
     { type: "stream_delta", delta: "late text" },
     { type: "stream_snapshot", content: "late snapshot" },

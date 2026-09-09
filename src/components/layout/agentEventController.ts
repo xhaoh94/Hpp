@@ -373,8 +373,12 @@ export function createAgentEventController({
   };
 
   const completeIdleNotice = (sessionId: string) => {
-    flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
+    // Most turn activity is not an idle-notice transition. Avoid flushing the
+    // normal stream buffer on every tool/plan/process event; only an existing
+    // idle interval needs to be closed here.
+    if (!runtime.streamIdleNoticeEntryId && runtime.streamIdleSince === null) return;
+    flushRuntimeRender(sessionId);
     const entryId = runtime.streamIdleNoticeEntryId;
     if (entryId) {
       // 每个无输出区间保留自己的开始/结束时间，渲染层会把同一处理过程
@@ -471,8 +475,9 @@ export function createAgentEventController({
   };
 
   const finishThinkingEntry = (sessionId: string) => {
-    flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
+    if (!runtime.thinkingEntryId) return;
+    flushRuntimeRender(sessionId);
     if (runtime.thinkingEntryId) {
       useChatStore.getState().updateLastAssistantProcessEntry(runtime.thinkingEntryId, {
         state: "completed",

@@ -328,11 +328,6 @@ const parseStringRecordMap = (value: unknown): Record<string, Record<string, str
   return result;
 };
 
-const hasStreamingMessages = (sessionMessages: Record<string, ChatMessage[]>) =>
-  Object.values(sessionMessages).some((messages) =>
-    messages.some(hasOpenAssistantProcessState)
-  );
-
 const parsePersistedModel = (value: unknown): PersistedModel | null => {
   if (!isRecord(value)) return null;
   return {
@@ -361,6 +356,13 @@ let _cacheDirty = false;
 let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
 const saveScheduler = new PersistenceFlushScheduler();
+
+const getCurrentPersistedMessages = (): PersistedMessages => ({
+  // Keep the live record by reference. Transient filtering is intentionally
+  // deferred until the debounce actually fires, so a stream update does not
+  // walk every historical session before the save timer has elapsed.
+  sessionMessages: useChatStore.getState().sessionMessages,
+});
 
 export class PersistenceHydrationGate {
   private generation = 0;
@@ -416,18 +418,20 @@ function flushMessagesToDisk() {
   if (!_pendingMessagesData) return;
   const data = _pendingMessagesData;
   _pendingMessagesData = null;
-  window.electronAPI.saveData("sessionMessages", data);
+  window.electronAPI.saveData("sessionMessages", {
+    sessionMessages: stripTransientMessages(data.sessionMessages),
+  });
 }
 
-function scheduleMessagesSave(data: PersistedMessages) {
+function scheduleMessagesSave(data?: PersistedMessages) {
   if (!persistenceHydration.canPersist()) return;
-  _pendingMessagesData = data;
+  _pendingMessagesData = data || getCurrentPersistedMessages();
   saveScheduler.schedule("messages", 1000, flushMessagesToDisk);
 }
 
-function scheduleStreamingMessagesSave(data: PersistedMessages) {
+function scheduleStreamingMessagesSave(data?: PersistedMessages) {
   if (!persistenceHydration.canPersist()) return;
-  _pendingMessagesData = data;
+  _pendingMessagesData = data || getCurrentPersistedMessages();
   saveScheduler.schedule("streamingMessages", 8000, flushMessagesToDisk, { reset: false });
 }
 
@@ -709,9 +713,7 @@ export function useDataPersistence() {
       // normalization (stale processes, commentary and compaction) is not
       // revived again on the next launch when no later chat mutation occurs.
       if (hydratedMessagesLoaded) {
-        scheduleMessagesSave({
-          sessionMessages: stripTransientMessages(useChatStore.getState().sessionMessages),
-        });
+        scheduleMessagesSave();
       }
 
       if (validSessionIds) {
@@ -762,20 +764,37 @@ export function useDataPersistence() {
     return unsubscribe;
   }, []);
 
-  // Save session messages when they change
+  // Save session messages when they change. Keep the streaming decision
+  // incremental: only arrays whose reference changed can change their open
+  // process state. The actual transient filtering waits until flush.
   useEffect(() => {
     let lastSessionMessages = useChatStore.getState().sessionMessages;
+    const streamingSessionIds = new Set(
+      Object.entries(lastSessionMessages)
+        .filter(([, messages]) => messages.some(hasOpenAssistantProcessState))
+        .map(([sessionId]) => sessionId),
+    );
     const unsubscribe = useChatStore.subscribe((state) => {
       if (state.sessionMessages === lastSessionMessages) return;
+      const previousSessionMessages = lastSessionMessages;
       lastSessionMessages = state.sessionMessages;
+
+      for (const sessionId of Object.keys(previousSessionMessages)) {
+        if (!(sessionId in state.sessionMessages)) streamingSessionIds.delete(sessionId);
+      }
+      for (const [sessionId, messages] of Object.entries(state.sessionMessages)) {
+        if (messages === previousSessionMessages[sessionId]) continue;
+        if (messages.some(hasOpenAssistantProcessState)) streamingSessionIds.add(sessionId);
+        else streamingSessionIds.delete(sessionId);
+      }
+
       if (!persistenceHydration.canPersist()) return;
-      const data = { sessionMessages: stripTransientMessages(state.sessionMessages) };
-      if (hasStreamingMessages(state.sessionMessages)) {
-        scheduleStreamingMessagesSave(data);
+      if (streamingSessionIds.size > 0) {
+        scheduleStreamingMessagesSave();
         return;
       }
 
-      scheduleMessagesSave(data);
+      scheduleMessagesSave();
     });
     return unsubscribe;
   }, []);

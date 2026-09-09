@@ -336,6 +336,9 @@ async function readDroidSettings(): Promise<UnknownRecord> {
 // ============================================================
 export class DroidAgent {
   private process: ChildProcess | null = null;
+  // Transport termination may precede process exit. Keep the child owned by
+  // the backend until the next disposal can terminate its process tree.
+  private processForCleanup: ChildProcess | null = null;
   private projectPath = "";
   /** provider 未回报补丁时的自算兜底（tool_start 抓快照 → tool_end 出差异）。 */
   private readonly toolFileDiffFallback = new ToolFileDiffFallback();
@@ -925,9 +928,10 @@ export class DroidAgent {
   }
 
   private async killProcess() {
-    const childProcess = this.process;
+    const childProcess = this.process || this.processForCleanup;
     const wasActive = this.turnActive;
     this.process = null;
+    this.processForCleanup = null;
     try {
       childProcess?.stdin?.end();
     } catch {
@@ -1727,6 +1731,7 @@ export class DroidAgent {
 
   private handleProcessTermination(childProcess: ChildProcess, title: string, detail: string) {
     if (this.process !== childProcess) return;
+    this.processForCleanup = childProcess;
     this.process = null;
     const wasReady = this.isReady;
     this.isReady = false;
