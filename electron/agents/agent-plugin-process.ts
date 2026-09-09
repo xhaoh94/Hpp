@@ -58,6 +58,7 @@ export class AgentPluginProcess {
   private loadPromise: Promise<PluginHostCapabilities> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private stopping = false;
+  private stopped = false;
   private terminalError: Error | null = null;
 
   constructor(
@@ -67,15 +68,15 @@ export class AgentPluginProcess {
   ) {}
 
   async ensureLoaded(): Promise<PluginHostCapabilities> {
-    if (this.stopping || this.shutdownPromise) throw new Error("Plugin host stopped.");
+    if (this.stopped || this.stopping || this.shutdownPromise) throw new Error("Plugin host stopped.");
     if (this.terminalError) throw this.terminalError;
     if (!this.loadPromise) this.loadPromise = this.start();
     return this.loadPromise;
   }
 
-  async call(method: string, params?: unknown): Promise<unknown> {
+  async call(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
     await this.ensureLoaded();
-    return this.request(method, params);
+    return this.request(method, params, timeoutMs);
   }
 
   async createBackend(
@@ -141,6 +142,7 @@ export class AgentPluginProcess {
 
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    this.stopped = true;
     const child = this.child;
     this.loadPromise = null;
     this.eventHandlers.clear();
@@ -272,17 +274,40 @@ export class AgentPluginProcess {
     });
   }
 
-  private request(method: string, params?: unknown): Promise<unknown> {
+  private request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
     const child = this.child;
     if (!child?.stdin.writable) return Promise.reject(new Error("Plugin host is not running."));
     const id = `main-${++this.nextId}`;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const clearRequestTimeout = () => {
+        if (!timeout) return;
+        clearTimeout(timeout);
+        timeout = null;
+      };
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearRequestTimeout();
+          resolve(value);
+        },
+        reject: (error) => {
+          clearRequestTimeout();
+          reject(error);
+        },
+      });
+      if (timeoutMs && timeoutMs > 0) {
+        timeout = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          timeout = null;
+          reject(new Error(`Plugin host request timed out: ${method}`));
+        }, timeoutMs);
+      }
       try {
         child.stdin.write(`${JSON.stringify({ kind: "request", id, method, params })}\n`);
       } catch (error) {
         const transportError = error instanceof Error ? error : new Error(String(error));
         this.pending.delete(id);
+        clearRequestTimeout();
         this.handleTransportError(child, transportError, "plugin-host-stdin-error");
         reject(transportError);
       }

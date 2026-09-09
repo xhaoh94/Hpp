@@ -12,6 +12,33 @@ import { clearAllPendingUIEvents, getPendingUIEvents } from "./pending-ui-events
 
 afterEach(() => clearAllPendingUIEvents());
 
+describe("AgentPluginProcess requests", () => {
+  it("cannot restart after shutdown", async () => {
+    const pluginProcess = new AgentPluginProcess("C:\\plugin\\index.mjs", {}, {});
+
+    await pluginProcess.shutdown();
+
+    await expect(pluginProcess.ensureLoaded()).rejects.toThrow("Plugin host stopped.");
+  });
+
+  it("removes a timed-out request from the pending map", async () => {
+    const pluginProcess = new AgentPluginProcess("C:\\plugin\\index.mjs", {}, {});
+    const internals = pluginProcess as unknown as {
+      child: { stdin: { writable: boolean; write: ReturnType<typeof vi.fn> } };
+      pending: Map<string, unknown>;
+      request: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
+    };
+    internals.child = {
+      stdin: { writable: true, write: vi.fn() },
+    };
+
+    await expect(internals.request("getStatus", undefined, 10)).rejects.toThrow(
+      "Plugin host request timed out: getStatus",
+    );
+    expect(internals.pending.size).toBe(0);
+  });
+});
+
 describe("AgentPluginProcess pending UI capture", () => {
   it("captures plugin questions before forwarding and clears them on backend disposal", async () => {
     const pluginProcess = new AgentPluginProcess("C:\\plugin\\index.mjs", {}, {});

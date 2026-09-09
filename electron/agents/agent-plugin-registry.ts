@@ -54,6 +54,17 @@ interface PluginRecord {
   processCapabilities?: PluginHostCapabilities;
 }
 
+interface PluginProcessEntry {
+  entryPath: string;
+  process: AgentPluginProcess;
+  capabilities: Promise<PluginHostCapabilities>;
+}
+
+interface StatusRequestEntry {
+  generation: number;
+  promise: Promise<AgentPackageStatus>;
+}
+
 type RawAgentPluginManifest = Omit<AgentPluginManifest, "schemaVersion" | "minHppVersion"> & {
   schemaVersion: number;
   minHppVersion?: string;
@@ -98,6 +109,8 @@ type CommandError = Error & {
 const MANIFEST_FILE = "hpp-agent-plugin.json";
 const DEFAULT_THINKING_LEVEL = "medium";
 const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
+const AGENT_STATUS_CACHE_TTL_MS = 30_000;
+const AGENT_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 const IDLE_ACTIVITY_RECHECK_MS = 5_000;
 const IDLE_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000] as const;
 const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
@@ -758,11 +771,20 @@ function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; mani
 
 export class AgentPluginRegistry {
   private pluginRecords = new Map<string, PluginRecord>();
+  private pluginProcesses = new Map<string, PluginProcessEntry>();
+  private pluginProcessLocks = new Map<string, Promise<void>>();
+  private blockedPluginProcesses = new Set<string>();
+  private pluginProcessGeneration = 0;
+  private statusCache = new Map<string, { expiresAt: number; status: AgentPackageStatus }>();
+  private statusRequests = new Map<string, StatusRequestEntry>();
+  private statusGeneration = 0;
   private loaded = false;
   private stopping = false;
   private permanentShutdown = false;
   private shutdownPromise: Promise<void> | null = null;
   private loadPromise: Promise<AgentDescriptor[]> | null = null;
+  private reloadPromise: Promise<AgentDescriptor[]> | null = null;
+  private reloading = false;
 
   async ensureLoaded() {
     if (this.loaded) return;
@@ -778,8 +800,20 @@ export class AgentPluginRegistry {
   }
 
   async reload(): Promise<AgentDescriptor[]> {
+    if (!this.reloadPromise) {
+      this.reloading = true;
+      this.reloadPromise = this.performReload().finally(() => {
+        this.reloading = false;
+        this.reloadPromise = null;
+      });
+    }
+    return this.reloadPromise;
+  }
+
+  private async performReload(): Promise<AgentDescriptor[]> {
     await this.shutdown();
     this.pluginRecords.clear();
+    this.invalidateStatus();
     await mkdir(getPluginInstallDir(), { recursive: true });
 
     let entries: string[] = [];
@@ -885,6 +919,31 @@ export class AgentPluginRegistry {
 
   async getStatus(agentId: string): Promise<AgentPackageStatus> {
     if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
+    const cached = this.statusCache.get(agentId);
+    if (cached?.expiresAt && cached.expiresAt > Date.now()) return cached.status;
+    if (cached) this.statusCache.delete(agentId);
+
+    const generation = this.statusGeneration;
+    const existingRequest = this.statusRequests.get(agentId);
+    if (existingRequest?.generation === generation) return existingRequest.promise;
+
+    let request!: Promise<AgentPackageStatus>;
+    request = this.loadStatus(agentId).then((status) => {
+      if (!this.stopping && !this.permanentShutdown && this.statusGeneration === generation) {
+        this.statusCache.set(agentId, {
+          expiresAt: Date.now() + AGENT_STATUS_CACHE_TTL_MS,
+          status,
+        });
+      }
+      return status;
+    }).finally(() => {
+      if (this.statusRequests.get(agentId)?.promise === request) this.statusRequests.delete(agentId);
+    });
+    this.statusRequests.set(agentId, { generation, promise: request });
+    return request;
+  }
+
+  private async loadStatus(agentId: string): Promise<AgentPackageStatus> {
     await this.ensureLoaded();
     if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
     const record = this.pluginRecords.get(agentId);
@@ -902,25 +961,16 @@ export class AgentPluginRegistry {
     if (pluginProcess && record.processCapabilities?.getStatus) {
       let status: Partial<AgentPackageStatus>;
       try {
-        status = await pluginProcess.call("getStatus") as Partial<AgentPackageStatus>;
+        status = await pluginProcess.call(
+          "getStatus",
+          undefined,
+          AGENT_STATUS_REQUEST_TIMEOUT_MS,
+        ) as Partial<AgentPackageStatus>;
       } catch (error) {
         if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
         throw error;
       }
-      const rollbackVersion = (await readRuntimeVersionRecords())[agentId]?.rollbackVersion;
-      return {
-        installed: status.installed !== false,
-        updateAvailable: status.updateAvailable === true,
-        canUpdate: status.canUpdate === true,
-        currentVersion: status.currentVersion || record.descriptor.version,
-        latestVersion: status.latestVersion,
-        error: status.error,
-        source: "plugin",
-        installedPath: record.pluginDir,
-        removable: true,
-        rollbackVersion,
-        canRollback: !!rollbackVersion,
-      };
+      return this.normalizeManagedStatus(record, status);
     }
 
     if (record.descriptor.command) {
@@ -961,6 +1011,7 @@ export class AgentPluginRegistry {
     const record = this.pluginRecords.get(agentId);
     if (!record) return { success: false, error: `未安装 Agent 插件：${agentId}` };
     const previousStatus = await this.getStatus(agentId);
+    this.invalidateStatus(agentId);
     const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
     const normalizedVersion = normalizeVersionSpec(versionSpec);
     let result: { success: boolean; error?: string; status?: AgentPackageStatus };
@@ -974,7 +1025,11 @@ export class AgentPluginRegistry {
     if (result.success && previousStatus.currentVersion) {
       await writeRuntimeVersionRecord(agentId, previousStatus.currentVersion);
     }
-    return { ...result, status: result.status || await this.getStatus(agentId) };
+    this.invalidateStatus(agentId);
+    const status = result.status
+      ? await this.normalizeManagedStatus(record, result.status)
+      : await this.getStatus(agentId);
+    return { ...result, status };
   }
 
   async rollbackAgent(agentId: string): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }> {
@@ -982,7 +1037,12 @@ export class AgentPluginRegistry {
     if (!rollbackVersion) return { success: false, error: "没有可回退的版本。", status: await this.getStatus(agentId) };
     const result = await this.updateAgent(agentId, rollbackVersion);
     if (result.success) await writeRuntimeVersionRecord(agentId, undefined);
-    return { ...result, status: await this.getStatus(agentId) };
+    this.invalidateStatus(agentId);
+    const record = this.pluginRecords.get(agentId);
+    const status = result.status && record
+      ? await this.normalizeManagedStatus(record, result.status)
+      : await this.getStatus(agentId);
+    return { ...result, status };
   }
 
   async getDefaultThinkingLevel(agentId: string): Promise<string> {
@@ -1028,6 +1088,7 @@ export class AgentPluginRegistry {
     let stagingDir = "";
     let backupDir = "";
     let targetDir = "";
+    let blockedAgentId = "";
     try {
       const sourcePath = resolve(pluginPath);
       const info = await stat(sourcePath);
@@ -1064,6 +1125,10 @@ export class AgentPluginRegistry {
 
       targetDir = join(installDir, descriptor.id);
       const replaced = this.pluginRecords.has(descriptor.id) || existsSync(targetDir);
+      blockedAgentId = descriptor.id;
+      this.blockPluginProcess(blockedAgentId);
+      this.invalidateStatus(blockedAgentId);
+      await this.releasePluginProcess(blockedAgentId);
       if (existsSync(targetDir)) {
         backupDir = join(installDir, `.backup-${descriptor.id}-${operationId}`);
         await rename(targetDir, backupDir);
@@ -1103,10 +1168,12 @@ export class AgentPluginRegistry {
       if (backupDir && existsSync(backupDir) && existsSync(targetDir)) {
         await rm(backupDir, { recursive: true, force: true }).catch(() => undefined);
       }
+      if (blockedAgentId) this.unblockPluginProcess(blockedAgentId);
     }
   }
 
   async removePlugin(agentId: string, removeRuntime = false): Promise<AgentPluginInstallResult> {
+    let processBlocked = false;
     try {
       await this.ensureLoaded();
       const record = this.pluginRecords.get(agentId);
@@ -1133,7 +1200,10 @@ export class AgentPluginRegistry {
         }
       }
 
-      await record.process?.shutdown();
+      this.invalidateStatus(agentId);
+      this.blockPluginProcess(agentId);
+      processBlocked = true;
+      await this.releasePluginProcess(agentId);
       record.process = undefined;
       record.processCapabilities = undefined;
       await rm(record.pluginDir, { recursive: true, force: true });
@@ -1141,6 +1211,8 @@ export class AgentPluginRegistry {
       return { success: true, agents: await this.listAgents() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error), agents: await this.listAgents().catch(() => []) };
+    } finally {
+      if (processBlocked) this.unblockPluginProcess(agentId);
     }
   }
 
@@ -1148,15 +1220,25 @@ export class AgentPluginRegistry {
     if (permanent) this.permanentShutdown = true;
     if (this.shutdownPromise) return this.shutdownPromise;
     this.stopping = true;
+    this.pluginProcessGeneration += 1;
+    this.invalidateStatus();
     const records = Array.from(this.pluginRecords.values());
-    this.shutdownPromise = Promise.allSettled(records.map(async (record) => {
-      await record.process?.shutdown();
-      record.process = undefined;
-      record.processCapabilities = undefined;
-    })).then(() => undefined).finally(() => {
-      if (!this.permanentShutdown) this.stopping = false;
-      this.shutdownPromise = null;
-    });
+    const processes = new Set<AgentPluginProcess>([
+      ...this.pluginProcesses.values().map((entry) => entry.process),
+      ...records.flatMap((record) => record.process ? [record.process] : []),
+    ]);
+    this.pluginProcesses.clear();
+    this.shutdownPromise = Promise.allSettled(Array.from(processes, (process) => process.shutdown()))
+      .then(() => {
+        for (const record of records) {
+          record.process = undefined;
+          record.processCapabilities = undefined;
+        }
+      })
+      .finally(() => {
+        if (!this.permanentShutdown) this.stopping = false;
+        this.shutdownPromise = null;
+      });
     return this.shutdownPromise;
   }
 
@@ -1238,25 +1320,128 @@ export class AgentPluginRegistry {
     };
   }
 
+  private async normalizeManagedStatus(
+    record: PluginRecord,
+    status: Partial<AgentPackageStatus>,
+  ): Promise<AgentPackageStatus> {
+    const rollbackVersion = (await readRuntimeVersionRecords())[record.descriptor.id]?.rollbackVersion;
+    return {
+      ...status,
+      installed: status.installed !== false,
+      updateAvailable: status.updateAvailable === true,
+      canUpdate: status.canUpdate === true,
+      currentVersion: status.currentVersion || record.descriptor.version,
+      source: status.source || "plugin",
+      installedPath: status.installedPath || record.pluginDir,
+      removable: status.removable !== false,
+      rollbackVersion,
+      canRollback: !!rollbackVersion,
+    };
+  }
+
+  private blockPluginProcess(agentId: string): void {
+    this.pluginProcessGeneration += 1;
+    this.blockedPluginProcesses.add(agentId);
+  }
+
+  private unblockPluginProcess(agentId: string): void {
+    this.blockedPluginProcesses.delete(agentId);
+  }
+
+  private invalidateStatus(agentId?: string): void {
+    this.statusGeneration += 1;
+    if (agentId) {
+      this.statusCache.delete(agentId);
+      this.statusRequests.delete(agentId);
+      return;
+    }
+    this.statusCache.clear();
+    this.statusRequests.clear();
+  }
+
+  private async withPluginProcessLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.pluginProcessLocks.get(agentId) || Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    this.pluginProcessLocks.set(agentId, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.pluginProcessLocks.get(agentId) === queued) this.pluginProcessLocks.delete(agentId);
+    }
+  }
+
+  private async releasePluginProcess(agentId: string): Promise<void> {
+    await this.withPluginProcessLock(agentId, async () => {
+      const pooled = this.pluginProcesses.get(agentId);
+      if (pooled && this.pluginProcesses.get(agentId) === pooled) this.pluginProcesses.delete(agentId);
+      const record = this.pluginRecords.get(agentId);
+      const processes = new Set<AgentPluginProcess>();
+      if (pooled) processes.add(pooled.process);
+      if (record?.process) processes.add(record.process);
+      await Promise.allSettled(Array.from(processes, (process) => process.shutdown()));
+      if (record && this.pluginRecords.get(agentId) === record) {
+        if (!record.process || processes.has(record.process)) record.process = undefined;
+        record.processCapabilities = undefined;
+      }
+    });
+  }
+
   private async getPluginProcess(record: PluginRecord): Promise<AgentPluginProcess> {
-    if (this.stopping || this.permanentShutdown) throw new Error("Plugin registry is stopping.");
-    if (!record.process) {
-      const hostApi = this.createHostApi();
-      record.process = new AgentPluginProcess(
-        record.entryPath,
-        {
-          agentId: record.descriptor.id,
-          pluginDir: record.pluginDir,
-          dataDir: getDataDir(),
-          appVersion: app.getVersion(),
-        },
-        hostApi as unknown as Record<string, (...args: unknown[]) => unknown>,
-      );
+    const agentId = record.descriptor.id;
+    if (this.stopping || this.permanentShutdown || this.reloading || this.blockedPluginProcesses.has(agentId)) {
+      throw new Error("Plugin registry is stopping.");
     }
-    if (!record.processCapabilities) {
-      record.processCapabilities = await record.process.ensureLoaded();
-    }
-    return record.process;
+    const generation = this.pluginProcessGeneration;
+    return this.withPluginProcessLock(agentId, async () => {
+      if (
+        this.stopping
+        || this.permanentShutdown
+        || this.reloading
+        || this.blockedPluginProcesses.has(agentId)
+        || this.pluginProcessGeneration !== generation
+        || this.pluginRecords.get(agentId) !== record
+      ) {
+        throw new Error("Plugin registry is stopping.");
+      }
+      let pooled = this.pluginProcesses.get(agentId);
+      if (pooled && pooled.entryPath !== record.entryPath) {
+        if (this.pluginProcesses.get(agentId) === pooled) this.pluginProcesses.delete(agentId);
+        await pooled.process.shutdown();
+        pooled = undefined;
+      }
+      if (!pooled) {
+        const hostApi = this.createHostApi();
+        const process = new AgentPluginProcess(
+          record.entryPath,
+          {
+            agentId,
+            pluginDir: record.pluginDir,
+            dataDir: getDataDir(),
+            appVersion: app.getVersion(),
+          },
+          hostApi as unknown as Record<string, (...args: unknown[]) => unknown>,
+        );
+        const capabilities = process.ensureLoaded().catch(async (error) => {
+          const current = this.pluginProcesses.get(agentId);
+          if (current?.process === process) this.pluginProcesses.delete(agentId);
+          if (record.process === process) {
+            record.process = undefined;
+            record.processCapabilities = undefined;
+          }
+          await process.shutdown();
+          throw error;
+        });
+        pooled = { entryPath: record.entryPath, process, capabilities };
+        this.pluginProcesses.set(agentId, pooled);
+      }
+      record.process = pooled.process;
+      record.processCapabilities = await pooled.capabilities;
+      return pooled.process;
+    });
   }
 
 

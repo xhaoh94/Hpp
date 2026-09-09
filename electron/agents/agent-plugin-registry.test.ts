@@ -1,5 +1,5 @@
 import { existsSync } from "fs";
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import AdmZip from "adm-zip";
@@ -226,6 +226,260 @@ export function getStatus() {
 
     expect(first).toMatchObject({ installed: false, latestVersion: "2.0.0" });
     expect(second).toMatchObject({ installed: false, latestVersion: "2.0.0" });
+  });
+
+  it("coalesces concurrent status probes and reuses the short-lived cache", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "cached-status-agent",
+      "1.0.0",
+      undefined,
+      `
+${backendModule}
+let statusCalls = 0;
+export function getStatus() {
+  statusCalls += 1;
+  return {
+    installed: true,
+    currentVersion: \`1.0.\${statusCalls}\`,
+    updateAvailable: false,
+    canUpdate: false,
+  };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+
+    const statuses = await Promise.all(Array.from(
+      { length: 12 },
+      () => registry.getStatus("cached-status-agent"),
+    ));
+    expect(statuses.every((status) => status.currentVersion === "1.0.1")).toBe(true);
+
+    await expect(registry.getStatus("cached-status-agent")).resolves.toMatchObject({
+      currentVersion: "1.0.1",
+    });
+  });
+
+  it("preserves the authoritative status returned by a successful update", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "update-status-agent",
+      "1.0.0",
+      undefined,
+      `
+${backendModule}
+let updated = false;
+export function getStatus() {
+  if (updated) throw new Error("post-update probe should not run");
+  return {
+    installed: true,
+    currentVersion: "1.0.0",
+    updateAvailable: true,
+    canUpdate: true,
+  };
+}
+export function update() {
+  updated = true;
+  return {
+    success: true,
+    status: {
+      installed: true,
+      currentVersion: "2.0.0",
+      updateAvailable: false,
+      canUpdate: true,
+    },
+  };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+
+    await expect(registry.updateAgent("update-status-agent")).resolves.toMatchObject({
+      success: true,
+      status: {
+        currentVersion: "2.0.0",
+        rollbackVersion: "1.0.0",
+        canRollback: true,
+      },
+    });
+  });
+
+  it("preserves rollback status without a failing post-rollback probe", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "rollback-status-agent",
+      "1.0.0",
+      undefined,
+      `
+${backendModule}
+let stage = 0;
+export function getStatus() {
+  if (stage === 2) throw new Error("post-rollback probe should not run");
+  return {
+    installed: true,
+    currentVersion: stage === 0 ? "1.0.0" : "2.0.0",
+    updateAvailable: stage === 0,
+    canUpdate: true,
+  };
+}
+export function update(_context, options = {}) {
+  const target = options.versionSpec;
+  stage = target === "1.0.0" ? 2 : 1;
+  return {
+    success: true,
+    status: {
+      installed: true,
+      currentVersion: stage === 2 ? "1.0.0" : "2.0.0",
+      updateAvailable: false,
+      canUpdate: true,
+    },
+  };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+    await expect(registry.updateAgent("rollback-status-agent", "2.0.0")).resolves.toMatchObject({
+      success: true,
+      status: { currentVersion: "2.0.0", canRollback: true },
+    });
+
+    await expect(registry.rollbackAgent("rollback-status-agent")).resolves.toMatchObject({
+      success: true,
+      status: {
+        currentVersion: "1.0.0",
+        rollbackVersion: undefined,
+        canRollback: false,
+      },
+    });
+  });
+
+  it("does not let an old status request repopulate the cache after an update", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "status-generation-agent",
+      "1.0.0",
+      undefined,
+      `
+${backendModule}
+let version = "1.0.0";
+let updating = false;
+export async function getStatus() {
+  const snapshot = version;
+  if (updating) await new Promise((resolve) => setTimeout(resolve, 250));
+  return {
+    installed: true,
+    currentVersion: snapshot,
+    updateAvailable: snapshot === "1.0.0",
+    canUpdate: true,
+  };
+}
+export async function update() {
+  updating = true;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  version = "2.0.0";
+  updating = false;
+  return {
+    success: true,
+    status: {
+      installed: true,
+      currentVersion: version,
+      updateAvailable: false,
+      canUpdate: true,
+    },
+  };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+    await registry.getStatus("status-generation-agent");
+
+    const update = registry.updateAgent("status-generation-agent");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const staleProbe = registry.getStatus("status-generation-agent");
+
+    await expect(update).resolves.toMatchObject({ status: { currentVersion: "2.0.0" } });
+    await expect(staleProbe).resolves.toMatchObject({ currentVersion: "1.0.0" });
+    await expect(registry.getStatus("status-generation-agent")).resolves.toMatchObject({
+      currentVersion: "2.0.0",
+    });
+  });
+
+  it("shuts down a plugin host when loading the plugin fails", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "load-failure-agent",
+      "1.0.0",
+      undefined,
+      `
+import { appendFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+const exitLog = join(dirname(fileURLToPath(import.meta.url)), "host-exits.log");
+process.on("exit", () => appendFileSync(exitLog, "exit\\n"));
+throw new Error("intentional load failure");
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+
+    await expect(registry.getStatus("load-failure-agent")).resolves.toMatchObject({
+      installed: true,
+    });
+    await registry.reload();
+    await expect(registry.getStatus("load-failure-agent")).resolves.toMatchObject({
+      installed: true,
+    });
+
+    const exitLog = join(electronState.userDataDir, "hpp-data", "agent-plugins", "load-failure-agent", "host-exits.log");
+    await expect(readFile(exitLog, "utf8")).resolves.toBe("exit\nexit\n");
+  });
+
+  it("does not restart a plugin host while the plugin is being removed", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "remove-race-agent",
+      "1.0.0",
+      undefined,
+      `
+${backendModule}
+export function getStatus() {
+  return { installed: true, updateAvailable: false, canUpdate: false };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+    await registry.getStatus("remove-race-agent");
+
+    const internals = registry as unknown as {
+      pluginProcesses: Map<string, { process: { shutdown: () => Promise<void> } }>;
+      blockedPluginProcesses: Set<string>;
+    };
+    const process = internals.pluginProcesses.get("remove-race-agent")?.process;
+    expect(process).toBeDefined();
+    const shutdown = process!.shutdown.bind(process);
+    vi.spyOn(process!, "shutdown").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await shutdown();
+    });
+
+    const removal = registry.removePlugin("remove-race-agent");
+    while (!internals.blockedPluginProcesses.has("remove-race-agent")) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    await expect(registry.createBackend("remove-race-agent", "late-session")).rejects.toThrow(
+      "Plugin registry is stopping.",
+    );
+    await expect(removal).resolves.toMatchObject({ success: true });
+    expect(internals.pluginProcesses.size).toBe(0);
+  });
+
+  it("serializes concurrent explicit reloads", async () => {
+    const internals = registry as unknown as { performReload: () => Promise<unknown[]> };
+    const performReload = vi.spyOn(internals, "performReload");
+
+    await Promise.all(Array.from({ length: 8 }, () => registry.reload()));
+
+    expect(performReload).toHaveBeenCalledTimes(1);
   });
 
   it("preserves plugin-declared backend model visibility controls", async () => {
