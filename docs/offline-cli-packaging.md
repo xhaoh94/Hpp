@@ -136,10 +136,11 @@ $HppDataDir = "$env:APPDATA\hpp\hpp-data"
 
 1. 检查 `runtime\node.exe`、Codex 入口和 Pi `dist\bundle\cli.js` 是否存在。
 2. 使用 `robocopy /E` 复制 `runtime` 和 `app` 到 CLI 安装目录。
-3. 使用 `robocopy /E` 将完整 `app` 目录复制到 `$HppDataDir\pi-sdk-runtime`。
-4. 检查 Hpp 目录下 Pi 的 `package.json` 并输出版本。
-5. 默认把 CLI 安装目录加入用户级 PATH。
-6. 调用两个入口输出版本，作为安装结果校验。
+3. 复制 `codex.cmd` 和 `pi.cmd` 入口文件到 CLI 安装目录。
+4. 使用 `robocopy /E` 将完整 `app` 目录复制到 `$HppDataDir\pi-sdk-runtime`。
+5. 检查 Hpp 目录下 Pi 的 `package.json` 并输出版本。
+6. 默认把 CLI 安装目录加入用户级 PATH。
+7. 调用两个入口输出版本，作为安装结果校验。
 
 使用 `robocopy` 而不是深层 `Copy-Item` 是为了避免 Pi 的 AWS SDK 等依赖路径较深时触发 Windows PowerShell 5.1 路径复制错误。`robocopy` 返回码小于 8 视为成功。
 
@@ -250,7 +251,9 @@ pi-sdk-runtime\node_modules\@earendil-works\pi-coding-agent\package.json
 
 ### 9.2 PowerShell 报解析错误或中文乱码
 
-旧版脚本含中文且以无 BOM UTF-8 保存，Windows PowerShell 5.1 可能按本地 ANSI 解码。当前 `install.ps1` 使用 ASCII 文本，兼容 PowerShell 5.1。
+`install.ps1` 中含中文字符且以无 BOM UTF-8 保存时，Windows PowerShell 5.1 可能按本地 ANSI 解码，导致报错"表达式或语句中包含意外的标记"。
+
+解决方法：`install.ps1` 应使用纯 ASCII 文本（英文提示信息），避免中文字符。当前版本脚本已遵循此规则。
 
 ### 9.3 复制依赖时报路径太长
 
