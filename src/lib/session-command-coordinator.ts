@@ -500,6 +500,68 @@ export async function reopenSession(sessionId: string, options: { activate?: boo
   });
 }
 
+export type IdleRuntimeReleaseResult = {
+  released: boolean;
+  reason?:
+    | "active"
+    | "closed"
+    | "uninitialized"
+    | "running"
+    | "missing"
+    | "pending-interaction"
+    | "failed";
+  error?: string;
+};
+
+/**
+ * 释放一个空闲会话的后端（及其 worker/CLI 子进程）以回收内存，但保持页签
+ * 与消息不变。下次激活或发送时会走既有的“后端缺失 → 重新初始化”路径
+ * （与应用重启后打开会话完全同一条通路），从 sessionFilePath 恢复上下文。
+ *
+ * 任何无法确认“确实空闲”的情况都直接放弃，宁可不释放也不打断用户。
+ */
+export async function releaseIdleSessionRuntime(
+  sessionId: string,
+  hooks?: SendMessageHooks,
+): Promise<IdleRuntimeReleaseResult> {
+  return withSessionSendLock(sessionId, async () => {
+    const projectState = useProjectStore.getState();
+    if (projectState.activeSessionId === sessionId) return { released: false, reason: "active" };
+    if (!sessionIsOpen(sessionId)) return { released: false, reason: "closed" };
+    if (!projectState.initializedSessionIds.has(sessionId)) return { released: false, reason: "uninitialized" };
+    if (isRunning(sessionId, hooks)) return { released: false, reason: "running" };
+
+    // 主进程是后端的唯一权威：missing 说明已经释放过，busy 说明还有回合在跑。
+    const activity = await getBackendSessionActivity(sessionId);
+    if (activity === "missing") {
+      clearMissingRuntimeInitialization(sessionId);
+      return { released: false, reason: "missing" };
+    }
+    if (activity !== "idle") return { released: false, reason: "running" };
+
+    // 待答交互（权限确认、问卷…）必须保留后端，否则用户无法作答。
+    const pending = await window.electronAPI.agentGetPendingUIRequests(sessionId).catch(() => null);
+    if (!pending) return { released: false, reason: "failed" };
+    if (pending.requests.length > 0) return { released: false, reason: "pending-interaction" };
+
+    // 上面的等待可能又来了新回合。
+    if (useProjectStore.getState().activeSessionId === sessionId || isRunning(sessionId, hooks)) {
+      return { released: false, reason: "running" };
+    }
+
+    try {
+      await window.electronAPI.agentRemoveSession(sessionId);
+    } catch (error) {
+      // 与 closeSession 一致：主进程先摘除后清理，dispose 报错也可能已经移除。
+      if (await getBackendSessionActivity(sessionId) !== "missing") {
+        return { released: false, reason: "failed", error: getErrorMessage(error) };
+      }
+    }
+    clearMissingRuntimeInitialization(sessionId);
+    return { released: true };
+  });
+}
+
 export async function forkSession(input: {
   sourceSessionId: string;
   throughMessageId: string;

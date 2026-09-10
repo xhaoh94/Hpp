@@ -25,7 +25,10 @@ import type {
   AgentActionInvocation,
   AgentActionListOptions,
 } from "../../../shared/agent-actions";
-import type { AgentSubagentConfig } from "../../../shared/agent-subagent";
+import {
+  normalizeAgentSubagentConfig,
+  type AgentSubagentConfig,
+} from "../../../shared/agent-subagent";
 
 interface AgentModel {
   id: string;
@@ -416,6 +419,7 @@ export class PiSDKAgent {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       env: workerEnv,
+      windowsHide: true,
     });
     this.process = child;
 
@@ -815,6 +819,21 @@ export class PiSDKAgent {
     const data = await this.requestWorkerCommand({ type: "setCompactionConfig", config }, 8_000);
     if (data.type !== "compaction_config_changed") {
       throw new Error(optionalString(data.error) || "Pi SDK set compaction config failed");
+    }
+  }
+
+  /**
+   * 热更新内置 SubAgent 配置。运行中的 worker 会把新配置用于下一次
+   * subagent 调用（模型、profile 模型、启用状态检查），无需重载会话；
+   * 未启动 worker 时仅记录，等下次初始化时随 init 参数下发。
+   */
+  async setSubagentConfig(value: AgentSubagentConfig): Promise<void> {
+    const config = normalizeAgentSubagentConfig(value);
+    this.subagentConfig = config;
+    if (!this.process) return;
+    const data = await this.requestWorkerCommand({ type: "setSubagentConfig", config }, 8_000);
+    if (data.type !== "subagent_config_changed") {
+      throw new Error(optionalString(data.error) || "Pi SDK set subagent config failed");
     }
   }
 

@@ -827,10 +827,19 @@ export const createHppSubagentExtension = ({
   dismissUI,
   bridgeExtensionPath = SUBAGENT_BRIDGE_EXTENSION_PATH,
   subagentConfig,
+  getSubagentConfig,
 } = {}) => (pi) => {
   if (!pi || typeof pi.registerTool !== "function") return;
-  const effectiveSubagentConfig = normalizeHppSubagentConfig(subagentConfig);
-  if (!effectiveSubagentConfig.enabled) return;
+  // Hpp can hot-update the subagent config while this worker keeps running
+  // ("SubAgent 设置" 保存不重建会话). Resolve the config on every use so a
+  // changed profile/default model applies to the next subagent call instead
+  // of only after a session reload. Plain values keep the previous behavior.
+  const readSubagentConfig = () => normalizeHppSubagentConfig(
+    typeof getSubagentConfig === "function"
+      ? getSubagentConfig()
+      : (typeof subagentConfig === "function" ? subagentConfig() : subagentConfig)
+  );
+  if (!readSubagentConfig().enabled) return;
 
   pi.registerTool({
     name: "subagent",
@@ -896,6 +905,14 @@ export const createHppSubagentExtension = ({
       const mode = chain.length > 0 ? "chain" : tasks.length > 0 ? "parallel" : "single";
       const details = (results) => makeDetails(mode, agentScope, discovery.projectAgentsDir, results);
       const defaultTimeoutMs = normalizeTaskTimeout(params.timeoutMs);
+      const effectiveSubagentConfig = readSubagentConfig();
+      if (!effectiveSubagentConfig.enabled) {
+        return {
+          content: [{ type: "text", text: "内置 SubAgent 已在设置中禁用；重新启用后保存会在此会话生效。" }],
+          details: details([]),
+          isError: true,
+        };
+      }
 
       if (modeCount !== 1) {
         const available = agents.map((agent) => `${agent.name} (${agent.source})`).join(", ") || "无可用 agent";

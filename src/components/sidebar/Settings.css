@@ -1581,6 +1581,19 @@
   line-height: 1.5;
 }
 
+/* 已保存的压缩模型不在渠道里的显式警告：运行时会静默回退，必须让用户看见。 */
+.settings-compaction-warning {
+  margin: 8px 2px 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 35%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .settings-compaction-actions {
   display: flex;
   min-height: 34px;
@@ -1769,6 +1782,10 @@
   justify-content: space-between;
   border-bottom: 1px solid var(--border-color);
   color: var(--text-secondary);
+}
+
+.settings-subagent-model-inherit:hover {
+  color: var(--accent-color);
 }
 
 .settings-subagent-model-inherit.active {

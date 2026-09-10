@@ -797,6 +797,7 @@ export class OpenCodeAgent {
       stdio: ["pipe", "pipe", "pipe"],
       shell: isWindowsShellShim(opencodeCommand),
       env: processEnv,
+      windowsHide: true,
     });
 
     const childProcess = this.process!;

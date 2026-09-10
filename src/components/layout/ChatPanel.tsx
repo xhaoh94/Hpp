@@ -2116,6 +2116,9 @@ export function ChatPanel({
   const activeSessionTitle = activeSession
     ? getSessionHeaderTitle(activeSession, activeSessionId ? sessionMessages[activeSessionId] || [] : [])
     : "";
+  const messages = useChatStore((state) => state.messages);
+  const [scrollHeaderTitle, setScrollHeaderTitle] = useState<string | null>(null);
+  const [scrollHeaderMessageId, setScrollHeaderMessageId] = useState<string | null>(null);
   const currentAgentId = activeSession?.agentId || activeAgentId;
   const activeDraft = useChatStore(useShallow((state) => {
     const draft = activeSessionId
@@ -2375,6 +2378,50 @@ export function ChatPanel({
     getMessageIndex,
   });
 
+  const computeScrollHeaderTitle = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || messages.length === 0) {
+      setScrollHeaderTitle(null);
+      setScrollHeaderMessageId(null);
+      return;
+    }
+    const speechIndexes = messages.reduce<number[]>((indexes, message, index) => {
+      if (isUserSpeechMessage(message)) indexes.push(index);
+      return indexes;
+    }, []);
+    if (speechIndexes.length === 0) {
+      setScrollHeaderTitle(null);
+      setScrollHeaderMessageId(null);
+      return;
+    }
+    const speechIndexSet = new Set(speechIndexes);
+    const containerRect = el.getBoundingClientRect();
+    const viewportBottom = containerRect.bottom - 1;
+    const mountedRows = Array.from(el.querySelectorAll<HTMLElement>(
+      ".chat-message-virtual-content > .chat-virtual-row",
+    )).flatMap((row) => {
+      const index = Number(row.dataset.index);
+      if (!Number.isInteger(index) || index > messages.length) return [];
+      return [{ row, index, rect: row.getBoundingClientRect() }];
+    });
+    // 找到视野内或视野上方的最后一个用户发言
+    let lastSpeechAboveOrInView: number | null = null;
+    for (const { index, rect } of mountedRows) {
+      if (!speechIndexSet.has(index)) continue;
+      if (rect.top < viewportBottom) {
+        lastSpeechAboveOrInView = index;
+      }
+    }
+    if (lastSpeechAboveOrInView === null) {
+      setScrollHeaderTitle(null);
+      setScrollHeaderMessageId(null);
+      return;
+    }
+    const preview = getChatMessagePreviewText(messages[lastSpeechAboveOrInView]);
+    setScrollHeaderTitle(preview || null);
+    setScrollHeaderMessageId(messages[lastSpeechAboveOrInView].id);
+  }, [messages, scrollRef]);
+
   const syncInputState = useCallback((value: string) => {
     inputValueRef.current = value;
     const hasText = value.trim().length > 0;
@@ -2540,6 +2587,25 @@ export function ChatPanel({
     }));
   }, []);
 
+  // 根据滚动位置更新标题栏显示的上一条发言
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(computeScrollHeaderTitle);
+    };
+    el.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    schedule();
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [computeScrollHeaderTitle, scrollRef]);
+
   // Close user message history on outside click
   useEffect(() => {
     if (!userMsgHistoryOpen) return;
@@ -2630,6 +2696,20 @@ export function ChatPanel({
     scrollToMessageElement(msgId);
     setUserMsgHistoryOpen(false);
   }, [scrollToMessageElement]);
+
+  const scrollToMessageIfOutsideView = useCallback((msgId: string) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const containerRect = el.getBoundingClientRect();
+    const viewportTop = containerRect.top;
+    const viewportBottom = containerRect.bottom;
+    const messageEl = el.querySelector(`[data-msg-id="${msgId}"]`);
+    if (messageEl) {
+      const rect = messageEl.getBoundingClientRect();
+      if (rect.top >= viewportTop && rect.bottom <= viewportBottom) return;
+    }
+    scrollToMessage(msgId);
+  }, [scrollRef, scrollToMessage]);
 
   const handleAddOrRefreshReference = useCallback((sourceSession: ProjectSession) => {
     if (!activeProject || !activeSessionId || sourceSession.id === activeSessionId) return;
@@ -3451,9 +3531,20 @@ export function ChatPanel({
           <span>{getAgentName(currentAgentId)}</span>
           <RefreshCw size={10} strokeWidth={2} />
         </button>
-        <span className="chat-header-session-title" title={activeSessionTitle}>
-          {activeSessionTitle}
-        </span>
+        {scrollHeaderTitle && scrollHeaderMessageId ? (
+          <button
+            type="button"
+            className="chat-header-session-title chat-header-session-title-clickable"
+            onClick={() => scrollToMessageIfOutsideView(scrollHeaderMessageId)}
+            title={scrollHeaderTitle}
+          >
+            {scrollHeaderTitle}
+          </button>
+        ) : (
+          <span className="chat-header-session-title" title={activeSessionTitle}>
+            {activeSessionTitle}
+          </span>
+        )}
         {currentSessionRunning && <BrailleSpinner />}
         <div style={{ flex: 1 }} />
       </div>

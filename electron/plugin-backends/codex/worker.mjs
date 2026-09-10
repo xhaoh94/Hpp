@@ -379,6 +379,7 @@ const startAppServer = async () => {
       cwd: projectPath || process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
       env,
+      windowsHide: true,
     });
     appServer = child;
 

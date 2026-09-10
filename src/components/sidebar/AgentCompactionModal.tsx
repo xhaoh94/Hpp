@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BrainCircuit, X } from "lucide-react";
 import type { AgentCompactionCapabilities } from "@/types";
@@ -82,6 +82,14 @@ export function AgentCompactionModal({
     () => withStoredModel(modelOptions || [], config.model),
     [config.model, modelOptions],
   );
+  // 渠道里的模型被删除或改名后，已保存的引用仍留在配置里，运行时只会静默回退到当前
+  // 模型。渠道选项加载完成后立刻提示，避免用户以为压缩还在用这个模型。
+  const channelModelOptions = modelOptions || [];
+  const storedChannelModelMissing = canSelectChannelModel
+    && config.modelMode === "custom"
+    && !!config.model
+    && channelModelOptions.length > 0
+    && !channelModelOptions.some((option) => option.value === config.model);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,11 +120,11 @@ export function AgentCompactionModal({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !saving) onClose();
+      if (event.key === "Escape") void requestCloseRef.current();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, saving]);
+  }, []);
 
   const updateConfig = (next: AgentCompactionConfig) => {
     setConfig(normalizeForCapabilities(next, capabilities));
@@ -132,7 +140,7 @@ export function AgentCompactionModal({
     });
   };
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<boolean> => {
     const normalized = normalizeForCapabilities(config, capabilities);
     if (normalized.modelMode === "custom" && !isCustomAgentCompactionModelConfigured(normalized)) {
       setStatus({
@@ -141,7 +149,15 @@ export function AgentCompactionModal({
           ? "请从已配置渠道中选择压缩模型"
           : "自定义压缩模型需要填写 Base URL 和模型 ID",
       });
-      return;
+      return false;
+    }
+    // 渠道里已经没有这个模型：允许保存只会留下一个每次压缩都失败的引用。
+    if (storedChannelModelMissing) {
+      setStatus({
+        type: "error",
+        text: `压缩模型 ${normalized.model} 已不在渠道配置中，请重新选择或改为“跟随当前 Agent 模型”`,
+      });
+      return false;
     }
 
     setSaving(true);
@@ -171,7 +187,7 @@ export function AgentCompactionModal({
           type: "success",
           text: "已保存；完全退出并重启 Hpp 后将应用到该 Agent",
         });
-        return;
+        return true;
       }
 
       const applied = await applyConfig(agentId, normalized);
@@ -184,19 +200,37 @@ export function AgentCompactionModal({
           ? `已保存并应用到 ${applied.appliedSessionIds.length} 个 ${agentName} 会话`
           : `已保存，将在 ${agentName} 下次初始化时应用`,
       });
+      return true;
     } catch (error) {
       setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      return false;
     } finally {
       setSaving(false);
     }
   };
+
+  // 关闭时还没应用的选择要自动保存：压缩设置只有保存才会下发到运行中的
+  // 会话，若直接丢弃，用户会以为已选中的设置“不生效”。
+  const savingRef = useRef(saving);
+  savingRef.current = saving;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const saveRef = useRef<() => Promise<boolean>>(handleSave);
+  saveRef.current = handleSave;
+  const requestClose = async () => {
+    if (savingRef.current) return;
+    if (dirtyRef.current && !(await saveRef.current())) return;
+    onClose();
+  };
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
 
   return createPortal(
     <div
       className="settings-modal-overlay agent-compaction-modal-overlay"
       onMouseDown={(event) => {
         event.stopPropagation();
-        if (!saving) onClose();
+        void requestCloseRef.current();
       }}
     >
       <div
@@ -215,7 +249,7 @@ export function AgentCompactionModal({
               <p>此设置只应用于 {agentName} 会话</p>
             </div>
           </div>
-          <button type="button" className="settings-modal-close" onClick={onClose} disabled={saving} aria-label="关闭">
+          <button type="button" className="settings-modal-close" onClick={() => void requestCloseRef.current()} disabled={saving} aria-label="关闭">
             <X size={18} />
           </button>
         </div>
@@ -313,6 +347,13 @@ export function AgentCompactionModal({
                       </select>
                     )}
                   </div>
+
+                  {storedChannelModelMissing && (
+                    <p className="settings-compaction-warning" role="alert">
+                      当前压缩模型 {config.model} 已不在渠道配置中：压缩时会回退到当前 Agent
+                      模型。请重新选择，或改为“跟随当前 Agent 模型”。
+                    </p>
+                  )}
 
                   {!canSelectChannelModel && config.modelMode === "custom" && (
                     <div className="settings-compaction-custom-model">

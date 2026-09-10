@@ -115,6 +115,61 @@ describe("Pi built-in subagent extension", () => {
     }
   });
 
+  it("re-reads the subagent config on every call so host hot updates apply immediately", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-hot-config-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\\n"), "utf8");
+      let current: Record<string, unknown> = {
+        enabled: true,
+        defaultModelMode: "custom",
+        defaultModel: "provider/first",
+        profiles: {},
+      };
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir: join(root, "agent"),
+        getSubagentConfig: () => current,
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const first = await tools[0].execute(
+        "call-hot-1",
+        { agent: "scout", task: "第一次检查" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(first.content[0].text).toContain("--model|provider/first");
+
+      current = { ...current, defaultModel: "provider/second" };
+      const second = await tools[0].execute(
+        "call-hot-2",
+        { agent: "scout", task: "第二次检查" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(second.content[0].text).toContain("--model|provider/second");
+
+      current = { ...current, enabled: false };
+      const disabled = await tools[0].execute(
+        "call-hot-3",
+        { agent: "scout", task: "第三次检查" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(disabled.isError).toBe(true);
+      expect(disabled.content[0].text).toContain("已在设置中禁用");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("loads the installed pi-fff package only for read-only built-in agents", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-fff-test-"));
     try {

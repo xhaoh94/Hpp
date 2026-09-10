@@ -48,6 +48,12 @@ export interface AgentCompactionConfigResult {
   appliedSessionIds?: string[];
 }
 
+export interface AgentSubagentConfigResult {
+  success: boolean;
+  error?: string;
+  appliedSessionIds?: string[];
+}
+
 export interface AgentEvent {
   type: string;
   sessionId?: string;

@@ -65,6 +65,13 @@ describe("desktop general settings layout", () => {
     expect(compactionModal).toContain("agentSetAgentCompactionConfig");
     expect(compactionModal).toContain('typeof applyConfig !== "function"');
     expect(compactionModal).toContain("完全退出并重启 Hpp 后将应用到该 Agent");
+    // 改完设置直接关闭（关闭按钮/遮罩/Esc）时自动应用，避免“选了跟随聊天
+    // 但没点保存”被静默丢弃后看起来像配置不生效。
+    expect(compactionModal).toContain("requestCloseRef");
+    expect(compactionModal).toContain("if (dirtyRef.current && !(await saveRef.current())) return;");
+    // 渠道里已删除的压缩模型引用：保存时拦住并显式提示，否则运行期只会静默回退。
+    expect(compactionModal).toContain("storedChannelModelMissing");
+    expect(compactionModal).toContain("已不在渠道配置中");
 
     const preload = readWorkspaceFile("electron/preload.ts");
     expect(preload).toContain("agentSetAgentCompactionConfig");
@@ -72,7 +79,31 @@ describe("desktop general settings layout", () => {
 
     const styles = readWorkspaceFile("src/components/sidebar/Settings.css");
     expect(styles).toContain(".settings-compaction-custom-model");
+    expect(styles).toContain(".settings-compaction-warning");
     expect(styles).toContain(".agent-compaction-modal-overlay");
     expect(styles).toContain("grid-template-columns: repeat(2, minmax(0, 1fr))");
+  });
+
+  it("hot-updates SubAgent settings before falling back to session reload", () => {
+    const subagentModal = readWorkspaceFile("src/components/sidebar/AgentSubagentModal.tsx");
+    expect(subagentModal).toContain("agentSetAgentSubagentConfig");
+    expect(subagentModal).toContain("enablingFromDisabled");
+    expect(subagentModal).toContain("agentReloadConfig");
+    // 关闭时若还没保存，同样要自动应用而不是静默丢弃。
+    expect(subagentModal).toContain("requestCloseRef");
+    expect(subagentModal).toContain("if (dirtyRef.current && !(await saveRef.current())) return;");
+
+    const preload = readWorkspaceFile("electron/preload.ts");
+    expect(preload).toContain('ipcRenderer.invoke("agent:setAgentSubagentConfig", agentId, config)');
+
+    const manager = readWorkspaceFile("electron/agents/agent-manager.ts");
+    expect(manager).toContain('ipcMain.handle("agent:setAgentSubagentConfig"');
+    expect(manager).toContain("setAgentSubagentConfig");
+
+    // 运行中的 Pi worker 必须通过 getter 读取 SubAgent 配置，否则热更新
+    // 只会改到内存里的死配置，下一次 subagent 调用仍用旧模型。
+    const worker = readWorkspaceFile("electron/plugin-backends/pi/worker.mjs");
+    expect(worker).toContain('case "setSubagentConfig"');
+    expect(worker).toContain("getSubagentConfig: () => activeSubagentConfig");
   });
 });

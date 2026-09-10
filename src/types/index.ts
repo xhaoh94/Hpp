@@ -3,6 +3,8 @@ import type {
   AgentPendingUIEventSnapshot,
   AgentCompactionConfig,
   AgentCompactionConfigResult,
+  AgentSubagentConfig,
+  AgentSubagentConfigResult,
   AgentImagePayload,
   AgentPermissionMode,
   AgentSendOptions,
@@ -71,6 +73,7 @@ export type {
   AgentCompactionCapabilities,
   AgentCompactionConfig,
   AgentCompactionConfigResult,
+  AgentSubagentConfigResult,
   AgentCompactionSupport,
   AgentSubagentSupport,
   AgentSubagentCapabilities,
@@ -326,6 +329,7 @@ export interface ElectronAPI {
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
   agentSetCompactionConfig: (config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
+  agentSetAgentSubagentConfig: (agentId: string, config: AgentSubagentConfig) => Promise<AgentSubagentConfigResult>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
   agentConfigLookupModel: (agentId: string, modelId: string) => Promise<AgentModelLookupResult>;
   agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;

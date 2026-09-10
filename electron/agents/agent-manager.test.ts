@@ -129,6 +129,7 @@ function createBackend(idle = true) {
     setModel: vi.fn(),
     setThinkingLevel: vi.fn(),
     setCompactionConfig: vi.fn(),
+    setSubagentConfig: vi.fn(),
     sendUIResponse: vi.fn(),
     dispose: vi.fn(async () => undefined),
     get sessionFilePath() {
@@ -506,6 +507,63 @@ describe("AgentManager plugin removal", () => {
     await expect(getHandler("agent:setAgentCompactionConfig")({}, "codex", {})).resolves.toEqual({
       success: false,
       error: "当前 Agent 未声明上下文压缩配置能力。",
+      appliedSessionIds: [],
+    });
+  });
+
+  it("hot-updates scoped subagent config only for sessions whose plugin declares support", async () => {
+    const piBackend = createBackend(true);
+    const otherBackend = createBackend(true);
+    testState.createBackend
+      .mockResolvedValueOnce(piBackend)
+      .mockResolvedValueOnce(otherBackend);
+    testState.getCapabilities.mockImplementation(async (agentId: string) => ({
+      planMode: "prompt",
+      permissions: true,
+      guidance: false,
+      fork: false,
+      configuration: "none",
+      providerActivation: "none",
+      subagent: agentId === "pi"
+        ? { configurable: true, modelSelection: "inherit-or-custom" }
+        : "none",
+    }));
+    await getHandler("agent:createSession")({}, "pi", "C:\\project", "subagent-session");
+    await getHandler("agent:createSession")({}, "codex", "C:\\project", "codex-subagent-session");
+
+    const config = {
+      enabled: true,
+      defaultModelMode: "custom",
+      defaultModel: "provider/default",
+      profiles: { scout: { modelMode: "custom", model: "provider/scout" } },
+    };
+    await expect(getHandler("agent:setAgentSubagentConfig")({}, "pi", config)).resolves.toEqual({
+      success: true,
+      appliedSessionIds: ["subagent-session"],
+    });
+    // 热更新直接下发到运行中的会话，无需重载；未声明能力的 agent 不受影响。
+    expect(piBackend.setSubagentConfig).toHaveBeenCalledWith({
+      enabled: true,
+      defaultModelMode: "custom",
+      defaultModel: "provider/default",
+      profiles: { scout: { modelMode: "custom", model: "provider/scout" } },
+    });
+    expect(otherBackend.setSubagentConfig).not.toHaveBeenCalled();
+  });
+
+  it("rejects scoped subagent config when the plugin does not declare the capability", async () => {
+    testState.getCapabilities.mockResolvedValueOnce({
+      planMode: "prompt",
+      permissions: true,
+      guidance: false,
+      fork: false,
+      configuration: "none",
+      providerActivation: "none",
+    });
+
+    await expect(getHandler("agent:setAgentSubagentConfig")({}, "pi", { enabled: true })).resolves.toEqual({
+      success: false,
+      error: "当前 Agent 未声明 SubAgent 配置能力。",
       appliedSessionIds: [],
     });
   });

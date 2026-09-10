@@ -14,6 +14,7 @@ import type {
 import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
 import type { FileSystemChange } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
+import type { AgentSubagentConfig } from "../shared/agent-subagent";
 import type {
   PrepareReviewUndoRequest,
   ReviewUndoTarget,
@@ -163,6 +164,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:setCompactionConfig", config),
   agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) =>
     ipcRenderer.invoke("agent:setAgentCompactionConfig", agentId, config),
+  agentSetAgentSubagentConfig: (agentId: string, config: AgentSubagentConfig) =>
+    ipcRenderer.invoke("agent:setAgentSubagentConfig", agentId, config),
   agentConfigList: (agentId: string) =>
     ipcRenderer.invoke("agentConfig:list", agentId),
   agentConfigLookupModel: (agentId: string, modelId: string) =>

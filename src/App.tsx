@@ -14,6 +14,7 @@ import { EditorArea } from "./components/editor/EditorArea";
 import { FileSearch, type FileSearchSelection } from "./components/shared/FileSearch";
 import { useDataPersistence } from "./hooks/useDataPersistence";
 import { useEditorPersistence } from "./hooks/useEditorPersistence";
+import { useIdleSessionRuntimeRelease } from "./hooks/useIdleSessionRuntimeRelease";
 import { DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useAppStore } from "./stores/app-store";
 import { useEditorStore } from "./stores/editor-store";
 import { useAgentCatalogStore } from "./stores/agent-catalog-store";
@@ -55,6 +56,8 @@ const CHAT_RESIZE_KEYBOARD_LARGE_STEP = 48;
 export default function App() {
   useDataPersistence();
   useEditorPersistence();
+  // 长时间空闲的会话保留页签但回收其后端进程，避免内存随打开页签数增长。
+  useIdleSessionRuntimeRelease();
   const [showFileSearch, setShowFileSearch] = useState(false);
   const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);
   const layoutContentRef = useRef<HTMLDivElement>(null);

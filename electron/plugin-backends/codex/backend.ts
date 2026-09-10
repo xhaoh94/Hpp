@@ -158,6 +158,7 @@ export class CodexAgent {
       cwd: projectPath,
       stdio: ["pipe", "pipe", "pipe"],
       env: worker.env,
+      windowsHide: true,
     });
     this.process = child;
 

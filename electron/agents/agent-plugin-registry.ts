@@ -113,6 +113,11 @@ const AGENT_STATUS_CACHE_TTL_MS = 30_000;
 const AGENT_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 const IDLE_ACTIVITY_RECHECK_MS = 5_000;
 const IDLE_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000] as const;
+// 空闲宿主回收：某个 agent 已经没有存活的会话后端、且长时间没有任何宿主
+// 交互时，关掉它的 plugin host 进程（下次使用时按需冷启动）。否则每个用过
+// 一次的 agent 都会留下一个常驻 node 进程，内存占用随 agent 数增长。
+const HOST_IDLE_SHUTDOWN_MS = 10 * 60_000;
+const HOST_IDLE_REAP_INTERVAL_MS = 60_000;
 const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   planMode: "prompt",
   permissions: false,
@@ -778,6 +783,9 @@ export class AgentPluginRegistry {
   private statusCache = new Map<string, { expiresAt: number; status: AgentPackageStatus }>();
   private statusRequests = new Map<string, StatusRequestEntry>();
   private statusGeneration = 0;
+  private backendCounts = new Map<string, number>();
+  private hostActivityAt = new Map<string, number>();
+  private hostReaper: ReturnType<typeof setInterval> | null = null;
   private loaded = false;
   private stopping = false;
   private permanentShutdown = false;
@@ -836,6 +844,7 @@ export class AgentPluginRegistry {
     }
 
     this.loaded = true;
+    this.startHostReaper();
     return this.listAgents();
   }
 
@@ -1065,7 +1074,16 @@ export class AgentPluginRegistry {
     await this.ensureLoaded();
     const record = this.pluginRecords.get(agentId);
     if (!record) throw new Error(`Agent 插件未安装：${agentId}`);
-    return this.createPluginBackend(record, sessionId, options);
+    this.acquireBackendSlot(agentId);
+    try {
+      return await this.createPluginBackend(record, sessionId, {
+        ...options,
+        releaseSlot: () => this.releaseBackendSlot(agentId),
+      });
+    } catch (error) {
+      this.releaseBackendSlot(agentId);
+      throw error;
+    }
   }
 
   async inspectInstallCandidate(pluginPath: string): Promise<AgentDescriptor> {
@@ -1218,6 +1236,7 @@ export class AgentPluginRegistry {
 
   async shutdown(permanent = false): Promise<void> {
     if (permanent) this.permanentShutdown = true;
+    this.stopHostReaper();
     if (this.shutdownPromise) return this.shutdownPromise;
     this.stopping = true;
     this.pluginProcessGeneration += 1;
@@ -1375,19 +1394,84 @@ export class AgentPluginRegistry {
   }
 
   private async releasePluginProcess(agentId: string): Promise<void> {
-    await this.withPluginProcessLock(agentId, async () => {
-      const pooled = this.pluginProcesses.get(agentId);
-      if (pooled && this.pluginProcesses.get(agentId) === pooled) this.pluginProcesses.delete(agentId);
-      const record = this.pluginRecords.get(agentId);
-      const processes = new Set<AgentPluginProcess>();
-      if (pooled) processes.add(pooled.process);
-      if (record?.process) processes.add(record.process);
-      await Promise.allSettled(Array.from(processes, (process) => process.shutdown()));
-      if (record && this.pluginRecords.get(agentId) === record) {
-        if (!record.process || processes.has(record.process)) record.process = undefined;
-        record.processCapabilities = undefined;
-      }
-    });
+    await this.withPluginProcessLock(agentId, () => this.disposePluginProcess(agentId));
+  }
+
+  /** 关闭某个 agent 的宿主进程；调用方必须已持有该 agent 的宿主互斥锁。 */
+  private async disposePluginProcess(agentId: string, expected?: PluginProcessEntry): Promise<void> {
+    const pooled = this.pluginProcesses.get(agentId);
+    if (expected && pooled !== expected) return;
+    if (pooled && this.pluginProcesses.get(agentId) === pooled) this.pluginProcesses.delete(agentId);
+    const record = this.pluginRecords.get(agentId);
+    const processes = new Set<AgentPluginProcess>();
+    if (pooled) processes.add(pooled.process);
+    if (record?.process) processes.add(record.process);
+    await Promise.allSettled(Array.from(processes, (process) => process.shutdown()));
+    if (record && this.pluginRecords.get(agentId) === record) {
+      if (!record.process || processes.has(record.process)) record.process = undefined;
+      record.processCapabilities = undefined;
+    }
+  }
+
+  private startHostReaper() {
+    if (this.hostReaper) return;
+    const timer = setInterval(() => {
+      void this.reapIdlePluginHosts().catch(() => undefined);
+    }, HOST_IDLE_REAP_INTERVAL_MS);
+    // 回收定时器不应阻止 Electron 主进程退出。
+    timer.unref?.();
+    this.hostReaper = timer;
+  }
+
+  private stopHostReaper() {
+    if (!this.hostReaper) return;
+    clearInterval(this.hostReaper);
+    this.hostReaper = null;
+  }
+
+  private acquireBackendSlot(agentId: string) {
+    this.backendCounts.set(agentId, (this.backendCounts.get(agentId) || 0) + 1);
+    this.hostActivityAt.set(agentId, Date.now());
+  }
+
+  private releaseBackendSlot(agentId: string) {
+    const count = this.backendCounts.get(agentId) || 0;
+    if (count <= 1) {
+      this.backendCounts.delete(agentId);
+      // 最后一个会话后端消失后才开始计算空闲窗口。
+      this.hostActivityAt.set(agentId, Date.now());
+      return;
+    }
+    this.backendCounts.set(agentId, count - 1);
+  }
+
+  /**
+   * 关闭没有存活会话后端、且长时间没有交互的宿主进程。
+   * 会话后端计数在进入宿主互斥锁之前自增，因此这里的复核能保证
+   * 刚刚创建的 backend 不会被回收掉宿主。
+   */
+  async reapIdlePluginHosts(now = Date.now()): Promise<string[]> {
+    if (this.stopping || this.permanentShutdown || this.reloading) return [];
+    const reaped: string[] = [];
+    for (const [agentId, entry] of Array.from(this.pluginProcesses.entries())) {
+      if (this.backendCounts.get(agentId)) continue;
+      // 插件安装/卸载/重载期间的宿主不能被回收。
+      if (this.blockedPluginProcesses.has(agentId)) continue;
+      const lastUsed = this.hostActivityAt.get(agentId) || 0;
+      if (now - lastUsed < HOST_IDLE_SHUTDOWN_MS) continue;
+      const released = await this.withPluginProcessLock(agentId, async () => {
+        if (this.stopping || this.permanentShutdown || this.reloading) return false;
+        if (this.backendCounts.get(agentId)) return false;
+        if (this.blockedPluginProcesses.has(agentId)) return false;
+        // 还有未应答的宿主请求（安装、状态探测等）时不动它。
+        if (entry.process.pendingRequestCount > 0) return false;
+        if (this.pluginProcesses.get(agentId) !== entry) return false;
+        await this.disposePluginProcess(agentId, entry);
+        return true;
+      });
+      if (released) reaped.push(agentId);
+    }
+    return reaped;
   }
 
   private async getPluginProcess(record: PluginRecord): Promise<AgentPluginProcess> {
@@ -1395,6 +1479,8 @@ export class AgentPluginRegistry {
     if (this.stopping || this.permanentShutdown || this.reloading || this.blockedPluginProcesses.has(agentId)) {
       throw new Error("Plugin registry is stopping.");
     }
+    // 任何宿主交互（状态、配置、会话后端…）都会刷新空闲回收窗口。
+    this.hostActivityAt.set(agentId, Date.now());
     const generation = this.pluginProcessGeneration;
     return this.withPluginProcessLock(agentId, async () => {
       if (
@@ -1448,8 +1534,18 @@ export class AgentPluginRegistry {
   private async createPluginBackend(
     record: PluginRecord,
     sessionId: string,
-    options: { window?: BrowserWindow | null; getConfigState?: () => Promise<unknown> }
+    options: {
+      window?: BrowserWindow | null;
+      getConfigState?: () => Promise<unknown>;
+      releaseSlot?: () => void;
+    }
   ): Promise<AgentBackend> {
+    let slotReleased = false;
+    const releaseSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      options.releaseSlot?.();
+    };
     let currentWindow = options.window || null;
     let idle = true;
     let idleStateRevision = 0;
@@ -1848,6 +1944,8 @@ export class AgentPluginRegistry {
       },
       dispose: () => {
         disposed = true;
+        // 释放会话后端后，宿主进程的空闲回收窗口从这里开始计时。
+        releaseSlot();
         clearIdleRefreshTimer();
         return pluginProcess.disposeBackend(backendId);
       },

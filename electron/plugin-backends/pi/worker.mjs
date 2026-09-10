@@ -66,6 +66,28 @@ const normalizeAgentCompactionConfig = (value) => {
     },
   };
 };
+// 摘要输出上限 = min(0.8 × settings.reserveTokens, 模型 maxTokens)，而 pi 默认
+// reserveTokens=16384 只给摘要 13107 tokens（turn prefix 更只有 8192）：长历史摘要一旦撞上
+// 输出上限，SDK 会判定 "generation hit the token cap" 并让整次压缩失败。compact() 只把
+// settings.reserveTokens 用于计算这个上限，压缩切点（保留哪些消息）在 prepareCompaction
+// 时已用 keepRecentTokens 定稿，抬高它不会改变摘要覆盖的历史范围。
+const MIN_COMPACTION_SUMMARY_RESERVE_TOKENS = 32768;
+const COMPACTION_THINKING_LEVEL_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+// 压缩是“总结”任务：思考内容与被截断的正文共享同一份输出预算。继承聊天档位时
+//（常见 max/xhigh）模型会把预算耗在思考上，正文只剩几十个 token 就被截断；显式选择
+// 高档位的用户仍按其选择执行，只在“跟随聊天”时套一个保守上限。
+const MAX_INHERITED_COMPACTION_THINKING_LEVEL = "medium";
+// 连续压缩失败达到阈值后暂停本次会话的自动压缩：每次失败都是一轮十万级 token 的
+// 摘要请求，重复失败既昂贵又不会成功。
+const MAX_CONSECUTIVE_COMPACTION_FAILURES = 2;
+
+const clampInheritedThinkingLevel = (level) => {
+  const index = COMPACTION_THINKING_LEVEL_ORDER.indexOf(level);
+  const maxIndex = COMPACTION_THINKING_LEVEL_ORDER.indexOf(MAX_INHERITED_COMPACTION_THINKING_LEVEL);
+  if (index < 0 || maxIndex < 0 || index <= maxIndex) return level;
+  return MAX_INHERITED_COMPACTION_THINKING_LEVEL;
+};
+
 const PLAN_MODE_SYSTEM_PROMPT = `[HPP 计划模式已启用]
 当前回合处于计划模式。请在不改变环境的前提下，输出完整、可执行的实施计划。
 
@@ -84,6 +106,8 @@ let uiBridge = null;
 let activeSettingsManager = null;
 let activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
 let activeSubagentConfig = normalizeHppSubagentConfig(undefined);
+let compactionFailureStreak = 0;
+let compactionSuspended = false;
 let unsubscribe = null;
 let projectPath = "";
 let activePromptId = null;
@@ -675,6 +699,8 @@ const disposeSession = async () => {
   activeSettingsManager = null;
   activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
   activeSubagentConfig = normalizeHppSubagentConfig(undefined);
+  compactionFailureStreak = 0;
+  compactionSuspended = false;
   actionKeys.clear();
   builtinThinkingLevelMaps = null;
   builtinThinkingLevelMapsFailed = false;
@@ -840,8 +866,9 @@ const isCompactionThinkingLevelSupported = (model, level) => {
 
 const getCompactionThinkingLevel = (config, model, inheritedLevel) => {
   if (model?.reasoning !== true) return "off";
-  const requested = config.thinkingLevel === "inherit"
-    ? String(inheritedLevel || "off")
+  const inherited = config.thinkingLevel === "inherit";
+  const requested = inherited
+    ? clampInheritedThinkingLevel(String(inheritedLevel || "off"))
     : config.thinkingLevel;
   if (isCompactionThinkingLevelSupported(model, requested)) return requested;
   return ["minimal", "low", "medium", "high", "xhigh", "max"]
@@ -861,7 +888,18 @@ const resolveChannelCompactionTarget = async (config) => {
   if (separator <= 0 || separator === ref.length - 1) return null;
   const provider = ref.slice(0, separator);
   const modelId = ref.slice(separator + 1);
-  const model = modelRegistry?.find?.(provider, modelId);
+  let model = modelRegistry?.find?.(provider, modelId);
+  if (!model) {
+    // 渠道弹窗在会话运行期间改写的 models.json 不会自动进入注册表
+    //（SDK 只在 registerProvider 等 API 调用时刷新，不 watch 文件），
+    // 与 setModel 同理：宣判不可用之前先重读一次磁盘配置（仅本地，不走网络）。
+    try {
+      await modelRegistry?.refresh?.({ allowNetwork: false });
+    } catch {
+      // 刷新失败不覆盖下方原始的「模型不可用」诊断。
+    }
+    model = modelRegistry?.find?.(provider, modelId);
+  }
   if (!model) {
     throw new Error(`已配置的压缩模型不可用：${ref}（渠道或模型可能已被删除）`);
   }
@@ -922,13 +960,28 @@ const resolveCurrentCompactionTarget = async (context) => {
   return { model, auth };
 };
 
-const runConfiguredCompaction = async (event, context, target, config) => {
+// 摘要输出预算：只替换 preparation.settings 里的 reserveTokens，其余字段（切点、待
+// 摘要的消息集合）都保持 pi 算好的结果，不会让摘要漏掉被丢弃的历史。
+const withSummaryBudget = (preparation) => {
+  const settings = isRecord(preparation?.settings) ? preparation.settings : null;
+  if (!settings) return preparation;
+  const reserveTokens = Number(settings.reserveTokens);
+  const current = Number.isFinite(reserveTokens) && reserveTokens > 0 ? reserveTokens : 0;
+  if (current >= MIN_COMPACTION_SUMMARY_RESERVE_TOKENS) return preparation;
+  return {
+    ...preparation,
+    settings: { ...settings, reserveTokens: MIN_COMPACTION_SUMMARY_RESERVE_TOKENS },
+  };
+};
+
+const runConfiguredCompaction = async (event, context, target, config, forcedThinkingLevel) => {
   if (typeof sdk?.compact !== "function") {
     throw new Error("当前 Agent 运行时不支持自定义压缩");
   }
-  const thinkingLevel = getCompactionThinkingLevel(config, target.model, context?.thinkingLevel || session?.thinkingLevel);
+  const thinkingLevel = forcedThinkingLevel
+    || getCompactionThinkingLevel(config, target.model, context?.thinkingLevel || session?.thinkingLevel);
   return sdk.compact(
-    event.preparation,
+    withSummaryBudget(event.preparation),
     target.model,
     target.auth.apiKey,
     target.auth.headers,
@@ -941,12 +994,54 @@ const runConfiguredCompaction = async (event, context, target, config) => {
   );
 };
 
+// 摘要被输出上限截断（SDK 文案 "hit the token cap"）时，同一模型改用最低思考档重试
+// 一次：正文能拿到全部输出预算，比直接回退到另一个模型更省，也避免长历史摘要因为
+// “思考吃光预算”而彻底失败。
+const isSummaryTokenCapFailure = (error) => {
+  const message = error?.message || String(error);
+  return message.includes("hit the token cap");
+};
+
+const runCompactionWithRetry = async (event, context, target, config) => {
+  try {
+    return await runConfiguredCompaction(event, context, target, config);
+  } catch (error) {
+    if (event.signal?.aborted || !isSummaryTokenCapFailure(error)) throw error;
+    return await runConfiguredCompaction(event, context, target, config, "off");
+  }
+};
+
+const markCompactionSucceeded = () => {
+  compactionFailureStreak = 0;
+  compactionSuspended = false;
+};
+
+// 只有“自定义模型与当前模型都没跑通”才算一次彻底失败；达到阈值后停止自动压缩，
+// 让用户先处理配置或新建会话，而不是每轮交互都重复发起注定失败的摘要请求。
+const markCompactionFailed = () => {
+  compactionFailureStreak += 1;
+  if (compactionSuspended || compactionFailureStreak < MAX_CONSECUTIVE_COMPACTION_FAILURES) return;
+  compactionSuspended = true;
+  send({
+    type: "status",
+    id: `hpp-compaction-suspended-${randomUUID()}`,
+    status: "warning",
+    title: "上下文压缩已暂停",
+    detail: `连续 ${compactionFailureStreak} 次压缩失败，本次会话已停止自动压缩以避免重复失败。请新建会话，或在「渠道配置 → 上下文压缩」更换压缩模型/渠道后重新保存；也可以手动触发一次压缩重试。`,
+  });
+};
+
 const hppCompactionExtension = (pi) => {
   pi.on("session_before_compact", async (event, context) => {
     const config = normalizeAgentCompactionConfig(activeCompactionConfig);
     if (!config.enabled) {
       // 用户在渠道配置里关闭了上下文压缩：取消本次压缩（含阈值自动触发与
       // 溢出恢复），由 SDK 按未压缩流程继续——上下文超限时会话将直接报错。
+      return { cancel: true };
+    }
+    // 连续失败已达阈值：本次会话不再自动压缩（手动压缩仍放行，便于用户改完配置后
+    // 主动重试）。直接取消可以让 pi 跳过之后每一轮的无效尝试。
+    if (compactionSuspended && event.reason !== "manual") {
       return { cancel: true };
     }
     // 渠道模型可能已被删除或凭据失效：解析失败时按「自定义模型不可用」处理，
@@ -961,13 +1056,15 @@ const hppCompactionExtension = (pi) => {
           id: `hpp-compaction-custom-model-fallback-${randomUUID()}`,
           status: "warning",
           title: "自定义压缩模型不可用，已回退当前模型",
-          detail: error?.message || String(error),
+          detail: `${error?.message || String(error)}（可在「渠道配置 → 上下文压缩」重新选择压缩模型，或改为“跟随当前 Agent 模型”）`,
         });
       }
     }
     if (customTarget) {
       try {
-        return { compaction: await runConfiguredCompaction(event, context, customTarget, config) };
+        const compaction = await runCompactionWithRetry(event, context, customTarget, config);
+        markCompactionSucceeded();
+        return { compaction };
       } catch (error) {
         if (event.signal?.aborted) return undefined;
         send({
@@ -975,14 +1072,16 @@ const hppCompactionExtension = (pi) => {
           id: `hpp-compaction-custom-model-fallback-${randomUUID()}`,
           status: "warning",
           title: "自定义压缩模型不可用，已回退当前模型",
-          detail: error?.message || String(error),
+          detail: `${error?.message || String(error)}（请检查该压缩模型渠道的凭据与额度）`,
         });
       }
     }
 
     try {
       const currentTarget = await resolveCurrentCompactionTarget(context);
-      return { compaction: await runConfiguredCompaction(event, context, currentTarget, config) };
+      const compaction = await runCompactionWithRetry(event, context, currentTarget, config);
+      markCompactionSucceeded();
+      return { compaction };
     } catch (error) {
       if (!event.signal?.aborted) {
         send({
@@ -990,9 +1089,11 @@ const hppCompactionExtension = (pi) => {
           id: `hpp-compaction-default-fallback-${randomUUID()}`,
           status: "warning",
           title: "独立压缩策略不可用，已使用 Agent 默认压缩",
-          detail: error?.message || String(error),
+          detail: `${error?.message || String(error)}（请检查当前模型渠道的凭据与额度）`,
         });
       }
+      // 这里才是“这次压缩彻底失败”：自定义模型与当前模型都没跑通。
+      markCompactionFailed();
       // 返回 undefined 让 Agent 的原生压缩流程接管，避免配置错误阻断会话恢复。
       return undefined;
     }
@@ -1250,7 +1351,9 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     getPermissionMode: () => activePermissionMode,
     requestUI: requestSubagentUI,
     dismissUI: dismissSubagentUIRequests,
-    subagentConfig: activeSubagentConfig,
+    // Read through a getter so setSubagentConfig hot updates reach the
+    // already-registered subagent tool without restarting this worker.
+    getSubagentConfig: () => activeSubagentConfig,
   });
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,
@@ -1758,7 +1861,14 @@ const handleCommand = async (command) => {
         break;
       case "setCompactionConfig":
         activeCompactionConfig = normalizeAgentCompactionConfig(command.config);
+        // 用户改完压缩配置视为重新开始：恢复自动压缩，允许再试一次。
+        compactionFailureStreak = 0;
+        compactionSuspended = false;
         send({ type: "compaction_config_changed", id: command.id, config: activeCompactionConfig });
+        break;
+      case "setSubagentConfig":
+        activeSubagentConfig = normalizeHppSubagentConfig(command.config);
+        send({ type: "subagent_config_changed", id: command.id, config: activeSubagentConfig });
         break;
       case "uiResponse":
         if (!uiBridge?.handleResponse(command.response) && !handleSubagentUIResponse(command.response)) {

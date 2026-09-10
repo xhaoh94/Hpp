@@ -156,7 +156,12 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
-    if (message === "compact" || message === "slow-compact") {
+    if (message === "compact" || message === "slow-compact" || message === "compact-token-cap-once" || message === "compact-fail-always") {
+      // 摘要内容决定 mock compact 的行为：token-cap-once 只在第一次调用失败（验证降档重试），
+      // token-cap-always 每次都失败（验证连续失败止损）。
+      const compactMarker = message === "compact-token-cap-once"
+        ? "token-cap-once"
+        : message === "compact-fail-always" ? "token-cap-always" : "summarize this";
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "compaction_start", reason: "threshold" });
       let compaction;
@@ -166,7 +171,7 @@ class FakeSession {
           type: "session_before_compact",
           preparation: {
             firstKeptEntryId: "kept-1",
-            messagesToSummarize: [{ role: "user", content: "summarize this", timestamp: Date.now() }],
+            messagesToSummarize: [{ role: "user", content: compactMarker, timestamp: Date.now() }],
             turnPrefixMessages: [],
             isSplitTurn: false,
             tokensBefore: 1000,
@@ -434,23 +439,37 @@ export const createAgentSession = async ({ sessionManager, modelRegistry, modelR
     resourceLoader.appendSystemPrompt,
   ),
 });
-export const compact = async (_preparation, model, apiKey, headers, _instructions, _signal, thinkingLevel, _streamFn, env, retry) => ({
-  summary: JSON.stringify({
-    id: model.id,
-    provider: model.provider,
-    api: model.api,
-    baseUrl: model.baseUrl,
-    reasoning: model.reasoning,
-    apiKey,
-    headers,
-    env,
-    thinkingLevel,
-    retry,
-  }),
-  firstKeptEntryId: "kept-1",
-  tokensBefore: 1000,
-  details: { readFiles: [], modifiedFiles: [] },
-});
+let compactAttempts = 0;
+let firstCompactThinkingLevel = null;
+export const compact = async (preparation, model, apiKey, headers, _instructions, _signal, thinkingLevel, _streamFn, env, retry) => {
+  compactAttempts += 1;
+  if (compactAttempts === 1) firstCompactThinkingLevel = thinkingLevel;
+  // 摘要被输出上限截断：SDK 会抛出这条文案，worker 应据此降档重试。
+  const marker = preparation?.messagesToSummarize?.[0]?.content;
+  if (marker === "token-cap-always" || (marker === "token-cap-once" && compactAttempts === 1)) {
+    throw new Error("Summarization failed: generation hit the token cap and the summary is incomplete");
+  }
+  return {
+    summary: JSON.stringify({
+      id: model.id,
+      provider: model.provider,
+      api: model.api,
+      baseUrl: model.baseUrl,
+      reasoning: model.reasoning,
+      apiKey,
+      headers,
+      env,
+      thinkingLevel,
+      retry,
+      attempts: compactAttempts,
+      firstThinkingLevel: firstCompactThinkingLevel,
+      summaryReserveTokens: preparation?.settings?.reserveTokens,
+    }),
+    firstKeptEntryId: "kept-1",
+    tokensBefore: 1000,
+    details: { readFiles: [], modifiedFiles: [] },
+  };
+};
 export const createBashToolDefinition = (_cwd, options = {}) => ({
   name: "bash",
   label: "bash",
@@ -710,6 +729,85 @@ describe("Pi SDK worker protocol", () => {
     });
   });
 
+  it("raises the summary output budget and caps an inherited thinking level", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      // “跟随聊天”（inherit）+ 支持 max 档的压缩模型。
+      compactionConfig: { thinkingLevel: "inherit", modelMode: "custom", model: "luna/gpt-5.6-luna" },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    // 聊天档位调到 max：继承给摘要请求会把输出预算耗在思考上，必须下调到 medium。
+    worker.send({ id: "switch", type: "setModel", provider: "luna", modelId: "gpt-5.6-luna" });
+    await worker.waitFor((message) => message.type === "model_changed");
+    worker.send({ id: "level", type: "setThinkingLevel", level: "max" });
+    await expect(worker.waitFor((message) => message.id === "level"))
+      .resolves.toMatchObject({ type: "thinking_level_changed", level: "max" });
+    worker.send({ id: "compact-inherit", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-inherit");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({
+      id: "gpt-5.6-luna",
+      provider: "luna",
+      thinkingLevel: "medium",
+      // pi 默认 reserveTokens=16384 只给摘要 13107 tokens，压缩前抬高到 32768。
+      summaryReserveTokens: 32768,
+    });
+  });
+
+  it("retries a token-capped summary with the lowest thinking level", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-cap", type: "prompt", message: "compact-token-cap-once", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-cap");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({
+      id: "pi-model",
+      // 第一次以默认 low 档被输出上限截断，第二次降到 off 档重试成功，不必回退到别的模型。
+      firstThinkingLevel: "low",
+      thinkingLevel: "off",
+      attempts: 2,
+    });
+    expect(worker.messages.some((item) => item.type === "status" && String(item.title || "").includes("不可用"))).toBe(false);
+  });
+
+  it("suspends auto compaction after repeated failures and resumes when the config changes", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    const runFailingCompaction = async (id: string) => {
+      worker.send({ id, type: "prompt", message: "compact-fail-always", permissionMode: "full-access" });
+      await worker.waitFor((message) => message.type === "prompt_done" && message.id === id);
+      const last = worker.messages.filter((item) => item.type === "message_end").at(-1);
+      return String((last?.message as { text?: unknown })?.text || "");
+    };
+
+    await runFailingCompaction("fail-1");
+    expect(worker.messages.some((item) => item.type === "status" && String(item.title || "") === "上下文压缩已暂停")).toBe(false);
+
+    // 第二次彻底失败达到阈值：发出暂停提示，不再反复发起注定失败的摘要请求。
+    expect(await runFailingCompaction("fail-2")).toBe("continued");
+    expect(worker.messages.some((item) => item.type === "status" && String(item.title || "") === "上下文压缩已暂停")).toBe(true);
+
+    // 已暂停：自动压缩直接取消，不再产生摘要请求。
+    expect(await runFailingCompaction("fail-3")).toBe("compaction-cancelled");
+
+    // 用户改完压缩配置（例如换了渠道/模型）后恢复尝试。
+    worker.send({ id: "resume", type: "setCompactionConfig", config: { enabled: true, thinkingLevel: "low" } });
+    await worker.waitFor((message) => message.type === "compaction_config_changed");
+    expect(await runFailingCompaction("fail-4")).toBe("continued");
+  });
+
   it("uses a configured OpenAI-compatible model for Agent compaction", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -769,6 +867,28 @@ describe("Pi SDK worker protocol", () => {
     });
   });
 
+  it("re-reads the model catalogue before reporting a freshly added compaction model", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      // 渠道弹窗在会话运行期间新加入的模型：init 快照里 find 不到，
+      // refresh（重读磁盘配置）之后才能找到，不应误报不可用。
+      compactionConfig: { modelMode: "custom", model: "tanwan/gpt-5.6-sol" },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-added", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-added");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
+    expect(summary).toMatchObject({ id: "gpt-5.6-sol", provider: "tanwan" });
+    expect(worker.messages.some((item) => item.type === "status"
+      && String(item.title || "").includes("自定义压缩模型不可用"))).toBe(false);
+  });
+
   it("falls back to the current model when the configured channel model is gone", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -788,6 +908,9 @@ describe("Pi SDK worker protocol", () => {
     expect(summary).toMatchObject({ id: "pi-model", provider: "test-provider" });
     expect(worker.messages.some((item) => item.type === "status"
       && String(item.detail || "").includes("已配置的压缩模型不可用"))).toBe(true);
+    // 用户看不懂“不可用”应该怎么做：detail 里要给可直接照做的指引。
+    expect(worker.messages.some((item) => item.type === "status"
+      && String(item.detail || "").includes("跟随当前 Agent 模型"))).toBe(true);
   });
 
   it("cancels compaction when the channel config disables it", async () => {
@@ -823,6 +946,30 @@ describe("Pi SDK worker protocol", () => {
     await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-hot");
     const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
     expect((message?.message as { text?: unknown })?.text).toBe("compaction-cancelled");
+  });
+
+  it("applies a hot-updated subagent config without restarting the worker", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      subagentConfig: { enabled: true, defaultModelMode: "custom", defaultModel: "provider/first" },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    // 弹窗「应用 SubAgent 设置」走的路径：模型/profile 热更新后
+    // 下一次 subagent 调用即使用新配置。
+    worker.send({
+      id: "subagent-cfg",
+      type: "setSubagentConfig",
+      config: { enabled: true, defaultModelMode: "custom", defaultModel: "provider/second" },
+    });
+    await expect(worker.waitFor((message) => message.id === "subagent-cfg"))
+      .resolves.toMatchObject({
+        type: "subagent_config_changed",
+        config: { enabled: true, defaultModelMode: "custom", defaultModel: "provider/second" },
+      });
   });
 
   it("waits for an active post-turn compaction to settle before worker exit", async () => {

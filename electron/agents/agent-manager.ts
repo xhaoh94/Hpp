@@ -435,13 +435,11 @@ export class AgentManager {
     return agent.listActions(options);
   }
 
-  private async applyCompactionConfigToSessions(
-    config: AgentCompactionConfig,
+  private async applyBackendConfigToSessions(
     supportedSessions: Array<[string, AgentBackend]>,
+    apply: (agent: AgentBackend) => Promise<void>,
   ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[] }> {
-    const results = await Promise.allSettled(supportedSessions.map(([, agent]) =>
-      agent.setCompactionConfig!(config)
-    ));
+    const results = await Promise.allSettled(supportedSessions.map(([, agent]) => apply(agent)));
     const failedIndex = results.findIndex((result) => result.status === "rejected");
     if (failedIndex >= 0) {
       const failure = results[failedIndex] as PromiseRejectedResult;
@@ -465,7 +463,7 @@ export class AgentManager {
     const supportedSessions = Array.from(this.sessionAgents.entries()).filter(([, agent]) =>
       typeof agent.setCompactionConfig === "function"
     );
-    return this.applyCompactionConfigToSessions(config, supportedSessions);
+    return this.applyBackendConfigToSessions(supportedSessions, (agent) => agent.setCompactionConfig!(config));
   }
 
   async setAgentCompactionConfig(
@@ -480,7 +478,27 @@ export class AgentManager {
     const supportedSessions = Array.from(this.sessionAgents.entries()).filter(([sessionId, agent]) =>
       this.sessionAgentTypes.get(sessionId) === agentId && typeof agent.setCompactionConfig === "function"
     );
-    return this.applyCompactionConfigToSessions(config, supportedSessions);
+    return this.applyBackendConfigToSessions(supportedSessions, (agent) => agent.setCompactionConfig!(config));
+  }
+
+  /**
+   * 热更新某个 Agent 内置 SubAgent 配置。已初始化的会话会立即收到新配置，
+   * 下一次 subagent 调用即使用新模型，无需重载会话；未初始化的会话在
+   * 下次初始化时读取最新设置。
+   */
+  async setAgentSubagentConfig(
+    agentId: string,
+    value: unknown,
+  ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[] }> {
+    const capabilities = await agentRegistry.getCapabilities(agentId);
+    if (!capabilities.subagent || capabilities.subagent === "none") {
+      return { success: false, error: "当前 Agent 未声明 SubAgent 配置能力。", appliedSessionIds: [] };
+    }
+    const config = normalizeAgentSubagentConfig(value);
+    const supportedSessions = Array.from(this.sessionAgents.entries()).filter(([sessionId, agent]) =>
+      this.sessionAgentTypes.get(sessionId) === agentId && typeof agent.setSubagentConfig === "function"
+    );
+    return this.applyBackendConfigToSessions(supportedSessions, (agent) => agent.setSubagentConfig!(config));
   }
 
   async getModelsByAgentId(agentId: string): Promise<AgentModel[]> {
@@ -1425,6 +1443,14 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agent:setAgentCompactionConfig", async (_event, agentId: string, config: unknown) => {
     try {
       return await agentManager.setAgentCompactionConfig(agentId, config);
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), appliedSessionIds: [] };
+    }
+  });
+
+  ipcMain.handle("agent:setAgentSubagentConfig", async (_event, agentId: string, config: unknown) => {
+    try {
+      return await agentManager.setAgentSubagentConfig(agentId, config);
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err), appliedSessionIds: [] };
     }

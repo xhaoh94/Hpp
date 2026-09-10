@@ -235,11 +235,11 @@ export function AgentSubagentModal({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !saving) onClose();
+      if (event.key === "Escape") void requestCloseRef.current();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, saving]);
+  }, []);
 
   const updateConfig = (next: AgentSubagentConfig) => {
     setConfig(normalizeAgentSubagentConfig(next));
@@ -267,16 +267,16 @@ export function AgentSubagentModal({
     });
   };
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<boolean> => {
     const normalized = normalizeAgentSubagentConfig(config);
     if (normalized.defaultModelMode === "custom" && !normalized.defaultModel) {
       setStatus({ type: "error", text: "请选择默认 subagent 模型" });
-      return;
+      return false;
     }
     for (const [name, profile] of Object.entries(normalized.profiles)) {
       if (profile.modelMode === "custom" && !profile.model) {
         setStatus({ type: "error", text: `请为 ${name} 选择模型` });
-        return;
+        return false;
       }
     }
 
@@ -295,6 +295,27 @@ export function AgentSubagentModal({
       });
       if (!saved.success) throw new Error(saved.error || "保存 SubAgent 设置失败");
 
+      // 模型、profile 模型和热禁用可以直接热更新到运行中的会话：下一次
+      // subagent 调用即使用新配置，无需重载会话。只有从禁用切换为启用
+      // 需要重新注册 subagent 工具，仍走会话重载（空闲时生效）。
+      const enablingFromDisabled = !config.enabled && normalized.enabled;
+      const applyConfig = window.electronAPI.agentSetAgentSubagentConfig;
+      if (!enablingFromDisabled && typeof applyConfig === "function") {
+        const applied = await applyConfig(agentId, normalized);
+        if (!applied.success) throw new Error(applied.error || "SubAgent 设置热更新失败");
+        if (applied.appliedSessionIds?.length) {
+          setConfig(normalized);
+          setDirty(false);
+          setStatus({
+            type: "success",
+            text: `已保存并应用到 ${applied.appliedSessionIds.length} 个 ${agentName} 会话`,
+          });
+          return true;
+        }
+        // 没有赶上热更新的运行中会话（如插件未实现热更新）：回落到
+        // 会话重载，空闲会话会重建一次以应用新配置。
+      }
+
       const reloadResult = await window.electronAPI.agentReloadConfig(agentId);
       setConfig(normalized);
       setDirty(false);
@@ -311,19 +332,37 @@ export function AgentSubagentModal({
           text: `已保存；${reloadResult.error || "当前会话暂未重载，将在下次初始化时应用"}`,
         });
       }
+      return true;
     } catch (error) {
       setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      return false;
     } finally {
       setSaving(false);
     }
   };
+
+  // 关闭时还没保存的选择要自动保存：SubAgent 设置只有保存才会下发到
+  // 运行中的会话，直接丢弃会让用户以为配置“不生效”。
+  const savingRef = useRef(saving);
+  savingRef.current = saving;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const saveRef = useRef<() => Promise<boolean>>(handleSave);
+  saveRef.current = handleSave;
+  const requestClose = async () => {
+    if (savingRef.current) return;
+    if (dirtyRef.current && !(await saveRef.current())) return;
+    onClose();
+  };
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
 
   return createPortal(
     <div
       className="settings-modal-overlay agent-subagent-modal-overlay"
       onMouseDown={(event) => {
         event.stopPropagation();
-        if (!saving) onClose();
+        void requestCloseRef.current();
       }}
     >
       <div
@@ -342,7 +381,7 @@ export function AgentSubagentModal({
               <p>配置 Hpp fallback subagent；用户或项目同名 Pi 扩展仍然优先</p>
             </div>
           </div>
-          <button type="button" className="settings-modal-close" onClick={onClose} disabled={saving} aria-label="关闭">
+          <button type="button" className="settings-modal-close" onClick={() => void requestCloseRef.current()} disabled={saving} aria-label="关闭">
             <X size={18} />
           </button>
         </div>

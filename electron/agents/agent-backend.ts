@@ -73,6 +73,8 @@ export interface AgentBackend {
   setThinkingLevel(level: string): Promise<void>;
   /** 热更新通用压缩策略；未实现时在下次初始化读取。 */
   setCompactionConfig?(config: AgentCompactionConfig): Promise<void>;
+  /** 热更新内置 SubAgent 配置；未实现时在下次初始化读取。 */
+  setSubagentConfig?(config: AgentSubagentConfig): Promise<void>;
   sendUIResponse(response: AgentUIResponse): Promise<void>;
   dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;

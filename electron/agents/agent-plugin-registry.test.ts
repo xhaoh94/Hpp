@@ -473,6 +473,69 @@ export function getStatus() {
     expect(internals.pluginProcesses.size).toBe(0);
   });
 
+  it("reaps an idle plugin host once its last backend is gone", async () => {
+    const source = await createPluginSource(tempRoot, "idle-agent");
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+    const internals = registry as unknown as {
+      pluginProcesses: Map<string, unknown>;
+    };
+    const longIdle = Date.now() + 60 * 60_000;
+
+    const first = await registry.createBackend("idle-agent", "idle-session-1");
+    const second = await registry.createBackend("idle-agent", "idle-session-2");
+    expect(internals.pluginProcesses.has("idle-agent")).toBe(true);
+
+    // 还有会话后端时，无论空闲多久都不能回收宿主。
+    await expect(registry.reapIdlePluginHosts(longIdle)).resolves.toEqual([]);
+    expect(internals.pluginProcesses.has("idle-agent")).toBe(true);
+
+    await first.dispose();
+    await expect(registry.reapIdlePluginHosts(longIdle)).resolves.toEqual([]);
+    expect(internals.pluginProcesses.has("idle-agent")).toBe(true);
+
+    await second.dispose();
+    // 刚刚释放后端，空闲窗口尚未到期。
+    await expect(registry.reapIdlePluginHosts(Date.now())).resolves.toEqual([]);
+    expect(internals.pluginProcesses.has("idle-agent")).toBe(true);
+
+    await expect(registry.reapIdlePluginHosts(longIdle)).resolves.toEqual(["idle-agent"]);
+    expect(internals.pluginProcesses.has("idle-agent")).toBe(false);
+
+    // 下一次使用时按需冷启动一个全新的宿主。
+    const revived = await registry.createBackend("idle-agent", "idle-session-3");
+    expect(internals.pluginProcesses.has("idle-agent")).toBe(true);
+    await revived.dispose();
+  });
+
+  it("keeps a host that was queried after its last backend went away", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "fresh-agent",
+      "1.0.0",
+      undefined,
+      `
+${backendModule}
+export function getStatus() {
+  return { installed: true, updateAvailable: false, canUpdate: false };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+    const internals = registry as unknown as { pluginProcesses: Map<string, unknown> };
+
+    const backend = await registry.createBackend("fresh-agent", "fresh-session");
+    await backend.dispose();
+    // 刚发生的状态查询会刷新空闲窗口。
+    await registry.getStatus("fresh-agent");
+    const requestedAt = Date.now();
+
+    await expect(registry.reapIdlePluginHosts(requestedAt + 10 * 60_000 - 1_000)).resolves.toEqual([]);
+    expect(internals.pluginProcesses.has("fresh-agent")).toBe(true);
+    await expect(registry.reapIdlePluginHosts(requestedAt + 10 * 60_000 + 1_000)).resolves.toEqual([
+      "fresh-agent",
+    ]);
+  });
+
   it("serializes concurrent explicit reloads", async () => {
     const internals = registry as unknown as { performReload: () => Promise<unknown[]> };
     const performReload = vi.spyOn(internals, "performReload");

@@ -83,6 +83,11 @@ export class AgentPluginProcess {
     return this.request(method, params, timeoutMs);
   }
 
+  /** 正在等待宿主应答的请求数；供空闲回收确认宿主真的空闲。 */
+  get pendingRequestCount(): number {
+    return this.pending.size;
+  }
+
   async createBackend(
     sessionId: string,
     onEvent: (event: unknown) => void,

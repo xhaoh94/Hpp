@@ -77,6 +77,19 @@
   max-width: 480px;
 }
 
+.chat-header-session-title-clickable {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.chat-header-session-title-clickable:hover {
+  color: var(--accent-color);
+}
+
 @media (min-width: 1400px) {
   .chat-header-session-title {
     max-width: 720px;

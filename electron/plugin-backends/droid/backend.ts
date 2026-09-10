@@ -437,6 +437,7 @@ export class DroidAgent {
       stdio: ["pipe", "pipe", "pipe"],
       shell: executable.shell || false,
       env: getCommandEnv(),
+      windowsHide: true,
     } satisfies SpawnOptions);
 
     const decoder = new StringDecoder("utf8");

@@ -238,6 +238,7 @@ export class ClaudeSDKAgent {
         ...worker.env,
         CLAUDE_AGENT_SDK_PACKAGE_ROOT: runtimeRoot,
       },
+      windowsHide: true,
     });
     this.process = child;
 
