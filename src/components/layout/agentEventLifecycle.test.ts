@@ -1115,6 +1115,70 @@ describe("agent event terminal reconciliation", () => {
     harness.controller.clearAllStreamWatchdogs();
   });
 
+  it("tracks whether a compaction runs while the turn is still active", () => {
+    const harness = createHarness();
+
+    harness.controller.appendContextCompactionDivider(SESSION_ID, "compact-mid-run", "started", false);
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBe(true);
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBe(false);
+
+    harness.controller.appendContextCompactionDivider(SESSION_ID, "compact-mid-run", "completed");
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBeUndefined();
+
+    harness.controller.appendContextCompactionDivider(SESSION_ID, "compact-post-turn", "started", true);
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBe(true);
+
+    harness.controller.appendContextCompactionDivider(SESSION_ID, "compact-post-turn", "interrupted");
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBeUndefined();
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBeUndefined();
+
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
+  it("keeps blocking guidance only for compactions that report a post-turn phase", () => {
+    const harness = createHarness();
+
+    // Pi 上报运行中压缩（postTurn=false）：压缩结束 Pi 会继续对话，仍可引导。
+    dispatchAgentEvent(
+      { type: "context_compaction", id: "compact-mid-run", phase: "started", postTurn: false, sessionId: SESSION_ID },
+      harness.controller,
+    );
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBe(true);
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBe(false);
+    dispatchAgentEvent(
+      { type: "context_compaction", id: "compact-mid-run", phase: "completed", sessionId: SESSION_ID },
+      harness.controller,
+    );
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBeUndefined();
+
+    // Pi 上报收尾型压缩（postTurn=true）：本轮已结束，压缩期间不提供引导。
+    dispatchAgentEvent(
+      { type: "context_compaction", id: "compact-post-turn", phase: "started", postTurn: true, sessionId: SESSION_ID },
+      harness.controller,
+    );
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBe(true);
+    dispatchAgentEvent(
+      { type: "context_compaction", id: "compact-post-turn", phase: "completed", sessionId: SESSION_ID },
+      harness.controller,
+    );
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBeUndefined();
+
+    // 旧后端不上报压缩阶段：保持“压缩期间不引导”。
+    dispatchAgentEvent(
+      { type: "context_compaction", id: "compact-unknown", phase: "started", sessionId: SESSION_ID },
+      harness.controller,
+    );
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBe(true);
+    expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBeUndefined();
+    dispatchAgentEvent(
+      { type: "context_compaction", id: "compact-unknown", phase: "completed", sessionId: SESSION_ID },
+      harness.controller,
+    );
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBeUndefined();
+
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it("merges stream idle notices and accumulates each completed interval", async () => {
     vi.useFakeTimers();
     agentGetSessionState.mockResolvedValue({ success: true, idle: false });

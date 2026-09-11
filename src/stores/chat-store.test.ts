@@ -576,6 +576,21 @@ describe("chat process entry defaults", () => {
     expect(useChatStore.getState().compactingSessions["session-1"]).toBeUndefined();
   });
 
+  it("records whether a session is compacting after the turn already ended", () => {
+    useChatStore.setState({ activeSessionId: "session-1" });
+    const store = useChatStore.getState();
+
+    store.setSessionCompactionPostTurn("session-1", false);
+    expect(useChatStore.getState().compactionPostTurnSessions["session-1"]).toBe(false);
+
+    store.setSessionCompactionPostTurn("session-1", true);
+    expect(useChatStore.getState().compactionPostTurnSessions["session-1"]).toBe(true);
+
+    store.setSessionCompactionPostTurn("session-1", undefined);
+    expect(useChatStore.getState().compactionPostTurnSessions["session-1"]).toBeUndefined();
+    expect("session-1" in useChatStore.getState().compactionPostTurnSessions).toBe(false);
+  });
+
   it("atomically interrupts only running compaction dividers for one session", () => {
     useChatStore.getState().switchSession("session-compaction-interrupt");
     const store = useChatStore.getState();

@@ -108,6 +108,8 @@ export interface AgentEvent {
   turnId?: unknown;
   turnRevision?: unknown;
   lifecycleRevision?: unknown;
+  /** 压缩是否发生在本轮对话结束之后（收尾型）：此时压缩期间的消息无法再作为引导注入。 */
+  postTurn?: boolean;
   pendingUIRevision?: unknown;
   clientUserMessageId?: unknown;
   threadId?: unknown;

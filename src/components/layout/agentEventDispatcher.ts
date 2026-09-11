@@ -491,6 +491,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         currentSessionId,
         typeof event.id === "string" ? event.id : undefined,
         event.phase === "started" || event.phase === "interrupted" ? event.phase : "completed",
+        typeof event.postTurn === "boolean" ? event.postTurn : undefined,
       );
       break;
     case "turn_metadata":

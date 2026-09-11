@@ -129,6 +129,7 @@ import {
   createComposerDocument,
   getComposerImageNodes,
   getComposerPlainText,
+  truncateComposerDocumentLines,
   withoutComposerImages,
   type ComposerDocument,
   type ComposerNode,
@@ -141,6 +142,9 @@ type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: st
 type MessagePayload = PreparedSessionMessage;
 
 const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+
+/** 用户发言折叠后保留的行数，超过该行数时展示“显示更多”。 */
+const COLLAPSED_USER_MESSAGE_LINES = 10;
 
 const documentFromDraftParts = (draft: {
   text: string;
@@ -211,7 +215,8 @@ type QueuePanelProps = {
   items: QueuedMessage[];
   canGuide: boolean;
   currentSessionRunning: boolean;
-  compactionInProgress: boolean;
+  /** 收尾型压缩进行中（本轮对话已结束）：压缩期间无法再把队列消息作为引导注入。 */
+  compactionBlocksGuidance: boolean;
   onGuide: (item: QueuedMessage) => void;
   onEdit: (item: QueuedMessage) => void;
   onReorder: (itemId: string, toIndex: number) => void;
@@ -231,7 +236,7 @@ function MessageQueuePanel({
   items,
   canGuide,
   currentSessionRunning,
-  compactionInProgress,
+  compactionBlocksGuidance,
   onGuide,
   onEdit,
   onReorder,
@@ -344,7 +349,7 @@ function MessageQueuePanel({
               <button type="button" className="chat-queue-icon-btn" onClick={() => onEdit(item)} disabled={item.status === "sending"} title="编辑">
                 <Pencil size={14} />
               </button>
-              {canGuide && !compactionInProgress && !item.action && (
+              {canGuide && !compactionBlocksGuidance && !item.action && (
                 <button
                   type="button"
                   className="chat-queue-action"
@@ -1134,11 +1139,19 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const hasOrderedContent = !!orderedComposerDocument && composerDocumentHasContent(orderedComposerDocument);
   const hasRawContent = msg.content.trim().length > 0;
   const hasTextAttachments = userMessagePresentation.attachments.length > 0;
-  const userMessageLines = msg.role === "user" ? userMessagePresentation.text.split(/\r?\n/) : [];
-  const userMessageIsLong = userMessageLines.length > 10;
-  const displayedUserContent = userMessageIsLong && !userMessageExpanded
-    ? userMessageLines.slice(0, 10).join("\n")
+  // 有 composer 文档时以文档文本计行，避免芯片标签影响折叠判断。
+  const userMessageText = orderedComposerDocument
+    ? getComposerPlainText(orderedComposerDocument)
     : userMessagePresentation.text;
+  const userMessageLines = msg.role === "user" ? userMessageText.split(/\r?\n/) : [];
+  const userMessageIsLong = userMessageLines.length > COLLAPSED_USER_MESSAGE_LINES;
+  const displayedUserContent = userMessageIsLong && !userMessageExpanded
+    ? userMessageLines.slice(0, COLLAPSED_USER_MESSAGE_LINES).join("\n")
+    : userMessagePresentation.text;
+  // 富文本发言（携带 composer 文档）同样需要折叠，否则“显示更多”不起作用。
+  const displayedComposerDocument = orderedComposerDocument && userMessageIsLong && !userMessageExpanded
+    ? truncateComposerDocumentLines(orderedComposerDocument, COLLAPSED_USER_MESSAGE_LINES)
+    : orderedComposerDocument;
   const hasVisibleBubble =
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction)
@@ -1229,8 +1242,8 @@ const ChatMessageItem = memo(function ChatMessageItem({
                     )}
                     {msg.role === "user" && (hasOrderedContent || hasTextAttachments || hasSessionReferences || hasContent) && (
                       <div className="chat-user-message-flow">
-                        {orderedComposerDocument ? (
-                          <ComposerMessageFlow document={orderedComposerDocument} onOpenImage={onOpenImage} />
+                        {displayedComposerDocument ? (
+                          <ComposerMessageFlow document={displayedComposerDocument} onOpenImage={onOpenImage} />
                         ) : (
                           <>
                         {userMessagePresentation.attachments.map((attachment, index) => (
@@ -2152,6 +2165,13 @@ export function ChatPanel({
   ));
   const activeSessionCompacting = useChatStore((state) =>
     activeSessionId ? state.compactingSessions[activeSessionId] === true : false
+  );
+  // 收尾型压缩（本轮对话结束后才开始）没有后续对话；压缩阶段未知时也维持不引导。
+  const activeSessionCompactionBlocksGuidance = useChatStore((state) =>
+    activeSessionId
+      ? state.compactingSessions[activeSessionId] === true
+        && state.compactionPostTurnSessions[activeSessionId] !== false
+      : false
   );
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
   const activeSessionSupportsActions = supportsAgentActions(activeSession?.agentId || activeAgentId);
@@ -3236,13 +3256,15 @@ export function ChatPanel({
   }, [permissionMode, planModeEnabled, sendPayloadNow]);
 
   const handleGuideQueuedMessage = useCallback(async (item: QueuedMessage) => {
-    if (!activeSessionSupportsGuidance) return;
+    // 收尾型压缩期间没有回合会消费引导（按钮已隐藏，这里兼做兜底拦截）。
+    if (!activeSessionSupportsGuidance || activeSessionCompactionBlocksGuidance) return;
     try {
       await SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id);
     } catch (error) {
       showFloatingToastMessage(error instanceof Error ? error.message : String(error));
     }
   }, [
+    activeSessionCompactionBlocksGuidance,
     activeSessionSupportsGuidance,
   ]);
 
@@ -3596,7 +3618,7 @@ export function ChatPanel({
         items={activeQueuedMessages}
         canGuide={activeSessionSupportsGuidance}
         currentSessionRunning={currentSessionRunning}
-        compactionInProgress={activeSessionCompacting}
+        compactionBlocksGuidance={activeSessionCompactionBlocksGuidance}
         onGuide={handleGuideQueuedMessage}
         onEdit={(item) => setQueueEditingId(item.id)}
         onReorder={handleReorderQueuedMessage}

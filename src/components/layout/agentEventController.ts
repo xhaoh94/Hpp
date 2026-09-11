@@ -194,6 +194,7 @@ export function createAgentEventController({
       runtime.activeCompactionPresentation = null;
     }
     useChatStore.getState().interruptSessionCompaction(sessionId);
+    useChatStore.getState().setSessionCompactionPostTurn(sessionId, undefined);
   };
 
   const promoteContextCompactionToDivider = (sessionId: string) => {
@@ -1076,6 +1077,7 @@ export function createAgentEventController({
     currentSessionId: string,
     eventId?: string,
     phase: "started" | "completed" | "interrupted" = "completed",
+    postTurn?: boolean,
   ) => {
     const runtime = getRuntime(currentSessionId);
     const normalizedEventId = phase === "started"
@@ -1099,6 +1101,9 @@ export function createAgentEventController({
       runtime.activeCompactionId = normalizedEventId;
       runtime.activeCompactionPresentation = presentation;
       useChatStore.getState().setSessionCompacting(currentSessionId, true);
+      // 收尾型压缩没有后续对话，压缩期间不能再注入引导；运行中压缩结束后 Pi 会继续对话并消费引导。
+      // postTurn 缺省表示后端未上报压缩阶段（保持“压缩期间不引导”的旧行为）。
+      useChatStore.getState().setSessionCompactionPostTurn(currentSessionId, postTurn);
       completeIdleNotice(currentSessionId);
       finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
@@ -1138,6 +1143,7 @@ export function createAgentEventController({
     }
     rememberSettledCompactionEvent(runtime, normalizedEventId);
     useChatStore.getState().setSessionCompacting(currentSessionId, false);
+    useChatStore.getState().setSessionCompactionPostTurn(currentSessionId, undefined);
     runtime.activeCompactionId = null;
     runtime.activeCompactionPresentation = null;
     if (!runtime.processActive && !hasOpenAssistantProcess(currentSessionId)) {

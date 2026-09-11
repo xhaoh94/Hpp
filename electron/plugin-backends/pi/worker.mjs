@@ -195,6 +195,10 @@ let shellAvailable = false;
 let shellWarningEmitted = false;
 let shellEnvironment = { platform: process.platform, shellFamily: "unknown", shellPath: "" };
 let activeCompactionId = null;
+// 本轮 agent run 是否仍在进行中。压缩既可能发生在轮次结束之后（收尾型：压缩完回空闲），
+// 也可能发生在运行中（工具循环之间、溢出恢复重试：压缩完对话继续）。
+// 只有运行中压缩期间排队的引导，才会在 Pi 继续对话时被消费。
+let agentRunActive = false;
 const completedPromptIds = new Set();
 const actionKeys = new Set();
 
@@ -672,6 +676,7 @@ const disposeSession = async () => {
   fullAccessToolNames = [];
   planModeToolNames = [];
   activeCompactionId = null;
+  agentRunActive = false;
   completedPromptIds.clear();
   dismissSubagentUIRequests(undefined, "dispose");
   unsubscribe?.();
@@ -1329,6 +1334,10 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
       // Offline or network error – fall back to whatever models.json already
       // contains from a previous successful refresh.
     }
+    // Resolve context windows from pi's built-in catalogue before the session
+    // starts: Hpp-synced channels only declare id/name/reasoning/input, which
+    // would otherwise leave every custom model at pi's 128k default.
+    await applyCatalogueContextWindows(modelRuntime);
   } else {
     authStorage = requireSDKFactory("AuthStorage").create(join(agentDir, "auth.json"));
     createdModelRegistry = requireSDKFactory("ModelRegistry").create(authStorage, join(agentDir, "models.json"));
@@ -1428,6 +1437,48 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
 
 const actionText = (value) => typeof value === "string" ? value.trim() : "";
 
+// Pi 扩展注册的命令在 SDK 里存成 Map（extension.commands），不是数组；
+// 兼容 Map / 数组 / 普通对象三种形态。
+const collectionValues = (value) => {
+  if (value instanceof Map) return [...value.values()];
+  if (Array.isArray(value)) return value;
+  if (isRecord(value)) return Object.values(value);
+  return [];
+};
+
+// Hpp 客户端命令：Pi 的内置斜杠命令（compact/export/...）只在它自己的 TUI 里实现，
+// SDK 嵌入模式需要宿主提供入口。这些命令由 worker 直接执行、不经过模型。
+const CLIENT_COMMANDS = [
+  {
+    name: "compact",
+    description: "手动压缩当前会话上下文",
+    argumentHint: "[补充说明]",
+    run: async (message) => {
+      if (typeof session?.compact !== "function") {
+        throw new Error("ACTION_NOT_SUPPORTED: 当前 Pi SDK 不支持手动压缩");
+      }
+      await session.compact(message || undefined);
+    },
+  },
+];
+
+const findClientCommand = (name) => CLIENT_COMMANDS.find((command) => command.name === name) || null;
+
+const clientCommandFromAction = (action) => {
+  if (!isRecord(action) || action.kind !== "command") return null;
+  return findClientCommand(actionText(action.name).replace(/^\//, ""));
+};
+
+// 用户在 Pi 扩展里注册了同名命令时以扩展为准（交给 Pi 原生命令分发执行）。
+const hasRegisteredPiCommand = (name) => {
+  try {
+    return typeof session?.extensionRunner?.getCommand === "function"
+      && Boolean(session.extensionRunner.getCommand(name));
+  } catch {
+    return false;
+  }
+};
+
 const actionEntry = (kind, value) => {
   if (!isRecord(value)) return null;
   const name = actionText(value.name || value.command || value.id).replace(/^\//, "");
@@ -1461,14 +1512,33 @@ const getActions = async (reload = false) => {
     }
   }
   const extensions = resourceLoader.getExtensions?.()?.extensions;
-  if (Array.isArray(extensions)) {
-    for (const extension of extensions) {
-      const commands = isRecord(extension) && Array.isArray(extension.commands) ? extension.commands : [];
-      for (const value of commands) {
+  const registeredCommands = typeof session?.extensionRunner?.getRegisteredCommands === "function"
+    ? session.extensionRunner.getRegisteredCommands()
+    : [];
+  if (Array.isArray(registeredCommands) && registeredCommands.length > 0) {
+    for (const command of registeredCommands) {
+      // invocationName 才是可调用的名字（重名命令为 name:2），与 Pi TUI 一致。
+      const entry = actionEntry("command", { ...command, name: command?.invocationName || command?.name });
+      if (entry) entries.push(entry);
+    }
+  } else {
+    // 旧版 SDK 没有命令运行器（或尚未注册任何命令）时退回读取扩展对象。
+    // 真实 SDK 里 extension.commands 是 Map，按数组读取会永远取空。
+    for (const extension of Array.isArray(extensions) ? extensions : []) {
+      for (const value of collectionValues(isRecord(extension) ? extension.commands : undefined)) {
         const entry = actionEntry("command", value);
         if (entry) entries.push(entry);
       }
     }
+  }
+  // 客户端命令排在扩展之后：用户在扩展里注册同名命令时以扩展优先。
+  for (const command of CLIENT_COMMANDS) {
+    entries.push({
+      kind: "command",
+      name: command.name,
+      ...(command.description ? { description: command.description } : {}),
+      ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+    });
   }
   const unique = [];
   const seen = new Set();
@@ -1497,7 +1567,14 @@ const resolveActionPrompt = async (action, message) => {
 const handleSessionEvent = (event) => {
   if (event.type === "compaction_start") {
     activeCompactionId = randomUUID();
-    send({ type: "context_compaction", id: activeCompactionId, phase: "started" });
+    send({
+      type: "context_compaction",
+      id: activeCompactionId,
+      phase: "started",
+      // 收尾型压缩没有后续对话，压缩期间的消息无法再作为引导注入；
+      // 运行中压缩结束后 Pi 会继续对话并消费排队中的引导。
+      postTurn: !agentRunActive,
+    });
     return;
   }
   if (event.type === "compaction_end") {
@@ -1517,6 +1594,7 @@ const handleSessionEvent = (event) => {
 
   switch (event.type) {
     case "agent_start":
+      agentRunActive = true;
       send({ type: "agent_start" });
       break;
     case "message_start": {
@@ -1531,9 +1609,11 @@ const handleSessionEvent = (event) => {
       break;
     }
     case "agent_end":
+      agentRunActive = false;
       send({ type: "agent_end" });
       break;
     case "agent_settled":
+      agentRunActive = false;
       finishPrompt(activePromptId);
       break;
     case "message_update": {
@@ -1640,6 +1720,119 @@ const isCompleteThinkingLevelMap = (map) =>
 /** 能力 map 中显式声明“不支持”(null) 的档位数。 */
 const countNullThinkingLevels = (map) =>
   PI_STANDARD_THINKING_LEVELS.filter((level) => map[level] === null).length;
+
+// Lazy index of the SDK's built-in catalogue context windows. Hpp-synced
+// models.json entries for custom channels carry only id/name/reasoning/input,
+// so pi reports pi's 128k default for them. When a configured model id also
+// exists in the built-in catalogue, adopt the catalogue window (largest among
+// providers) so custom channels compact on the upstream model's real limit.
+const CATALOGUE_WINDOW_IGNORED_PROVIDERS = ["cloudflare-workers-ai", "cloudflare-ai-gateway"];
+const CATALOGUE_DEFAULT_CONTEXT_WINDOW = 128000;
+const CATALOGUE_DEFAULT_MAX_TOKENS = 16384;
+let builtinContextWindows = null;
+let builtinContextWindowsFailed = false;
+
+const getBuiltinContextWindows = async () => {
+  if (builtinContextWindows || builtinContextWindowsFailed) return builtinContextWindows;
+  try {
+    if (typeof sdk?.ModelRuntime?.create !== "function" || typeof sdk?.ModelRegistry !== "function") {
+      builtinContextWindowsFailed = true;
+      return null;
+    }
+    // modelsPath: null keeps only the built-in catalogue (no custom models.json).
+    const runtime = await sdk.ModelRuntime.create({ modelsPath: null });
+    const registry = new sdk.ModelRegistry(runtime);
+    const windows = new Map();
+    const providerIds = new Set();
+    for (const model of registry.getAll?.() || []) {
+      if (!isRecord(model) || !model.id) continue;
+      const provider = String(model.provider || "");
+      providerIds.add(provider);
+      // Cloudflare entries report a gateway limit rather than the model window.
+      if (CATALOGUE_WINDOW_IGNORED_PROVIDERS.includes(provider)) continue;
+      const window = Number(model.contextWindow) || 0;
+      if (window <= 0) continue;
+      const key = String(model.id).toLowerCase();
+      if (window > (windows.get(key) || 0)) windows.set(key, window);
+    }
+    builtinContextWindows = { windows, providerIds };
+    return builtinContextWindows;
+  } catch {
+    builtinContextWindowsFailed = true;
+    return null;
+  }
+};
+
+/** Rebuild one channel's model list with catalogue-resolved context windows. */
+const buildCatalogueWindowModels = (providerConfig, windows) => {
+  const definitions = isRecord(providerConfig) && Array.isArray(providerConfig.models) ? providerConfig.models : [];
+  const overrides = isRecord(providerConfig?.modelOverrides) ? providerConfig.modelOverrides : {};
+  const models = [];
+  for (const definition of definitions) {
+    if (!isRecord(definition) || typeof definition.id !== "string" || !definition.id) continue;
+    const override = isRecord(overrides[definition.id]) ? overrides[definition.id] : undefined;
+    const declared = Number(definition.contextWindow) || Number(override?.contextWindow) || 0;
+    const thinkingLevelMap = definition.thinkingLevelMap ?? override?.thinkingLevelMap;
+    const samplingParams = definition.samplingParams ?? override?.samplingParams;
+    const compat = definition.compat ?? override?.compat;
+    models.push({
+      id: definition.id,
+      name: definition.name ?? definition.id,
+      reasoning: definition.reasoning ?? override?.reasoning ?? false,
+      input: definition.input ?? override?.input ?? ["text"],
+      cost: definition.cost ?? override?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      // Catalogue first, then the window declared in models.json, then pi's default.
+      contextWindow: windows.get(definition.id.toLowerCase()) || declared || CATALOGUE_DEFAULT_CONTEXT_WINDOW,
+      maxTokens: definition.maxTokens ?? override?.maxTokens ?? CATALOGUE_DEFAULT_MAX_TOKENS,
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      ...(samplingParams ? { samplingParams } : {}),
+      ...(compat ? { compat } : {}),
+    });
+  }
+  return models;
+};
+
+/**
+ * Re-register every custom (non built-in) channel from models.json with
+ * context windows resolved from pi's built-in catalogue. Runs once per worker
+ * start-up, after the registry loaded models.json and before the session is
+ * created, so Hpp sessions compact on the upstream model's real window instead
+ * of pi's 128k default. Channels and models the catalogue does not know keep
+ * the window declared in models.json.
+ */
+const applyCatalogueContextWindows = async (modelRuntime) => {
+  try {
+    if (!modelRuntime || typeof modelRuntime.registerProvider !== "function") return;
+    const catalogue = await getBuiltinContextWindows();
+    if (!catalogue || catalogue.windows.size === 0) return;
+    const configPath = join(sdk.getAgentDir(), "models.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    const providers = isRecord(config?.providers) ? config.providers : null;
+    if (!providers) return;
+    for (const [providerId, providerConfig] of Object.entries(providers)) {
+      // First-party providers already ship correct metadata in the SDK.
+      if (catalogue.providerIds.has(providerId)) continue;
+      const models = buildCatalogueWindowModels(providerConfig, catalogue.windows);
+      if (models.length === 0) continue;
+      modelRuntime.registerProvider(providerId, {
+        models,
+        // The channel dialog can rewrite models.json while this worker stays
+        // alive: re-read it on refresh so new models and windows stay current.
+        refreshModels: async () => {
+          try {
+            const nextConfig = JSON.parse(readFileSync(configPath, "utf8"));
+            const nextModels = buildCatalogueWindowModels(nextConfig?.providers?.[providerId], catalogue.windows);
+            return nextModels.length > 0 ? nextModels : models;
+          } catch {
+            return models;
+          }
+        },
+      });
+    }
+  } catch {
+    // Catalogue resolution must never block worker start-up.
+  }
+};
 
 // Lazy index of the SDK's built-in catalogue capability maps. Hpp-synced
 // models.json entries for custom channels carry only id/name/reasoning/input,
@@ -1784,7 +1977,16 @@ const handleCommand = async (command) => {
           });
         }
         send({ type: "accepted", id: command.id });
-        session.prompt(await resolveActionPrompt(command.action, command.message), { images: command.images })
+        // 客户端命令（如手动压缩）由 worker 直接执行，不发给模型。
+        Promise.resolve()
+          .then(async () => {
+            const clientCommand = clientCommandFromAction(command.action);
+            if (clientCommand && !hasRegisteredPiCommand(clientCommand.name)) {
+              await clientCommand.run(command.message);
+              return;
+            }
+            await session.prompt(await resolveActionPrompt(command.action, command.message), { images: command.images });
+          })
           .then(() => {
             if (activePromptId === command.id) finishPrompt(command.id);
           })
@@ -1800,6 +2002,11 @@ const handleCommand = async (command) => {
         }
         if (typeof command.hostSystemPrompt === "string") {
           activeHostSystemPrompt = command.hostSystemPrompt.trim();
+        }
+        if (!agentRunActive) {
+          // steer() 只是入队。本轮已经结束时没有任何运行的回合会消费它，
+          // 消息会一直卡在 Pi 的引导队列里，不如直接拒绝并让用户重新发送。
+          throw new Error("当前对话本轮已结束，无法作为引导注入，请直接发送消息");
         }
         await session.steer(command.message, command.images);
         send({ type: "guidance_done", id: command.id });

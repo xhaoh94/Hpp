@@ -973,6 +973,9 @@ export class PiSDKAgent {
           id: record.id,
           phase: record.phase,
           detail: record.error,
+          // 收尾型压缩（本轮对话已结束才开始）没有后续对话继续，
+          // 渲染层据此隐藏压缩期间的引导入口。
+          postTurn: record.postTurn === true,
         });
         if (record.phase !== "started") this.refreshAgentEndFallback();
         break;

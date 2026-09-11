@@ -221,6 +221,22 @@ describe("Pi lifecycle", () => {
     expect(agent.isIdle()).toBe(true);
   });
 
+  it("forwards the compaction phase reported by the worker", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-mid-run", phase: "started", postTurn: false });
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-post-turn", phase: "started", postTurn: true });
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-legacy", phase: "started" });
+
+    const compactionEvents = events.filter((event) => event.type === "context_compaction");
+    // 第三个事件代表旧后端：未上报压缩阶段时按 false 处理，渲染层维持压缩期间不引导。
+    expect(compactionEvents.map((event) => event.postTurn)).toEqual([false, true, false]);
+  });
+
   it("waits out an active compaction before asking the worker for models", async () => {
     const child = new FakePiProcess();
     const getModelsCommands: string[] = [];

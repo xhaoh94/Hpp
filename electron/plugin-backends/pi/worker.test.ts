@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { createInterface } from "readline";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,6 +13,10 @@ const TEST_HOST_SYSTEM_PROMPT = `[HPP 语言规则]
 代码、标识符、文件路径、命令、日志、API 名称和专有名词应保持原文，除非为了说明确有必要翻译。`;
 
 const fakeSDKSource = `
+import { appendFileSync } from "node:fs";
+const registeredExtensionCommands = process.env.PI_TEST_REGISTERED_COMMANDS
+  ? JSON.parse(process.env.PI_TEST_REGISTERED_COMMANDS)
+  : [];
 class FakeSessionManager {
   static create() { return new FakeSessionManager(); }
   static open() { return new FakeSessionManager(); }
@@ -36,6 +40,7 @@ class FakeSession {
   beforeProviderRequestHandlers = [];
   sessionBeforeCompactHandlers = [];
   registeredTools = [];
+  compactCalls = [];
   lastSystemPrompt = "BASE_SYSTEM_PROMPT";
   baseSystemPrompt = "BASE_SYSTEM_PROMPT";
 
@@ -80,6 +85,20 @@ class FakeSession {
     this.thinkingLevel = levels.includes(level) ? level : levels[0];
   }
   async setModel(model) { this.model = model; }
+  // 真实 SDK 的 AgentSession.extensionRunner 暴露 getRegisteredCommands/getCommand。
+  get extensionRunner() {
+    return {
+      getRegisteredCommands: () => registeredExtensionCommands,
+      getCommand: (name) => registeredExtensionCommands.find((command) => (command.invocationName || command.name) === name),
+    };
+  }
+  async compact(instructions) {
+    this.compactCalls.push(instructions ?? null);
+    this.listener?.({ type: "agent_start" });
+    this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "compacted:" + (instructions ?? "") }], stopReason: "stop" } });
+    this.listener?.({ type: "agent_end" });
+    this.listener?.({ type: "agent_settled" });
+  }
   async steer() {}
   dispose() {}
 
@@ -138,7 +157,7 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
-    if (message.startsWith("/skill:review") || message.startsWith("/scout-and-plan") || message.startsWith("/implement") || message.startsWith("/implement-and-review")) {
+    if (message.startsWith("/skill:review") || message.startsWith("/scout-and-plan") || message.startsWith("/implement") || message.startsWith("/implement-and-review") || message.startsWith("/compact")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
@@ -196,6 +215,17 @@ class FakeSession {
       this.listener?.({ type: "compaction_end", reason: "threshold", aborted: cancelled, willRetry: true });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: compaction?.summary || (cancelled ? "compaction-cancelled" : "continued") }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "compact-post-turn") {
+      // 收尾型压缩：agent_end 之后才开始（压缩完直接回空闲）。
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "turn-finished" }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "compaction_start", reason: "threshold" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      this.listener?.({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
       this.listener?.({ type: "agent_settled" });
       return;
     }
@@ -327,6 +357,18 @@ const refreshAddedModel = {
 };
 export const ModelRuntime = process.env.PI_TEST_BUILTIN_FALLBACK === "1" || process.env.PI_TEST_BUILTIN_ID_FALLBACK === "1"
   ? { create: async (options = {}) => ({ modelsPath: options.modelsPath }) }
+  : process.env.PI_TEST_BUILTIN_CATALOGUE === "1"
+  ? {
+      create: async (options = {}) => ({
+        modelsPath: options.modelsPath,
+        // 记录 worker 启动时重新注册的渠道，供用例断言窗口修正结果。
+        registerProvider: (providerId, config) => {
+          const logPath = process.env.PI_TEST_REGISTRY_LOG;
+          if (!logPath) return;
+          appendFileSync(logPath, JSON.stringify({ providerId, config }) + "\\n");
+        },
+      }),
+    }
   : undefined;
 export class ModelRegistry {
   constructor(runtime) { this.runtime = runtime; this.refreshCount = 0; }
@@ -346,6 +388,7 @@ export class ModelRegistry {
       return [
         builtinDeepSeekModel,
         ...(process.env.PI_TEST_BUILTIN_ID_FALLBACK === "1" ? builtinTerraModels : []),
+        ...(process.env.PI_TEST_BUILTIN_CATALOGUE === "1" ? builtinCatalogueWindowModels : []),
       ];
     }
     return [...availableModels, proxyModel];
@@ -401,6 +444,13 @@ const builtinTerraModels = [
     },
   },
 ];
+// 模拟 pi-ai 内置目录的上下文窗口：同一模型存在多条 provider 声明，
+// cloudflare 条目上报的是网关上限，不参与取最大值。
+const builtinCatalogueWindowModels = [
+  { id: "gpt-5.6-sol", provider: "opencode", contextWindow: 400000, reasoning: true },
+  { id: "gpt-5.6-sol", provider: "cloudflare-workers-ai", contextWindow: 9999999, reasoning: true },
+  { id: "gpt-5.6-sol", provider: "openai", contextWindow: 262144, reasoning: true },
+];
 export const SettingsManager = { create: () => ({ getRetrySettings: () => ({ enabled: true, maxRetries: 1, baseDelayMs: 1 }) }) };
 export class DefaultResourceLoader {
   constructor(options = {}) {
@@ -425,7 +475,8 @@ export class DefaultResourceLoader {
     return {
       extensions: [
         { path: "<inline:1>", handlers: new Map([["tool_call", [() => undefined]]]) },
-        { commands: [{ name: "inspect", description: "Inspect project" }] },
+        // 真实 SDK 里扩展命令集合是 Map（loader 的 extension.commands）。
+        { commands: new Map([["inspect", { name: "inspect", description: "Inspect project" }]]) },
       ],
     };
   }
@@ -652,6 +703,46 @@ describe("Pi SDK worker protocol", () => {
     })]));
   });
 
+  it("adopts built-in catalogue context windows for custom channels on start-up", async () => {
+    // Hpp 同步写入 models.json 的自建渠道只声明 id/name/reasoning/input。
+    await writeFile(join(agentDir, "models.json"), JSON.stringify({
+      providers: {
+        tanwan: {
+          name: "Tanwan",
+          baseUrl: "https://api.example.com/v1",
+          api: "openai-responses",
+          apiKey: "test-key",
+          models: [
+            { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, input: ["text"] },
+            { id: "unknown-model", name: "Unknown", reasoning: true, input: ["text"] },
+            { id: "declared-model", name: "Declared", reasoning: true, input: ["text"], contextWindow: 555000 },
+          ],
+        },
+      },
+    }), "utf8");
+    const registryLog = join(tempRoot, "registry-log.jsonl");
+    const worker = startWorker(runtimeRoot, agentDir, {
+      PI_TEST_BUILTIN_CATALOGUE: "1",
+      PI_TEST_REGISTRY_LOG: registryLog,
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    type RegistryEntry = { providerId: string; config: { models: Array<{ id: string; contextWindow: number }> } };
+    const entries = (await readFile(registryLog, "utf8")).trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as RegistryEntry);
+    expect(entries.map((entry) => entry.providerId)).toEqual(["tanwan"]);
+    expect(Object.fromEntries(entries[0].config.models.map((model) => [model.id, model.contextWindow]))).toEqual({
+      // 目录命中：多 provider 同名取最大，cloudflare 网关条目被忽略。
+      "gpt-5.6-sol": 400000,
+      // 目录未命中且未声明 → pi 默认窗口。
+      "unknown-model": 128000,
+      // 目录未命中但 models.json 声明了 → 保留声明值。
+      "declared-model": 555000,
+    });
+  });
+
   it("reloads model config from disk before declaring a model unavailable", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -709,6 +800,57 @@ describe("Pi SDK worker protocol", () => {
     expect(worker.messages.indexOf(completed)).toBeLessThan(
       worker.messages.findIndex((message) => message.type === "prompt_done" && message.id === "compact-1"),
     );
+  });
+
+  it("marks compaction that only starts after the turn ended", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    // 运行中压缩（工具循环之间）：agent run 尚未结束，压缩完对话继续。
+    worker.send({ id: "compact-mid-run", type: "prompt", message: "compact", permissionMode: "full-access" });
+    const midRun = await worker.waitFor(
+      (message) => message.type === "context_compaction" && message.phase === "started" && message.postTurn === false,
+    );
+    expect(midRun.postTurn).toBe(false);
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-mid-run");
+
+    // 收尾型压缩：agent_end 之后才开始，压缩完直接回空闲。
+    worker.send({ id: "compact-after-turn", type: "prompt", message: "compact-post-turn", permissionMode: "full-access" });
+    const postTurn = await worker.waitFor(
+      (message) => message.type === "context_compaction" && message.phase === "started" && message.postTurn === true,
+    );
+    expect(postTurn.postTurn).toBe(true);
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-after-turn");
+    await worker.waitFor(
+      (message) => message.type === "context_compaction" && message.phase === "completed" && message.id === postTurn.id,
+    );
+  });
+
+  it("accepts guidance while compaction runs and rejects it once the turn has ended", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    // 压缩仍在运行（agent run 未结束）：引导可以入队，压缩结束后 Pi 继续对话时消费它。
+    worker.send({ id: "compact-slow", type: "prompt", message: "slow-compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "context_compaction" && message.phase === "started");
+    worker.send({ id: "guide-running", type: "guidance", message: "顺便改下文案" });
+    const accepted = await worker.waitFor(
+      (message) => message.id === "guide-running" && (message.type === "guidance_done" || message.type === "error"),
+    );
+    expect(accepted.type).toBe("guidance_done");
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-slow");
+
+    // 本轮已经结束：没有运行的回合会消费这条引导，直接拒绝而不是让它卡在 Pi 的队列里。
+    worker.send({ id: "guide-idle", type: "guidance", message: "现在呢" });
+    const rejected = await worker.waitFor(
+      (message) => message.id === "guide-idle" && (message.type === "guidance_done" || message.type === "error"),
+    );
+    expect(rejected.type).toBe("error");
+    expect(String(rejected.error)).toContain("本轮已结束");
   });
 
   it("uses low thinking by default for Agent compaction", async () => {
@@ -1421,6 +1563,8 @@ describe("Pi SDK worker protocol", () => {
           { kind: "command", name: "scout-and-plan", description: "先由 scout 调查代码库，再由 planner 制定计划，不执行修改" },
           { kind: "command", name: "implement-and-review", description: "worker 实施、reviewer 审查、worker 根据反馈修正" },
           { kind: "command", name: "inspect", description: "Inspect project" },
+          // Hpp 客户端命令总是排在末尾（扩展可用同名命令覆盖它）。
+          { kind: "command", name: "compact", description: "手动压缩当前会话上下文", argumentHint: "[补充说明]" },
         ],
       });
     worker.send({
@@ -1447,4 +1591,53 @@ describe("Pi SDK worker protocol", () => {
     await expect(worker.waitFor((message) => message.type === "error" && message.id === "missing-skill"))
       .resolves.toMatchObject({ error: "ACTION_NOT_FOUND: missing" });
   }, 15_000);
+
+  it("lists commands from the SDK command runner and exposes the Hpp compact action", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, {
+      PI_TEST_REGISTERED_COMMANDS: JSON.stringify([
+        { name: "deploy", invocationName: "deploy", description: "Deploy the app" },
+        { name: "probe", invocationName: "probe:2", description: "Second probe" },
+      ]),
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "actions", type: "listActions" });
+    const actionsMessage = await worker.waitFor((message) => message.type === "actions" && message.id === "actions");
+    expect(actionsMessage.actions).toEqual(expect.arrayContaining([
+      { kind: "command", name: "deploy", description: "Deploy the app" },
+      // 重名命令以 invocationName（name:2）作为可调用名字。
+      { kind: "command", name: "probe:2", description: "Second probe" },
+      // Hpp 客户端命令：Pi 内置斜杠命令只在它自己的 TUI 里实现。
+      { kind: "command", name: "compact", description: "手动压缩当前会话上下文", argumentHint: "[补充说明]" },
+    ]));
+  });
+
+  it("runs the compact action through the Pi session instead of prompting the model", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact", type: "prompt", message: "把测试细节压缩掉", action: { kind: "command", name: "compact" } });
+    // fake session 的 compact() 回显指令 → 证明走的是 session.compact 而非 session.prompt。
+    await expect(worker.waitFor((message) => message.type === "message_end"))
+      .resolves.toMatchObject({ message: { text: "compacted:把测试细节压缩掉" } });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact");
+  });
+
+  it("prefers a Pi extension command over the Hpp client action with the same name", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, {
+      PI_TEST_REGISTERED_COMMANDS: JSON.stringify([
+        { name: "compact", invocationName: "compact", description: "Extension compact" },
+      ]),
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact", type: "prompt", message: "keep", action: { kind: "command", name: "compact" } });
+    // 扩展注册了同名命令 → 交给 Pi 原生命令分发（消息以 /compact 文本进入 prompt）。
+    await expect(worker.waitFor((message) => message.type === "message_end"))
+      .resolves.toMatchObject({ message: { text: "/compact keep" } });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact");
+  });
 });

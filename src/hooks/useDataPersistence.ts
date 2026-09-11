@@ -270,6 +270,7 @@ export const applyPersistedMessagesSnapshot = (
     isStreaming: false,
     // Compaction is renderer-runtime state and is never valid after hydration.
     compactingSessions: {},
+    compactionPostTurnSessions: {},
   });
 };
 

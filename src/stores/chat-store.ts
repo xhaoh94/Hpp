@@ -239,6 +239,8 @@ interface ChatState {
   sessionDrafts: Record<string, ChatDraft>;
   messageQueues: Record<string, QueuedMessage[]>;
   compactingSessions: Record<string, boolean>;
+  /** 压缩阶段：true=收尾型（本轮已结束），false=运行中，缺省=未知（旧后端）。 */
+  compactionPostTurnSessions: Record<string, boolean>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
@@ -251,6 +253,7 @@ interface ChatState {
     state?: "running" | "completed" | "interrupted",
   ) => void;
   setSessionCompacting: (sessionId: string, compacting: boolean) => void;
+  setSessionCompactionPostTurn: (sessionId: string, postTurn?: boolean) => void;
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
   appendLastAssistantCommentaryDelta: (itemId: string, delta: string, timestamp?: number, sessionId?: string | null) => void;
   finishLastAssistantCommentary: (itemId: string, content?: string, timestamp?: number, sessionId?: string | null) => void;
@@ -726,6 +729,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionDrafts: {},
   messageQueues: {},
   compactingSessions: {},
+  compactionPostTurnSessions: {},
 
   addMessage: (msg, sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
@@ -833,6 +837,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (compacting) next[sessionId] = true;
       else delete next[sessionId];
       return { compactingSessions: next };
+    }),
+
+  setSessionCompactionPostTurn: (sessionId, postTurn) =>
+    set((s) => {
+      if (!sessionId) return {};
+      const hasCurrent = Object.prototype.hasOwnProperty.call(s.compactionPostTurnSessions, sessionId);
+      if (postTurn === undefined) {
+        if (!hasCurrent) return {};
+        const next = { ...s.compactionPostTurnSessions };
+        delete next[sessionId];
+        return { compactionPostTurnSessions: next };
+      }
+      if (hasCurrent && s.compactionPostTurnSessions[sessionId] === postTurn) return {};
+      return { compactionPostTurnSessions: { ...s.compactionPostTurnSessions, [sessionId]: postTurn } };
     }),
 
   interruptSessionCompaction: (sessionId) =>
@@ -1418,11 +1436,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextSessionDrafts[sessionId];
       const nextCompactingSessions = { ...s.compactingSessions };
       delete nextCompactingSessions[sessionId];
+      const nextCompactionPostTurnSessions = { ...s.compactionPostTurnSessions };
+      delete nextCompactionPostTurnSessions[sessionId];
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
         sessionDrafts: nextSessionDrafts,
         compactingSessions: nextCompactingSessions,
+        compactionPostTurnSessions: nextCompactionPostTurnSessions,
         messages: s.activeSessionId === sessionId ? [] : s.messages,
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
       };
@@ -1435,11 +1456,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const nextMessageQueues = { ...s.messageQueues };
       const nextSessionDrafts = { ...s.sessionDrafts };
       const nextCompactingSessions = { ...s.compactingSessions };
+      const nextCompactionPostTurnSessions = { ...s.compactionPostTurnSessions };
       for (const sessionId of sessionIdSet) {
         delete nextSessionMessages[sessionId];
         delete nextMessageQueues[sessionId];
         delete nextSessionDrafts[sessionId];
         delete nextCompactingSessions[sessionId];
+        delete nextCompactionPostTurnSessions[sessionId];
       }
       const deletingActiveSession = !!s.activeSessionId && sessionIdSet.has(s.activeSessionId);
       return {
@@ -1447,6 +1470,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messageQueues: nextMessageQueues,
         sessionDrafts: nextSessionDrafts,
         compactingSessions: nextCompactingSessions,
+        compactionPostTurnSessions: nextCompactionPostTurnSessions,
         messages: deletingActiveSession ? [] : s.messages,
         activeSessionId: deletingActiveSession ? null : s.activeSessionId,
       };

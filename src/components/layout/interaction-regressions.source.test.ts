@@ -247,6 +247,14 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("useChatStore.getState().sessionDrafts[activeSessionId]?.text");
   });
 
+  it("folds long user messages rendered as plain text or as a composer document", () => {
+    expect(chatPanelSource).toContain("const COLLAPSED_USER_MESSAGE_LINES = 10");
+    expect(chatPanelSource).toContain("truncateComposerDocumentLines(orderedComposerDocument, COLLAPSED_USER_MESSAGE_LINES)");
+    expect(chatPanelSource).toContain("<ComposerMessageFlow document={displayedComposerDocument}");
+    expect(chatPanelSource).not.toContain("<ComposerMessageFlow document={orderedComposerDocument}");
+    expect(chatPanelSource).toContain('userMessageExpanded ? "收起" : "显示更多"');
+  });
+
   it("allows sending during context compaction and admits the message through the queue", () => {
     expect(chatComposerSource).toContain("if (compactionInProgress && hasPendingContent)");
     expect(chatComposerSource).toContain("SessionCommandCoordinator perform authoritative admission");
@@ -254,7 +262,10 @@ describe("chat interaction regression constraints", () => {
     expect(chatComposerSource).toContain('placeholder={placeholder}');
     expect(chatComposerSource).not.toContain("sendDisabled && !(compactionInProgress && hasPendingContent)");
     expect(chatPanelSource).toContain("queueIfRunning: true");
-    expect(chatPanelSource).toContain("canGuide && !compactionInProgress && !item.action");
+    // 运行中压缩（压缩完继续对话）仍提供引导按钮；只有收尾型压缩（本轮已结束）才隐藏。
+    expect(chatPanelSource).toContain("canGuide && !compactionBlocksGuidance && !item.action");
+    expect(chatPanelSource).toContain("compactionBlocksGuidance={activeSessionCompactionBlocksGuidance}");
+    expect(chatPanelSource).toContain("state.compactionPostTurnSessions[activeSessionId] !== false");
     expect(chatPanelSource).not.toContain('showFloatingToastMessage("上下文正在压缩，请等待压缩完成后发送")');
   });
 

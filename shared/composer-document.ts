@@ -166,6 +166,40 @@ export const getComposerPlainText = (document: ComposerDocument) => document.nod
 export const composerDocumentHasContent = (document: ComposerDocument) =>
   document.nodes.some((node) => node.type === "text" ? !!node.text.trim() : true);
 
+/**
+ * 按行数折叠文档，与纯文本折叠（`text.split("\n").slice(0, maxLines)`）保持相同的显示结果：
+ * 只保留前 maxLines 行。第 maxLines 行末尾紧跟的实体芯片（文件 / 路径 / 会话引用）照常显示，
+ * 进入第 maxLines + 1 行之后的文本与芯片全部丢弃。原文档不会被修改。
+ */
+export const truncateComposerDocumentLines = (
+  document: ComposerDocument,
+  maxLines: number,
+): ComposerDocument => {
+  const limit = Math.floor(maxLines);
+  if (!Number.isFinite(limit) || limit < 1) return createComposerDocument([]);
+  // 只有文本节点里的换行符会换行，芯片与图片都停留在当前行。
+  const allowedNewlines = limit - 1;
+  const nodes: ComposerNode[] = [];
+  let consumedNewlines = 0;
+  for (const node of document.nodes) {
+    if (node.type !== "text") {
+      nodes.push(node);
+      continue;
+    }
+    const lines = node.text.split("\n");
+    const nodeNewlines = lines.length - 1;
+    if (consumedNewlines + nodeNewlines <= allowedNewlines) {
+      nodes.push({ ...node });
+      consumedNewlines += nodeNewlines;
+      continue;
+    }
+    const keptText = lines.slice(0, allowedNewlines - consumedNewlines + 1).join("\n");
+    if (keptText) nodes.push({ ...node, text: keptText });
+    break;
+  }
+  return createComposerDocument(nodes);
+};
+
 export const getComposerNodeLabel = (node: Exclude<ComposerNode, ComposerTextNode>) => {
   if (node.type === "image") return `[image: ${node.name}]`;
   if (node.type === "path") return `[${node.kind}: ${node.name}]`;
