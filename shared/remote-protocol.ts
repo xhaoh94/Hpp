@@ -365,7 +365,7 @@ export interface RemoteChatMessage {
   timestamp: number;
   isStreaming?: boolean;
   systemType?: string;
-  compactionState?: "running" | "completed" | "interrupted";
+  compactionState?: "running" | "completed" | "interrupted" | "failed";
   /** 回合开始时的调用模型名称。 */
   modelLabel?: string;
   /** 本回合累计 token 消耗，cacheInput 为输入中命中缓存的部分。 */

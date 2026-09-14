@@ -482,7 +482,7 @@ export const getThinkingPreviewMarkdown = (value?: string) => {
 };
 
 export const getContextCompactionPresentation = (
-  phase: "started" | "completed" | "interrupted",
+  phase: "started" | "completed" | "interrupted" | "failed",
   processActive: boolean,
   activePresentation: SessionRuntime["activeCompactionPresentation"],
 ) => phase === "started"

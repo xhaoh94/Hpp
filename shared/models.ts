@@ -3,6 +3,8 @@ export interface SharedModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  /** 模型上下文窗口大小（tokens），后端未提供时为空。 */
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
   /** 思考档位的呈现模式：levels=有档位声明（下拉）；toggle=仅有思考开关（无档位声明）。 */
@@ -149,4 +151,43 @@ export function getEffectiveThinkingLevelMode(
   if (model.thinkingLevelMode) return model.thinkingLevelMode;
   const levels = normalizeSupportedThinkingLevels(model.supportedThinkingLevels).filter((l) => l !== "off");
   return levels.length > 1 ? "levels" : "toggle";
+}
+
+/** 上下文明细（仅部分后端能提供）：分类别 token，用于弹窗展示。 */
+export interface ContextUsageBreakdownEntry {
+  id: string;
+  label: string;
+  tokens: number;
+}
+
+/** 上下文用量数字的紧凑写法：160300 → "160.3K"（保留一位小数，便于对齐比较）。 */
+export function formatContextTokenAmount(count: number): string {
+  const value = Math.max(0, Math.round(Number(count) || 0));
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+/**
+ * 上下文用量的悬浮提示文案，例：
+ * `53.4% · 160.3K / 300.0K 上下文已使用`
+ * 只知窗口时退为 `300.0K 上下文窗口`；模型未提供窗口时返回说明文字。
+ * 非精确值时附加“（估算）”，避免把估算当成精确数字。
+ */
+export function formatContextUsageDetail(input: {
+  contextWindow?: number;
+  usedTokens?: number;
+  estimated?: boolean;
+}): string {
+  const windowTokens = Number(input.contextWindow);
+  const hasWindow = Number.isFinite(windowTokens) && windowTokens > 0;
+  const usedTokens = Number(input.usedTokens);
+  const hasUsage = Number.isFinite(usedTokens) && usedTokens >= 0;
+  const estimateNote = input.estimated ? "（估算）" : "";
+  if (hasWindow && hasUsage) {
+    const percent = ((usedTokens / windowTokens) * 100).toFixed(1);
+    return `${percent}% · ${formatContextTokenAmount(usedTokens)} / ${formatContextTokenAmount(windowTokens)} 上下文已使用${estimateNote}`;
+  }
+  if (hasWindow) return `${formatContextTokenAmount(windowTokens)} 上下文窗口${estimateNote}`;
+  return "当前模型未提供上下文窗口";
 }

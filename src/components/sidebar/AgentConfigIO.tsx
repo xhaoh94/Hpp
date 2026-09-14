@@ -13,10 +13,12 @@ import type {
   AgentProviderConfig,
 } from "@/types";
 import { getAgentName } from "@/lib/agents";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { createCopiedProviderId } from "@shared/agent-provider-copy";
 import {
   createAgentConfigExportData,
+  formatAgentConfigImportSummary,
   isValidAgentConfigExport,
   resolveImportProviderId,
   sanitizeAgentConfigExport,
@@ -44,12 +46,17 @@ function downloadAgentConfigExportFallback(data: AgentConfigExportData) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+type AgentConfigIOProps = {
+  /** 导入写入成功后通知宿主刷新渠道列表与模型目录。 */
+  onImported?: (agentIds: string[]) => void;
+};
+
 /**
  * Cross-agent import/export of channel (provider) configurations.
  * The entry point is rendered in the Agent configuration title bar because
  * an export is a bundle that can span many agents, not a per-channel action.
  */
-export function AgentConfigIO() {
+export function AgentConfigIO({ onImported }: AgentConfigIOProps) {
   const agents = useAgentCatalogStore((state) => state.agents);
 
   const configurableAgents = useMemo(
@@ -244,6 +251,8 @@ export function AgentConfigIO() {
     setImporting(true);
     setImportError("");
     const failed: string[] = [];
+    const importedAgentIds = new Set<string>();
+    let imported = 0;
     try {
       for (const agentId of Object.keys(importData.agents)) {
         const entry = importData.agents[agentId];
@@ -272,23 +281,39 @@ export function AgentConfigIO() {
             const result = await window.electronAPI.agentConfigSave(agentId, nextProvider);
             if (!result.success) {
               failed.push(`${agentId}/${incoming.providerId}: ${result.error || "保存失败"}`);
+            } else {
+              imported += 1;
+              importedAgentIds.add(agentId);
             }
           } catch (error) {
             failed.push(`${agentId}/${incoming.providerId}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
       }
+      const importedAgents = [...importedAgentIds];
+      // 导入只是写盘；必须回头刷新渠道列表与模型目录，并明确告知结果，
+      // 否则用户看到的界面和导入前一样，不知道到底有没有生效。
+      if (imported > 0) onImported?.(importedAgents);
+      const summary = formatAgentConfigImportSummary({
+        imported,
+        agentCount: importedAgents.length,
+        failedCount: failed.length,
+      });
       if (failed.length > 0) {
         setImportError(`部分渠道导入失败：\n${failed.join("\n")}`);
+        showFloatingToastMessage(summary);
       } else {
         setImportOpen(false);
+        setImportData(null);
+        setImportDecisions({});
+        showFloatingToastMessage(summary);
       }
     } catch (error) {
       setImportError(error instanceof Error ? error.message : String(error));
     } finally {
       setImporting(false);
     }
-  }, [importData, importTargetConfigs, importDecisions, configurableAgents]);
+  }, [importData, importTargetConfigs, importDecisions, configurableAgents, onImported]);
 
   const toggleExportAgent = (agentId: string) => {
     const selection = exportSelections[agentId];

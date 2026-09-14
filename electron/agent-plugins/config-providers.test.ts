@@ -131,6 +131,36 @@ describe("official plugin config providers", () => {
     });
   });
 
+  it("keeps the declared Pi context window when reading channels back", async () => {
+    const pi = await import("./pi/config.mjs");
+    const configuredProvider = {
+      ...provider("responses"),
+      models: [{
+        id: "window-model",
+        name: "Window Model",
+        reasoning: true,
+        imageInput: false,
+        contextWindow: 1050000,
+      }],
+    };
+
+    // 写入 models.json 时保留 contextWindow。
+    await writeFile(process.env.PI_CONFIG_PATH!, JSON.stringify({
+      providers: { custom: pi.toProviderConfig(configuredProvider) },
+    }), "utf8");
+
+    // 读回时不能丢掉窗口：否则标题栏/上下文弹窗只能显示“未提供上下文窗口”。
+    const state = await pi.readProviderConfig();
+    expect(state).toMatchObject({
+      providers: [{ models: [{ id: "window-model", contextWindow: 1050000 }] }],
+    });
+
+    // 再写回也不能丢（保存渠道后窗口仍保留）。
+    await pi.writeProviderConfig(state);
+    const saved = JSON.parse(await readFile(process.env.PI_CONFIG_PATH!, "utf8"));
+    expect(saved.providers.custom.models[0].contextWindow).toBe(1050000);
+  });
+
   it("keeps Pi reasoning independent from the declared thinking levels", async () => {
     const pi = await import("./pi/config.mjs");
     const base = provider("chat-completions");

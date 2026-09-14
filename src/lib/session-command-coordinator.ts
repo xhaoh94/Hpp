@@ -668,6 +668,24 @@ export async function forkSession(input: {
   return { project, session, ...(warning ? { warning } : {}) };
 }
 
+const modelChangeLocks = new Map<string, Promise<void>>();
+
+const withModelChangeLock = async <T>(sessionId: string, task: () => Promise<T>): Promise<T> => {
+  const previous = modelChangeLocks.get(sessionId);
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  modelChangeLocks.set(sessionId, current);
+  await previous?.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (modelChangeLocks.get(sessionId) === current) modelChangeLocks.delete(sessionId);
+  }
+};
+
 const isRunning = (sessionId: string, hooks?: SendMessageHooks) => {
   const chat = useChatStore.getState();
   const messages = chat.activeSessionId === sessionId
@@ -1004,7 +1022,7 @@ export async function abortSession(sessionId: string, context: AbortCommandConte
   return { success: true };
 }
 
-export async function setModel(
+async function setModelInternal(
   sessionId: string,
   model: Pick<ModelInfo, "id" | "provider">,
   options: { models?: ModelInfo[]; isProcessActive?: (sessionId: string) => boolean } = {},
@@ -1033,9 +1051,19 @@ export async function setModel(
     candidate.provider === selected.provider && candidate.id === selected.id
   ) || selected;
   saveSessionModel(sessionId, effectiveModel);
+  // 上下文用量属于具体模型；切模型后旧模型的占用比例不能套到新窗口上。
+  useChatStore.getState().clearSessionContextUsage(sessionId);
   applyActiveModels(sessionId, availableModels, effectiveModel);
   await reconcileThinkingForModel(sessionId, session.agentId, effectiveModel);
   return { model: effectiveModel, models: availableModels, previous };
+}
+
+export async function setModel(
+  sessionId: string,
+  model: Pick<ModelInfo, "id" | "provider">,
+  options: { models?: ModelInfo[]; isProcessActive?: (sessionId: string) => boolean } = {},
+) {
+  return withModelChangeLock(sessionId, () => setModelInternal(sessionId, model, options));
 }
 
 export async function setThinking(

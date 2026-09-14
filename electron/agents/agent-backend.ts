@@ -14,6 +14,7 @@ export interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
   /** levels=思考档位下拉；toggle=只有思考开关。 */

@@ -195,6 +195,17 @@ let shellAvailable = false;
 let shellWarningEmitted = false;
 let shellEnvironment = { platform: process.platform, shellFamily: "unknown", shellPath: "" };
 let activeCompactionId = null;
+// 模型切换必须等当前压缩完成，否则同一次压缩可能前后使用不同模型。
+let compactionWaiters = [];
+const waitForCompactionToSettle = () => {
+  if (!activeCompactionId) return Promise.resolve();
+  return new Promise((resolve) => compactionWaiters.push(resolve));
+};
+const releaseCompactionWaiters = () => {
+  const waiters = compactionWaiters;
+  compactionWaiters = [];
+  for (const resolve of waiters) resolve();
+};
 // 本轮 agent run 是否仍在进行中。压缩既可能发生在轮次结束之后（收尾型：压缩完回空闲），
 // 也可能发生在运行中（工具循环之间、溢出恢复重试：压缩完对话继续）。
 // 只有运行中压缩期间排队的引导，才会在 Pi 继续对话时被消费。
@@ -675,7 +686,6 @@ const disposeSession = async () => {
   activeHostSystemPrompt = "";
   fullAccessToolNames = [];
   planModeToolNames = [];
-  activeCompactionId = null;
   agentRunActive = false;
   completedPromptIds.clear();
   dismissSubagentUIRequests(undefined, "dispose");
@@ -699,6 +709,8 @@ const disposeSession = async () => {
   }
 
   if (session === disposingSession) session = null;
+  activeCompactionId = null;
+  releaseCompactionWaiters();
   modelRegistry = null;
   resourceLoader = null;
   activeSettingsManager = null;
@@ -1564,6 +1576,56 @@ const resolveActionPrompt = async (action, message) => {
   return message ? `${command} ${message}` : command;
 };
 
+// SDK 在部分版本暴露了精确的上下文计数（getContextUsage）。存在时用真实值，
+// 不存在时返回 0，让调用方回退到本次请求的输入 token 估算。
+const readPreciseContextTokens = () => {
+  try {
+    if (typeof session?.getContextUsage !== "function") return 0;
+    const usage = session.getContextUsage();
+    const tokens = Number(usage?.tokens);
+    return Number.isFinite(tokens) && tokens > 0 ? tokens : 0;
+  } catch {
+    return 0;
+  }
+};
+
+// 上下文构成没有官方接口：SDK 只给出总量。这里按文本体量估算各部分权重，
+// 再把权重归一化到实际总量，得到的是构成比例（事件里已标记为估算）。
+const estimateTextWeight = (value) => {
+  try {
+    const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
+    if (!text) return 0;
+    return Math.ceil(text.length / 4);
+  } catch {
+    return 0;
+  }
+};
+
+const collectContextBreakdown = (totalTokens) => {
+  const total = Number(totalTokens);
+  if (!Number.isFinite(total) || total <= 0) return undefined;
+  const weights = [
+    { id: "messages", label: "对话消息", weight: estimateTextWeight(session?.sessionManager?.getBranch?.() || []) },
+    { id: "tools", label: "工具定义", weight: estimateTextWeight(session?.getAllTools?.() || []) },
+    {
+      id: "skills",
+      label: "技能与命令",
+      weight: estimateTextWeight(resourceLoader?.getSkills?.() || null)
+        + estimateTextWeight(resourceLoader?.getPrompts?.() || null),
+    },
+  ];
+  const known = weights.reduce((sum, item) => sum + item.weight, 0);
+  // 估算体量超过实际总量时按比例缩小，避免出现负的系统提示词。
+  const scale = known > total && known > 0 ? total / known : 1;
+  const entries = [
+    ...weights.map((item) => ({ ...item, weight: item.weight * scale })),
+    { id: "system", label: "系统提示词", weight: Math.max(0, total - known) },
+  ];
+  return entries
+    .map((entry) => ({ id: entry.id, label: entry.label, tokens: Math.max(0, Math.round(entry.weight)) }))
+    .filter((entry) => entry.tokens > 0);
+};
+
 const handleSessionEvent = (event) => {
   if (event.type === "compaction_start") {
     activeCompactionId = randomUUID();
@@ -1581,10 +1643,15 @@ const handleSessionEvent = (event) => {
     send({
       type: "context_compaction",
       id: activeCompactionId || randomUUID(),
-      phase: event.aborted ? "interrupted" : "completed",
+      phase: event.aborted
+        ? "interrupted"
+        : event.errorMessage
+          ? "failed"
+          : "completed",
       error: event.errorMessage,
     });
     activeCompactionId = null;
+    releaseCompactionWaiters();
     return;
   }
   if (isContextCompactionLike(event.type, event.name, event.title, event.message)) {
@@ -1638,6 +1705,10 @@ const handleSessionEvent = (event) => {
         const inputTokens = (Number(usage?.input) || 0)
           + (Number(usage?.cacheRead) || 0)
           + (Number(usage?.cacheWrite) || 0);
+        // SDK 提供 getContextUsage() 时用它的精确值；否则退回本次请求的输入
+        // token 作为估算值，并在事件里如实标记，避免 UI 把估算当精确值展示。
+        const preciseContextTokens = readPreciseContextTokens();
+        const reportedContextTokens = preciseContextTokens || inputTokens;
         send({
           type: "message_end",
           message: {
@@ -1650,6 +1721,10 @@ const handleSessionEvent = (event) => {
           inputTokens,
           outputTokens: Number(usage?.output) || 0,
           cacheInputTokens: Number(usage?.cacheRead) || 0,
+          contextTokens: preciseContextTokens || inputTokens,
+          contextWindow: Number(session?.model?.contextWindow) > 0 ? Number(session.model.contextWindow) : undefined,
+          contextEstimated: !preciseContextTokens,
+          contextBreakdown: collectContextBreakdown(reportedContextTokens),
         });
         emitLatestAssistantTurnMetadata(promptId, previousLeafId);
       }
@@ -1938,6 +2013,7 @@ const getModels = async () => {
       name: model.name || model.id || model.modelId,
       provider: model.provider,
       reasoning: !!model.reasoning,
+      contextWindow: Number(model.contextWindow) > 0 ? Number(model.contextWindow) : undefined,
       supportsImages: Array.isArray(model.input) ? model.input.includes("image") : false,
       supportedThinkingLevels: computed?.levels || (isActive ? activeThinkingLevels : undefined),
       thinkingLevelMode: model.reasoning === true
@@ -2033,6 +2109,7 @@ const handleCommand = async (command) => {
         send({ type: "actions", id: command.id, actions: await getActions(command.reload === true) });
         break;
       case "setModel": {
+        await waitForCompactionToSettle();
         if (!session) throw new Error("Pi SDK session is not initialized");
         let registeredModel = modelRegistry?.find?.(command.provider, command.modelId);
         if (!registeredModel) {
@@ -2059,6 +2136,9 @@ const handleCommand = async (command) => {
           throw new Error(`No API key found for model: ${command.provider}/${command.modelId}`);
         }
         await session.setModel(registeredModel);
+        // 切换到新模型意味着之前的压缩失败状态不应继续污染后续会话。
+        compactionFailureStreak = 0;
+        compactionSuspended = false;
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
       }

@@ -1166,6 +1166,22 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     }
   }, [agentId, config, onModelsUpdated, reorderingProviderId]);
 
+  // 导入渠道只是写盘：必须回头重读渠道列表并刷新模型目录，
+  // 否则用户关掉导入弹窗后看到的界面和导入前一样，以为没有生效。
+  const handleProvidersImported = useCallback((importedAgentIds: string[]) => {
+    if (importedAgentIds.includes(agentId)) {
+      void loadConfig();
+    }
+    void (async () => {
+      try {
+        const models = await window.electronAPI.agentGetModels();
+        if (Array.isArray(models) && models.length > 0) onModelsUpdated(agentId, models);
+      } catch {
+        // 模型目录刷新失败不影响导入结果提示。
+      }
+    })();
+  }, [agentId, loadConfig, onModelsUpdated]);
+
   const clearProviderDragVisuals = useCallback(() => {
     stopProviderAutoScroll();
     setDragProviderId("");
@@ -1319,7 +1335,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   );
                 })}
               </div>
-              <AgentConfigIO />
+              <AgentConfigIO onImported={handleProvidersImported} />
             </div>
           </div>
           <button type="button" className="settings-modal-close" onClick={onClose} aria-label="关闭">

@@ -237,6 +237,66 @@ describe("Pi lifecycle", () => {
     expect(compactionEvents.map((event) => event.postTurn)).toEqual([false, true, false]);
   });
 
+  it("forwards a failed compaction without turning it into a completion", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-failed", phase: "started" });
+    internals.handleWorkerMessage({
+      type: "context_compaction",
+      id: "compact-failed",
+      phase: "failed",
+      error: "Auto-compaction failed: model switch race",
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "context_compaction",
+      phase: "failed",
+      detail: "Auto-compaction failed: model switch race",
+    }));
+    expect(agent.isIdle()).toBe(true);
+  });
+
+  it("waits for an active compaction before sending a model switch", async () => {
+    const child = new FakePiProcess();
+    const commands: Record<string, unknown>[] = [];
+    let internals: {
+      process: FakePiProcess;
+      compactionActive: boolean;
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    respondToInit(child, "C:\\sessions\\pi.jsonl", (command) => {
+      commands.push(command);
+      if (command.type === "setModel") {
+        queueMicrotask(() => internals.handleWorkerMessage({
+          type: "model_changed",
+          id: command.id,
+          model: { id: command.modelId, provider: command.provider },
+        }));
+      }
+    });
+    const agent = new PiSDKAgent("hpp-session");
+    internals = agent as unknown as {
+      process: FakePiProcess;
+      compactionActive: boolean;
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.process = child;
+    internals.compactionActive = true;
+
+    const pending = agent.setModel("luna", "gpt-5.6-luna");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(commands.some((command) => command.type === "setModel")).toBe(false);
+
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-switch", phase: "completed" });
+    await expect(pending).resolves.toBeUndefined();
+    expect(commands.some((command) => command.type === "setModel")).toBe(true);
+    internals.process = null;
+  });
+
   it("waits out an active compaction before asking the worker for models", async () => {
     const child = new FakePiProcess();
     const getModelsCommands: string[] = [];
@@ -535,7 +595,8 @@ describe("Pi lifecycle", () => {
           type: "context_compaction",
           id: continuationEvent.id,
           phase: "completed",
-        })}\n`);
+        })}
+`);
       }
       expect(agent.isIdle()).toBe(true);
       (agent as unknown as { process: unknown }).process = null;

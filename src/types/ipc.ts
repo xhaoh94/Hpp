@@ -110,6 +110,14 @@ export interface AgentEvent {
   lifecycleRevision?: unknown;
   /** 压缩是否发生在本轮对话结束之后（收尾型）：此时压缩期间的消息无法再作为引导注入。 */
   postTurn?: boolean;
+  /** 最近一次请求实际携带的上下文 token 数；不同后端精度可能不同。 */
+  contextTokens?: number;
+  /** 产生该用量时的模型上下文窗口。 */
+  contextWindow?: number;
+  /** 当前上下文值是否为估算值。 */
+  contextEstimated?: boolean;
+  /** 上下文构成明细（估算）；仅部分后端能提供。 */
+  contextBreakdown?: Array<{ id: string; label: string; tokens: number }>;
   pendingUIRevision?: unknown;
   clientUserMessageId?: unknown;
   threadId?: unknown;

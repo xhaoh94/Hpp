@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createAgentConfigExportData,
+  formatAgentConfigImportSummary,
   isValidAgentConfigExport,
   resolveImportProviderId,
   sanitizeAgentConfigExport,
@@ -86,5 +87,24 @@ describe("import conflict resolution", () => {
     const resolved = resolveImportProviderId(provider(), existingIds, { action: "create" });
     expect(resolved.action).toBe("create");
     expect(resolved.providerId).toBe("chan-x-copy-3");
+  });
+});
+
+describe("import result summary", () => {
+  it("reports the imported channels and the refreshed scope", () => {
+    expect(formatAgentConfigImportSummary({ imported: 3, agentCount: 2, failedCount: 0 }))
+      .toBe("已导入 3 个渠道到 2 个 Agent，渠道列表已刷新");
+  });
+
+  it("keeps failures visible even when some channels were imported", () => {
+    expect(formatAgentConfigImportSummary({ imported: 2, agentCount: 1, failedCount: 1 }))
+      .toBe("已导入 2 个渠道到 1 个 Agent，1 个失败");
+  });
+
+  it("explains a fully failed or fully skipped run instead of claiming success", () => {
+    expect(formatAgentConfigImportSummary({ imported: 0, agentCount: 0, failedCount: 2 }))
+      .toBe("导入失败：2 个渠道未能写入");
+    expect(formatAgentConfigImportSummary({ imported: 0, agentCount: 0, failedCount: 0 }))
+      .toBe("没有需要导入的渠道");
   });
 });

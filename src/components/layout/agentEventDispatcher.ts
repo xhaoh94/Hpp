@@ -1,6 +1,11 @@
 import { getAgentName } from "@/lib/agents";
 import { confirmGuidanceResponse } from "@/lib/session-command-coordinator";
 import { formatModelRequestFailure } from "@/i18n/text";
+import {
+  getSessionModel,
+  getSessionContextUsage,
+  saveSessionContextUsage,
+} from "@/hooks/useDataPersistence";
 import { useProjectStore } from "@/stores/project-store";
 import {
   useChatStore,
@@ -136,7 +141,7 @@ export function shouldAcceptTurnScopedAgentEvent(
 
 export function shouldAcceptContextCompactionEvent(event: AgentEvent, runtime: SessionRuntime) {
   const eventId = typeof event.id === "string" && event.id.trim() ? event.id.trim() : null;
-  const phase = event.phase === "started" || event.phase === "interrupted"
+  const phase = event.phase === "started" || event.phase === "interrupted" || event.phase === "failed"
     ? event.phase
     : "completed";
   if (phase === "started") {
@@ -456,8 +461,55 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         const inputTokens = Number(event.inputTokens) || 0;
         const outputTokens = Number(event.outputTokens) || 0;
         const cacheInputTokens = Number(event.cacheInputTokens) || 0;
+        const contextTokens = Number(event.contextTokens);
+        const contextWindow = Number(event.contextWindow);
+        const chat = useChatStore.getState();
         if (inputTokens > 0 || outputTokens > 0) {
-          useChatStore.getState().addAssistantTokenUsage(inputTokens, outputTokens, cacheInputTokens, currentSessionId);
+          chat.addAssistantTokenUsage(inputTokens, outputTokens, cacheInputTokens, currentSessionId);
+        }
+        // 各后端把最近一次请求携带的输入上下文统一映射到 contextTokens。
+        // 它通常是服务商 usage 或本地适配器值，不一定是 SDK 精确估算，因此保留 estimated 标记。
+        const usedTokens = Number.isFinite(contextTokens) && contextTokens > 0
+          ? contextTokens
+          : inputTokens > 0
+            ? inputTokens
+            : 0;
+        const breakdown = Array.isArray(event.contextBreakdown)
+          ? event.contextBreakdown.flatMap((entry) => {
+              const item = entry as { id?: unknown; label?: unknown; tokens?: unknown };
+              const id = typeof item?.id === "string" ? item.id : "";
+              const label = typeof item?.label === "string" ? item.label : "";
+              const tokens = Number(item?.tokens);
+              return id && label && Number.isFinite(tokens) && tokens > 0 ? [{ id, label, tokens }] : [];
+            })
+          : undefined;
+        const usageModel = chat.activeSessionId === currentSessionId
+          ? chat.currentModel
+          : getSessionModel(currentSessionId);
+        const resolvedWindow = Number.isFinite(contextWindow) && contextWindow > 0
+          ? contextWindow
+          : usageModel?.contextWindow;
+        if (usedTokens > 0 || resolvedWindow) {
+          const nextUsage = {
+            contextWindow: resolvedWindow,
+            usedTokens: usedTokens > 0 ? usedTokens : undefined,
+            remainingTokens: resolvedWindow && usedTokens > 0
+              ? Math.max(0, resolvedWindow - usedTokens)
+              : undefined,
+            usageRatio: resolvedWindow && usedTokens > 0
+              ? Math.min(1, usedTokens / resolvedWindow)
+              : undefined,
+            source: event.contextEstimated === false ? "provider" as const : "estimated" as const,
+            estimated: event.contextEstimated !== false,
+            ...(breakdown && breakdown.length > 0 ? { breakdown } : {}),
+            model: usageModel
+              ? { provider: usageModel.provider, id: usageModel.id }
+              : undefined,
+            updatedAt: Date.now(),
+          };
+          chat.setSessionContextUsage(currentSessionId, nextUsage);
+          // 事件流重启后不会重放，因此同步落盘，供下次启动直接显示。
+          saveSessionContextUsage(currentSessionId, nextUsage);
         }
       }
       break;
@@ -487,10 +539,18 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       handleDiffUpdateEvent(event, currentSessionId, handlerContext);
       break;
     case "context_compaction":
+      // 压缩成功或失败后，压缩前的上下文占用都不再可靠；
+      // 暂时只显示当前模型窗口，等待下一次请求重新上报用量。
+      if (event.phase !== "started") {
+        useChatStore.getState().clearSessionContextUsage(currentSessionId);
+        saveSessionContextUsage(currentSessionId, null);
+      }
       appendContextCompactionDivider(
         currentSessionId,
         typeof event.id === "string" ? event.id : undefined,
-        event.phase === "started" || event.phase === "interrupted" ? event.phase : "completed",
+        event.phase === "started" || event.phase === "interrupted" || event.phase === "failed"
+          ? event.phase
+          : "completed",
         typeof event.postTurn === "boolean" ? event.postTurn : undefined,
       );
       break;

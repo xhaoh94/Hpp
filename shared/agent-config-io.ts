@@ -119,3 +119,24 @@ export function resolveImportProviderId(
   if (exists) return { providerId: incoming.providerId, action: "overwrite" };
   return { providerId: incoming.providerId, action: "create" };
 }
+
+/**
+ * 导入完成后的提示文案：同时说明成功数量与失败数量，
+ * 避免用户在部分失败时误以为全部成功（或全部失败）。
+ */
+export function formatAgentConfigImportSummary(result: {
+  imported: number;
+  agentCount: number;
+  failedCount: number;
+}): string {
+  const { imported, agentCount, failedCount } = result;
+  if (imported === 0) {
+    return failedCount > 0
+      ? `导入失败：${failedCount} 个渠道未能写入`
+      : "没有需要导入的渠道";
+  }
+  const scope = agentCount > 0 ? `到 ${agentCount} 个 Agent` : "";
+  return failedCount > 0
+    ? `已导入 ${imported} 个渠道${scope}，${failedCount} 个失败`
+    : `已导入 ${imported} 个渠道${scope}，渠道列表已刷新`;
+}

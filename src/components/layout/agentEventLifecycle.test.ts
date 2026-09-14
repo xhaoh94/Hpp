@@ -104,6 +104,7 @@ beforeEach(() => {
     activeSessionId: SESSION_ID,
     isStreaming: false,
     compactingSessions: {},
+    contextUsageBySession: {},
   });
 });
 
@@ -113,6 +114,40 @@ afterEach(() => {
 });
 
 describe("agent event terminal reconciliation", () => {
+  it("tracks context usage and clears it after compaction settles", () => {
+    const harness = createHarness();
+    useChatStore.getState().setCurrentModel({
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: false,
+      contextWindow: 128000,
+    });
+
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      // 本回合增量 input 远小于上下文总量：占用必须取 contextTokens。
+      inputTokens: 5000,
+      outputTokens: 1000,
+      contextTokens: 82000,
+      contextWindow: 128000,
+      contextEstimated: true,
+    }, harness.controller);
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toMatchObject({
+      contextWindow: 128000,
+      usedTokens: 82000,
+      remainingTokens: 46000,
+      estimated: true,
+      usageRatio: 0.640625,
+    });
+
+    dispatchAgentEvent({ type: "context_compaction", id: "usage-compact", phase: "started", sessionId: SESSION_ID }, harness.controller);
+    dispatchAgentEvent({ type: "context_compaction", id: "usage-compact", phase: "completed", sessionId: SESSION_ID }, harness.controller);
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toBeUndefined();
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it("does not flush a pending stream render for unrelated turn activity", () => {
     vi.useFakeTimers();
     const harness = createHarness();
@@ -1132,6 +1167,32 @@ describe("agent event terminal reconciliation", () => {
     expect(useChatStore.getState().compactionPostTurnSessions[SESSION_ID]).toBeUndefined();
     expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBeUndefined();
 
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
+  it("keeps a failed compaction visibly failed instead of completed", () => {
+    const harness = createHarness();
+
+    dispatchAgentEvent({
+      type: "context_compaction",
+      id: "compact-failed",
+      phase: "started",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+    dispatchAgentEvent({
+      type: "context_compaction",
+      id: "compact-failed",
+      phase: "failed",
+      detail: "Auto-compaction failed: model switch race",
+      sessionId: SESSION_ID,
+    }, harness.controller);
+
+    const failed = getMessages().find((message) => message.eventId === "compact-failed");
+    expect(failed).toMatchObject({
+      content: "上下文压缩失败",
+      compactionState: "failed",
+    });
+    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBeUndefined();
     harness.controller.clearAllStreamWatchdogs();
   });
 

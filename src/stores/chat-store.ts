@@ -12,6 +12,7 @@ import {
   getComposerPlainText,
   type ComposerDocument,
 } from "@shared/composer-document";
+import type { ContextUsageBreakdownEntry } from "@shared/models";
 
 export interface FileDiff extends DiffLike {
   file: string;
@@ -117,7 +118,7 @@ export interface ChatMessage {
   timestamp: number;
   isStreaming?: boolean;
   systemType?: "context_compaction" | "agent_startup_error";
-  compactionState?: "running" | "completed" | "interrupted";
+  compactionState?: "running" | "completed" | "interrupted" | "failed";
   eventId?: string;
   images?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
@@ -205,6 +206,21 @@ export interface ChatDraft {
 
 export interface ModelInfo extends SharedModel {}
 
+export type ContextUsageSource = "provider" | "estimated" | "unknown";
+
+export interface SessionContextUsage {
+  contextWindow?: number;
+  usedTokens?: number;
+  remainingTokens?: number;
+  usageRatio?: number;
+  source: ContextUsageSource;
+  estimated: boolean;
+  model?: { provider: string; id: string };
+  /** 上下文构成明细；仅部分后端提供。 */
+  breakdown?: ContextUsageBreakdownEntry[];
+  updatedAt: number;
+}
+
 export type QueuedMessageStatus = "queued" | "sending" | "failed";
 
 export interface QueuedMessage {
@@ -241,6 +257,8 @@ interface ChatState {
   compactingSessions: Record<string, boolean>;
   /** 压缩阶段：true=收尾型（本轮已结束），false=运行中，缺省=未知（旧后端）。 */
   compactionPostTurnSessions: Record<string, boolean>;
+  /** 每个会话最近一次上下文用量，属于运行时状态，不写入会话历史。 */
+  contextUsageBySession: Record<string, SessionContextUsage>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
@@ -250,10 +268,12 @@ interface ChatState {
   appendContextCompactionDivider: (
     eventId?: string,
     sessionId?: string | null,
-    state?: "running" | "completed" | "interrupted",
+    state?: "running" | "completed" | "interrupted" | "failed",
   ) => void;
   setSessionCompacting: (sessionId: string, compacting: boolean) => void;
   setSessionCompactionPostTurn: (sessionId: string, postTurn?: boolean) => void;
+  setSessionContextUsage: (sessionId: string, usage: SessionContextUsage) => void;
+  clearSessionContextUsage: (sessionId: string) => void;
   startAssistantProcess: (startedAt?: number, sessionId?: string | null) => void;
   appendLastAssistantCommentaryDelta: (itemId: string, delta: string, timestamp?: number, sessionId?: string | null) => void;
   finishLastAssistantCommentary: (itemId: string, content?: string, timestamp?: number, sessionId?: string | null) => void;
@@ -730,6 +750,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messageQueues: {},
   compactingSessions: {},
   compactionPostTurnSessions: {},
+  contextUsageBySession: {},
 
   addMessage: (msg, sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
@@ -801,7 +822,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? "上下文压缩中"
           : compactionState === "interrupted"
             ? "上下文压缩已中断"
-            : "上下文已自动压缩";
+            : compactionState === "failed"
+              ? "上下文压缩失败"
+              : "上下文已自动压缩";
         if (normalizedEventId) {
           const existingIndex = messages.findIndex((msg) =>
             msg.systemType === "context_compaction" && msg.eventId === normalizedEventId
@@ -837,6 +860,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (compacting) next[sessionId] = true;
       else delete next[sessionId];
       return { compactingSessions: next };
+    }),
+
+  setSessionContextUsage: (sessionId, usage) =>
+    set((s) => {
+      if (!sessionId) return {};
+      return { contextUsageBySession: { ...s.contextUsageBySession, [sessionId]: usage } };
+    }),
+
+  clearSessionContextUsage: (sessionId) =>
+    set((s) => {
+      if (!sessionId || !Object.prototype.hasOwnProperty.call(s.contextUsageBySession, sessionId)) return {};
+      const next = { ...s.contextUsageBySession };
+      delete next[sessionId];
+      return { contextUsageBySession: next };
     }),
 
   setSessionCompactionPostTurn: (sessionId, postTurn) =>
@@ -1438,12 +1475,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextCompactingSessions[sessionId];
       const nextCompactionPostTurnSessions = { ...s.compactionPostTurnSessions };
       delete nextCompactionPostTurnSessions[sessionId];
+      const nextContextUsageBySession = { ...s.contextUsageBySession };
+      delete nextContextUsageBySession[sessionId];
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
         sessionDrafts: nextSessionDrafts,
         compactingSessions: nextCompactingSessions,
         compactionPostTurnSessions: nextCompactionPostTurnSessions,
+        contextUsageBySession: nextContextUsageBySession,
         messages: s.activeSessionId === sessionId ? [] : s.messages,
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
       };
@@ -1457,12 +1497,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const nextSessionDrafts = { ...s.sessionDrafts };
       const nextCompactingSessions = { ...s.compactingSessions };
       const nextCompactionPostTurnSessions = { ...s.compactionPostTurnSessions };
+      const nextContextUsageBySession = { ...s.contextUsageBySession };
       for (const sessionId of sessionIdSet) {
         delete nextSessionMessages[sessionId];
         delete nextMessageQueues[sessionId];
         delete nextSessionDrafts[sessionId];
         delete nextCompactingSessions[sessionId];
         delete nextCompactionPostTurnSessions[sessionId];
+        delete nextContextUsageBySession[sessionId];
       }
       const deletingActiveSession = !!s.activeSessionId && sessionIdSet.has(s.activeSessionId);
       return {
@@ -1471,6 +1513,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionDrafts: nextSessionDrafts,
         compactingSessions: nextCompactingSessions,
         compactionPostTurnSessions: nextCompactionPostTurnSessions,
+        contextUsageBySession: nextContextUsageBySession,
         messages: deletingActiveSession ? [] : s.messages,
         activeSessionId: deletingActiveSession ? null : s.activeSessionId,
       };

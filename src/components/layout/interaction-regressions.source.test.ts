@@ -247,6 +247,24 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("useChatStore.getState().sessionDrafts[activeSessionId]?.text");
   });
 
+  it("keeps the header context usage compact with a ring and hover details", () => {
+    expect(chatPanelSource).toContain("className={`chat-context-ring ${getContextUsageTone(contextUsageRatio)}`}");
+    expect(chatPanelSource).toContain('className="chat-context-ring-value"');
+    // 详情放在主题气泡里（data-tooltip），不用系统原生 title。
+    expect(chatPanelSource).toContain("data-tooltip={contextUsageTitle}");
+    expect(chatPanelSource).toContain("formatContextUsageDetail({");
+    // 点击圆环打开上下文用量弹窗。
+    expect(chatPanelSource).toContain("onClick={() => setContextUsageOpen(true)}");
+    expect(chatPanelSource).toContain("<ContextUsageModal");
+    expect(chatPanelSource).toContain("anchorRef={contextRingRef}");
+    // 重启/热重载后事件流不重放：会话激活时用磁盘记录补一次用量。
+    expect(chatPanelSource).toContain("const persisted = getSessionContextUsage(activeSessionId);");
+    expect(chatPanelStyles).toContain(".chat-context-ring-value");
+    expect(chatPanelStyles).toContain(".chat-context-ring[data-tooltip]::after");
+    // 完整数值只保留在悬浮提示里，不再铺回标题栏。
+    expect(chatPanelStyles).not.toContain(".chat-context-usage");
+  });
+
   it("folds long user messages rendered as plain text or as a composer document", () => {
     expect(chatPanelSource).toContain("const COLLAPSED_USER_MESSAGE_LINES = 10");
     expect(chatPanelSource).toContain("truncateComposerDocumentLines(orderedComposerDocument, COLLAPSED_USER_MESSAGE_LINES)");

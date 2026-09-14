@@ -133,6 +133,8 @@ export interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  /** 模型上下文窗口大小（tokens），后端未提供时为空。 */
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
   /** 思考档位呈现模式：levels=有档位声明（下拉）；toggle=仅有思考开关（无档位声明，如 mimo）。 */
@@ -145,6 +147,8 @@ export interface AgentCustomModelConfig {
   /** 内置模型来自 Agent 能力；自定义模型由 supportedThinkingLevels 是否非空派生。 */
   reasoning: boolean;
   imageInput: boolean;
+  /** 模型上下文窗口大小（tokens），由 Agent 目录提供时保留。 */
+  contextWindow?: number;
   /** 自定义模型选中的思考档位；空数组或缺失表示不支持思考。 */
   supportedThinkingLevels?: string[];
   /** 旧版兼容字段；配置控件当前仅由 isBuiltin 决定是否显示。 */

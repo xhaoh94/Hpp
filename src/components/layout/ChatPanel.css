@@ -65,6 +65,119 @@
   gap: 8px;
 }
 
+.chat-header-app-title,
+.chat-agent-name,
+.chat-agent-tag,
+.chat-context-ring,
+.chat-header-session-title {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.chat-header-app-title {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.chat-header-separator {
+  flex: 0 0 auto;
+  color: var(--text-tertiary, var(--text-secondary));
+  opacity: 0.65;
+}
+
+.chat-agent-name {
+  max-width: min(220px, 22vw);
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+/* 上下文圆环：只显示占比，完整数值通过 title 悬浮提示展示。 */
+.chat-context-ring {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+/* 点击后打开上下文用量弹窗，hover 给一个轻微的背景反馈。 */
+.chat-context-ring:hover,
+.chat-context-ring:focus-visible {
+  background-color: color-mix(in srgb, currentColor 14%, transparent);
+  outline: none;
+}
+
+.chat-context-ring svg {
+  position: absolute;
+  inset: 0;
+}
+
+.chat-context-ring-track {
+  stroke: color-mix(in srgb, currentColor 30%, transparent);
+}
+
+.chat-context-ring-progress {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+.chat-context-ring-value {
+  position: relative;
+  color: inherit;
+  font-size: 9px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.2px;
+  line-height: 1;
+}
+
+.chat-context-ring.warning { color: var(--warning, #d9a441); }
+.chat-context-ring.danger { color: #e07a3f; }
+.chat-context-ring.critical { color: var(--error-color, #ef4444); }
+.chat-context-ring.unknown { color: var(--text-tertiary, var(--text-secondary)); }
+
+/* 悬浮详情用主题气泡而不是系统原生 title：与截图一致，且能跟随暗色主题。 */
+.chat-context-ring[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 5px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: var(--bg-secondary);
+  box-shadow: 0 8px 24px var(--shadow-color, rgba(0, 0, 0, 0.35));
+  color: var(--text-primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  white-space: nowrap;
+}
+
+.chat-context-ring[data-tooltip]:hover::after,
+.chat-context-ring[data-tooltip]:focus-visible::after {
+  opacity: 1;
+}
+
 .chat-header-session-title {
   font-size: 12px;
   font-weight: 500;
@@ -121,12 +234,6 @@
   50% {
     box-shadow: 0 0 0 4px rgba(16, 185, 129, 0);
   }
-}
-
-.chat-agent-name {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
 }
 
 .chat-agent-tag {

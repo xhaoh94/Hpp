@@ -3886,7 +3886,9 @@
 
 .agent-config-io-modal {
   width: min(700px, calc(100vw - 32px));
-  height: auto;
+  /* 固定高度：渠道展开后列表区必须拿到剩余空间并自行滚动，
+     否则窗口矮时滚动区会被固定区块挤到几乎不可见。 */
+  height: min(78vh, 680px);
   max-height: min(78vh, 680px);
 }
 
@@ -3896,14 +3898,25 @@
 
 .agent-config-io-content {
   display: flex;
+  flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   gap: 12px;
   overflow: hidden;
 }
 
+/* 固定区块不参与收缩，剩余高度全部留给可滚动的渠道列表。 */
+.agent-config-io-overview,
+.agent-config-io-apikey,
+.agent-config-io-error,
+.agent-config-io-footer {
+  flex: 0 0 auto;
+}
+
 .agent-config-io-empty-state {
   display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
   align-items: center;
   flex-direction: column;
   gap: 7px;
@@ -3982,13 +3995,21 @@
 
 .agent-config-io-scroll {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
-  flex: 0 1 auto;
-  max-height: min(54vh, 460px);
+  max-height: none;
   overflow: auto;
   padding: 1px 2px 2px;
+}
+
+/* 滚动容器是 flex 列：子项默认 flex-shrink: 1，内容超高时会被压扁，
+   而卡片自身 overflow: hidden 会直接裁掉展开的渠道行（看起来“滚不动、看不到全部”）。
+   锁定子项高度，超高时交给容器滚动。 */
+
+.agent-config-io-scroll > * {
+  flex: 0 0 auto;
 }
 
 .agent-config-io-agent {

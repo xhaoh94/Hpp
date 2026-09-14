@@ -78,4 +78,13 @@ describe("AgentConfigModal provider selection", () => {
     expect(modalSource).toContain("event.preventDefault();");
     expect(modalSource).toContain('event.dataTransfer.dropEffect = "move"');
   });
+
+  it("refreshes the channel list and model catalogue after an import", () => {
+    expect(modalSource).toContain("<AgentConfigIO onImported={handleProvidersImported} />");
+    expect(modalSource).toContain("const handleProvidersImported = useCallback((importedAgentIds: string[]) => {");
+    expect(modalSource).toContain("if (importedAgentIds.includes(agentId)) {");
+    expect(modalSource).toContain("void loadConfig();");
+    expect(modalSource).toContain("await window.electronAPI.agentGetModels()");
+    expect(modalSource).toContain("onModelsUpdated(agentId, models)");
+  });
 });

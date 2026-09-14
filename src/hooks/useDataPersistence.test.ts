@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   saveSessionModel,
   saveSessionThinking,
+  saveSessionContextUsage,
   getSessionModel,
   getSessionThinking,
+  getSessionContextUsage,
   purgeDeletedSessionData,
   DISK_USAGE_INVALIDATED_EVENT,
   SESSION_CONFIG_UPDATED_EVENT,
@@ -45,6 +47,63 @@ describe("session config change notifications", () => {
     const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent<{ sessionId: string }>;
     expect(event.type).toBe(SESSION_CONFIG_UPDATED_EVENT);
     expect(event.detail).toEqual({ sessionId: "session-model" });
+  });
+
+  it("persists the last context usage so a restart can still show it", () => {
+    saveSessionContextUsage("session-ctx", {
+      contextWindow: 300000,
+      usedTokens: 160300,
+      remainingTokens: 139700,
+      usageRatio: 0.534,
+      source: "estimated",
+      estimated: true,
+      model: { provider: "tanwan", id: "deepseek-v4-flash" },
+      updatedAt: 1,
+    });
+    vi.advanceTimersByTime(600);
+
+    const payload = saveData.mock.calls.map((call) => call[1]).find((data) => data && data.contextUsage);
+    expect(payload?.contextUsage?.["session-ctx"]).toMatchObject({
+      contextWindow: 300000,
+      usedTokens: 160300,
+    });
+
+    // 清除后不应再写回旧值（例如压缩完成后用量归零）。
+    saveSessionContextUsage("session-ctx", null);
+    vi.advanceTimersByTime(600);
+    const lastPayload = saveData.mock.calls.map((call) => call[1]).filter((data) => data && data.contextUsage).at(-1);
+    expect(lastPayload?.contextUsage?.["session-ctx"]).toBeUndefined();
+  });
+
+  it("hands the persisted context usage back for the active session", () => {
+    saveSessionContextUsage("session-ctx-get", {
+      contextWindow: 1050000,
+      usedTokens: 601849,
+      source: "provider",
+      estimated: false,
+      updatedAt: 1,
+    });
+    expect(getSessionContextUsage("session-ctx-get")).toMatchObject({
+      contextWindow: 1050000,
+      usedTokens: 601849,
+    });
+    saveSessionContextUsage("session-ctx-get", null);
+    expect(getSessionContextUsage("session-ctx-get")).toBeNull();
+  });
+
+  it("drops persisted context usage together with deleted sessions", async () => {
+    saveSessionContextUsage("deleted-session", {
+      contextWindow: 128000,
+      usedTokens: 64000,
+      source: "estimated",
+      estimated: true,
+      updatedAt: 1,
+    });
+    await purgeDeletedSessionData(["deleted-session"], []);
+    vi.advanceTimersByTime(600);
+
+    const lastPayload = saveData.mock.calls.map((call) => call[1]).filter((data) => data && data.contextUsage).at(-1);
+    expect(lastPayload?.contextUsage?.["deleted-session"]).toBeUndefined();
   });
 
   it("purges deleted model caches and notifies in-memory history consumers", async () => {

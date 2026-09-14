@@ -35,6 +35,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
   /** 思考档位呈现模式：levels=有档位声明（下拉）；toggle=仅有思考开关（无档位声明，如 mimo）。 */
@@ -99,6 +100,9 @@ const normalizeModels = (value: unknown): AgentModel[] => {
       name,
       provider,
       reasoning: model.reasoning === true,
+      contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
+        ? Number(model.contextWindow)
+        : undefined,
       supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
       supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
         ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
@@ -748,20 +752,26 @@ export class PiSDKAgent {
    * bounded timeout — whichever comes first. A compaction that never settles
    * must not block model/config RPCs forever.
    */
-  private waitForCompactionIdle(timeoutMs: number): Promise<void> {
-    if (!this.compactionActive) return Promise.resolve();
+  private waitForCompactionIdle(timeoutMs: number): Promise<boolean> {
+    if (!this.compactionActive) return Promise.resolve(true);
     return new Promise((resolve) => {
       const startedAt = Date.now();
       const timer = setInterval(() => {
         if (!this.compactionActive || Date.now() - startedAt >= timeoutMs) {
           clearInterval(timer);
-          resolve();
+          resolve(!this.compactionActive);
         }
       }, 200);
     });
   }
 
   async setModel(provider: string, modelId: string): Promise<void> {
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    // 不允许在压缩中途修改 Pi 的 session.model。压缩请求已经捕获了旧模型，
+    // 这时切换会让 Hpp hook 看到新模型，造成准备数据、认证和实际模型不一致。
+    if (!(await this.waitForCompactionIdle(PI_COMPACTION_MODEL_WAIT_MS))) {
+      throw new Error("SESSION_BUSY");
+    }
     if (!this.process) throw new Error("Pi SDK worker is not running");
     let requestId = "";
     await new Promise<void>((resolve, reject) => {
@@ -1079,7 +1089,26 @@ export class PiSDKAgent {
           const outputTokens = Number(record.outputTokens) || 0;
           const cacheInputTokens = Number(record.cacheInputTokens) || 0;
           if (inputTokens > 0 || outputTokens > 0) {
-            this.emitEvent({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+            this.emitEvent({
+          type: "token_usage",
+          inputTokens,
+          outputTokens,
+          cacheInputTokens,
+          contextTokens: Number(record.contextTokens) || undefined,
+          contextWindow: Number(record.contextWindow) || undefined,
+          contextEstimated: record.contextEstimated !== false,
+          contextBreakdown: Array.isArray(record.contextBreakdown)
+            ? record.contextBreakdown.flatMap((entry) => {
+                const item = asRecord(entry);
+                const id = optionalString(item.id);
+                const label = optionalString(item.label);
+                const tokens = Number(item.tokens);
+                return id && label && Number.isFinite(tokens) && tokens > 0
+                  ? [{ id, label, tokens }]
+                  : [];
+              })
+            : undefined,
+        });
           }
         }
         this.refreshAgentEndFallback();

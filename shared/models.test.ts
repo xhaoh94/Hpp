@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   THINKING_LEVELS,
+  formatContextTokenAmount,
+  formatContextUsageDetail,
   getOrderedModelProviders,
   groupModelsByProvider,
   includeCurrentModel,
@@ -100,6 +102,29 @@ describe("shared model rules", () => {
     expect(getThinkingToggleLevel({ supportedThinkingLevels: ["off", "minimal", "low", "medium", "high"] })).toBe("medium");
     expect(getThinkingToggleLevel({ supportedThinkingLevels: [] })).toBe("medium");
     expect(getThinkingToggleLevel(null)).toBe("medium");
+  });
+
+  it("formats context usage like '53.4% · 160.3K / 300.0K 上下文已使用'", () => {
+    expect(formatContextUsageDetail({ contextWindow: 300000, usedTokens: 160300 }))
+      .toBe("53.4% · 160.3K / 300.0K 上下文已使用");
+  });
+
+  it("marks estimated context usage and degrades gracefully without values", () => {
+    expect(formatContextUsageDetail({ contextWindow: 128000, usedTokens: 64000, estimated: true }))
+      .toBe("50.0% · 64.0K / 128.0K 上下文已使用（估算）");
+    // 只有窗口：显示窗口，并如实说明用量未知。
+    expect(formatContextUsageDetail({ contextWindow: 128000 })).toBe("128.0K 上下文窗口");
+    expect(formatContextUsageDetail({ contextWindow: 128000, estimated: true })).toBe("128.0K 上下文窗口（估算）");
+    expect(formatContextUsageDetail({})).toBe("当前模型未提供上下文窗口");
+    expect(formatContextUsageDetail({ contextWindow: 0 })).toBe("当前模型未提供上下文窗口");
+  });
+
+  it("formats context token amounts with one decimal and K/M suffixes", () => {
+    expect(formatContextTokenAmount(999)).toBe("999");
+    expect(formatContextTokenAmount(160300)).toBe("160.3K");
+    expect(formatContextTokenAmount(300000)).toBe("300.0K");
+    expect(formatContextTokenAmount(1_500_000)).toBe("1.5M");
+    expect(formatContextTokenAmount(Number.NaN)).toBe("0");
   });
 
   it("validates toggle values even when off/default are not declared levels", () => {

@@ -85,6 +85,11 @@ class FakeSession {
     this.thinkingLevel = levels.includes(level) ? level : levels[0];
   }
   async setModel(model) { this.model = model; }
+  // 模拟 SDK 提供精确上下文计数的版本（仅测试开启）；未开启时返回 undefined，
+  // 让 worker 回退到本次请求的输入 token 估算。
+  getContextUsage() {
+    return process.env.PI_TEST_PRECISE_CONTEXT === "1" ? { tokens: 123456 } : undefined;
+  }
   // 真实 SDK 的 AgentSession.extensionRunner 暴露 getRegisteredCommands/getCommand。
   get extensionRunner() {
     return {
@@ -214,6 +219,37 @@ class FakeSession {
       await new Promise((resolve) => setTimeout(resolve, message === "slow-compact" ? 200 : 20));
       this.listener?.({ type: "compaction_end", reason: "threshold", aborted: cancelled, willRetry: true });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: compaction?.summary || (cancelled ? "compaction-cancelled" : "continued") }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "compact-fail-event") {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "compaction_start", reason: "threshold" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      this.listener?.({
+        type: "compaction_end",
+        reason: "threshold",
+        aborted: false,
+        willRetry: false,
+        errorMessage: "Auto-compaction failed: model switch race",
+      });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "context-usage") {
+      // 带 usage 的普通回合：验证 worker 上报的上下文用量字段。
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "ok" }],
+          stopReason: "stop",
+          usage: { input: 9000, cacheRead: 1000, cacheWrite: 0, output: 50 },
+        },
+      });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -853,6 +889,69 @@ describe("Pi SDK worker protocol", () => {
     expect(String(rejected.error)).toContain("本轮已结束");
   });
 
+  it("reports a failed compaction instead of marking it completed", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "compact-failed", type: "prompt", message: "compact-fail-event", permissionMode: "full-access" });
+    const failed = await worker.waitFor(
+      (message) => message.type === "context_compaction" && message.phase === "failed",
+    );
+    expect(failed.error).toContain("model switch race");
+    expect(failed.phase).not.toBe("completed");
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-failed");
+  });
+
+  it("waits for compaction to settle before applying a model switch", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "slow-compaction", type: "prompt", message: "slow-compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "context_compaction" && message.phase === "started");
+    worker.send({ id: "model-during-compaction", type: "setModel", provider: "luna", modelId: "gpt-5.6-luna" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(worker.messages.some((message) => message.type === "model_changed" && message.id === "model-during-compaction")).toBe(false);
+
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "slow-compaction");
+    await expect(worker.waitFor((message) => message.type === "model_changed" && message.id === "model-during-compaction"))
+      .resolves.toMatchObject({ model: { provider: "luna", id: "gpt-5.6-luna" } });
+  });
+
+  it("reports estimated context usage by default and the SDK's precise count when available", async () => {
+    const estimatedWorker = startWorker(runtimeRoot, agentDir);
+    children.push(estimatedWorker.child);
+    estimatedWorker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await estimatedWorker.waitFor((message) => message.type === "ready");
+    estimatedWorker.send({ id: "ctx-estimated", type: "prompt", message: "context-usage", permissionMode: "full-access" });
+    const estimatedMessage = await estimatedWorker.waitFor(
+      (message) => message.type === "message_end" && Number(message.contextTokens) > 0,
+    );
+    // 无精确 API：input + cacheRead + cacheWrite = 10000，并标记为估算。
+    expect(estimatedMessage.contextTokens).toBe(10000);
+    expect(estimatedMessage.contextEstimated).toBe(true);
+    await estimatedWorker.waitFor((message) => message.type === "prompt_done" && message.id === "ctx-estimated");
+
+    const preciseWorker = startWorker(runtimeRoot, agentDir, { PI_TEST_PRECISE_CONTEXT: "1" });
+    children.push(preciseWorker.child);
+    preciseWorker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await preciseWorker.waitFor((message) => message.type === "ready");
+    preciseWorker.send({ id: "ctx-precise", type: "prompt", message: "context-usage", permissionMode: "full-access" });
+    const preciseMessage = await preciseWorker.waitFor(
+      (message) => message.type === "message_end" && Number(message.contextTokens) > 0,
+    );
+    expect(preciseMessage.contextTokens).toBe(123456);
+    expect(preciseMessage.contextEstimated).toBe(false);
+    // 上下文构成按实际总量归一化：分类之和等于上报总量。
+    const breakdown = preciseMessage.contextBreakdown as Array<{ id: string; tokens: number }>;
+    expect(Array.isArray(breakdown)).toBe(true);
+    expect(breakdown.reduce((sum, entry) => sum + entry.tokens, 0)).toBe(123456);
+    expect(breakdown.some((entry) => entry.id === "system")).toBe(true);
+    await preciseWorker.waitFor((message) => message.type === "prompt_done" && message.id === "ctx-precise");
+  });
+
   it("uses low thinking by default for Agent compaction", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -948,6 +1047,27 @@ describe("Pi SDK worker protocol", () => {
     worker.send({ id: "resume", type: "setCompactionConfig", config: { enabled: true, thinkingLevel: "low" } });
     await worker.waitFor((message) => message.type === "compaction_config_changed");
     expect(await runFailingCompaction("fail-4")).toBe("continued");
+  });
+
+  it("resumes auto compaction after a successful model switch", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    const runFailingCompaction = async (id: string) => {
+      worker.send({ id, type: "prompt", message: "compact-fail-always", permissionMode: "full-access" });
+      await worker.waitFor((message) => message.type === "prompt_done" && message.id === id);
+      const last = worker.messages.filter((item) => item.type === "message_end").at(-1);
+      return String((last?.message as { text?: unknown })?.text || "");
+    };
+
+    await runFailingCompaction("switch-fail-1");
+    await runFailingCompaction("switch-fail-2");
+    expect(await runFailingCompaction("switch-fail-3")).toBe("compaction-cancelled");
+
+    worker.send({ id: "switch-after-failures", type: "setModel", provider: "luna", modelId: "gpt-5.6-luna" });
+    await worker.waitFor((message) => message.type === "model_changed" && message.id === "switch-after-failures");
+    expect(await runFailingCompaction("switch-fail-4")).toBe("continued");
   });
 
   it("uses a configured OpenAI-compatible model for Agent compaction", async () => {

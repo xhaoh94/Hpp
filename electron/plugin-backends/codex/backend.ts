@@ -19,6 +19,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
 }
@@ -79,6 +80,9 @@ const normalizeModels = (value: unknown): AgentModel[] => {
       name,
       provider,
       reasoning: model.reasoning === true,
+      contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
+        ? Number(model.contextWindow)
+        : undefined,
       supportsImages: typeof model.supportsImages === "boolean" ? model.supportsImages : undefined,
       supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
         ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
@@ -516,7 +520,14 @@ export class CodexAgent {
         const outputTokens = Number(record.outputTokens) || 0;
         const cacheInputTokens = Number(record.cacheInputTokens) || 0;
         if (inputTokens > 0 || outputTokens > 0) {
-          this.emitEvent({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+          this.emitEvent({
+          type: "token_usage",
+          inputTokens,
+          outputTokens,
+          cacheInputTokens,
+          contextTokens: inputTokens,
+          contextEstimated: true,
+        });
         }
         break;
       }

@@ -51,6 +51,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
 }
@@ -175,6 +176,9 @@ function normalizeModels(value: unknown): AgentModel[] {
       name: optionalString(model.name) || id,
       provider,
       reasoning: model.reasoning !== false,
+      contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
+        ? Number(model.contextWindow)
+        : undefined,
       supportsImages: model.supportsImages !== false,
       supportedThinkingLevels: Array.isArray(model.supportedThinkingLevels)
         ? model.supportedThinkingLevels.filter((level): level is string => typeof level === "string")
@@ -698,7 +702,14 @@ export class ClaudeSDKAgent {
           const outputTokens = Number(usage.output_tokens) || 0;
           const cacheInputTokens = Number(usage.cache_read_input_tokens) || 0;
           if (inputTokens > 0 || outputTokens > 0) {
-            this.emitEvent({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+            this.emitEvent({
+      type: "token_usage",
+      inputTokens,
+      outputTokens,
+      cacheInputTokens,
+      contextTokens: inputTokens,
+      contextEstimated: true,
+    });
           }
         }
         this.activePromptId = null;

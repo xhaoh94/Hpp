@@ -1,0 +1,139 @@
+.context-usage-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+}
+
+/* 位置由 useAnchoredOverlay 内联给出（锚定标题栏的上下文圆环）。 */
+.context-usage-modal {
+  position: fixed;
+  width: 300px;
+  box-sizing: border-box;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background-color: var(--bg-secondary);
+  box-shadow: 0 16px 40px var(--shadow-color, rgba(0, 0, 0, 0.45));
+  color: var(--text-primary);
+}
+
+.context-usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-usage-header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.context-usage-close {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.context-usage-close:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.context-usage-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0 8px;
+}
+
+.context-usage-summary strong {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+
+.context-usage-summary span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-usage-bar {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--border-color) 70%, transparent);
+}
+
+.context-usage-bar-segment {
+  height: 100%;
+  border-radius: 2px;
+  background-color: var(--accent-color);
+  transition: width 0.25s ease;
+}
+
+.context-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-usage-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-usage-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.context-usage-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-usage-value {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.context-usage-empty {
+  margin: 12px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.context-usage-footnote {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}

@@ -16,6 +16,7 @@ import {
   type AgentCommentary,
   type ChatMessage,
   type ModelInfo,
+  type SessionContextUsage,
 } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
@@ -39,6 +40,8 @@ interface PersistedModel {
   /** sessionId -> modelKey -> thinking level */
   thinkingLevelsByModel?: Record<string, Record<string, string>>;
   models?: Record<string, ModelInfo>;
+  /** sessionId -> 最近一次上下文用量；重启后仍能显示上次已知值。 */
+  contextUsage?: Record<string, SessionContextUsage>;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -271,6 +274,7 @@ export const applyPersistedMessagesSnapshot = (
     // Compaction is renderer-runtime state and is never valid after hydration.
     compactingSessions: {},
     compactionPostTurnSessions: {},
+    contextUsageBySession: {},
   });
 };
 
@@ -329,6 +333,33 @@ const parseStringRecordMap = (value: unknown): Record<string, Record<string, str
   return result;
 };
 
+const parseContextUsageRecord = (value: unknown): Record<string, SessionContextUsage> => {
+  if (!isRecord(value)) return {};
+  const result: Record<string, SessionContextUsage> = {};
+  for (const [sessionId, item] of Object.entries(value)) {
+    if (!isRecord(item)) continue;
+    const contextWindow = Number(item.contextWindow);
+    const usedTokens = Number(item.usedTokens);
+    if (!Number.isFinite(contextWindow) && !Number.isFinite(usedTokens)) continue;
+    const model = isRecord(item.model)
+      && typeof item.model.provider === "string" && typeof item.model.id === "string"
+      ? { provider: item.model.provider, id: item.model.id }
+      : undefined;
+    result[sessionId] = {
+      ...(Number.isFinite(contextWindow) && contextWindow > 0 ? { contextWindow } : {}),
+      ...(Number.isFinite(usedTokens) && usedTokens >= 0 ? { usedTokens } : {}),
+      ...(Number.isFinite(usedTokens) && Number.isFinite(contextWindow) && contextWindow > 0
+        ? { remainingTokens: Math.max(0, contextWindow - usedTokens), usageRatio: Math.min(1, usedTokens / contextWindow) }
+        : {}),
+      source: item.source === "provider" ? "provider" : "estimated",
+      estimated: item.estimated !== false,
+      ...(model ? { model } : {}),
+      updatedAt: Number(item.updatedAt) || Date.now(),
+    };
+  }
+  return result;
+};
+
 const parsePersistedModel = (value: unknown): PersistedModel | null => {
   if (!isRecord(value)) return null;
   return {
@@ -338,6 +369,7 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
     thinkingLevels: parseStringRecord(value.thinkingLevels),
     thinkingLevelsByModel: parseStringRecordMap(value.thinkingLevelsByModel),
     models: parseModelRecord(value.models),
+    contextUsage: parseContextUsageRecord(value.contextUsage),
   };
 };
 
@@ -345,6 +377,8 @@ const parsePersistedModel = (value: unknown): PersistedModel | null => {
 let _sessionModelsCache: Record<string, ModelInfo> = {};
 let _sessionThinkingCache: Record<string, string> = {};
 let _sessionModelThinkingCache: Record<string, Record<string, string>> = {};
+// 重启后事件流不会重放，因此把最近一次上下文用量随模型数据一起落盘。
+let _sessionContextUsageCache: Record<string, SessionContextUsage> = {};
 export const SESSION_CONFIG_UPDATED_EVENT = "session-config-updated";
 export const SESSION_DATA_PURGED_EVENT = "session-data-purged";
 export const DISK_USAGE_INVALIDATED_EVENT = "disk-usage-invalidated";
@@ -452,8 +486,29 @@ function flushModelsToDisk() {
     models: { ..._sessionModelsCache },
     thinkingLevels: { ..._sessionThinkingCache },
     thinkingLevelsByModel: { ..._sessionModelThinkingCache },
+    contextUsage: { ..._sessionContextUsageCache },
     modelVersion: 6,
   });
+}
+
+/** 保存/清除会话的上下文用量（内存立即生效，磁盘防抖写入）。 */
+export function saveSessionContextUsage(sessionId: string, usage?: SessionContextUsage | null) {
+  if (!sessionId) return;
+  if (!usage) {
+    if (!Object.prototype.hasOwnProperty.call(_sessionContextUsageCache, sessionId)) return;
+    const next = { ..._sessionContextUsageCache };
+    delete next[sessionId];
+    _sessionContextUsageCache = next;
+  } else {
+    _sessionContextUsageCache = { ..._sessionContextUsageCache, [sessionId]: usage };
+  }
+  _cacheDirty = true;
+  saveScheduler.schedule("models", 500, flushModelsToDisk);
+}
+
+/** 读取磁盘缓存里的上下文用量（用于会话激活时补一次展示值）。 */
+export function getSessionContextUsage(sessionId: string): SessionContextUsage | null {
+  return _sessionContextUsageCache[sessionId] || null;
 }
 
 /** Save a model for a specific session (synchronous cache update, debounced disk write) */
@@ -520,13 +575,16 @@ export async function purgeDeletedSessionData(sessionIds: string[], projectIds: 
   const previousModelCount = Object.keys(_sessionModelsCache).length;
   const previousThinkingCount = Object.keys(_sessionThinkingCache).length;
   const previousModelThinkingCount = Object.keys(_sessionModelThinkingCache).length;
+  const previousContextUsageCount = Object.keys(_sessionContextUsageCache).length;
   _sessionModelsCache = withoutSessionKeys(_sessionModelsCache, normalizedSessionIds);
   _sessionThinkingCache = withoutSessionKeys(_sessionThinkingCache, normalizedSessionIds);
   _sessionModelThinkingCache = withoutSessionKeys(_sessionModelThinkingCache, normalizedSessionIds);
+  _sessionContextUsageCache = withoutSessionKeys(_sessionContextUsageCache, normalizedSessionIds);
   if (
     Object.keys(_sessionModelsCache).length !== previousModelCount ||
     Object.keys(_sessionThinkingCache).length !== previousThinkingCount ||
-    Object.keys(_sessionModelThinkingCache).length !== previousModelThinkingCount
+    Object.keys(_sessionModelThinkingCache).length !== previousModelThinkingCount ||
+    Object.keys(_sessionContextUsageCache).length !== previousContextUsageCount
   ) {
     _cacheDirty = true;
     saveScheduler.schedule("models", 500, flushModelsToDisk);
@@ -677,12 +735,14 @@ export function useDataPersistence() {
             models: {},
             thinkingLevels: {},
             thinkingLevelsByModel: {},
+            contextUsage: {},
             modelVersion: 6,
           });
         } else {
           if (model.models) _sessionModelsCache = { ...model.models };
           if (model.thinkingLevels) _sessionThinkingCache = { ...model.thinkingLevels };
           if (model.thinkingLevelsByModel) _sessionModelThinkingCache = { ...model.thinkingLevelsByModel };
+          if (model.contextUsage) _sessionContextUsageCache = { ...model.contextUsage };
           if (validSessionIds) {
             _sessionModelsCache = Object.fromEntries(
               Object.entries(_sessionModelsCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
@@ -693,12 +753,20 @@ export function useDataPersistence() {
             _sessionModelThinkingCache = Object.fromEntries(
               Object.entries(_sessionModelThinkingCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
             );
+            _sessionContextUsageCache = Object.fromEntries(
+              Object.entries(_sessionContextUsageCache).filter(([sessionId]) => validSessionIds!.has(sessionId))
+            );
           }
         }
 
         // Restore active session's model from cache
         if (activeSessionId && _sessionModelsCache[activeSessionId]) {
           useChatStore.setState({ currentModel: _sessionModelsCache[activeSessionId] });
+        }
+
+        // 重启后没有事件流：先把上次已知的上下文用量恢复到标题栏。
+        if (activeSessionId && _sessionContextUsageCache[activeSessionId]) {
+          useChatStore.getState().setSessionContextUsage(activeSessionId, _sessionContextUsageCache[activeSessionId]);
         }
 
         // Restore active session's thinking level from cache

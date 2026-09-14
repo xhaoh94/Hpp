@@ -305,11 +305,15 @@ const normalizeModel = async (value, providerId) => {
     : savedLevels;
   const directoryReasoning = isBuiltin ? directoryEntry.reasoning === true : null;
   const directoryImageInput = isBuiltin ? directoryEntry.input.includes("image") : null;
+  // 上下文窗口：优先取 models.json 里的声明（Hpp 同步渠道时写入），
+  // 否则用 Agent 目录条目；两者都没有时留空，由运行时自己决定默认值。
+  const declaredContextWindow = Number(value.contextWindow) || Number(directoryEntry?.contextWindow) || 0;
   return {
     id,
     name: asString(value.name) || id,
     reasoning: directoryReasoning !== null ? directoryReasoning : (value.reasoning === true),
     imageInput: directoryImageInput !== null ? directoryImageInput : (Array.isArray(value.input) && value.input.includes("image")),
+    ...(declaredContextWindow > 0 ? { contextWindow: declaredContextWindow } : {}),
     // 内置模型（目录命中）→ 能力由 Agent 管理，配置弹窗不显示能力控件；
     // 非内置模型（目录里完全没有）→ 显示控件供自定义。
     isBuiltin,
@@ -382,6 +386,13 @@ export const toProviderConfig = (provider, existingProvider = {}) => {
         reasoning: model.reasoning === true,
         input: model.imageInput ? ["text", "image"] : ["text"],
       };
+      // 保留已声明的上下文窗口，否则保存一次渠道就会丢掉窗口信息。
+      const declaredContextWindow = Number(model.contextWindow);
+      if (Number.isFinite(declaredContextWindow) && declaredContextWindow > 0) {
+        entry.contextWindow = declaredContextWindow;
+      } else {
+        delete entry.contextWindow;
+      }
       if (declaredLevels.length > 0 && model.reasoning === true) {
         entry.thinkingLevelMap = supportedThinkingLevelsToMap(declaredLevels);
       } else {

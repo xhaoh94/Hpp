@@ -1723,6 +1723,45 @@ describe("SessionCommandCoordinator", () => {
       .resolves.toMatchObject({ level: "high" });
   });
 
+  it("serializes model changes so a slower switch cannot overwrite a newer one", async () => {
+    const modelA = {
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: false,
+    };
+    const modelB = {
+      id: "model-b",
+      name: "Model B",
+      provider: "test",
+      reasoning: false,
+    };
+    useChatStore.setState({ currentModel: modelA, availableModels: [modelA, modelB] });
+    saveSessionModel("session-one", modelA);
+
+    let releaseFirst!: (value: { success: boolean }) => void;
+    electronAPI.agentSetModel
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve; }))
+      .mockResolvedValue({ success: true });
+
+    const first = SessionCommandCoordinator.setModel("session-one", modelB, {
+      models: [modelA, modelB],
+    });
+    await vi.waitFor(() => expect(electronAPI.agentSetModel).toHaveBeenCalledTimes(1));
+    const second = SessionCommandCoordinator.setModel("session-one", modelA, {
+      models: [modelA, modelB],
+    });
+    await Promise.resolve();
+    expect(electronAPI.agentSetModel).toHaveBeenCalledTimes(1);
+
+    releaseFirst({ success: true });
+    await expect(first).resolves.toMatchObject({ model: modelB });
+    await expect(second).resolves.toMatchObject({ model: modelA });
+    expect(electronAPI.agentSetModel.mock.calls.map(([provider, modelId]) => [provider, modelId]))
+      .toEqual([["test", "model-b"], ["test", "model-a"]]);
+    expect(useChatStore.getState().currentModel).toEqual(modelA);
+  });
+
   it("rejects thinking levels not supported by the current model", async () => {
     useChatStore.setState({
       currentModel: {

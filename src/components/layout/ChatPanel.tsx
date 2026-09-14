@@ -45,7 +45,7 @@ import {
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
 import { getLocalMarkdownCodePath, getLocalMarkdownFilePath, resolveProjectFilePath } from "@/lib/project-file-path";
 import { extractUserMessageAttachments } from "@shared/user-message-attachments";
-import { getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersistence";
+import { getSessionContextUsage, getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersistence";
 import {
   SessionCommandCoordinator,
   type PreparedSessionMessage,
@@ -59,6 +59,7 @@ import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
 import { FilePreview } from "@/components/shared/FilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
+import { ContextUsageModal } from "./ContextUsageModal";
 import { ChatComposer } from "./ChatComposer";
 import { InlineComposerEditor, type InlineComposerEditorHandle } from "@/components/shared/InlineComposerEditor";
 import { ChatToolbar } from "./ChatToolbar";
@@ -98,6 +99,7 @@ import {
   type SessionRuntime,
 } from "./agentEventUtils";
 import {
+  formatContextUsageDetail,
   getModelThinkingLevels,
   getOrderedModelProviders,
   includeCurrentModel,
@@ -856,6 +858,20 @@ const formatTokenCount = (count: number) => {
   if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
   return String(count);
 };
+
+const getContextUsageTone = (ratio?: number) => {
+  if (ratio === undefined) return "unknown";
+  if (ratio >= 0.95) return "critical";
+  if (ratio >= 0.85) return "danger";
+  if (ratio >= 0.7) return "warning";
+  return "normal";
+};
+
+// 标题栏的上下文圆环：只显示占比，完整数值在悬浮提示里。
+const CONTEXT_RING_SIZE = 20;
+const CONTEXT_RING_STROKE = 2;
+const CONTEXT_RING_RADIUS = (CONTEXT_RING_SIZE - CONTEXT_RING_STROKE) / 2;
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
 
 // 发言记录弹窗的虚拟行高度估算：12px 文本行高（约 16.8px）+ 上下 8px padding
 // + 1px 底部边框。真实高度由 ResizeObserver 测量后自动校正。
@@ -2173,6 +2189,9 @@ export function ChatPanel({
         && state.compactionPostTurnSessions[activeSessionId] !== false
       : false
   );
+  const activeSessionContextUsage = useChatStore((state) =>
+    activeSessionId ? state.contextUsageBySession[activeSessionId] : undefined
+  );
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
   const activeSessionSupportsActions = supportsAgentActions(activeSession?.agentId || activeAgentId);
   const openSessions = useMemo(
@@ -2234,6 +2253,20 @@ export function ChatPanel({
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
   const [agentReloadConfirmOpen, setAgentReloadConfirmOpen] = useState(false);
+  const [contextUsageOpen, setContextUsageOpen] = useState(false);
+  const contextRingRef = useRef<HTMLButtonElement>(null);
+  // 重启/热重载后事件流不会重放：当前会话没有实时用量时，
+  // 用磁盘里上次已知的值补一次，避免标题栏与弹窗显示空数据。
+  useEffect(() => {
+    if (!activeSessionId) return;
+    if (useChatStore.getState().contextUsageBySession[activeSessionId]) return;
+    const persisted = getSessionContextUsage(activeSessionId);
+    if (persisted) useChatStore.getState().setSessionContextUsage(activeSessionId, persisted);
+  }, [activeSessionId]);
+  // 弹窗展示的是当前会话的用量，切会话时关闭，避免看到上一个会话的明细。
+  useEffect(() => {
+    setContextUsageOpen(false);
+  }, [activeSessionId]);
   const [agentReloading, setAgentReloading] = useState(false);
   const [agentReloadError, setAgentReloadError] = useState("");
   const [queueEditingId, setQueueEditingId] = useState<string | null>(null);
@@ -3470,6 +3503,32 @@ export function ChatPanel({
     }
   };
 
+  const contextWindow = activeSessionContextUsage?.contextWindow || currentModel?.contextWindow;
+  const contextUsedTokens = activeSessionContextUsage?.model
+    && currentModel
+    && (activeSessionContextUsage.model.id !== currentModel.id
+      || activeSessionContextUsage.model.provider !== currentModel.provider)
+      ? undefined
+      : activeSessionContextUsage?.usedTokens;
+  const contextUsageRatio = contextWindow && contextUsedTokens !== undefined
+    ? Math.min(1, contextUsedTokens / contextWindow)
+    : undefined;
+  // 标题栏只留一个进度环 + 中心百分比，完整数值放到悬浮提示里。
+  const contextPercentLabel = contextUsageRatio !== undefined
+    ? `${Math.round(contextUsageRatio * 100)}`
+    : contextWindow
+      ? "–"
+      : "?";
+  // 百分比太小（不足 0.5%）时取整会显示 0，仍应让环上留出可见进度。
+  const contextRingProgress = contextUsageRatio !== undefined
+    ? Math.max(contextUsageRatio, contextUsageRatio > 0 ? 0.02 : 0)
+    : 0;
+  const contextUsageTitle = formatContextUsageDetail({
+    contextWindow,
+    usedTokens: contextUsedTokens,
+    estimated: activeSessionContextUsage?.estimated,
+  });
+
   const thinkingLevels = getModelThinkingLevels(currentModel);
   const normalizedThinkingLevel = normalizeModelThinkingLevel(thinkingLevel, currentModel);
   const currentThinking = thinkingLevels.find((level) => level.id === normalizedThinkingLevel)
@@ -3506,6 +3565,8 @@ export function ChatPanel({
       <div className="chat-panel">
         <div className="chat-header">
           <div className="chat-agent-dot" />
+          <span className="chat-header-app-title">Hpp</span>
+          <span className="chat-header-separator" aria-hidden="true">·</span>
           <span className="chat-agent-name">{activeProject.name}</span>
         </div>
         <div className="chat-empty-state">
@@ -3542,7 +3603,10 @@ export function ChatPanel({
       {/* Header */}
       <div className="chat-header">
         <div className={`chat-agent-dot${currentSessionRunning ? " chat-agent-dot-running" : ""}`} />
-        <span className="chat-agent-name">{activeProject.name}</span>
+        <span className="chat-header-app-title">Hpp</span>
+        <span className="chat-header-separator" aria-hidden="true">·</span>
+        <span className="chat-agent-name" title={activeProject.name}>{activeProject.name}</span>
+        <span className="chat-header-separator" aria-hidden="true">·</span>
         <button
           type="button"
           className="chat-agent-tag chat-agent-reload-trigger"
@@ -3553,6 +3617,39 @@ export function ChatPanel({
           <span>{getAgentName(currentAgentId)}</span>
           <RefreshCw size={10} strokeWidth={2} />
         </button>
+        <span className="chat-header-separator" aria-hidden="true">·</span>
+        <button
+          type="button"
+          ref={contextRingRef}
+          className={`chat-context-ring ${getContextUsageTone(contextUsageRatio)}`}
+          data-tooltip={contextUsageTitle}
+          aria-label={`上下文：${contextUsageTitle}`}
+          onClick={() => setContextUsageOpen(true)}
+        >
+          <svg width={CONTEXT_RING_SIZE} height={CONTEXT_RING_SIZE} viewBox={`0 0 ${CONTEXT_RING_SIZE} ${CONTEXT_RING_SIZE}`} aria-hidden="true">
+            <circle
+              className="chat-context-ring-track"
+              cx={CONTEXT_RING_SIZE / 2}
+              cy={CONTEXT_RING_SIZE / 2}
+              r={CONTEXT_RING_RADIUS}
+              fill="none"
+              strokeWidth={CONTEXT_RING_STROKE}
+            />
+            <circle
+              className="chat-context-ring-progress"
+              cx={CONTEXT_RING_SIZE / 2}
+              cy={CONTEXT_RING_SIZE / 2}
+              r={CONTEXT_RING_RADIUS}
+              fill="none"
+              strokeWidth={CONTEXT_RING_STROKE}
+              strokeDasharray={CONTEXT_RING_CIRCUMFERENCE}
+              strokeDashoffset={CONTEXT_RING_CIRCUMFERENCE * (1 - contextRingProgress)}
+              transform={`rotate(-90 ${CONTEXT_RING_SIZE / 2} ${CONTEXT_RING_SIZE / 2})`}
+            />
+          </svg>
+          <span className="chat-context-ring-value">{contextPercentLabel}</span>
+        </button>
+        <span className="chat-header-separator" aria-hidden="true">·</span>
         {scrollHeaderTitle && scrollHeaderMessageId ? (
           <button
             type="button"
@@ -3834,6 +3931,13 @@ export function ChatPanel({
           />
         ) : null;
       })()}
+      {contextUsageOpen && (
+        <ContextUsageModal
+          usage={activeSessionContextUsage}
+          anchorRef={contextRingRef}
+          onClose={() => setContextUsageOpen(false)}
+        />
+      )}
       {modelConfigAgentId && (
         <AgentConfigModal
           agentId={modelConfigAgentId}

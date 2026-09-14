@@ -576,6 +576,41 @@ describe("chat process entry defaults", () => {
     expect(useChatStore.getState().compactingSessions["session-1"]).toBeUndefined();
   });
 
+  it("tracks per-session context usage and drops it with the session", () => {
+    useChatStore.setState({ activeSessionId: "session-1" });
+    const store = useChatStore.getState();
+
+    store.setSessionContextUsage("session-1", {
+      contextWindow: 200000,
+      usedTokens: 50000,
+      remainingTokens: 150000,
+      usageRatio: 0.25,
+      source: "estimated",
+      estimated: true,
+      model: { provider: "test", id: "model-a" },
+      updatedAt: 1,
+    });
+    expect(useChatStore.getState().contextUsageBySession["session-1"]).toMatchObject({
+      contextWindow: 200000,
+      usedTokens: 50000,
+      remainingTokens: 150000,
+    });
+
+    store.clearSessionContextUsage("session-1");
+    expect(useChatStore.getState().contextUsageBySession["session-1"]).toBeUndefined();
+
+    // 会话被删除后不能残留上下文用量，否则重建同名会话会显示旧数据。
+    store.setSessionContextUsage("session-1", {
+      contextWindow: 200000,
+      usedTokens: 50000,
+      source: "estimated",
+      estimated: true,
+      updatedAt: 1,
+    });
+    store.deleteSessionMessages("session-1");
+    expect(useChatStore.getState().contextUsageBySession["session-1"]).toBeUndefined();
+  });
+
   it("records whether a session is compacting after the turn already ended", () => {
     useChatStore.setState({ activeSessionId: "session-1" });
     const store = useChatStore.getState();

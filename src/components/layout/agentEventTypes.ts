@@ -63,7 +63,7 @@ export type AgentEventRuntimeController = AgentEventHandlerContext & {
   appendContextCompactionDivider: (
     currentSessionId: string,
     eventId?: string,
-    phase?: "started" | "completed" | "interrupted",
+    phase?: "started" | "completed" | "interrupted" | "failed",
     postTurn?: boolean,
   ) => void;
   clearAllStreamWatchdogs: () => void;

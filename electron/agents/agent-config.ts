@@ -13,6 +13,8 @@ export interface AgentCustomModelConfig {
   /** 内置模型来自 Agent 能力；自定义模型由 supportedThinkingLevels 是否非空派生。 */
   reasoning: boolean;
   imageInput: boolean;
+  /** 模型上下文窗口大小（tokens），目录未提供时为空。 */
+  contextWindow?: number;
   /**
    * 模型声明的思考档位。未知档位保持原值；对自定义模型而言，空值表示不支持思考。
    */
@@ -108,6 +110,9 @@ function normalizeModel(value: unknown): AgentCustomModelConfig | null {
     // 内置模型使用 Agent 目录的 reasoning；自定义模型由思考档位是否非空决定。
     reasoning: isBuiltin ? value.reasoning === true : supportedThinkingLevels.length > 0,
     imageInput: value.imageInput === true,
+    ...(Number.isFinite(Number(value.contextWindow)) && Number(value.contextWindow) > 0
+      ? { contextWindow: Number(value.contextWindow) }
+      : {}),
     ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
     ...(value.hasThinkingLevels === true || supportedThinkingLevels.length > 0 ? { hasThinkingLevels: true } : {}),
     ...(isBuiltin ? { isBuiltin: true } : {}),
@@ -633,6 +638,7 @@ export async function getConfiguredAgentModels(
       name: model.name || model.id,
       provider: provider.providerId,
       reasoning: model.reasoning === true,
+      ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
       supportsImages: model.imageInput === true,
       ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
       ...(thinkingLevelMode ? { thinkingLevelMode } : {}),

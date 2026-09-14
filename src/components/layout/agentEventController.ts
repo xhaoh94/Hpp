@@ -1076,7 +1076,7 @@ export function createAgentEventController({
   const appendContextCompactionDivider = (
     currentSessionId: string,
     eventId?: string,
-    phase: "started" | "completed" | "interrupted" = "completed",
+    phase: "started" | "completed" | "interrupted" | "failed" = "completed",
     postTurn?: boolean,
   ) => {
     const runtime = getRuntime(currentSessionId);
@@ -1087,7 +1087,9 @@ export function createAgentEventController({
       ? "running"
       : phase === "interrupted"
         ? "interrupted"
-        : "completed";
+        : phase === "failed"
+          ? "failed"
+          : "completed";
 
     if (phase === "started") {
       if (runtime.activeCompactionId && runtime.activeCompactionId !== normalizedEventId) {
@@ -1130,8 +1132,12 @@ export function createAgentEventController({
 
     if (runtime.activeCompactionPresentation === "process") {
       useChatStore.getState().updateLastAssistantProcessEntry(normalizedEventId, {
-        title: phase === "interrupted" ? "上下文压缩已中断" : "上下文已自动压缩",
-        state: phase === "interrupted" ? "interrupted" : "completed",
+        title: phase === "interrupted"
+          ? "上下文压缩已中断"
+          : phase === "failed"
+            ? "上下文压缩失败"
+            : "上下文已自动压缩",
+        state: phase === "interrupted" ? "interrupted" : phase === "failed" ? "error" : "completed",
         expanded: false,
       }, currentSessionId);
     } else {

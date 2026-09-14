@@ -56,6 +56,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
 }
@@ -1705,6 +1706,9 @@ export class DroidAgent {
         name: String(model.displayName || model.shortDisplayName || customModel?.displayName || modelId),
         provider,
         reasoning: modelSupportsReasoning(model),
+        contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
+          ? Number(model.contextWindow)
+          : undefined,
         supportsImages: model.noImageSupport !== true,
         supportedThinkingLevels: normalizeSupportedThinkingLevels(model.supportedReasoningEfforts),
       });
@@ -1822,7 +1826,13 @@ export class DroidAgent {
         usage.outputTokens ?? usage.output_tokens ?? usage.output ?? usage.completionTokens ?? usage.completion_tokens,
       ) || 0;
       if (inputTokens > 0 || outputTokens > 0) {
-        this.emitEvent({ type: "token_usage", inputTokens, outputTokens });
+        this.emitEvent({
+        type: "token_usage",
+        inputTokens,
+        outputTokens,
+        contextTokens: inputTokens,
+        contextEstimated: true,
+      });
         return;
       }
     }

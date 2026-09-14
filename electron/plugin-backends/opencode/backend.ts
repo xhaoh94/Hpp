@@ -40,6 +40,7 @@ interface AgentModel {
   name: string;
   provider: string;
   reasoning: boolean;
+  contextWindow?: number;
   supportsImages?: boolean;
   supportedThinkingLevels?: string[];
 }
@@ -2170,6 +2171,9 @@ export class OpenCodeAgent {
                 name: String(model.name || model.id || modelId),
                 provider: providerId,
                 reasoning: modelSupportsReasoning(model),
+                contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
+                  ? Number(model.contextWindow)
+                  : undefined,
                 supportsImages: modelSupportsImages(model),
                 supportedThinkingLevels: normalizeOpenCodeThinkingLevels(variants),
               });
@@ -2185,6 +2189,9 @@ export class OpenCodeAgent {
                 name: typeof model.name === "string" ? model.name : modelId,
                 provider: providerId,
                 reasoning: modelSupportsReasoning(modelInfo),
+                contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
+                  ? Number(model.contextWindow)
+                  : undefined,
                 supportsImages: modelSupportsImages(modelInfo),
                 supportedThinkingLevels: normalizeOpenCodeThinkingLevels(variants),
               });
@@ -2198,6 +2205,7 @@ export class OpenCodeAgent {
               name: String(defaultModel),
               provider: providerId,
               reasoning: false,
+              contextWindow: undefined,
               supportsImages: false,
             });
           }
@@ -2447,6 +2455,10 @@ export class OpenCodeAgent {
       inputTokens: Math.max(0, deltaInput),
       outputTokens: Math.max(0, deltaOutput),
       cacheInputTokens: Math.max(0, deltaCacheInput),
+      // input 是该 part 当前请求的总上下文；上报它而不是 deltaInput，
+      // 否则通用剩余上下文会随着每个 part 累加而失真。
+      contextTokens: input,
+      contextEstimated: true,
     });
   }
 
