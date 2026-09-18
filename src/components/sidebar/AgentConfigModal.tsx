@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
-import { Bot, BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X, Zap } from "lucide-react";
+import { Bot, BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { getThinkingLevelLabel, normalizeSupportedThinkingLevels, THINKING_LEVELS } from "@shared/models";
@@ -12,6 +13,19 @@ import { AgentCompactionModal } from "./AgentCompactionModal";
 import { AgentSubagentModal } from "./AgentSubagentModal";
 import { AgentConfigIO } from "./AgentConfigIO";
 import "./Settings.css";
+
+/** 拖拽放下后的目标下标：决定插到目标行之前还是之后，并修正删除原位造成的位移。 */
+export const resolveModelDropIndex = (
+  from: number,
+  index: number,
+  position: "before" | "after",
+): number => {
+  // 拖到自己身上：上半区原地不动，下半区语义是“往后挪一位”。
+  if (from === index) return position === "after" ? index + 1 : index;
+  const insertAt = position === "before" ? index : index + 1;
+  // 删除原位后，插入点在其后面的会前移一位。
+  return from < insertAt ? insertAt - 1 : insertAt;
+};
 
 type AgentConfigModalProps = {
   agentId: string;
@@ -70,7 +84,7 @@ const buildNormalizedProviderPayload = (draft: AgentProviderConfig, originalProv
     : normalizedDraft;
 };
 
-/** 自动保存的静默跳过条件：草稿不完整时不打断输入，也不弹错误。 */
+/** 草稿未满足保存条件时的说明（主动保存时才会提示）。 */
 const isProviderPayloadSavable = (
   payload: { providerId: string; baseUrl: string; apiKey: string; models: { id: string }[] },
 ) => /^[a-zA-Z0-9._:-]+$/.test(payload.providerId)
@@ -403,11 +417,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   // 模型内置实时判定的防抖计时器与请求序号（按模型行索引隔离，避免乱序覆盖）。
   const modelLookupTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   const modelLookupSeq = useRef(new Map<number, number>());
-  // 渠道自动保存：防抖计时器、并发保护与最近一次已保存的 payload 指纹。
-  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoSaveInFlight = useRef(false);
-  const autoSaveCompletion = useRef<Promise<void> | null>(null);
-  const autoSavePending = useRef(false);
+  // 渠道编辑改为主动保存：只有用户点“保存”或按 Ctrl+S 才写入。
+  // lastSavedPayload 仅用于判断是否有未保存改动。
+  const [savingProvider, setSavingProvider] = useState(false);
   const lastSavedPayload = useRef("");
   const draftRef = useRef<AgentProviderConfig | null>(null);
   const editorOriginalProviderIdRef = useRef("");
@@ -415,8 +427,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   // 防止旧请求返回时把旧配置重新写回当前弹窗。
   const editorScope = useRef(0);
   const editorAgentIdRef = useRef(agentId);
-  // 保存最新自动保存函数的引用，供卸载清理（早于定义处）调用。
-  const performAutoSaveRef = useRef(() => Promise.resolve());
   const pendingProviderEditor = useRef<{ agentId: string; providerId: string } | null>(null);
   const providerItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   // HTML5 drag/drop 在 Electron 中可能先触发 dragend 再完成 drop；用 ref 保留来源，
@@ -636,10 +646,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     return () => {
       if (apiKeyCopyTimer.current) clearTimeout(apiKeyCopyTimer.current);
       clearModelLookupState();
-      if (autoSaveTimer.current) {
-        clearTimeout(autoSaveTimer.current);
-        autoSaveTimer.current = null;
-      }
       if (dragProviderCleanupTimerRef.current) {
         clearTimeout(dragProviderCleanupTimerRef.current);
         dragProviderCleanupTimerRef.current = null;
@@ -650,8 +656,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       dragLastValidProviderIdRef.current = "";
       dragLastValidProviderPositionRef.current = "before";
       dragReorderCommittedRef.current = false;
-      // 关闭整个配置弹窗时冲刷防抖窗口内的改动，避免丢失。
-      void performAutoSaveRef.current();
     };
   }, [clearModelLookupState]);
 
@@ -689,20 +693,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   );
 
   const handleReload = useCallback(async () => {
-    // 重载前先冲刷防抖窗口内/在途的自动保存，否则重载会读到未含最新
-    // 改动（甚至已回滚用户草稿）的磁盘配置，造成“保存了却不生效”。
-    if (autoSaveTimer.current) {
-      clearTimeout(autoSaveTimer.current);
-      autoSaveTimer.current = null;
-    }
-    if (autoSaveCompletion.current) {
-      try {
-        await autoSaveCompletion.current;
-      } catch {
-        // 保存失败已由自动保存路径降级提示，这里继续重载磁盘上的旧配置。
-      }
-    }
-    await performAutoSaveRef.current();
     setReloading(true);
     setStatus(null);
     try {
@@ -760,6 +750,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     lastSavedPayload.current = "";
     setEditorOriginalProviderId("");
     setEditorOpen(true);
+    setSavingProvider(false);
     setStatus(null);
   }, [config.providers, providerConfiguration, usesActivation]);
 
@@ -777,6 +768,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     );
     setEditorOriginalProviderId(provider.providerId);
     setEditorOpen(true);
+    setSavingProvider(false);
     setStatus(null);
   }, []);
 
@@ -955,24 +947,33 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     editorOriginalProviderIdRef.current = editorOriginalProviderId;
   }, [editorOriginalProviderId]);
 
-  // 渠道编辑改为自动保存：每次草稿变化防抖后直接写入，无需保存按钮。
-  const performAutoSave = useCallback(async () => {
+  // 主动保存：点“保存”或按 Ctrl+S 才写入。草稿不完整时给出明确提示而不是静默跳过。
+  const providerDraftPayload = useMemo(
+    () => (draft ? buildNormalizedProviderPayload(draft, editorOriginalProviderId) : null),
+    [draft, editorOriginalProviderId],
+  );
+  const canSaveProviderDraft = !!providerDraftPayload && isProviderPayloadSavable(providerDraftPayload);
+  const providerDraftSerialized = providerDraftPayload ? JSON.stringify(providerDraftPayload) : "";
+  const providerDirty = canSaveProviderDraft && providerDraftSerialized !== lastSavedPayload.current;
+
+  const handleSaveProvider = useCallback(async () => {
     const currentDraft = draftRef.current;
     if (!currentDraft) return;
     const scope = editorScope.current;
     const saveAgentId = editorAgentIdRef.current;
     const payload = buildNormalizedProviderPayload(currentDraft, editorOriginalProviderIdRef.current);
-    // 草稿不完整（新建渠道填写中）时静默跳过，不弹错误。
-    if (!isProviderPayloadSavable(payload)) return;
-    const serialized = JSON.stringify(payload);
-    if (serialized === lastSavedPayload.current) return;
-    if (autoSaveInFlight.current) {
-      // 保存进行中的改动记为待补存，完成后立即再存一次。
-      autoSavePending.current = true;
+    if (!isProviderPayloadSavable(payload)) {
+      setStatus({ type: "error", text: "请先填写渠道 ID、渠道 URL、API Key，并至少保留一个模型。" });
       return;
     }
-    autoSaveInFlight.current = true;
-    const savePromise = (async () => {
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastSavedPayload.current) {
+      showFloatingToastMessage("渠道没有需要保存的改动");
+      return;
+    }
+    setSavingProvider(true);
+    setStatus(null);
+    try {
       const result = await window.electronAPI.agentConfigSave(saveAgentId, payload as AgentProviderConfig);
       if (scope !== editorScope.current || saveAgentId !== editorAgentIdRef.current) return;
       if (!result.success || !result.config) {
@@ -980,65 +981,129 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         return;
       }
       lastSavedPayload.current = serialized;
-      setConfig(result.config);
-      setSelectedProviderId(payload.providerId);
       // 渠道已按新 ID 落盘：后续改动就地更新，不再携带重命名标记，
       // 同时保证已有渠道的标题保持“编辑渠道”。
       editorOriginalProviderIdRef.current = payload.providerId;
       setEditorOriginalProviderId(payload.providerId);
-      // 自动保存只是把改动落盘，不能隐式把会话模型切到本渠道第一个模型
-      //（只有用户显式“启用渠道”时才切换，见 handleActivate 的三参调用）。
+      setSelectedProviderId(payload.providerId);
+      setConfig(result.config);
+      // 显式保存才刷新模型目录与渠道列表（主动保存不能隐式切换会话模型，
+      // 只有用户点“启用渠道”时才切换，见 handleActivate 的三参调用）。
       if (result.models) onModelsUpdated(saveAgentId, result.models);
+      void loadConfig();
       if (result.error) {
         // 配置已保存，但会话忙碌/重载失败，改动尚未应用到运行中的会话。
-        setStatus({ type: "success", text: `已保存；${result.error}` });
+        showFloatingToastMessage(`渠道已保存；${result.error}`);
+      } else {
+        showFloatingToastMessage("渠道已保存");
       }
-    })();
-    autoSaveCompletion.current = savePromise;
-    try {
-      await savePromise;
     } catch (error) {
       if (scope === editorScope.current && saveAgentId === editorAgentIdRef.current) {
         setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
       }
     } finally {
-      if (autoSaveCompletion.current === savePromise) autoSaveCompletion.current = null;
-      autoSaveInFlight.current = false;
-      if (autoSavePending.current) {
-        autoSavePending.current = false;
-        void performAutoSave();
-      }
+      // 无条件清理：保存成功后会调用 loadConfig()，它会自增 editorScope，
+      // 若把重置放在 scope 判断里，按钮会永远停在“保存中...”。
+      setSavingProvider(false);
     }
-  }, [onModelsUpdated]);
+  }, [loadConfig, onModelsUpdated]);
 
+  // Ctrl+S / Cmd+S 主动保存（仅在渠道编辑弹窗打开时生效）。
   useEffect(() => {
-    performAutoSaveRef.current = performAutoSave;
-  }, [performAutoSave]);
-
-  useEffect(() => {
-    if (!editorOpen || !draft) return;
-    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    autoSaveTimer.current = setTimeout(() => {
-      autoSaveTimer.current = null;
-      void performAutoSave();
-    }, 600);
-    return () => {
-      if (autoSaveTimer.current) {
-        clearTimeout(autoSaveTimer.current);
-        autoSaveTimer.current = null;
-      }
+    if (!editorOpen) return;
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      void handleSaveProvider();
     };
-  }, [draft, editorOpen, performAutoSave]);
+    window.addEventListener("keydown", handleSaveShortcut);
+    return () => window.removeEventListener("keydown", handleSaveShortcut);
+  }, [editorOpen, handleSaveProvider]);
 
-  // 关闭编辑器前立即冲刷一次，避免防抖窗口内的改动丢失。
   const closeProviderEditor = useCallback(() => {
-    if (autoSaveTimer.current) {
-      clearTimeout(autoSaveTimer.current);
-      autoSaveTimer.current = null;
-    }
-    void performAutoSave();
+    // 主动保存语义：取消/关闭不写入，丢弃未保存改动时给一次轻提示。
+    if (providerDirty) showFloatingToastMessage("已放弃未保存的渠道改动");
     setEditorOpen(false);
-  }, [performAutoSave]);
+  }, [providerDirty]);
+
+  const [dragModelIndex, setDragModelIndex] = useState<number | null>(null);
+  const [dragOverModelIndex, setDragOverModelIndex] = useState<number | null>(null);
+  const [dragOverModelPosition, setDragOverModelPosition] = useState<"before" | "after">("before");
+  // dragstart → dragover 可能同一帧发生，React state 还没生效；
+  // 用 ref 同步记录，否则 dragover 不会 preventDefault，drop 永远不触发。
+  const dragModelIndexRef = useRef<number | null>(null);
+  const dragOverModelPositionRef = useRef<"before" | "after">("before");
+
+  const dragModelOverRef = useRef<{ index: number; position: "before" | "after" } | null>(null);
+  // drop 与 dragend 可能都触发（或都不触发），用标记防止重复提交。
+  const modelDropCommittedRef = useRef(false);
+
+  const resetModelDragState = useCallback(() => {
+    dragModelIndexRef.current = null;
+    dragOverModelPositionRef.current = "before";
+    dragModelOverRef.current = null;
+    modelDropCommittedRef.current = false;
+    setDragModelIndex(null);
+    setDragOverModelIndex(null);
+    setDragOverModelPosition("before");
+  }, []);
+
+  // 模型行内有输入框，所以只能拖手柄；行本身保持可编辑。
+  const handleModelDragStart = useCallback((event: ReactDragEvent<HTMLElement>, index: number) => {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(index));
+    dragModelIndexRef.current = index;
+    dragOverModelPositionRef.current = "before";
+    setDragModelIndex(index);
+    setDragOverModelIndex(null);
+    setDragOverModelPosition("before");
+  }, []);
+
+  const handleModelDragOver = useCallback((event: ReactDragEvent<HTMLElement>, index: number) => {
+    if (dragModelIndexRef.current === null) return;
+    // 必须无条件 preventDefault，否则浏览器不会派发 drop。
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    dragOverModelPositionRef.current = position;
+    dragModelOverRef.current = { index, position };
+    setDragOverModelIndex(index);
+    setDragOverModelPosition(position);
+  }, []);
+
+  const applyModelDrop = useCallback((from: number | null, target: { index: number; position: "before" | "after" } | null) => {
+    if (from === null || !target) return;
+    const to = resolveModelDropIndex(from, target.index, target.position);
+    if (to === from) return;
+    setDraft((current) => {
+      if (!current) return current;
+      const models = [...current.models];
+      const [moved] = models.splice(from, 1);
+      if (!moved) return current;
+      models.splice(Math.max(0, Math.min(models.length, to)), 0, moved);
+      return { ...current, models };
+    });
+  }, []);
+
+  const commitModelDrop = useCallback((event: ReactDragEvent<HTMLElement>, index: number) => {
+    event.preventDefault();
+    // dataTransfer 与 ref 双保险：即使 state 未及时更新也能拿到拖拽来源。
+    const fromRaw = Number(event.dataTransfer.getData("text/plain"));
+    const from = Number.isInteger(fromRaw) ? fromRaw : dragModelIndexRef.current;
+    const target = { index, position: dragOverModelPositionRef.current };
+    modelDropCommittedRef.current = true;
+    applyModelDrop(from, target);
+    resetModelDragState();
+  }, [applyModelDrop, resetModelDragState]);
+
+  // Electron 里可能只派发 dragend、不派发 drop：用最后记录的悬停位置补一次提交。
+  const handleModelDragEnd = useCallback(() => {
+    if (!modelDropCommittedRef.current) {
+      applyModelDrop(dragModelIndexRef.current, dragModelOverRef.current);
+    }
+    resetModelDragState();
+  }, [applyModelDrop, resetModelDragState]);
 
   const handleActivate = useCallback(async (providerId: string) => {
     setActivatingProviderId(providerId);
@@ -1315,8 +1380,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           <div className="agent-config-header-main">
             <div className="agent-config-title-row">
               <h3>{getAgentName(agentId)} 配置</h3>
+              <span
+                className="agent-config-subtitle"
+                title={providerConfiguration?.pathLabel || undefined}
+              >
+                {providerConfiguration?.pathLabel || "Agent provider config"}
+              </span>
             </div>
-            <div className="agent-config-subtitle">{providerConfiguration?.pathLabel || "Agent provider config"}</div>
             <div className="agent-config-tabbar">
               <div className="agent-config-tabs" role="tablist" aria-label="Agent 配置切换">
                 {configurableAgentList.map((agent) => {
@@ -1399,7 +1469,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           ) : (
             <div className="agent-config-grid">
               <aside className="agent-config-provider-list">
-                <div className="agent-config-section-title">渠道</div>
+                <div className="agent-config-pane-title">
+                  <span className="agent-config-section-title">渠道</span>
+                  <span className="agent-config-count">{config.providers.length}</span>
+                </div>
                 <div
                   ref={providerScrollRef}
                   className="agent-config-provider-scroll persistent-scroll"
@@ -1484,7 +1557,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 ) : (
                   <>
                     <div className="agent-config-form-header">
-                      <div className="agent-config-section-title">渠道配置</div>
+                      <div className="agent-config-pane-title">
+                        <span className="agent-config-section-title">
+                          {selectedSavedProvider.displayName || selectedSavedProvider.providerId}
+                        </span>
+                        <span className="agent-config-form-caption">{selectedSavedProvider.providerId}</span>
+                      </div>
                       <div className="agent-config-form-actions">
                         <button
                           type="button"
@@ -1504,7 +1582,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         </button>
                         <button
                           type="button"
-                          className="btn-action"
+                          className="btn-action agent-config-danger-btn"
                           onClick={() => {
                             setDeleteError("");
                             setDeleteConfirmProvider(cloneProvider(selectedSavedProvider));
@@ -1537,14 +1615,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                           <strong>{authModeOptions.find((option) => option.id === selectedSavedProvider.authMode)?.label || selectedSavedProvider.authMode}</strong>
                         </div>
                       )}
-                      <div className="agent-config-summary-row">
-                        <span>模型数量</span>
-                        <strong>{selectedSavedProvider.models.length}</strong>
-                      </div>
                     </div>
 
                     <div className="agent-config-summary-models">
-                      <div className="agent-config-section-title">模型</div>
+                      <div className="agent-config-pane-title">
+                        <span className="agent-config-section-title">模型</span>
+                        <span className="agent-config-count">{selectedSavedProvider.models.length}</span>
+                      </div>
                       <div className="agent-config-summary-model-list">
                         {selectedSavedProvider.models.length === 0 ? (
                           <div className="agent-config-empty compact">暂无模型</div>
@@ -1601,6 +1678,19 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 <div className="agent-config-subtitle">{draft.providerId || "new-provider"}</div>
               </div>
               <div className="agent-config-form-actions">
+                {providerDirty && <span className="agent-config-dirty-hint">未保存</span>}
+                <button
+                  type="button"
+                  className="filter-add-btn"
+                  onClick={() => void handleSaveProvider()}
+                  disabled={savingProvider || !canSaveProviderDraft}
+                  title="保存渠道（Ctrl+S）"
+                >
+                  {savingProvider
+                    ? <Loader2 size={13} className="agent-config-spin" />
+                    : <Save size={13} />}
+                  {savingProvider ? "保存中..." : "保存"}
+                </button>
                 <button
                   type="button"
                   className="settings-modal-close"
@@ -1614,6 +1704,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
             <div className="settings-modal-content agent-provider-editor-content">
               <div className="agent-config-fields">
+                <div className="agent-config-group-title">连接信息</div>
                 <label>
                   <span>渠道 ID</span>
                   <input
@@ -1707,7 +1798,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
 
               <div className="agent-config-models-panel">
                 <div className="agent-config-models-header">
-                <div className="agent-config-section-title">模型</div>
+                <span />
+                <span className="agent-config-model-head-label">模型 ID</span>
+                <span className="agent-config-model-head-label">显示名</span>
                 <div className="agent-config-model-actions">
                   <button
                     type="button"
@@ -1729,8 +1822,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 {draft.models.map((model, index) => (
                   <div
                     key={index}
-                    className={`agent-config-model-row ${model.isBuiltin ? "builtin" : "custom"}`}
+                    className={`agent-config-model-row ${model.isBuiltin ? "builtin" : "custom"} ${dragModelIndex === index ? "dragging" : ""} ${dragOverModelIndex === index && dragModelIndex !== index ? `drop-${dragOverModelPosition}` : ""}`}
+                    onDragOver={(event) => handleModelDragOver(event, index)}
+                    onDrop={(event) => commitModelDrop(event, index)}
                   >
+                    <span
+                      className="agent-config-model-drag"
+                      draggable
+                      title="拖动调整模型顺序"
+                      aria-label="拖动调整模型顺序"
+                      onDragStart={(event) => handleModelDragStart(event, index)}
+                      onDragEnd={handleModelDragEnd}
+                    >
+                      <GripVertical size={13} />
+                    </span>
                     <input
                       value={model.id}
                       onChange={(event) => updateModel(index, { id: event.target.value })}
@@ -1740,10 +1845,10 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     <input
                       value={model.name}
                       onChange={(event) => updateModel(index, { name: event.target.value })}
-                      className="input-field"
-                      placeholder="渠道名"
+                      className="input-field agent-config-model-display-name"
+                      placeholder="显示名（默认同 ID）"
                     />
-                    {!model.isBuiltin && (
+                    {!model.isBuiltin ? (
                       <div className="agent-config-model-checks">
                         <label className="agent-config-check">
                           <input
@@ -1764,7 +1869,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                           />
                         </label>
                       </div>
-                    )}
+                    ) : null}
                     <button
                       type="button"
                       className="btn-icon btn-delete"

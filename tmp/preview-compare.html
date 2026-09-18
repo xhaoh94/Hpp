@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>渠道配置界面 改前 / 改后 对照</title>
+<style>
+body { margin: 0; padding: 20px; background: #1b1b1c; font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+h1 { margin: 0 0 4px; color: #e6e6e6; font-size: 15px; font-weight: 600; }
+p.note { margin: 0 0 16px; color: #8a8a8a; font-size: 12px; line-height: 1.7; }
+.tag { display: inline-block; margin: 0 0 8px; padding: 2px 9px; border-radius: 999px; font-size: 11px; }
+.tag.before { background: rgba(244, 71, 71, 0.16); color: #f48771; }
+.tag.after { background: rgba(16, 185, 129, 0.16); color: #10b981; }
+iframe { width: 1200px; height: 1420px; border: 1px solid #333; border-radius: 8px; background: #1e1e1e; }
+section { margin-bottom: 26px; }
+</style>
+</head>
+<body>
+<h1>渠道配置界面：改前 / 改后</h1>
+<p class="note">两屏都是真实 CSS 渲染（改前一屏用的是 git HEAD 里的样式与旧结构），宽度 1200px 命中宽屏分支。悬停可以看到行高亮、拖拽手柄与行内操作的显隐。</p>
+<section>
+  <span class="tag before">改前</span>
+  <iframe src="./preview-before.html" title="改前"></iframe>
+</section>
+<section>
+  <span class="tag after">改后</span>
+  <iframe src="./preview-after.html" title="改后"></iframe>
+</section>
+</body>
+</html>

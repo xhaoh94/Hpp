@@ -1,3 +1,963 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>渠道配置界面 · 改前</title>
+<style>
+/* ===== src/styles/global.css (HEAD) ===== */
+:root {
+  color-scheme: dark;
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-tertiary: #2d2d30;
+  --text-primary: #d4d4d4;
+  --text-secondary: #808080;
+  --border-color: #3c3c3c;
+  --accent-color: #007acc;
+  --hover-bg: #2a2d2e;
+  --bg-hover: #2a2d2e;
+  --danger-color: #f44747;
+  --scrollbar-bg: #1e1e1e;
+  --scrollbar-thumb: #424242;
+  --scrollbar-thumb-hover: #555;
+  --text-on-accent: #fff;
+  --surface-subtle: rgba(255, 255, 255, 0.03);
+  --surface-muted: rgba(255, 255, 255, 0.06);
+  --surface-strong: rgba(255, 255, 255, 0.12);
+  --surface-inset: rgba(0, 0, 0, 0.08);
+  --overlay-backdrop: rgba(0, 0, 0, 0.5);
+  --shadow-color: rgba(0, 0, 0, 0.4);
+  --titlebar-bg: #1e1e1e;
+  --floating-bg: rgba(45, 45, 48, 0.99);
+  --floating-text: #f4f4f4;
+  --user-bubble-bg: #232323;
+  --user-bubble-border: #3a3a3a;
+  --code-bg: #161b22;
+  --code-text: #c9d1d9;
+  --diff-bg: #171717;
+  --diff-header-bg: #242424;
+  --diff-popover-bg: #111;
+  --success-color: #10b981;
+  --warning-color: #fbbf24;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-primary: #f7f7f8;
+  --bg-secondary: #f0f1f3;
+  --bg-tertiary: #e7e9ed;
+  --text-primary: #24272d;
+  --text-secondary: #66707b;
+  --border-color: #d2d6dc;
+  --accent-color: #0969da;
+  --hover-bg: #e3e6ea;
+  --bg-hover: #e3e6ea;
+  --danger-color: #d1242f;
+  --scrollbar-bg: #f0f1f3;
+  --scrollbar-thumb: #c2c7cf;
+  --scrollbar-thumb-hover: #aeb5bf;
+  --text-on-accent: #fff;
+  --surface-subtle: rgba(15, 23, 42, 0.035);
+  --surface-muted: rgba(15, 23, 42, 0.065);
+  --surface-strong: rgba(15, 23, 42, 0.12);
+  --surface-inset: rgba(15, 23, 42, 0.04);
+  --overlay-backdrop: rgba(15, 23, 42, 0.36);
+  --shadow-color: rgba(15, 23, 42, 0.18);
+  --titlebar-bg: #eceef1;
+  --floating-bg: rgba(255, 255, 255, 0.98);
+  --floating-text: #24272d;
+  --user-bubble-bg: #e9edf2;
+  --user-bubble-border: #d2d8e0;
+  --code-bg: #f3f5f7;
+  --code-text: #24292f;
+  --diff-bg: #fff;
+  --diff-header-bg: #f1f3f5;
+  --diff-popover-bg: #fff;
+  --success-color: #16834f;
+  --warning-color: #9a6700;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* VSCode-style overlay scrollbar utility: Only the thumb (fingers) is drawn —
+   there is no persistent track/“base” underneath.
+   - .overlay-scroll: hidden by default, only shown while the mouse is over
+     the scrolling element.
+   - .persistent-scroll: the thumb is always visible.
+   Both keep layout stable via scrollbar-gutter. Add the class to any
+   scrollable container to get this look. */
+.overlay-scroll,
+.persistent-scroll {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+.overlay-scroll {
+  scrollbar-color: transparent transparent;
+}
+
+.persistent-scroll {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.overlay-scroll:hover,
+.persistent-scroll:hover {
+  scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+}
+
+.overlay-scroll::-webkit-scrollbar,
+.persistent-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.overlay-scroll::-webkit-scrollbar-track,
+.persistent-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Thumb shape is shared. Color differs: overlay hides it until hover;
+   persistent keeps it visible at all times. */
+.overlay-scroll::-webkit-scrollbar-thumb,
+.persistent-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 6px;
+  min-height: 32px;
+}
+
+.persistent-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+.overlay-scroll:hover::-webkit-scrollbar-thumb,
+.persistent-scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+.persistent-scroll::-webkit-scrollbar-thumb:hover,
+.overlay-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* ===== src/components/sidebar/Sidebar.css (HEAD) ===== */
+.sidebar {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background-color: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.sidebar-header {
+  height: 36px;
+  box-sizing: border-box;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 8px;
+  /* 项目栏保留滚动能力，但完全隐藏滚动条。 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sidebar-content::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.placeholder-text {
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+  margin-top: 40px;
+}
+
+.btn-add {
+  background: none;
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.btn-add:hover {
+  background-color: var(--bg-tertiary);
+}
+
+.project-form,
+.project-edit {
+  padding: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.project-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--overlay-backdrop);
+}
+
+.project-modal {
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 48px));
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 16px 44px var(--shadow-color);
+  animation: project-modal-in 0.16s ease-out;
+}
+
+.project-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 16px 13px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.project-modal-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.project-modal-header p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.project-modal-close {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.project-modal-close:hover {
+  border-color: var(--border-color);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.project-modal-body {
+  padding: 16px;
+}
+
+.project-modal .input-field {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.project-modal .path-input-row {
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.project-modal .form-actions {
+  gap: 8px;
+}
+
+.project-modal .btn {
+  min-width: 72px;
+  padding: 7px 14px;
+}
+
+@keyframes project-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-modal { animation: none; }
+}
+
+.input-field {
+  width: 100%;
+  padding: 6px 8px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: 4px;
+  font-size: 13px;
+  margin-bottom: 6px;
+  box-sizing: border-box;
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.path-input-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.path-input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.btn-browse {
+  padding: 6px 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-browse:hover {
+  background-color: var(--bg-hover);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.btn {
+  padding: 5px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+}
+
+.btn-cancel {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.btn-cancel:hover {
+  background-color: var(--bg-hover);
+}
+
+.btn-primary {
+  background-color: var(--accent-color);
+  color: var(--bg-primary);
+  border-color: var(--accent-color);
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-item {
+  padding: 8px;
+  border-radius: 4px;
+  cursor: grab;
+  transition: background-color 0.1s;
+}
+
+.project-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.project-item.always-active {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.project-item.active {
+  border-color: rgba(0, 122, 204, 0.4);
+  box-shadow: 0 0 0 1px rgba(0, 122, 204, 0.15);
+}
+
+.project-item.dragging {
+  opacity: 0.5;
+  background-color: var(--bg-tertiary);
+}
+
+.project-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: relative;
+}
+
+.project-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.project-close-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 20px;
+  height: 20px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.15s;
+}
+
+.project-history-btn {
+  position: absolute;
+  top: -4px;
+  right: 20px;
+  width: 20px;
+  height: 20px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.15s;
+}
+
+.project-item:hover .project-close-btn,
+.project-item:hover .project-history-btn {
+  opacity: 1;
+}
+
+.project-close-btn:hover {
+  background-color: #e74c3c;
+  color: white;
+  border-color: #e74c3c;
+}
+
+.project-history-btn:hover {
+  background-color: #0078d4;
+  color: white;
+  border-color: #0078d4;
+}
+
+.project-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.project-item:hover .project-actions {
+  opacity: 1;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+.btn-icon:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-delete:hover {
+  color: var(--danger-color);
+}
+
+.project-terminal-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.project-terminal-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin: 0 8px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.project-info { cursor: pointer; }
+.project-info.sessions-collapsed { opacity: 0.9; }
+
+.project-card-drag-wrapper { position: relative; cursor: grab; }
+.project-card-drag-wrapper:active { cursor: grabbing; }
+.project-card-drag-wrapper.dragging { opacity: 0.45; }
+.project-card-drag-wrapper.drop-target { outline: none; }
+.project-card-drag-wrapper.drop-target::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--accent-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-color) 25%, transparent), 0 0 6px color-mix(in srgb, var(--accent-color) 45%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+.project-card-drag-wrapper.drop-target.after::before { top: auto; bottom: -5px; }
+
+.project-terminal-child:hover {
+  background-color: var(--bg-primary);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+.project-terminal-child.active {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  border-color: rgba(0, 122, 204, 0.4);
+  box-shadow: 0 0 0 1px rgba(0, 122, 204, 0.15);
+}
+
+.terminal-child-icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.project-terminal-child.active .terminal-child-icon {
+  opacity: 1;
+}
+
+.terminal-child-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 78px;
+  min-width: 0;
+  min-height: 18px;
+  flex: 0 1 auto;
+  padding: 1px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-terminal-child.active .terminal-child-agent-badge {
+  border-color: rgba(0, 122, 204, 0.35);
+  background: rgba(0, 122, 204, 0.12);
+  color: var(--text-primary);
+}
+
+.terminal-child-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.terminal-child-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px;
+  padding: 2px 5px;
+  border: 1px solid rgba(140, 140, 140, 0.35);
+  border-radius: 4px;
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.terminal-child-attachment.file svg { color: var(--text-secondary); }
+.terminal-child-attachment.folder svg { color: #dcab5f; }
+.terminal-child-attachment span { overflow: hidden; text-overflow: ellipsis; }
+
+.terminal-child-fork-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid rgba(0, 122, 204, 0.35);
+  border-radius: 4px;
+  background: rgba(0, 122, 204, 0.1);
+  color: var(--accent-color);
+}
+
+.terminal-child-fork-badge svg {
+  flex-shrink: 0;
+}
+
+.terminal-child-close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.1s ease;
+}
+
+.project-terminal-child:hover .terminal-child-close {
+  opacity: 0.6;
+}
+
+.terminal-child-close:hover {
+  opacity: 1 !important;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.project-terminal-child.active .terminal-child-close:hover {
+  background-color: rgba(0, 0, 0, 0.2);
+}
+
+.project-terminals {
+  position: relative;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  width: 100%;
+  max-width: 100%;
+  /* 隐藏的 max-content 测量层不能把侧栏撑出横向滚动范围。 */
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.project-terminal-measurements {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  width: max-content;
+  align-items: center;
+  gap: inherit;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.project-terminals-loading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.project-terminal-btn {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background-color: var(--bg-tertiary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  max-width: 96px;
+}
+
+.project-terminal-btn:hover {
+  background-color: var(--accent-color);
+  border-color: rgba(255, 255, 255, 0.32);
+  color: var(--bg-primary);
+}
+
+.project-terminal-btn svg {
+  flex-shrink: 0;
+}
+
+.project-terminal-btn span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-agent-picker {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.project-agent-more-btn {
+  width: 24px;
+  padding: 2px;
+  justify-content: center;
+}
+
+.project-agent-menu {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  width: 168px;
+  max-height: 220px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px var(--shadow-color);
+}
+
+.project-agent-menu-item {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-agent-menu-item:hover,
+.project-agent-menu-item:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+}
+
+.project-agent-menu-item span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.braille-dot-spinner {
+  display: inline-grid;
+  grid-template-columns: repeat(2, 3px);
+  grid-template-rows: repeat(3, 3px);
+  gap: 2px;
+  width: 8px;
+  height: 13px;
+  flex-shrink: 0;
+  align-items: center;
+}
+.braille-dot-spinner > .braille-dot {
+  display: block;
+  width: 3px;
+  height: 3px;
+  border-radius: 0.5px;
+  background: #e0e0e0;
+  transition: opacity 0.05s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .braille-dot-spinner > .braille-dot { transition: none; }
+}
+
+.terminal-child-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #4CAF50;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+
+.terminal-child-status {
+  font-size: 10px;
+  color: var(--text-primary);
+  padding: 1px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.file-change-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: rgba(52, 152, 219, 0.2);
+  border: 1px solid rgba(52, 152, 219, 0.3);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.file-change-badge:hover {
+  background: rgba(52, 152, 219, 0.3);
+  transform: scale(1.05);
+}
+
+.file-change-badge svg {
+  color: #3498db;
+  flex-shrink: 0;
+}
+
+.file-change-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: #3498db;
+  line-height: 1;
+}
+
+.project-badge {
+  position: absolute;
+  top: 8px;
+  right: 40px;
+}
+
+:root[data-theme="light"] .terminal-child-agent-badge,
+:root[data-theme="light"] .project-terminal-btn {
+  border-color: var(--border-color);
+}
+
+:root[data-theme="light"] .terminal-child-close:hover {
+  background-color: var(--surface-muted);
+}
+
+:root[data-theme="light"] .project-terminal-child.active .terminal-child-close:hover {
+  background-color: var(--surface-inset);
+}
+
+/* ===== src/components/sidebar/Settings.css (HEAD) ===== */
 .settings {
   display: flex;
   flex-direction: column;
@@ -2193,45 +3153,23 @@
   color: var(--text-primary);
 }
 
-/* ===== Agent 配置弹窗：比默认弹窗更宽更高，右侧模型表需要横向空间 ===== */
 .agent-config-modal {
-  width: min(1040px, calc(100vw - 48px));
-  max-height: min(84vh, 820px);
-  height: min(84vh, 820px);
+  width: min(980px, calc(100vw - 48px));
+  max-height: min(82vh, 760px);
+  height: min(82vh, 760px);
 }
 
-/* Agent 系列弹窗共用同一套外壳：一致的圆角与描边，跟主弹窗对齐。
-   （比默认的 .settings-modal 圆角更大一档，收起对话框时不会显得“扁”。） */
-.settings-modal.agent-config-modal,
-.settings-modal.agent-provider-editor-modal,
-.settings-modal.agent-model-picker-modal,
-.settings-modal.agent-provider-copy-modal,
-.settings-modal.agent-remove-confirm-modal,
-.settings-modal.agent-config-io-modal,
-.settings-modal.agent-subagent-modal,
-.settings-modal.agent-compaction-modal,
-.settings-modal.agent-plugin-modal,
-.settings-modal.agent-runtime-version-modal {
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-}
-
-/* 头部：标题与配置文件路径同排，下面一整行留给标签页与导入导出。 */
 .agent-config-header {
   position: relative;
   align-items: flex-start;
   gap: 16px;
-  padding: 14px 20px 12px;
+  padding-bottom: 12px;
 }
 
 .agent-config-header > .settings-modal-close {
   position: absolute;
-  top: 12px;
-  right: 14px;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border-radius: 6px;
+  top: 16px;
+  right: 20px;
 }
 
 .agent-config-header-main {
@@ -2239,11 +3177,10 @@
   min-width: 0;
 }
 
-/* 配置文件路径跟在标题后面（不再单独占一行），窄了就地省略。 */
 .agent-config-subtitle {
-  min-width: 0;
-  color: var(--text-secondary);
+  margin-top: 3px;
   font-size: 11px;
+  color: var(--text-secondary);
   font-family: monospace;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2252,45 +3189,18 @@
 
 .agent-config-title-row {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-  /* 给右上角的关闭按钮留出位置。 */
-  padding-right: 36px;
-}
-
-.agent-config-title-row h3 {
-  flex: 0 0 auto;
-}
-
-/* 小标题 + 数量徽标：渠道/模型这类列表的统一样式。 */
-.agent-config-pane-title {
-  display: flex;
   align-items: center;
-  gap: 7px;
   min-width: 0;
-}
-
-.agent-config-count {
-  display: inline-flex;
-  align-items: center;
-  height: 16px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
 }
 
 .agent-config-tabs {
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 2px;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 3px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: 7px;
   background: var(--bg-primary);
   overflow-x: auto;
   scrollbar-width: none;
@@ -2301,10 +3211,10 @@
 }
 
 .agent-config-tab {
-  height: 26px;
+  height: 28px;
   padding: 0 12px;
   border: none;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-secondary);
   font-size: 12px;
@@ -2318,40 +3228,37 @@
   background: var(--bg-hover);
 }
 
-/* 选中的标签页用强调色底：和渠道列表里的“当前”徽标保持同一语义。 */
 .agent-config-tab.active {
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  background: var(--bg-tertiary);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
 }
 
 .agent-config-content {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   min-height: 0;
   overflow: hidden;
-  padding: 12px 20px 16px;
 }
 
-/* 说明条：一块安静的浅色带，重点是右侧的操作按钮，不再和表单抢视觉。 */
 .agent-config-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 7px 10px 7px 12px;
-  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
-  border-radius: 8px;
-  background: var(--surface-subtle);
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .agent-config-toolbar > span {
-  flex: 1 1 260px;
+  flex: 1 1 280px;
   min-width: 0;
-  line-height: 1.5;
 }
 
 .agent-config-toolbar-actions {
@@ -2359,24 +3266,9 @@
   align-items: center;
   justify-content: flex-end;
   flex-flow: row wrap;
-  gap: 6px;
+  gap: 10px;
   flex: 0 1 auto;
   min-width: 0;
-}
-
-/* 说明条里的按钮做轻：默认无边框，hover 才浮出边界。 */
-.agent-config-toolbar-actions > .btn-action {
-  height: 26px;
-  min-height: 26px;
-  padding: 0 9px;
-  border-color: transparent;
-  background: transparent;
-  font-size: 11px;
-}
-
-.agent-config-toolbar-actions > .btn-action:hover:not(:disabled) {
-  border-color: var(--border-color);
-  background: var(--bg-hover);
 }
 
 /* 只让实际渲染的控件参与布局；任意 capability 按钮隐藏后不保留占位。 */
@@ -2436,27 +3328,25 @@
 
 .agent-config-grid {
   display: grid;
-  /* 左栏给到 280px：250px 时渠道 URL 会被操作位挤掉一半。 */
-  grid-template-columns: minmax(280px, 0.4fr) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(260px, 0.38fr) minmax(0, 1fr);
+  gap: 14px;
   flex: 1;
   min-height: 360px;
   overflow: hidden;
 }
 
-/* 两栏都是内嵌卡片：底色比弹窗深一档，只留一条边框。 */
 .agent-config-provider-list,
 .agent-config-form {
   min-width: 0;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: var(--bg-primary);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
 }
 
 .agent-config-provider-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   padding: 10px;
   min-height: 0;
   overflow: hidden;
@@ -2470,17 +3360,16 @@
   overflow: hidden;
 }
 
-/* 渠道列表是行列表不是卡片列表：行间只留 2px。 */
 .agent-config-provider-scroll {
   display: flex;
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   margin-block: -5px;
   overflow-y: auto;
   padding-block: 5px;
-  padding-right: 2px;
+  padding-right: 4px;
 }
 
 .agent-provider-editor-overlay {
@@ -2488,63 +3377,61 @@
   background: rgba(0, 0, 0, 0.58);
 }
 
-/* 编辑弹窗跟主弹窗同一套外壳：同样的圆角、边框与宽度节奏。 */
 .agent-provider-editor-modal {
-  width: min(1000px, calc(100vw - 48px));
-  height: min(82vh, 780px);
-  max-height: min(82vh, 780px);
+  width: min(980px, calc(100vw - 48px));
+  height: min(82vh, 760px);
+  max-height: min(82vh, 760px);
 }
 
 .agent-provider-editor-content {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   overflow: hidden;
-  padding: 14px 20px 16px;
 }
 
 .agent-config-section-title {
   font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.2px;
   color: var(--text-primary);
 }
 
-/* 渠道行：不再是套在卡片里的卡片，hover / 选中用底色表达。 */
 .agent-config-provider-item {
   position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 6px;
-  padding: 6px 8px 6px 4px;
-  border: 1px solid transparent;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: transparent;
+  background: var(--bg-primary);
   cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s, opacity 0.15s;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
 }
 
 .agent-config-provider-item:hover {
-  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--border-color) 65%, var(--text-secondary));
+  background: color-mix(in srgb, var(--bg-primary) 90%, var(--text-primary));
 }
 
 .agent-config-provider-item.dragging {
-  opacity: 0.5;
+  opacity: 0.55;
   border-style: dashed;
-  border-color: var(--border-color);
   cursor: grabbing;
 }
 
 .agent-config-provider-item.drop-target {
   border-color: var(--border-color);
+  box-shadow: none;
 }
 
 .agent-config-provider-item.drop-target::before {
   content: "";
   position: absolute;
-  top: -4px;
+  top: -5px;
   left: 0;
   right: 0;
   height: 3px;
@@ -2557,7 +3444,7 @@
 
 .agent-config-provider-item.drop-target.after::before {
   top: auto;
-  bottom: -4px;
+  bottom: -5px;
 }
 
 .agent-config-provider-item.reordering {
@@ -2565,48 +3452,51 @@
 }
 
 .agent-config-provider-item.selected {
-  background: var(--surface-muted);
-  border-color: var(--border-color);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: color-mix(in srgb, var(--bg-primary) 82%, var(--text-primary));
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 
-/* 当前生效的渠道：强调色 + 左侧竖条，和标签页选中态同一套语义。 */
 .agent-config-provider-item.active {
-  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
-  border-color: color-mix(in srgb, var(--accent-color) 40%, transparent);
+  position: relative;
+  background: rgba(0, 120, 212, 0.10);
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px rgba(0, 120, 212, 0.22);
 }
 
 .agent-config-provider-item.active::before {
   content: "";
   position: absolute;
-  left: 2px;
-  top: 11px;
-  bottom: 11px;
+  left: -1px;
+  top: 9px;
+  bottom: 9px;
   width: 3px;
   border-radius: 999px;
   background: var(--accent-color);
 }
 
 .agent-config-provider-item.selected.active {
-  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
-  border-color: color-mix(in srgb, var(--accent-color) 55%, transparent);
+  border-color: var(--accent-color);
+  background:
+    linear-gradient(0deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)),
+    rgba(0, 120, 212, 0.10);
 }
 
 .agent-config-provider-drag {
-  width: 12px;
-  align-self: stretch;
+  width: 14px;
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   color: var(--text-secondary);
   cursor: grab;
-  transition: opacity 0.15s;
+  opacity: 0.72;
 }
 
 .agent-config-provider-item:hover .agent-config-provider-drag,
-.agent-config-provider-item.selected .agent-config-provider-drag,
-.agent-config-provider-item.dragging .agent-config-provider-drag {
-  opacity: 0.85;
+.agent-config-provider-item.selected .agent-config-provider-drag {
+  opacity: 1;
 }
 
 .agent-config-provider-item.dragging .agent-config-provider-drag {
@@ -2614,24 +3504,23 @@
 }
 
 .agent-config-provider-avatar {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--accent-color) 15%, transparent);
-  color: color-mix(in srgb, var(--accent-color) 72%, var(--text-primary));
-  font-size: 11px;
-  font-weight: 600;
+  background: rgba(0, 120, 212, 0.16);
+  color: var(--accent-color);
+  font-size: 12px;
+  font-weight: 700;
 }
 
-/* 三行信息（名称 / URL / ID·模型数），行距压到 2px：左栏只有 250px，两行会挤坏 URL。 */
 .agent-config-provider-main {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   flex: 1;
   min-width: 0;
 }
@@ -2645,7 +3534,7 @@
 
 .agent-config-provider-name {
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -2667,51 +3556,28 @@
 
 .agent-config-provider-id {
   color: var(--text-secondary);
-  font-family: monospace;
-  font-size: 10.5px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* 行内操作位常驻占宽（只是透明），否则 hover 时出现按钮会把上面的文字挤一下。 */
 .agent-config-provider-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 4px;
-  flex: 0 0 auto;
-  min-width: 42px;
-}
-
-/* 拖拽手柄与行内操作默认收起：指针设备上悬停/聚焦才出现，触摸设备保持常显。 */
-@media (hover: hover) {
-  .agent-config-provider-drag,
-  .agent-config-provider-actions {
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-
-  .agent-config-provider-item:hover .agent-config-provider-drag,
-  .agent-config-provider-item.selected .agent-config-provider-drag,
-  .agent-config-provider-item.dragging .agent-config-provider-drag,
-  .agent-config-provider-item:hover .agent-config-provider-actions,
-  .agent-config-provider-item.selected .agent-config-provider-actions,
-  .agent-config-provider-item:focus-within .agent-config-provider-actions {
-    opacity: 1;
-  }
+  flex-shrink: 0;
 }
 
 .agent-config-active-badge {
   display: inline-flex;
   align-items: center;
-  height: 18px;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent-color) 20%, transparent);
-  color: color-mix(in srgb, var(--accent-color) 62%, var(--text-primary));
-  font-size: 10px;
-  font-weight: 600;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: rgba(0, 120, 212, 0.18);
+  color: var(--accent-color);
+  font-size: 11px;
 }
 
 .agent-config-mini-btn {
@@ -2729,82 +3595,18 @@
   gap: 6px;
 }
 
-/* 新增渠道：虚线幽灵按钮（覆盖 .filter-add-btn 的强调色填充），不与主操作抢强调色。 */
 .agent-config-add-provider {
   margin-top: auto;
   width: 100%;
-  min-height: 30px;
-  border: 1px dashed var(--border-color);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
 }
 
-.agent-config-add-provider:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--accent-color) 55%, transparent);
-  background: var(--surface-subtle);
-  color: var(--text-primary);
-  opacity: 1;
-}
-
-/* 模型表的列标题行：与每行共用列宽变量，保证左右对齐。 */
+.agent-config-form-header,
 .agent-config-models-header {
-  display: grid;
-  grid-template-columns: var(--agent-model-columns);
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 8px;
-  padding: 0 9px;
-}
-
-/* 右侧详情头部：渠道名 + ID 在左，编辑/复制/删除在右。
-   原来它跟模型表头共用一条规则，而 --agent-model-columns 只定义在模型面板上，
-   变量取不到 → grid-template-columns 失效 → 标题和按钮被堆成两行。 */
-.agent-config-form-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.agent-config-form-caption {
-  min-width: 0;
-  color: var(--text-secondary);
-  font-family: monospace;
-  font-size: 10.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-config-model-head-label {
-  /* 左对齐 + 输入框的内边距（1px 边框 + 9px padding），让列标题和下方输入内容对齐成表头。 */
-  padding-left: 10px;
-  color: var(--text-tertiary, var(--text-secondary));
-  font-size: 11px;
-  line-height: 1.4;
-  letter-spacing: 0.2px;
-  text-align: left;
-}
-
-.agent-config-models-header .agent-config-model-actions {
-  grid-column: 4 / 6;
-}
-
-/* 表头按钮减重：去掉填充底色，保留一圈淡边框保证可点性，hover 才上强调色。 */
-.agent-config-models-header .agent-config-mini-btn {
-  height: 24px;
-  padding: 0 9px;
-  border-color: color-mix(in srgb, var(--border-color) 70%, transparent);
-  background: transparent;
-}
-
-.agent-config-models-header .agent-config-mini-btn:hover:not(:disabled) {
-  border-color: var(--accent-color);
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .agent-config-form-actions {
@@ -2813,33 +3615,6 @@
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-
-/* 详情头部的次级操作：轻按钮 + 删除单独走危险色。 */
-.agent-config-form-actions .btn-action {
-  height: 26px;
-  min-height: 26px;
-  padding: 0 9px;
-  border-color: transparent;
-  background: transparent;
-  font-size: 11px;
-}
-
-.agent-config-form-actions .btn-action:hover:not(:disabled) {
-  border-color: var(--border-color);
-  background: var(--bg-hover);
-}
-
-.agent-config-form-actions .btn-action.agent-config-danger-btn:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--danger-color) 55%, transparent);
-  color: var(--danger-color);
-}
-
-/* 主动保存：有未保存改动时在保存按钮旁提示。 */
-.agent-config-dirty-hint {
-  color: var(--warning, #d9a441);
-  font-size: 11px;
-  white-space: nowrap;
 }
 
 .agent-config-model-actions {
@@ -2861,26 +3636,14 @@
 .agent-config-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px 12px;
-  /* 组与组之间的间距交给 .agent-provider-editor-content 的 gap，避免双份留白。 */
-  margin-bottom: 0;
-}
-
-/* 分组标题作为栅格里的整行，不需要额外包一层容器。 */
-.agent-config-group-title {
-  grid-column: 1 / -1;
-  margin-top: 1px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
 .agent-config-fields label {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  min-width: 0;
+  gap: 4px;
   color: var(--text-secondary);
   font-size: 11px;
 }
@@ -2889,58 +3652,34 @@
   grid-column: 1 / -1;
 }
 
-/* 编辑弹窗里的控件统一 28px 高，跟模型列表的行高对齐。
-   选择器带上 .agent-provider-editor-modal 是为了压过后面那条
-   `.agent-provider-editor-modal .input-field`（同样 0,2,0）的内边距。 */
-.agent-provider-editor-modal .agent-provider-editor-content .input-field {
-  height: 28px;
-  padding: 0 9px;
-  margin-bottom: 0;
-  border-radius: 6px;
-  font-size: 12px;
-}
-
-/* 模型面板 = 一张内嵌卡片：表头固定在顶部，只有列表在内部滚动。 */
 .agent-config-models-panel {
   display: flex;
   min-height: 260px;
   flex: 1 1 auto;
   flex-direction: column;
-  /* 四周留白交给表头与列表各自负责，避免卡片里再套一张卡片的双层边框。 */
-  padding: 0;
+  padding: 13px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: var(--bg-primary);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
   overflow: hidden;
 }
 
 .agent-config-models-panel .agent-config-models-header {
   flex: 0 0 auto;
-  /* 左右内边距 = 列表内边距(8) + 行内边距(6)，列标题才能和下方输入框左对齐。 */
-  padding: 6px 14px;
-  margin-bottom: 0;
-  border-bottom: 1px solid var(--border-color);
-  background: var(--surface-subtle);
+  margin-bottom: 12px;
 }
 
 .agent-config-models-panel .agent-config-model-list {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  /* 隐藏滚动条（仍可滚动），避免右侧多出一条竖线。 */
-  scrollbar-width: none;
-  padding: 4px 8px 8px;
-}
-
-.agent-config-models-panel .agent-config-model-list::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  padding: 2px 4px 2px 1px;
+  scrollbar-gutter: stable;
 }
 
 .agent-config-fetch-error {
-  margin: 10px 14px 0;
+  margin: 0 0 10px;
   padding: 8px 10px;
-  border-radius: 6px;
   font-size: 11px;
 }
 
@@ -3104,8 +3843,8 @@
   gap: 12px;
   padding: 9px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
+  border-radius: 6px;
+  background: var(--bg-primary);
 }
 
 .agent-provider-delete-target span {
@@ -3136,7 +3875,7 @@
 }
 
 .agent-model-picker-modal {
-  width: min(680px, calc(100vw - 48px));
+  width: min(660px, calc(100vw - 48px));
   max-height: min(76vh, 640px);
 }
 
@@ -3183,7 +3922,7 @@
   min-height: 220px;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--bg-primary);
 }
 
@@ -3192,10 +3931,9 @@
   grid-template-columns: 18px minmax(120px, 0.8fr) minmax(160px, 1.2fr) auto;
   align-items: center;
   gap: 10px;
-  min-height: 34px;
-  padding: 6px 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
-  border-radius: 6px;
+  min-height: 38px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-color);
   color: var(--text-primary);
   cursor: pointer;
 }
@@ -3232,12 +3970,11 @@
 }
 
 .agent-model-picker-badge {
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--success-color, #10b981) 14%, transparent);
-  color: var(--success-color, #10b981);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
   font-size: 10px;
-  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -3247,118 +3984,30 @@
   border-top: 1px solid var(--border-color);
 }
 
-/* 模型列表：行只在 hover 时高亮，分隔线交给行本身的 border。 */
-/* 列宽变量放在面板上：列标题行与列表共用。 */
-.agent-config-models-panel {
-  /* 能力列给一个刚好够用的上限，剩余宽度交给 ID/显示名，避免中间大片空白。 */
-  --agent-model-columns: 22px minmax(0, 1fr) minmax(0, 1.45fr) minmax(0, 250px) 28px;
-}
-
-.agent-config-model-list {
-  display: flex;
-  flex-direction: column;
-}
-
 .agent-config-model-row {
   position: relative;
   display: grid;
-  grid-template-columns: var(--agent-model-columns);
   align-items: center;
   gap: 9px;
-  padding: 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
-  border-radius: 6px;
-  background: transparent;
-  transition: background-color 0.12s ease;
+  padding: 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-primary);
 }
 
-.agent-config-model-row:last-child {
-  border-bottom: 0;
+/* 内置模型没有自定义能力控件，两个输入框自动平分全部可用宽度。 */
+.agent-config-model-row.builtin {
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) 28px;
 }
 
-.agent-config-model-row:hover {
-  background: color-mix(in srgb, var(--bg-hover) 75%, transparent);
-}
-
-/* 行内输入框：清掉 .input-field 的下外边距，整行才能按 28px 垂直居中。
-   多一层 .agent-config-models-panel 是为了压过下方 .agent-config-modal .input-field 的内边距。 */
-.agent-config-models-panel .agent-config-model-row .input-field {
-  height: 28px;
-  padding: 0 9px;
-  margin-bottom: 0;
-  border-radius: 5px;
-  font-size: 12px;
-}
-
-/* 能力区里的档位下拉跟着行高收到 28px，内置行与自定义行高度一致。 */
-.agent-config-model-row .agent-thinking-multiselect-trigger {
-  height: 28px;
-}
-
-/* 内置模型没有能力控件：显示名跨过空的能力列，保留 ID 宽度并吃掉右侧空白。 */
-.agent-config-model-row.builtin > .agent-config-model-display-name {
-  grid-column: 3 / 5;
-}
-
-/* 删除按钮显式落在最后一列：内置行少了能力控件，靠自动排布会被挤到第二行左侧。 */
-.agent-config-model-row > .btn-delete {
-  grid-column: 5;
-  justify-self: end;
-  opacity: 0.45;
-  transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
-}
-
-.agent-config-model-row:hover > .btn-delete:not(:disabled),
-.agent-config-model-row > .btn-delete:focus-visible {
-  opacity: 1;
-}
-
-.agent-config-model-row > .btn-delete:disabled {
-  opacity: 0.2;
-  cursor: not-allowed;
-}
-
-.agent-config-model-drag {
-  display: grid;
-  height: 28px;
-  place-items: center;
-  border-radius: 5px;
-  color: var(--text-tertiary, var(--text-secondary));
-  opacity: 0.5;
-  cursor: grab;
-  transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
-}
-
-.agent-config-model-row:hover > .agent-config-model-drag {
-  opacity: 1;
-}
-
-.agent-config-model-drag:hover {
-  background: color-mix(in srgb, var(--bg-hover) 80%, transparent);
-  color: var(--text-primary);
-}
-
-.agent-config-model-drag:active {
-  cursor: grabbing;
-}
-
-.agent-config-model-row.dragging {
-  opacity: 0.55;
-}
-
-.agent-config-model-row.drop-before {
-  box-shadow: inset 0 2px 0 0 var(--accent-color);
-}
-
-.agent-config-model-row.drop-after {
-  box-shadow: inset 0 -2px 0 0 var(--accent-color);
+/* 自定义模型为图片能力和思考档位保留独立区域。 */
+.agent-config-model-row.custom {
+  grid-template-columns: minmax(140px, 1.05fr) minmax(120px, 0.95fr) minmax(250px, 1fr) 28px;
 }
 
 .agent-config-model-checks {
   display: flex;
   align-items: center;
-  /* 能力区靠右对齐，紧贴删除按钮一侧。 */
-  justify-content: flex-end;
   gap: 10px;
   min-width: 0;
   flex-wrap: nowrap;
@@ -3369,8 +4018,7 @@
 }
 
 .agent-config-model-checks .agent-config-thinking-levels {
-  /* 不撑满剩余宽度：图片勾选与思考档位保持紧凑，整体靠右贴。 */
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -3390,10 +4038,7 @@
 
 .agent-thinking-multiselect {
   position: relative;
-  /* 档位文本很短：固定一个紧凑宽度，两个字的档位名也不会被省略。 */
-  flex: 0 0 auto;
-  width: 112px;
-  max-width: 100%;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -3643,25 +4288,23 @@
 .agent-config-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
-/* 摘要单元格：比弹窗底色浅一档的信息块，标签小、值清楚。 */
 .agent-config-summary-row {
   min-width: 0;
-  padding: 8px 10px;
+  padding: 9px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
+  border-radius: 6px;
+  background: var(--bg-primary);
 }
 
 .agent-config-summary-row span {
   display: block;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   color: var(--text-secondary);
-  font-size: 10.5px;
-  letter-spacing: 0.2px;
+  font-size: 11px;
 }
 
 .agent-config-summary-row strong {
@@ -3688,7 +4331,7 @@
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 0;
+  gap: 8px;
   overflow-x: hidden;
   overflow-y: auto;
   padding-right: 4px;
@@ -3719,24 +4362,15 @@
   background: var(--scrollbar-thumb-hover);
 }
 
-/* 摘要里的模型行：不再套一层卡片，用分隔线 + hover 表达列表。 */
 .agent-config-summary-model {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 6px 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  padding: 7px 9px;
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: transparent;
-}
-
-.agent-config-summary-model:last-child {
-  border-bottom: 0;
-}
-
-.agent-config-summary-model:hover {
-  background: var(--bg-hover);
+  background: var(--bg-primary);
 }
 
 .agent-config-summary-model span,
@@ -3745,29 +4379,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
 }
 
 .agent-config-summary-model span {
   color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 500;
 }
 
-/* 模型 ID 用等宽小胶囊，和技术标识的语义一致。 */
 .agent-config-summary-model code {
-  padding: 1px 6px;
-  border-radius: 5px;
-  background: var(--surface-subtle);
   color: var(--text-secondary);
   font-family: monospace;
-  font-size: 11px;
 }
 
 .agent-config-activate-wide {
   width: 100%;
-  margin-top: 12px;
-  height: 32px;
-  border-radius: 8px;
+  margin-top: 14px;
+  height: 30px;
 }
 
 .agent-config-empty {
@@ -3784,37 +4411,16 @@
 }
 
 @media (max-width: 1080px) {
-  .agent-config-models-header {
-    grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 28px;
-  }
-
-  .agent-config-models-header .agent-config-model-actions {
-    grid-column: 2 / 5;
-  }
-
-  /* 窄屏：隐藏列标题，能力区换到第二行，列宽改为 ID / 名字 / 删除。 */
-  .agent-config-model-head-label {
-    display: none;
-  }
-
-  .agent-config-model-list {
-    --agent-model-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 28px;
-  }
-
-  /* 只有 4 列：删除按钮回到第 4 列，内置行也能单独占一行。 */
-  .agent-config-model-row > .btn-delete {
-    grid-column: 4;
-  }
-
-  .agent-config-model-row.builtin > .agent-config-model-display-name {
-    grid-column: auto;
+  .agent-config-model-row.custom {
+    grid-template-columns: minmax(140px, 1fr) minmax(120px, 1fr) 28px;
   }
 
   .agent-config-model-row.custom .agent-config-model-checks {
-    grid-column: 2 / 4;
+    grid-column: 1 / 3;
   }
 
   .agent-config-model-row.custom > .btn-delete {
+    grid-column: 3;
     grid-row: 1 / 3;
   }
 }
@@ -3828,18 +4434,18 @@
     grid-template-columns: 1fr;
   }
 
-  .agent-config-model-list {
-    --agent-model-columns: 1fr;
+  .agent-config-model-row.builtin,
+  .agent-config-model-row.custom {
+    grid-template-columns: 1fr;
   }
 
-  .agent-config-model-checks {
+  .agent-config-model-row.custom .agent-config-model-checks,
+  .agent-config-model-row.custom > .btn-delete {
     grid-column: auto;
     grid-row: auto;
   }
 
   .agent-config-model-row > .btn-delete {
-    grid-column: auto;
-    grid-row: auto;
     justify-self: end;
   }
 
@@ -4582,8 +5188,7 @@
 }
 
 .agent-config-tabbar > .agent-config-tabs {
-  /* 只占内容宽度，别拉成一条横贯整个头部的空胶囊。 */
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   margin-top: 0;
 }
@@ -4591,8 +5196,7 @@
 .agent-config-tabbar > .agent-config-io-entry-actions {
   flex-shrink: 0;
   gap: 6px;
-  /* 导入导出贴右，中间的空白留给标签页呼吸。 */
-  margin: 0 0 0 auto;
+  margin: 0;
 }
 
 .agent-config-tabbar > .agent-config-io-entry-actions .agent-config-io-entry-btn {
@@ -4684,3 +5288,244 @@
   border-top: 1px solid var(--border-color);
   background: var(--bg-primary);
 }
+
+</style>
+<style>
+/* ===== 预览页专用：把 fixed 的遮罩改成静态块，方便多屏并排对照 ===== */
+body { margin: 0; padding: 20px; background: var(--bg-primary); font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.preview-frame { margin-bottom: 22px; }
+.preview-frame > .settings-modal-overlay { position: static; inset: auto; background: transparent; display: block; padding: 0; }
+.preview-frame .settings-modal { margin: 0 auto; height: 620px; max-height: 620px; }
+.preview-caption { margin: 0 0 8px; color: var(--text-secondary); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="preview-frame">
+  <p class="preview-caption">1 / 主弹窗：渠道概览</p>
+  
+      <div class="settings-modal-overlay agent-config-modal-overlay">
+        <div class="settings-modal agent-config-modal">
+          <div class="settings-modal-header agent-config-header">
+            <div class="agent-config-header-main">
+              <div class="agent-config-title-row">
+                <h3>Hpp Agent 配置</h3>
+                
+              </div>
+              <div class="agent-config-subtitle">~/.pi/agents/hpp/config.json</div>
+              <div class="agent-config-tabbar">
+                <div class="agent-config-tabs" role="tablist">
+                  <button class="agent-config-tab active">Hpp</button>
+                  <button class="agent-config-tab">Pi</button>
+                  <button class="agent-config-tab">Codex</button>
+                </div>
+                <div class="agent-config-io-entry-actions">
+                  <button class="filter-add-btn agent-config-io-entry-btn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>导入</button>
+                  <button class="filter-add-btn agent-config-io-entry-btn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h7V3"/></svg>导出</button>
+                </div>
+              </div>
+            </div>
+            <button type="button" class="settings-modal-close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></button>
+          </div>
+          <div class="settings-modal-content agent-config-content">
+            <div class="agent-config-toolbar">
+              <span>渠道与模型写在 ~/.pi/agents/hpp/config.json；改完要点启用才会重载当前会话。</span>
+              <div class="agent-config-toolbar-actions">
+                <label class="agent-config-model-visibility"><span>显示内置模型</span><input type="checkbox" checked /></label>
+                <button type="button" class="btn-action"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 5v3"/><path d="M9 13h.01"/><path d="M15 13h.01"/></svg>SubAgent</button>
+                <button type="button" class="btn-action"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/><path d="M8 8h8"/></svg>上下文压缩</button>
+                <button type="button" class="btn-action"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>重新载入当前配置</button>
+              </div>
+            </div>
+            <div class="agent-config-grid">
+              <aside class="agent-config-provider-list">
+                <div class="agent-config-section-title">渠道</div>
+                <div class="agent-config-provider-scroll">
+                  
+            <div class="agent-config-provider-item selected active">
+              <span class="agent-config-provider-drag" title="拖动调整渠道顺序"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+              <div class="agent-config-provider-avatar">Y</div>
+              <div class="agent-config-provider-main">
+                <div class="agent-config-provider-title-line">
+                  <span class="agent-config-provider-name">YLK 中转</span>
+                  <span class="agent-config-provider-check"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg></span>
+                </div>
+                <span class="agent-config-provider-url">https://api.ylk.example/v1</span>
+                <span class="agent-config-provider-id">ylk · 12 个模型</span>
+              </div>
+              <div class="agent-config-provider-actions">
+                <span class="agent-config-active-badge">当前</span>
+              </div>
+            </div>
+            <div class="agent-config-provider-item  ">
+              <span class="agent-config-provider-drag" title="拖动调整渠道顺序"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+              <div class="agent-config-provider-avatar">P</div>
+              <div class="agent-config-provider-main">
+                <div class="agent-config-provider-title-line">
+                  <span class="agent-config-provider-name">Pixel Proxy</span>
+                  
+                </div>
+                <span class="agent-config-provider-url">https://api.pixel.example/v1</span>
+                <span class="agent-config-provider-id">pixel · 8 个模型</span>
+              </div>
+              <div class="agent-config-provider-actions">
+                <button type="button" class="btn-action agent-config-mini-btn">启用</button>
+              </div>
+            </div>
+            <div class="agent-config-provider-item  ">
+              <span class="agent-config-provider-drag" title="拖动调整渠道顺序"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+              <div class="agent-config-provider-avatar">W</div>
+              <div class="agent-config-provider-main">
+                <div class="agent-config-provider-title-line">
+                  <span class="agent-config-provider-name">wanzi</span>
+                  
+                </div>
+                <span class="agent-config-provider-url">https://api.wanzi.example/v1</span>
+                <span class="agent-config-provider-id">wanzi · 5 个模型</span>
+              </div>
+              <div class="agent-config-provider-actions">
+                <button type="button" class="btn-action agent-config-mini-btn">启用</button>
+              </div>
+            </div>
+                </div>
+                <button type="button" class="filter-add-btn agent-config-add-provider"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新增渠道</button>
+              </aside>
+              <section class="agent-config-form">
+                <div class="agent-config-form-header">
+                  <div class="agent-config-section-title">渠道配置</div>
+                  <div class="agent-config-form-actions">
+                    <button type="button" class="btn-action"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M14 6l4 4"/></svg>编辑</button>
+                    <button type="button" class="btn-action"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>复制</button>
+                    <button type="button" class="btn-action "><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>删除</button>
+                  </div>
+                </div>
+                <div class="agent-config-summary">
+            <div class="agent-config-summary-row"><span>渠道名</span><strong>YLK 中转</strong></div>
+            <div class="agent-config-summary-row"><span>渠道 URL</span><strong>https://api.ylk.example/v1</strong></div>
+            <div class="agent-config-summary-row"><span>Endpoint</span><strong>OpenAI Responses</strong></div>
+            <div class="agent-config-summary-row"><span>鉴权方式</span><strong>Bearer Token</strong></div>
+            <div class="agent-config-summary-row"><span>模型数量</span><strong>12</strong></div></div>
+                <div class="agent-config-summary-models">
+                  <div class="agent-config-section-title">模型</div>
+                  <div class="agent-config-summary-model-list">
+              <div class="agent-config-summary-model"><span>gpt-6-astra</span><code>gpt-6-astra</code></div>
+              <div class="agent-config-summary-model"><span>gpt-5.6-sol</span><code>gpt-5.6-sol</code></div>
+              <div class="agent-config-summary-model"><span>gpt-5.6-luna</span><code>gpt-5.6-luna</code></div>
+              <div class="agent-config-summary-model"><span>gpt-5.5-orbit</span><code>gpt-5.5-orbit</code></div>
+              <div class="agent-config-summary-model"><span>o5-mini</span><code>o5-mini</code></div></div>
+                </div>
+                <button type="button" class="filter-add-btn agent-config-activate-wide"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>启用此渠道并重载</button>
+              </section>
+            </div>
+            <div class="status-message success">渠道已保存</div>
+          </div>
+        </div>
+      </div>
+</div>
+<div class="preview-frame">
+  <p class="preview-caption">2 / 编辑渠道弹窗</p>
+  
+      <div class="settings-modal-overlay agent-provider-editor-overlay">
+        <div class="settings-modal agent-provider-editor-modal">
+          <div class="settings-modal-header">
+            <div>
+              <h3>编辑渠道</h3>
+              <div class="agent-config-subtitle">ylk</div>
+            </div>
+            <div class="agent-config-form-actions">
+              <span class="agent-config-dirty-hint">未保存</span>
+              <button type="button" class="filter-add-btn" title="保存渠道（Ctrl+S）"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h7V3"/></svg>保存</button>
+              <button type="button" class="settings-modal-close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></button>
+            </div>
+          </div>
+          <div class="settings-modal-content agent-provider-editor-content">
+            <div class="agent-config-fields">
+              
+              
+                <label>
+                  <span>渠道 ID</span>
+                  <input class="input-field" value="ylk" />
+                </label>
+              
+                <label>
+                  <span>渠道名</span>
+                  <input class="input-field" value="YLK 中转" />
+                </label>
+              
+                <label>
+                  <span>渠道 URL</span>
+                  <input class="input-field" value="https://api.ylk.example/v1" />
+                </label>
+              
+                <label>
+                  <span>Endpoint</span>
+                  <input class="input-field" value="OpenAI Responses" />
+                </label>
+              
+                <label>
+                  <span>鉴权方式</span>
+                  <input class="input-field" value="Bearer Token" />
+                </label>
+              
+            </div>
+            <div class="agent-config-fields">
+                <label class="agent-config-field-wide">
+                  <span>sk-key</span>
+                  <div class="agent-config-secret-input">
+                    <input class="input-field" value="sk-abcdefghijklmnopqrstuvwxyz" />
+                    <button type="button" class="btn-icon agent-config-secret-btn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/></svg></button>
+                    <button type="button" class="btn-icon agent-config-secret-btn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+                  </div>
+                </label></div>
+            <div class="agent-config-models-panel">
+              <div class="agent-config-models-header">
+                <span></span>
+                <span class="agent-config-model-head-label">模型 ID</span>
+                <span class="agent-config-model-head-label">显示名</span>
+                <div class="agent-config-model-actions">
+                  <button type="button" class="btn-action agent-config-mini-btn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>获取模型</button>
+                  <button type="button" class="btn-action agent-config-mini-btn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>添加模型</button>
+                </div>
+              </div>
+              <div class="agent-config-model-list">
+                
+                <div class="agent-config-model-row builtin">
+                  <span class="agent-config-model-drag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <input class="input-field" value="gpt-6-astra" />
+                  <input class="input-field agent-config-model-display-name" value="gpt-6-astra" />
+                  <div class="agent-config-model-checks" aria-hidden="true"></div>
+                  <button type="button" class="btn-icon btn-delete"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+                </div>
+                <div class="agent-config-model-row builtin">
+                  <span class="agent-config-model-drag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <input class="input-field" value="gpt-5.6-sol" />
+                  <input class="input-field agent-config-model-display-name" value="gpt-5.6-sol" />
+                  <div class="agent-config-model-checks" aria-hidden="true"></div>
+                  <button type="button" class="btn-icon btn-delete"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+                </div>
+                <div class="agent-config-model-row builtin">
+                  <span class="agent-config-model-drag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <input class="input-field" value="gpt-5.6-luna" />
+                  <input class="input-field agent-config-model-display-name" value="gpt-5.6-luna" />
+                  <div class="agent-config-model-checks" aria-hidden="true"></div>
+                  <button type="button" class="btn-icon btn-delete"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+                </div>
+                <div class="agent-config-model-row custom">
+                  <span class="agent-config-model-drag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg></span>
+                  <input class="input-field" value="my-finetune-v3" />
+                  <input class="input-field agent-config-model-display-name" value="微调模型 v3" />
+                  <div class="agent-config-model-checks">
+                    <label class="agent-config-check"><input type="checkbox" checked /> 图片</label>
+                    <label class="agent-config-thinking-levels"><span>思考档位</span>
+                      <div class="agent-thinking-multiselect"><div class="agent-thinking-multiselect-trigger"><span>中、高</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div></div>
+                    </label>
+                  </div>
+                  <button type="button" class="btn-icon btn-delete"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+</div>
+</body>
+</html>
