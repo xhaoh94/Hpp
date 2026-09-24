@@ -3,6 +3,7 @@ import {
   getLocalMarkdownCodePath,
   getLocalMarkdownFilePath,
   isAbsoluteProjectFilePath,
+  isExternalMarkdownHref,
   resolveProjectFilePath,
 } from "./project-file-path";
 
@@ -63,5 +64,16 @@ describe("project file path resolution", () => {
     expect(getLocalMarkdownCodePath("npm run build")).toBeNull();
     expect(getLocalMarkdownCodePath("https://example.com/file.md")).toBeNull();
     expect(getLocalMarkdownCodePath("plainIdentifier")).toBeNull();
+  });
+
+  it("only counts http(s) as external links", () => {
+    expect(isExternalMarkdownHref("https://example.com/docs")).toBe(true);
+    expect(isExternalMarkdownHref("  HTTP://example.com")).toBe(true);
+    expect(isExternalMarkdownHref("mailto:test@example.com")).toBe(false);
+    expect(isExternalMarkdownHref("vscode://file/E:/x.lua")).toBe(false);
+    expect(isExternalMarkdownHref("#section")).toBe(false);
+    expect(isExternalMarkdownHref("Assets/Lua/x.lua")).toBe(false);
+    expect(isExternalMarkdownHref("")).toBe(false);
+    expect(isExternalMarkdownHref(null)).toBe(false);
   });
 });

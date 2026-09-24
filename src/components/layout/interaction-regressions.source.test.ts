@@ -215,6 +215,26 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain('code.md-inline-code.md-path-reference');
   });
 
+  it("never lets a message link spawn an Electron window", () => {
+    const markdownRendererSource = readFileSync(resolve(process.cwd(), "src/components/shared/MarkdownRenderer.tsx"), "utf8");
+    // 无 preload 的新窗口 = 黑屏，所以只有 http(s) 才允许 target="_blank"（主进程转给系统浏览器），
+    // 其余 href 一律拦掉默认跳转。
+    expect(markdownRendererSource).not.toContain('target="_blank"\n                rel="noopener noreferrer"');
+    expect(markdownRendererSource).toContain('{...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}');
+    expect(markdownRendererSource).toContain("if (!external) event.preventDefault();");
+    // 默认 URL 清洗会把 Windows 盘符路径清成空 href，空 href 解析成当前页面 → 又开一个自己。
+    expect(markdownRendererSource).toContain("urlTransform={keepLocalHref}");
+    expect(markdownRendererSource).toContain("const SCRIPT_HREF = /^\\s*(?:javascript|data|vbscript):/i;");
+  });
+
+  it("denies new Electron windows in the main process and sends http(s) to the browser", () => {
+    const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+    expect(mainSource).toContain("setWindowOpenHandler");
+    expect(mainSource).toContain('return { action: "deny" };');
+    expect(mainSource).toContain("shell.openExternal(url)");
+    expect(mainSource).toContain('mainWindow.webContents.on("will-navigate"');
+  });
+
   it("allows @ mentions to attach files and folders", () => {
     expect(chatComposerSource).not.toContain("includeDirectories: false");
     expect(chatComposerSource).toContain('kind: item.isDirectory ? "folder" : "file"');

@@ -664,6 +664,7 @@ const finishSDKPromptFromResult = () => {
       usage: accumulatedResultUsage,
       totalCostUsd: accumulatedResultCostUsd,
     });
+    void emitPreciseContextUsage();
   }
   activePromptId = null;
   resetCommandTracking();
@@ -1017,6 +1018,58 @@ const listActions = async (reload = false) => {
   }
   actionNames = nextNames;
   return actions;
+};
+
+// Claude 的 /context 走这个控制调用：full 逐类调 count_tokens（真计数，SDK 默认档），
+// summary 只用最近一次响应的 usage + 本地估算。先取 full 才有"精确"可言，
+// full 不可用时退到 summary 并如实降级为估算。
+const readContextUsage = async () => {
+  const query = activeQuery;
+  if (!query || typeof query.getContextUsage !== "function") return null;
+  const generation = queryGeneration;
+  for (const detail of ["full", "summary"]) {
+    try {
+      const usage = await query.getContextUsage({ detail });
+      if (generation !== queryGeneration) return null;
+      if (usage && typeof usage === "object") {
+        return { usage, precision: detail === "full" ? "exact" : "estimated" };
+      }
+    } catch {
+      // 旧版 SDK 或不支持该接口的渠道会抛错：换下一档，仍失败就当没有可用读数。
+    }
+  }
+  return null;
+};
+
+// 单独发一条，不拖慢 prompt_done：拿不到读数时 backend 仍会沿用 usage 估算。
+const emitPreciseContextUsage = async () => {
+  const reading = await readContextUsage();
+  if (!reading) return;
+  const { usage, precision } = reading;
+  const breakdown = (Array.isArray(usage.categories) ? usage.categories : [])
+    .map((entry, index) => {
+      const item = asRecord(entry);
+      return {
+        id: `claude-context-${index}`,
+        label: String(item.name || "").trim(),
+        tokens: Number(item.tokens) || 0,
+        // free/buffer/deferred 不属于"已占用"，色条上不能算进已用段。
+        isUsed: item.kind === "used",
+      };
+    })
+    .filter((entry) => entry.isUsed && entry.label && entry.tokens > 0)
+    .map(({ id, label, tokens }) => ({ id, label, tokens }));
+  const contextTokens = Number(usage.totalTokens) || 0;
+  // maxTokens 是扣掉预留后的有效上限，和 CLI 自己显示的百分比同口径；rawMaxTokens 才是裸窗口。
+  const contextWindow = Number(usage.maxTokens) || Number(usage.rawMaxTokens) || 0;
+  if (contextTokens <= 0 && contextWindow <= 0) return;
+  send({
+    type: "context_usage",
+    contextTokens,
+    contextWindow,
+    precision,
+    ...(breakdown.length > 0 ? { breakdown } : {}),
+  });
 };
 
 const buildActionMessage = async (action, message) => {

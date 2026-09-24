@@ -703,18 +703,47 @@ export class ClaudeSDKAgent {
           const cacheInputTokens = Number(usage.cache_read_input_tokens) || 0;
           if (inputTokens > 0 || outputTokens > 0) {
             this.emitEvent({
-      type: "token_usage",
-      inputTokens,
-      outputTokens,
-      cacheInputTokens,
-      contextTokens: inputTokens,
-      contextEstimated: true,
-    });
+              type: "token_usage",
+              inputTokens,
+              outputTokens,
+              cacheInputTokens,
+              contextTokens: inputTokens,
+              contextPrecision: "estimated",
+            });
           }
         }
         this.activePromptId = null;
         this.finishTurn(true);
         break;
+      case "context_usage": {
+        // SDK 的 getContextUsage 读数：只更新上下文占用，不带本回合消耗，
+        // 否则会和 prompt_done 那份 usage 重复计入 token 统计。
+        const contextTokens = Number(data.contextTokens) || 0;
+        const contextWindow = Number(data.contextWindow) || 0;
+        const breakdown = Array.isArray(data.breakdown)
+          ? data.breakdown.flatMap((entry) => {
+              const item = asRecord(entry);
+              const label = optionalString(item.label) || "";
+              const tokens = Number(item.tokens) || 0;
+              return label && tokens > 0
+                ? [{ id: optionalString(item.id) || label, label, tokens }]
+                : [];
+            })
+          : [];
+        if (contextTokens <= 0 && contextWindow <= 0) break;
+        this.emitEvent({
+          type: "token_usage",
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheInputTokens: 0,
+          ...(contextTokens > 0 ? { contextTokens } : {}),
+          ...(contextWindow > 0 ? { contextWindow } : {}),
+          // full 档是逐类 count_tokens 数出来的；summary 档是本地估算，不能跟着标精确。
+          contextPrecision: data.precision === "exact" ? "exact" : "estimated",
+          ...(breakdown.length > 0 ? { contextBreakdown: breakdown } : {}),
+        });
+        break;
+      }
       case "error":
         if (!this.turnActive || (id && id !== this.activePromptId)) break;
         this.emitEvent({

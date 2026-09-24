@@ -1305,6 +1305,19 @@
   line-height: 1.4;
 }
 
+/* 模型切换 divider：性能提示整行换行居中显示。 */
+.chat-model-change-divider {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.chat-model-change-hint {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: 12px;
+  color: var(--warning-color, #d9a441);
+}
+
 .chat-context-divider-line {
   flex: 1;
   height: 1px;

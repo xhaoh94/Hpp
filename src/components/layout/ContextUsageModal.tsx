@@ -8,6 +8,14 @@ import "./ContextUsageModal.css";
 // 与截图一致的分类配色：蓝、绿、黄、紫、粉、青，按明细顺序取用。
 const BREAKDOWN_COLORS = ["#6b8afd", "#3ecf8e", "#f5a623", "#b06bff", "#ff6bd6", "#4dd0e1"];
 
+// 精度 → 脚注说明：估算和"后端上报值"都不能当成独立测量的精确值来讲。
+const SOURCE_NOTES: Record<SessionContextUsage["source"], string> = {
+  exact: "用量来自后端精确统计",
+  official: "用量来自后端上报值",
+  estimated: "用量为估算值",
+  unknown: "用量来源未知",
+};
+
 type ContextUsageModalProps = {
   usage?: SessionContextUsage;
   /** 标题栏的上下文圆环：弹窗锚定在它旁边，而不是贴在窗口左上角。 */
@@ -103,11 +111,7 @@ export function ContextUsageModal({ usage, anchorRef, onClose }: ContextUsageMod
 
         <div className="context-usage-footnote">
           {usage?.model ? `${usage.model.provider}/${usage.model.id} · ` : ""}
-          {!usage
-            ? "暂无用量数据，发送一次消息后即可看到"
-            : usage.estimated
-              ? "用量为估算值"
-              : "用量来自后端精确值"}
+          {!usage ? "暂无用量数据，发送一次消息后即可看到" : SOURCE_NOTES[usage.source]}
           {!contextWindow ? " · 当前模型未提供上下文窗口" : ""}
         </div>
       </div>

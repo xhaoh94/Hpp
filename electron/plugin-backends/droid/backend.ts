@@ -1491,6 +1491,7 @@ export class DroidAgent {
     if (shouldFinishTurn) {
       this.emitEvent({ type: "stream_end" });
       this.emitEvent({ type: "agent_end" });
+      void this.emitContextStats();
     }
     this.activeClientMessageId = null;
     this.clientMessageIdsByRequestId.clear();
@@ -1827,14 +1828,50 @@ export class DroidAgent {
       ) || 0;
       if (inputTokens > 0 || outputTokens > 0) {
         this.emitEvent({
-        type: "token_usage",
-        inputTokens,
-        outputTokens,
-        contextTokens: inputTokens,
-        contextEstimated: true,
-      });
+          type: "token_usage",
+          inputTokens,
+          outputTokens,
+          contextTokens: inputTokens,
+          contextPrecision: "estimated",
+        });
         return;
       }
     }
+  }
+
+  /**
+   * droid 的 /context 面板走这条 RPC；返回体就是面板的数据源：
+   * contextBudget = 窗口，usedTokens = 各分类求和，categories 是分类明细。
+   * 分类求和按它自己的说法是估算值，所以精度只能标 estimated。
+   */
+  private async emitContextStats() {
+    if (!this.process) return;
+    let stats: UnknownRecord;
+    try {
+      stats = asRecord(await this.sendRpcAsync("droid.get_context_stats", {}, 5000));
+    } catch (error) {
+      // 旧版 droid 没有该方法：保留消息事件里的 usage，不额外上报。
+      console.warn("[droid] get_context_stats unavailable:", error instanceof Error ? error.message : error);
+      return;
+    }
+    const contextWindow = Number(stats.contextBudget) || 0;
+    const usedTokens = Number(stats.usedTokens) || 0;
+    const breakdown = (Array.isArray(stats.categories) ? stats.categories : []).flatMap((entry, index) => {
+      const item = asRecord(entry);
+      const label = String(item.name || "").trim();
+      const tokens = Number(item.tokens) || 0;
+      return label && tokens > 0 ? [{ id: `droid-context-${index}`, label, tokens }] : [];
+    });
+    if (usedTokens <= 0 && contextWindow <= 0) return;
+    this.emitEvent({
+      type: "token_usage",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheInputTokens: 0,
+      ...(usedTokens > 0 ? { contextTokens: usedTokens } : {}),
+      ...(contextWindow > 0 ? { contextWindow } : {}),
+      contextPrecision: "estimated",
+      ...(breakdown.length > 0 ? { contextBreakdown: breakdown } : {}),
+    });
   }
 }

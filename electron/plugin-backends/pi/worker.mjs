@@ -1723,7 +1723,7 @@ const handleSessionEvent = (event) => {
           cacheInputTokens: Number(usage?.cacheRead) || 0,
           contextTokens: preciseContextTokens || inputTokens,
           contextWindow: Number(session?.model?.contextWindow) > 0 ? Number(session.model.contextWindow) : undefined,
-          contextEstimated: !preciseContextTokens,
+          contextPrecision: preciseContextTokens ? "exact" : "estimated",
           contextBreakdown: collectContextBreakdown(reportedContextTokens),
         });
         emitLatestAssistantTurnMetadata(promptId, previousLeafId);

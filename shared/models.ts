@@ -160,6 +160,38 @@ export interface ContextUsageBreakdownEntry {
   tokens: number;
 }
 
+/**
+ * 上下文用量的精度，描述的是数据来源而不是数字好坏：
+ * - exact：读数由后端逐项数出来（claude 的 getContextUsage(full)、pi 的精确分支）；
+ * - official：没有专用接口，取的是官方 CLI 自己上报的 token 计数（codex 的 tokenUsage.last、opencode 的 part.tokens）；
+ * - estimated：按分类求和或本地估算借位成上下文占用，只保证量级正确（claude summary、droid 的 context stats、pi 的回落值）。
+ */
+export type ContextUsagePrecision = "exact" | "official" | "estimated";
+
+const CONTEXT_USAGE_PRECISION_NOTES: Record<ContextUsagePrecision, string> = {
+  exact: "",
+  official: "（后端上报）",
+  estimated: "（估算）",
+};
+
+/** 会话记录的来源归一成精度；未知/缺省返回 undefined（不附加任何说明）。 */
+export function toContextUsagePrecision(source?: unknown): ContextUsagePrecision | undefined {
+  return source === "exact" || source === "official" || source === "estimated" ? source : undefined;
+}
+
+/**
+ * 后端事件 → 精度。旧事件只带 contextEstimated（pi 的历史约定：false 即精确），
+ * 因此优先读 contextPrecision，缺失时按 contextEstimated 回落。
+ */
+export function resolveContextUsagePrecision(input: {
+  contextPrecision?: unknown;
+  contextEstimated?: unknown;
+}): ContextUsagePrecision {
+  const declared = toContextUsagePrecision(input.contextPrecision);
+  if (declared) return declared;
+  return input.contextEstimated === false ? "exact" : "estimated";
+}
+
 /** 上下文用量数字的紧凑写法：160300 → "160.3K"（保留一位小数，便于对齐比较）。 */
 export function formatContextTokenAmount(count: number): string {
   const value = Math.max(0, Math.round(Number(count) || 0));
@@ -172,22 +204,22 @@ export function formatContextTokenAmount(count: number): string {
  * 上下文用量的悬浮提示文案，例：
  * `53.4% · 160.3K / 300.0K 上下文已使用`
  * 只知窗口时退为 `300.0K 上下文窗口`；模型未提供窗口时返回说明文字。
- * 非精确值时附加“（估算）”，避免把估算当成精确数字。
+ * 非精确值时附加精度说明，避免把估算/上报值当成独立测量。
  */
 export function formatContextUsageDetail(input: {
   contextWindow?: number;
   usedTokens?: number;
-  estimated?: boolean;
+  precision?: ContextUsagePrecision;
 }): string {
   const windowTokens = Number(input.contextWindow);
   const hasWindow = Number.isFinite(windowTokens) && windowTokens > 0;
   const usedTokens = Number(input.usedTokens);
   const hasUsage = Number.isFinite(usedTokens) && usedTokens >= 0;
-  const estimateNote = input.estimated ? "（估算）" : "";
+  const precisionNote = input.precision ? CONTEXT_USAGE_PRECISION_NOTES[input.precision] : "";
   if (hasWindow && hasUsage) {
     const percent = ((usedTokens / windowTokens) * 100).toFixed(1);
-    return `${percent}% · ${formatContextTokenAmount(usedTokens)} / ${formatContextTokenAmount(windowTokens)} 上下文已使用${estimateNote}`;
+    return `${percent}% · ${formatContextTokenAmount(usedTokens)} / ${formatContextTokenAmount(windowTokens)} 上下文已使用${precisionNote}`;
   }
-  if (hasWindow) return `${formatContextTokenAmount(windowTokens)} 上下文窗口${estimateNote}`;
+  if (hasWindow) return `${formatContextTokenAmount(windowTokens)} 上下文窗口${precisionNote}`;
   return "当前模型未提供上下文窗口";
 }

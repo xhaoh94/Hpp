@@ -2,7 +2,7 @@ import { isValidElement, memo, useCallback, useState, type MouseEvent, type Reac
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { getLocalMarkdownCodePath } from "@/lib/project-file-path";
+import { getLocalMarkdownCodePath, isExternalMarkdownHref } from "@/lib/project-file-path";
 import "./MarkdownRenderer.css";
 
 function CopyButton({ text }: { text: string }) {
@@ -65,12 +65,22 @@ interface MarkdownRendererProps {
   onLinkClick?: (href: string, event: MouseEvent<HTMLAnchorElement>) => boolean | void;
 }
 
+// 默认的 URL 清洗只放行协议白名单，会把 Windows 盘符路径（`E:\a\b.lua`、`C:/a/b.lua`）
+// 整条清成空串；空的 href 会解析成「当前页面」，点一下就把应用自己再开一个窗口。
+// 这里只拦真正的脚本协议，本地路径原样保留给点击处理器。
+const SCRIPT_HREF = /^\s*(?:javascript|data|vbscript):/i;
+
+function keepLocalHref(url: string): string {
+  return SCRIPT_HREF.test(url) ? "" : url;
+}
+
 function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
   return (
     <div className="md-content">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
+        urlTransform={keepLocalHref}
         components={{
           code({ node, className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");
@@ -136,15 +146,18 @@ function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
             );
           },
           a({ href, children, ...props }) {
+            // 只有 http(s) 交给系统浏览器（主进程的 setWindowOpenHandler 会接管），
+            // 其余 href 一律拦掉默认跳转，否则 Electron 会新开一个没有 preload 的空白窗口。
+            const external = isExternalMarkdownHref(href);
             return (
               <a
                 {...props}
                 href={href}
-                target="_blank"
-                rel="noopener noreferrer"
+                {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
                 className="md-link"
                 onClick={(event) => {
-                  if (href) onLinkClick?.(href, event);
+                  if (href && onLinkClick?.(href, event)) return;
+                  if (!external) event.preventDefault();
                 }}
               >
                 {children}

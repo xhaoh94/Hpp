@@ -33,4 +33,12 @@ describe("context usage modal", () => {
     expect(modalStyles).toContain(".context-usage-bar-segment");
     expect(modalStyles).toContain(".context-usage-dot");
   });
+
+  it("states the usage precision instead of a single estimate flag", () => {
+    expect(modalSource).toContain("SOURCE_NOTES[usage.source]");
+    // 后端上报值与完成独立测量的精确值不是一回事，文案要分开说。
+    expect(modalSource).toContain("用量来自后端上报值");
+    expect(modalSource).toContain("用量来自后端精确统计");
+    expect(modalSource).not.toContain("usage.estimated");
+  });
 });

@@ -333,6 +333,12 @@ const parseStringRecordMap = (value: unknown): Record<string, Record<string, str
   return result;
 };
 
+// 旧数据把精确值记为 "provider"；读回时归一成 "exact"，其余未知来源保留 unknown。
+const parseContextUsageSource = (value: unknown): SessionContextUsage["source"] => {
+  if (value === "provider" || value === "exact") return "exact";
+  return value === "official" || value === "estimated" ? value : "unknown";
+};
+
 const parseContextUsageRecord = (value: unknown): Record<string, SessionContextUsage> => {
   if (!isRecord(value)) return {};
   const result: Record<string, SessionContextUsage> = {};
@@ -351,8 +357,7 @@ const parseContextUsageRecord = (value: unknown): Record<string, SessionContextU
       ...(Number.isFinite(usedTokens) && Number.isFinite(contextWindow) && contextWindow > 0
         ? { remainingTokens: Math.max(0, contextWindow - usedTokens), usageRatio: Math.min(1, usedTokens / contextWindow) }
         : {}),
-      source: item.source === "provider" ? "provider" : "estimated",
-      estimated: item.estimated !== false,
+      source: parseContextUsageSource(item.source),
       ...(model ? { model } : {}),
       updatedAt: Number(item.updatedAt) || Date.now(),
     };

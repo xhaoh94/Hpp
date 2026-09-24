@@ -127,18 +127,34 @@ describe("agent event terminal reconciliation", () => {
     dispatchAgentEvent({
       type: "token_usage",
       sessionId: SESSION_ID,
+      inputTokens: 0,
+      outputTokens: 0,
+      contextTokens: 82000,
+      contextWindow: 128000,
+      contextPrecision: "official",
+    }, harness.controller);
+    // 后端声明的精度要原样落到会话记录上（tooltip/脚注都读它）。
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toMatchObject({
+      usedTokens: 82000,
+      source: "official",
+    });
+
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
       // 本回合增量 input 远小于上下文总量：占用必须取 contextTokens。
       inputTokens: 5000,
       outputTokens: 1000,
       contextTokens: 82000,
       contextWindow: 128000,
-      contextEstimated: true,
+      // 旧事件只带 contextEstimated：false 仍要归到精确。
+      contextEstimated: false,
     }, harness.controller);
     expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toMatchObject({
       contextWindow: 128000,
       usedTokens: 82000,
       remainingTokens: 46000,
-      estimated: true,
+      source: "exact",
       usageRatio: 0.640625,
     });
 

@@ -56,7 +56,6 @@ describe("session config change notifications", () => {
       remainingTokens: 139700,
       usageRatio: 0.534,
       source: "estimated",
-      estimated: true,
       model: { provider: "tanwan", id: "deepseek-v4-flash" },
       updatedAt: 1,
     });
@@ -79,8 +78,7 @@ describe("session config change notifications", () => {
     saveSessionContextUsage("session-ctx-get", {
       contextWindow: 1050000,
       usedTokens: 601849,
-      source: "provider",
-      estimated: false,
+      source: "exact",
       updatedAt: 1,
     });
     expect(getSessionContextUsage("session-ctx-get")).toMatchObject({
@@ -96,7 +94,6 @@ describe("session config change notifications", () => {
       contextWindow: 128000,
       usedTokens: 64000,
       source: "estimated",
-      estimated: true,
       updatedAt: 1,
     });
     await purgeDeletedSessionData(["deleted-session"], []);

@@ -11,6 +11,17 @@ function decodeMarkdownHrefPath(href: string): string {
   }
 }
 
+const EXTERNAL_HREF = /^https?:\/\//i;
+
+/**
+ * http(s) 是唯一有「系统浏览器」这条出路的链接。
+ * 其余 href（本地路径、#锚点、mailto:、vscode: 等自定义 scheme）在 Electron 里都没有
+ * 可用的默认行为：放行 target="_blank" 只会让 Electron 新开一个没有 preload 的空窗口。
+ */
+export function isExternalMarkdownHref(href: string | null | undefined): boolean {
+  return EXTERNAL_HREF.test((href || "").trim());
+}
+
 export function getLocalMarkdownFilePath(href: string): string | null {
   const path = decodeMarkdownHrefPath(href);
   if (!path || href.trim().startsWith("#") || path.startsWith("//")) return null;

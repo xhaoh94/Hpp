@@ -566,6 +566,17 @@ function modelSupportsReasoning(modelInfo: unknown): boolean {
   return info.reasoning === true || asRecord(info.capabilities).reasoning === true;
 }
 
+// opencode 的模型元数据把窗口放在 limit.context（实测 /config/providers），不是 contextWindow；
+// 只认后者会让分母永远为空，圆环就只能显示"当前模型未提供上下文窗口"。
+function getOpenCodeContextWindow(modelInfo: unknown): number | undefined {
+  const info = asRecord(modelInfo);
+  for (const candidate of [info.contextWindow, asRecord(info.limit).context]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
+}
+
 function getModelVariants(modelInfo: unknown): string[] {
   const variants = asRecord(asRecord(modelInfo).variants);
   return Object.entries(variants).flatMap(([variantId, value]) => {
@@ -2171,9 +2182,7 @@ export class OpenCodeAgent {
                 name: String(model.name || model.id || modelId),
                 provider: providerId,
                 reasoning: modelSupportsReasoning(model),
-                contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
-                  ? Number(model.contextWindow)
-                  : undefined,
+                contextWindow: getOpenCodeContextWindow(model),
                 supportsImages: modelSupportsImages(model),
                 supportedThinkingLevels: normalizeOpenCodeThinkingLevels(variants),
               });
@@ -2189,9 +2198,7 @@ export class OpenCodeAgent {
                 name: typeof model.name === "string" ? model.name : modelId,
                 provider: providerId,
                 reasoning: modelSupportsReasoning(modelInfo),
-                contextWindow: Number.isFinite(Number(model.contextWindow)) && Number(model.contextWindow) > 0
-                  ? Number(model.contextWindow)
-                  : undefined,
+                contextWindow: getOpenCodeContextWindow(modelInfo),
                 supportsImages: modelSupportsImages(modelInfo),
                 supportedThinkingLevels: normalizeOpenCodeThinkingLevels(variants),
               });
@@ -2458,7 +2465,7 @@ export class OpenCodeAgent {
       // input 是该 part 当前请求的总上下文；上报它而不是 deltaInput，
       // 否则通用剩余上下文会随着每个 part 累加而失真。
       contextTokens: input,
-      contextEstimated: true,
+      contextPrecision: "official",
     });
   }
 

@@ -1055,7 +1055,46 @@ async function setModelInternal(
   useChatStore.getState().clearSessionContextUsage(sessionId);
   applyActiveModels(sessionId, availableModels, effectiveModel);
   await reconcileThinkingForModel(sessionId, session.agentId, effectiveModel);
+  appendModelChangeDivider(sessionId, previous, effectiveModel);
   return { model: effectiveModel, models: availableModels, previous };
+}
+
+/** 模型切换成功后在聊天流插入 divider；新模型与上一回合实际运行模型不同时附加性能提示。 */
+function appendModelChangeDivider(
+  sessionId: string,
+  previous: Pick<ModelInfo, "id" | "provider" | "name"> | null,
+  effectiveModel: ModelInfo,
+) {
+  if (!previous) return;
+  if (previous.id === effectiveModel.id && previous.provider === effectiveModel.provider) return;
+  const chatState = useChatStore.getState();
+  const sourceMessages = sessionId === chatState.activeSessionId
+    ? chatState.messages
+    : chatState.sessionMessages[sessionId] || [];
+  // 对话「实际运行模型」以最近一条带 modelLabel 的 assistant 消息为准：
+  // 仅切换选择器不发消息时，两者可能不同，此时不算中途换模。
+  let lastRunLabel: string | undefined;
+  for (let i = sourceMessages.length - 1; i >= 0; i -= 1) {
+    const candidate = sourceMessages[i];
+    if (candidate.role === "assistant" && candidate.modelLabel) {
+      lastRunLabel = candidate.modelLabel;
+      break;
+    }
+  }
+  const from = previous.name || previous.id;
+  const to = effectiveModel.name || effectiveModel.id;
+  chatState.upsertModelChangeDivider({
+    id: crypto.randomUUID(),
+    role: "system",
+    systemType: "model_change",
+    content: `模型已从 ${from} 更改为 ${to}`,
+    timestamp: Date.now(),
+    modelChange: {
+      from,
+      to,
+      performanceHint: !!lastRunLabel && lastRunLabel !== to,
+    },
+  }, sessionId);
 }
 
 export async function setModel(

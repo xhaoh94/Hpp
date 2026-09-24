@@ -123,6 +123,30 @@ class FakeQuery {
   }
 }
 
+// 默认不挂 getContextUsage，模拟"老版本 SDK 没有这个接口"；
+// 打开后按 mode 模拟：both=两档都支持，summary-only=只支持 summary，
+// 并把实际被请求的 detail 编进分类名，让测试能从 worker 输出里读回来。
+const contextUsageMode = process.env.CLAUDE_FAKE_CONTEXT_USAGE;
+if (contextUsageMode) {
+  FakeQuery.prototype.getContextUsage = async function (opts) {
+    const detail = (opts && opts.detail) || "full";
+    if (contextUsageMode === "unsupported") throw new Error("get_context_usage is not supported");
+    if (contextUsageMode === "summary-only" && detail !== "summary") throw new Error("detail full is not supported");
+    return {
+      categories: [
+        { name: "detail:" + detail, tokens: 70000, color: "#6b8afd", kind: "used" },
+        { name: "Messages", tokens: 0, color: "#3ecf8e", kind: "used" },
+        { name: "Free space", tokens: 130000, color: "#888888", kind: "free" },
+        { name: "Compaction buffer", tokens: 30000, color: "#f5a623", kind: "buffer" },
+      ],
+      totalTokens: 70000,
+      maxTokens: 200000,
+      rawMaxTokens: 184000,
+      percentage: 35,
+    };
+  };
+}
+
 export const query = ({ prompt, options }) => new FakeQuery(prompt, options);
 export const getSubagentMessages = async (_sessionId, agentId) => {
   if (agentId !== "agent-1" && agentId !== "task-1") return [];
@@ -266,6 +290,35 @@ describe("Claude Agent SDK worker", () => {
     await writeFakeSDK(runtimeRoot, "7.9.0");
     const worker = await initialize();
     expect(worker.messages).toContainEqual(expect.objectContaining({ type: "ready" }));
+  });
+
+  it("reports the SDK's precise context usage and drops non-occupied rows", async () => {
+    const worker = await initialize("new-session", true, providerConfig, { CLAUDE_FAKE_CONTEXT_USAGE: "both" });
+    worker.send({ id: "prompt-ctx", type: "prompt", message: "hello", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-ctx");
+
+    const usage = await worker.waitFor((message) => message.type === "context_usage");
+    expect(usage.contextTokens).toBe(70000);
+    // maxTokens 才是与 CLI 百分比同口径的有效上限，不是裸窗口 rawMaxTokens。
+    expect(usage.contextWindow).toBe(200000);
+    // full 才是逐类 count_tokens 数出来的真值，两档都可用时不能退而求其次用 summary。
+    expect(usage.precision).toBe("exact");
+    // free/buffer 不是"已占用"，不能算进明细（否则色条会假性占满）。
+    expect((usage.breakdown as Array<{ label: string }>).map((entry) => entry.label)).toEqual(["detail:full"]);
+  });
+
+  it("falls back to summary with an estimated precision, and stays silent without the API", async () => {
+    const summaryOnly = await initialize("summary-only-session", true, providerConfig, { CLAUDE_FAKE_CONTEXT_USAGE: "summary-only" });
+    summaryOnly.send({ id: "prompt-ctx-summary", type: "prompt", message: "hello", permissionMode: "full-access" });
+    const usage = await summaryOnly.waitFor((message) => message.type === "context_usage");
+    expect((usage.breakdown as Array<{ label: string }>)[0].label).toBe("detail:summary");
+    // summary 是本地估算，精度必须跟着降级，否则会拿估算冒充精确统计。
+    expect(usage.precision).toBe("estimated");
+
+    const legacy = await initialize("legacy-session");
+    legacy.send({ id: "prompt-ctx-legacy", type: "prompt", message: "hello", permissionMode: "full-access" });
+    await legacy.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-ctx-legacy");
+    expect(legacy.messages.some((message) => message.type === "context_usage")).toBe(false);
   });
 
   it("rejects mismatched native SDK versions", async () => {

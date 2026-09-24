@@ -47,7 +47,8 @@ import {
   type RunGitApply,
 } from "./reverse-apply-patches";
 
-const MANIFEST_VERSION = 1;
+// 推导逻辑变化时必须 +1：prepareLocked 命中旧缓存会直接返回结果，不重算。
+const MANIFEST_VERSION = 2;
 const MAX_REVIEW_FILES = 500;
 const MAX_PATCH_BYTES = 20 * 1024 * 1024;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -668,12 +669,13 @@ export class ReviewUndoService {
     mkdirSync(this.stateRoot, { recursive: true });
     mkdirSync(this.backupRoot, { recursive: true });
     const stateDir = join(this.stateRoot, transactionId);
-    const manifestPath = join(stateDir, "manifest.json");
-    if (existsSync(manifestPath)) {
-      const manifest = this.loadManifest(transactionId);
-      this.recoverPending(stateDir, manifest);
-      return { success: true, state: this.buildState(stateDir, manifest) };
+    const cached = this.readUsableManifest(transactionId);
+    if (cached) {
+      this.recoverPending(stateDir, cached);
+      return { success: true, state: this.buildState(stateDir, cached) };
     }
+    // 无缓存、版本过期或已损坏：丢弃旧目录后重新推导
+    if (existsSync(stateDir)) rmSync(stateDir, { recursive: true, force: true });
 
     const tempStateDir = `${stateDir}.${process.pid}.${randomUUID()}.tmp`;
     rmSync(tempStateDir, { recursive: true, force: true });
@@ -1162,6 +1164,15 @@ export class ReviewUndoService {
       throw new Error("Target path does not exist");
     }
     return { filePath: requested, relativePath: parts.join(sep) };
+  }
+
+  /** 缓存不可用（无文件、版本过期、损坏、项目路径变化）时返回 null，让调用方重新推导。 */
+  private readUsableManifest(transactionId: string): ReviewManifest | null {
+    try {
+      return this.loadManifest(transactionId);
+    } catch {
+      return null;
+    }
   }
 
   private loadManifest(transactionId: string): ReviewManifest {

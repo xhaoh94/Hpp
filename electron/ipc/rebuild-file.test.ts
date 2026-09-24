@@ -751,4 +751,70 @@ describe("ReviewUndoService", () => {
     // 逐字节断言（readFileSync 原样读，不经 read() 的 CRLF 归一化）
     expect(readFileSync(file, "utf8")).toBe(raw(base));
   });
+
+  it("discards a cached transaction produced by an older derivation", { timeout: 30000 }, async () => {
+    const dir = createRepo();
+    const { root, service } = createService();
+    const file = join(dir, "a.txt");
+    writeLines(file, ["base"]);
+    commit(dir, "base");
+    writeLines(file, ["base", "added"]);
+    const files = [{ file: "a.txt", patches: [diff(dir)] }];
+    commit(dir, "edit");
+
+    const first = await prepare(service, dir, files);
+    expect(first.files[0].undoable).toBe(true);
+
+    // 把落盘的 manifest 退回旧版本号，模拟「推导逻辑升级前算出来的缓存」
+    const manifestPath = join(root, "state", first.transactionId, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.schemaVersion = 1;
+    manifest.files[0] = {
+      sourceFile: join(dir, "a.txt"),
+      relativePath: "a.txt",
+      status: "modified",
+      statusExplicit: false,
+      supported: false,
+      error: "旧版本留下的一次失败",
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+    // 同一个 reviewId + 同一组补丁 => 同一个 transactionId，命中同一份缓存
+    const second = await prepare(service, dir, files);
+    expect(second.transactionId).toBe(first.transactionId);
+    expect(second.files[0].error).toBeUndefined();
+    expect(second.files[0].undoable).toBe(true);
+  });
+
+  it("rescans instead of trusting a cache written by an older derivation", async () => {
+    // 空补丁会在 prepareFile 里直接短路，全程不碰 git —— 沙箱禁子进程时也能跑
+    const projectPath = mkdtempSync(join(tmpdir(), "hpp-review-proj-"));
+    tempDirs.push(projectPath);
+    writeFileSync(join(projectPath, "a.txt"), "base\n", "utf8");
+    const { root, service } = createService();
+    const request = {
+      reviewId: "older-derivation",
+      projectPath,
+      files: [{ file: "a.txt", patches: [] }],
+    };
+
+    const first = await service.prepare(request);
+    expect(first.success).toBe(true);
+    if (!first.success) return;
+    expect(first.state.files[0].error).toContain("没有文本补丁");
+
+    // 退回旧版本号，并塞一个本次推导不可能产出的错误文案
+    const manifestPath = join(root, "state", first.state.transactionId, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.schemaVersion = 1;
+    manifest.files[0].error = "旧版本留下的失败";
+    writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+    // 同一 reviewId + 同一组 files => 同一 transactionId，必然命中同一份缓存
+    const second = await service.prepare(request);
+    expect(second.success).toBe(true);
+    if (!second.success) return;
+    expect(second.state.transactionId).toBe(first.state.transactionId);
+    expect(second.state.files[0].error).toContain("没有文本补丁");
+  });
 });

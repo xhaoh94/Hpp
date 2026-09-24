@@ -931,7 +931,7 @@ describe("Pi SDK worker protocol", () => {
     );
     // 无精确 API：input + cacheRead + cacheWrite = 10000，并标记为估算。
     expect(estimatedMessage.contextTokens).toBe(10000);
-    expect(estimatedMessage.contextEstimated).toBe(true);
+    expect(estimatedMessage.contextPrecision).toBe("estimated");
     await estimatedWorker.waitFor((message) => message.type === "prompt_done" && message.id === "ctx-estimated");
 
     const preciseWorker = startWorker(runtimeRoot, agentDir, { PI_TEST_PRECISE_CONTEXT: "1" });
@@ -943,7 +943,7 @@ describe("Pi SDK worker protocol", () => {
       (message) => message.type === "message_end" && Number(message.contextTokens) > 0,
     );
     expect(preciseMessage.contextTokens).toBe(123456);
-    expect(preciseMessage.contextEstimated).toBe(false);
+    expect(preciseMessage.contextPrecision).toBe("exact");
     // 上下文构成按实际总量归一化：分类之和等于上报总量。
     const breakdown = preciseMessage.contextBreakdown as Array<{ id: string; tokens: number }>;
     expect(Array.isArray(breakdown)).toBe(true);

@@ -190,6 +190,51 @@ describe("ClaudeSDKAgent busy lifecycle", () => {
     expect(events.map((event) => event.type)).toEqual(["stream_end", "agent_end"]);
   });
 
+  it("maps the worker's precise context usage without double counting turn tokens", () => {
+    const events: Record<string, unknown>[] = [];
+    const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));
+    Object.assign(mutable(agent), {
+      activePromptId: "prompt-ctx",
+      turnActive: true,
+    });
+
+    mutable(agent).handleWorkerMessage({
+      type: "context_usage",
+      contextTokens: 82000,
+      contextWindow: 200000,
+      precision: "exact",
+      breakdown: [
+        { id: "claude-context-0", label: "System prompt", tokens: 30000 },
+        { id: "claude-context-1", label: "", tokens: 5 },
+      ],
+    });
+    // summary 档是本地估算，降级标记必须原样透出，不能被固定成 exact。
+    mutable(agent).handleWorkerMessage({
+      type: "context_usage",
+      contextTokens: 81000,
+      contextWindow: 200000,
+      precision: "estimated",
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      // 精确读数只更新上下文占用；本回合消耗已由 prompt_done 报过，这里必须为 0。
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheInputTokens: 0,
+      contextTokens: 82000,
+      contextWindow: 200000,
+      contextPrecision: "exact",
+      // 空 label 的条目会在进事件前被丢掉。
+      contextBreakdown: [{ id: "claude-context-0", label: "System prompt", tokens: 30000 }],
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      contextTokens: 81000,
+      contextPrecision: "estimated",
+    }));
+  });
+
   it("keeps the turn busy when a completed compact boundary arrives before prompt_done", () => {
     const events: Record<string, unknown>[] = [];
     const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));

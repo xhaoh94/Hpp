@@ -3,6 +3,8 @@ release
 linux-release
 dist
 out
+# 本地验证产物（预览 HTML / 截图 / 临时脚本 / 打包中间目录），不入库
+/tmp/
 mobile/android/.idea
 # electron-vite 每次 dev 启动时用 esbuild 打包配置生成的临时缓存（正常退出自删，
 # 强杀进程会遗留，已人工清理过多次）

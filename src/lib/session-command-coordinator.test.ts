@@ -1762,6 +1762,69 @@ describe("SessionCommandCoordinator", () => {
     expect(useChatStore.getState().currentModel).toEqual(modelA);
   });
 
+  it("appends a model change divider with a mid-conversation performance hint", async () => {
+    const modelA = {
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: false,
+    };
+    const modelB = {
+      id: "model-b",
+      name: "Model B",
+      provider: "test",
+      reasoning: false,
+    };
+    const modelC = {
+      id: "model-c",
+      name: "Model C",
+      provider: "test",
+      reasoning: false,
+    };
+    saveSessionModel("session-one", modelA);
+    useChatStore.setState({ currentModel: modelA, availableModels: [modelA, modelB, modelC] });
+    electronAPI.agentGetModels.mockResolvedValue([modelA, modelB, modelC]);
+    // 对话上一回合由 Model A 实际运行。
+    useChatStore.setState((state) => ({
+      messages: [...state.messages, {
+        id: "assistant-1",
+        role: "assistant" as const,
+        content: "done",
+        timestamp: 1,
+        modelLabel: "Model A",
+      }],
+    }));
+
+    await SessionCommandCoordinator.setModel("session-one", modelB, { models: [modelA, modelB, modelC] });
+    let messages = useChatStore.getState().messages;
+    const divider = messages[messages.length - 1];
+    expect(divider.role).toBe("system");
+    expect(divider.systemType).toBe("model_change");
+    expect(divider.modelChange).toMatchObject({ from: "Model A", to: "Model B", performanceHint: true });
+
+    // 连续切换：原地替换为最新一次切换，不追加第二条；id 必须保留原值，
+    // 远程端按 id upsert，换 id 会被当成新消息 push 导致重复 divider。
+    await SessionCommandCoordinator.setModel("session-one", modelC, { models: [modelA, modelB, modelC] });
+    messages = useChatStore.getState().messages;
+    expect(messages[messages.length - 1].modelChange)
+      .toMatchObject({ from: "Model B", to: "Model C", performanceHint: true });
+    expect(messages[messages.length - 1].id).toBe(divider.id);
+    expect(messages.filter((msg) => msg.systemType === "model_change")).toHaveLength(1);
+
+    // 切回上一回合运行的模型：divider 保留（显示最近一次切换），但不带性能提示。
+    await SessionCommandCoordinator.setModel("session-one", modelA, { models: [modelA, modelB, modelC] });
+    messages = useChatStore.getState().messages;
+    expect(messages[messages.length - 1].systemType).toBe("model_change");
+    expect(messages[messages.length - 1].modelChange)
+      .toMatchObject({ from: "Model C", to: "Model A", performanceHint: false });
+    expect(messages.filter((msg) => msg.systemType === "model_change")).toHaveLength(1);
+
+    // 重复选择同一模型：不追加 divider。
+    const countBefore = useChatStore.getState().messages.length;
+    await SessionCommandCoordinator.setModel("session-one", modelA, { models: [modelA, modelB, modelC] });
+    expect(useChatStore.getState().messages.length).toBe(countBefore);
+  });
+
   it("rejects thinking levels not supported by the current model", async () => {
     useChatStore.setState({
       currentModel: {

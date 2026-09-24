@@ -31,6 +31,14 @@ describe("AgentConfigModal provider selection", () => {
     expect(resolvePreferredProviderId({ providers: state.providers }, "missing")).toBe("ylk");
   });
 
+  it("prefers the last edited provider and looks up builtin for batch-added models", () => {
+    // 重进配置界面优先选中上次编辑/保存的渠道，压过会话当前模型渠道。
+    expect(modalSource).toContain("lastEditedProviderByAgent.set(saveAgentId, payload.providerId);");
+    expect(modalSource).toContain("const lastEdited = lastEditedProviderByAgent.get(agentId) || \"\";");
+    // 「获取模型」批量添加无输入焦点，添加后立即判定内置目录（不经防抖）。
+    expect(modalSource).toContain("runModelBuiltinLookup(retainedModels.length + offset, modelId);");
+  });
+
   it("mounts above the Agent settings dialog when opened from its header", () => {
     expect(modalSource).toContain('import { createPortal } from "react-dom";');
     expect(modalSource).toContain("return createPortal(");

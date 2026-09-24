@@ -40,6 +40,51 @@ describe("Droid protocol adapter", () => {
     expect(agent.isIdle()).toBe(true);
   });
 
+  it("reads droid's own context stats when the turn goes idle", async () => {
+    const events: AgentEvent[] = [];
+    const agent = new DroidAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as DroidInternals;
+    internals.process = { stdin: { writable: true, write: vi.fn() } };
+    internals.isReady = true;
+    internals.turnActive = true;
+    const rpcCalls: string[] = [];
+    internals.sendRpcAsync = vi.fn(async (method: string) => {
+      rpcCalls.push(method);
+      return {
+        modelId: "gpt-5.4",
+        modelDisplayName: "GPT-5.4",
+        contextBudget: 200000,
+        usedTokens: 64000,
+        freeTokens: 136000,
+        categories: [
+          { name: "System prompt", tokens: 24000, colorKey: "system" },
+          { name: "Messages", tokens: 40000, colorKey: "messages" },
+          { name: "Free space", tokens: 0, colorKey: "free" },
+        ],
+        skills: [{ name: "review", location: "personal", tokens: 1200 }],
+        mcpServers: [],
+        droids: [],
+      };
+    });
+
+    internals.handleNotification("droid.session_notification", {
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+    });
+    await vi.waitFor(() => expect(rpcCalls).toContain("droid.get_context_stats"));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      contextTokens: 64000,
+      contextWindow: 200000,
+      // 分类求和按 droid 自己的说法是估算，不能标成精确值。
+      contextPrecision: "estimated",
+      contextBreakdown: [
+        { id: "droid-context-0", label: "System prompt", tokens: 24000 },
+        { id: "droid-context-1", label: "Messages", tokens: 40000 },
+      ],
+    }));
+  });
+
   it("rejects a new prompt while the current Droid turn is active", async () => {
     const agent = new DroidAgent("hpp-session");
     const internals = agent as unknown as DroidInternals;

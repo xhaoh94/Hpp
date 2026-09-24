@@ -4,6 +4,7 @@ import { join } from "path";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText, withoutToolDiffPayload } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
 import {
   formatSubagentModel,
   humanizeSubagentLabel,
@@ -334,6 +335,7 @@ export class PiSDKAgent {
   private processForCleanup: ChildProcess | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
+  private readonly toolFileDiffFallback = new ToolFileDiffFallback();
   private eventBuffer: AgentEventBuffer;
   private pendingResponses = new Map<string, (data: UnknownRecord) => void>();
   private requestId = 0;
@@ -1090,25 +1092,25 @@ export class PiSDKAgent {
           const cacheInputTokens = Number(record.cacheInputTokens) || 0;
           if (inputTokens > 0 || outputTokens > 0) {
             this.emitEvent({
-          type: "token_usage",
-          inputTokens,
-          outputTokens,
-          cacheInputTokens,
-          contextTokens: Number(record.contextTokens) || undefined,
-          contextWindow: Number(record.contextWindow) || undefined,
-          contextEstimated: record.contextEstimated !== false,
-          contextBreakdown: Array.isArray(record.contextBreakdown)
-            ? record.contextBreakdown.flatMap((entry) => {
-                const item = asRecord(entry);
-                const id = optionalString(item.id);
-                const label = optionalString(item.label);
-                const tokens = Number(item.tokens);
-                return id && label && Number.isFinite(tokens) && tokens > 0
-                  ? [{ id, label, tokens }]
-                  : [];
-              })
-            : undefined,
-        });
+              type: "token_usage",
+              inputTokens,
+              outputTokens,
+              cacheInputTokens,
+              contextTokens: Number(record.contextTokens) || undefined,
+              contextWindow: Number(record.contextWindow) || undefined,
+              contextPrecision: record.contextPrecision === "exact" ? "exact" : "estimated",
+              contextBreakdown: Array.isArray(record.contextBreakdown)
+                ? record.contextBreakdown.flatMap((entry) => {
+                    const item = asRecord(entry);
+                    const id = optionalString(item.id);
+                    const label = optionalString(item.label);
+                    const tokens = Number(item.tokens);
+                    return id && label && Number.isFinite(tokens) && tokens > 0
+                      ? [{ id, label, tokens }]
+                      : [];
+                  })
+                : undefined,
+            });
           }
         }
         this.refreshAgentEndFallback();
@@ -1132,7 +1134,10 @@ export class PiSDKAgent {
           this.ignoredToolCallIds.has(toolCallId) || this.completedToolCallIds.has(toolCallId)
         )) break;
         if (toolCallId) this.activeToolCallIds.add(toolCallId);
-        this.emitEvent(normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName }));
+        const startEvent = normalizeToolEvent("tool_start", { ...record, args: record.args, name: record.toolName });
+        // 工具刚开始执行，文件尚未被改写——此刻抓到的才是「修改前」快照。
+        this.toolFileDiffFallback.onToolStart(this.projectPath, startEvent);
+        this.emitEvent(startEvent);
         break;
       }
       case "tool_execution_update": {
@@ -1157,13 +1162,17 @@ export class PiSDKAgent {
         if (toolCallId) this.activeToolCallIds.add(toolCallId);
         const detail = unwrapToolText(record.partialResult);
         if (detail) {
-          this.emitEvent(normalizeToolEvent("tool_start", {
+          const updateEvent = normalizeToolEvent("tool_start", {
             ...record,
             args: record.args,
             result: record.partialResult,
             detail,
             name: record.toolName,
-          }));
+          });
+          // 执行中文件可能已被部分改写，但快照按「本轮最早」保留，
+          // 重复调用不会覆盖 tool_execution_start 抓到的基线。
+          this.toolFileDiffFallback.onToolStart(this.projectPath, updateEvent);
+          this.emitEvent(updateEvent);
         }
         break;
       }
@@ -1199,8 +1208,11 @@ export class PiSDKAgent {
           output: record.result,
           name: record.toolName,
         });
+        // provider 的补丁常基于过期上下文（行号/行尾都可能对不上），兜底由工具
+        // 前后的磁盘快照算出、反向必然可应用，所以优先用它。
+        const fallback = this.toolFileDiffFallback.resolve(this.projectPath, toolEvent);
         this.emitEvent(withoutToolDiffPayload(toolEvent));
-        const diffs = buildDiffsFromToolEvent(toolEvent);
+        const diffs = buildDiffsFromToolEvent(toolEvent, fallback);
         if (diffs.length > 0) this.emitEvent({ type: "diff_update", diffs });
         if (toolCallId) {
           this.activeToolCallIds.delete(toolCallId);
@@ -1351,6 +1363,7 @@ export class PiSDKAgent {
 
   private beginTurn() {
     this.clearTurnFallback();
+    this.toolFileDiffFallback.reset();
     this.agentEndObserved = false;
     if (this.turnActive) return;
     this.turnToken += 1;

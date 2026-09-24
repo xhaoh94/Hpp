@@ -3,6 +3,7 @@ import { StringDecoder } from "string_decoder";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { normalizeQuestionProcessEvent } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import { ToolFileDiffFallback, type ToolFileTarget } from "../../plugin-runtime/turn-file-diff";
 import { loadCodexHistorySnapshot } from "./history";
 import type {
   AgentActionCatalogEntry,
@@ -122,6 +123,7 @@ export class CodexAgent {
   private intentionalExits = new WeakSet<ChildProcess>();
   private hostSystemPrompt = "";
   private guidancePendingId: string | null = null;
+  private readonly toolFileDiffFallback = new ToolFileDiffFallback();
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -519,15 +521,19 @@ export class CodexAgent {
         const inputTokens = Number(record.inputTokens) || 0;
         const outputTokens = Number(record.outputTokens) || 0;
         const cacheInputTokens = Number(record.cacheInputTokens) || 0;
+        // worker 把 last.inputTokens 这个绝对值当上下文占用一起报上来；缺失时退回本次增量。
+        const contextTokens = Number(record.contextTokens) || inputTokens;
+        const contextWindow = Number(record.contextWindow) || 0;
         if (inputTokens > 0 || outputTokens > 0) {
           this.emitEvent({
-          type: "token_usage",
-          inputTokens,
-          outputTokens,
-          cacheInputTokens,
-          contextTokens: inputTokens,
-          contextEstimated: true,
-        });
+            type: "token_usage",
+            inputTokens,
+            outputTokens,
+            cacheInputTokens,
+            contextTokens,
+            ...(contextWindow > 0 ? { contextWindow } : {}),
+            contextPrecision: "official",
+          });
         }
         break;
       }
@@ -545,6 +551,8 @@ export class CodexAgent {
         break;
       }
       case "agent_start":
+        // 回合起点：清掉上一轮的快照缓存，避免沿用过期 baseline。
+        this.toolFileDiffFallback.reset();
         this.emitEvent({ type: "agent_start" });
         break;
       // The worker correlates this event with the delayed userMessage item
@@ -593,13 +601,38 @@ export class CodexAgent {
         this.emitEvent({ type: "thinking_end" });
         break;
       case "tool_start":
+        // 工具刚开始执行、文件尚未被改写——此刻抓到的才是「修改前」快照。
+        this.forEachCodexFileTarget(record, (target) => {
+          this.toolFileDiffFallback.onToolStart(this.projectPath, target);
+        });
+        this.emitEvent(record);
+        break;
       case "tool_end":
+        // 工具结束后读一次磁盘，算出「修改前 → 当前」的真实差异；provider
+        // 补丁不可用或对不上时，它就是唯一可靠的撤销依据。
+        this.forEachCodexFileTarget(record, (target) => {
+          this.toolFileDiffFallback.resolve(this.projectPath, target);
+        });
+        this.emitEvent(record);
+        break;
       case "subagent_event":
       case "plan_update":
       case "context_compaction":
-      case "diff_update":
         this.emitEvent(record);
         break;
+      case "diff_update": {
+        // 兜底补丁由磁盘真实字节算出、反向必然可应用；provider 的累计快照可能
+        // 基于过期上下文（行号/行尾都可能对不上），同一文件以兜底为准。
+        const providerDiffs = (Array.isArray(record.diffs) ? record.diffs : []) as Array<{ file: string }>;
+        const diffs = this.toolFileDiffFallback.mergeWithProviderDiffs(
+          providerDiffs,
+          (file) => this.diffFileKey(file),
+        );
+        // 兜底缓存是「回合起点 → 当前磁盘」的累计快照，只在本回合结算用一次。
+        this.toolFileDiffFallback.reset();
+        this.emitEvent({ ...record, diffs });
+        break;
+      }
       case "process_event":
         this.emitEvent(isQuestionProcessEvent(record) ? normalizeCodexQuestionEvent(record) : record);
         break;
@@ -772,6 +805,36 @@ export class CodexAgent {
     } catch (error: unknown) {
       console.warn("[codex-history] Failed to recover session history:", error);
     }
+  }
+
+  /**
+   * codex 的 file_change 一次可涉及多个文件（apply_patch 批量改），事件里只用
+   * files[{ file, label }] 给路径。兜底跟踪器按单文件调用，这里逐个喂进去；
+   * 重复路径幂等——基线只记本轮最早一次，差异按文件去重。
+   */
+  private forEachCodexFileTarget(
+    event: UnknownRecord,
+    run: (target: ToolFileTarget) => void,
+  ): void {
+    const toolKind = String(event.toolKind || "");
+    const files = Array.isArray(event.files) ? event.files : [];
+    for (const raw of files) {
+      const filePath = String(asRecord(raw).file || "").trim();
+      if (filePath) run({ toolKind, filePath });
+    }
+  }
+
+  /**
+   * 兜底差异按 POSIX 项目相对路径命名，而 provider 在 Windows 上可能给
+   * `src\a.ts`（path.relative 的产物）或项目内的绝对路径，比较前统一形式。
+   */
+  private diffFileKey(file: string): string {
+    const posix = String(file || "").replace(/\\/g, "/").replace(/^\.\//, "");
+    const prefix = this.projectPath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!prefix) return posix;
+    return posix.toLowerCase().startsWith(`${prefix.toLowerCase()}/`)
+      ? posix.slice(prefix.length + 1)
+      : posix;
   }
 
   private emitEvent(data: unknown) {

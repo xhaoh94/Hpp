@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, session, Tray } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, session, shell, Tray } from "electron";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
@@ -25,6 +25,8 @@ const env = detectDesktopEnvironment();
 // Bump the dev AppUserModelID when the taskbar icon changes to bypass
 // Windows' icon cache, which otherwise keeps showing the stale icon.
 const WINDOWS_APP_ID = is.dev ? "com.hpp.app.dev.v5" : "com.hpp.app";
+
+const isHttpUrl = (url: string): boolean => /^https?:\/\//i.test(url);
 
 if (is.dev) {
   console.log("[Hpp] Display server:", env.displayServer);
@@ -394,6 +396,20 @@ function createWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
+  });
+
+  // 应用内的链接不允许新开窗口。那样创建的窗口拿不到 preload（window.electronAPI undefined），
+  // 渲染层一启动就崩，用户看到的就是一块黑屏；外链改交给系统浏览器。
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isHttpUrl(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  // 主窗口自己也不允许被链接带走，只放行同地址（HMR 整页刷新走的就是这个）。
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url === mainWindow?.webContents.getURL()) return;
+    event.preventDefault();
+    if (isHttpUrl(url)) void shell.openExternal(url);
   });
 
   mainWindow.on("close", (event) => {

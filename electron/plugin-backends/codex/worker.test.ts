@@ -188,6 +188,18 @@ input.on("line", async (line) => {
       write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
       return;
     }
+    if (promptText === "token-usage") {
+      const tokenUsage = (inputTokens, outputTokens) => ({
+        total: { totalTokens: 30000, inputTokens: 24000, cachedInputTokens: 20000, cacheWriteInputTokens: 0, outputTokens: 500, reasoningOutputTokens: 0 },
+        last: { totalTokens: inputTokens + outputTokens, inputTokens, cachedInputTokens: 8000, cacheWriteInputTokens: 0, outputTokens, reasoningOutputTokens: 0 },
+        modelContextWindow: 200000,
+      });
+      // 同一个 turn 推两次（codex 每次模型调用都会刷新 last），再正常收尾。
+      write({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId: "turn-1", tokenUsage: tokenUsage(12000, 100) } });
+      write({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId: "turn-1", tokenUsage: tokenUsage(18000, 200) } });
+      write({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      return;
+    }
     if (promptText === "subagents") {
       write({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", startedAtMs: 900, item: {
         id: "collab-empty-1",
@@ -529,6 +541,24 @@ describe("Codex worker protocol", () => {
     ]);
     expect(worker.messages.filter((message) => message.type === "diff_update")).toHaveLength(1);
     await worker.waitFor((message) => message.type === "prompt_done" && message.id === "turn-diff-prompt");
+  });
+
+  it("maps thread/tokenUsage/updated to per-turn deltas plus the absolute context size", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "token-usage-prompt", type: "prompt", message: "token-usage" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "token-usage-prompt");
+
+    const usage = worker.messages.filter((message) => message.type === "token_usage");
+    // 同一 turn 的第二次推送只补差值，否则渲染端会把同一份用量重复累加。
+    expect(usage.map((message) => message.inputTokens)).toEqual([12000, 6000]);
+    expect(usage.map((message) => message.outputTokens)).toEqual([100, 100]);
+    // 上下文占用是 last.inputTokens 的绝对值，分母来自 modelContextWindow。
+    expect(usage.map((message) => message.contextTokens)).toEqual([12000, 18000]);
+    expect(usage.every((message) => message.contextWindow === 200000)).toBe(true);
   });
 
   it("emits only the latest file-change snapshot and keeps tool_end diff-free", async () => {

@@ -180,14 +180,18 @@ export class ToolFileDiffFallback {
    * 过期上下文而 apply 不上——那正是「审核弹窗显示无法撤销」的主要成因，
    * 而它又会因为「权威」身份盖掉兜底。兜底没覆盖到的文件（子代理改动、
    * 未被工具事件记录的变更）仍保留 provider 数据，不会因为这里丢信息。
+   *
+   * keyOf 决定「什么算同一个文件」：Windows 上 provider 常给 path.relative
+   * 产物的 `src\a.ts`，兜底给 `src/a.ts`，按原字符串比会留下两条同文件差异。
    */
   mergeWithProviderDiffs<T extends { file: string }>(
     providerDiffs: T[],
+    keyOf: (file: string) => string = (file) => file,
   ): Array<T | ComputedFileDiff> {
     if (this.resolved.size === 0) return providerDiffs;
     const fallback = [...this.resolved.values()];
-    const files = new Set(fallback.map((diff) => diff.file));
-    return [...providerDiffs.filter((diff) => !files.has(diff.file)), ...fallback];
+    const files = new Set(fallback.map((diff) => keyOf(diff.file)));
+    return [...providerDiffs.filter((diff) => !files.has(keyOf(diff.file))), ...fallback];
   }
 
   /**

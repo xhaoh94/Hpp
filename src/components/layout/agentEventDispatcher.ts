@@ -15,6 +15,7 @@ import {
 } from "@/stores/chat-store";
 import type { AgentEvent } from "@/types";
 import { isAgentTurnContinuationEvidence } from "@shared/agent-event-lifecycle";
+import { resolveContextUsagePrecision } from "@shared/models";
 import {
   activateSessionRuntimeTurn,
   compareAgentTurnRevisions,
@@ -468,7 +469,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
           chat.addAssistantTokenUsage(inputTokens, outputTokens, cacheInputTokens, currentSessionId);
         }
         // 各后端把最近一次请求携带的输入上下文统一映射到 contextTokens。
-        // 它通常是服务商 usage 或本地适配器值，不一定是 SDK 精确估算，因此保留 estimated 标记。
+        // 精度由后端自己声明：专用接口=exact，官方上报=official，借位请求计数=estimated。
         const usedTokens = Number.isFinite(contextTokens) && contextTokens > 0
           ? contextTokens
           : inputTokens > 0
@@ -499,8 +500,7 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
             usageRatio: resolvedWindow && usedTokens > 0
               ? Math.min(1, usedTokens / resolvedWindow)
               : undefined,
-            source: event.contextEstimated === false ? "provider" as const : "estimated" as const,
-            estimated: event.contextEstimated !== false,
+            source: resolveContextUsagePrecision(event),
             ...(breakdown && breakdown.length > 0 ? { breakdown } : {}),
             model: usageModel
               ? { provider: usageModel.provider, id: usageModel.id }

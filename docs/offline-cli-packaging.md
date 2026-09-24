@@ -7,12 +7,12 @@
 
 本文只覆盖 CLI/SDK 软件安装。模型 API 地址、API Key、账号登录和内网模型网关不包含在包内，运行模型请求时仍需配置可达的服务。
 
-## 2. 当前打包版本（2026-08-26）
+## 2. 当前打包版本（2026-09-23）
 
 | 组件 | 包名 | 版本 |
 | --- | --- | --- |
-| Codex CLI | `@openai/codex` | `0.149.1` |
-| Pi SDK/CLI | `@earendil-works/pi-coding-agent` | `0.84.3` |
+| Codex CLI | `@openai/codex` | `0.156.1` |
+| Pi SDK/CLI | `@earendil-works/pi-coding-agent` | `0.87.1` |
 | Node.js | 便携运行时 | `24.12.0` |
 
 Pi 包既提供 SDK 导出，也提供 `pi` 命令。当前版本的 npm `bin` 入口是 `dist/bundle/cli.js`；Hpp 集成使用同一个包的 SDK 导出，不依赖全局 `pi` 命令。
@@ -33,7 +33,7 @@ Hpp Pi 插件不会通过 PATH 查找全局 `pi` 命令，而是固定读取：
 ## 4. 离线包目录结构
 
 ```text
-codex-pi-offline-win-x64-latest-2026-08-26/
+codex-pi-offline-win-x64-latest-2026-09-23/
 ├─ app/
 │  ├─ package.json
 │  └─ node_modules/
@@ -51,15 +51,20 @@ codex-pi-offline-win-x64-latest-2026-08-26/
 ```json
 {
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.3",
-    "@openai/codex": "0.149.1"
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@openai/codex": "0.156.1"
   }
 }
 ```
 
 ## 5. 构建流程
 
-以下命令在联网的 Windows x64 打包机执行。示例目录为 `release/codex-pi-offline-win-x64-latest-2026-08-26`。
+以下命令在联网的 Windows x64 打包机执行。示例目录为 `release/codex-pi-offline-win-x64-latest-2026-09-23`。
+
+> 自动化：`npm run offline:build`（`offline-installers/build-offline.cjs`）一键完成 5.2–5.4、第 6 节打包与 SHA-256。
+> 版本可用环境变量覆盖：`CODEX_VERSION` / `PI_VERSION` / `NODE_VERSION`（默认上面第 2 节的版本）。
+> 脚本在「node 无法创建子进程」的沙箱里会自动加 `--ignore-scripts`（本包 codex/pi 无 install 脚本，原生二进制走可选依赖，不影响产物）；正常环境仍按本文保留脚本执行。
+> 下面的手工步骤保留作为参考与排障依据。
 
 ### 5.1 查询最新版本
 
@@ -149,8 +154,8 @@ $HppDataDir = "$env:APPDATA\hpp\hpp-data"
 从 `release` 目录执行：
 
 ```powershell
-tar.exe -a -cf codex-pi-offline-win-x64-0.149.1-0.84.3.zip `
-  -C . codex-pi-offline-win-x64-latest-2026-08-26
+tar.exe -a -cf codex-pi-offline-win-x64-0.156.1-0.87.1.zip `
+  -C . codex-pi-offline-win-x64-latest-2026-09-23
 ```
 
 Windows PowerShell 自带的 `Compress-Archive` 在大量 `node_modules` 文件上可能耗时很长；`tar.exe -a` 通常更适合本包。
@@ -158,13 +163,13 @@ Windows PowerShell 自带的 `Compress-Archive` 在大量 `node_modules` 文件�
 生成 SHA-256：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\codex-pi-offline-win-x64-0.149.1-0.84.3.zip
+Get-FileHash -Algorithm SHA256 .\codex-pi-offline-win-x64-0.156.1-0.87.1.zip
 ```
 
 当前包的校验值：
 
 ```text
-51B82861AE09FDA0CBC6C2D04DF1CAFE93C948088CAD63B3770DEF6CB842074B
+000A8C096785B06A4425819E246BD78799EE9B23781F13D7487F29A18474A43B
 ```
 
 ## 7. 内网机器安装
@@ -180,9 +185,9 @@ Get-FileHash -Algorithm SHA256 .\codex-pi-offline-win-x64-0.149.1-0.84.3.zip
 4. 看到类似输出后，完全退出并重新打开 Hpp：
 
    ```text
-   Hpp Pi SDK installed: 0.84.3
-   codex-cli 0.149.1
-   0.84.3
+   Hpp Pi SDK installed: 0.87.1
+   codex-cli 0.156.1
+   0.87.1
    ```
 
 5. 打开 Hpp Agent 面板并点击“刷新”（必要时重启 Hpp）。

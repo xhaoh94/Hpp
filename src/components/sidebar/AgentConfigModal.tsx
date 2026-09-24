@@ -356,6 +356,9 @@ export function resolvePreferredProviderId(state: AgentConfigState, currentProvi
   return state.providers[0]?.providerId || "";
 }
 
+/** 每个 Agent 最近一次保存/编辑的渠道：重进配置界面时优先选中它。应用级会话内记忆。 */
+const lastEditedProviderByAgent = new Map<string, string>();
+
 export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpdated }: AgentConfigModalProps) {
   const [agentId, setAgentId] = useState(initialAgentId);
   const agents = useAgentCatalogStore((state) => state.agents);
@@ -414,8 +417,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [copyProviderError, setCopyProviderError] = useState("");
   const apiKeyCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelFetchRequest = useRef(0);
-  // 模型内置实时判定的防抖计时器与请求序号（按模型行索引隔离，避免乱序覆盖）。
-  const modelLookupTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  // 模型内置判定的请求序号（按模型行索引隔离，避免失焦/批量添加的乱序响应覆盖）。
   const modelLookupSeq = useRef(new Map<number, number>());
   // 渠道编辑改为主动保存：只有用户点“保存”或按 Ctrl+S 才写入。
   // lastSavedPayload 仅用于判断是否有未保存改动。
@@ -442,57 +444,50 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const { update: updateProviderAutoScroll, stop: stopProviderAutoScroll } = useDragAutoScroll(providerScrollRef);
 
   const clearModelLookupState = useCallback(() => {
-    for (const timer of modelLookupTimers.current.values()) clearTimeout(timer);
-    modelLookupTimers.current.clear();
     modelLookupSeq.current.clear();
   }, []);
 
-  // 模型 ID 变化时防抖实时查询 Agent 内置目录，未保存即可切换内置/自定义形态。
-  const scheduleModelBuiltinLookup = useCallback((index: number, modelId: string) => {
-    const previousTimer = modelLookupTimers.current.get(index);
-    if (previousTimer) clearTimeout(previousTimer);
+  // 模型 id 失焦时查询 Agent 内置目录：打字过程不判定，失焦/批量添加才触发。
+  const runModelBuiltinLookup = useCallback((index: number, modelId: string) => {
     const id = modelId.trim();
     if (!id) return;
-    modelLookupTimers.current.set(index, setTimeout(() => {
-      modelLookupTimers.current.delete(index);
-      const seq = (modelLookupSeq.current.get(index) || 0) + 1;
-      modelLookupSeq.current.set(index, seq);
-      void window.electronAPI.agentConfigLookupModel(agentId, id).then((result) => {
-        if (modelLookupSeq.current.get(index) !== seq) return;
-        const builtinModel = result.success && result.builtin ? result.model : undefined;
-        setDraft((current) => {
-          if (!current) return current;
-          const target = current.models[index];
-          if (!target || target.id.trim() !== id) return current;
-          if (builtinModel) {
-            // 命中内置目录：能力改由目录接管（保存时插件会再次校验）。
-            return {
-              ...current,
-              models: current.models.map((model, modelIndex) => modelIndex === index ? {
-                ...model,
-                isBuiltin: true,
-                reasoning: builtinModel.reasoning,
-                imageInput: builtinModel.imageInput,
-                supportedThinkingLevels: builtinModel.supportedThinkingLevels,
-                name: model.name.trim() ? model.name : (builtinModel.name || model.name),
-              } : model),
-            };
-          }
-          // 非内置：仅当该行之前被判为内置时才回退为自定义默认能力，
-          // 避免覆盖用户已勾选的自定义能力（也兼容未实现 lookupModel 的插件）。
-          if (!target.isBuiltin) return current;
-          const customDefault = emptyModel(providerConfiguration);
+    const seq = (modelLookupSeq.current.get(index) || 0) + 1;
+    modelLookupSeq.current.set(index, seq);
+    void window.electronAPI.agentConfigLookupModel(agentId, id).then((result) => {
+      if (modelLookupSeq.current.get(index) !== seq) return;
+      const builtinModel = result.success && result.builtin ? result.model : undefined;
+      setDraft((current) => {
+        if (!current) return current;
+        const target = current.models[index];
+        if (!target || target.id.trim() !== id) return current;
+        if (builtinModel) {
+          // 命中内置目录：能力改由目录接管（保存时插件会再次校验）。
           return {
             ...current,
             models: current.models.map((model, modelIndex) => modelIndex === index ? {
-              ...customDefault,
-              id: model.id,
-              name: model.name,
+              ...model,
+              isBuiltin: true,
+              reasoning: builtinModel.reasoning,
+              imageInput: builtinModel.imageInput,
+              supportedThinkingLevels: builtinModel.supportedThinkingLevels,
+              name: model.name.trim() ? model.name : (builtinModel.name || model.name),
             } : model),
           };
-        });
-      }).catch(() => undefined);
-    }, 300));
+        }
+        // 非内置：仅当该行之前被判为内置时才回退为自定义默认能力，
+        // 避免覆盖用户已勾选的自定义能力（也兼容未实现 lookupModel 的插件）。
+        if (!target.isBuiltin) return current;
+        const customDefault = emptyModel(providerConfiguration);
+        return {
+          ...current,
+          models: current.models.map((model, modelIndex) => modelIndex === index ? {
+            ...customDefault,
+            id: model.id,
+            name: model.name,
+          } : model),
+        };
+      });
+    }).catch(() => undefined);
   }, [agentId, providerConfiguration]);
 
   useEffect(() => {
@@ -557,7 +552,11 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, [agentId, configurableAgentList, copySourceProvider]);
 
   const getPreferredProviderId = useCallback((state: AgentConfigState) => {
-    const currentProviderId = agentId === activeAgentId ? currentModelProvider : "";
+    // 上次编辑过的渠道优先于会话当前模型渠道：保存后重进配置界面应回到刚才编辑的渠道。
+    const lastEdited = lastEditedProviderByAgent.get(agentId) || "";
+    const currentProviderId = lastEdited
+      ? lastEdited
+      : agentId === activeAgentId ? currentModelProvider : "";
     return resolvePreferredProviderId(state, currentProviderId);
   }, [activeAgentId, agentId, currentModelProvider]);
 
@@ -840,8 +839,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         ),
       };
     });
-    if (patch.id !== undefined) scheduleModelBuiltinLookup(index, patch.id);
-  }, [scheduleModelBuiltinLookup]);
+  }, []);
 
   const addModel = useCallback(() => {
     setDraft((current) => current ? { ...current, models: [...current.models, emptyModel(providerConfiguration)] } : current);
@@ -908,13 +906,16 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     const selectedModels = remoteModels.filter((model) => selectedRemoteModelIds.has(model.id));
     if (selectedModels.length === 0) return;
     const existingIds = new Set(draft.models.map((model) => model.id.trim()).filter(Boolean));
-    const additions = selectedModels.flatMap((model) => {
-      if (existingIds.has(model.id)) return [];
+    const retainedModels = draft.models.filter((model) => model.id.trim() || model.name.trim());
+    const additions: AgentCustomModelConfig[] = [];
+    const addedModelIds: string[] = [];
+    for (const model of selectedModels) {
+      if (existingIds.has(model.id)) continue;
       existingIds.add(model.id);
       const supportedThinkingLevels = getConfiguredThinkingLevels(
         providerConfiguration?.modelDefaults.supportedThinkingLevels,
       );
-      return [{
+      additions.push({
         id: model.id,
         name: model.name || model.id,
         reasoning: supportedThinkingLevels.length > 0,
@@ -922,15 +923,19 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         hasThinkingLevels: false,
         isBuiltin: false,
         supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
-      }];
-    });
+      });
+      addedModelIds.push(model.id);
+    }
     if (additions.length === 0) return;
-    const retainedModels = draft.models.filter((model) => model.id.trim() || model.name.trim());
     setDraft({ ...draft, models: [...retainedModels, ...additions] });
+    // 批量添加无输入焦点，直接立即判定内置目录（不经防抖）。
+    addedModelIds.forEach((modelId, offset) => {
+      runModelBuiltinLookup(retainedModels.length + offset, modelId);
+    });
     setModelPickerOpen(false);
     setModelFetchError("");
     setStatus({ type: "success", text: `已添加 ${additions.length} 个模型到渠道草稿` });
-  }, [draft, providerConfiguration, remoteModels, selectedRemoteModelIds]);
+  }, [draft, providerConfiguration, remoteModels, selectedRemoteModelIds, runModelBuiltinLookup]);
 
   const removeModel = useCallback((index: number) => {
     setDraft((current) => {
@@ -986,6 +991,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       editorOriginalProviderIdRef.current = payload.providerId;
       setEditorOriginalProviderId(payload.providerId);
       setSelectedProviderId(payload.providerId);
+      lastEditedProviderByAgent.set(saveAgentId, payload.providerId);
       setConfig(result.config);
       // 显式保存才刷新模型目录与渠道列表（主动保存不能隐式切换会话模型，
       // 只有用户点“启用渠道”时才切换，见 handleActivate 的三参调用）。
@@ -1839,6 +1845,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     <input
                       value={model.id}
                       onChange={(event) => updateModel(index, { id: event.target.value })}
+                      onBlur={() => runModelBuiltinLookup(index, model.id)}
                       className="input-field"
                       placeholder="model-id"
                     />

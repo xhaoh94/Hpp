@@ -64,6 +64,27 @@ describe("OpenCode models", () => {
     }));
   });
 
+  it("reads the context window from OpenCode's limit.context field", async () => {
+    const agent = new OpenCodeAgent();
+    const internals = agent as unknown as OpenCodeInternals;
+    internals.httpGet = vi.fn(async () => ({
+      providers: [{
+        id: "custom",
+        models: [
+          { id: "windowed", name: "Windowed", limit: { context: 200000, output: 8192 } },
+          { id: "legacy", name: "Legacy", contextWindow: 128000 },
+          { id: "unknown", name: "Unknown" },
+        ],
+      }],
+    }));
+
+    await expect(agent.getModels()).resolves.toEqual([
+      expect.objectContaining({ id: "windowed", contextWindow: 200000 }),
+      expect.objectContaining({ id: "legacy", contextWindow: 128000 }),
+      expect.objectContaining({ id: "unknown" }),
+    ]);
+  });
+
   it("uses only an actual model variant and normalizes its protocol alias", async () => {
     const events: AgentEvent[] = [];
     const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));

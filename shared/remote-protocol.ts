@@ -366,6 +366,8 @@ export interface RemoteChatMessage {
   isStreaming?: boolean;
   systemType?: string;
   compactionState?: "running" | "completed" | "interrupted" | "failed";
+  /** 切模型 divider 的切换信息；performanceHint 表示对话中途换模需要提示。 */
+  modelChange?: { from: string; to: string; performanceHint?: boolean };
   /** 回合开始时的调用模型名称。 */
   modelLabel?: string;
   /** 本回合累计 token 消耗，cacheInput 为输入中命中缓存的部分。 */

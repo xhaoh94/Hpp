@@ -112,6 +112,10 @@ let activeImageCleanups = [];
 let forkRequestActive = false;
 let shuttingDown = false;
 let skillPathsByName = new Map();
+// tokenUsage.last 是"本 turn 到目前为止"的累计，而渲染端按回合累加 token 数：
+// 同一 turn 重复推送时只补差值，换 turn 时重置基线，否则会把同一份用量重复计入。
+let tokenUsageTurnId = "";
+let tokenUsageTurnBaseline = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 };
 
 const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -1991,17 +1995,35 @@ const handleServerNotification = (method, params) => {
     case "turn/completed":
       handleTurnCompleted(params);
       break;
-    case "token_count": {
-      // app-server 协议在每次模型调用后推送 lastTokenUsage（本次增量），
-      // totalTokenUsage 是会话累计值，不能直接累加给渲染端。
+    case "thread/tokenUsage/updated": {
+      // 协议把用量分成 total（会话累计）与 last（最近一个 turn），上下文占用只能取 last：
+      // total 会随会话无限增长，拿去和 modelContextWindow 比会超过 100%。
       if (!promptRunning || abortRequested) break;
-      const usage = params?.lastTokenUsage || params?.last_token_usage;
-      const inputTokens = Number(usage?.inputTokens ?? usage?.input_tokens) || 0;
-      const outputTokens = Number(usage?.outputTokens ?? usage?.output_tokens) || 0;
-      const cacheInputTokens = Number(usage?.cachedInputTokens ?? usage?.cached_input_tokens) || 0;
-      if (inputTokens > 0 || outputTokens > 0) {
-        send({ type: "token_usage", inputTokens, outputTokens, cacheInputTokens });
+      const usage = params?.tokenUsage || {};
+      const last = usage.last || {};
+      const inputTokens = Number(last.inputTokens) || 0;
+      const outputTokens = Number(last.outputTokens) || 0;
+      const cachedInputTokens = Number(last.cachedInputTokens) || 0;
+      const contextWindow = Number(usage.modelContextWindow) || 0;
+      const turnId = String(params?.turnId || activeTurnId || "");
+      if (turnId !== tokenUsageTurnId) {
+        tokenUsageTurnId = turnId;
+        tokenUsageTurnBaseline = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 };
       }
+      // 回合增量用于累计消耗，contextTokens 取 last.inputTokens 这个绝对值当上下文占用。
+      const deltaInputTokens = inputTokens - tokenUsageTurnBaseline.inputTokens;
+      const deltaOutputTokens = outputTokens - tokenUsageTurnBaseline.outputTokens;
+      const deltaCachedInputTokens = cachedInputTokens - tokenUsageTurnBaseline.cachedInputTokens;
+      tokenUsageTurnBaseline = { inputTokens, outputTokens, cachedInputTokens };
+      if (deltaInputTokens <= 0 && deltaOutputTokens <= 0) break;
+      send({
+        type: "token_usage",
+        inputTokens: Math.max(0, deltaInputTokens),
+        outputTokens: Math.max(0, deltaOutputTokens),
+        cacheInputTokens: Math.max(0, deltaCachedInputTokens),
+        contextTokens: inputTokens,
+        ...(contextWindow > 0 ? { contextWindow } : {}),
+      });
       break;
     }
     case "turn/plan/updated":

@@ -586,7 +586,6 @@ describe("chat process entry defaults", () => {
       remainingTokens: 150000,
       usageRatio: 0.25,
       source: "estimated",
-      estimated: true,
       model: { provider: "test", id: "model-a" },
       updatedAt: 1,
     });
@@ -604,7 +603,6 @@ describe("chat process entry defaults", () => {
       contextWindow: 200000,
       usedTokens: 50000,
       source: "estimated",
-      estimated: true,
       updatedAt: 1,
     });
     store.deleteSessionMessages("session-1");

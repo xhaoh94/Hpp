@@ -1593,12 +1593,26 @@ const MessageItem = memo(function MessageItem({
     || !!message.action
     || hasOrderedContent
   );
+  // divider 类系统消息（压缩/切模型）在移动端渲染为居中小字条；错误类保持警告条。
+  const isSystemDivider = message.role === "system"
+    && (message.systemType === "model_change" || message.systemType === "context_compaction");
   return (
-    <article id={`message-${message.id}`} className={`message ${message.role}`}>
+    <article
+      id={`message-${message.id}`}
+      className={`message ${message.role}${isSystemDivider ? " system-divider" : ""}`}
+    >
       {message.role === "system" && (
         <div className="message-meta">
           <span>System</span>
           <time>{new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+        </div>
+      )}
+      {message.role === "system" && messagePresentation.text && (
+        <div className="message-content">
+          <p>{messagePresentation.text}</p>
+          {message.modelChange?.performanceHint && (
+            <p className="message-system-divider-hint">对话中途更改模型可能会降低性能</p>
+          )}
         </div>
       )}
       {displayedImages.length > 0 && (

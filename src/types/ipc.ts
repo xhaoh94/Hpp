@@ -114,9 +114,11 @@ export interface AgentEvent {
   contextTokens?: number;
   /** 产生该用量时的模型上下文窗口。 */
   contextWindow?: number;
-  /** 当前上下文值是否为估算值。 */
+  /** 上下文用量精度：exact=后端专用接口，official=官方上报计数，estimated=按请求计数或分类求和借位。 */
+  contextPrecision?: "exact" | "official" | "estimated";
+  /** 旧版精度标记（false 即精确）：只为历史事件保留，新代码一律发 contextPrecision。 */
   contextEstimated?: boolean;
-  /** 上下文构成明细（估算）；仅部分后端能提供。 */
+  /** 上下文构成明细；pi / claude / droid 能提供。 */
   contextBreakdown?: Array<{ id: string; label: string; tokens: number }>;
   pendingUIRevision?: unknown;
   clientUserMessageId?: unknown;

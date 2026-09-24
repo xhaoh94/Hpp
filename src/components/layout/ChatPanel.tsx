@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -104,6 +104,7 @@ import {
   getOrderedModelProviders,
   includeCurrentModel,
   normalizeModelThinkingLevel,
+  toContextUsagePrecision,
 } from "@shared/models";
 import { collectProcessDiffs } from "@shared/diff-summary";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
@@ -1102,6 +1103,25 @@ const ChatMessageItem = memo(function ChatMessageItem({
     event.stopPropagation();
     void openMessageProjectPath(codePath);
   }, [openMessageProjectPath]);
+
+  if (msg.role === "system" && msg.systemType === "model_change") {
+    const label = msg.modelChange
+      ? `模型已从 ${msg.modelChange.from} 更改为 ${msg.modelChange.to}`
+      : msg.content;
+    return (
+      <div data-msg-id={msg.id} className="chat-context-divider chat-model-change-divider">
+        <span className="chat-context-divider-line" />
+        <span className="chat-context-divider-label">
+          <ArrowRightLeft size={14} strokeWidth={1.8} />
+          <span>{label}</span>
+        </span>
+        <span className="chat-context-divider-line" />
+        {msg.modelChange?.performanceHint ? (
+          <span className="chat-model-change-hint">对话中途更改模型可能会降低性能</span>
+        ) : null}
+      </div>
+    );
+  }
 
   if (msg.role === "system" && msg.systemType === "context_compaction") {
     const compactionText = !compactionRunning && msg.compactionState === "running"
@@ -3526,7 +3546,7 @@ export function ChatPanel({
   const contextUsageTitle = formatContextUsageDetail({
     contextWindow,
     usedTokens: contextUsedTokens,
-    estimated: activeSessionContextUsage?.estimated,
+    precision: toContextUsagePrecision(activeSessionContextUsage?.source),
   });
 
   const thinkingLevels = getModelThinkingLevels(currentModel);

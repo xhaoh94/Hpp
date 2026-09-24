@@ -117,8 +117,10 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   isStreaming?: boolean;
-  systemType?: "context_compaction" | "agent_startup_error";
+  systemType?: "context_compaction" | "agent_startup_error" | "model_change";
   compactionState?: "running" | "completed" | "interrupted" | "failed";
+  /** 模型切换 divider 的结构化信息；performanceHint 表示新模型与上一回合实际运行模型不同。 */
+  modelChange?: { from: string; to: string; performanceHint?: boolean };
   eventId?: string;
   images?: Array<{ id: string; src: string; name: string }>;
   sessionReferences?: Array<{ sourceSessionId: string; sourceTitle: string }>;
@@ -206,7 +208,8 @@ export interface ChatDraft {
 
 export interface ModelInfo extends SharedModel {}
 
-export type ContextUsageSource = "provider" | "estimated" | "unknown";
+/** 会话级上下文用量的来源；unknown = 还没有拿到数据。 */
+export type ContextUsageSource = "exact" | "official" | "estimated" | "unknown";
 
 export interface SessionContextUsage {
   contextWindow?: number;
@@ -214,7 +217,6 @@ export interface SessionContextUsage {
   remainingTokens?: number;
   usageRatio?: number;
   source: ContextUsageSource;
-  estimated: boolean;
   model?: { provider: string; id: string };
   /** 上下文构成明细；仅部分后端提供。 */
   breakdown?: ContextUsageBreakdownEntry[];
@@ -270,6 +272,8 @@ interface ChatState {
     sessionId?: string | null,
     state?: "running" | "completed" | "interrupted" | "failed",
   ) => void;
+  /** 连续切换模型时不重复插 divider：最后一条就是 model_change 时原地替换为最新一次切换。 */
+  upsertModelChangeDivider: (msg: ChatMessage, sessionId?: string | null) => void;
   setSessionCompacting: (sessionId: string, compacting: boolean) => void;
   setSessionCompactionPostTurn: (sessionId: string, postTurn?: boolean) => void;
   setSessionContextUsage: (sessionId: string, usage: SessionContextUsage) => void;
@@ -813,6 +817,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return msgs;
       });
     }),
+
+  upsertModelChangeDivider: (msg, sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      const last = messages[messages.length - 1];
+      const mergeable = last?.role === "system"
+        && last.systemType === "model_change"
+        && !!last.modelChange
+        && !!msg.modelChange;
+      if (!mergeable) return [...messages, msg];
+      // 原地替换为最新一次切换（from/to/hint 都以新消息为准），位置保持在原 divider 处。
+      // 必须保留原 id：远程端按 id upsert，换新 id 会被当成新消息 push，变成重复 divider。
+      const next = [...messages];
+      next[next.length - 1] = { ...msg, id: last.id };
+      return next;
+    })),
 
   appendContextCompactionDivider: (eventId, sessionId, compactionState = "completed") =>
     set((s) => {
