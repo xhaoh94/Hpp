@@ -2,6 +2,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   memo,
   useRef,
   type DragEvent,
@@ -9,11 +10,13 @@ import {
   type MouseEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppStore, type FileRevealRequest } from "@/stores/app-store";
 import { useProjectStore } from "@/stores/project-store";
+import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "@/stores/chat-store";
 import { useEditorStore } from "@/stores/editor-store";
-import { FilePreview } from "@/components/shared/FilePreview";
+import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { useFileFilters } from "@/hooks/useFileFilters";
 import { isFileTreePathWithin, isSameFileTreePath } from "@/lib/file-tree-paths";
 import { writePathAttachmentDragData } from "@/lib/path-attachments";
@@ -36,6 +39,7 @@ import {
 } from "lucide-react";
 import "./FileTree.css";
 
+const FilePreview = LazyFilePreview;
 const FILE_EXPLORER_SEARCH_DEBOUNCE_MS = 100;
 
 interface FileTreeCommand {
@@ -322,8 +326,12 @@ export function FileExplorer() {
   const rootRequestRef = useRef(0);
   const searchRequestRef = useRef(0);
   const centeredRevealRequestIdRef = useRef<number | null>(null);
+  const treeContentRef = useRef<HTMLDivElement>(null);
   const handleRefreshRef = useRef<() => void>(() => undefined);
-  const { projects, activeProjectId } = useProjectStore();
+  const { projects, activeProjectId } = useProjectStore(useShallow((state) => ({
+    projects: state.projects,
+    activeProjectId: state.activeProjectId,
+  })));
   const sidebarTab = useAppStore((state) => state.sidebarTab);
   const sidebarCollapsed = useAppStore((state) => state.sidebarCollapsed);
   const revealRequest = useAppStore((state) => state.fileRevealRequest);
@@ -580,9 +588,30 @@ export function FileExplorer() {
     return scheduledSearch.cancel;
   }, [search, activeProject?.path, filterKey, filters, refreshVersion]);
 
-  const displayEntries = (search.trim() ? searchResults : rootEntries)
-    .filter((entry) => !isFileEntryExcluded(entry, filters));
+  const displayEntries = useMemo(
+    () => (search.trim() ? searchResults : rootEntries)
+      .filter((entry) => !isFileEntryExcluded(entry, filters)),
+    [filters, rootEntries, search, searchResults],
+  );
+  const selectedPaths = useMemo(
+    () => new Set(selectedEntries.keys()),
+    [selectedEntries],
+  );
   const activeRevealRequest = search.trim() ? null : revealRequest;
+  const displayEntriesRef = useRef(displayEntries);
+  displayEntriesRef.current = displayEntries;
+  const getTreeScrollElement = useCallback(() => treeContentRef.current, []);
+  const getTreeItemKey = useCallback(
+    (index: number) => displayEntriesRef.current[index]?.path || index,
+    [],
+  );
+  const treeVirtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+    count: displayEntries.length,
+    getScrollElement: getTreeScrollElement,
+    estimateSize: () => 28,
+    getItemKey: getTreeItemKey,
+    overscan: 12,
+  });
 
   return (
     <div className="file-tree">
@@ -628,29 +657,51 @@ export function FileExplorer() {
         )}
       </div>
 
-      <div className="file-tree-content overlay-scroll">
+      <div ref={treeContentRef} className="file-tree-content overlay-scroll">
         {!activeProject ? (
           <p className="placeholder-text">请先选择一个项目</p>
         ) : displayEntries.length === 0 ? (
           <p className="placeholder-text">{search ? "无匹配结果" : "空目录"}</p>
         ) : (
-          displayEntries.map((entry) => (
-            <FileTreeItem
-              key={`${filterKey}:${entry.path}`}
-              entry={entry}
-              depth={0}
-              filters={filters}
-              filterKey={filterKey}
-              revealRequest={activeRevealRequest}
-              treeCommand={activeTreeCommand}
-              onClaimRevealCenter={claimRevealCenter}
-              onFileClick={handleFileClick}
-              onContextMenu={handleContextMenu}
-              selectedPaths={new Set(selectedEntries.keys())}
-              onSelect={handleSelect}
-              siblingEntries={displayEntries}
-            />
-          ))
+          <div
+            className="file-tree-virtual-content"
+            style={{ height: `${treeVirtualizer.getTotalSize()}px`, position: "relative" }}
+          >
+            {treeVirtualizer.getVirtualItems().map((virtualRow) => {
+              const entry = displayEntries[virtualRow.index];
+              if (!entry) return null;
+              return (
+                <div
+                  key={virtualRow.key}
+                  ref={treeVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  className="file-tree-virtual-row"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  <FileTreeItem
+                    entry={entry}
+                    depth={0}
+                    filters={filters}
+                    filterKey={filterKey}
+                    revealRequest={activeRevealRequest}
+                    treeCommand={activeTreeCommand}
+                    onClaimRevealCenter={claimRevealCenter}
+                    onFileClick={handleFileClick}
+                    onContextMenu={handleContextMenu}
+                    selectedPaths={selectedPaths}
+                    onSelect={handleSelect}
+                    siblingEntries={displayEntries}
+                  />
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 

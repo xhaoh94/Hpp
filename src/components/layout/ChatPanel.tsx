@@ -45,7 +45,13 @@ import {
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
 import { getLocalMarkdownCodePath, getLocalMarkdownFilePath, resolveProjectFilePath } from "@/lib/project-file-path";
 import { extractUserMessageAttachments } from "@shared/user-message-attachments";
-import { getSessionContextUsage, getSessionModel, SESSION_DATA_PURGED_EVENT } from "@/hooks/useDataPersistence";
+import {
+  ensureSessionMessagesLoaded,
+  getSessionContextUsage,
+  getSessionModel,
+  loadOlderSessionMessages,
+  SESSION_DATA_PURGED_EVENT,
+} from "@/hooks/useDataPersistence";
 import {
   SessionCommandCoordinator,
   type PreparedSessionMessage,
@@ -57,7 +63,7 @@ import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
-import { FilePreview } from "@/components/shared/FilePreview";
+import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ContextUsageModal } from "./ContextUsageModal";
 import { ChatComposer } from "./ChatComposer";
@@ -139,12 +145,14 @@ import {
 } from "@shared/composer-document";
 import "./ChatPanel.css";
 
+const FilePreview = LazyFilePreview;
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
 type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: string };
 type MessagePayload = PreparedSessionMessage;
 
 const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+const EMPTY_SESSION_MESSAGES: ChatMessage[] = [];
 
 /** 用户发言折叠后保留的行数，超过该行数时展示“显示更多”。 */
 const COLLAPSED_USER_MESSAGE_LINES = 10;
@@ -1011,6 +1019,7 @@ type ChatMessagesViewProps = {
   userMsgHistoryOpen: boolean;
   userMsgHistoryRef: RefObject<HTMLDivElement | null>;
   onMessagesScroll: (event: ReactUIEvent<HTMLDivElement>) => void;
+  onLoadOlderMessages: () => Promise<boolean>;
   onScrollToBottom: () => void;
   onContentChange: () => void;
   onEditMessage: (message: ChatMessage) => void;
@@ -1243,7 +1252,10 @@ const ChatMessageItem = memo(function ChatMessageItem({
               key={item.id}
               className={`chat-commentary-item ${turnRunning && item.isStreaming ? "streaming" : ""}`}
             >
-              <MarkdownRenderer content={item.content} />
+              <MarkdownRenderer
+                content={item.content}
+                deferHighlight={turnRunning && item.isStreaming === true}
+              />
             </div>
           ))}
         </div>
@@ -1319,7 +1331,10 @@ const ChatMessageItem = memo(function ChatMessageItem({
                     )}
                     {msg.role !== "user" && hasContent && (
                       <div className="chat-bubble-content">
-                        <MarkdownRenderer content={msg.content} />
+                        <MarkdownRenderer
+                          content={msg.content}
+                          deferHighlight={turnRunning}
+                        />
                       </div>
                     )}
                   </div>
@@ -1557,12 +1572,43 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   onResendMessage,
   stickyPortalTarget,
 }: ChatMessagesViewportProps) {
+  // 流式期间消息对象会持续替换，但消息 ID 通常不变。缓存 ID 列表，
+  // 这样尾部内容更新不会每 120ms 重新 map 全部历史消息；只有新增消息、
+  // 会话切换或首尾 ID 变化时才重建。
+  const messageKeyCacheRef = useRef<{
+    count: number;
+    firstId: string | null;
+    lastId: string | null;
+    keys: string[];
+  }>({ count: -1, firstId: null, lastId: null, keys: [] });
+  const messageKeys = useMemo(() => {
+    const cache = messageKeyCacheRef.current;
+    const count = messages.length;
+    const firstId = messages[0]?.id || null;
+    const lastId = messages[count - 1]?.id || null;
+    if (
+      cache.count === count
+      && cache.firstId === firstId
+      && cache.lastId === lastId
+    ) {
+      return cache.keys;
+    }
+
+    const appended = count === cache.count + 1
+      && firstId === cache.firstId
+      && messages[count - 2]?.id === cache.lastId
+      && !!lastId;
+    cache.keys = appended
+      ? [...cache.keys, lastId]
+      : messages.map((message) => message.id);
+    cache.count = count;
+    cache.firstId = firstId;
+    cache.lastId = lastId;
+    return cache.keys;
+  }, [messages]);
   const itemKeys = useMemo(
-    () => [
-      ...messages.map((message) => message.id),
-      ...(showWorking ? ["__chat-working__"] : []),
-    ],
-    [messages, showWorking],
+    () => showWorking ? [...messageKeys, "__chat-working__"] : messageKeys,
+    [messageKeys, showWorking],
   );
   const pinnedIndexes = useMemo(() => {
     const next = new Set<number>();
@@ -1587,10 +1633,11 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   useExposeChatVirtualizer(virtualizerRef, handle);
 
   useLayoutEffect(() => {
-    // Row ResizeObserver measures Markdown, images and process output changes.
-    // Do not clear the whole measurement cache on every streaming update.
+    // 行高变化由 virtualizer 的 measureElement / ResizeObserver 负责；这里
+    // 只在条数变化或工作占位出现/消失时触发一次底部协调，避免流式正文每次
+    // 更新都同步读取 scrollHeight。
     onContentChange();
-  }, [messages, onContentChange, showWorking]);
+  }, [messages.length, onContentChange, showWorking]);
 
   return (
     <div
@@ -1659,6 +1706,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   userMsgHistoryOpen,
   userMsgHistoryRef,
   onMessagesScroll,
+  onLoadOlderMessages,
   onScrollToBottom,
   onContentChange,
   onEditMessage,
@@ -1701,6 +1749,31 @@ const ChatMessagesView = memo(function ChatMessagesView({
     setActiveDiffMessageId(null);
     setPreviousUserTargetId(null);
   }, [activeSessionId]);
+
+  // 历史消息按页从 SQLite 恢复。滚动到顶部时追加更早消息，并补偿
+  // prepend 前后的 scrollHeight，避免视口内容跳动。
+  const olderMessagesLoadingRef = useRef(false);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const handleLoadOlder = () => {
+      if (olderMessagesLoadingRef.current || element.scrollTop > 80) return;
+      olderMessagesLoadingRef.current = true;
+      const previousHeight = element.scrollHeight;
+      void onLoadOlderMessages().finally(() => {
+        requestAnimationFrame(() => {
+          const current = scrollRef.current;
+          if (current && current.scrollHeight > previousHeight) {
+            current.scrollTop += current.scrollHeight - previousHeight;
+          }
+          olderMessagesLoadingRef.current = false;
+        });
+      });
+    };
+    element.addEventListener("scroll", handleLoadOlder, { passive: true });
+    return () => element.removeEventListener("scroll", handleLoadOlder);
+  }, [onLoadOlderMessages, scrollRef]);
+
   const handleUserMessageExpandedChange = useCallback((messageId: string, expanded: boolean) => {
     setExpandedUserMessageIds((current) => {
       const next = new Set(current);
@@ -1713,16 +1786,20 @@ const ChatMessagesView = memo(function ChatMessagesView({
     setActiveDiffMessageId(open ? messageId : null);
   }, []);
   // 全局「返回上一条发言」按钮：若视口中已有用户气泡，就定位到它的上一条；
-  // 否则定位到视口上方最近的用户发言。这样在对话底部可以返回最后一条发言，
-  // 跳转后即使气泡只剩一部分可见，也会继续正确指向更早的一条。
+  // 否则定位到视口上方最近的用户发言。消息正文流式增长时消息数组引用会变化，
+  // 但目标计算只需要在滚动、窗口变化、新增消息和会话切换时刷新；用 ref 读取
+  // 最新消息，避免每次流式 delta 都重新绑定事件并读取大量 DOM 几何信息。
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const refreshPreviousUserTarget = useCallback(() => {
+    const currentMessages = messagesRef.current;
     const el = scrollRef.current;
     if (!el) {
       setPreviousUserTargetId(null);
       return;
     }
 
-    const speechIndexes = messages.reduce<number[]>((indexes, message, index) => {
+    const speechIndexes = currentMessages.reduce<number[]>((indexes, message, index) => {
       if (isUserSpeechMessage(message)) indexes.push(index);
       return indexes;
     }, []);
@@ -1739,7 +1816,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
       ".chat-message-virtual-content > .chat-virtual-row",
     )).flatMap((row) => {
       const index = Number(row.dataset.index);
-      if (!Number.isInteger(index) || index > messages.length) return [];
+      if (!Number.isInteger(index) || index > currentMessages.length) return [];
       return [{ row, index, rect: row.getBoundingClientRect() }];
     });
 
@@ -1773,8 +1850,8 @@ const ChatMessagesView = memo(function ChatMessagesView({
       visibleSpeechIndex,
       viewportMessageIndex,
     );
-    setPreviousUserTargetId(targetIndex === null ? null : messages[targetIndex].id);
-  }, [messages, scrollRef]);
+    setPreviousUserTargetId(targetIndex === null ? null : currentMessages[targetIndex].id);
+  }, [scrollRef]);
   const previousUserTarget = previousUserTargetId
     ? messages.find((message) => message.id === previousUserTargetId)
     : undefined;
@@ -1803,7 +1880,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   }, [refreshPreviousUserTarget, scrollRef]);
   useLayoutEffect(() => {
     refreshPreviousUserTarget();
-  }, [refreshPreviousUserTarget]);
+  }, [messages.length, refreshPreviousUserTarget]);
   const activeDiffMessageIndex = activeDiffMessageId
     ? messages.findIndex((message) => message.id === activeDiffMessageId)
     : -1;
@@ -2147,7 +2224,11 @@ export function ChatPanel({
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const projects = useProjectStore((state) => state.projects);
   const activeSessionId = useProjectStore((state) => state.activeSessionId);
-  const sessionMessages = useChatStore((state) => state.sessionMessages);
+  // 只订阅当前会话的消息。后台其它会话流式更新时，sessionMessages
+  // 字典引用会变化，但不应让整个 ChatPanel 跟着重渲染。
+  const sessionMessages = useChatStore((state) => (
+    activeSessionId ? state.sessionMessages[activeSessionId] || EMPTY_SESSION_MESSAGES : EMPTY_SESSION_MESSAGES
+  ));
   const activeSessionAgentStatus = useProjectStore((state) =>
     activeSessionId ? state.agentStatuses[activeSessionId] : undefined
   );
@@ -2163,7 +2244,7 @@ export function ChatPanel({
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
   const activeSessionTitle = activeSession
-    ? getSessionHeaderTitle(activeSession, activeSessionId ? sessionMessages[activeSessionId] || [] : [])
+    ? getSessionHeaderTitle(activeSession, sessionMessages)
     : "";
   const messages = useChatStore((state) => state.messages);
   const [scrollHeaderTitle, setScrollHeaderTitle] = useState<string | null>(null);
@@ -2450,6 +2531,10 @@ export function ChatPanel({
     virtualizerRef: chatVirtualizerRef,
     getMessageIndex,
   });
+  const handleLoadOlderMessages = useCallback(
+    () => activeSessionId ? loadOlderSessionMessages(activeSessionId) : Promise.resolve(false),
+    [activeSessionId],
+  );
 
   const computeScrollHeaderTitle = useCallback(() => {
     const el = scrollRef.current;
@@ -2784,8 +2869,11 @@ export function ChatPanel({
     scrollToMessage(msgId);
   }, [scrollRef, scrollToMessage]);
 
-  const handleAddOrRefreshReference = useCallback((sourceSession: ProjectSession) => {
+  const handleAddOrRefreshReference = useCallback(async (sourceSession: ProjectSession) => {
     if (!activeProject || !activeSessionId || sourceSession.id === activeSessionId) return;
+    // 非活动会话不再随启动加载；用户首次添加引用时再恢复其最近一页。
+    await ensureSessionMessagesLoaded(sourceSession.id);
+    if (useProjectStore.getState().activeSessionId !== activeSessionId) return;
     const sessionMessages = useChatStore.getState().sessionMessages;
     const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || []);
     const existing = activeComposerDocument.nodes.find((node) =>
@@ -2804,7 +2892,7 @@ export function ChatPanel({
         syncComposerDocument(createComposerDocument([...activeComposerDocument.nodes, node]));
       }
     }
-  }, [activeComposerDocument, activeProject, activeSessionId, syncComposerDocument]);
+  }, [activeComposerDocument, activeProject, activeSessionId, ensureSessionMessagesLoaded, syncComposerDocument]);
 
   const handleRemoveReference = useCallback((sourceSessionId: string) => {
     if (!activeProject || !activeSessionId) return;
@@ -3585,8 +3673,6 @@ export function ChatPanel({
       <div className="chat-panel">
         <div className="chat-header">
           <div className="chat-agent-dot" />
-          <span className="chat-header-app-title">Hpp</span>
-          <span className="chat-header-separator" aria-hidden="true">·</span>
           <span className="chat-agent-name">{activeProject.name}</span>
         </div>
         <div className="chat-empty-state">
@@ -3623,8 +3709,6 @@ export function ChatPanel({
       {/* Header */}
       <div className="chat-header">
         <div className={`chat-agent-dot${currentSessionRunning ? " chat-agent-dot-running" : ""}`} />
-        <span className="chat-header-app-title">Hpp</span>
-        <span className="chat-header-separator" aria-hidden="true">·</span>
         <span className="chat-agent-name" title={activeProject.name}>{activeProject.name}</span>
         <span className="chat-header-separator" aria-hidden="true">·</span>
         <button
@@ -3702,6 +3786,7 @@ export function ChatPanel({
         userMsgHistoryOpen={userMsgHistoryOpen}
         userMsgHistoryRef={userMsgHistoryRef}
         onMessagesScroll={handleMessagesScroll}
+        onLoadOlderMessages={handleLoadOlderMessages}
         onScrollToBottom={scrollToBottom}
         onContentChange={handleContentChange}
         onEditMessage={handleEditMessage}

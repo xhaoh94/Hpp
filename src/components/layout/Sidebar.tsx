@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useAppStore, type SidebarTab } from "@/stores/app-store";
+import { useShallow } from "zustand/react/shallow";
 import "../layout/Layout.css";
 
 const tabs: { id: SidebarTab; label: string; icon: ReactNode }[] = [
@@ -44,8 +45,14 @@ export function Sidebar({
   onCollapse?: () => void;
   onExpand?: () => void;
 }) {
-  const { sidebarTab, sidebarCollapsed, setSidebarTab, toggleSidebar } =
-    useAppStore();
+  const { sidebarTab, sidebarCollapsed, setSidebarTab, toggleSidebar } = useAppStore(
+    useShallow((state) => ({
+      sidebarTab: state.sidebarTab,
+      sidebarCollapsed: state.sidebarCollapsed,
+      setSidebarTab: state.setSidebarTab,
+      toggleSidebar: state.toggleSidebar,
+    })),
+  );
   const handleToggleSidebar = sidebarCollapsed
     ? (onExpand || toggleSidebar)
     : (onCollapse || toggleSidebar);

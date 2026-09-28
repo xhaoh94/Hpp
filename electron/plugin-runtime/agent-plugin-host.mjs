@@ -26,7 +26,7 @@ const loadBuiltinBackend = async (backendName, sessionId, emit, context) => {
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
-const validateEvent = (event) => {
+const serializeEvent = (event) => {
   if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string" || !event.type.trim()) {
     throw new Error("Plugin events must include a non-empty type.");
   }
@@ -34,7 +34,14 @@ const validateEvent = (event) => {
   if (Buffer.byteLength(serialized, "utf8") > 1024 * 1024) {
     throw new Error("Plugin event exceeds the 1 MB size limit.");
   }
-  return event;
+  return serialized;
+};
+
+// 事件信封手工拼接：event 只在校验时序列化一次，发送时直接复用。
+// 旧写法先 stringify 校验、再随信封 stringify 一遍，大事件（历史快照、
+// 长工具输出）会白做一次整份序列化。
+const emitEvent = (backendId, event) => {
+  process.stdout.write(`{"kind":"event","backendId":${JSON.stringify(backendId)},"event":${serializeEvent(event)}}\n`);
 };
 
 const requestHost = (method, args = []) => new Promise((resolve, reject) => {
@@ -56,12 +63,12 @@ const createContext = (sessionId, backendId) => ({
   ...pluginMeta,
   sessionId,
   host,
-  sendEvent: (event) => send({ kind: "event", backendId, event: validateEvent(event) }),
+  sendEvent: (event) => emitEvent(backendId, event),
   getConfigState: () => requestHost("getConfigState", [backendId]),
   createBuiltinBackend: (backendName) => loadBuiltinBackend(
     backendName,
     sessionId,
-    (event) => send({ kind: "event", backendId, event: validateEvent(event) }),
+    (event) => emitEvent(backendId, event),
     {
       getConfigState: () => requestHost("getConfigState", [backendId]),
       dataDir: pluginMeta.dataDir,

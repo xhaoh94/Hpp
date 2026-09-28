@@ -1762,6 +1762,30 @@ describe("SessionCommandCoordinator", () => {
     expect(useChatStore.getState().currentModel).toEqual(modelA);
   });
 
+  it("skips the model change divider when the session has no conversation yet", async () => {
+    const modelA = {
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: false,
+    };
+    const modelB = {
+      id: "model-b",
+      name: "Model B",
+      provider: "test",
+      reasoning: false,
+    };
+    saveSessionModel("session-two", modelA);
+    useChatStore.setState({ currentModel: modelA, availableModels: [modelA, modelB] });
+    electronAPI.agentGetModels.mockResolvedValue([modelA, modelB]);
+    // 新建会话还没有任何 user/assistant 消息：切模型不插 divider。
+    useChatStore.setState({ sessionMessages: { ...useChatStore.getState().sessionMessages, "session-two": [] } });
+
+    await SessionCommandCoordinator.setModel("session-two", modelB, { models: [modelA, modelB] });
+    const messages = useChatStore.getState().sessionMessages["session-two"] || [];
+    expect(messages.some((msg) => msg.systemType === "model_change")).toBe(false);
+  });
+
   it("appends a model change divider with a mid-conversation performance hint", async () => {
     const modelA = {
       id: "model-a",

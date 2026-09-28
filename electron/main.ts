@@ -5,7 +5,7 @@ import { join } from "path";
 import { is } from "@electron-toolkit/utils";
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { registerFileHandlers } from "./ipc/file-handlers";
-import { registerStoreHandlers } from "./ipc/store-handlers";
+import { closeStoreDatabases, registerStoreHandlers } from "./ipc/store-handlers";
 import { registerStorageUsageHandlers } from "./ipc/storage-usage-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
@@ -174,6 +174,7 @@ const shutdownCoordinator = new AppShutdownCoordinator(async () => {
     shutdownAgentRuntime(),
     remoteAccessServer.shutdown(),
   ]);
+  closeStoreDatabases();
 });
 
 function startPeriodicUpdateChecks() {
@@ -431,10 +432,15 @@ function createWindow() {
 
 if (singleInstanceLock) {
   app.whenReady().then(async () => {
-    // Clear cache to ensure latest CSS/JS assets are loaded (not stale cached versions)
-    await session.defaultSession.clearCache();
-    await loadCloseToTraySetting();
-    await remoteAccessServer.initialize(() => mainWindow);
+    if (is.dev) {
+      // 开发服务器下的资源名固定，清缓存确保拿到最新 CSS/JS。生产产物用带 hash 的
+      // 文件名且走 file://，不需要清缓存，反而会连 V8 code cache 一起丢掉，
+      // 拖慢每次冷启动的首屏解析。
+      await session.defaultSession.clearCache();
+    }
+
+    // 先把窗口建起来，让渲染进程尽早开始加载；读设置、起远程服务这类初始化放到
+    // 后面，它们与渲染进程加载并行，不再叠加进首屏白屏时间。
     createWindow();
     createTray();
 
@@ -450,6 +456,10 @@ if (singleInstanceLock) {
       canCheck: app.isPackaged,
       error: app.isPackaged ? undefined : "自动更新仅在打包后的应用中可用。",
     });
+
+    await loadCloseToTraySetting();
+    await remoteAccessServer.initialize(() => mainWindow);
+
     if (app.isPackaged) {
       initAutoUpdater();
       startPeriodicUpdateChecks();

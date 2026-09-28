@@ -116,7 +116,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   const contentRef = useRef<HTMLPreElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const goToLineInputRef = useRef<HTMLInputElement>(null);
-  const { addPendingFile } = useChatStore();
+  const addPendingFile = useChatStore((state) => state.addPendingFile);
 
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -227,10 +227,6 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     () => activeFilePath ? getFilePreviewLanguage(activeFilePath) : null,
     [activeFilePath],
   );
-  const highlightedLines = useMemo(
-    () => buildHighlightedLines(content, previewLanguage),
-    [content, previewLanguage],
-  );
   const searchMatches = useMemo(
     () => findTextMatches(contentLines, searchQuery, {
       matchCase: searchMatchCase,
@@ -258,6 +254,32 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     ),
     [renderWindow.endIndex, renderWindow.startIndex],
   );
+  // 只高亮当前渲染窗口，而不是对最多 10 MB 的完整文件执行 highlight.js。
+  // 搜索和跳行会改变窗口，届时只重新解析新的可见片段；Markdown 预览、图片
+  // 或加载阶段不需要代码高亮。
+  const highlightedLines = useMemo(() => {
+    if (
+      showMarkdownPreview
+      || isImage
+      || loading
+      || !content
+    ) return new Map<number, ReturnType<typeof buildHighlightedLines>[number]>();
+
+    const windowContent = contentLines
+      .slice(renderWindow.startIndex, renderWindow.endIndex)
+      .join("\n");
+    const windowLines = buildHighlightedLines(windowContent, previewLanguage);
+    return new Map(windowLines.map((line, index) => [renderWindow.startIndex + index, line]));
+  }, [
+    content,
+    contentLines,
+    isImage,
+    loading,
+    previewLanguage,
+    renderWindow.endIndex,
+    renderWindow.startIndex,
+    showMarkdownPreview,
+  ]);
 
   const markdownContent = useMemo(() => {
     if (!showMarkdownPreview) return content;
@@ -659,7 +681,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
               {visibleLineIndexes.map((lineIndex) => {
                 const lineNumber = lineIndex + 1;
                 const lineMatches = searchOpen ? searchMatchesByLine.get(lineNumber) || [] : [];
-                const displayTokens = buildDisplayTokens(highlightedLines[lineIndex] || [], lineMatches);
+                const displayTokens = buildDisplayTokens(highlightedLines.get(lineIndex) || [], lineMatches);
                 return (
                   <div
                     key={lineNumber}

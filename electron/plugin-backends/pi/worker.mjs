@@ -1171,6 +1171,11 @@ const getAvailableToolNames = () => new Set(
     .filter(Boolean),
 );
 
+// 同一次 init 里对同一个 shell 会探测多次（解析配置一次、最终确认一次，
+// 回退候选再各一次）。Windows 上每次 spawnSync 都是几十毫秒的进程启动，
+// 按 shell 路径+参数缓存结果。
+const shellProbeCache = new Map();
+
 const probeShell = (settingsManager) => {
   if (typeof sdk?.getShellConfig !== "function") return null;
   try {
@@ -1178,10 +1183,13 @@ const probeShell = (settingsManager) => {
     if (!config?.shell || !Array.isArray(config.args)) {
       return "Pi 返回了无效的 Shell 配置";
     }
+    const usesStdin = config.commandTransport === "stdin";
+    const cacheKey = `${config.shell}\u0000${config.args.join("\u0000")}\u0000${usesStdin ? "stdin" : "argv"}`;
+    const cached = shellProbeCache.get(cacheKey);
+    if (cached !== undefined) return cached;
     // `echo` is available in POSIX shells, PowerShell, and cmd. Using `printf`
     // here incorrectly marked a healthy PowerShell as unavailable on Windows.
     const command = `echo ${SHELL_PROBE_TOKEN}`;
-    const usesStdin = config.commandTransport === "stdin";
     const result = spawnSync(
       config.shell,
       usesStdin ? config.args : [...config.args, command],
@@ -1192,14 +1200,16 @@ const probeShell = (settingsManager) => {
         windowsHide: true,
       },
     );
-    if (result.status === 0 && String(result.stdout || "").includes(SHELL_PROBE_TOKEN)) return "";
-    const detail = [
-      result.error?.message,
-      String(result.stderr || "").trim(),
-      String(result.stdout || "").trim(),
-      typeof result.status === "number" ? `退出码 ${result.status}` : "",
-    ].filter(Boolean).join("\n");
-    return detail || "Shell 启动检查失败";
+    const probeResult = result.status === 0 && String(result.stdout || "").includes(SHELL_PROBE_TOKEN)
+      ? ""
+      : [
+        result.error?.message,
+        String(result.stderr || "").trim(),
+        String(result.stdout || "").trim(),
+        typeof result.status === "number" ? `退出码 ${result.status}` : "",
+      ].filter(Boolean).join("\n") || "Shell 启动检查失败";
+    shellProbeCache.set(cacheKey, probeResult);
+    return probeResult;
   } catch (error) {
     return error?.message || String(error);
   }
@@ -1288,6 +1298,21 @@ const configureFullAccessTools = (settingsManager) => {
   applyActiveToolMode();
 };
 
+/**
+ * Pi 的包同时提供两种入口：package.json 声明的模块树入口（`dist/index.js`）
+ * 与预打包入口（`dist/bundle/index.js`）。两者导出完全一致（实测 152 个导出
+ * 零差异），但预打包入口只需解析一个大文件：实测 205 ms vs 816 ms，因为模块树
+ * 入口的开销几乎全在成干上万个小文件的解析与解析（resolution）上。
+ * 优先使用 bundle，缺失或导出不全时回退到 package.json 声明的入口。
+ */
+const REQUIRED_SDK_EXPORTS = [
+  "createAgentSession",
+  "ModelRuntime",
+  "ModelRegistry",
+  "SettingsManager",
+  "DefaultResourceLoader",
+];
+
 const loadPiSDK = async () => {
   const packageRoot = String(process.env.PI_SDK_PACKAGE_ROOT || "").trim();
   if (!packageRoot) throw new Error("Pi SDK 未安装，请先在 Hpp Agent 设置中安装 Pi");
@@ -1300,7 +1325,19 @@ const loadPiSDK = async () => {
       : rootExport?.import || packageJson.main;
     if (!entry) throw new Error("package.json does not define an ESM entry");
     const entryPath = resolve(packageDir, entry);
-    if (!entryPath.startsWith(resolve(packageDir)) || !existsSync(entryPath)) {
+    const absolutePackageDir = resolve(packageDir);
+    const insidePackage = (candidate) => candidate.startsWith(absolutePackageDir) && existsSync(candidate);
+    const bundlePath = resolve(packageDir, "dist/bundle/index.js");
+    // 先用 bundle：只有确认它完整性才用，否则回退到声明入口（保持原有行为）。
+    if (insidePackage(bundlePath)) {
+      try {
+        const bundleModule = await import(pathToFileURL(bundlePath).href);
+        if (REQUIRED_SDK_EXPORTS.every((name) => bundleModule[name])) return bundleModule;
+      } catch {
+        // bundle 加载失败时继续用声明入口
+      }
+    }
+    if (!insidePackage(entryPath)) {
       throw new Error(`Pi SDK entry does not exist: ${entryPath}`);
     }
     return import(pathToFileURL(entryPath).href);

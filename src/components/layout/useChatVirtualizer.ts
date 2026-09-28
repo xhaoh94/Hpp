@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import type { MutableRefObject, RefObject } from "react";
 import {
   defaultRangeExtractor,
@@ -49,21 +49,46 @@ export function useChatVirtualizer({
   anchorTo = "end",
   overscan = 12,
 }: UseChatVirtualizerOptions) {
-  const rangeExtractor = useMemo(
-    () => (range: Range) => {
-      if (!pinnedIndexes || pinnedIndexes.size === 0) return defaultRangeExtractor(range);
+  // virtual-core 把回调的「函数身份」当作 memo 依赖（见其 getMeasurementOptions /
+  // getVirtualIndexes）。若每次渲染都传新函数，它会在每次渲染重建 O(count) 的
+  // measurements 缓存——流式期间每 120ms 一次。这里统一用 ref 读取最新值，
+  // 把传给 virtualizer 的身份固定下来。
+  const itemKeysRef = useRef(itemKeys);
+  itemKeysRef.current = itemKeys;
+  const estimateSizeRef = useRef(estimateSize);
+  estimateSizeRef.current = estimateSize;
+  const pinnedIndexesRef = useRef(pinnedIndexes);
+  pinnedIndexesRef.current = pinnedIndexes;
+
+  const getItemKey = useCallback((index: number) => itemKeysRef.current[index] ?? index, []);
+  const stableEstimateSize = useCallback((index: number) => estimateSizeRef.current(index), []);
+  const getScrollElement = useCallback(() => scrollRef.current, [scrollRef]);
+
+  // 展开的过程行必须常驻，否则滚动位置会跳。只有展开集合的内容真变了才换
+  // rangeExtractor 身份，避免每次渲染都让 virtual-core 重算可见索引。
+  const pinnedSignature = useMemo(
+    () => (pinnedIndexes && pinnedIndexes.size > 0
+      ? Array.from(pinnedIndexes).sort((left, right) => left - right).join(",")
+      : ""),
+    [pinnedIndexes],
+  );
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const pinned = pinnedIndexesRef.current;
+      if (!pinned || pinned.size === 0) return defaultRangeExtractor(range);
       return Array.from(new Set([
         ...defaultRangeExtractor(range),
-        ...pinnedIndexes,
+        ...pinned,
       ])).sort((left, right) => left - right);
     },
-    [pinnedIndexes],
+    // pinnedSignature 只用于决定何时更换身份，实际数据从 ref 读取。
+    [pinnedSignature],
   );
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count,
-    getScrollElement: () => scrollRef.current,
-    estimateSize,
-    getItemKey: (index) => itemKeys[index] || index,
+    getScrollElement,
+    estimateSize: stableEstimateSize,
+    getItemKey,
     rangeExtractor,
     overscan,
     gap,
@@ -74,6 +99,16 @@ export function useChatVirtualizer({
     scrollEndThreshold: 50,
     useAnimationFrameWithResizeObserver: true,
   });
+
+  // 条数变化由 virtual-core 自己增量处理；但「条数不变、首条换了」（切换会话、
+  // 整体替换消息）不会：旧行高缓存按 key 已全部失效，显式重算一次避免行高错位。
+  const firstKey = itemKeys[0];
+  const previousFirstKeyRef = useRef(firstKey);
+  useLayoutEffect(() => {
+    if (previousFirstKeyRef.current === firstKey) return;
+    previousFirstKeyRef.current = firstKey;
+    virtualizer.measure();
+  }, [firstKey, virtualizer]);
 
   const handle = useMemo<ChatVirtualizerHandle>(() => ({
     getTotalSize: () => virtualizer.getTotalSize(),

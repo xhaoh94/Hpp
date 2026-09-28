@@ -84,8 +84,13 @@ export function useChatScroll({
 
   const keepAtBottom = useCallback((el = scrollRef.current) => {
     if (!el) return;
-    virtualizerRef?.current?.scrollToEnd("auto");
-    el.scrollTop = el.scrollHeight;
+    // ResizeObserver、virtualizer 和消息提交可能在同一帧重复触发这里。
+    // 已经贴底时不再写 scrollTop，避免额外 scroll 事件和布局同步。
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance > AUTO_FOLLOW_BOTTOM_EPSILON) {
+      virtualizerRef?.current?.scrollToEnd("auto");
+      el.scrollTop = el.scrollHeight;
+    }
     setShowScrollBottom(false);
   }, [virtualizerRef]);
 

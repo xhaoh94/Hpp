@@ -17,7 +17,6 @@ import {
 import { createPortal } from "react-dom";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
-import { BarcodeFormat, BarcodeScanner } from "@capacitor-mlkit/barcode-scanning";
 import {
   ArrowLeft,
   ArrowDown,
@@ -61,8 +60,36 @@ import {
 } from "lucide-react";
 import { isValidElement, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+
+type MobileRehypeHighlightPlugin = typeof import("rehype-highlight").default;
+let mobileRehypeHighlightPlugin: MobileRehypeHighlightPlugin | null = null;
+let mobileRehypeHighlightPromise: Promise<MobileRehypeHighlightPlugin> | null = null;
+
+const loadMobileRehypeHighlight = () => {
+  if (mobileRehypeHighlightPlugin) return Promise.resolve(mobileRehypeHighlightPlugin);
+  mobileRehypeHighlightPromise ||= import("rehype-highlight").then((module) => {
+    mobileRehypeHighlightPlugin = module.default;
+    return module.default;
+  });
+  return mobileRehypeHighlightPromise;
+};
+
+function useMobileRehypeHighlight(enabled: boolean) {
+  const [plugin, setPlugin] = useState<MobileRehypeHighlightPlugin | null>(() => mobileRehypeHighlightPlugin);
+  useEffect(() => {
+    if (!enabled || plugin) return;
+    let cancelled = false;
+    void loadMobileRehypeHighlight().then((loaded) => {
+      // 插件是函数，直接 setPlugin(loaded) 会被 React 当成 state updater 调用。
+      if (!cancelled) setPlugin(() => loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, plugin]);
+  return plugin;
+}
 
 function WebCopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -1019,6 +1046,7 @@ function MessageCommentary({
         <MarkdownContent
           className={`message-commentary-item assistant-body-segment${running && item.isStreaming ? " streaming" : ""}`}
           text={item.content}
+          deferHighlight={running && item.isStreaming === true}
           key={item.id}
         />
       ))}
@@ -1223,12 +1251,23 @@ function useProcessTicker(enabled: boolean) {
   return now;
 }
 
-const MarkdownContent = memo(function MarkdownContent({ text, className }: { text: string; className?: string }) {
+const MarkdownContent = memo(function MarkdownContent({
+  text,
+  className,
+  deferHighlight = false,
+}: {
+  text: string;
+  className?: string;
+  deferHighlight?: boolean;
+}) {
+  const highlightPlugin = useMobileRehypeHighlight(!deferHighlight);
   return (
     <div className={`md-content ${className || "message-content"}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { detect: false, ignoreMissing: true }]]}
+        rehypePlugins={highlightPlugin && !deferHighlight
+          ? [[highlightPlugin, { detect: false, ignoreMissing: true }]]
+          : undefined}
         components={{
           code(props) {
             const { children, className, node, ...rest } = props as any;
@@ -3656,6 +3695,8 @@ export default function App() {
     setPairingBusy(true);
     setError("");
     try {
+      // 扫码不是首屏能力，按需加载 ML Kit，避免把原生扫码依赖打入移动端主包。
+      const { BarcodeFormat, BarcodeScanner } = await import("@capacitor-mlkit/barcode-scanning");
       const module = await BarcodeScanner.isGoogleBarcodeScannerModuleAvailable();
       if (!module.available) {
         await BarcodeScanner.installGoogleBarcodeScannerModule();

@@ -113,6 +113,8 @@ export interface TmHighlightPluginOptions {
   langCompartment: Compartment;
   /** worker 失败时的降级语言扩展（通常是原 StreamLanguage），恢复非空白高亮。 */
   fallbackLanguage: Extension[] | null;
+  /** 动态加载语言包后更新的降级扩展引用。 */
+  fallbackLanguageRef?: { current: Extension[] };
   /** 运行时状态回调，用于状态栏指示。 */
   onStatus?: (status: TmStatus) => void;
 }
@@ -214,7 +216,9 @@ export function tmHighlightPlugin(options: TmHighlightPluginOptions) {
           console.error("[TextMate] tokenize 失败，已回退内置高亮:", err);
           this.enabled = false;
           this.view.dispatch({
-            effects: options.langCompartment.reconfigure(options.fallbackLanguage ?? []),
+            effects: options.langCompartment.reconfigure(
+        options.fallbackLanguageRef?.current || options.fallbackLanguage || [],
+      ),
           });
           options.onStatus?.({
             kind: "error",

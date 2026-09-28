@@ -2,13 +2,22 @@ import { useState, useEffect, useRef, type DragEvent } from "react";
 import { createPortal } from "react-dom";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
 
 export function ProjectView() {
-  const { projects, activeSessionId, projectDataHydrated, addProject, reorderProjects } = useProjectStore();
+  const { projects, activeSessionId, projectDataHydrated, addProject, reorderProjects } = useProjectStore(
+    useShallow((state) => ({
+      projects: state.projects,
+      activeSessionId: state.activeSessionId,
+      projectDataHydrated: state.projectDataHydrated,
+      addProject: state.addProject,
+      reorderProjects: state.reorderProjects,
+    })),
+  );
   const startupCollapseStateRef = useRef<Map<string, boolean> | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [dropProjectId, setDropProjectId] = useState<string | null>(null);
@@ -17,7 +26,10 @@ export function ProjectView() {
   const { update: updateProjectAutoScroll, stop: stopProjectAutoScroll } = useDragAutoScroll(projectScrollRef);
   const agents = useAgentCatalogStore((state) => state.agents);
   const loadAgents = useAgentCatalogStore((state) => state.loadAgents);
-  const { showAddProject, clearAddProject } = useAppStore();
+  const { showAddProject, clearAddProject } = useAppStore(useShallow((state) => ({
+    showAddProject: state.showAddProject,
+    clearAddProject: state.clearAddProject,
+  })));
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");

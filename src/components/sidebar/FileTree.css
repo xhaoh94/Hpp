@@ -97,6 +97,7 @@
   display: flex;
   align-items: center;
   min-height: 26px;
+  contain: layout paint style;
   padding: 3px 8px;
   font-size: 13px;
   color: var(--text-primary);
@@ -180,6 +181,9 @@
 
 .file-tree-children {
   overflow: hidden;
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: 160px;
 }
 
 .file-tree-children[hidden] {

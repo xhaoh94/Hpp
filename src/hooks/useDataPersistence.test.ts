@@ -12,6 +12,8 @@ import {
   SESSION_DATA_PURGED_EVENT,
   applyPersistedMessagesSnapshot,
   applyPersistedProjectSnapshot,
+  ensureSessionMessagesLoaded,
+  loadOlderSessionMessages,
   parsePersistedChatMessage,
 } from "./useDataPersistence";
 import { useChatStore, type ChatMessage } from "@/stores/chat-store";
@@ -150,6 +152,48 @@ describe("session config change notifications", () => {
     const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent<{ sessionId: string }>;
     expect(event.type).toBe(SESSION_CONFIG_UPDATED_EVENT);
     expect(event.detail).toEqual({ sessionId: "session-thinking" });
+  });
+});
+
+describe("按需恢复会话消息", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("只读取目标会话一次，并按分页顺序合并更早消息", async () => {
+    const loadPage = vi.fn()
+      .mockResolvedValueOnce({
+        messages: [
+          { id: "message-4", role: "user", content: "第四条", timestamp: 4 },
+          { id: "message-5", role: "assistant", content: "第五条", timestamp: 5 },
+        ],
+        hasMore: true,
+        nextBefore: 4,
+        firstSequence: 4,
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          { id: "message-1", role: "user", content: "第一条", timestamp: 1 },
+          { id: "message-2", role: "assistant", content: "第二条", timestamp: 2 },
+          { id: "message-3", role: "user", content: "第三条", timestamp: 3 },
+        ],
+        hasMore: false,
+        nextBefore: null,
+        firstSequence: 1,
+      });
+    vi.stubGlobal("window", { electronAPI: { loadSessionMessagesPage: loadPage } });
+    useChatStore.setState({ activeSessionId: null, messages: [], sessionMessages: {} });
+
+    await expect(ensureSessionMessagesLoaded("session-on-demand")).resolves.toBe(true);
+    await expect(ensureSessionMessagesLoaded("session-on-demand")).resolves.toBe(true);
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().sessionMessages["session-on-demand"]?.map((message) => message.id))
+      .toEqual(["message-4", "message-5"]);
+
+    await expect(loadOlderSessionMessages("session-on-demand")).resolves.toBe(true);
+    expect(loadPage).toHaveBeenCalledTimes(2);
+    expect(useChatStore.getState().sessionMessages["session-on-demand"]?.map((message) => message.id))
+      .toEqual(["message-1", "message-2", "message-3", "message-4", "message-5"]);
   });
 });
 

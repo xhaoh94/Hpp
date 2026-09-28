@@ -54,7 +54,7 @@ const getSessionPreviewText = (
   const msgs = sessionMessages[session.id];
   const firstUserMsg = msgs?.find((m) => isUserSpeechMessage(m));
   const preview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
-  return preview || session.title;
+  return preview || session.preview || session.title;
 };
 
 export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onResume, onDelete, onDeleteAll }: Props) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type WheelEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type WheelEvent } from "react";
 import { FileCode, FileSearch, FolderOpen, Pin, PinOff, Search, X } from "lucide-react";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore, type EditorTab } from "@/stores/editor-store";
@@ -17,7 +17,6 @@ import {
 } from "./all-files-search";
 import { sharedSearchConfig, requestGotoMatch, requestReplaceMatch, type AllFileMatch } from "./searchConfig";
 import { DEFAULT_FILE_FILTERS, type FileFilterConfig } from "@shared/file-filters";
-import { EditorPane } from "./EditorPane";
 import {
   ExpandSearchList,
   type ExpandSearchGroup,
@@ -25,6 +24,11 @@ import {
 } from "./ExpandSearchList";
 import type { TmStatus } from "./tm-highlight";
 import "./EditorArea.css";
+
+// CodeMirror 全家（编辑器核心 + 九个语言包 + legacy modes + minimap）只在用户
+// 真正打开文件时才需要。动态导入把它拆出首屏 bundle；tabs 为空时不会触发加载。
+const EditorPane = lazy(() => import("./EditorPane").then((module) => ({ default: module.EditorPane })));
+const MAX_MOUNTED_EDITOR_PANES = 6;
 
 // 项目级“扩大搜索”使用的过滤：在默认排除项基础上，额外跳过构建产物与二进制文件，
 // 避免读取体积过大或无关内容。
@@ -80,6 +84,14 @@ const PROJECT_SEARCH_FILTERS: FileFilterConfig = {
 
 const MAX_RESULTS = 5000;
 const MAX_FILE_READ_BYTES = 2_000_000;
+const PROJECT_SEARCH_READ_CONCURRENCY = 16;
+
+const throwIfSearchAborted = (signal?: AbortSignal) => {
+  if (!signal?.aborted) return;
+  const error = new Error("项目搜索已取消");
+  error.name = "AbortError";
+  throw error;
+};
 
 function dirFromPath(filePath: string): string {
   if (!filePath) return "";
@@ -115,16 +127,21 @@ async function runProjectSearch(
   query: string,
   options: { matchCase: boolean; wholeWord: boolean; regex: boolean },
   contentOverrides?: ReadonlyMap<string, string>,
+  signal?: AbortSignal,
 ): Promise<ExpandSearchResult[]> {
+  throwIfSearchAborted(signal);
   const index = await getProjectFileIndex(root, PROJECT_SEARCH_FILTERS);
+  throwIfSearchAborted(signal);
   const files = index.filter((item) => !item.isDirectory).map((item) => item.path);
   const results: ExpandSearchResult[] = [];
-  const concurrency = 32;
-  for (let offset = 0; offset < files.length && results.length < MAX_RESULTS; offset += concurrency) {
-    const batch = files.slice(offset, offset + concurrency);
+  for (let offset = 0; offset < files.length && results.length < MAX_RESULTS; offset += PROJECT_SEARCH_READ_CONCURRENCY) {
+    throwIfSearchAborted(signal);
+    const batch = files.slice(offset, offset + PROJECT_SEARCH_READ_CONCURRENCY);
     // 批量读取（异步 IPC，不阻塞主线程），只保留有效文本内容。
+    // 并发量受限，避免一次搜索同时持有几十 MB 文本及其 Worker 克隆。
     const readFiles = await Promise.all(
       batch.map(async (filePath) => {
+        if (signal?.aborted) return null;
         const override = contentOverrides?.get(filePath);
         if (override !== undefined) {
           if (override.length > MAX_FILE_READ_BYTES) return null;
@@ -132,6 +149,7 @@ async function runProjectSearch(
         }
         try {
           const res = await window.electronAPI.readFile(filePath);
+          if (signal?.aborted) return null;
           if (!res.success || res.binary || res.content == null) return null;
           if (res.content.length > MAX_FILE_READ_BYTES) return null;
           return { ...getAllFilesSearchFile(root, filePath), content: res.content };
@@ -140,6 +158,7 @@ async function runProjectSearch(
         }
       }),
     );
+    throwIfSearchAborted(signal);
     const validFiles = readFiles.filter((file): file is NonNullable<typeof file> => file !== null);
     if (validFiles.length === 0) continue;
     // 正则匹配在 Worker 后台线程执行，主线程保持响应。
@@ -149,14 +168,18 @@ async function runProjectSearch(
         query,
         options,
         ALL_FILES_MAX_MATCHES_PER_FILE,
+        signal,
       );
+      throwIfSearchAborted(signal);
       for (const item of batchResults) {
         results.push(item);
         if (results.length >= MAX_RESULTS) break;
       }
-    } catch {
+    } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
       // Worker 不可用（如构建异常）：回退主线程逐文件匹配，保证功能可用。
       for (const file of validFiles) {
+        throwIfSearchAborted(signal);
         if (results.length >= MAX_RESULTS) break;
         const matches = searchAllFilesContent(file, file.content, query, options);
         for (const match of matches) {
@@ -262,8 +285,34 @@ export function EditorArea() {
   const documentContentsRef = useRef(new Map<string, string>());
   const tabsRef = useRef<HTMLDivElement>(null);
   const expandSearchPanelRef = useRef<HTMLDivElement>(null);
+  const mountedEditorKeysRef = useRef<string[]>([]);
+  const [mountedEditorRevision, setMountedEditorRevision] = useState(0);
+  const allFilesSearchAbortRef = useRef<AbortController | null>(null);
+  const allFilesSearchGenerationRef = useRef(0);
   // 结果面板顶部偏移：跟随搜索栏实际高度（展开替换时栏更高），避免遮挡或留空。
   const [panelTop, setPanelTop] = useState<number | null>(null);
+
+  useEffect(() => () => {
+    allFilesSearchAbortRef.current?.abort();
+    allFilesSearchAbortRef.current = null;
+    allFilesSearchGenerationRef.current += 1;
+  }, []);
+
+  // 只让最近使用的少量标签页保留完整 CodeMirror/Minimap/TextMate 实例。
+  // 被回收的脏标签页仍通过 documentContentsRef 保留内容，重新激活时恢复。
+  useEffect(() => {
+    if (!activeKey) return;
+    const previous = mountedEditorKeysRef.current.filter((key) => key !== activeKey);
+    mountedEditorKeysRef.current = [activeKey, ...previous].slice(0, MAX_MOUNTED_EDITOR_PANES);
+    setMountedEditorRevision((revision) => revision + 1);
+  }, [activeKey]);
+
+  const mountedEditorKeys = useMemo(() => {
+    const available = new Set(tabs.map((tab) => tab.key));
+    const keys = mountedEditorKeysRef.current.filter((key) => available.has(key));
+    if (activeKey && !keys.includes(activeKey)) keys.unshift(activeKey);
+    return new Set(keys.slice(0, MAX_MOUNTED_EDITOR_PANES));
+  }, [activeKey, mountedEditorRevision, tabs]);
 
   // 关闭标签页后丢弃对应的内容快照，避免同一路径稍后重新打开时复用过期文本。
   useEffect(() => {
@@ -344,6 +393,16 @@ export function EditorArea() {
   //   - 无匹配：始终不显示面板（含“未找到”空态）。
   //   - 有匹配：面板已开则保持；已关但本次为“新内容”（与关窗时搜索词不同）则重新打开；否则保持关闭。
   const runAllFilesSearch = useCallback((openPanel: boolean) => {
+    // 新查询会使旧查询失效；旧的 IPC 读取无法立刻中断，但其结果不会再
+    // 更新 UI，Worker 请求也会从 pending 表中移除。
+    allFilesSearchAbortRef.current?.abort();
+    const controller = new AbortController();
+    allFilesSearchAbortRef.current = controller;
+    const generation = ++allFilesSearchGenerationRef.current;
+    const isCurrentSearch = () => (
+      !controller.signal.aborted && generation === allFilesSearchGenerationRef.current
+    );
+
     const query = sharedSearchConfig.searchQuery.trim();
     if (!query) {
       // 关键词为空：清空结果，不提示（输入过程中会反复触发）。
@@ -371,8 +430,9 @@ export function EditorArea() {
       matchCase: sharedSearchConfig.searchMatchCase,
       wholeWord: sharedSearchConfig.searchWholeWord,
       regex: sharedSearchConfig.searchRegex,
-    }, documentContentsRef.current)
+    }, documentContentsRef.current, controller.signal)
       .then((results) => {
+        if (!isCurrentSearch()) return;
         if (results.length === 0) {
           // 无匹配：始终不显示面板（也不弹“未找到”空态）；显式搜索才提示 toast。
           setExpandSearch((state) => ({
@@ -403,6 +463,7 @@ export function EditorArea() {
         }
       })
       .catch((error: unknown) => {
+        if (!isCurrentSearch()) return;
         const message = error instanceof Error ? error.message : String(error);
         setExpandSearch((state) => ({
           ...state,
@@ -413,6 +474,11 @@ export function EditorArea() {
           dismissedQuery: openPanel ? "" : state.dismissedQuery,
         }));
         if (openPanel) showFloatingToastMessage(`搜索失败：${message}`);
+      })
+      .finally(() => {
+        if (allFilesSearchGenerationRef.current === generation) {
+          allFilesSearchAbortRef.current = null;
+        }
       });
   }, [activeProject?.path, activeKey]);
 
@@ -594,14 +660,29 @@ export function EditorArea() {
   const saveAndClose = useCallback(async () => {
     if (!confirmClose) return;
     const key = confirmClose.key;
+    const tab = tabs.find((item) => item.key === key);
+    if (!tab) return;
     const saveFn = saveFnsRef.current.get(key);
     if (saveFn) {
       const saved = await saveFn();
       if (!saved) return;
+    } else {
+      // LRU 回收后的脏标签页没有存活的 EditorView，直接使用快照保存，
+      // 避免“保存并关闭”因 save 函数已随 Pane 卸载而静默丢失修改。
+      const content = documentContentsRef.current.get(tab.path);
+      if (content === undefined) {
+        showFloatingToastMessage(`${uiText.editor.saveFailed}：找不到未保存内容`);
+        return;
+      }
+      const result = await window.electronAPI.writeFile(tab.path, content);
+      if (!result.success) {
+        showFloatingToastMessage(`${uiText.editor.saveFailed}：${result.error || "保存失败"}`);
+        return;
+      }
     }
     closeTab(key);
     setConfirmClose(null);
-  }, [closeTab, confirmClose]);
+  }, [closeTab, confirmClose, tabs]);
 
   const discardAndClose = useCallback(() => {
     if (!confirmClose) return;
@@ -733,11 +814,13 @@ export function EditorArea() {
       </div>
 
       <div className="editor-panes">
-        {tabs.map((tab) => (
+        {/* 首次打开文件时才会请求编辑器 chunk；本地加载通常只有一瞬，先留空避免布局跳动。 */}
+        <Suspense fallback={null}>{tabs.filter((tab) => mountedEditorKeys.has(tab.key)).map((tab) => (
           <EditorPane
             key={tab.key}
             path={tab.path}
             visible={tab.key === activeKey}
+            initialContent={tab.dirty ? documentContentsRef.current.get(tab.path) : undefined}
             onDirtyChange={handleDirtyChange(tab.key)}
             onDocumentChange={handleDocumentChange}
             onSaved={handleSaved}
@@ -764,7 +847,7 @@ export function EditorArea() {
             }}
             onSearchClose={() => setExpandSearch((state) => ({ ...state, open: false, dismissedQuery: "" }))}
           />
-        ))}
+        ))}</Suspense>
         {tabs.length === 0 && (
           <div className="editor-empty">
             <div className="editor-empty-icon" aria-hidden="true">

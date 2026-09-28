@@ -110,10 +110,11 @@ describe("code review dialog", () => {
     // git 会把间距小于上下文窗口的多处修改合并成一个 hunk；按钮若只挂在 hunk
     // 首行（可能是上下文行），用户悬停在实际改动行上永远看不到按钮，且撤销
     // 粒度被迫扩大到整个 hunk。按钮必须挂在每个修改点（changeStart）的首个增删行上。
-    expect(dialogSource).toContain("const changeIdx = pair.changeIdx;");
-    expect(dialogSource).toContain("pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined");
+    expect(dialogSource).toContain("pair.changeIdx");
+    expect(dialogSource).toContain("pair.changeStart");
+    expect(dialogSource).toContain("pair.hunkIdx");
+    expect(dialogSource).toContain("renderUndoButton");
     expect(dialogSource).not.toContain("pair.hunkStart");
-    expect(dialogSource).toContain("const hunkIdx = pair.hunkIdx;");
     expect(dialogSource).not.toContain("hunkStartMap.get(index)");
     expect(dialogSource).not.toContain("hunkStartMap");
     expect(dialogSource).not.toContain("parsePatchHunks(active.patch)");
@@ -179,8 +180,9 @@ describe("code review dialog", () => {
   it("keeps the left column as the clean original file and concentrates changes on the right", () => {
     expect(dialogSource).toContain("chat-review-col left");
     expect(dialogSource).toContain("chat-review-col right");
-    // 左列只渲染原文件行，不含任何右栏判断。
-    expect(dialogSource).toContain("if (!pair.left) return null");
+    // 虚拟行分别渲染左右 cell，左列只读取 pair.left，不依赖右列内容。
+    expect(dialogSource).toContain('side === "left"');
+    expect(dialogSource).toContain('pair.left');
     expect(chatPanelStyles).toContain(".chat-review-col.right .chat-review-col-line.del");
   });
 
@@ -188,11 +190,10 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("showDeletedInRight");
     expect(dialogSource).toContain("EyeOff");
     expect(dialogSource).toContain("aria-pressed={showDeletedInRight}");
-    // 右列：仅在开关开启时额外显示被删除的行，否则紧凑跳过。
-    expect(dialogSource).toContain("showDeletedInRight && !pair.right");
-    expect(dialogSource).toContain("if (!pair.right && !showDeleted) return null");
-    expect(dialogSource).toContain("chat-review-split-cols");
-    expect(chatPanelStyles).toContain(".chat-review-split-cols");
+    // 虚拟行中右列仅在开关开启时复用被删除的左侧 cell。
+    expect(dialogSource).toContain("showDeletedInRight && pair.left?.cell.type === \"del\"");
+    expect(dialogSource).toContain("chat-review-split-row");
+    expect(chatPanelStyles).toContain(".chat-review-split-row");
     expect(chatPanelStyles).toContain(".chat-review-col-line");
   });
 

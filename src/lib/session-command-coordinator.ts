@@ -12,6 +12,7 @@ import {
   getReferencesDisplayText,
 } from "@/lib/session-references";
 import {
+  ensureSessionMessagesLoaded,
   getSessionModel,
   getSessionModelThinking,
   getSessionThinking,
@@ -264,12 +265,16 @@ async function runInitialization(
   const { project, session } = initialTarget;
   const projectStore = useProjectStore.getState();
   const chatStore = useChatStore.getState();
+  let messageLoadPromise: Promise<boolean> | null = null;
 
   if (options.activate) {
+    // 会话切换先立即更新 UI，再并行恢复目标会话最近一页；发送路径会
+    // 等待同一个加载 Promise，避免用户在历史尚未恢复时追加消息。
     projectStore.setActiveProject(project.id);
     projectStore.setActiveSession(session.id);
     chatStore.setActiveAgent(session.agentId);
     chatStore.switchSession(session.id);
+    messageLoadPromise = ensureSessionMessagesLoaded(sessionId);
     if (projectStore.agentStatuses[session.id] === "completed") projectStore.setAgentStatus(session.id, "idle");
     if (projectStore.initializedSessionIds.has(sessionId)) restoreActiveSessionSettings(sessionId);
   }
@@ -283,6 +288,7 @@ async function runInitialization(
     // discovery is repeated by useSessionModels after the new session is
     // painted, so do not make the tab click wait for an IPC/backend roundtrip.
     if (options.activate && !needsRuntimeInitialization) {
+      await messageLoadPromise;
       void window.electronAPI.agentSwitchSession(sessionId).catch((error) => {
         console.warn("[agent] background session switch failed:", error);
       });
@@ -357,6 +363,7 @@ async function runInitialization(
     }
     applyActiveModels(sessionId, models, selectedModel);
 
+    if (messageLoadPromise) await messageLoadPromise;
     if (options.activate && useProjectStore.getState().activeSessionId === sessionId) {
       await window.electronAPI.agentSwitchSession(sessionId);
     }
@@ -583,6 +590,7 @@ export async function forkSession(input: {
     return { project: existingProject, session: existing };
   }
 
+  await ensureSessionMessagesLoaded(input.sourceSessionId);
   const chat = useChatStore.getState();
   const currentMessages = chat.sessionMessages[input.sourceSessionId] ||
     (chat.activeSessionId === input.sourceSessionId ? chat.messages : []);
@@ -879,6 +887,9 @@ export async function sendMessage(input: {
     if (message.action && !supportsAgentActions(session.agentId)) {
       throw new Error("ACTION_NOT_SUPPORTED");
     }
+    // 远程发送或启动竞态可能绕过普通的会话点击路径，发送前仍需确保
+    // 目标会话的最近一页已经恢复，避免在空数组上追加消息覆盖历史。
+    await ensureSessionMessagesLoaded(input.sessionId);
 
     const enqueue = (): SendMessageResult => {
       const chat = useChatStore.getState();
@@ -1071,6 +1082,9 @@ function appendModelChangeDivider(
   const sourceMessages = sessionId === chatState.activeSessionId
     ? chatState.messages
     : chatState.sessionMessages[sessionId] || [];
+  // 会话还没进行过对话（无任何 user/assistant 消息）时不插 divider：没有"中途"可言。
+  const hasConversation = sourceMessages.some((msg) => msg.role === "user" || msg.role === "assistant");
+  if (!hasConversation) return;
   // 对话「实际运行模型」以最近一条带 modelLabel 的 assistant 消息为准：
   // 仅切换选择器不发消息时，两者可能不同，此时不算中途换模。
   let lastRunLabel: string | undefined;
@@ -1192,7 +1206,7 @@ export const getSessionCommandStatus = (sessionId: string) =>
 export const getAllSessionCommandIds = () => useProjectStore.getState().projects
   .flatMap((project) => project.sessions.map((session) => session.id));
 
-export function prepareSessionReferenceContext(
+export async function prepareSessionReferenceContext(
   sessionId: string,
   referenceIds: string[],
   maxReferences: number,
@@ -1205,6 +1219,7 @@ export function prepareSessionReferenceContext(
     if (!source) throw new Error("INVALID_SESSION_REFERENCE");
     return source;
   });
+  await Promise.all(sourceSessions.map((source) => ensureSessionMessagesLoaded(source.id)));
   const sessionMessages = useChatStore.getState().sessionMessages;
   const references = sourceSessions.map((source) =>
     createSessionReferenceSnapshot(source, sessionMessages[source.id] || []));

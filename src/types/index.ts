@@ -302,6 +302,16 @@ export interface ElectronAPI {
   // Data persistence
   loadData: (key: string) => Promise<unknown>;
   saveData: (key: string, data: unknown) => Promise<{ success: boolean; error?: string }>;
+  loadSessionMessages: (sessionId: string) => Promise<unknown>;
+  loadSessionMessageSummaries: (sessionIds: string[]) => Promise<Record<string, unknown>>;
+  loadSessionMessagesPage: (sessionId: string, beforeSequence?: number, limit?: number) => Promise<{
+    messages: unknown[];
+    hasMore: boolean;
+    nextBefore: number | null;
+    firstSequence: number;
+  }>;
+  saveSessionMessages: (sessionId: string, messages: unknown) => Promise<{ success: boolean; error?: string }>;
+  deleteSessionMessages: (sessionIds: string[]) => Promise<{ success: boolean; error?: string }>;
   purgeSessionData: (request: import("./ipc").SessionDataPurgeRequest) => Promise<{ success: boolean; error?: string }>;
   getDiskUsage: () => Promise<DiskUsageStats>;
   cleanupDiskCache: () => Promise<DiskCleanupResult>;

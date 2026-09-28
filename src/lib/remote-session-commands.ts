@@ -12,7 +12,7 @@ import type {
   RemoteSessionConfig,
   RemoteSessionCreateResult,
 } from "@/types";
-import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
+import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-constants";
 import { isAgentActionInvocation } from "@shared/agent-actions";
 import { normalizeAgentPermissionMode } from "@shared/agent-permissions";
 import { createComposerDocument, type ComposerDocument, type ComposerNode } from "@shared/composer-document";
@@ -92,7 +92,7 @@ function toRemoteSession(session: ProjectSession, config: RemoteSessionConfig): 
   return {
     id: session.id,
     agentId: session.agentId,
-    title: session.title,
+    title: session.preview || session.title,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     closed: session.closed === true,
@@ -171,7 +171,7 @@ async function sendRemoteMessage(payload: Record<string, unknown>) {
           : undefined,
       )).filter(Boolean)
     : [];
-  const referenceContext = SessionCommandCoordinator.prepareSessionReferenceContext(
+  const referenceContext = await SessionCommandCoordinator.prepareSessionReferenceContext(
     sessionId,
     rawReferenceIds,
     MAX_REMOTE_SESSION_REFERENCES,
@@ -238,7 +238,7 @@ async function editRemoteQueuedMessage(payload: Record<string, unknown>) {
           : undefined,
       )).filter(Boolean)
     : [];
-  const referenceContext = SessionCommandCoordinator.prepareSessionReferenceContext(
+  const referenceContext = await SessionCommandCoordinator.prepareSessionReferenceContext(
     sessionId,
     rawReferenceIds,
     MAX_REMOTE_SESSION_REFERENCES,

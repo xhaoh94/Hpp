@@ -81,7 +81,8 @@ describe("ProjectCard lifecycle regression constraints", () => {
       projectCardSource.indexOf("{(session.forkedFrom || session.forkContext) && ("),
     );
 
-    expect(tabBlock).toContain("const tabPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : \"\"");
+    expect(tabBlock).toContain("getChatMessagePreviewText(firstUserMsg)");
+    expect(tabBlock).toContain("session.preview || \"\"");
     expect(tabBlock).toContain("const tabLabel = tabPreview || session.title;");
     expect(tabBlock).toContain("title={tabLabel}");
     // 展示仍用 30 字符截断版本，只有 tips 是完整的

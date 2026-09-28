@@ -1,8 +1,19 @@
-import { isValidElement, memo, useCallback, useState, type MouseEvent, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import {
+  createContext,
+  isValidElement,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { getLocalMarkdownCodePath, isExternalMarkdownHref } from "@/lib/project-file-path";
+import { splitMarkdownChunks } from "./markdown-chunks";
 import "./MarkdownRenderer.css";
 
 function CopyButton({ text }: { text: string }) {
@@ -63,6 +74,8 @@ function getTextContent(children: ReactNode): string {
 interface MarkdownRendererProps {
   content: string;
   onLinkClick?: (href: string, event: MouseEvent<HTMLAnchorElement>) => boolean | void;
+  /** 流式输出期间跳过代码高亮，等内容稳定后再执行 rehype-highlight。 */
+  deferHighlight?: boolean;
 }
 
 // 默认的 URL 清洗只放行协议白名单，会把 Windows 盘符路径（`E:\a\b.lua`、`C:/a/b.lua`）
@@ -74,119 +87,193 @@ function keepLocalHref(url: string): string {
   return SCRIPT_HREF.test(url) ? "" : url;
 }
 
-function MarkdownRendererImpl({ content, onLinkClick }: MarkdownRendererProps) {
-  return (
-    <div className="md-content">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        urlTransform={keepLocalHref}
-        components={{
-          code({ node, className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || "");
-            const language = match ? match[1] : "";
-            // react-markdown 解析代码块时 children 末尾总会带一个 \n，
-            // 复制时去掉它，避免剪贴板内容尾部多一个换行。
-            const text = getTextContent(children).replace(/\r?\n$/, "");
+// react-markdown 不做任何内部缓存：每次渲染都会拿这些 options 重建解析器。
+// 把插件与组件表提升为模块级常量，避免它们每次渲染都是新引用。
+const REMARK_PLUGINS = [remarkGfm];
+type RehypeHighlightPlugin = typeof import("rehype-highlight").default;
+let rehypeHighlightPlugin: RehypeHighlightPlugin | null = null;
+let rehypeHighlightPromise: Promise<RehypeHighlightPlugin> | null = null;
 
-            // Inline code (no language = no newline = likely inline)
-            if (!language && !text.includes("\n")) {
-              const localPath = getLocalMarkdownCodePath(text);
-              return (
-                <code className={`md-inline-code${localPath ? " md-path-reference" : ""}`} {...props}>
-                  {children}
-                </code>
-              );
-            }
+const loadRehypeHighlight = () => {
+  if (rehypeHighlightPlugin) return Promise.resolve(rehypeHighlightPlugin);
+  rehypeHighlightPromise ||= import("rehype-highlight").then((module) => {
+    rehypeHighlightPlugin = module.default;
+    return module.default;
+  });
+  return rehypeHighlightPromise;
+};
 
-            // Code block
-            // 横向滚动容器（pre）自身的左右 padding 在 Chromium 中会被"吞掉"，
-            // 故在其外套一层不滚动的 wrapper 负责四边间距，pre 内部 padding 为 0。
-            // 语言标签与复制按钮放在独立的 header 行，不再用 absolute 悬浮在内容上方，
-            // 从根本上避免标签与长内容重叠，同时 wrapper 的左右 padding 可统一为 24px。
-            return (
-              <div className={`md-code-block${language ? " md-code-block--with-lang" : ""}`}>
-                <div className="md-code-header">
-                  {language ? (
-                    <div className="md-code-lang">{language}</div>
-                  ) : (
-                    <span />
-                  )}
-                  <CopyButton text={text} />
-                </div>
-                <div
-                  className="md-code-scroll-wrapper"
-                  style={{
-                    boxSizing: "border-box",
-                    width: "100%",
-                    padding: "4px 24px 8px 24px",
-                  }}
-                >
-                  <pre style={{
-                    boxSizing: "border-box",
-                    margin: 0,
-                    padding: 0,
-                    overflowX: "auto",
-                    maxWidth: "100%",
-                  }}>
-                    <code
-                      className={className}
-                      {...props}
-                      style={{
-                        display: "block",
-                        whiteSpace: "pre",
-                        padding: 0,
-                      }}
-                    >
-                      {children}
-                    </code>
-                  </pre>
-                </div>
-              </div>
-            );
-          },
-          a({ href, children, ...props }) {
-            // 只有 http(s) 交给系统浏览器（主进程的 setWindowOpenHandler 会接管），
-            // 其余 href 一律拦掉默认跳转，否则 Electron 会新开一个没有 preload 的空白窗口。
-            const external = isExternalMarkdownHref(href);
-            return (
-              <a
-                {...props}
-                href={href}
-                {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-                className="md-link"
-                onClick={(event) => {
-                  if (href && onLinkClick?.(href, event)) return;
-                  if (!external) event.preventDefault();
-                }}
-              >
-                {children}
-              </a>
-            );
-          },
-          table({ children, ...props }) {
-            return (
-              <div className="md-table-wrap">
-                <table {...props}>{children}</table>
-              </div>
-            );
-          },
-          input({ checked, ...props }) {
-            // Render task list checkboxes as disabled (display only)
-            return (
-              <input
-                type="checkbox"
-                checked={checked}
-                readOnly
-                className="md-task-checkbox"
-                {...props}
-              />
-            );
-          },
+function useRehypeHighlight(enabled: boolean) {
+  const [plugin, setPlugin] = useState<RehypeHighlightPlugin | null>(() => rehypeHighlightPlugin);
+
+  useEffect(() => {
+    if (!enabled || plugin) return;
+    let cancelled = false;
+    void loadRehypeHighlight().then((loaded) => {
+      // 插件本身就是函数，直接 setPlugin(loaded) 会被 React 当作 state updater
+      // 调用，存下的是 rehypeHighlight(prevState) 的返回值（transformer）。
+      if (!cancelled) setPlugin(() => loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, plugin]);
+
+  return plugin;
+}
+
+// 链接点击处理器通过 context 下发，这样组件表可以完全稳定，分块渲染时
+// 各块之间也不需要重复传递回调。
+const MarkdownLinkClickContext = createContext<MarkdownRendererProps["onLinkClick"]>(undefined);
+
+const MARKDOWN_COMPONENTS: Components = {
+  code({ node, className, children, ...props }) {
+    const match = /language-(\w+)/.exec(className || "");
+    const language = match ? match[1] : "";
+    // react-markdown 解析代码块时 children 末尾总会带一个 \n，
+    // 复制时去掉它，避免剪贴板内容尾部多一个换行。
+    const text = getTextContent(children).replace(/\r?\n$/, "");
+
+    // Inline code (no language = no newline = likely inline)
+    if (!language && !text.includes("\n")) {
+      const localPath = getLocalMarkdownCodePath(text);
+      return (
+        <code className={`md-inline-code${localPath ? " md-path-reference" : ""}`} {...props}>
+          {children}
+        </code>
+      );
+    }
+
+    // Code block
+    // 横向滚动容器（pre）自身的左右 padding 在 Chromium 中会被"吞掉"，
+    // 故在其外套一层不滚动的 wrapper 负责四边间距，pre 内部 padding 为 0。
+    // 语言标签与复制按钮放在独立的 header 行，不再用 absolute 悬浮在内容上方，
+    // 从根本上避免标签与长内容重叠，同时 wrapper 的左右 padding 可统一为 24px。
+    return (
+      <div className={`md-code-block${language ? " md-code-block--with-lang" : ""}`}>
+        <div className="md-code-header">
+          {language ? (
+            <div className="md-code-lang">{language}</div>
+          ) : (
+            <span />
+          )}
+          <CopyButton text={text} />
+        </div>
+        <div
+          className="md-code-scroll-wrapper"
+          style={{
+            boxSizing: "border-box",
+            width: "100%",
+            padding: "4px 24px 8px 24px",
+          }}
+        >
+          <pre style={{
+            boxSizing: "border-box",
+            margin: 0,
+            padding: 0,
+            overflowX: "auto",
+            maxWidth: "100%",
+          }}>
+            <code
+              className={className}
+              {...props}
+              style={{
+                display: "block",
+                whiteSpace: "pre",
+                padding: 0,
+              }}
+            >
+              {children}
+            </code>
+          </pre>
+        </div>
+      </div>
+    );
+  },
+  a({ href, children, ...props }) {
+    const onLinkClick = useContext(MarkdownLinkClickContext);
+    // 只有 http(s) 交给系统浏览器（主进程的 setWindowOpenHandler 会接管），
+    // 其余 href 一律拦掉默认跳转，否则 Electron 会新开一个没有 preload 的空白窗口。
+    const external = isExternalMarkdownHref(href);
+    return (
+      <a
+        {...props}
+        href={href}
+        {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+        className="md-link"
+        onClick={(event) => {
+          if (href && onLinkClick?.(href, event)) return;
+          if (!external) event.preventDefault();
         }}
       >
-        {content}
-      </ReactMarkdown>
+        {children}
+      </a>
+    );
+  },
+  table({ children, ...props }) {
+    return (
+      <div className="md-table-wrap">
+        <table {...props}>{children}</table>
+      </div>
+    );
+  },
+  input({ checked, ...props }) {
+    // Render task list checkboxes as disabled (display only)
+    return (
+      <input
+        type="checkbox"
+        checked={checked}
+        readOnly
+        className="md-task-checkbox"
+        {...props}
+      />
+    );
+  },
+};
+
+/**
+ * 单块渲染。分块后流式期间只有尾部块的内容会变，其余块命中 memo，
+ * 不再重复走 remark → rehype → 高亮。
+ */
+const MarkdownChunk = memo(function MarkdownChunk({
+  content,
+  enableHighlight,
+  highlightPlugin,
+}: {
+  content: string;
+  enableHighlight: boolean;
+  highlightPlugin: RehypeHighlightPlugin | null;
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={enableHighlight && highlightPlugin ? [highlightPlugin] : undefined}
+      urlTransform={keepLocalHref}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+function MarkdownRendererImpl({ content, onLinkClick, deferHighlight = false }: MarkdownRendererProps) {
+  // 切分是 O(长度) 的字符串扫描（微秒级），远低于一次 Markdown 解析，
+  // 但能换来「已写完的前缀块不重新解析」。
+  const chunks = useMemo(() => splitMarkdownChunks(content), [content]);
+  const enableHighlight = !deferHighlight;
+  const highlightPlugin = useRehypeHighlight(enableHighlight);
+  return (
+    <div className="md-content">
+      <MarkdownLinkClickContext.Provider value={onLinkClick}>
+        {chunks.map((chunk, index) => (
+          <MarkdownChunk
+            key={index}
+            content={chunk}
+            enableHighlight={enableHighlight}
+            highlightPlugin={highlightPlugin}
+          />
+        ))}
+      </MarkdownLinkClickContext.Provider>
     </div>
   );
 }

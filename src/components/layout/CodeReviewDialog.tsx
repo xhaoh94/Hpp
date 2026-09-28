@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -6,8 +7,10 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronDown,
   ChevronUp,
@@ -49,7 +52,7 @@ import { resolveProjectFilePath } from "@/lib/project-file-path";
 
 export type ReviewViewMode = "split" | "unified";
 
-type CodeReviewDialogProps = {
+export type CodeReviewDialogProps = {
   open: boolean;
   reviewId: string;
   diffs: DiffLike[];
@@ -99,13 +102,162 @@ const renderTokens = (tokens: SyntaxToken[]) => {
   ));
 };
 
+const MAX_HIGHLIGHT_CACHE_ENTRIES = 2_000;
+const highlightCache = new Map<string, SyntaxToken[]>();
+
 const highlightText = (text: string, language?: string): SyntaxToken[] => {
   if (!language || text.length > MAX_HIGHLIGHT_CHARS) return [{ text, classNames: [] }];
-  return buildHighlightedLines(text, language)[0] || [];
+  const cacheKey = `${language}\u0000${text}`;
+  const cached = highlightCache.get(cacheKey);
+  if (cached) return cached;
+  const tokens = buildHighlightedLines(text, language)[0] || [];
+  highlightCache.set(cacheKey, tokens);
+  if (highlightCache.size > MAX_HIGHLIGHT_CACHE_ENTRIES) {
+    const oldestKey = highlightCache.keys().next().value;
+    if (oldestKey !== undefined) highlightCache.delete(oldestKey);
+  }
+  return tokens;
 };
 
 const isDiffPair = (pair: HighlightedPair) =>
   !!(pair.left && pair.left.cell.type === "del") || !!(pair.right && pair.right.cell.type === "add");
+
+type ReviewVirtualRowsProps = {
+  pairs: HighlightedPair[];
+  viewMode: ReviewViewMode;
+  showDeletedInRight: boolean;
+  scrollRef: RefObject<HTMLDivElement | null>;
+  undoable: boolean;
+  undoBusy: boolean;
+  isHunkUndoing: (hunkIndex: number, changeIndex: number) => boolean;
+  onHunkUndo: (hunkIndex: number, changeIndex: number) => void;
+};
+
+function ReviewVirtualRows({
+  pairs,
+  viewMode,
+  showDeletedInRight,
+  scrollRef,
+  undoable,
+  undoBusy,
+  isHunkUndoing,
+  onHunkUndo,
+}: ReviewVirtualRowsProps) {
+  const getScrollElement = useCallback(() => scrollRef.current, [scrollRef]);
+  const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+    count: pairs.length,
+    getScrollElement,
+    estimateSize: () => 26,
+    getItemKey: (index) => pairs[index]?.left?.cell.lineNo || pairs[index]?.right?.cell.lineNo || index,
+    overscan: 20,
+    useAnimationFrameWithResizeObserver: true,
+  });
+
+  const renderUndoButton = (pair: HighlightedPair) => {
+    if (!pair.changeStart || pair.hunkIdx === undefined || pair.changeIdx === undefined || !undoable) return null;
+    return (
+      <button
+        type="button"
+        className="chat-review-hunk-undo"
+        onClick={() => onHunkUndo(pair.hunkIdx!, pair.changeIdx!)}
+        disabled={undoBusy}
+        title="撤销此段修改"
+      >
+        {isHunkUndoing(pair.hunkIdx, pair.changeIdx) ? (
+          <Loader2 className="chat-review-spin" size={11} />
+        ) : (
+          <Undo2 size={11} strokeWidth={2.2} />
+        )}
+        <span>撤销</span>
+      </button>
+    );
+  };
+
+  const renderUnified = (pair: HighlightedPair, index: number) => {
+    const type = pair.left?.cell.type === "del"
+      ? "del"
+      : pair.right?.cell.type === "add"
+        ? "add"
+        : "context";
+    const text = pair.left ?? pair.right;
+    return (
+      <div
+        className={`chat-review-line ${type}`}
+        data-review-diff-index={isDiffPair(pair) ? index : undefined}
+      >
+        <span className="chat-review-line-no">
+          {type === "del"
+            ? pair.left?.cell.lineNo ?? ""
+            : pair.right?.cell.lineNo ?? pair.left?.cell.lineNo ?? ""}
+        </span>
+        <span className="chat-review-marker" aria-hidden="true">
+          {type === "del" ? "-" : type === "add" ? "+" : " "}
+        </span>
+        <span className="chat-review-code">
+          {text ? renderTokens(text.tokens) : <span className="chat-review-code-empty" />}
+        </span>
+        {renderUndoButton(pair)}
+      </div>
+    );
+  };
+
+  const renderSplitCell = (pair: HighlightedPair, side: "left" | "right", index: number) => {
+    const cell = side === "left"
+      ? pair.left
+      : pair.right || (showDeletedInRight && pair.left?.cell.type === "del" ? pair.left : undefined);
+    if (!cell) return <div className="chat-review-col-line empty" aria-hidden="true" />;
+    const isDiff = cell.cell.type === (side === "left" ? "del" : "add");
+    const hiddenDeletedOnRight = side === "left"
+      && !!pair.left
+      && pair.left.cell.type === "del"
+      && !pair.right
+      && !showDeletedInRight;
+    return (
+      <div
+        className={`chat-review-col-line ${cell.cell.type}`}
+        data-review-diff-index={isDiff ? index : undefined}
+      >
+        <span className="chat-review-line-no">{cell.cell.lineNo}</span>
+        <span className="chat-review-code">{renderTokens(cell.tokens)}</span>
+        {hiddenDeletedOnRight ? renderUndoButton(pair) : side === "right" ? renderUndoButton(pair) : null}
+      </div>
+    );
+  };
+
+  return (
+    <div
+      className={`chat-review-virtual-list ${viewMode === "split" ? "split" : "unified"}`}
+      style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}
+    >
+      {virtualizer.getVirtualItems().map((virtualRow) => {
+        const pair = pairs[virtualRow.index];
+        if (!pair) return null;
+        return (
+          <div
+            key={virtualRow.key}
+            ref={virtualizer.measureElement}
+            data-index={virtualRow.index}
+            className="chat-review-virtual-row"
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              transform: `translateY(${virtualRow.start}px)`,
+            }}
+          >
+            {viewMode === "unified" ? renderUnified(pair, virtualRow.index) : (
+              <div className="chat-review-split-row">
+                <div className="chat-review-col left">{renderSplitCell(pair, "left", virtualRow.index)}</div>
+                <div className="chat-review-col right">{renderSplitCell(pair, "right", virtualRow.index)}</div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function FileStatusIcon({ status }: { status: ReviewFileDiff["status"] }) {
   if (status === "added") return <FilePlus2 size={14} strokeWidth={2} />;
@@ -537,6 +689,12 @@ export function CodeReviewDialog({
         return;
       }
     }
+    // 虚拟列表中目标行尚未挂载时，先按估算行高定位；下一帧虚拟器会挂载
+    // 目标附近的行，随后用户仍可继续使用导航按钮精确定位。
+    container.scrollTo({
+      top: Math.max(0, pairIndex * 26 - container.clientHeight / 2),
+      behavior: smooth ? "smooth" : "auto",
+    });
   };
 
   // 默认定位到当前文件的第一个变化点。
@@ -837,135 +995,32 @@ export function CodeReviewDialog({
                       </div>
                     ) : viewMode === "split" ? (
                       <div className="chat-review-split">
-                        <div className="chat-review-split-cols">
-                          {/* 左列：原文件原文——被删除的行标红，始终完整显示 */}
-                          <div className="chat-review-col left">
-                            {highlightedPairs.map((pair, index) => {
-                              if (!pair.left) return null;
-                              const isDiff = pair.left.cell.type === "del";
-                              const hunkIdx = pair.hunkIdx;
-                              const changeIdx = pair.changeIdx;
-                              // 右列默认隐藏删除行时，修改点起始的删除行在右列不可见，在左列补充撤销按钮。
-                              const rightHidden =
-                                !pair.right && !!pair.left && pair.left.cell.type === "del" && !showDeletedInRight;
-                              return (
-                                <div
-                                  className={`chat-review-col-line ${pair.left.cell.type}`}
-                                  key={index}
-                                  data-review-diff-index={isDiff ? index : undefined}
-                                >
-                                  <span className="chat-review-line-no">{pair.left.cell.lineNo}</span>
-                                  <span className="chat-review-code">{renderTokens(pair.left.tokens)}</span>
-                                  {pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined && rightHidden && active.undoable && (
-                                    <button
-                                      type="button"
-                                      className="chat-review-hunk-undo"
-                                      onClick={() => handleHunkUndo(hunkIdx, changeIdx)}
-                                      disabled={undoBusy}
-                                      title="撤销此段修改"
-                                    >
-                                      {isHunkUndoing(hunkIdx, changeIdx) ? (
-                                        <Loader2 className="chat-review-spin" size={11} />
-                                      ) : (
-                                        <Undo2 size={11} strokeWidth={2.2} />
-                                      )}
-                                      <span>撤销</span>
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {/* 右列：修改后内容；开关开启时也显示被删除的行 */}
-                          <div className="chat-review-col right">
-                            {highlightedPairs.map((pair, index) => {
-                              const showDeleted =
-                                showDeletedInRight && !pair.right && !!pair.left && pair.left.cell.type === "del";
-                              if (!pair.right && !showDeleted) return null;
-                              const cell = pair.right ?? pair.left!;
-                              const isDiff = pair.right ? pair.right.cell.type === "add" : cell.cell.type === "del";
-                              const hunkIdx = pair.hunkIdx;
-                              const changeIdx = pair.changeIdx;
-                              return (
-                                <div
-                                  className={`chat-review-col-line ${cell.cell.type}`}
-                                  key={index}
-                                  data-review-diff-index={isDiff ? index : undefined}
-                                >
-                                  <span className="chat-review-line-no">{cell.cell.lineNo}</span>
-                                  <span className="chat-review-code">{renderTokens(cell.tokens)}</span>
-                                  {pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined && active.undoable && (
-                                    <button
-                                      type="button"
-                                      className="chat-review-hunk-undo"
-                                      onClick={() => handleHunkUndo(hunkIdx, changeIdx)}
-                                      disabled={undoBusy}
-                                      title="撤销此段修改"
-                                    >
-                                      {isHunkUndoing(hunkIdx, changeIdx) ? (
-                                        <Loader2 className="chat-review-spin" size={11} />
-                                      ) : (
-                                        <Undo2 size={11} strokeWidth={2.2} />
-                                      )}
-                                      <span>撤销</span>
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
+                        <ReviewVirtualRows
+                          pairs={highlightedPairs}
+                          viewMode="split"
+                          showDeletedInRight={showDeletedInRight}
+                          scrollRef={diffScrollRef}
+                          undoable={!!active.undoable}
+                          undoBusy={undoBusy}
+                          isHunkUndoing={isHunkUndoing}
+                          onHunkUndo={handleHunkUndo}
+                        />
                         {truncated && (
                           <div className="chat-review-truncated">{uiText.review.truncated(MAX_RENDER_LINES)}</div>
                         )}
                       </div>
                     ) : (
                       <div className="chat-review-unified">
-                        {highlightedPairs.map((pair, index) => {
-                          const type = pair.left?.cell.type === "del"
-                            ? "del"
-                            : pair.right?.cell.type === "add"
-                              ? "add"
-                              : "context";
-                          const text = pair.left ?? pair.right;
-                          const hunkIdx = pair.hunkIdx;
-                          const changeIdx = pair.changeIdx;
-                          return (
-                            <div
-                              className={`chat-review-line ${type}`}
-                              key={index}
-                              data-review-diff-index={isDiffPair(pair) ? index : undefined}
-                            >
-                              <span className="chat-review-line-no">
-                                {type === "del"
-                                  ? pair.left?.cell.lineNo ?? ""
-                                  : pair.right?.cell.lineNo ?? pair.left?.cell.lineNo ?? ""}
-                              </span>
-                              <span className="chat-review-marker" aria-hidden="true">
-                                {type === "del" ? "-" : type === "add" ? "+" : " "}
-                              </span>
-                              <span className="chat-review-code">
-                                {text ? renderTokens(text.tokens) : <span className="chat-review-code-empty" />}
-                              </span>
-                              {pair.changeStart && hunkIdx !== undefined && changeIdx !== undefined && active.undoable && (
-                                <button
-                                  type="button"
-                                  className="chat-review-hunk-undo"
-                                  onClick={() => handleHunkUndo(hunkIdx, changeIdx)}
-                                  disabled={undoBusy}
-                                  title="撤销此段修改"
-                                >
-                                  {isHunkUndoing(hunkIdx, changeIdx) ? (
-                                    <Loader2 className="chat-review-spin" size={11} />
-                                  ) : (
-                                    <Undo2 size={11} strokeWidth={2.2} />
-                                  )}
-                                  <span>撤销</span>
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
+                        <ReviewVirtualRows
+                          pairs={highlightedPairs}
+                          viewMode="unified"
+                          showDeletedInRight={false}
+                          scrollRef={diffScrollRef}
+                          undoable={!!active.undoable}
+                          undoBusy={undoBusy}
+                          isHunkUndoing={isHunkUndoing}
+                          onHunkUndo={handleHunkUndo}
+                        />
                         {truncated && (
                           <div className="chat-review-truncated">{uiText.review.truncated(MAX_RENDER_LINES)}</div>
                         )}

@@ -58,6 +58,7 @@ const classifyFile = (root: string, filePath: string): DiskUsageCategoryId => {
     const name = parts[1] || "";
     if (
       name.startsWith("sessionmessages.json") ||
+      name.startsWith("session-messages.sqlite") ||
       name.startsWith("projects.json") ||
       name.startsWith("currentmodel.json")
     ) {

@@ -11,6 +11,7 @@ import {
   getAssistantProcessLastActivityAt,
   hasOpenAssistantProcessState,
   isAgentStartupFailureMessage,
+  isUserSpeechMessage,
   normalizeAssistantProcessTerminalState,
   useChatStore,
   type AgentCommentary,
@@ -19,6 +20,7 @@ import {
   type SessionContextUsage,
 } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 import { parseComposerDocument } from "@shared/composer-document";
 
@@ -140,6 +142,7 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
     agentId,
     agentSessionId,
     title,
+    ...(getString(value.preview) ? { preview: getString(value.preview) } : {}),
     createdAt,
     lastActiveAt,
     sessionFilePath: getString(value.sessionFilePath),
@@ -243,16 +246,19 @@ export const parsePersistedChatMessage = (value: unknown): ChatMessage | null =>
   });
 };
 
-const parsePersistedMessages = (value: unknown): PersistedMessages | null => {
-  if (!isRecord(value) || !isRecord(value.sessionMessages)) return null;
-  const sessionMessages: Record<string, ChatMessage[]> = {};
-  for (const [sessionId, messages] of Object.entries(value.sessionMessages)) {
-    if (!Array.isArray(messages)) continue;
-    sessionMessages[sessionId] = messages
-      .map(parsePersistedChatMessage)
-      .filter((message): message is ChatMessage => !!message && !isAgentStartupFailureMessage(message));
-  }
-  return { sessionMessages };
+const updatePersistedSessionPreview = (sessionId: string, preview: string) => {
+  if (!preview) return;
+  const projects = useProjectStore.getState().projects;
+  let changed = false;
+  const nextProjects = projects.map((project) => ({
+    ...project,
+    sessions: project.sessions.map((session) => {
+      if (session.id !== sessionId || session.preview === preview) return session;
+      changed = true;
+      return { ...session, preview };
+    }),
+  }));
+  if (changed) useProjectStore.setState({ projects: nextProjects });
 };
 
 /**
@@ -278,12 +284,14 @@ export const applyPersistedMessagesSnapshot = (
   });
 };
 
-const stripTransientMessages = (sessionMessages: Record<string, ChatMessage[]>) => {
-  const result: Record<string, ChatMessage[]> = {};
-  for (const [sessionId, messages] of Object.entries(sessionMessages)) {
-    result[sessionId] = messages.filter((message) => !isAgentStartupFailureMessage(message));
-  }
-  return result;
+const stripTransientMessageList = (messages: ChatMessage[]) => (
+  messages.filter((message) => !isAgentStartupFailureMessage(message))
+);
+
+type PendingSessionMessageChanges = {
+  replace: boolean;
+  upserts: Map<string, { message: ChatMessage; sequence: number }>;
+  deletedIds: Set<string>;
 };
 
 const parseModelInfo = (value: unknown): ModelInfo | null => {
@@ -395,6 +403,21 @@ const notifySessionConfigUpdated = (sessionId: string) => {
 let _cacheDirty = false;
 let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
+let _messagesSnapshotNeedsFullRebuild = true;
+const SESSION_MESSAGE_PAGE_SIZE = 500;
+type SessionMessagePageState = {
+  /** 只要当前会话首次加载完成，即使结果为空也不能重复请求。 */
+  loaded: boolean;
+  loadFailed: boolean;
+  hasMore: boolean;
+  beforeSequence: number | null;
+  /** 当前内存页在 SQLite 完整消息序列中的绝对起点。 */
+  sequenceOffset: number;
+  loadedMessages: ChatMessage[];
+  loading: Promise<boolean> | null;
+};
+const sessionMessagePages = new Map<string, SessionMessagePageState>();
+const _pendingMessageChanges = new Map<string, PendingSessionMessageChanges>();
 const saveScheduler = new PersistenceFlushScheduler();
 
 const getCurrentPersistedMessages = (): PersistedMessages => ({
@@ -403,6 +426,160 @@ const getCurrentPersistedMessages = (): PersistedMessages => ({
   // walk every historical session before the save timer has elapsed.
   sessionMessages: useChatStore.getState().sessionMessages,
 });
+
+const parsePersistedMessageList = (value: unknown): ChatMessage[] => (
+  Array.isArray(value)
+    ? value
+      .map(parsePersistedChatMessage)
+      .filter((message): message is ChatMessage => !!message && !isAgentStartupFailureMessage(message))
+    : []
+);
+
+const createEmptySessionMessagePage = (): SessionMessagePageState => ({
+  loaded: false,
+  loadFailed: false,
+  hasMore: false,
+  beforeSequence: null,
+  sequenceOffset: 0,
+  loadedMessages: [],
+  loading: null,
+});
+
+const mergeSessionMessageLists = (loadedMessages: ChatMessage[], currentMessages: ChatMessage[]) => {
+  if (currentMessages.length === 0 || loadedMessages === currentMessages) return loadedMessages;
+  const currentById = new Map(currentMessages.map((message) => [message.id, message]));
+  const loadedIds = new Set(loadedMessages.map((message) => message.id));
+  const merged = [
+    ...loadedMessages.map((message) => currentById.get(message.id) || message),
+    ...currentMessages.filter((message) => !loadedIds.has(message.id)),
+  ];
+  return merged.length === currentMessages.length
+    && merged.every((message, index) => message === currentMessages[index])
+    ? currentMessages
+    : merged;
+};
+
+/**
+ * 读取某个会话的首屏页，但不直接改 Chat Store。启动恢复需要先完成
+ * 项目快照校验，再原子替换聊天状态；普通切换则通过 ensure... 写入 Store。
+ */
+const requestInitialSessionMessagePage = (sessionId: string): Promise<boolean> => {
+  const existing = sessionMessagePages.get(sessionId);
+  if (existing?.loaded) return Promise.resolve(true);
+  if (existing?.loading) return existing.loading;
+
+  const loadPage = window.electronAPI?.loadSessionMessagesPage;
+  if (typeof loadPage !== "function") return Promise.resolve(false);
+
+  const request = loadPage(
+    sessionId,
+    undefined,
+    SESSION_MESSAGE_PAGE_SIZE,
+  ).then(
+    (result) => ({ result, failed: false }),
+    () => ({
+      result: { messages: [], hasMore: false, nextBefore: null, firstSequence: 0 },
+      failed: true,
+    }),
+  ).then(({ result, failed }) => {
+      const page = sessionMessagePages.get(sessionId) || createEmptySessionMessagePage();
+      page.loaded = true;
+      page.loadFailed = failed;
+      page.hasMore = result.hasMore === true;
+      page.beforeSequence = typeof result.nextBefore === "number" ? result.nextBefore : null;
+      page.sequenceOffset = Number.isSafeInteger(result.firstSequence) ? result.firstSequence : 0;
+      page.loadedMessages = parsePersistedMessageList(result.messages);
+      page.loading = null;
+      sessionMessagePages.set(sessionId, page);
+      return true;
+    });
+  sessionMessagePages.set(sessionId, {
+    ...(existing || createEmptySessionMessagePage()),
+    loading: request,
+  });
+  return request;
+};
+
+/** 非阻塞地恢复侧栏预览，不把摘要混入聊天正文的分页缓存。 */
+const loadSessionMessageSummaries = (sessionIds: string[]) => {
+  const loadSummaries = window.electronAPI?.loadSessionMessageSummaries;
+  if (typeof loadSummaries !== "function" || sessionIds.length === 0) return;
+  void loadSummaries(sessionIds).then((summaries) => {
+    for (const [sessionId, value] of Object.entries(summaries || {})) {
+      const message = parsePersistedChatMessage(value);
+      if (message && isUserSpeechMessage(message)) {
+        updatePersistedSessionPreview(sessionId, getChatMessagePreviewText(message));
+      }
+    }
+  }).catch(() => undefined);
+};
+
+/** 确保指定会话已经从 SQLite 恢复最近一页；未访问的会话不会在启动时触发此函数。 */
+export async function ensureSessionMessagesLoaded(sessionId: string): Promise<boolean> {
+  if (!sessionId) return false;
+  await requestInitialSessionMessagePage(sessionId);
+  const page = sessionMessagePages.get(sessionId);
+  if (!page) return false;
+
+  const state = useChatStore.getState();
+  const currentMessages = state.sessionMessages[sessionId]
+    || (state.activeSessionId === sessionId ? state.messages : []);
+  const mergedMessages = mergeSessionMessageLists(page.loadedMessages, currentMessages);
+  page.loadedMessages = mergedMessages;
+  useChatStore.getState().loadSessionMessages(sessionId, mergedMessages);
+  return page.loaded && !page.loadFailed;
+}
+
+export function hasOlderSessionMessages(sessionId: string): boolean {
+  return sessionMessagePages.get(sessionId)?.loaded === true
+    && sessionMessagePages.get(sessionId)?.hasMore === true;
+}
+
+export async function loadOlderSessionMessages(sessionId: string): Promise<boolean> {
+  let page = sessionMessagePages.get(sessionId);
+  if (!page?.loaded) {
+    await ensureSessionMessagesLoaded(sessionId);
+    page = sessionMessagePages.get(sessionId);
+  }
+  if (!page?.hasMore) return false;
+  if (page.loading) return page.loading;
+
+  const loadPage = window.electronAPI?.loadSessionMessagesPage;
+  if (typeof loadPage !== "function") return false;
+  const request = loadPage(
+    sessionId,
+    page.beforeSequence ?? undefined,
+    SESSION_MESSAGE_PAGE_SIZE,
+  ).then((result) => ({ result, failed: false }), () => ({
+    result: { messages: [], hasMore: false, nextBefore: null, firstSequence: page!.sequenceOffset },
+    failed: true,
+  })).then(({ result, failed }) => {
+      const olderMessages = parsePersistedMessageList(result.messages);
+      const state = useChatStore.getState();
+      const existingMessages = state.sessionMessages[sessionId]
+        || (state.activeSessionId === sessionId ? state.messages : []);
+      const mergedMessages = mergeSessionMessageLists(olderMessages, existingMessages);
+      const currentPage = sessionMessagePages.get(sessionId) || createEmptySessionMessagePage();
+      currentPage.loaded = true;
+      currentPage.loadFailed = failed;
+      if (!failed) {
+        currentPage.hasMore = result.hasMore === true;
+        currentPage.beforeSequence = typeof result.nextBefore === "number" ? result.nextBefore : null;
+      }
+      if (olderMessages.length > 0) {
+        currentPage.sequenceOffset = Number.isSafeInteger(result.firstSequence)
+          ? result.firstSequence
+          : currentPage.sequenceOffset;
+      }
+      currentPage.loadedMessages = mergedMessages;
+      currentPage.loading = null;
+      sessionMessagePages.set(sessionId, currentPage);
+      useChatStore.getState().loadSessionMessages(sessionId, mergedMessages);
+      return olderMessages.length > 0;
+    });
+  page.loading = request;
+  return request;
+}
 
 export class PersistenceHydrationGate {
   private generation = 0;
@@ -449,23 +626,91 @@ function scheduleProjectsSave(data: PersistedData) {
   saveScheduler.schedule("projects", 500, flushProjectsToDisk);
 }
 
+const queueSessionMessageChanges = (
+  sessionId: string,
+  previousMessages: ChatMessage[],
+  nextMessages: ChatMessage[],
+  replace = false,
+) => {
+  const previous = stripTransientMessageList(previousMessages);
+  const next = stripTransientMessageList(nextMessages);
+  const sequenceOffset = sessionMessagePages.get(sessionId)?.sequenceOffset || 0;
+  const previousById = new Map(previous.map((message, index) => [
+    message.id,
+    { message, sequence: sequenceOffset + index },
+  ]));
+  const current = _pendingMessageChanges.get(sessionId) || {
+    replace: false,
+    upserts: new Map<string, { message: ChatMessage; sequence: number }>(),
+    deletedIds: new Set<string>(),
+  };
+  current.replace ||= replace;
+
+  const nextIds = new Set<string>();
+  for (let sequence = 0; sequence < next.length; sequence += 1) {
+    const message = next[sequence];
+    nextIds.add(message.id);
+    const previousEntry = previousById.get(message.id);
+    const absoluteSequence = sequenceOffset + sequence;
+    if (replace || !previousEntry || previousEntry.message !== message || previousEntry.sequence !== absoluteSequence) {
+      current.upserts.set(message.id, { message, sequence: absoluteSequence });
+      current.deletedIds.delete(message.id);
+    }
+  }
+  for (const message of previous) {
+    if (!nextIds.has(message.id)) {
+      current.deletedIds.add(message.id);
+      current.upserts.delete(message.id);
+    }
+  }
+  _pendingMessageChanges.set(sessionId, current);
+};
+
 function flushMessagesToDisk() {
   saveScheduler.clearMany(["messages", "streamingMessages"]);
   if (!persistenceHydration.canPersist()) {
     _pendingMessagesData = null;
+    _pendingMessageChanges.clear();
     return;
   }
   if (!_pendingMessagesData) return;
   const data = _pendingMessagesData;
   _pendingMessagesData = null;
-  window.electronAPI.saveData("sessionMessages", {
-    sessionMessages: stripTransientMessages(data.sessionMessages),
-  });
+
+  if (_messagesSnapshotNeedsFullRebuild) {
+    for (const [sessionId, messages] of Object.entries(data.sessionMessages)) {
+      const persisted = stripTransientMessageList(messages);
+      const page = sessionMessagePages.get(sessionId);
+      const sequenceOffset = page?.sequenceOffset || 0;
+      // 只加载最近一页时，不能 replace 整个会话，否则会误删尚未加载的旧消息。
+      const replace = page?.hasMore !== true && page?.loadFailed !== true;
+      _pendingMessageChanges.set(sessionId, {
+        replace,
+        upserts: new Map(persisted.map((message, sequence) => [
+          message.id,
+          { message, sequence: sequenceOffset + sequence },
+        ])),
+        deletedIds: new Set(),
+      });
+    }
+    _messagesSnapshotNeedsFullRebuild = false;
+  }
+
+  const changes = [..._pendingMessageChanges.entries()];
+  _pendingMessageChanges.clear();
+  for (const [sessionId, sessionChanges] of changes) {
+    void window.electronAPI.saveSessionMessages(sessionId, {
+      replace: sessionChanges.replace,
+      upserts: [...sessionChanges.upserts.values()],
+      deletedIds: [...sessionChanges.deletedIds],
+    });
+  }
 }
 
-function scheduleMessagesSave(data?: PersistedMessages) {
+function scheduleMessagesSave(data?: PersistedMessages, forceFull = false) {
   if (!persistenceHydration.canPersist()) return;
   _pendingMessagesData = data || getCurrentPersistedMessages();
+  if (data || forceFull) _messagesSnapshotNeedsFullRebuild = true;
   saveScheduler.schedule("messages", 1000, flushMessagesToDisk);
 }
 
@@ -595,6 +840,11 @@ export async function purgeDeletedSessionData(sessionIds: string[], projectIds: 
     saveScheduler.schedule("models", 500, flushModelsToDisk);
   }
 
+  // 已删会话的分页状态必须一起清掉，否则 hasMore/beforeSequence 会指向已经不存在的行。
+  for (const sessionId of normalizedSessionIds) {
+    _pendingMessageChanges.delete(sessionId);
+    sessionMessagePages.delete(sessionId);
+  }
   if (_pendingMessagesData) {
     _pendingMessagesData = {
       sessionMessages: withoutSessionKeys(_pendingMessagesData.sessionMessages, normalizedSessionIds),
@@ -673,13 +923,15 @@ export function useDataPersistence() {
     let cancelled = false;
     _pendingProjectsData = null;
     _pendingMessagesData = null;
+    _messagesSnapshotNeedsFullRebuild = true;
+    _pendingMessageChanges.clear();
+    sessionMessagePages.clear();
     saveScheduler.clearMany(["projects", "messages", "streamingMessages"]);
 
     Promise.all([
       window.electronAPI.loadData("projects").catch(() => null),
-      window.electronAPI.loadData("sessionMessages").catch(() => null),
       window.electronAPI.loadData("currentModel").catch(() => null),
-    ]).then(([projectData, msgData, modelData]) => {
+    ]).then(async ([projectData, modelData]) => {
       if (cancelled || !persistenceHydration.isCurrent(hydrationGeneration)) return;
 
       // 1. Load projects and restore active session
@@ -707,19 +959,22 @@ export function useDataPersistence() {
         useProjectStore.setState({ projectDataHydrated: true });
       }
 
-      // 2. Load session messages
-      const md = parsePersistedMessages(msgData);
-      if (md) {
+      // 2. 只恢复当前活动会话的最近一页。其它会话保留在 SQLite 中，
+      // 用户真正切换过去时才通过 ensureSessionMessagesLoaded() 读取，避免
+      // 会话数量或历史总量把启动时间线性拉长。
+      if (validSessionIds && activeSessionId) {
+        await requestInitialSessionMessagePage(activeSessionId);
+        if (cancelled || !persistenceHydration.isCurrent(hydrationGeneration)) return;
+        const activePage = sessionMessagePages.get(activeSessionId);
+        const sessionMessages: Record<string, ChatMessage[]> = {};
+        if (activePage && activePage.loadedMessages.length > 0) {
+          sessionMessages[activeSessionId] = activePage.loadedMessages;
+        }
         hydratedMessagesLoaded = true;
-        const sessionMessages = validSessionIds
-          ? Object.fromEntries(Object.entries(md.sessionMessages).filter(([sessionId]) => validSessionIds!.has(sessionId)))
-          : md.sessionMessages;
         applyPersistedMessagesSnapshot(sessionMessages, activeSessionId);
       } else {
-        // A failed or invalid disk snapshot must not inherit renderer memory
-        // left behind by a previous mount. In particular, switchSession()
-        // would persist that old active array under the restored session and
-        // could revive a completed process as "running" after HMR/reload.
+        // A failed or invalid project snapshot must not inherit renderer memory
+        // left behind by a previous mount.
         applyPersistedMessagesSnapshot({}, activeSessionId);
       }
 
@@ -787,10 +1042,11 @@ export function useDataPersistence() {
       // normalization (stale processes, commentary and compaction) is not
       // revived again on the next launch when no later chat mutation occurs.
       if (hydratedMessagesLoaded) {
-        scheduleMessagesSave();
+        scheduleMessagesSave(undefined, true);
       }
 
       if (validSessionIds) {
+        loadSessionMessageSummaries([...validSessionIds]);
         void window.electronAPI.purgeSessionData({
           validSessionIds: [...validSessionIds],
           validProjectIds: d?.projects.map((project) => project.id) || [],
@@ -854,10 +1110,19 @@ export function useDataPersistence() {
       lastSessionMessages = state.sessionMessages;
 
       for (const sessionId of Object.keys(previousSessionMessages)) {
-        if (!(sessionId in state.sessionMessages)) streamingSessionIds.delete(sessionId);
+        if (!(sessionId in state.sessionMessages)) {
+          streamingSessionIds.delete(sessionId);
+          queueSessionMessageChanges(sessionId, previousSessionMessages[sessionId] || [], []);
+        }
       }
       for (const [sessionId, messages] of Object.entries(state.sessionMessages)) {
-        if (messages === previousSessionMessages[sessionId]) continue;
+        const previous = previousSessionMessages[sessionId] || [];
+        if (messages === previous) continue;
+        const firstUserMessage = messages.find(isUserSpeechMessage);
+        if (firstUserMessage) {
+          updatePersistedSessionPreview(sessionId, getChatMessagePreviewText(firstUserMessage));
+        }
+        queueSessionMessageChanges(sessionId, previous, messages);
         if (messages.some(hasOpenAssistantProcessState)) streamingSessionIds.add(sessionId);
         else streamingSessionIds.delete(sessionId);
       }

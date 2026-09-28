@@ -7,49 +7,21 @@ import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-act
 import type { AgentPermissionMode } from "./agent-permissions";
 import type { ComposerDocument, ComposerNode } from "./composer-document";
 
-export const REMOTE_PROTOCOL_VERSION = 1 as const;
-export const DEFAULT_REMOTE_PORT = 47831;
-export const REMOTE_HISTORY_PAGE_SIZE = 50;
-export const MAX_REMOTE_IMAGES = 4;
-export const MAX_REMOTE_SESSION_REFERENCES = 8;
-export const MAX_REMOTE_IMAGE_BYTES = 2 * 1024 * 1024;
-export const MAX_REMOTE_REQUEST_BYTES = 8 * 1024 * 1024;
+import {
+  MAX_REMOTE_IMAGES,
+  MAX_REMOTE_IMAGE_BYTES,
+  MAX_REMOTE_SESSION_REFERENCES,
+  REMOTE_HISTORY_PAGE_SIZE,
+  REMOTE_PROTOCOL_VERSION,
+  REMOTE_REQUEST_NAMES,
+  type RemoteEventName,
+  type RemoteRequestName,
+} from "./remote-constants";
 
-export const REMOTE_REQUEST_NAMES = [
-  "catalog.get",
-  "session.get",
-  "session.create",
-  "session.fork",
-  "session.close",
-  "session.reopen",
-  "session.send",
-  "session.abort",
-  "session.reload",
-  "session.queue.guide",
-  "session.queue.edit",
-  "session.queue.reorder",
-  "session.queue.remove",
-  "session.setModel",
-  "session.setThinking",
-  "session.models.get",
-  "session.actions.get",
-  "settings.setPlanMode",
-  "settings.setPermissionMode",
-  "interaction.respond",
-] as const;
-
-export const REMOTE_EVENT_NAMES = [
-  "catalog.updated",
-  "session.message.upsert",
-  "session.messages.replace",
-  "session.runtime.updated",
-  "session.queue.updated",
-  "session.interaction.updated",
-  "session.config.updated",
-] as const;
-
-export type RemoteRequestName = typeof REMOTE_REQUEST_NAMES[number];
-export type RemoteEventName = typeof REMOTE_EVENT_NAMES[number];
+// 常量本体在 remote-constants.ts：渲染进程/移动端只需要那些数值，直接引用
+// 那边就不会把本文件（含 zod schema）带进它们的 bundle。这里重新导出，
+// 保持既有引用路径可用。
+export * from "./remote-constants";
 
 const nonEmptyString = z.string().trim().min(1).max(4096);
 const requestIdSchema = z.string().trim().min(1).max(128);

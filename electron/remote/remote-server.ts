@@ -149,6 +149,8 @@ class RemoteAccessServer {
   private catalog: RemoteProject[] = [];
   private agents: RemoteAgent[] = [];
   private messages = new Map<string, RemoteChatMessage[]>();
+  // 远程消息 upsert 的高频路径按 ID 定位，避免每次流式更新都复制并线性查找整段历史。
+  private messageIndexes = new Map<string, Map<string, number>>();
   private queues = new Map<string, RemoteQueuedMessage[]>();
   private interactions = new Map<string, RemoteInteraction | null>();
   private configs = new Map<string, RemoteSessionConfig>();
@@ -615,6 +617,10 @@ class RemoteAccessServer {
       this.agents = update.agents;
       const sessionIds = update.catalog.flatMap((project) => project.sessions.map((session) => session.id));
       this.messages = new Map(sessionIds.map((sessionId) => [sessionId, update.messages[sessionId] || []]));
+      this.messageIndexes = new Map(sessionIds.map((sessionId) => [
+        sessionId,
+        new Map((this.messages.get(sessionId) || []).map((message, index) => [message.id, index])),
+      ]));
       this.queues = new Map(sessionIds.map((sessionId) => [sessionId, update.queues[sessionId] || []]));
       this.interactions = new Map(sessionIds.map((sessionId) => [sessionId, update.interactions[sessionId] || null]));
       this.configs = new Map(sessionIds.flatMap((sessionId) => {
@@ -679,14 +685,23 @@ class RemoteAccessServer {
     if (!sessionExists) return;
     const revision = this.nextRevision(update.sessionId);
     if (update.type === "session.message.upsert") {
-      const messages = [...(this.messages.get(update.sessionId) || [])];
-      const index = messages.findIndex((message) => message.id === update.message.id);
-      if (index >= 0) messages[index] = update.message;
-      else messages.push(update.message);
+      const messages = this.messages.get(update.sessionId) || [];
+      const index = this.messageIndexes.get(update.sessionId) || new Map<string, number>();
+      const existingIndex = index.get(update.message.id);
+      if (existingIndex !== undefined && messages[existingIndex]?.id === update.message.id) {
+        messages[existingIndex] = update.message;
+      } else {
+        index.set(update.message.id, messages.length);
+        messages.push(update.message);
+      }
       this.messages.set(update.sessionId, messages);
+      this.messageIndexes.set(update.sessionId, index);
       this.broadcast("session.message.upsert", { sessionId: update.sessionId, message: update.message }, revision);
     } else if (update.type === "session.messages.replace") {
       this.messages.set(update.sessionId, update.messages);
+      this.messageIndexes.set(update.sessionId, new Map(
+        update.messages.map((message, index) => [message.id, index]),
+      ));
       this.broadcast("session.messages.replace", { sessionId: update.sessionId, messages: update.messages }, revision);
     } else if (update.type === "session.queue") {
       this.queues.set(update.sessionId, update.queue);
@@ -707,6 +722,7 @@ class RemoteAccessServer {
       }
     };
     prune(this.messages);
+    prune(this.messageIndexes);
     prune(this.queues);
     prune(this.interactions);
     prune(this.configs);

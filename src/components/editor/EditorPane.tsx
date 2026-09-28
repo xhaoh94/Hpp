@@ -1,23 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search, WholeWord } from "lucide-react";
 import { EditorView, basicSetup } from "codemirror";
-import { Compartment, EditorState, EditorSelection, Extension, StateEffect, StateField, Transaction } from "@codemirror/state";
+import { Compartment, EditorState, EditorSelection, StateEffect, StateField, Transaction, type Extension } from "@codemirror/state";
 import { Decoration, keymap } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
-import { javascript } from "@codemirror/lang-javascript";
-import { json } from "@codemirror/lang-json";
-import { css } from "@codemirror/lang-css";
-import { html } from "@codemirror/lang-html";
-import { markdown } from "@codemirror/lang-markdown";
-import { python } from "@codemirror/lang-python";
-import { sql } from "@codemirror/lang-sql";
-import { xml } from "@codemirror/lang-xml";
-import { yaml } from "@codemirror/lang-yaml";
-import { lua } from "@codemirror/legacy-modes/mode/lua";
 import { showMinimap } from "../../lib/codemirror-minimap/index.js";
-import { csharp } from "@codemirror/legacy-modes/mode/clike";
 import { EDITOR_GOTO_MATCH_EVENT, EDITOR_REPLACE_MATCH_EVENT, pendingGoto, requestGotoMatch, sharedSearchConfig, type AllFileMatch, type GotoMatchDetail, type ReplaceMatchDetail } from "./searchConfig";
 import { uiText } from "@/i18n/text";
 import { isSameFileTreePath } from "@/lib/file-tree-paths";
@@ -55,8 +44,10 @@ interface EditorContextMenuState {
 interface EditorPaneProps {
   /** Absolute file path. */
   path: string;
-  /** When false the pane is hidden but the editor instance stays alive. */
+  /** When false the mounted pane is hidden; inactive panes may be released by the parent. */
   visible: boolean;
+  /** 未保存标签页被回收后，用内存快照恢复编辑内容；undefined 表示直接读取磁盘。 */
+  initialContent?: string;
   /** Report that the document now has unsaved changes. */
   onDirtyChange: (dirty: boolean) => void;
   /** Report the latest document text so project-level search can stay in sync with unsaved edits. */
@@ -273,54 +264,83 @@ const searchHighlightField = StateField.define<EditorSearchHighlight>({
     }),
 });
 
-function getLanguageExtension(filePath: string): Extension[] {
+async function loadLanguageExtension(filePath: string): Promise<Extension[]> {
   const fileName = filePath.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   const ext = fileName.split(".").pop() ?? "";
   const base = fileName.replace(/\.(json|jsonc)$/i, "");
   if (base === "package" || base === "tsconfig" || base === "tsconfig.base" || base === "composer") {
+    const { json } = await import("@codemirror/lang-json");
     return [json()];
   }
   switch (ext) {
     case "ts":
     case "mts":
-    case "cts":
+    case "cts": {
+      const { javascript } = await import("@codemirror/lang-javascript");
       return [javascript({ typescript: true })];
-    case "tsx":
+    }
+    case "tsx": {
+      const { javascript } = await import("@codemirror/lang-javascript");
       return [javascript({ typescript: true, jsx: true })];
+    }
     case "js":
     case "mjs":
-    case "cjs":
+    case "cjs": {
+      const { javascript } = await import("@codemirror/lang-javascript");
       return [javascript()];
-    case "jsx":
+    }
+    case "jsx": {
+      const { javascript } = await import("@codemirror/lang-javascript");
       return [javascript({ jsx: true })];
+    }
     case "json":
-    case "jsonc":
+    case "jsonc": {
+      const { json } = await import("@codemirror/lang-json");
       return [json()];
+    }
     case "css":
     case "scss":
-    case "less":
+    case "less": {
+      const { css } = await import("@codemirror/lang-css");
       return [css()];
+    }
     case "html":
-    case "htm":
+    case "htm": {
+      const { html } = await import("@codemirror/lang-html");
       return [html()];
+    }
     case "md":
     case "mdx":
-    case "markdown":
+    case "markdown": {
+      const { markdown } = await import("@codemirror/lang-markdown");
       return [markdown()];
-    case "py":
+    }
+    case "py": {
+      const { python } = await import("@codemirror/lang-python");
       return [python()];
-    case "sql":
+    }
+    case "sql": {
+      const { sql } = await import("@codemirror/lang-sql");
       return [sql()];
+    }
     case "xml":
-    case "svg":
+    case "svg": {
+      const { xml } = await import("@codemirror/lang-xml");
       return [xml()];
+    }
     case "yaml":
-    case "yml":
+    case "yml": {
+      const { yaml } = await import("@codemirror/lang-yaml");
       return [yaml()];
-    case "lua":
+    }
+    case "lua": {
+      const { lua } = await import("@codemirror/legacy-modes/mode/lua");
       return [StreamLanguage.define(lua)];
-    case "cs":
+    }
+    case "cs": {
+      const { csharp } = await import("@codemirror/legacy-modes/mode/clike");
       return [StreamLanguage.define(csharp)];
+    }
     default:
       return [];
   }
@@ -329,6 +349,7 @@ function getLanguageExtension(filePath: string): Extension[] {
 export function EditorPane({
   path,
   visible,
+  initialContent,
   onDirtyChange,
   onDocumentChange,
   onSaved,
@@ -352,6 +373,7 @@ export function EditorPane({
   const themeCompartmentRef = useRef<Compartment | null>(null);
   const highlightCompartmentRef = useRef<Compartment | null>(null);
   const langCompartmentRef = useRef<Compartment | null>(null);
+  const languageExtensionsRef = useRef<Extension[]>([]);
   const dirtyRef = useRef(false);
   const savingRef = useRef(false);
   const readonlyRef = useRef(false);
@@ -1094,7 +1116,8 @@ export function EditorPane({
     langCompartmentRef.current = langCompartment;
 
     const colors = getColors();
-    const langExtensions = getLanguageExtension(path);
+    languageExtensionsRef.current = [];
+    const languageExtensionsPromise = loadLanguageExtension(path).catch(() => [] as Extension[]);
     const view = new EditorView({
       parent: container,
       state: EditorState.create({
@@ -1178,11 +1201,12 @@ export function EditorPane({
           themeCompartment.of(buildEditorTheme(colors)),
           highlightCompartment.of(syntaxHighlighting(buildHighlightStyle(colors))),
           searchHighlightField,
-          langCompartment.of(langExtensions),
+          langCompartment.of([]),
           tmHighlightPlugin({
             language: getTextMateLanguage(path),
             langCompartment,
-            fallbackLanguage: langExtensions,
+            fallbackLanguage: [],
+            fallbackLanguageRef: languageExtensionsRef,
             onStatus: (status) => onTmStatusRef.current?.(status),
           }),
           readOnlyCompartment.of(EditorState.readOnly.of(false)),
@@ -1366,23 +1390,31 @@ export function EditorPane({
       void window.electronAPI.watchPath(path, false).catch(() => undefined);
     };
 
-    void window.electronAPI.readFile(path).then((result) => {
+    void window.electronAPI.readFile(path).then(async (result) => {
       if (disposed) return;
-      if (!result.success) {
+      if (!result.success && initialContent === undefined) {
         readonlyRef.current = true;
         setReadOnly(true);
         setStatus("error");
         setStatusMessage(result.error || uiText.editor.readOnlyError);
         return;
       }
-      if (result.binary) {
+      if (result.binary && initialContent === undefined) {
         readonlyRef.current = true;
         setReadOnly(true);
         setStatus("readonly");
         return;
       }
-      const content = result.content ?? "";
-      originalContentRef.current = content;
+      // 回收未活跃 Pane 后，脏标签页优先恢复内存快照；磁盘内容只作为
+      // dirty 基线，用于继续显示未保存状态和后续保存。
+      const diskContent = result.success && !result.binary ? result.content ?? "" : "";
+      const content = initialContent !== undefined ? initialContent : diskContent;
+      const restoredDirty = initialContent !== undefined && initialContent !== diskContent;
+      const langExtensions = await languageExtensionsPromise;
+      if (disposed) return;
+      languageExtensionsRef.current = langExtensions;
+      originalContentRef.current = diskContent;
+      dirtyRef.current = restoredDirty;
       initializingRef.current = true;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: content },
@@ -1392,15 +1424,20 @@ export function EditorPane({
       });
       initializingRef.current = false;
       onDocumentChangeRef.current(path, content);
+      onDirtyChangeRef.current(restoredDirty);
       startFileWatcher();
       setStatus("ready");
-      // TextMate 高亮：lua/cs 且文件在阈值内时启用（大文件自动回退 StreamLanguage）。
+      // 语言包按文件类型异步加载；lua/cs 在阈值内时交给 TextMate，
+      // 大文件或 TextMate 不可用时保留动态加载的 StreamLanguage 回退。
       const tmLanguage = getTextMateLanguage(path);
+      const tmEnabled = !!tmLanguage
+        && estimateTextBytes(content) <= MAX_TM_BYTES
+        && content.split("\n").length <= MAX_TM_LINES;
+      view.dispatch({
+        effects: langCompartment.reconfigure(tmEnabled ? [] : langExtensions),
+      });
       if (tmLanguage) {
-        const bytes = estimateTextBytes(content);
-        const lineCount = content.split("\n").length;
-        const enabled = bytes <= MAX_TM_BYTES && lineCount <= MAX_TM_LINES;
-        view.dispatch({ effects: tmEnableEffect.of({ language: tmLanguage, enabled }) });
+        view.dispatch({ effects: tmEnableEffect.of({ language: tmLanguage, enabled: tmEnabled }) });
       }
       requestAnimationFrame(() => view.requestMeasure());
     });
@@ -1420,7 +1457,7 @@ export function EditorPane({
       highlightCompartmentRef.current = null;
       langCompartmentRef.current = null;
     };
-  }, [path, setReadOnly, save, openSearch, openGoToLine]);
+  }, [path, initialContent, setReadOnly, save, openSearch, openGoToLine]);
 
   // 监听全局 data-theme 切换，动态更新编辑器主题与高亮配色。
   useEffect(() => {

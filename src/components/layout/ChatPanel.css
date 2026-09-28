@@ -65,20 +65,12 @@
   gap: 8px;
 }
 
-.chat-header-app-title,
 .chat-agent-name,
 .chat-agent-tag,
 .chat-context-ring,
 .chat-header-session-title {
   min-width: 0;
   white-space: nowrap;
-}
-
-.chat-header-app-title {
-  flex: 0 0 auto;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 650;
 }
 
 .chat-header-separator {
@@ -92,7 +84,8 @@
   overflow: hidden;
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 500;
+  /* 头部首个标签（状态点之后）由项目名承担，沿用原应用名的视觉权重。 */
+  font-weight: 650;
   text-overflow: ellipsis;
 }
 
@@ -6288,6 +6281,30 @@ body.chat-questionnaire-resizing .chat-bubble {
   line-height: 1.6;
 }
 
+.chat-review-virtual-list {
+  width: 100%;
+  min-width: 0;
+}
+
+.chat-review-virtual-row {
+  min-width: 0;
+}
+
+.chat-review-split-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+}
+
+.chat-review-split-row > .chat-review-col {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+
+.chat-review-split-row .chat-review-col-line.empty {
+  min-height: 26px;
+}
+
 .chat-review-row {
   display: flex;
   min-width: 0;
@@ -6315,6 +6332,9 @@ body.chat-questionnaire-resizing .chat-bubble {
   align-items: flex-start;
   min-width: 0;
   position: relative;
+  /* 大 Diff 仍保持行号/滚动布局，但让 Chromium 跳过屏外行的绘制。 */
+  content-visibility: auto;
+  contain-intrinsic-size: 24px;
 }
 
 /* 左列（原文件）：被删除的行标红；右列（修改后）标出增删 */
@@ -6406,6 +6426,8 @@ body.chat-questionnaire-resizing .chat-bubble {
   align-items: flex-start;
   min-width: 0;
   position: relative;
+  content-visibility: auto;
+  contain-intrinsic-size: 24px;
 }
 
 .chat-review-line.context {

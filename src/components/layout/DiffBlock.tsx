@@ -4,8 +4,8 @@ import { buildDiffSummary, type DiffLike } from "@shared/diff-summary";
 import { buildReviewDiff } from "@shared/patch-split";
 import type { ReviewUndoState } from "@shared/review-undo";
 import { uiText } from "@/i18n/text";
-import { CodeReviewDialog } from "./CodeReviewDialog";
-import { FilePreview } from "@/components/shared/FilePreview";
+import { LazyCodeReviewDialog } from "./LazyCodeReviewDialog";
+import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { useEditorStore } from "@/stores/editor-store";
 
 type DiffBlockProps = {
@@ -15,6 +15,8 @@ type DiffBlockProps = {
   onOpenChange?: (open: boolean) => void;
 };
 
+const FilePreview = LazyFilePreview;
+const CodeReviewDialog = LazyCodeReviewDialog;
 const DEFAULT_VISIBLE_FILES = 3;
 
 export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBlockProps) {

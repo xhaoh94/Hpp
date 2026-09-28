@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
-import { useChatStore, isUserSpeechMessage } from "@/stores/chat-store";
+import { useProjectStore, type AgentStatus, type Project, type ProjectSession } from "@/stores/project-store";
+import { useChatStore, isUserSpeechMessage, type ChatMessage } from "@/stores/chat-store";
+import { useShallow } from "zustand/react/shallow";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
@@ -45,11 +46,35 @@ interface Props {
 }
 
 export function ProjectCard({ project, initialSessionsCollapsed = false }: Props) {
-  const { removeProject, removeSession, activeProjectId, activeSessionId, agentStatuses } = useProjectStore();
   const {
-    sessionMessages,
-    deleteSessionsMessages,
-  } = useChatStore();
+    removeProject,
+    removeSession,
+    activeProjectId,
+    activeSessionId,
+  } = useProjectStore(useShallow((state) => ({
+    removeProject: state.removeProject,
+    removeSession: state.removeSession,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+  })));
+  // 只返回本项目会话的状态。其它项目会话状态变化时，useShallow
+  // 可以复用当前结果，避免所有 ProjectCard 一起重渲染。
+  const agentStatuses = useProjectStore(useShallow((state) => {
+    const statuses: Record<string, AgentStatus | undefined> = {};
+    for (const session of project.sessions) statuses[session.id] = state.agentStatuses[session.id];
+    return statuses;
+  }));
+  const deleteSessionsMessages = useChatStore((state) => state.deleteSessionsMessages);
+  // 只订阅本项目会话的消息。聊天流式期间 store 每 120ms 写一次，订阅整个
+  // sessionMessages 会让侧栏里每张互不相干的项目卡片都跟着重渲染。
+  const sessionMessages = useChatStore(useShallow((state) => {
+    const next: Record<string, ChatMessage[]> = {};
+    for (const session of project.sessions) {
+      const messages = state.sessionMessages[session.id];
+      if (messages) next[session.id] = messages;
+    }
+    return next;
+  }));
   const [showHistory, setShowHistory] = useState(false);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(initialSessionsCollapsed);
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
@@ -457,9 +482,11 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
             const status = agentStatuses[session.id];
             const agentBadgeLabel = getSessionAgentBadgeLabel(session.agentId);
             const firstUserMsg = sessionMessages[session.id]?.find((m) => isUserSpeechMessage(m));
-            // 页签标题被 CSS 截断（且预览只取 30 字符），悬浮时给出未截断的
-            // 完整首条内容，方便在多个同名/长提示语的会话之间辨认。
-            const tabPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
+            // 未访问会话正文尚未加载时使用轻量摘要；当前会话仍优先使用内存中的
+            // 消息，保证用户刚发出的首条请求立即反映到页签。
+            const tabPreview = firstUserMsg
+              ? getChatMessagePreviewText(firstUserMsg)
+              : session.preview || "";
             const tabLabel = tabPreview || session.title;
             return (
               <div

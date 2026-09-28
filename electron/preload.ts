@@ -119,6 +119,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   loadData: (key: string) => ipcRenderer.invoke("store:load", key),
   saveData: (key: string, data: unknown) =>
     ipcRenderer.invoke("store:save", key, data),
+  loadSessionMessages: (sessionId: string) =>
+    ipcRenderer.invoke("store:loadSessionMessages", sessionId),
+  loadSessionMessageSummaries: (sessionIds: string[]) =>
+    ipcRenderer.invoke("store:loadSessionMessageSummaries", sessionIds),
+  loadSessionMessagesPage: (sessionId: string, beforeSequence?: number, limit?: number) =>
+    ipcRenderer.invoke("store:loadSessionMessagesPage", sessionId, beforeSequence, limit),
+  saveSessionMessages: (sessionId: string, messages: unknown) =>
+    ipcRenderer.invoke("store:saveSessionMessages", sessionId, messages),
+  deleteSessionMessages: (sessionIds: string[]) =>
+    ipcRenderer.invoke("store:deleteSessionMessages", sessionIds),
   purgeSessionData: (request: SessionDataPurgeRequest) =>
     ipcRenderer.invoke("store:purgeSessions", request),
   getDiskUsage: (): Promise<DiskUsageStats> => ipcRenderer.invoke("storage:getUsage"),

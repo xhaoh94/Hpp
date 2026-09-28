@@ -249,7 +249,14 @@ export function SettingsView() {
     setDiskCleanupLoading(true);
     setDiskUsageError("");
     try {
-      const projects = useProjectStore.getState().projects;
+      const projectState = useProjectStore.getState();
+      // validSessionIds 传空数组 = "所有会话都是孤儿"。未水合就清理会删掉全部 SQLite 消息行，
+      // 而这条路径绕过 purgeDeletedSessionData，内存里的消息不会同步清空 —— 用户当场看不出来。
+      if (!projectState.projectDataHydrated) {
+        showFloatingToastMessage("项目数据尚未加载完成，请稍后重试");
+        return;
+      }
+      const projects = projectState.projects;
       const validSessionIds = projects.flatMap((project) => project.sessions.map((session) => session.id));
       const purgeResult = await window.electronAPI.purgeSessionData({
         validSessionIds,

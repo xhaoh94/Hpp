@@ -584,7 +584,7 @@ function ProcessEntryRow({
             <ProcessEntryIcon type="thinking" />
           </span>
           <div className="chat-process-output chat-process-thinking-output">
-            <MarkdownRenderer content={entry.detail} />
+            <MarkdownRenderer content={entry.detail} deferHighlight={thinkingRunning} />
           </div>
         </div>
       );
@@ -608,12 +608,12 @@ function ProcessEntryRow({
         {thinkingExpanded ? (
           <div className="chat-process-thinking-body">
             <div className="chat-process-output chat-process-thinking-output">
-              <MarkdownRenderer content={entry.detail} />
+              <MarkdownRenderer content={entry.detail} deferHighlight={thinkingRunning} />
             </div>
           </div>
         ) : (
           <div className={`chat-process-thinking-preview${thinkingPreviewHasCodeBlock ? " has-code-block" : ""}`}>
-            <MarkdownRenderer content={thinkingPreviewMarkdown} />
+            <MarkdownRenderer content={thinkingPreviewMarkdown} deferHighlight={thinkingRunning} />
           </div>
         )}
       </div>
@@ -626,7 +626,7 @@ function ProcessEntryRow({
   if (isAssistantNarrationProcessEntry(entry) || entry.title === uiText.process.narration) {
     return (
       <div className="chat-process-output">
-        <MarkdownRenderer content={entry.detail || entry.title} />
+        <MarkdownRenderer content={entry.detail || entry.title} deferHighlight={running} />
       </div>
     );
   }
@@ -669,7 +669,7 @@ function ProcessEntryRow({
         )}
         {detailVisible && errorDetailMarkdown && (
           <div className={`chat-process-entry-detail chat-process-error-markdown ${canExpand ? "panel" : ""}`}>
-            <MarkdownRenderer content={errorDetailMarkdown} />
+            <MarkdownRenderer content={errorDetailMarkdown} deferHighlight={running} />
           </div>
         )}
         {detailVisible && !errorDetailMarkdown && (
@@ -1363,7 +1363,10 @@ export function ProcessBlock({
               key={`commentary-${item.id}`}
               className={`chat-commentary-item ${processRunning && item.commentary.isStreaming ? "streaming" : ""}`}
             >
-              <MarkdownRenderer content={item.commentary.content} />
+              <MarkdownRenderer
+                content={item.commentary.content}
+                deferHighlight={processRunning && item.commentary.isStreaming === true}
+              />
             </div>
           ) : expanded ? (
             <ProcessEntryRow

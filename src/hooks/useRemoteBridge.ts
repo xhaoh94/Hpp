@@ -267,10 +267,10 @@ function buildSessionConfig(
   };
 }
 
-export function getRemoteSessionTitle(sessionTitle: string, messages: ChatMessage[]) {
+export function getRemoteSessionTitle(sessionTitle: string, messages: ChatMessage[], persistedPreview?: string) {
   const firstUserMessage = messages.find((message) => isUserSpeechMessage(message) && message.content.trim());
-  if (!firstUserMessage) return sessionTitle;
-  return getChatMessagePreviewText(firstUserMessage) || sessionTitle;
+  if (!firstUserMessage) return persistedPreview || sessionTitle;
+  return getChatMessagePreviewText(firstUserMessage) || persistedPreview || sessionTitle;
 }
 
 function buildCatalog(
@@ -287,7 +287,7 @@ function buildCatalog(
     sessions: project.sessions.map((session) => ({
       id: session.id,
       agentId: session.agentId,
-      title: getRemoteSessionTitle(session.title, messages[session.id] || []),
+      title: getRemoteSessionTitle(session.title, messages[session.id] || [], session.preview),
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt,
       closed: session.closed === true,
@@ -371,6 +371,25 @@ export function getRemoteInteractionUpdates(
 export function canPublishMessageUpsert(previous: ChatMessage[], next: ChatMessage[]) {
   if (next.length === 0) return false;
   if (next.length !== previous.length && next.length !== previous.length + 1) return false;
+
+  // Store 的高频路径只有两种：追加一条消息，或替换最后一条流式消息。
+  // 先验证尾部边界引用，避免每 100ms 为了确认 upsert 而扫描整个历史前缀。
+  // 若边界不符合常见路径，再走完整比较，保证历史消息被修改时仍发送 replace。
+  const lastIndex = next.length - 1;
+  if (next.length === previous.length) {
+    if (
+      previous[lastIndex] !== next[lastIndex]
+      && (lastIndex === 0 || previous[lastIndex - 1] === next[lastIndex - 1])
+    ) {
+      return true;
+    }
+  } else if (
+    previous.length === 0
+    || previous[previous.length - 1] === next[lastIndex - 1]
+  ) {
+    return true;
+  }
+
   const prefixLength = next.length - 1;
   for (let index = 0; index < prefixLength; index += 1) {
     if (previous[index] !== next[index]) return false;

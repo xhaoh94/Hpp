@@ -10,10 +10,19 @@ import type { SearchWorkerFile, SearchWorkerRequest, SearchWorkerResponse, Searc
 let worker: Worker | null = null;
 let nextRequestId = 1;
 
-const pending = new Map<
-  number,
-  { resolve: (results: SearchWorkerResult[]) => void; reject: (error: Error) => void }
->();
+type PendingSearch = {
+  resolve: (results: SearchWorkerResult[]) => void;
+  reject: (error: Error) => void;
+  cleanupAbort?: () => void;
+};
+
+const pending = new Map<number, PendingSearch>();
+
+const createAbortError = () => {
+  const error = new Error("搜索已取消");
+  error.name = "AbortError";
+  return error;
+};
 
 function getWorker(): Worker {
   if (!worker) {
@@ -23,6 +32,7 @@ function getWorker(): Worker {
       const entry = pending.get(msg.id);
       if (!entry) return;
       pending.delete(msg.id);
+      entry.cleanupAbort?.();
       if (msg.ok) entry.resolve(msg.results ?? []);
       else entry.reject(new Error(msg.error ?? "search worker failed"));
     };
@@ -45,10 +55,40 @@ export function searchFilesInWorker(
   query: string,
   options: { matchCase: boolean; wholeWord: boolean; regex: boolean },
   maxMatchesPerFile = 200,
+  signal?: AbortSignal,
 ): Promise<SearchWorkerResult[]> {
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+
+    let cleanupAbort: () => void = () => undefined;
+    const entry: PendingSearch = {
+      resolve: (results) => {
+        cleanupAbort();
+        resolve(results);
+      },
+      reject: (error) => {
+        cleanupAbort();
+        reject(error);
+      },
+      cleanupAbort: () => cleanupAbort(),
+    };
+    pending.set(id, entry);
+
+    if (signal) {
+      const onAbort = () => {
+        if (pending.get(id) !== entry) return;
+        pending.delete(id);
+        cleanupAbort();
+        reject(createAbortError());
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      cleanupAbort = () => signal.removeEventListener("abort", onAbort);
+    }
+
     const request: SearchWorkerRequest = {
       id,
       type: "search",

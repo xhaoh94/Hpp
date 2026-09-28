@@ -5,6 +5,8 @@ export interface ProjectSession {
   agentId: string;
   agentSessionId: string;
   title: string;
+  /** 首条用户消息的轻量预览；正文仍按会话按需加载。 */
+  preview?: string;
   createdAt: string;
   lastActiveAt: string;
   sessionFilePath?: string;
