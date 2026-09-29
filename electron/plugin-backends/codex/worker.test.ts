@@ -29,6 +29,12 @@ input.on("line", async (line) => {
   await log(message);
   if (message.method === "initialize") {
     write({ id: message.id, result: {} });
+    if (process.env.FAKE_CODEX_WARNINGS === "1") {
+      write({ method: "configWarning", params: {
+        summary: "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\\n  user (config.toml): \\\`disable_response_storage\\\` is ignored.",
+        details: null,
+      } });
+    }
     return;
   }
   if (message.method === "initialized") {
@@ -69,6 +75,13 @@ input.on("line", async (line) => {
   if (message.method === "thread/start") {
     write({ id: message.id, result: { thread: { id: "thread-1" } } });
     write({ method: "thread/started", params: { thread: { id: "thread-1" } } });
+    if (process.env.FAKE_CODEX_WARNINGS === "1") {
+      // 真实 codex 会再发一次同文本的 warning（字段名是 message 而不是 summary）。
+      write({ method: "warning", params: {
+        threadId: "thread-1",
+        message: "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\\n  user (config.toml): \\\`disable_response_storage\\\` is ignored.",
+      } });
+    }
     return;
   }
   if (message.method === "thread/resume") {
@@ -86,6 +99,15 @@ input.on("line", async (line) => {
   if (message.method === "turn/start") {
     write({ id: message.id, result: { turn: { id: "turn-1" } } });
     write({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+    if (process.env.FAKE_CODEX_WARNINGS === "1") {
+      // 回合进行中的告警：要显示，而且字段名不同（summary）也要读到。同文本发两次用于验证去重。
+      const notice = { method: "guardianWarning", params: {
+        threadId: "thread-1",
+        summary: "Guardian blocked a risky command\\n  reason: destructive rm",
+      } };
+      write(notice);
+      write(notice);
+    }
     const promptText = message.params?.input?.find((item) => item.type === "text")?.text;
     if (promptText === "disconnect") {
       setImmediate(() => process.exit(7));
@@ -936,5 +958,33 @@ describe("Codex worker protocol", () => {
     worker.send({ id: "missing-skill", type: "prompt", message: "", action: { kind: "skill", name: "missing" } });
     await expect(worker.waitFor((message) => message.type === "process_event" && message.detail === "ACTION_NOT_FOUND"))
       .resolves.toMatchObject({ state: "error" });
+  });
+
+  it("keeps session-init config notices out of the chat and still shows in-turn warnings", async () => {
+    const worker = startWorker(commandPath, tempRoot, logPath, { FAKE_CODEX_WARNINGS: "1" });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "notice-prompt", type: "prompt", message: "hello" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "notice-prompt");
+
+    // 初始化阶段的配置告警（configWarning 用 summary，随后的 warning 用 message，文本相同）不进对话流。
+    expect(worker.messages.some((message) => (
+      message.type === "process_event" && String(message.title).includes("unrecognized configuration setting")
+    ))).toBe(false);
+    expect(worker.messages.some((message) => message.title === "Codex warning")).toBe(false);
+
+    // 回合进行中的告警照常显示：字段名不统一也要读到真实文本，同文本只出一条。
+    const inTurn = worker.messages.filter((message) => (
+      message.type === "process_event" && String(message.title).includes("Guardian blocked a risky command")
+    ));
+    expect(inTurn).toHaveLength(1);
+    expect(inTurn[0]).toMatchObject({
+      entryType: "status",
+      state: "completed",
+      title: "Guardian blocked a risky command",
+      // 详情保留 codex 原文的缩进（不 trim），避免破坏多行告警里的对齐。
+      detail: "  reason: destructive rm",
+    });
   });
 });

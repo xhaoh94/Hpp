@@ -795,15 +795,24 @@ export class AgentPluginRegistry {
   private reloading = false;
 
   async ensureLoaded() {
+    // `loaded` 在重载过程中可能仍为 true（旧目录尚未清空），不能只看它。
+    // 否则会话初始化会越过正在进行的 shutdown/reload，随后在
+    // getPluginProcess() 中收到 "Plugin registry is stopping."。
+    if (this.loadPromise) {
+      await this.loadPromise;
+      return;
+    }
+    if (this.reloadPromise) {
+      await this.reloadPromise;
+      return;
+    }
     if (this.loaded) return;
     // Concurrent callers at app startup (session init, catalog load, config
     // queries) must share one reload: interleaved reloads call shutdown()
     // against each other and can kill freshly spawned plugin host processes.
-    if (!this.loadPromise) {
-      this.loadPromise = this.reload().finally(() => {
-        this.loadPromise = null;
-      });
-    }
+    this.loadPromise = this.reload().finally(() => {
+      this.loadPromise = null;
+    });
     await this.loadPromise;
   }
 
@@ -845,11 +854,12 @@ export class AgentPluginRegistry {
 
     this.loaded = true;
     this.startHostReaper();
-    return this.listAgents();
+    // performReload() 不能调用 listAgents()：listAgents() 会等待当前
+    // reloadPromise，而当前 Promise 正在等待 performReload() 返回，形成自等待。
+    return this.listLoadedAgents();
   }
 
-  async listAgents(): Promise<AgentDescriptor[]> {
-    await this.ensureLoaded();
+  private async listLoadedAgents(): Promise<AgentDescriptor[]> {
     const plugins = Array.from(this.pluginRecords.values())
       .map((record) => record.descriptor)
       .sort((left, right) => {
@@ -859,6 +869,11 @@ export class AgentPluginRegistry {
       ...agent,
       capabilities: await resolveEffectiveCapabilities(agent),
     })));
+  }
+
+  async listAgents(): Promise<AgentDescriptor[]> {
+    await this.ensureLoaded();
+    return this.listLoadedAgents();
   }
 
   async getDescriptor(agentId: string): Promise<AgentDescriptor | undefined> {

@@ -198,6 +198,8 @@ export class AgentManager {
   private pluginMutatingAgentIds = new Set<string>();
   private suspendedPluginSessions = new Map<string, SuspendedPluginSessions>();
   private initializingSessionAgentTypes = new Map<string, string>();
+  /** 进行中的会话初始化，供并发创建合并等待（见 createSession）。 */
+  private sessionInitializations = new Map<string, Promise<void>>();
   private disposingSessionIds = new Set<string>();
   private pluginCatalogMutating = false;
   private activeSessionId: string | null = null;
@@ -283,9 +285,25 @@ export class AgentManager {
     if (this.disposingSessionIds.has(sessionId)) {
       throw new Error("Agent 会话正在关闭，请稍后重试。");
     }
-    if (this.initializingSessionAgentTypes.has(sessionId)) {
-      throw new Error("Agent 会话正在初始化，请稍后重试。");
+    // 同一会话的并发初始化合并到同一次尝试：渲染层在切换/重试时会重复触发，
+    // 各自抛「正在初始化」只会让重试瞬间失败、永远拿不到真实结果。后端不同
+    // （agentId 不一致）时不能合并 —— 那是真的冲突。
+    const inFlight = this.sessionInitializations.get(sessionId);
+    if (inFlight) {
+      if (this.initializingSessionAgentTypes.get(sessionId) !== agentId) {
+        throw new Error("Agent 会话正在初始化，请稍后重试。");
+      }
+      return inFlight;
     }
+    let resolveAttempt!: () => void;
+    let rejectAttempt!: (error: unknown) => void;
+    const attempt = new Promise<void>((resolve, reject) => {
+      resolveAttempt = resolve;
+      rejectAttempt = reject;
+    });
+    // 合并进来的调用方可能一个都没有，先挂兜底 catch 以免 unhandled rejection。
+    attempt.catch(() => undefined);
+    this.sessionInitializations.set(sessionId, attempt);
     this.initializingSessionAgentTypes.set(sessionId, agentId);
     try {
       console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
@@ -329,9 +347,16 @@ export class AgentManager {
       if (fp) this.sessionFilePaths.set(sessionId, fp);
 
       this.activeSessionId = sessionId;
+      resolveAttempt();
+    } catch (error) {
+      rejectAttempt(error);
+      throw error;
     } finally {
       if (this.initializingSessionAgentTypes.get(sessionId) === agentId) {
         this.initializingSessionAgentTypes.delete(sessionId);
+      }
+      if (this.sessionInitializations.get(sessionId) === attempt) {
+        this.sessionInitializations.delete(sessionId);
       }
     }
   }
@@ -966,6 +991,7 @@ export class AgentManager {
     this.pluginMutatingAgentIds.clear();
     this.suspendedPluginSessions.clear();
     this.initializingSessionAgentTypes.clear();
+    this.sessionInitializations.clear();
     this.disposingSessionIds.clear();
     this.pluginCatalogMutating = false;
     this.activeSessionId = null;
@@ -1286,13 +1312,17 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
 
   ipcMain.handle("agent:createSession", async (_event, agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => {
     const sid = sessionId || "default";
+    const startedAt = Date.now();
+    console.log(`[Hpp timing] agent:createSession:start sessionId=${sid} agent=${agentId}`);
     try {
       const win = getWindow();
       if (win) agentManager.setWindow(win);
       await agentManager.createSession(sid, agentId, projectPath, sessionFilePath);
       const models = await agentManager.getModelsBySessionId(sid);
+      console.log(`[Hpp timing] agent:createSession:done sessionId=${sid} durationMs=${Date.now() - startedAt} models=${models.length}`);
       return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid), models };
     } catch (err: unknown) {
+      console.log(`[Hpp timing] agent:createSession:failed sessionId=${sid} durationMs=${Date.now() - startedAt} error=${getErrorMessage(err)}`);
       return { success: false, error: getErrorMessage(err) };
     }
   });
@@ -1712,11 +1742,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agent:getModels", async (_event, sessionId?: string) => {
+    const startedAt = Date.now();
     const agent = sessionId
       ? agentManager.getAgentBySessionId(sessionId)
       : agentManager.getActiveAgent();
-    console.log("[agent-manager] getModels sessionId:", sessionId, "agent:", agent ? agent.constructor.name : "null");
-    if (!agent) return [];
+    console.log(`[Hpp timing] agent:getModels:start sessionId=${sessionId || "active"} agent=${agent ? agent.constructor.name : "null"}`);
+    if (!agent) {
+      console.log(`[Hpp timing] agent:getModels:done sessionId=${sessionId || "active"} durationMs=${Date.now() - startedAt} models=0 no-agent`);
+      return [];
+    }
     let models: AgentModel[];
     try {
       models = await withTimeout(
@@ -1726,10 +1760,13 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       );
     } catch (error) {
       console.warn("[agent-manager] getModels failed:", getErrorMessage(error));
+      console.log(`[Hpp timing] agent:getModels:failed sessionId=${sessionId || "active"} durationMs=${Date.now() - startedAt} error=${getErrorMessage(error)}`);
       return [];
     }
     const agentType = sessionId ? agentManager.getSessionAgentType(sessionId) : agentManager.getActiveAgentType();
-    return mergeModelsWithConfiguredAgentModels(agentType, models);
+    const mergedModels = await mergeModelsWithConfiguredAgentModels(agentType, models);
+    console.log(`[Hpp timing] agent:getModels:done sessionId=${sessionId || "active"} durationMs=${Date.now() - startedAt} models=${mergedModels.length}`);
+    return mergedModels;
   });
 
   ipcMain.handle("agent:listActions", async (_event, sessionId?: string, options?: AgentActionListOptions) => {

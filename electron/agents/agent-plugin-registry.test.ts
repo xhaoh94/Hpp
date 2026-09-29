@@ -545,6 +545,41 @@ export function getStatus() {
     expect(performReload).toHaveBeenCalledTimes(1);
   });
 
+  it("waits for an in-flight reload before creating a backend", async () => {
+    const source = await createPluginSource(tempRoot, "reload-race-agent");
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+    await expect(registry.listAgents()).resolves.toHaveLength(1);
+
+    const internals = registry as unknown as { performReload: () => Promise<unknown[]> };
+    const originalPerformReload = internals.performReload.bind(registry);
+    let releaseReload!: () => void;
+    let reloadEntered!: () => void;
+    const reloadGate = new Promise<void>((resolve) => { releaseReload = resolve; });
+    const entered = new Promise<void>((resolve) => { reloadEntered = resolve; });
+    vi.spyOn(internals, "performReload").mockImplementation(async () => {
+      reloadEntered();
+      await reloadGate;
+      return originalPerformReload();
+    });
+
+    const reloadPromise = registry.reload();
+    await entered;
+    const createPromise = registry.createBackend("reload-race-agent", "reload-race-session");
+
+    // 创建请求应等待重载，而不是立即收到 Plugin registry is stopping。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    let settled = false;
+    void createPromise.finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+
+    releaseReload();
+    await reloadPromise;
+    const backend = await createPromise;
+    expect(backend).toBeTruthy();
+    await backend.dispose();
+  });
+
   it("preserves plugin-declared backend model visibility controls", async () => {
     const source = await createPluginSource(tempRoot, "visibility-agent", "1.0.0", {
       planMode: "prompt",

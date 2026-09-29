@@ -140,6 +140,7 @@ const recoveredRuntimeMonitors = new Map<string, ReturnType<typeof setTimeout>>(
 const RECOVERED_RUNTIME_POLL_MS = 2_000;
 
 const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
+const getTimingNow = () => typeof performance !== "undefined" ? performance.now() : Date.now();
 
 async function withSessionSendLock<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
   const previous = sessionSendLocks.get(sessionId) || Promise.resolve();
@@ -261,6 +262,12 @@ async function runInitialization(
   sessionId: string,
   options: { activate?: boolean; recordFailure?: boolean; refreshModels?: boolean } = {},
 ): Promise<SessionCommandResult> {
+  const initStartedAt = getTimingNow();
+  const logInitTiming = (stage: string) => {
+    if (import.meta.env.DEV) {
+      console.info(`[agent] init(${sessionId}): ${stage} +${Math.round(getTimingNow() - initStartedAt)}ms`);
+    }
+  };
   const initialTarget = getSessionCommandTarget(sessionId);
   const { project, session } = initialTarget;
   const projectStore = useProjectStore.getState();
@@ -292,6 +299,7 @@ async function runInitialization(
       void window.electronAPI.agentSwitchSession(sessionId).catch((error) => {
         console.warn("[agent] background session switch failed:", error);
       });
+      logInitTiming("ready");
       return { ...getSessionCommandTarget(sessionId) };
     }
 
@@ -299,6 +307,7 @@ async function runInitialization(
     if (needsRuntimeInitialization) {
       console.info(`[agent] init(${sessionId}): probing backend activity`);
       const backendActivity = await getBackendSessionActivity(sessionId);
+      logInitTiming(`backend=${backendActivity}`);
       if (backendActivity === "unknown") {
         throw new Error("SESSION_RUNTIME_STATE_UNKNOWN");
       }
@@ -324,16 +333,25 @@ async function runInitialization(
       useChatStore.getState().clearAgentStartupErrors(session.id);
     }
 
-    if (options.refreshModels !== false) {
+    // agent:createSession 已经返回非空模型目录时直接复用；只有创建结果为空
+    // 或恢复已有 backend 时才需要再次查询。这样不会在启动阶段无条件重复读目录。
+    if (options.refreshModels !== false && models.length === 0) {
       try {
         const refreshed = await window.electronAPI.agentGetModels(sessionId);
         if (refreshed.length > 0 || models.length === 0) models = refreshed as ModelInfo[];
+        logInitTiming(`models=${models.length}`);
       } catch {
         // Initialization models remain usable while a backend is still warming up.
       }
     }
 
     let selectedModel = selectSessionModel(sessionId, models);
+    // 模型列表是独立的 UI 能力：先展示已经拿到的目录，再在后台完成
+    // setModel/thinking level。否则用户会看到“会话已初始化但模型列表为空”。
+    if (models.length > 0) {
+      applyActiveModels(sessionId, models, selectedModel);
+      logInitTiming(`models-ready=${models.length}`);
+    }
     if (createdRuntime) {
       if (selectedModel) {
         saveSessionModel(sessionId, selectedModel);
@@ -367,9 +385,11 @@ async function runInitialization(
     if (options.activate && useProjectStore.getState().activeSessionId === sessionId) {
       await window.electronAPI.agentSwitchSession(sessionId);
     }
+    logInitTiming("ready");
     if (createdRuntime) console.info(`[agent] init(${sessionId}): completed`);
   } catch (error) {
     warning = getErrorMessage(error);
+    logInitTiming(`failed: ${warning}`);
     // The spinner overlay hides startup-error messages, so keep a console
     // trail for intermittent startup failures (e.g. startup races).
     console.warn(`[agent] session initialization failed (${sessionId}):`, warning);
@@ -1166,7 +1186,8 @@ export async function reloadSession(sessionId: string) {
 }
 
 export async function getAvailableModels(sessionId: string) {
-  await initializeSession(sessionId);
+  const initialized = await initializeSession(sessionId);
+  if (initialized.models && initialized.models.length > 0) return initialized.models;
   try {
     const models = await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
     if (models.length > 0) return models;

@@ -1981,6 +1981,23 @@ const handleTurnCompleted = (params) => {
   finishPrompt();
 };
 
+// codex 这几类通知的字段名不统一：warning 用 message，configWarning 用 summary。
+// 只读 message 会退化成没有信息量的 "Codex warning"（用户看不出要改什么）。
+// 首行当标题、其余行进详情；并按文本去重 —— 同一段文本在 initialize 和
+// thread/start 会各来一次（configWarning + warning）。
+// 注意：会话初始化阶段（没有在跑的回合）的这些提示不进对话流，见下面的分支。
+const emittedNoticeKeys = new Set();
+const formatCodexNotice = (params) => {
+  const raw = params.message || params.summary || params.text || params.description;
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return { title: "Codex warning", detail: params.details || params.help };
+  const [firstLine, ...rest] = text.split(/\r?\n/);
+  const detail = [...rest, params.details, params.help]
+    .filter((line) => typeof line === "string" && line.trim())
+    .join("\n");
+  return { title: firstLine.trim(), detail: detail || undefined };
+};
+
 const handleServerNotification = (method, params) => {
   switch (method) {
     case "thread/started":
@@ -2161,15 +2178,32 @@ const handleServerNotification = (method, params) => {
     case "warning":
     case "guardianWarning":
     case "deprecationNotice":
-    case "configWarning":
+    case "configWarning": {
+      const notice = formatCodexNotice(params);
+      const noticeKey = `${notice.title}\n${notice.detail || ""}`;
+      const repeated = emittedNoticeKeys.has(noticeKey);
+      emittedNoticeKeys.add(noticeKey);
+      // 配置/环境层面的提示不进对话流（只写日志）：configWarning/deprecationNotice 专门报这类问题，
+      // 而 codex 还会在 initialize 报完后、thread/start（首次 prompt 时才发生）用 warning 重发同一段文本，
+      // 以及回合之外冒出来的提示 —— 这些都不属于本回合内容，塞进对话只会变成噪音。
+      const isEnvironmentNotice = !promptRunning
+        || abortRequested
+        || repeated
+        || method === "configWarning"
+        || method === "deprecationNotice";
+      if (isEnvironmentNotice) {
+        process.stderr.write(`[codex-notice] ${method}: ${notice.title}${notice.detail ? ` | ${notice.detail}` : ""}\n`);
+        break;
+      }
       send({
         type: "process_event",
         entryType: "status",
-        title: String(params.message || "Codex warning"),
-        detail: params.details || params.help,
+        title: notice.title,
+        detail: notice.detail,
         state: "completed",
       });
       break;
+    }
     case "thread/closed":
       if (params.threadId && params.threadId === threadId) {
         threadId = null;

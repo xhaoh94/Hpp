@@ -1223,4 +1223,28 @@ describe("AgentManager plugin removal", () => {
     });
     expect(testState.reloadRegistry).not.toHaveBeenCalled();
   });
+
+  it("coalesces concurrent session creation instead of failing the retry instantly", async () => {
+    // 慢后端（droid 实测 10~40s）初始化期间，渲染层的重复触发会各自撞上
+    // 「正在初始化」：谁都没拿到结果，重试全部瞬间失败且刷屏。并发调用必须
+    // 等同一次尝试，而不是各自报错。
+    const init = createDeferred<void>();
+    const backend = createBackend(true);
+    backend.init.mockReturnValueOnce(init.promise);
+    testState.createBackend.mockResolvedValueOnce(backend);
+
+    const first = getHandler("agent:createSession")({}, "pi", "C:\\project", "slow-session");
+    const retry = getHandler("agent:createSession")({}, "pi", "C:\\project", "slow-session");
+    let retrySettled = false;
+    void retry.then(() => { retrySettled = true; }, () => { retrySettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(testState.createBackend).toHaveBeenCalledTimes(1);
+    expect(retrySettled).toBe(false);
+
+    init.resolve();
+    await expect(first).resolves.toMatchObject({ success: true });
+    await expect(retry).resolves.toMatchObject({ success: true });
+    expect(backend.init).toHaveBeenCalledTimes(1);
+  });
 });
