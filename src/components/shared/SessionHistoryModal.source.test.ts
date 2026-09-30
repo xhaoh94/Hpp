@@ -8,6 +8,7 @@ describe("desktop session deletion affordances", () => {
   it("distinguishes closing a session from permanently deleting its stored data", () => {
     const modalSource = readWorkspaceFile("src/components/shared/SessionHistoryModal.tsx");
     const projectSource = readWorkspaceFile("src/components/sidebar/ProjectCard.tsx");
+    const discardSource = readWorkspaceFile("src/lib/session-discard.ts");
     const settingsSource = readWorkspaceFile("src/components/sidebar/SettingsView.tsx");
     const cleanupDialogSource = settingsSource.slice(
       settingsSource.indexOf("const cleanupDiskUsage"),
@@ -17,8 +18,8 @@ describe("desktop session deletion affordances", () => {
     expect(modalSource).toContain("彻底删除全部");
     expect(modalSource).toContain("会话、消息与草稿快照会从本机删除");
     expect(modalSource).toContain("await onDeleteAll()");
-    expect(projectSource).toContain("关闭并移到历史会话");
-    expect(projectSource).toContain("await purgeDeletedSessionData(uniqueSessionIds)");
+    expect(projectSource).toContain("关闭会话（空对话直接删除）");
+    expect(discardSource).toContain("await purgeDeletedSessionData(uniqueSessionIds)");
     expect(cleanupDialogSource).toContain("其中 ${closedSessionCount} 个在历史中");
     expect(cleanupDialogSource).toContain("删除会话只会减少“会话与快照”");
     expect(cleanupDialogSource).toContain("浏览器缓存会在使用或重启后重新生成");

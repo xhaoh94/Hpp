@@ -4232,14 +4232,37 @@ export default function App() {
       : project));
   }, []);
 
+  /** 服务端已把会话彻底删除（空对话关闭）：本地也要移除，只清了服务端会让它留在历史里。 */
+  const removeSessionLocally = useCallback((projectId: string, sessionId: string) => {
+    setProjects((current) => current.map((project) => project.id === projectId
+      ? { ...project, sessions: project.sessions.filter((session) => session.id !== sessionId) }
+      : project));
+    setConfigs((current) => {
+      if (!(sessionId in current)) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setMessages((current) => {
+      if (!(sessionId in current)) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
   const closeRemoteSession = useCallback(async (project: RemoteProject, session: RemoteSession) => {
     if (commandBusy || session.closed) return;
     try {
       if (demoMode) {
-        setDemoSessionClosed(project.id, session.id, true);
+        // demo 没有服务端，只能按本地已加载的消息判断空不空（demo-session-2 就是空的）。
+        if ((messages[session.id]?.length ?? 0) === 0) removeSessionLocally(project.id, session.id);
+        else setDemoSessionClosed(project.id, session.id, true);
       } else {
         const result = await runCommand<RemoteSessionCreateResult>("session.close", { sessionId: session.id });
-        applySessionResult(result);
+        // 以服务端的结果为准：手机这边可能根本没加载过这个会话的消息，判空不准。
+        if (result.deleted) removeSessionLocally(result.projectId, result.session.id);
+        else applySessionResult(result);
       }
       if (selectedSessionId === session.id) {
         const fallback = [
@@ -4253,7 +4276,7 @@ export default function App() {
     } catch {
       // runCommand keeps the error visible on mobile.
     }
-  }, [applySessionResult, commandBusy, demoMode, loadSession, projects, runCommand, selectedSessionId, setDemoSessionClosed]);
+  }, [applySessionResult, commandBusy, demoMode, loadSession, messages, projects, removeSessionLocally, runCommand, selectedSessionId, setDemoSessionClosed]);
 
   const reopenRemoteSession = useCallback(async (project: RemoteProject, session: RemoteSession) => {
     if (commandBusy || !session.closed) return;

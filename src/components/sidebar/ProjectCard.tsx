@@ -11,6 +11,8 @@ import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
+import { hasNoSessionMessages } from "@/lib/session-lifecycle";
+import { discardSessionsCompletely } from "@/lib/session-discard";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
 import { showAppAlert } from "@/lib/app-dialog";
 import { GitBranch, Terminal } from "lucide-react";
@@ -221,9 +223,19 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
     });
   };
 
+  // 空对话关闭后不留历史：直接删掉，否则「历史会话」会被一排没内容的条目塞满。
+  // 关后端必须成功才删 —— 后端还活着就把会话从列表抹掉会漏掉一个 CLI 进程。
   const handleCloseSession = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
-    void SessionCommandCoordinator.closeSession(sessionId);
+    void (async () => {
+      try {
+        const empty = await hasNoSessionMessages(sessionId);
+        await SessionCommandCoordinator.closeSession(sessionId);
+        if (empty) await discardSessionsCompletely([sessionId]);
+      } catch (error) {
+        console.error("[agent] session close failed:", getErrorMessage(error));
+      }
+    })();
   };
 
   const handleDeleteProject = () => {
@@ -257,20 +269,13 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
   };
 
   const handleDeleteHistorySessions = async (sessionIds: string[]) => {
-    const uniqueSessionIds = [...new Set(sessionIds)].filter((sessionId) =>
+    const targets = sessionIds.filter((sessionId) =>
       project.sessions.some((session) => session.id === sessionId && session.closed)
     );
-    if (uniqueSessionIds.length === 0) return;
+    if (targets.length === 0) return;
 
-    await Promise.allSettled(uniqueSessionIds.map((sessionId) =>
-      SessionCommandCoordinator.closeSession(sessionId)
-    ));
-    deleteSessionsMessages(uniqueSessionIds);
-    for (const sessionId of uniqueSessionIds) {
-      removeSession(project.id, sessionId);
-    }
     try {
-      await purgeDeletedSessionData(uniqueSessionIds);
+      await discardSessionsCompletely(targets);
     } catch (error) {
       console.error("[persistence] session cleanup failed:", error);
       showAppAlert(`会话已从列表移除，但磁盘数据清理失败：${getErrorMessage(error)}`);
@@ -521,8 +526,8 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
                 <button
                   className="terminal-child-close"
                   onClick={(e) => handleCloseSession(e, session.id)}
-                  title="关闭并移到历史会话"
-                  aria-label={`关闭并移到历史会话：${session.title}`}
+                  title="关闭会话（空对话直接删除）"
+                  aria-label={`关闭会话（空对话直接删除）：${session.title}`}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                     <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />

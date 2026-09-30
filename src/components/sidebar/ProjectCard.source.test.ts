@@ -44,6 +44,40 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(activationHandler).toContain("void SessionCommandCoordinator.initializeSession");
   });
 
+  // 空对话关闭后不该留下历史条目，而且必须先关后端再删 —— 后端还活着时把会话
+  // 从列表抹掉会漏掉一个 CLI 进程。
+  it("discards an empty session on close instead of archiving it", () => {
+    const closeHandler = projectCardSource.slice(
+      projectCardSource.indexOf("const handleCloseSession"),
+      projectCardSource.indexOf("const handleDeleteProject"),
+    );
+
+    expect(closeHandler).toContain("await hasNoSessionMessages(sessionId)");
+    expect(closeHandler).toContain("await discardSessionsCompletely([sessionId])");
+    expect(closeHandler.indexOf("await SessionCommandCoordinator.closeSession(sessionId)"))
+      .toBeLessThan(closeHandler.indexOf("if (empty) await discardSessionsCompletely"));
+  });
+
+  it("purges messages, session entry and disk rows in one permanent-delete routine", () => {
+    const discardSource = readFileSync(new URL("../../lib/session-discard.ts", import.meta.url), "utf8");
+
+    expect(discardSource).toContain("deleteSessionsMessages(uniqueSessionIds)");
+    expect(discardSource).toContain("projectState.removeSession(owner.id, sessionId)");
+    expect(discardSource).toContain("await purgeDeletedSessionData(uniqueSessionIds)");
+    expect(discardSource).toContain("uniqueSessionIds.length === 0");
+  });
+
+  it("still limits the history modal to closed sessions", () => {
+    const historyDeletion = projectCardSource.slice(
+      projectCardSource.indexOf("const handleDeleteHistorySessions"),
+      projectCardSource.indexOf("const handleDeleteHistorySession ="),
+    );
+
+    expect(historyDeletion).toContain("session.closed");
+    expect(historyDeletion).toContain("await discardSessionsCompletely(targets)");
+    expect(historyDeletion).toContain("if (targets.length === 0) return;");
+  });
+
   it("captures the remembered session project once and leaves later card state user-controlled", () => {
     expect(projectViewSource).toContain("projectDataHydrated && startupCollapseStateRef.current === null");
     expect(projectViewSource).toContain("project.id !== rememberedProjectId");

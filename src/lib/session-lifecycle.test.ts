@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatStore, type ChatMessage } from "@/stores/chat-store";
 import { useProjectStore, type ProjectSession } from "@/stores/project-store";
-import { archiveSessionsAfterBackendRemoval } from "./session-lifecycle";
+import { archiveSessionsAfterBackendRemoval, hasNoSessionMessages } from "./session-lifecycle";
 
 const session: ProjectSession = {
   id: "session-one",
@@ -137,5 +137,55 @@ describe("archiveSessionsAfterBackendRemoval", () => {
     expect(archivedMessages.find((message) => message.id === "compaction"))
       .toMatchObject({ compactionState: "interrupted" });
     expect(useChatStore.getState().compactingSessions[session.id]).toBeUndefined();
+  });
+});
+
+describe("hasNoSessionMessages", () => {
+  const loadPage = vi.fn();
+
+  const setSessionMessages = (sessionMessages: ChatMessage[] | undefined, active = false) => {
+    useChatStore.setState({
+      messages: active ? (sessionMessages || []) : [],
+      sessionMessages: sessionMessages ? { [session.id]: sessionMessages } : {},
+      activeSessionId: active ? session.id : null,
+    });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("window", { electronAPI: { loadSessionMessagesPage: loadPage } });
+  });
+
+  it("trusts in-memory messages and skips the storage round trip", async () => {
+    setSessionMessages(messages);
+    await expect(hasNoSessionMessages(session.id)).resolves.toBe(false);
+    expect(loadPage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the session when the active message array has content but the session map does not", async () => {
+    useChatStore.setState({ messages: [...messages], sessionMessages: {}, activeSessionId: session.id });
+    await expect(hasNoSessionMessages(session.id)).resolves.toBe(false);
+    expect(loadPage).not.toHaveBeenCalled();
+  });
+
+  it("only reports empty when the persisted page is empty too", async () => {
+    // 渲染层按会话分页水合，内存里没有消息只说明"还没加载过"，磁盘上仍可能有历史。
+    setSessionMessages(undefined);
+    loadPage.mockResolvedValueOnce({ messages: [messages[0]], hasMore: false, nextBefore: null, firstSequence: 0 });
+    await expect(hasNoSessionMessages(session.id)).resolves.toBe(false);
+    expect(loadPage).toHaveBeenCalledWith(session.id, undefined, 1);
+
+    loadPage.mockResolvedValueOnce({ messages: [], hasMore: false, nextBefore: null, firstSequence: 0 });
+    await expect(hasNoSessionMessages(session.id)).resolves.toBe(true);
+  });
+
+  it("refuses to call a session empty when the storage channel is missing or fails", async () => {
+    setSessionMessages(undefined);
+    vi.stubGlobal("window", {});
+    await expect(hasNoSessionMessages(session.id)).resolves.toBe(false);
+
+    vi.stubGlobal("window", { electronAPI: { loadSessionMessagesPage: loadPage } });
+    loadPage.mockRejectedValueOnce(new Error("ipc down"));
+    await expect(hasNoSessionMessages(session.id)).resolves.toBe(false);
   });
 });

@@ -197,6 +197,13 @@ describe("code review dialog", () => {
     expect(chatPanelStyles).toContain(".chat-review-col-line");
   });
 
+  it("keys virtual rows by index, never by line number", () => {
+    // 行号不是唯一标识：同一份补丁里旧行号与新行号会撞车（换位、多补丁合并时尤其常见）。
+    // 重复 key 会让 React 把多行渲染到同一个 transform 上，同一行的文字叠在一起。
+    expect(dialogSource).toContain("getItemKey: (index) => index");
+    expect(dialogSource).not.toContain("cell.lineNo || pairs[index]");
+  });
+
   it("preselects the file passed in via initialFile", () => {
     expect(dialogSource).toContain("initialFile");
     expect(dialogSource).toContain("file.displayFile === activeFileKey || file.file === activeFileKey");

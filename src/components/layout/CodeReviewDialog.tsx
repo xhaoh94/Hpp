@@ -148,7 +148,9 @@ function ReviewVirtualRows({
     count: pairs.length,
     getScrollElement,
     estimateSize: () => 26,
-    getItemKey: (index) => pairs[index]?.left?.cell.lineNo || pairs[index]?.right?.cell.lineNo || index,
+    // 行 key 只能用下标。行号不是唯一标识：同一份补丁里旧/新行号会撞车（换位、合并补丁尤甚），
+    // 撞车的 key 会让 React 把多行重复渲染到同一个 transform 上，视觉上就是同一行的文字叠在一起。
+    getItemKey: (index) => index,
     overscan: 20,
     useAnimationFrameWithResizeObserver: true,
   });

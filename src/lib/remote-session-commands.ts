@@ -3,6 +3,8 @@ import {
   SessionCommandCoordinator,
 } from "@/lib/session-command-coordinator";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
+import { discardSessionsCompletely } from "@/lib/session-discard";
+import { hasNoSessionMessages } from "@/lib/session-lifecycle";
 import type { ProjectSession } from "@/stores/project-store";
 import { useChatStore } from "@/stores/chat-store";
 import type { PendingUIResponse } from "@/components/layout/agentEventTypes";
@@ -31,6 +33,7 @@ export type RemoteCommandContext = {
 };
 
 const getString = (value: unknown) => typeof value === "string" ? value : "";
+const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 const hydrateRemoteComposerDocument = (
   value: unknown,
@@ -147,10 +150,24 @@ async function forkRemoteSession(payload: Record<string, unknown>) {
 }
 
 async function closeRemoteSession(payload: Record<string, unknown>, context: RemoteCommandContext) {
-  const result = await SessionCommandCoordinator.closeSession(getString(payload.sessionId), {
+  const sessionId = getString(payload.sessionId);
+  // 空对话与桌面端同一口径：关闭 = 彻底删除，不进历史。必须先把后端关掉再删，
+  // 所以关闭抛错时直接向上抛，不落到删除。
+  const discard = await hasNoSessionMessages(sessionId);
+  const result = await SessionCommandCoordinator.closeSession(sessionId, {
     clearPendingInteraction: context.clearPendingInteraction,
   });
-  return serializeSessionResult(result);
+  const serialized = await serializeSessionResult(result);
+  if (!discard) return serialized;
+
+  try {
+    await discardSessionsCompletely([sessionId]);
+  } catch (error) {
+    // 会话已经从列表移除，只是磁盘没清干净：客户端该收到"已删除"，否则它会把这个
+    // 早就不存在的会话留在历史里，重开会必然失败。
+    console.error("[remote] empty session discard failed:", getErrorMessage(error));
+  }
+  return { ...serialized, deleted: true };
 }
 
 async function reopenRemoteSession(payload: Record<string, unknown>) {

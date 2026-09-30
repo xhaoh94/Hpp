@@ -405,6 +405,8 @@ export interface RemoteSessionCreateResult {
   session: RemoteSession;
   config: RemoteSessionConfig;
   warning?: string;
+  /** 空对话在服务端被彻底删除（不是归档）：客户端要把它从本地列表移除，而不是标成已关闭。 */
+  deleted?: boolean;
 }
 
 export type RemoteServerEnvelope =

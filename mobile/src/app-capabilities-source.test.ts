@@ -300,4 +300,13 @@ describe("mobile capability source constraints", () => {
     expect(appSource).toContain("let probing = false");
     expect(appSource).toContain("if (disposed || probing) return;");
   });
+
+  // 空对话在服务端被直接删除（不是归档）：手机必须按服务端的 deleted 把它从本地
+  // 列表移除，只清服务端的话它会以"已关闭"留在历史里，再打开必然失败。
+  it("removes a discarded empty session locally instead of keeping it in history", () => {
+    expect(appSource).toContain("const removeSessionLocally = useCallback((projectId: string, sessionId: string) => {");
+    expect(appSource).toContain("if (result.deleted) removeSessionLocally(result.projectId, result.session.id);");
+    // demo 没有服务端，只能按本地已加载的消息判空。
+    expect(appSource).toContain("if ((messages[session.id]?.length ?? 0) === 0) removeSessionLocally(project.id, session.id);");
+  });
 });
