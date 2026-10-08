@@ -1,7 +1,11 @@
 import { app } from "electron";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
-import type { AgentProviderAuthMode, AgentProviderConfiguration } from "../../src/types/ipc";
+import type {
+  AgentBuiltinExtensionCapabilities,
+  AgentProviderAuthMode,
+  AgentProviderConfiguration,
+} from "../../src/types/ipc";
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "../../shared/agent-provider-copy";
 import { normalizeSupportedThinkingLevels } from "../../shared/models";
 import { asString, isRecord } from "../utils/unknown-value";
@@ -60,9 +64,16 @@ export interface AgentConfigResult {
 }
 
 export interface AgentModelVisibilityResult {
-  success: boolean;
+success: boolean;
   error?: string;
   backendModelsVisible?: boolean;
+}
+
+/** 启用的上游内置扩展 id 集合（codemode / tool_search 等）。 */
+export interface AgentBuiltinExtensionsResult {
+  success: boolean;
+  error?: string;
+  enabledIds?: string[];
 }
 
 export interface FileSnapshot {
@@ -75,6 +86,7 @@ type JsonRecord = Record<string, unknown>;
 
 const SETTINGS_KEY = "agentConfigs";
 const MODEL_PREFERENCES_KEY = "agentModelPreferences";
+const BUILTIN_EXTENSIONS_KEY = "agentBuiltinExtensions";
 
 function getDataDir() {
   return join(app.getPath("userData"), "hpp-data");
@@ -233,6 +245,69 @@ export async function setAgentBackendModelsVisible(
     };
     await writeSettings(settings);
     return { success: true, backendModelsVisible: visible };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function getBuiltinExtensionDeclaration(
+  agentId: string,
+): Promise<AgentBuiltinExtensionCapabilities | undefined> {
+  const capabilities = await getAgentPluginRegistry().getCapabilities(agentId);
+  const declaration = capabilities.builtinExtensions;
+  return declaration && declaration !== "none" && declaration.userConfigurable
+    ? declaration
+    : undefined;
+}
+
+/**
+ * 读取某个 agent 已启用的内置扩展。
+ * 返回 null 表示该agent 没有这项能力，调用方应跳过而不是当成「全关」。
+ */
+export async function getAgentBuiltinExtensions(agentId: string): Promise<string[] | null> {
+  try {
+    const declaration = await getBuiltinExtensionDeclaration(agentId);
+    if (!declaration) return null;
+    const settings = await readJsonObject(getSettingsPath());
+    const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
+    const saved = Array.isArray(all[agentId]) ? all[agentId].map(String) : undefined;
+    // 存过的值只保留插件仍声明的 id：插件升级删掉某个扩展后不该留下幽灵开关。
+    const known = new Set(declaration.options.map((option) => option.id));
+    const enabled = (saved ?? declaration.defaultEnabled).filter((id) => known.has(id));
+    return [...new Set(enabled)];
+  } catch {
+    return [];
+  }
+}
+
+export async function getAgentBuiltinExtensionsResult(agentId: string): Promise<AgentBuiltinExtensionsResult> {
+  try {
+    const enabledIds = await getAgentBuiltinExtensions(agentId);
+    if (enabledIds === null) {
+      return { success: false, error: "当前 Agent 未提供内置扩展开关。" };
+    }
+    return { success: true, enabledIds };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function setAgentBuiltinExtensions(
+  agentId: string,
+  enabledIds: string[],
+): Promise<AgentBuiltinExtensionsResult> {
+  try {
+    const declaration = await getBuiltinExtensionDeclaration(agentId);
+    if (!declaration) {
+      throw new Error("当前 Agent 不允许修改内置扩展开关。");
+    }
+    const known = new Set(declaration.options.map((option) => option.id));
+    const next = [...new Set((enabledIds || []).map(String).filter((id) => known.has(id)))];
+    const settings = await readJsonObject(getSettingsPath());
+    const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
+    settings[BUILTIN_EXTENSIONS_KEY] = { ...all, [agentId]: next };
+    await writeSettings(settings);
+    return { success: true, enabledIds: next };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }

@@ -18,6 +18,8 @@ import {
   copyAgentProviderConfig,
   deleteAgentProviderConfig,
   getAgentConfigStateForBackend,
+  getAgentBuiltinExtensions,
+  getAgentBuiltinExtensionsResult,
   getAgentModelVisibility,
   getConfiguredAgentModels,
   listAgentConfig,
@@ -26,6 +28,7 @@ import {
   restoreNativeConfigSnapshots,
   saveAgentProviderConfig,
   setAgentBackendModelsVisible,
+  setAgentBuiltinExtensions,
   setActiveAgentProviderConfig,
   shouldShowAgentBackendModels,
 } from "./agent-config";
@@ -46,6 +49,7 @@ import {
   normalizeAgentSubagentConfig,
   type AgentSubagentConfig,
 } from "../../shared/agent-subagent";
+import { builtinExtensionConfigFromIds } from "../../shared/agent-builtin-extensions";
 import { normalizeAgentPermissionMode } from "../../shared/agent-permissions";
 import type {
   AgentBackend,
@@ -257,10 +261,25 @@ export class AgentManager {
         const subagent = capabilities.subagent && capabilities.subagent !== "none"
           ? await loadSavedAgentSubagentConfig(agentId)
           : undefined;
+        const builtinExtensionDeclaration = capabilities.builtinExtensions && capabilities.builtinExtensions !== "none"
+          ? capabilities.builtinExtensions
+          : undefined;
+        // 返回 null 表示该 agent 没有内置扩展能力，此时不要下发该字段。
+        const builtinExtensions = builtinExtensionDeclaration
+          ? await getAgentBuiltinExtensions(agentId)
+          : null;
         await agent.init(projectPath, existingSessionFilePath, {
           hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
           ...(compaction ? { compaction } : {}),
           ...(subagent ? { subagent } : {}),
+          ...(builtinExtensions && builtinExtensionDeclaration
+            ? {
+                builtinExtensions: builtinExtensionConfigFromIds(
+                  builtinExtensions,
+                  builtinExtensionDeclaration.options.map((option) => option.id),
+                ),
+              }
+            : {}),
         });
       })(),
       AGENT_SESSION_INIT_TIMEOUT_MS,
@@ -524,6 +543,41 @@ export class AgentManager {
       this.sessionAgentTypes.get(sessionId) === agentId && typeof agent.setSubagentConfig === "function"
     );
     return this.applyBackendConfigToSessions(supportedSessions, (agent) => agent.setSubagentConfig!(config));
+  }
+
+  /**
+   * 把内置扩展开关热更新给所有已初始化的该agent 会话。
+   *
+   * 没开会话时不算失败：配置已经落盘，下次 init 会带上。
+   * 部分会话应用失败（老后端没有 setBuiltinExtensions）会如实返回失败，
+   * UI 需要提示「重启后生效」而不是假装成功。
+   */
+  async applyBuiltinExtensions(
+    agentId: string,
+    enabledIds: string[],
+  ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[]; pendingSessions: number }> {
+    const capabilities = await agentRegistry.getCapabilities(agentId);
+    if (!capabilities.builtinExtensions || capabilities.builtinExtensions === "none") {
+      return { success: false, error: "当前 Agent 未声明内置扩展能力。", appliedSessionIds: [], pendingSessions: 0 };
+    }
+    const config = builtinExtensionConfigFromIds(
+      enabledIds,
+      capabilities.builtinExtensions.options.map((option) => option.id),
+    );
+    const supportedSessions = Array.from(this.sessionAgents.entries()).filter(([sessionId, agent]) =>
+      this.sessionAgentTypes.get(sessionId) === agentId && typeof agent.setBuiltinExtensions === "function"
+    );
+    // 已初始化但后端不支持热切换的会话数 —— UI 据此提示需要重启。
+    const pendingSessions = Array.from(this.sessionAgents.entries()).filter(([sessionId]) =>
+      this.sessionAgentTypes.get(sessionId) === agentId
+    ).length - supportedSessions.length;
+    const result = await this.applyBackendConfigToSessions(
+      supportedSessions,
+      (agent) => agent.setBuiltinExtensions!(config),
+    );
+    // pendingSessions > 0 表示有会话拿不到热更新：配置已落盘，但要等重启才生效。
+    // 这不算失败，UI 据此提示用户。
+    return { ...result, pendingSessions };
   }
 
   async getModelsByAgentId(agentId: string): Promise<AgentModel[]> {
@@ -1505,6 +1559,20 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       ...result,
       models: await agentManager.getModelsByAgentId(agentId),
     };
+  });
+
+  ipcMain.handle("agentConfig:getBuiltinExtensions", async (_event, agentId: string) => {
+    return getAgentBuiltinExtensionsResult(agentId);
+  });
+
+  ipcMain.handle("agentConfig:setBuiltinExtensions", async (_event, agentId: string, enabledIds: string[]) => {
+    const result = await setAgentBuiltinExtensions(agentId, enabledIds);
+    if (!result.success) return result;
+    // 落盘成功后才推给运行中的后端：反过来的话一旦热切换失败，
+    // UI 已经显示「已开启」而实际没开，且下次启动又变了。
+    const applied = await agentManager.applyBuiltinExtensions(agentId, result.enabledIds || []);
+    if (!applied.success) return { ...result, success: false, error: applied.error };
+    return result;
   });
 
   ipcMain.handle("agentConfig:fetchModels", async (

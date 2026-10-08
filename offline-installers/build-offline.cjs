@@ -15,7 +15,7 @@ const ROOT = resolve(__dirname, "..");
 const RELEASE_DIR = join(ROOT, "release");
 
 const CODEX_VERSION = process.env.CODEX_VERSION || "0.156.1";
-const PI_VERSION = process.env.PI_VERSION || "0.87.1";
+const PI_VERSION = process.env.PI_VERSION || "1.1.0";
 const NODE_VERSION = process.env.NODE_VERSION || "24.12.0";
 
 const STAMP = new Date().toISOString().slice(0, 10);
@@ -69,8 +69,15 @@ function installAppDeps() {
     cwd: APP_DIR,
     shell: process.platform === "win32",
   });
-  // 与既有产物保持一致：不把锁文件带进离线包。
-  rmSync(join(APP_DIR, "package-lock.json"), { force: true });
+  // pi 1.0.1 起不再随包发布 npm-shrinkwrap.json，传递依赖完全由本仓库的锁文件决定。
+  // 删掉它等于放弃可复现构建：同一份 app/package.json 每次装出的树都可能不同。
+  // 反过来，安装 pi-ai 之类包时若存在版本冲突，npm 会为它单独建一份嵌套 node_modules，
+  // Hpp 读内置模型目录的路径必须同时接受这两种布局（见 electron/agent-plugins/pi/config.mjs）。
+  const appLock = join(APP_DIR, "package-lock.json");
+  if (existsSync(appLock)) {
+    rmSync(appLock, { force: true });
+    log("已移除 app/package-lock.json（离线包只交付 node_modules，不需要锁文件）");
+  }
 }
 
 function verifyAppDeps() {
@@ -81,6 +88,15 @@ function verifyAppDeps() {
   ];
   for (const [rel, label] of checks) {
     if (!existsSync(join(APP_DIR, rel))) fail(`缺少${label}: app/${rel}`);
+  }
+  // 内置模型目录：Hpp 靠它判断模型能力（reasoning/档位/上下文窗口），路径失效时
+  // 不报错、只是把所有内置模型当成自定义模型。两种布局都要认（见 pi/config.mjs）。
+  const catalogCandidates = [
+    join("node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data"),
+    join("node_modules", "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data"),
+  ];
+  if (!catalogCandidates.some((rel) => existsSync(join(APP_DIR, rel)))) {
+    fail(`缺少 Pi 内置模型目录，Hpp 将无法识别内置模型能力。尝试过：\n  ${catalogCandidates.join("\n  ")}`);
   }
   log("依赖校验通过");
 }

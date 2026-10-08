@@ -384,6 +384,15 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const supportsSubagentConfiguration = !!subagentCapabilities
     && subagentCapabilities !== "none"
     && subagentCapabilities.configurable === true;
+  const builtinExtensionCapabilities = activeAgent?.capabilities.builtinExtensions;
+  const builtinExtensionOptions = builtinExtensionCapabilities
+    && builtinExtensionCapabilities !== "none"
+    && builtinExtensionCapabilities.userConfigurable
+      ? builtinExtensionCapabilities.options
+      : [];
+  // options 每次渲染都是新数组，作为 useCallback 依赖会让回调恒定失效；
+  // 用稳定的 id 字符串代替，语义等价。
+  const builtinExtensionIds = builtinExtensionOptions.map((option) => option.id).join(",");
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
@@ -397,6 +406,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [reloading, setReloading] = useState(false);
   const [backendModelsVisible, setBackendModelsVisible] = useState(true);
   const [savingModelVisibility, setSavingModelVisibility] = useState(false);
+  const [builtinExtensionsEnabled, setBuiltinExtensionsEnabled] = useState<string[]>([]);
+  const [savingBuiltinExtensions, setSavingBuiltinExtensions] = useState(false);
   const [reorderingProviderId, setReorderingProviderId] = useState<string>("");
   const [dragProviderId, setDragProviderId] = useState<string>("");
   const [dragOverProviderId, setDragOverProviderId] = useState<string>("");
@@ -578,6 +589,11 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setApiKeyVisible(false);
     setApiKeyCopied(false);
     setBackendModelsVisible(backendModelVisibility?.defaultVisible ?? true);
+    setBuiltinExtensionsEnabled(
+      builtinExtensionCapabilities && builtinExtensionCapabilities !== "none"
+        ? builtinExtensionCapabilities.defaultEnabled
+        : [],
+    );
     try {
       const result = await window.electronAPI.agentConfigList(agentId);
       if (!result.success || !result.config) {
@@ -612,12 +628,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           setStatus({ type: "error", text: visibilityResult.error || "读取模型显示设置失败" });
         }
       }
+      if (builtinExtensionIds) {
+        const extensionsResult = await window.electronAPI.agentConfigGetBuiltinExtensions(agentId);
+        if (extensionsResult.success && Array.isArray(extensionsResult.enabledIds)) {
+          setBuiltinExtensionsEnabled(extensionsResult.enabledIds);
+        } else if (!extensionsResult.success) {
+          setStatus({ type: "error", text: extensionsResult.error || "读取内置扩展设置失败" });
+        }
+      }
     } catch (error) {
       setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       setLoading(false);
     }
-  }, [agentId, backendModelVisibility, getPreferredProviderId]);
+  }, [agentId, backendModelVisibility, builtinExtensionIds, getPreferredProviderId]);
 
   useEffect(() => {
     if (!configurable) {
@@ -737,6 +761,33 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setSavingModelVisibility(false);
     }
   }, [agentId, backendModelsVisible, onModelsUpdated]);
+
+  const handleBuiltinExtensionToggle = useCallback(async (id: string, enabled: boolean) => {
+    const previous = builtinExtensionsEnabled;
+    const next = enabled
+      ? [...new Set([...previous, id])]
+      : previous.filter((value) => value !== id);
+    setBuiltinExtensionsEnabled(next);
+    setSavingBuiltinExtensions(true);
+    setStatus(null);
+    try {
+      const result = await window.electronAPI.agentConfigSetBuiltinExtensions(agentId, next);
+      if (!result.success) {
+        setBuiltinExtensionsEnabled(previous);
+        setStatus({ type: "error", text: result.error || "保存内置扩展设置失败" });
+        return;
+      }
+      // 以主进程过滤后的结果为准：未知 id 会被丢弃，UI 不该显示一个不存在的开关。
+      if (Array.isArray(result.enabledIds)) setBuiltinExtensionsEnabled(result.enabledIds);
+      const label = builtinExtensionOptions.find((option) => option.id === id)?.label || id;
+      setStatus({ type: "success", text: `${enabled ? "已开启" : "已关闭"} ${label}` });
+    } catch (error) {
+      setBuiltinExtensionsEnabled(previous);
+      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSavingBuiltinExtensions(false);
+    }
+  }, [agentId, builtinExtensionIds, builtinExtensionsEnabled]);
 
   const handleAddProvider = useCallback(() => {
     if (!providerConfiguration) return;
@@ -1459,6 +1510,21 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   上下文压缩
                 </button>
               )}
+              {builtinExtensionOptions.map((option) => (
+                <label
+                  key={option.id}
+                  className="agent-config-model-visibility"
+                  title={option.description}
+                >
+                  <span>{option.label}</span>
+                  <input
+                    type="checkbox"
+                    checked={builtinExtensionsEnabled.includes(option.id)}
+                    disabled={loading || savingBuiltinExtensions}
+                    onChange={(event) => void handleBuiltinExtensionToggle(option.id, event.target.checked)}
+                  />
+                </label>
+              ))}
               <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
                 <RefreshCw size={13} />
                 {reloading ? "重载中..." : "重新载入当前配置"}

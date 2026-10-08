@@ -49,6 +49,10 @@ export interface NormalizedToolPayload {
   deletions?: number;
   command?: string;
   exitCode?: number;
+  /** 后端上报的工具自身执行耗时（毫秒）。比宿主侧事件时间戳相减更准。 */
+  durationMs?: number;
+  /** 嵌套工具调用的父调用 id（父工具通过 ctx.executeTool() 发起，如 codemode 脚本）。 */
+  parentToolCallId?: string;
   pattern?: string;
   question?: unknown;
   prompt?: unknown;
@@ -73,6 +77,11 @@ const isRecord = (value: unknown): value is UnknownRecord =>
 
 const asRecord = (value: unknown): UnknownRecord =>
   isRecord(value) ? value : {};
+
+const toPositiveNumber = (value: unknown): number | undefined => {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : undefined;
+};
 
 const getExitCode = (data: UnknownRecord, result: unknown): number | undefined => {
   const resultRecord = asRecord(result);
@@ -527,6 +536,10 @@ export const normalizeToolEvent = (
   const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
+  const durationMs = toPositiveNumber(dataRecord.durationMs);
+  const parentToolCallId = dataRecord.parentToolCallId
+    ? String(dataRecord.parentToolCallId)
+    : undefined;
   const outputText = unwrapToolText(result);
   const errorText = dataRecord.isError ? getErrorText(dataRecord, result) : undefined;
   const statusCandidate = dataRecord.status
@@ -578,6 +591,9 @@ export const normalizeToolEvent = (
     deletions: changes.deletions,
     command: command || undefined,
     exitCode,
+    // 条件展开而非写 undefined：键存在本身会让下游的 hasOwnProperty 判断误判为「有耗时」。
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(parentToolCallId ? { parentToolCallId } : {}),
     pattern: pattern || undefined,
     question: dataRecord.question || detailObject.question || argsObject.question || argsObject.prompt || undefined,
     prompt: dataRecord.prompt || detailObject.prompt || argsObject.prompt || undefined,

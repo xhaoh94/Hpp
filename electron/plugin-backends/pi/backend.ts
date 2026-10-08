@@ -30,6 +30,11 @@ import {
   normalizeAgentSubagentConfig,
   type AgentSubagentConfig,
 } from "../../../shared/agent-subagent";
+import {
+  areBuiltinExtensionConfigsEqual,
+  normalizeAgentBuiltinExtensionConfig,
+  type AgentBuiltinExtensionConfig,
+} from "../../../shared/agent-builtin-extensions";
 
 interface AgentModel {
   id: string;
@@ -56,6 +61,7 @@ interface AgentInitOptions {
   hostSystemPrompt?: string;
   compaction?: AgentCompactionConfig;
   subagent?: AgentSubagentConfig;
+  builtinExtensions?: AgentBuiltinExtensionConfig;
 }
 
 interface AgentForkTarget {
@@ -360,6 +366,7 @@ export class PiSDKAgent {
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
   private subagentConfig: AgentSubagentConfig | undefined;
+  private builtinExtensionConfig: AgentBuiltinExtensionConfig = normalizeAgentBuiltinExtensionConfig(undefined);
   private guidancePendingResponse = false;
   private piSubagentStarts = new Map<string, PiSubagentStart>();
   private piSubagentTerminalStates = new Map<string, NativeSubagentStatus>();
@@ -383,7 +390,8 @@ export class PiSDKAgent {
     const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
     const requestedCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
     const requestedSubagentConfig = options?.subagent;
-    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}\n${JSON.stringify(requestedCompactionConfig)}\n${JSON.stringify(requestedSubagentConfig || null)}`;
+    const requestedBuiltinExtensions = normalizeAgentBuiltinExtensionConfig(options?.builtinExtensions);
+    const nextInitKey = `${projectPath}\n${requestedSessionFilePath || ""}\n${requestedHostSystemPrompt}\n${JSON.stringify(requestedCompactionConfig)}\n${JSON.stringify(requestedSubagentConfig || null)}\n${JSON.stringify(requestedBuiltinExtensions)}`;
     if (this.initPromise && this.initKey === nextInitKey) {
       return this.initPromise;
     }
@@ -395,6 +403,7 @@ export class PiSDKAgent {
       this.hostSystemPrompt === requestedHostSystemPrompt &&
       JSON.stringify(this.compactionConfig) === JSON.stringify(requestedCompactionConfig) &&
       JSON.stringify(this.subagentConfig || null) === JSON.stringify(requestedSubagentConfig || null) &&
+      areBuiltinExtensionConfigsEqual(this.builtinExtensionConfig, requestedBuiltinExtensions) &&
       (!requestedSessionFilePath || this._sessionFilePath === requestedSessionFilePath)
     ) {
       return;
@@ -408,6 +417,7 @@ export class PiSDKAgent {
     this.hostSystemPrompt = requestedHostSystemPrompt;
     this.compactionConfig = requestedCompactionConfig;
     this.subagentConfig = requestedSubagentConfig;
+    this.builtinExtensionConfig = requestedBuiltinExtensions;
     this.models = [];
     this.isReady = false;
     this.emitEvent({ type: "agent_init", agentId: "pi" });
@@ -502,6 +512,7 @@ export class PiSDKAgent {
           hostSystemPrompt: this.hostSystemPrompt,
           compactionConfig: this.compactionConfig,
           subagentConfig: this.subagentConfig,
+          builtinExtensions: this.builtinExtensionConfig,
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "ready") {
@@ -846,6 +857,23 @@ export class PiSDKAgent {
     const data = await this.requestWorkerCommand({ type: "setSubagentConfig", config }, 8_000);
     if (data.type !== "subagent_config_changed") {
       throw new Error(optionalString(data.error) || "Pi SDK set subagent config failed");
+    }
+  }
+
+  /**
+   * 热更新内置扩展（codemode / tool_search）启用状态。
+   *
+   * 不重启 worker：pi 的 session 只有 resourceLoader 的 getter，换 loader 实例它看不到；
+   * 必须在原实例上换 extensionFactories/builtinExtensions 再 session.reload()。
+   * 未初始化的 worker 仅记录配置，等下次 init 下发。
+   */
+  async setBuiltinExtensions(value: unknown): Promise<void> {
+    const config = normalizeAgentBuiltinExtensionConfig(value);
+    this.builtinExtensionConfig = config;
+    if (!this.process) return;
+    const data = await this.requestWorkerCommand({ type: "setBuiltinExtensions", config }, 15_000);
+    if (data.type !== "builtin_extensions_changed") {
+      throw new Error(optionalString(data.error) || "Pi SDK set builtin extensions failed");
     }
   }
 
@@ -1228,6 +1256,15 @@ export class PiSDKAgent {
         if (messageId && !this.activePromptIds.delete(messageId)) break;
         if (!messageId) this.activePromptIds.clear();
         this.pendingUIRequestIds.clear();
+        // Pi 1.1.0 起 agent_settled 带 aborted，能区分「跑完」和「被取消」。
+        // 用户主动停止时 abort() 已经发过 aborted 并清了 turnActive，这里会直接返回；
+        // 只有 SDK 侧单方面取消（本轮没结束就作废）才会走到这，按取消收尾，
+        // 否则半截输出会被当成正常完成的助手消息落盘。
+        if (record.aborted === true && this.turnActive) {
+          this.finishAbortState();
+          this.emitEvent({ type: "aborted" });
+          break;
+        }
         this.completeTurn(true);
         break;
       case "agent_end":

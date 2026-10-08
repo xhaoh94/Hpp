@@ -35,6 +35,30 @@
         { "name": "worker", "label": "Worker", "description": "在隔离上下文中完成开发任务" }
       ]
     },
+    "builtinExtensions": {
+      "userConfigurable": true,
+      "defaultEnabled": [],
+      "options": [
+        {
+          "id": "codemode",
+          "label": "Codemode",
+          "description": "让模型用一段 JS 脚本批量编排工具调用，能省token 但会改变工具调用形态。Plan（只读）模式下不可用。",
+          "hotReload": true
+        },
+        {
+          "id": "tool_search",
+          "label": "Tool search",
+          "description": "按需检索并加载未声明的工具，适合工具集很大的场景。纯检索，无副作用。依赖 MCP 才有意义。",
+          "hotReload": true
+        },
+        {
+          "id": "mcp",
+          "label": "MCP",
+          "description": "读取 ~/.pi/agent/mcp.json 里的服务器并接入其工具。权限按工具自带的注解判定（只读免询问、破坏性与未声明的仍会询问）。",
+          "hotReload": true
+        }
+      ]
+    },
     "configuration": {
       "type": "provider",
       "storage": "plugin",

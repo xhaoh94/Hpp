@@ -57,6 +57,9 @@ describe("agent provider config", () => {
   let getAgentConfigStateForBackend: typeof import("./agent-config").getAgentConfigStateForBackend;
   let getConfiguredAgentModels: typeof import("./agent-config").getConfiguredAgentModels;
   let getAgentModelVisibility: typeof import("./agent-config").getAgentModelVisibility;
+  let getAgentBuiltinExtensions: typeof import("./agent-config").getAgentBuiltinExtensions;
+  let getAgentBuiltinExtensionsResult: typeof import("./agent-config").getAgentBuiltinExtensionsResult;
+  let setAgentBuiltinExtensions: typeof import("./agent-config").setAgentBuiltinExtensions;
   let listAgentConfig: typeof import("./agent-config").listAgentConfig;
   let reorderAgentProviderConfigs: typeof import("./agent-config").reorderAgentProviderConfigs;
   let saveAgentProviderConfig: typeof import("./agent-config").saveAgentProviderConfig;
@@ -94,6 +97,9 @@ describe("agent provider config", () => {
       deleteAgentProviderConfig,
       getAgentConfigStateForBackend,
       getAgentModelVisibility,
+      getAgentBuiltinExtensions,
+      getAgentBuiltinExtensionsResult,
+      setAgentBuiltinExtensions,
       getConfiguredAgentModels,
       listAgentConfig,
       reorderAgentProviderConfigs,
@@ -462,6 +468,71 @@ describe("agent provider config", () => {
 
     const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
     expect(settings.agentModelPreferences["test-agent"].backendModelsVisible).toBe(true);
+  });
+
+  it("persists builtin extension switches and falls back to declared defaults", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerActivation: "none",
+      builtinExtensions: {
+        userConfigurable: true,
+        defaultEnabled: ["tool_search"],
+        options: [
+          { id: "codemode", label: "Codemode", hotReload: true },
+          { id: "tool_search", label: "Tool search", hotReload: true },
+        ],
+      },
+    };
+
+    // 没存过时用插件声明的默认值。
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["tool_search"]);
+    await expect(setAgentBuiltinExtensions("test-agent", ["codemode"])).resolves.toMatchObject({
+      success: true,
+      enabledIds: ["codemode"],
+    });
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["codemode"]);
+
+    const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
+    expect(settings.agentBuiltinExtensions["test-agent"]).toEqual(["codemode"]);
+  });
+
+  it("drops unknown and duplicated builtin extension ids", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerActivation: "none",
+      builtinExtensions: {
+        userConfigurable: true,
+        defaultEnabled: [],
+        options: [{ id: "codemode", label: "Codemode", hotReload: true }],
+      },
+    };
+
+    await expect(setAgentBuiltinExtensions("test-agent", ["codemode", "codemode", "ghost_ext"]))
+      .resolves.toMatchObject({ success: true, enabledIds: ["codemode"] });
+
+    // 存过的幽灵 id（插件升级后删掉了该扩展）读回时被过滤掉。
+    const dataDir = join(tempRoot, "hpp-data");
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, "settings.json"), JSON.stringify({
+      agentBuiltinExtensions: { "test-agent": ["ghost_ext", "codemode"] },
+    }), "utf8");
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["codemode"]);
+  });
+
+  it("reports builtin extensions as unsupported when the agent does not declare them", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerActivation: "none",
+    };
+
+    // null（而非空数组）表示「没这项能力」，调用方要据此跳过而不是当成全关。
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toBeNull();
+    await expect(getAgentBuiltinExtensionsResult("test-agent")).resolves.toMatchObject({
+      success: false,
+    });
+    await expect(setAgentBuiltinExtensions("test-agent", ["codemode"])).resolves.toMatchObject({
+      success: false,
+    });
   });
 
   it("derives chat thinking controls from builtin capabilities and custom selections", async () => {

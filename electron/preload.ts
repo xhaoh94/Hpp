@@ -184,6 +184,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:getModelVisibility", agentId),
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) =>
     ipcRenderer.invoke("agentConfig:setBackendModelsVisible", agentId, visible),
+  agentConfigGetBuiltinExtensions: (agentId: string) =>
+    ipcRenderer.invoke("agentConfig:getBuiltinExtensions", agentId),
+  agentConfigSetBuiltinExtensions: (agentId: string, enabledIds: string[]) =>
+    ipcRenderer.invoke("agentConfig:setBuiltinExtensions", agentId, enabledIds),
   agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: "bearer" | "x-api-key") =>
     ipcRenderer.invoke("agentConfig:fetchModels", baseUrl, apiKey, endpoint, authMode),
   agentConfigSave: (agentId: string, config: unknown) =>

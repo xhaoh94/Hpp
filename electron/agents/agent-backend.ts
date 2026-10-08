@@ -8,6 +8,7 @@ import type {
   AgentUIResponse,
 } from "../../src/types/ipc";
 import type { AgentSubagentConfig } from "../../shared/agent-subagent";
+import type { AgentBuiltinExtensionConfig } from "../../shared/agent-builtin-extensions";
 
 export interface AgentModel {
   id: string;
@@ -76,6 +77,11 @@ export interface AgentBackend {
   setCompactionConfig?(config: AgentCompactionConfig): Promise<void>;
   /** 热更新内置 SubAgent 配置；未实现时在下次初始化读取。 */
   setSubagentConfig?(config: AgentSubagentConfig): Promise<void>;
+  /**
+   * 热更新上游可选内置扩展的启用状态；未实现时只能下次初始化读取。
+   * 返回的 config 只含启用项（`{ [id]: true }`）。
+   */
+  setBuiltinExtensions?(config: AgentBuiltinExtensionConfig): Promise<void>;
   sendUIResponse(response: AgentUIResponse): Promise<void>;
   dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;

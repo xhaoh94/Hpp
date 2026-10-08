@@ -15,6 +15,7 @@ import {
 } from "../utils/command-utils";
 import { getLatestNpmPackageVersion, getNpmPackageVersionInfo } from "../utils/npm-registry";
 import type {
+  AgentBuiltinExtensionSupport,
   AgentCapabilities,
   AgentDescriptor,
   AgentPackageStatus,
@@ -301,6 +302,35 @@ function normalizeSubagentCapabilities(value: unknown): AgentCapabilities["subag
   };
 }
 
+function normalizeBuiltinExtensionCapabilities(value: unknown): AgentBuiltinExtensionSupport {
+  const input = isRecord(value) ? value : {};
+  if (input.userConfigurable !== true) return "none";
+  const options = Array.isArray(input.options)
+    ? input.options.flatMap((rawOption) => {
+        if (!isRecord(rawOption)) return [];
+        const id = asString(rawOption.id);
+        if (!id || !/^[A-Za-z0-9._:-]+$/.test(id)) return [];
+        return [{
+          id,
+          label: asString(rawOption.label) || id,
+          description: asString(rawOption.description) || undefined,
+          // 缺省视为不支持热切换：后端没实现热更新时 UI 必须提示重启。
+          hotReload: rawOption.hotReload === true,
+        }];
+      })
+    : [];
+  if (options.length === 0) return "none";
+  const known = new Set(options.map((option) => option.id));
+  return {
+    userConfigurable: true,
+    // 默认值只认已声明的 id，避免插件写错 id 后静默生效。
+    defaultEnabled: Array.isArray(input.defaultEnabled)
+      ? input.defaultEnabled.map(asString).filter((id) => known.has(id))
+      : [],
+    options,
+  };
+}
+
 function normalizeCapabilities(value: unknown): AgentCapabilities {
   const input = isRecord(value) ? value : {};
   return {
@@ -313,6 +343,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
     compaction: normalizeCompactionCapabilities(input.compaction),
     subagent: normalizeSubagentCapabilities(input.subagent),
+    builtinExtensions: normalizeBuiltinExtensionCapabilities(input.builtinExtensions),
   };
 }
 
@@ -326,6 +357,13 @@ function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
       ? {
           ...capabilities.subagent,
           profiles: capabilities.subagent.profiles?.map((profile) => ({ ...profile })),
+        }
+      : "none",
+    builtinExtensions: capabilities.builtinExtensions && capabilities.builtinExtensions !== "none"
+      ? {
+          ...capabilities.builtinExtensions,
+          defaultEnabled: [...capabilities.builtinExtensions.defaultEnabled],
+          options: capabilities.builtinExtensions.options.map((option) => ({ ...option })),
         }
       : "none",
     configuration: capabilities.configuration === "none"

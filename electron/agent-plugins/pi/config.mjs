@@ -21,10 +21,19 @@ const getModelsStorePath = () => {
   return join(dirname(configPath), "models-store.json");
 };
 
-// SDK 内置 catalog 路径：HPP_DATA_DIR/pi-sdk-runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/data
-const getBuiltinCatalogPath = () => {
+// SDK 内置 catalog 路径。pi-ai 的落盘位置取决于 npm 怎么排依赖树：
+// pi <=1.0.0 随包发布 npm-shrinkwrap.json，把 pi-ai 固定嵌在 pi-coding-agent/node_modules 下；
+// 1.0.1 起上游删掉了 shrinkwrap，npm 按默认规则提升到 pi-sdk-runtime/node_modules 顶层。
+// 两条路径都试，且必须真实读到目录才算命中 —— 否则内置能力判定会静默退化成「全是非内置模型」。
+const getBuiltinCatalogDirCandidates = () => {
   const dataDir = process.env.HPP_DATA_DIR || process.cwd();
-  return join(dataDir, "pi-sdk-runtime", "node_modules", "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data");
+  const runtimeNodeModules = join(dataDir, "pi-sdk-runtime", "node_modules", "@earendil-works");
+  return [
+    // 1.0.1+ 的提升布局。
+    join(runtimeNodeModules, "pi-ai", "dist", "providers", "data"),
+    // <=1.0.0 的 shrinkwrap 嵌套布局。
+    join(runtimeNodeModules, "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data"),
+  ];
 };
 
 // pi 运行时刷新的渠道目录缓存（与 models.json 同目录）。
@@ -52,51 +61,65 @@ const getDirectoryStore = () => {
 // 格式：Map<provider:modelId, modelEntry> 和 Map<modelId, modelEntry>
 let builtinCatalogCache = null;
 let builtinCatalogLoaded = false;
-const getBuiltinCatalog = async () => {
-  if (builtinCatalogLoaded) return builtinCatalogCache;
-  builtinCatalogLoaded = true;
-  const catalogPath = getBuiltinCatalogPath();
-  try {
-    const files = await readdir(catalogPath);
-    const jsonFiles = files.filter((f) => f.endsWith(".json") && f !== ".manifest.json");
-    const byProviderAndId = new Map();
-    const byId = new Map();
-    for (const file of jsonFiles) {
-      try {
-        const content = await readFile(join(catalogPath, file), "utf8");
-        const data = JSON.parse(content);
-        if (!isRecord(data)) continue;
-        // 每个 JSON 文件格式：{ "api-type": { "model-id": { model-entry } } }
-        for (const apiType of Object.keys(data)) {
-          const apiModels = data[apiType];
-          if (!isRecord(apiModels)) continue;
-          for (const modelId of Object.keys(apiModels)) {
-            const model = apiModels[modelId];
-            if (!isRecord(model) || !model.id) continue;
-            const provider = asString(model.provider) || "";
-            const key = provider ? `${provider}:${model.id}` : model.id;
-            // 优先保留"声明完整"的能力 map
-            const existing = byProviderAndId.get(key);
-            if (!existing || isBetterCatalogEntry(model, existing)) {
-              byProviderAndId.set(key, model);
-              // 按 id 兜底时，同样保留一份
-              const idKey = model.id;
-              const existingById = byId.get(idKey);
-              if (!existingById || isBetterCatalogEntry(model, existingById)) {
-                byId.set(idKey, model);
-              }
+const readCatalogDir = async (catalogPath) => {
+  const files = await readdir(catalogPath);
+  const jsonFiles = files.filter((f) => f.endsWith(".json") && f !== ".manifest.json");
+  const byProviderAndId = new Map();
+  const byId = new Map();
+  for (const file of jsonFiles) {
+    try {
+      const content = await readFile(join(catalogPath, file), "utf8");
+      const data = JSON.parse(content);
+      if (!isRecord(data)) continue;
+      // 每个 JSON 文件格式：{ "api-type": { "model-id": { model-entry } } }
+      for (const apiType of Object.keys(data)) {
+        const apiModels = data[apiType];
+        if (!isRecord(apiModels)) continue;
+        for (const modelId of Object.keys(apiModels)) {
+          const model = apiModels[modelId];
+          if (!isRecord(model) || !model.id) continue;
+          const provider = asString(model.provider) || "";
+          const key = provider ? `${provider}:${model.id}` : model.id;
+          // 优先保留"声明完整"的能力 map
+          const existing = byProviderAndId.get(key);
+          if (!existing || isBetterCatalogEntry(model, existing)) {
+            byProviderAndId.set(key, model);
+            // 按 id 兜底时，同样保留一份
+            const idKey = model.id;
+            const existingById = byId.get(idKey);
+            if (!existingById || isBetterCatalogEntry(model, existingById)) {
+              byId.set(idKey, model);
             }
           }
         }
-      } catch {
-        // 单个文件读取失败，继续处理其他文件
       }
+    } catch {
+      // 单个文件读取失败，继续处理其他文件
     }
-    builtinCatalogCache = { byProviderAndId, byId };
-    return builtinCatalogCache;
-  } catch {
-    return null;
   }
+  return { byProviderAndId, byId, path: catalogPath };
+};
+
+const getBuiltinCatalog = async () => {
+  if (builtinCatalogLoaded) return builtinCatalogCache;
+  builtinCatalogLoaded = true;
+  const candidates = getBuiltinCatalogDirCandidates();
+  let lastError = null;
+  for (const catalogPath of candidates) {
+    try {
+      builtinCatalogCache = await readCatalogDir(catalogPath);
+      return builtinCatalogCache;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  // 两条路径都读不到时必须留下线索：静默返回 null 会让渠道弹窗把所有内置模型
+  // 当成自定义模型（能力控件全露出来），没有人会注意到是路径失效了。
+  console.warn(
+    `[pi] 未找到 SDK 内置模型目录，已跳过内置能力判定。尝试过：${candidates.join(" | ")}`,
+    lastError instanceof Error ? lastError.message : lastError,
+  );
+  return null;
 };
 
 // 判断 catalog entry 是否比现有的更好：

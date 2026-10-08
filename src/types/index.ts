@@ -208,10 +208,16 @@ export interface AgentConfigFetchModelsResult {
 }
 
 export interface AgentModelVisibilityResult {
-  success: boolean;
+success: boolean;
   error?: string;
   backendModelsVisible?: boolean;
   models?: AgentModel[];
+}
+
+export interface AgentBuiltinExtensionsResult {
+  success: boolean;
+  error?: string;
+  enabledIds?: string[];
 }
 
 export interface AgentForkTarget {
@@ -348,6 +354,8 @@ export interface ElectronAPI {
   agentConfigLookupModel: (agentId: string, modelId: string) => Promise<AgentModelLookupResult>;
   agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) => Promise<AgentModelVisibilityResult>;
+  agentConfigGetBuiltinExtensions: (agentId: string) => Promise<AgentBuiltinExtensionsResult>;
+  agentConfigSetBuiltinExtensions: (agentId: string, enabledIds: string[]) => Promise<AgentBuiltinExtensionsResult>;
   agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: AgentProviderAuthMode) => Promise<AgentConfigFetchModelsResult>;
   agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
   agentConfigCopy: (sourceAgentId: string, sourceProviderId: string, targetAgentId: string) => Promise<AgentConfigResult>;

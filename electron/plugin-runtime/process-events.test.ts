@@ -98,6 +98,42 @@ describe("process event normalization", () => {
     })).toEqual([]);
   });
 
+  it("carries Pi tool duration and nested-call parent id through normalization", () => {
+    // Pi 1.1.0 的 tool_execution_end 带 durationMs（工具自身耗时，单调时钟测量）
+    // 与 parentToolCallId（父工具通过 ctx.executeTool() 发起，如 codemode 脚本）。
+    expect(normalizeToolEvent("tool_end", {
+      toolName: "bash",
+      toolCallId: "call-nested",
+      args: { command: "npm test" },
+      result: { stdout: "ok" },
+      durationMs: 1234.6,
+      parentToolCallId: "call-parent",
+    })).toMatchObject({
+      durationMs: 1235,
+      parentToolCallId: "call-parent",
+    });
+
+    // 工具没实际执行时 Pi 省略该字段，不应凭空造出 0。
+    expect(normalizeToolEvent("tool_end", {
+      toolName: "read",
+      toolCallId: "call-1",
+      args: { path: "a.ts" },
+      result: { content: [] },
+    })).not.toHaveProperty("durationMs");
+
+    // 0 / 负数 / 非数字都不该被当成有效耗时传下去。
+    for (const durationMs of [0, -5, "abc", null, undefined]) {
+      const payload = normalizeToolEvent("tool_end", {
+        toolName: "read",
+        toolCallId: "call-x",
+        args: { path: "a.ts" },
+        result: { content: [] },
+        durationMs,
+      }) as Record<string, unknown>;
+      expect(payload.durationMs).toBeUndefined();
+    }
+  });
+
   it("unescapes JSON-escaped newlines in single-string provider patches", () => {
     // droid 的结构化 tool_result 可能携带字面 \n 的补丁；不反转义的话
     // 补丁解析不出 hunk，审核弹窗拿不到可用差异，局部撤销会静默失效。

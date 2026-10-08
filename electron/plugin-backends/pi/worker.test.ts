@@ -41,6 +41,8 @@ class FakeSession {
   sessionBeforeCompactHandlers = [];
   registeredTools = [];
   compactCalls = [];
+  resourceLoader = null;
+  extraTools = null;
   lastSystemPrompt = "BASE_SYSTEM_PROMPT";
   baseSystemPrompt = "BASE_SYSTEM_PROMPT";
 
@@ -53,9 +55,12 @@ class FakeSession {
     this.baseSystemPrompt = ["BASE_SYSTEM_PROMPT", ...appendSystemPrompt].filter(Boolean).join("\\n\\n");
   }
 
-  async bindExtensions({ uiContext }) {
+  async bindExtensions({ uiContext } = {}) {
     this.uiContext = uiContext;
-    for (const factory of this.extensionFactories) {
+    for (const input of this.extensionFactories) {
+      // 真实 SDK 把 builtin:true 的对象拆到 builtinExtensions Map，
+      // 由 loadExtensionFromFactory(builtin.factory) 单独加载，不会走到这里。
+      const factory = typeof input === "function" ? input : input.factory;
       factory({
         on: (eventName, handler) => {
           if (eventName === "tool_call") this.toolCallHandlers.push(handler);
@@ -70,7 +75,39 @@ class FakeSession {
   subscribe(listener) { this.listener = listener; return () => { this.listener = null; }; }
   getActiveToolNames() { return [...this.activeTools]; }
   setActiveToolsByName(names) { this.activeTools = [...names]; }
-  getAllTools() { return ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"].map((name) => ({ name })); }
+  // 内置扩展工具由 loader 决定；reload 后才出现在工具表里（与真实 SDK 一致，
+  // session 只在 reload 时重建 extensionRunner）。
+  reloadCount = 0;
+  async reload() {
+    this.reloadCount += 1;
+    this.syncToolsFromLoader();
+  }
+  // 真实 SDK 在 createAgentSession 里就按当时的 loader 建工具表，
+  // 所以这里既要在构造后同步一次，也要在 reload 后同步。
+  syncToolsFromLoader() {
+    const builtin = this.resourceLoader?.builtinExtensions ?? new Map();
+    const base = ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"];
+    const names = new Set(base);
+    // 内置扩展注册的工具：codemode → codemode，tool-search → tool_search。
+    for (const key of builtin.keys()) names.add(key.replace("-", "_"));
+    // MCP 工具带上注解与 exposure，宿主要靠注解做权限分类。
+    if (builtin.has("mcp") && process.env.PI_TEST_MCP_TOOLS === "1") {
+      for (const tool of MCP_PROBE_TOOLS) names.add(tool.name);
+    }
+    this.extraTools = [...names];
+  }
+  getAllTools() {
+    const withMeta = (name) => {
+      const mcpTool = MCP_PROBE_TOOLS.find((t) => t.name === name);
+      return {
+        name,
+        // 只有 MCP 工具有注解；内置工具保持 undefined，让分类走工具名路径。
+        ...(mcpTool?.annotations ? { annotations: mcpTool.annotations } : {}),
+      };
+    };
+    return [...(this.extraTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"])]
+      .map(withMeta);
+  }
   getAvailableThinkingLevels() {
     if (!this.model?.reasoning) return ["off"];
     return ["off", "minimal", "low", "medium", "high", "xhigh", "max"].filter((level) => {
@@ -154,6 +191,26 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
+    // 已加载的工具（含 defaultActive:false 的内置扩展）——与 active-tools 区分开：
+    // 前者反映「扩展加载了吗」，后者反映「声明给模型了吗」。
+    if (message.startsWith("loaded-tools")) {
+      const names = this.getAllTools().map((tool) => tool.name).sort();
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(names) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    // 宿主实际下发给 session 的白名单（activeTools）。跟 loaded-tools 区分：
+    // 那个读「已注册」，这个读「已激活」——MCP 工具两者可以不一致。
+    if (message.startsWith("active-tool-names")) {
+      const names = [...this.activeTools].sort();
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(names) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message === "registered-shell-tool") {
       const tool = this.registeredTools.find((candidate) => candidate.name === "bash");
       this.listener?.({ type: "agent_start" });
@@ -165,6 +222,32 @@ class FakeSession {
     if (message.startsWith("/skill:review") || message.startsWith("/scout-and-plan") || message.startsWith("/implement") || message.startsWith("/implement-and-review") || message.startsWith("/compact")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "settled-aborted") {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "aborted" } });
+      this.listener?.({ type: "agent_end" });
+      // Pi 1.1.0 起 agent_settled 带 aborted，能区分「跑完」和「被取消」。
+      this.listener?.({ type: "agent_settled", aborted: true });
+      return;
+    }
+    if (message === "tool-with-duration") {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "tool_execution_start", toolName: "bash", toolCallId: "call-nested", args: { command: "npm test" } });
+      this.listener?.({
+        type: "tool_execution_end",
+        toolName: "bash",
+        toolCallId: "call-nested",
+        args: { command: "npm test" },
+        result: { stdout: "ok" },
+        isError: false,
+        durationMs: 1234.6,
+        parentToolCallId: "call-parent",
+      });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -490,7 +573,15 @@ const builtinCatalogueWindowModels = [
 export const SettingsManager = { create: () => ({ getRetrySettings: () => ({ enabled: true, maxRetries: 1, baseDelayMs: 1 }) }) };
 export class DefaultResourceLoader {
   constructor(options = {}) {
-    this.extensionFactories = options.extensionFactories || [];
+    const factories = options.extensionFactories || [];
+    // 复刻真实 SDK 的分流：带 builtin:true 的进 builtinExtensions Map，
+    // 其余留在 extensionFactories。session.reload() 只读前者。
+    this.builtinExtensions = new Map(
+      factories
+        .filter((input) => typeof input !== "function" && input.builtin === true)
+        .map((input) => [input.name, input]),
+    );
+    this.extensionFactories = factories;
     this.appendSystemPrompt = options.appendSystemPrompt || [];
     this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths || [];
   }
@@ -518,14 +609,45 @@ export class DefaultResourceLoader {
   }
 }
 export const SessionManager = FakeSessionManager;
-export const createAgentSession = async ({ sessionManager, modelRegistry, modelRuntime, resourceLoader }) => ({
-  session: new FakeSession(
+export const createAgentSession = async ({ sessionManager, modelRegistry, modelRuntime, resourceLoader }) => {
+  const session = new FakeSession(
     sessionManager,
     modelRegistry || new ModelRegistry(modelRuntime),
     resourceLoader.extensionFactories,
     resourceLoader.appendSystemPrompt,
-  ),
-});
+  );
+  // 真实 SDK 的 session 在构造时持有 resourceLoader（只有 getter），
+  // 热切换扩展时 worker 改的是 loader 实例、再调 session.reload()。
+  session.resourceLoader = resourceLoader;
+  session.syncToolsFromLoader();
+  return { session };
+};
+// 内置扩展工厂：真实 SDK 从包根导出这两个。返回带 builtin:true 的工厂包装，
+// 与 worker 侧的注册方式一致。
+export const createCodemodeExtension = () => (pi) => {
+  pi.registerTool({ name: "codemode" });
+};
+export const createToolSearchExtension = () => (pi) => {
+  pi.registerTool({ name: "tool_search" });
+};
+// MCP 扩展在真实 SDK 里从 mcp.json 读服务器、异步连接后注册 mcp__<server>__<tool>。
+// 夹具用env 开关模拟三种注解组合，验证 worker 的权限分类按注解而非工具名。
+const MCP_PROBE_TOOLS = [
+  { name: "mcp__docs__fetch_note", annotations: { readOnlyHint: true } },
+  { name: "mcp__docs__delete_note", annotations: { destructiveHint: true, idempotentHint: false } },
+  { name: "mcp__docs__no_hint_tool" },
+];
+export const createMcpExtension = () => (pi) => {
+  if (process.env.PI_TEST_MCP_TOOLS !== "1") return;
+  for (const tool of MCP_PROBE_TOOLS) {
+    pi.registerTool({
+      name: tool.name,
+      // exposure 默认 direct：MCP 直接暴露给模型，宿主白名单要放行。
+      ...(tool.annotations ? { annotations: tool.annotations } : {}),
+      async execute() { return { content: [{ type: "text", text: "ok" }] }; },
+    });
+  }
+};
 let compactAttempts = 0;
 let firstCompactThinkingLevel = null;
 export const compact = async (preparation, model, apiKey, headers, _instructions, _signal, thinkingLevel, _streamFn, env, retry) => {
@@ -819,6 +941,195 @@ describe("Pi SDK worker protocol", () => {
     const types = worker.messages.map((message) => message.type);
     expect(types.filter((type) => type === "agent_start")).toHaveLength(2);
     expect(types.lastIndexOf("prompt_done")).toBeGreaterThan(types.lastIndexOf("agent_end"));
+  });
+
+  it("does not load optional builtin extensions by default", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tools-0", type: "prompt", message: "loaded-tools", permissionMode: "full-access" });
+
+    const ended = await worker.waitFor((message) => message.type === "message_end");
+    const reported: string[] = JSON.parse(ended.message.text);
+    expect(reported).not.toContain("codemode");
+    expect(reported).not.toContain("tool_search");
+  });
+
+  it("loads codemode and tool_search when the init config enables them", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      builtinExtensions: { codemode: true, tool_search: true },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tools-1", type: "prompt", message: "loaded-tools", permissionMode: "full-access" });
+
+    const ended = await worker.waitFor((message) => message.type === "message_end");
+    const reported: string[] = JSON.parse(ended.message.text);
+    expect(reported).toContain("codemode");
+    expect(reported).toContain("tool_search");
+  });
+
+  it("hot-toggles builtin extensions without restarting the worker", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "ext-on", type: "setBuiltinExtensions", config: { codemode: true } });
+    const enabled = await worker.waitFor(
+      (message) => message.type === "builtin_extensions_changed" && message.id === "ext-on",
+    );
+    expect(enabled.config).toEqual({ codemode: true, tool_search: false, mcp: false });
+
+    worker.send({ id: "tools-2", type: "prompt", message: "loaded-tools", permissionMode: "full-access" });
+    const afterOn = await worker.waitFor((message) => message.type === "message_end");
+    expect(JSON.parse(afterOn.message.text)).toContain("codemode");
+
+    // 关掉必须真正移除：Pi 的 session 只有 resourceLoader 的 getter，
+    // 换 loader 实例它看不到，所以必须原地改 + session.reload()。
+    worker.send({ id: "ext-off", type: "setBuiltinExtensions", config: {} });
+    await worker.waitFor(
+      (message) => message.type === "builtin_extensions_changed" && message.id === "ext-off",
+    );
+
+    worker.send({ id: "tools-3", type: "prompt", message: "loaded-tools", permissionMode: "full-access" });
+    const afterOff = await worker.waitFor(
+      (message) => message.type === "message_end" && JSON.parse(message.message.text).includes("codemode") === false,
+    );
+    expect(JSON.parse(afterOff.message.text)).not.toContain("codemode");
+  });
+
+  it("ignores unknown builtin extension ids", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({ id: "ext-bogus", type: "setBuiltinExtensions", config: { not_a_real_ext: true } });
+    const changed = await worker.waitFor(
+      (message) => message.type === "builtin_extensions_changed" && message.id === "ext-bogus",
+    );
+    // 归一化结果包含全部已知内置扩展（不止被点名的那个），
+    // 未提及的一律为 false。
+    expect(changed.config).toEqual({ codemode: false, tool_search: false, mcp: false });
+  });
+
+  it("keeps the permission hook self-check passing when builtin extensions are on", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    // 内置扩展带 builtin:true，不参与 <inline:N> 编号；权限扩展必须仍是 <inline:1>，
+    // 否则 init 会抛「Pi SDK 不支持 Hpp 权限钩子」。
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      builtinExtensions: { codemode: true, tool_search: true },
+    });
+    const ready = await worker.waitFor((message) => message.type === "ready" || message.type === "error");
+    expect(ready.type).toBe("ready");
+  });
+
+  it("does not load the MCP extension unless enabled", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      builtinExtensions: { codemode: true },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tools-mcp-off", type: "prompt", message: "loaded-tools", permissionMode: "full-access" });
+
+    const ended = await worker.waitFor((message) => message.type === "message_end");
+    const reported: string[] = JSON.parse(ended.message.text);
+    // 只开了 codemode：MCP 工具不该出现。
+    expect(reported).toContain("codemode");
+    expect(reported.some((name) => name.startsWith("mcp__"))).toBe(false);
+  });
+
+  it("exposes MCP tools in the whitelist and classifies them by annotation", async () => {
+    process.env.PI_TEST_MCP_TOOLS = "1";
+    try {
+      const worker = startWorker(runtimeRoot, agentDir);
+      children.push(worker.child);
+      worker.send({
+        id: "init",
+        type: "init",
+        projectPath: tempRoot,
+        builtinExtensions: { mcp: true },
+      });
+      await worker.waitFor((message) => message.type === "ready");
+      worker.send({ id: "tools-mcp-on", type: "prompt", message: "active-tool-names", permissionMode: "full-access" });
+
+      const ended = await worker.waitFor((message) => message.type === "message_end");
+      const reported: string[] = JSON.parse(ended.message.text);
+      // exposure=direct 的 MCP 工具必须进白名单，否则模型永远看不到。
+      expect(reported).toContain("mcp__docs__fetch_note");
+      expect(reported).toContain("mcp__docs__delete_note");
+      expect(reported).toContain("mcp__docs__no_hint_tool");
+    } finally {
+      delete process.env.PI_TEST_MCP_TOOLS;
+    }
+  });
+
+  it("keeps codemode and tool_search out of the MCP-enabled whitelist", async () => {
+    process.env.PI_TEST_MCP_TOOLS = "1";
+    try {
+      const worker = startWorker(runtimeRoot, agentDir);
+      children.push(worker.child);
+      worker.send({
+        id: "init",
+        type: "init",
+        projectPath: tempRoot,
+        builtinExtensions: { mcp: true },
+      });
+      await worker.waitFor((message) => message.type === "ready");
+      worker.send({ id: "tools-mcp-wl", type: "prompt", message: "active-tool-names", permissionMode: "full-access" });
+
+      const ended = await worker.waitFor((message) => message.type === "message_end");
+      const reported: string[] = JSON.parse(ended.message.text);
+      // 开了 MCP 不等于开了 codemode：后两者的激活仍需显式开启。
+      expect(reported).not.toContain("codemode");
+      expect(reported).not.toContain("tool_search");
+    } finally {
+      delete process.env.PI_TEST_MCP_TOOLS;
+    }
+  });
+
+  it("marks prompt_done as aborted when Pi settles a cancelled run", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "abort-1", type: "prompt", message: "settled-aborted", permissionMode: "full-access" });
+
+    const done = await worker.waitFor((message) => message.type === "prompt_done" && message.id === "abort-1");
+    // 半截输出不能被当成正常完成，backend 据此把本轮收尾为 interrupted。
+    expect(done.aborted).toBe(true);
+
+    // 对照：正常结束的 prompt_done 不带 aborted。
+    worker.send({ id: "ok-1", type: "prompt", message: "tool-with-duration", permissionMode: "full-access" });
+    const ok = await worker.waitFor((message) => message.type === "prompt_done" && message.id === "ok-1");
+    expect(ok.aborted).toBeUndefined();
+  });
+
+  it("forwards Pi tool duration and nested-call parent id", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "dur-1", type: "prompt", message: "tool-with-duration", permissionMode: "full-access" });
+
+    const end = await worker.waitFor((message) => message.type === "tool_execution_end");
+    // Pi 用单调时钟测量工具自身耗时，向上取整到毫秒。
+    expect(end.durationMs).toBe(1235);
+    expect(end.parentToolCallId).toBe("call-parent");
   });
 
   it("reports context compaction start and completion with one stable id", async () => {

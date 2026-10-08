@@ -192,6 +192,26 @@ export interface AgentCompactionCapabilities {
 export type AgentCompactionSupport = AgentCompactionCapabilities | "none";
 export type AgentSubagentSupport = AgentSubagentCapabilities | "none";
 
+/**
+ * Agent 上游自带的可选内置扩展。宿主不会自动加载它们（那需要走 agent CLI 的
+ * 启动路径），必须由用户显式开启，并按id 逐个下发到运行中的后端。
+ */
+export interface AgentBuiltinExtensionOption {
+  id: string;
+  label: string;
+  description?: string;
+  /** 旧版后端不支持热切换时置false，UI 需提示「重启后生效」。 */
+  hotReload?: boolean;
+}
+
+export interface AgentBuiltinExtensionCapabilities {
+  userConfigurable: boolean;
+  defaultEnabled: string[];
+  options: AgentBuiltinExtensionOption[];
+}
+
+export type AgentBuiltinExtensionSupport = AgentBuiltinExtensionCapabilities | "none";
+
 export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
   permissions: boolean;
@@ -202,6 +222,7 @@ export interface AgentCapabilities {
   providerActivation: AgentProviderActivationSupport;
   compaction?: AgentCompactionSupport;
   subagent?: AgentSubagentSupport;
+  builtinExtensions?: AgentBuiltinExtensionSupport;
 }
 
 export interface SessionDataPurgeRequest {

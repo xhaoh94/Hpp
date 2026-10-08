@@ -7,15 +7,28 @@
 
 本文只覆盖 CLI/SDK 软件安装。模型 API 地址、API Key、账号登录和内网模型网关不包含在包内，运行模型请求时仍需配置可达的服务。
 
-## 2. 当前打包版本（2026-09-23）
+## 2. 当前打包版本（2026-10-08）
 
 | 组件 | 包名 | 版本 |
 | --- | --- | --- |
 | Codex CLI | `@openai/codex` | `0.156.1` |
-| Pi SDK/CLI | `@earendil-works/pi-coding-agent` | `0.87.1` |
+| Pi SDK/CLI | `@earendil-works/pi-coding-agent` | `1.1.0` |
 | Node.js | 便携运行时 | `24.12.0` |
 
 Pi 包既提供 SDK 导出，也提供 `pi` 命令。当前版本的 npm `bin` 入口是 `dist/bundle/cli.js`；Hpp 集成使用同一个包的 SDK 导出，不依赖全局 `pi` 命令。
+
+> **Pi 1.1.0 的依赖布局变化（升级时必读）**：Pi 1.0.1 起不再随包发布 `npm-shrinkwrap.json`，
+> 传递依赖改由本仓库的锁文件决定，`npm install` 会把 `@earendil-works/*` 提升到
+> `node_modules/@earendil-works/` 顶层。Hpp 读取内置模型目录（判断模型 reasoning /
+> 思考档位 / 上下文窗口）的路径必须同时接受两种布局：
+>
+> ```text
+> node_modules/@earendil-works/pi-ai/dist/providers/data                                    # 1.0.1+ 提升布局
+> node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/...  # <=1.0.0 shrinkwrap 嵌套布局
+> ```
+>
+> 路径失效时不会报错，只会把所有内置模型静默降级为「自定义模型」。构建脚本的
+> `verifyAppDeps()` 会对这两个候选路径做检查。
 
 ## 3. 为什么必须按 Hpp 目录部署 Pi SDK
 
@@ -51,7 +64,7 @@ codex-pi-offline-win-x64-latest-2026-09-23/
 ```json
 {
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@openai/codex": "0.156.1"
   }
 }
@@ -96,7 +109,15 @@ npm install --omit=dev --no-audit --no-fund
 npm ls @openai/codex @earendil-works/pi-coding-agent --depth=0
 Test-Path node_modules\@openai\codex-win32-x64
 Test-Path node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js
+
+# Pi 内置模型目录（两种布局任一命中即可，见第 2 节说明）
+Test-Path node_modules\@earendil-works\pi-ai\dist\providers\data
+Test-Path node_modules\@earendil-works\pi-coding-agent\node_modules\@earendil-works\pi-ai\dist\providers\data
 ```
+
+> Pi 1.0.1 起不再自带 `npm-shrinkwrap.json`，所以 `app/package-lock.json` 决定了实际依赖树。
+> 同一份 `app/package.json` 在不同时间装出的树可能不同 —— 需要可复现产物时，把生成的
+> `package-lock.json` 一并留档（构建脚本会把它从交付包里删掉，见 5.2 的说明）。
 
 ### 5.3 下载便携 Node.js
 
@@ -154,7 +175,7 @@ $HppDataDir = "$env:APPDATA\hpp\hpp-data"
 从 `release` 目录执行：
 
 ```powershell
-tar.exe -a -cf codex-pi-offline-win-x64-0.156.1-0.87.1.zip `
+tar.exe -a -cf codex-pi-offline-win-x64-0.156.1-1.1.0.zip `
   -C . codex-pi-offline-win-x64-latest-2026-09-23
 ```
 
@@ -163,7 +184,7 @@ Windows PowerShell 自带的 `Compress-Archive` 在大量 `node_modules` 文件�
 生成 SHA-256：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\codex-pi-offline-win-x64-0.156.1-0.87.1.zip
+Get-FileHash -Algorithm SHA256 .\codex-pi-offline-win-x64-0.156.1-1.1.0.zip
 ```
 
 当前包的校验值：
@@ -185,9 +206,9 @@ Get-FileHash -Algorithm SHA256 .\codex-pi-offline-win-x64-0.156.1-0.87.1.zip
 4. 看到类似输出后，完全退出并重新打开 Hpp：
 
    ```text
-   Hpp Pi SDK installed: 0.87.1
+   Hpp Pi SDK installed: 1.1.0
    codex-cli 0.156.1
-   0.87.1
+   1.1.0
    ```
 
 5. 打开 Hpp Agent 面板并点击“刷新”（必要时重启 Hpp）。
@@ -228,6 +249,10 @@ Test-Path .\runtime\node.exe
 Test-Path .\app\node_modules\@openai\codex\bin\codex.js
 Test-Path .\app\node_modules\@openai\codex-win32-x64
 Test-Path .\app\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js
+
+# Pi 内置模型目录（两种布局任一命中即可）
+Test-Path .\app\node_modules\@earendil-works\pi-ai\dist\providers\data
+Test-Path .\app\node_modules\@earendil-works\pi-coding-agent\node_modules\@earendil-works\pi-ai\dist\providers\data
 
 # 不依赖系统 Node 的启动验证
 $oldPath = $env:Path
@@ -278,6 +303,11 @@ pi-sdk-runtime\node_modules\@earendil-works\pi-coding-agent\package.json
 2. 更新 `app/package.json` 的两个精确版本。
 3. 删除旧的 `app/node_modules` 和锁文件后重新执行生产依赖安装，避免残留旧包。
 4. 如果新 Pi 版本的 `bin` 路径变化，按 `npm view ... bin --json` 的结果更新 `pi.cmd` 和安装脚本检查项。
-5. 更新 `VERSIONS.txt`、`README.txt` 和 ZIP 文件名。
-6. 通过第 8 节清单，尤其是“无系统 Node 启动”和“临时目录安装”验证。
-7. 重新生成 SHA-256，并将校验文件与 ZIP 一起发布。
+5. 检查 Pi 的**依赖布局**是否变化（`npm view ... dist.shrinkwrap` 是否还在）。Pi 1.0.1 起不再发布
+   `npm-shrinkwrap.json`，`@earendil-works/*` 会被提升到 `node_modules/@earendil-works/` 顶层；
+   布局变化时必须同步 `electron/agent-plugins/pi/config.mjs` 里读内置模型目录的候选路径。
+6. 核对上游 CHANGELOG 的 `Breaking Changes`，逐条对照 Hpp 用到的 SDK 导出名、事件字段和
+   `models.json` 字段（provider id 改名之类的影响是静默的，测不出来）。
+7. 更新 `VERSIONS.txt`、`README.txt` 和 ZIP 文件名。
+8. 通过第 8 节清单，尤其是“无系统 Node 启动”和“临时目录安装”验证。
+9. 重新生成 SHA-256，并将校验文件与 ZIP 一起发布。

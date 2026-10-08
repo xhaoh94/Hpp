@@ -15,6 +15,8 @@ import {
   ensureSessionMessagesLoaded,
   loadOlderSessionMessages,
   parsePersistedChatMessage,
+  pickDefaultActiveSessionId,
+  resolveHydratedActiveSessionId,
 } from "./useDataPersistence";
 import { useChatStore, type ChatMessage } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -152,6 +154,77 @@ describe("session config change notifications", () => {
     const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent<{ sessionId: string }>;
     expect(event.type).toBe(SESSION_CONFIG_UPDATED_EVENT);
     expect(event.detail).toEqual({ sessionId: "session-thinking" });
+  });
+});
+
+describe("启动时默认选中第一个会话", () => {
+  const makeSession = (id: string, closed = false) => ({
+    id,
+    agentId: "codex",
+    agentSessionId: id,
+    title: id,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastActiveAt: "2026-01-01T00:00:00.000Z",
+    ...(closed ? { closed: true } : {}),
+  });
+  const makeProject = (id: string, sessions: ReturnType<typeof makeSession>[]) => ({
+    id,
+    name: id,
+    path: `C:\\${id}`,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    agents: ["codex"],
+    sessions,
+  });
+
+  it("没有恢复出活动会话时选中第一个未关闭会话", () => {
+    const projects = [
+      makeProject("project-1", [makeSession("archived-1", true)]),
+      makeProject("project-2", [makeSession("session-2a"), makeSession("session-2b")]),
+    ];
+
+    // 已归档会话不在卡片里渲染，不能作为默认选中目标。
+    expect(pickDefaultActiveSessionId(projects)).toBe("session-2a");
+    expect(resolveHydratedActiveSessionId({
+      projects,
+      activeProjectId: null,
+      activeSessionId: null,
+    })).toBe("session-2a");
+  });
+
+  it("保留已经恢复的活动会话，不改选其它会话", () => {
+    const projects = [makeProject("project-1", [makeSession("session-1"), makeSession("session-2")])];
+
+    expect(resolveHydratedActiveSessionId({
+      projects,
+      activeProjectId: "project-1",
+      activeSessionId: "session-2",
+    })).toBe("session-2");
+  });
+
+  it("所有会话都已归档时不自动选中", () => {
+    expect(resolveHydratedActiveSessionId({
+      projects: [makeProject("project-1", [makeSession("archived-1", true)])],
+      activeProjectId: null,
+      activeSessionId: null,
+    })).toBeNull();
+  });
+
+  it("自动选中的会话所属项目会同步成为活动项目（侧栏因此展开该项目卡片）", () => {
+    const projects = [
+      makeProject("project-1", []),
+      makeProject("project-2", [makeSession("session-2a")]),
+    ];
+
+    const activeSessionId = resolveHydratedActiveSessionId({
+      projects,
+      activeProjectId: null,
+      activeSessionId: null,
+    });
+    applyPersistedProjectSnapshot({ projects, activeProjectId: null, activeSessionId });
+
+    const state = useProjectStore.getState();
+    expect(state.activeSessionId).toBe("session-2a");
+    expect(state.activeProjectId).toBe("project-2");
   });
 });
 

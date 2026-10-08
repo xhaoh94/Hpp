@@ -22,7 +22,72 @@ const BUILTIN_SUBAGENT_PROMPT_DIR = join(fileURLToPath(new URL(".", import.meta.
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const MUTATING_TOOLS = new Set(["edit", "write"]);
 const PLAN_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
-const PLAN_BLOCKED_TOOLS = new Set(["edit", "write", "update_plan"]);
+// codemode 必须显式拉黑，不能靠「不在只读白名单里」兜底：它在 QuickJS 沙箱里用
+// ctx.executeTool() 调工具，脚本内部的写操作是一次新的嵌套 tool_call，绕过对
+// 脚本本身的检查。plan 模式只读，所以整个工具都禁掉。
+const PLAN_BLOCKED_TOOLS = new Set(["edit", "write", "update_plan", "codemode"]);
+// 内置扩展的可选开关。Hpp 不走 CLI 的 main()，不会自动注入 builtInExtensions，
+// 只能自己按用户选择把工厂塞进 extensionFactories（需带 builtin: true 才会走
+// builtin:<name> 加载路径）。
+const OPTIONAL_BUILTIN_EXTENSIONS = {
+  codemode: "createCodemodeExtension",
+  tool_search: "createToolSearchExtension",
+  mcp: "createMcpExtension",
+};
+// MCP 工具名形如 mcp__<server>__<tool>（server/tool 名里的 - 会被替换成 _）。
+const MCP_TOOL_NAME_PATTERN = /^mcp__/;
+
+/**
+ * 从工具注册表里读某个工具的 MCP 注解。
+ *
+ * MCP 是唯一能给宿主提供「这个工具做什么」声明的机制：ToolAnnotations 里的
+ * readOnlyHint / destructiveHint 由工具作者提供，pi 自己也在
+ * extensions/mcp/tools.js 里原样透传。没有它就只能靠工具名猜，而 MCP 工具名
+ * 带server 前缀，猜不出来。
+ */
+const getToolAnnotations = (toolName) => {
+  const tool = (session?.getAllTools?.() || []).find((candidate) => candidate?.name === toolName);
+  return isRecord(tool?.annotations) ? tool.annotations : null;
+};
+
+/**
+ * MCP 工具的权限口径。
+ *
+ * 按注解分三档而不是一律询问或一律放行：
+ * - readOnlyHint:true → 不改环境，与 Hpp 的 read/grep 同级，可免询问；
+ * - destructiveHint:true → 可能删改数据，必须询问；
+ * - 没声明注解 → 保守询问（作者没说清楚，不替它担保）。
+ */
+const classifyMcpToolPermission = (toolName) => {
+  const annotations = getToolAnnotations(toolName);
+  if (!annotations) return "ask";
+  if (annotations.readOnlyHint === true) return "allow";
+  return "ask";
+};
+
+// 工具名 → 是否可放进plan（只读）白名单。MCP 工具看注解，
+// 不看名字：注解缺失的一律不进 plan，避免只读模式里混进未知的写操作。
+const isReadOnlyToolName = (toolName) => {
+  const normalized = normalizeToolName(toolName);
+  if (READ_ONLY_TOOLS.has(normalized)) return true;
+  if (MCP_TOOL_NAME_PATTERN.test(String(toolName))) {
+    return getToolAnnotations(toolName)?.readOnlyHint === true;
+  }
+  return false;
+};
+// 从映射表派生，而不是硬编码键名：插件清单里新增选项时这里自动跟上，
+// 不会因为漏改而静默失效（那会让 UI 显示已开启但实际没加载）。
+const DEFAULT_BUILTIN_EXTENSION_CONFIG = Object.fromEntries(
+  Object.keys(OPTIONAL_BUILTIN_EXTENSIONS).map((id) => [id, false]),
+);
+const normalizeBuiltinExtensionConfig = (value) => {
+  const config = isRecord(value) ? value : {};
+  const normalized = {};
+  for (const id of Object.keys(OPTIONAL_BUILTIN_EXTENSIONS)) {
+    normalized[id] = config[id] === true;
+  }
+  return normalized;
+};
 const HIGH_RISK_COMMAND_PATTERN = /(?:\brm\s+(?:-[^\s]*r|--recursive)|\bsudo\b|\b(?:chmod|chown)\b|\bgit\s+(?:push|clean|reset\s+--hard)|\b(?:curl|wget|ssh|scp|rsync)\b|\b(?:npm|pnpm|yarn|pip|cargo)\s+(?:install|add|publish)|invoke-webrequest|start-process|\bshutdown\b|\breboot\b|\btaskkill\b)/i;
 const SHELL_PROBE_TOKEN = "hpp-shell-ready";
 const FILE_DISCOVERY_GUIDANCE = [
@@ -106,6 +171,7 @@ let uiBridge = null;
 let activeSettingsManager = null;
 let activeCompactionConfig = normalizeAgentCompactionConfig(undefined);
 let activeSubagentConfig = normalizeHppSubagentConfig(undefined);
+let activeBuiltinExtensionConfig = normalizeBuiltinExtensionConfig(undefined);
 let compactionFailureStreak = 0;
 let compactionSuspended = false;
 let unsubscribe = null;
@@ -114,6 +180,12 @@ let activePromptId = null;
 let activePermissionMode = "full-access";
 let activePlanMode = false;
 let activeHostSystemPrompt = "";
+// 重建 loader 需要的三样东西。做成模块级而不是 init 的局部闭包，
+// 因为 setBuiltinExtensions 要在init 之外复用同一套构造逻辑。
+let activeAgentDir = "";
+let activeShellEnvironmentContract = "";
+let activeHppSubagentExtension = null;
+let activeEventBus = null;
 const pendingSubagentUIRequests = new Map();
 
 const requestSubagentUI = (request, context = {}) => {
@@ -217,11 +289,13 @@ const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 };
 
-const finishPrompt = (id) => {
+// Pi 1.1.0 的 agent_settled 带 aborted；旧版 SDK 没有这个字段，按「正常结束」处理，
+// 调用方据此区分「跑完」与「被取消」。
+const finishPrompt = (id, aborted = false) => {
   if (!id || completedPromptIds.has(id)) return;
   completedPromptIds.add(id);
   if (activePromptId === id) activePromptId = null;
-  send({ type: "prompt_done", id });
+  send({ type: "prompt_done", id, ...(aborted ? { aborted: true } : {}) });
   setTimeout(() => completedPromptIds.delete(id), 60000);
 };
 
@@ -769,8 +843,15 @@ const isOutsideProject = (filePath) => {
 
 const shouldRequestPiToolPermission = (event) => {
   if (activePermissionMode === "full-access") return false;
-  const toolName = normalizeToolName(event?.toolName);
+  const rawToolName = String(event?.toolName || "");
+  const toolName = normalizeToolName(rawToolName);
   if (QUESTIONNAIRE_TOOLS.has(toolName)) return false;
+  // MCP 工具按注解判，不按名字猜：没有注解的保守询问（作者未声明清楚）。
+  if (MCP_TOOL_NAME_PATTERN.test(rawToolName)) {
+    if (activePermissionMode === "ask") return true;
+    if (getToolPaths(event).some(isOutsideProject)) return true;
+    return classifyMcpToolPermission(rawToolName) === "ask";
+  }
   const outsideProject = getToolPaths(event).some(isOutsideProject);
   if (activePermissionMode === "ask") {
     return outsideProject || !READ_ONLY_TOOLS.has(toolName);
@@ -796,6 +877,11 @@ const describePiToolPermission = (event) => {
 const planModeToolBlockReason = (event) => {
   if (!activePlanMode) return "";
   const toolName = normalizeToolName(event?.toolName);
+  // codemode 是整体禁用而非「会修改项目」：它能在沙箱里调任意工具，
+  // 只读工具集无法靠「允许列表」约束它内部调什么。
+  if (toolName === "codemode") {
+    return "Plan 模式为只读模式，不能使用 codemode（它可以调用写入类工具）。请关闭 Plan 模式后再实施。";
+  }
   if (PLAN_BLOCKED_TOOLS.has(toolName)) {
     return `Plan 模式为只读模式，不能使用 ${toolName} 修改项目。请关闭 Plan 模式后再实施。`;
   }
@@ -806,7 +892,9 @@ const planModeToolBlockReason = (event) => {
       ? `Plan 模式只允许只读 Shell 命令，已阻止：${blockedSegment}`
       : "";
   }
-  if (!PLAN_READ_ONLY_TOOLS.has(toolName)) {
+  // 白名单只放行注解声明只读的 MCP 工具；destructiveHint 与无注解的一律拦下
+  // （作者没声明清楚不等于安全，按可写处理）。
+  if (!PLAN_READ_ONLY_TOOLS.has(toolName) && !isReadOnlyToolName(event?.toolName)) {
     return `Plan 模式未开放工具 ${toolName}，请使用只读检索工具完成规划。`;
   }
   return "";
@@ -1284,7 +1372,15 @@ const resolveShellSettings = (settingsManager) => {
 const configureFullAccessTools = (settingsManager) => {
   const availableToolNames = getAvailableToolNames();
   const supportsTool = (name) => availableToolNames.size === 0 || availableToolNames.has(name);
-  const currentToolNames = session?.getActiveToolNames?.() || [];
+  // 用 getAllTools 而不是 getActiveToolNames：MCP 工具是「已注册但未激活」，
+  // 只看 active 会把它们全部漏掉，于是模型永远看不到 MCP 能力。
+  // 但 exposure 非 direct 的工具（codemode/tool_search/MCP 的 codemode|deferred 档）
+  // 不该被自动激活 —— 它们的激活方式是显式点名，加进来等于替用户做决定。
+  // 注意 getAllTools() 不返回 defaultActive，只有 exposure 可用（direct 是默认值）。
+  const currentToolNames = (session?.getAllTools?.() || [])
+    .filter((tool) => (tool?.exposure ?? "direct") === "direct")
+    .map((tool) => String(tool?.name || ""))
+    .filter(Boolean);
   shellWarning = probeShell(settingsManager) || "";
   if (shellNotice) shellWarning = "";
   shellWarningEmitted = false;
@@ -1293,9 +1389,35 @@ const configureFullAccessTools = (settingsManager) => {
     ...DISCOVERY_TOOL_NAMES.filter(supportsTool),
   ])];
   planModeToolNames = fullAccessToolNames.filter((name) =>
-    PLAN_READ_ONLY_TOOLS.has(normalizeToolName(name)) ||
+    isReadOnlyToolName(name) ||
     (normalizeToolName(name) === "bash" && !shellWarning));
   applyActiveToolMode();
+};
+
+/**
+ * 增量补进「中途出现」的工具，不动用户已有的选择。
+ *
+ * 与 configureFullAccessTools 的区别：后者是全量重算（切换 plan/权限模式时用），
+ * 这里只做并集 —— MCP server 在会话中途连上时会带来新工具，但用户之前手动关掉的
+ * 工具不该被重新打开。全量重算会把那些决定抹掉。
+ */
+const refreshToolAllowlists = () => {
+  if (!session) return;
+  const directTools = (session.getAllTools?.() || [])
+    .filter((tool) => (tool?.exposure ?? "direct") === "direct")
+    .map((tool) => String(tool?.name || ""))
+    .filter(Boolean)
+    .filter((name) => name !== "bash" || !shellWarning);
+  if (directTools.length === 0) return;
+  const before = fullAccessToolNames.length;
+  fullAccessToolNames = [...new Set([...fullAccessToolNames, ...directTools])];
+  // plan 白名单同样按增量并入，且必须过 isReadOnlyToolName（注解缺失的不进只读）。
+  planModeToolNames = [...new Set([
+    ...planModeToolNames,
+    ...fullAccessToolNames.filter((name) =>
+      isReadOnlyToolName(name) && !planModeToolNames.includes(name)),
+  ])];
+  if (fullAccessToolNames.length !== before) applyActiveToolMode();
 };
 
 /**
@@ -1354,14 +1476,88 @@ const requireSDKFactory = (name) => {
   return factory;
 };
 
-const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig, subagentConfig }) => {
+/**
+ * 按用户开关构造可选内置扩展的工厂列表。
+ * 缺工厂或调用抛错都直接跳过：旧版 SDK 没有这些导出时开关应当静默失效，
+ * 而不是让整个会话起不来。
+ */
+const buildOptionalBuiltinFactories = (config) => {
+  const factories = [];
+  for (const [name, factoryName] of Object.entries(OPTIONAL_BUILTIN_EXTENSIONS)) {
+    if (!config[name]) continue;
+    const create = sdk?.[factoryName];
+    if (typeof create !== "function") continue;
+    try {
+      factories.push({
+        name,
+        factory: create(),
+        replaceable: true,
+        builtin: true,
+      });
+    } catch {
+      // 工厂初始化失败（缺依赖、缺 WASM 等）时按「未启用」处理。
+    }
+  }
+  return factories;
+};
+
+/**
+ * 权限扩展自检：Hpp 的权限/plan 拦截全靠这个 inline 工厂注册的 tool_call 钩子。
+ * 它必须是数组里第一个 inline 工厂（路径恰好 <inline:1>）。内置扩展带builtin:true，
+ * 会被 loader 单独分流到 builtinExtensions，不参与 <inline:N> 编号，所以加内置扩展
+ * 不会让这个断言错位—— 但工厂顺序仍不要动。
+ */
+const assertPermissionExtensionLoaded = (loader) => {
+  const loadedExtensions = loader.getExtensions?.()?.extensions || [];
+  const permissionExtensionLoaded = loadedExtensions.some((extension) =>
+    String(extension?.path || "") === "<inline:1>" &&
+    typeof extension?.handlers?.get === "function" &&
+    (extension.handlers.get("tool_call")?.length || 0) > 0);
+  if (!permissionExtensionLoaded) {
+    throw new Error("Pi SDK 不支持 Hpp 权限钩子，请在 Hpp Agent 设置中更新 Pi SDK");
+  }
+};
+
+/**
+ * 切换可选内置扩展。
+ *
+ * 两个必须一起做的动作，缺一则不生效（实测 1.1.0）：
+ * 1. 原地改 loader 的 extensionFactories / builtinExtensions —— session 只持有
+ *    resourceLoader 的 getter（没有 setter），换实例它看不到。
+ * 2. 调 session.reload() —— 它会重建 extensionRunner 并重新读 loader；只调
+ *    loader.reload() 的话session 里的工具表不会变。
+ *
+ * loader 构造函数只在初始化时拆一次 builtinExtensions Map，所以工厂要始终留在
+ * extensionFactories 里，开关只决定它们是否被登记。
+ */
+const applyBuiltinExtensionConfig = async (config) => {
+  activeBuiltinExtensionConfig = normalizeBuiltinExtensionConfig(config);
+  if (!resourceLoader) return;
+  const factories = buildOptionalBuiltinFactories(activeBuiltinExtensionConfig);
+  resourceLoader.extensionFactories = [
+    hppPermissionExtension,
+    hppRuntimePolicyExtension,
+    hppCompactionExtension,
+    activeHppSubagentExtension,
+    ...factories,
+  ].filter(Boolean);
+  resourceLoader.builtinExtensions = new Map(factories.map((item) => [item.name, item]));
+  await resourceLoader.reload();
+  await session?.reload?.();
+  // 工具集变了才需要重算白名单，否则新工具进不了 fullAccessToolNames。
+  configureFullAccessTools(activeSettingsManager);
+};
+
+const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig, subagentConfig, builtinExtensions }) => {
   await disposeSession();
   activeHostSystemPrompt = String(hostSystemPrompt || "").trim();
   activeCompactionConfig = normalizeAgentCompactionConfig(compactionConfig);
   activeSubagentConfig = normalizeHppSubagentConfig(subagentConfig);
+  activeBuiltinExtensionConfig = normalizeBuiltinExtensionConfig(builtinExtensions);
   projectPath = cwd;
   sdk = await loadPiSDK();
   const eventBus = sdk.createEventBus();
+  activeEventBus = eventBus;
   const agentDir = sdk.getAgentDir();
   stripUtf8Bom(join(agentDir, "models.json"));
   stripUtf8Bom(join(agentDir, "auth.json"));
@@ -1413,6 +1609,9 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     // already-registered subagent tool without restarting this worker.
     getSubagentConfig: () => activeSubagentConfig,
   });
+  activeHppSubagentExtension = hppSubagentExtension;
+  activeAgentDir = agentDir;
+  activeShellEnvironmentContract = shellEnvironmentContract;
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,
     agentDir,
@@ -1432,6 +1631,9 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
       hppRuntimePolicyExtension,
       hppCompactionExtension,
       hppSubagentExtension,
+      // 内置扩展工厂必须带 builtin:true 才会走 builtin:<name> 加载路径；它们不参与
+      // <inline:N> 编号，所以插在哪都不影响下面那条 <inline:1> 权限自检。
+      ...buildOptionalBuiltinFactories(activeBuiltinExtensionConfig),
     ],
     appendSystemPrompt: [
       FILE_DISCOVERY_GUIDANCE,
@@ -1443,14 +1645,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     ].filter(Boolean),
   });
   await resourceLoader.reload();
-  const loadedExtensions = resourceLoader.getExtensions?.()?.extensions || [];
-  const permissionExtensionLoaded = loadedExtensions.some((extension) =>
-    String(extension?.path || "") === "<inline:1>" &&
-    typeof extension?.handlers?.get === "function" &&
-    (extension.handlers.get("tool_call")?.length || 0) > 0);
-  if (!permissionExtensionLoaded) {
-    throw new Error("Pi SDK 不支持 Hpp 权限钩子，请在 Hpp Agent 设置中更新 Pi SDK");
-  }
+  assertPermissionExtensionLoaded(resourceLoader);
   const sessionManager = sessionFilePath
     ? sdk.SessionManager.open(sessionFilePath, undefined, cwd)
     : requireSDKFactory("SessionManager").create(cwd);
@@ -1699,6 +1894,11 @@ const handleSessionEvent = (event) => {
   switch (event.type) {
     case "agent_start":
       agentRunActive = true;
+      // 每轮开头重算白名单：MCP server 可能在会话中途连上并注册新工具，
+      // 而白名单是 init 时算的，不刷新的话后注册的 MCP 工具模型永远看不到。
+      // mcp_servers_change 只在连接完成时发一次、覆盖不了 server 之后再加工具的情况，
+      // agent_start 才是每轮都有的信号。
+      if (activeBuiltinExtensionConfig.mcp) refreshToolAllowlists();
       send({ type: "agent_start" });
       break;
     case "message_start": {
@@ -1718,7 +1918,7 @@ const handleSessionEvent = (event) => {
       break;
     case "agent_settled":
       agentRunActive = false;
-      finishPrompt(activePromptId);
+      finishPrompt(activePromptId, event.aborted === true);
       break;
     case "message_update": {
       if (!activePromptId) break;
@@ -1814,6 +2014,11 @@ const handleSessionEvent = (event) => {
         args: event.args,
         result: event.result,
         isError: event.isError,
+        // Pi 1.1.0 起提供工具自身的执行耗时（单调时钟测量，工具没跑则为 undefined）。
+        // 比宿主侧用事件时间戳相减更准：后者会把工具排队和事件传输算进去。
+        ...(Number(event.durationMs) > 0 ? { durationMs: Math.round(Number(event.durationMs)) } : {}),
+        // 嵌套工具调用（另一个工具通过 ctx.executeTool() 发起，如 codemode 脚本）带上父调用 id。
+        ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
       });
       break;
   }
@@ -2194,6 +2399,18 @@ const handleCommand = async (command) => {
         activeSubagentConfig = normalizeHppSubagentConfig(command.config);
         send({ type: "subagent_config_changed", id: command.id, config: activeSubagentConfig });
         break;
+      case "setBuiltinExtensions": {
+        if (!resourceLoader) throw new Error("Pi SDK resource loader is not initialized");
+        await waitForCompactionToSettle();
+        const next = normalizeBuiltinExtensionConfig(command.config);
+        if (JSON.stringify(next) === JSON.stringify(activeBuiltinExtensionConfig)) {
+          send({ type: "builtin_extensions_changed", id: command.id, config: next });
+          break;
+        }
+        await applyBuiltinExtensionConfig(next);
+        send({ type: "builtin_extensions_changed", id: command.id, config: activeBuiltinExtensionConfig });
+        break;
+      }
       case "uiResponse":
         if (!uiBridge?.handleResponse(command.response) && !handleSubagentUIResponse(command.response)) {
           const responseId = command.response?.id;

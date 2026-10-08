@@ -24,7 +24,7 @@ import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 import { parseComposerDocument } from "@shared/composer-document";
 
-interface PersistedData {
+export interface PersistedData {
   projects: Project[];
   activeProjectId: string | null;
   activeSessionId: string | null;
@@ -192,10 +192,35 @@ const parsePersistedData = (value: unknown): PersistedData | null => {
   };
 };
 
+/**
+ * 启动时没有可恢复的活动会话（例如从未选择过会话）时，默认选中第一个
+ * 未关闭会话，让聊天面板和侧栏直接进入可用状态。已归档会话不参与自动选中：
+ * 它们在卡片里不渲染，选中后用户看不到。
+ */
+export const pickDefaultActiveSessionId = (projects: Project[]): string | null => {
+  for (const project of projects) {
+    const session = project.sessions.find((candidate) => candidate.closed !== true);
+    if (session) return session.id;
+  }
+  return null;
+};
+
+/** 保留磁盘上已恢复的会话；缺失时才回退到默认选中。 */
+export const resolveHydratedActiveSessionId = (data: PersistedData): string | null => (
+  data.activeSessionId || pickDefaultActiveSessionId(data.projects)
+);
+
 export const applyPersistedProjectSnapshot = (data: PersistedData) => {
+  // 活动项目必须包含活动会话，否则 ChatPanel 找不到当前会话（标题、模型、
+  // 输入框都按 activeProjectId + activeSessionId 定位）。
+  const sessionProjectId = data.activeSessionId
+    ? data.projects.find((project) => project.sessions.some((session) => session.id === data.activeSessionId))?.id
+    : undefined;
   useProjectStore.setState({
     projects: data.projects,
-    activeProjectId: data.activeProjectId || (data.projects.length > 0 ? data.projects[0].id : null),
+    activeProjectId: sessionProjectId
+      || data.activeProjectId
+      || (data.projects.length > 0 ? data.projects[0].id : null),
     activeSessionId: data.activeSessionId,
     projectDataHydrated: true,
     // These describe renderer/main-process runtime ownership, not persisted
@@ -945,8 +970,10 @@ export function useDataPersistence() {
       const d = parsePersistedData(projectData);
       if (d) {
         validSessionIds = new Set(d.projects.flatMap((project) => project.sessions.map((session) => session.id)));
-        activeSessionId = d.activeSessionId || null;
-        applyPersistedProjectSnapshot(d);
+        // 没有恢复出活动会话时默认选中第一个未关闭会话（含侧栏展开），
+        // 这样启动后不会停在“没有任何会话被选中”的空状态。
+        activeSessionId = resolveHydratedActiveSessionId(d);
+        applyPersistedProjectSnapshot({ ...d, activeSessionId });
         if (activeSessionId) {
           activeProject = d.projects.find((p) => p.sessions.some((s) => s.id === activeSessionId));
           activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
