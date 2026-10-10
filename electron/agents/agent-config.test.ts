@@ -64,6 +64,7 @@ describe("agent provider config", () => {
   let reorderAgentProviderConfigs: typeof import("./agent-config").reorderAgentProviderConfigs;
   let saveAgentProviderConfig: typeof import("./agent-config").saveAgentProviderConfig;
   let setAgentBackendModelsVisible: typeof import("./agent-config").setAgentBackendModelsVisible;
+  let saveAgentSubagentConfig: typeof import("./agent-config").saveAgentSubagentConfig;
   let activateAgentProviderConfig: typeof import("./agent-config").activateAgentProviderConfig;
 
   const writeSavedProviders = async () => {
@@ -104,6 +105,7 @@ describe("agent provider config", () => {
       listAgentConfig,
       reorderAgentProviderConfigs,
       saveAgentProviderConfig,
+      saveAgentSubagentConfig,
       setAgentBackendModelsVisible,
     } = await import("./agent-config"));
     await writeSavedProviders();
@@ -111,6 +113,49 @@ describe("agent provider config", () => {
 
   afterEach(async () => {
     await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("串行化 SubAgent 与其它 Agent settings 写入，避免互相覆盖", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerActivation: "single-active",
+      builtinExtensions: {
+        userConfigurable: true,
+        defaultEnabled: [],
+        options: [{ id: "mcp", label: "MCP" }],
+      },
+    };
+    await Promise.all([
+      saveAgentSubagentConfig("test-agent", {
+        enabled: true,
+        defaultModelMode: "custom",
+        defaultModel: "provider/model",
+        profiles: {},
+      }),
+      setAgentBuiltinExtensions("test-agent", ["mcp"]),
+    ]);
+    const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
+    expect(settings.subagentConfigs["test-agent"].defaultModel).toBe("provider/model");
+    expect(settings.agentBuiltinExtensions["test-agent"]).toEqual(["mcp"]);
+  });
+
+  it("按字段保存 SubAgent 配置且保留其他 settings", async () => {
+    const settingsPath = join(tempRoot, "hpp-data", "settings.json");
+    const before = JSON.parse(await readFile(settingsPath, "utf8"));
+    before.theme = "dark";
+    await writeFile(settingsPath, JSON.stringify(before), "utf8");
+
+    await expect(saveAgentSubagentConfig("test-agent", {
+      enabled: true,
+      defaultModelMode: "custom",
+      defaultModel: "provider/model",
+      profiles: {},
+    })).resolves.toMatchObject({ success: true });
+
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    expect(settings.theme).toBe("dark");
+    expect(settings.agentConfigs["test-agent"]).toBeDefined();
+    expect(settings.subagentConfigs["test-agent"]).toMatchObject({ defaultModel: "provider/model" });
   });
 
   it("persists the requested provider order and keeps the active provider", async () => {

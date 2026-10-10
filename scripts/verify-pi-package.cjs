@@ -11,10 +11,12 @@ const mainDir = process.env.HPP_PI_PACKAGE_MAIN_DIR
 const requiredFiles = [
   "pi-sdk-worker.mjs",
   "pi-fork-utils.mjs",
+  "pi-agent-dir.mjs",
   "shell-environment.mjs",
   "plan-mode-policy.mjs",
   "subagent-extension.mjs",
   "subagent-bridge-extension.mjs",
+  "subagent-policy.mjs",
   "subagent-prompts/implement.md",
   "subagent-prompts/scout-and-plan.md",
   "subagent-prompts/implement-and-review.md",

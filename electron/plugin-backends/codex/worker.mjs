@@ -62,6 +62,8 @@ const getDefaultThinkingLevel = () => {
 let projectPath = "";
 let threadId = null;
 let appServer = null;
+// stdout/stdin 断管不等于 app-server 已退出；保留最近 child 供 disposeSession 回收。
+let appServerForCleanup = null;
 let appServerReady = null;
 let nextRpcId = 0;
 let pendingRpc = new Map();
@@ -386,6 +388,7 @@ const startAppServer = async () => {
       windowsHide: true,
     });
     appServer = child;
+    appServerForCleanup = child;
 
     const finishInit = async () => {
       try {
@@ -433,6 +436,8 @@ const startAppServer = async () => {
         appServer = null;
         appServerReady = null;
       }
+      // 只有 disposeSession 才拥有终止该 child 的责任；不能因管道先断就丢引用。
+      appServerForCleanup = child;
       failPendingRpc(error);
       if (!settled) {
         settled = true;
@@ -2451,10 +2456,11 @@ const disposeSession = async () => {
   resetTurnState();
   await cleanupActiveImages();
   failPendingRpc(new Error("Codex worker disposed"));
-  if (appServer) {
-    const child = appServer;
-    appServer = null;
-    appServerReady = null;
+  const child = appServer || appServerForCleanup;
+  appServer = null;
+  appServerReady = null;
+  appServerForCleanup = null;
+  if (child) {
     try {
       child.stdin?.end();
     } catch {}

@@ -29,10 +29,12 @@ const PLAN_BLOCKED_TOOLS = new Set(["edit", "write", "update_plan", "codemode"])
 // 内置扩展的可选开关。Hpp 不走 CLI 的 main()，不会自动注入 builtInExtensions，
 // 只能自己按用户选择把工厂塞进 extensionFactories（需带 builtin: true 才会走
 // builtin:<name> 加载路径）。
+// 键顺序与 hpp-agent-plugin.json 的 options 顺序保持一致（codemode → mcp → tool_search），
+// 方便对读。映射本身无序，顺序只影响可读性。
 const OPTIONAL_BUILTIN_EXTENSIONS = {
   codemode: "createCodemodeExtension",
-  tool_search: "createToolSearchExtension",
   mcp: "createMcpExtension",
+  tool_search: "createToolSearchExtension",
 };
 // MCP 工具名形如 mcp__<server>__<tool>（server/tool 名里的 - 会被替换成 _）。
 const MCP_TOOL_NAME_PATTERN = /^mcp__/;
@@ -61,6 +63,9 @@ const getToolAnnotations = (toolName) => {
 const classifyMcpToolPermission = (toolName) => {
   const annotations = getToolAnnotations(toolName);
   if (!annotations) return "ask";
+  // 注解由 MCP server 自己提供；冲突时必须按更保守的 destructiveHint 处理，
+  // 不能让 readOnlyHint 把破坏性操作直接放行。
+  if (annotations.destructiveHint === true) return "ask";
   if (annotations.readOnlyHint === true) return "allow";
   return "ask";
 };
@@ -71,7 +76,8 @@ const isReadOnlyToolName = (toolName) => {
   const normalized = normalizeToolName(toolName);
   if (READ_ONLY_TOOLS.has(normalized)) return true;
   if (MCP_TOOL_NAME_PATTERN.test(String(toolName))) {
-    return getToolAnnotations(toolName)?.readOnlyHint === true;
+    const annotations = getToolAnnotations(toolName);
+    return annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
   }
   return false;
 };
@@ -1372,15 +1378,9 @@ const resolveShellSettings = (settingsManager) => {
 const configureFullAccessTools = (settingsManager) => {
   const availableToolNames = getAvailableToolNames();
   const supportsTool = (name) => availableToolNames.size === 0 || availableToolNames.has(name);
-  // 用 getAllTools 而不是 getActiveToolNames：MCP 工具是「已注册但未激活」，
-  // 只看 active 会把它们全部漏掉，于是模型永远看不到 MCP 能力。
-  // 但 exposure 非 direct 的工具（codemode/tool_search/MCP 的 codemode|deferred 档）
-  // 不该被自动激活 —— 它们的激活方式是显式点名，加进来等于替用户做决定。
-  // 注意 getAllTools() 不返回 defaultActive，只有 exposure 可用（direct 是默认值）。
-  const currentToolNames = (session?.getAllTools?.() || [])
-    .filter((tool) => (tool?.exposure ?? "direct") === "direct")
-    .map((tool) => String(tool?.name || ""))
-    .filter(Boolean);
+  // 白名单口径见 collectAllowlistToolNames —— 两处必须共用同一个函数，
+  // 否则全量重算和增量刷新会漂移（曾导致 MCP 自动激活的 tool_search 被抹掉）。
+  const currentToolNames = collectAllowlistToolNames();
   shellWarning = probeShell(settingsManager) || "";
   if (shellNotice) shellWarning = "";
   shellWarningEmitted = false;
@@ -1388,9 +1388,12 @@ const configureFullAccessTools = (settingsManager) => {
     ...currentToolNames.filter((name) => name !== "bash" || !shellWarning),
     ...DISCOVERY_TOOL_NAMES.filter(supportsTool),
   ])];
-  planModeToolNames = fullAccessToolNames.filter((name) =>
-    isReadOnlyToolName(name) ||
-    (normalizeToolName(name) === "bash" && !shellWarning));
+  // codemode 必须显式拉黑：它在 QuickJS 里能调任意工具，只读白名单管不到脚本内部。
+  // tool_search 则可以进 plan（纯检索、无副作用）。
+  planModeToolNames = fullAccessToolNames.filter((name) => {
+    if (normalizeToolName(name) === "codemode") return false;
+    return isReadOnlyToolName(name) || (normalizeToolName(name) === "bash" && !shellWarning);
+  });
   applyActiveToolMode();
 };
 
@@ -1401,21 +1404,44 @@ const configureFullAccessTools = (settingsManager) => {
  * 这里只做并集 —— MCP server 在会话中途连上时会带来新工具，但用户之前手动关掉的
  * 工具不该被重新打开。全量重算会把那些决定抹掉。
  */
+/**
+ * 该进 full-access 白名单的工具名。
+ * 口径（`configureFullAccessTools` 与 `refreshToolAllowlists` 必须一致，否则两处会漂移）：
+ * - exposure 为 "direct" 的：全要。这是 MCP 工具能被模型看到的唯一途径。
+ * - exposure 非 direct的（codemode / deferred 档）：**只在已被激活时**保留。
+ *   MCP 扩展会按 server 的 exposure 用 `pi.setActiveTools()` 自动激活
+ *   codemode/tool_search（ensureDiscoveryActive，extensions/mcp/index.js:388），
+ *   那是用户 mcp.json 配置的直接结果，白名单抹掉它会让 `exposure: "deferred"`
+ *   和 `"codemode"` 两个档位形同虚设；但没被激活的也不主动加 —— 那等于替用户
+ *   打开默认不激活的能力。
+ */
+const collectAllowlistToolNames = () => {
+  const activeToolNames = new Set(session?.getActiveToolNames?.() || []);
+  return (session?.getAllTools?.() || [])
+    .filter((tool) => {
+      const name = String(tool?.name || "");
+      if (!name) return false;
+      return (tool?.exposure ?? "direct") === "direct" || activeToolNames.has(name);
+    })
+    .map((tool) => String(tool.name))
+    .filter(Boolean);
+};
+
 const refreshToolAllowlists = () => {
   if (!session) return;
-  const directTools = (session.getAllTools?.() || [])
-    .filter((tool) => (tool?.exposure ?? "direct") === "direct")
-    .map((tool) => String(tool?.name || ""))
-    .filter(Boolean)
+  const allowlisted = collectAllowlistToolNames()
     .filter((name) => name !== "bash" || !shellWarning);
-  if (directTools.length === 0) return;
+  if (allowlisted.length === 0) return;
   const before = fullAccessToolNames.length;
-  fullAccessToolNames = [...new Set([...fullAccessToolNames, ...directTools])];
+  fullAccessToolNames = [...new Set([...fullAccessToolNames, ...allowlisted])];
   // plan 白名单同样按增量并入，且必须过 isReadOnlyToolName（注解缺失的不进只读）。
+  // codemode 显式排除：它在 QuickJS 里能调任意工具，只读白名单管不到脚本内部。
   planModeToolNames = [...new Set([
     ...planModeToolNames,
     ...fullAccessToolNames.filter((name) =>
-      isReadOnlyToolName(name) && !planModeToolNames.includes(name)),
+      name !== "codemode"
+      && isReadOnlyToolName(name)
+      && !planModeToolNames.includes(name)),
   ])];
   if (fullAccessToolNames.length !== before) applyActiveToolMode();
 };
@@ -2403,7 +2429,10 @@ const handleCommand = async (command) => {
         if (!resourceLoader) throw new Error("Pi SDK resource loader is not initialized");
         await waitForCompactionToSettle();
         const next = normalizeBuiltinExtensionConfig(command.config);
-        if (JSON.stringify(next) === JSON.stringify(activeBuiltinExtensionConfig)) {
+        // 开关没变时也要允许重载：mcp.json 改了之后宿主会用同一个开关值来请求重连，
+        // 走这个提前返回会让MCP server 连新配置（早返回是给纯开关切换省开销的）。
+        const unchanged = JSON.stringify(next) === JSON.stringify(activeBuiltinExtensionConfig);
+        if (unchanged && command.force !== true) {
           send({ type: "builtin_extensions_changed", id: command.id, config: next });
           break;
         }

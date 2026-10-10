@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
-import { Bot, BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X, Zap } from "lucide-react";
+import { Bot, BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Server, Terminal, Trash2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
+import { useProjectStore } from "@/stores/project-store";
 import { useChatStore } from "@/stores/chat-store";
 import { getThinkingLevelLabel, normalizeSupportedThinkingLevels, THINKING_LEVELS } from "@shared/models";
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { AgentCompactionModal } from "./AgentCompactionModal";
 import { AgentSubagentModal } from "./AgentSubagentModal";
+import { AgentMcpModal } from "./AgentMcpModal";
+import { AgentCodemodeModal } from "./AgentCodemodeModal";
 import { AgentConfigIO } from "./AgentConfigIO";
 import "./Settings.css";
 
@@ -393,6 +396,16 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   // options 每次渲染都是新数组，作为 useCallback 依赖会让回调恒定失效；
   // 用稳定的 id 字符串代替，语义等价。
   const builtinExtensionIds = builtinExtensionOptions.map((option) => option.id).join(",");
+  // MCP 弹窗要按项目列目录。用 hook 订阅而不是 getState()：项目列表是异步水合的，
+  // 弹窗先挂载、项目后到的话，不订阅就永远拿不到列表。
+  const projects = useProjectStore((state) => state.projects);
+  // 路径为空的条目写不出 <project>/.pi/mcp.json，列出来点了只会报错。
+  const mcpEditableProjects = useMemo(
+    () => projects
+      .filter((project) => typeof project.path === "string" && project.path.trim().length > 0)
+      .map((project) => ({ id: project.id, name: project.name, path: project.path })),
+    [projects],
+  );
   const [config, setConfig] = useState<AgentConfigState>({ providers: [] });
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [draft, setDraft] = useState<AgentProviderConfig | null>(null);
@@ -408,6 +421,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [savingModelVisibility, setSavingModelVisibility] = useState(false);
   const [builtinExtensionsEnabled, setBuiltinExtensionsEnabled] = useState<string[]>([]);
   const [savingBuiltinExtensions, setSavingBuiltinExtensions] = useState(false);
+  const [mcpModalOpen, setMcpModalOpen] = useState(false);
+  const [codemodeModalOpen, setCodemodeModalOpen] = useState(false);
   const [reorderingProviderId, setReorderingProviderId] = useState<string>("");
   const [dragProviderId, setDragProviderId] = useState<string>("");
   const [dragOverProviderId, setDragOverProviderId] = useState<string>("");
@@ -572,8 +587,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, [activeAgentId, agentId, currentModelProvider]);
 
   const loadConfig = useCallback(async () => {
-    editorScope.current += 1;
+    const loadScope = editorScope.current + 1;
+    editorScope.current = loadScope;
     editorAgentIdRef.current = agentId;
+    const isCurrentLoad = () => (
+      editorScope.current === loadScope && editorAgentIdRef.current === agentId
+    );
     setLoading(true);
     setStatus(null);
     setActivatingProviderId("");
@@ -596,6 +615,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     );
     try {
       const result = await window.electronAPI.agentConfigList(agentId);
+      if (!isCurrentLoad()) return;
       if (!result.success || !result.config) {
         setStatus({ type: "error", text: result.error || "读取配置失败" });
         return;
@@ -622,6 +642,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       }
       if (backendModelVisibility?.userConfigurable) {
         const visibilityResult = await window.electronAPI.agentConfigGetModelVisibility(agentId);
+        if (!isCurrentLoad()) return;
         if (visibilityResult.success && typeof visibilityResult.backendModelsVisible === "boolean") {
           setBackendModelsVisible(visibilityResult.backendModelsVisible);
         } else if (!visibilityResult.success) {
@@ -630,6 +651,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       }
       if (builtinExtensionIds) {
         const extensionsResult = await window.electronAPI.agentConfigGetBuiltinExtensions(agentId);
+        if (!isCurrentLoad()) return;
         if (extensionsResult.success && Array.isArray(extensionsResult.enabledIds)) {
           setBuiltinExtensionsEnabled(extensionsResult.enabledIds);
         } else if (!extensionsResult.success) {
@@ -637,9 +659,11 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         }
       }
     } catch (error) {
-      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      if (isCurrentLoad()) {
+        setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      }
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
   }, [agentId, backendModelVisibility, builtinExtensionIds, getPreferredProviderId]);
 
@@ -762,6 +786,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     }
   }, [agentId, backendModelsVisible, onModelsUpdated]);
 
+  /**
+   * 切换内置扩展开关。
+   *
+   * 失败时**必须往上抛**：MCP / Codemode 弹窗自己把错误显示在弹窗内，而这里写的 status
+   * 落在被弹窗遮住的父窗口上，用户根本看不到。本组件自己的 checkbox 调用点用
+   * `.catch(() => {})` 兜住，避免变成 unhandled rejection。
+   */
   const handleBuiltinExtensionToggle = useCallback(async (id: string, enabled: boolean) => {
     const previous = builtinExtensionsEnabled;
     const next = enabled
@@ -773,9 +804,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     try {
       const result = await window.electronAPI.agentConfigSetBuiltinExtensions(agentId, next);
       if (!result.success) {
-        setBuiltinExtensionsEnabled(previous);
-        setStatus({ type: "error", text: result.error || "保存内置扩展设置失败" });
-        return;
+        throw new Error(result.error || "保存内置扩展设置失败");
       }
       // 以主进程过滤后的结果为准：未知 id 会被丢弃，UI 不该显示一个不存在的开关。
       if (Array.isArray(result.enabledIds)) setBuiltinExtensionsEnabled(result.enabledIds);
@@ -783,7 +812,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setStatus({ type: "success", text: `${enabled ? "已开启" : "已关闭"} ${label}` });
     } catch (error) {
       setBuiltinExtensionsEnabled(previous);
-      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus({ type: "error", text: message });
+      throw new Error(message);
     } finally {
       setSavingBuiltinExtensions(false);
     }
@@ -1511,19 +1542,50 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 </button>
               )}
               {builtinExtensionOptions.map((option) => (
-                <label
-                  key={option.id}
-                  className="agent-config-model-visibility"
-                  title={option.description}
-                >
-                  <span>{option.label}</span>
-                  <input
-                    type="checkbox"
-                    checked={builtinExtensionsEnabled.includes(option.id)}
+                option.id === "mcp" ? (
+                  // MCP 有服务器配置要管，勾选框装不下 —— 走按钮 + 弹窗。
+                  // 勾选状态直接显示在按钮上，避免用户点进去才知道开没开。
+                  <button
+                    key={option.id}
+                    type="button"
+                    className="btn-action agent-config-mcp-button"
+                    onClick={() => setMcpModalOpen(true)}
                     disabled={loading || savingBuiltinExtensions}
-                    onChange={(event) => void handleBuiltinExtensionToggle(option.id, event.target.checked)}
-                  />
-                </label>
+                    title={option.description}
+                  >
+                    <Server size={13} />
+                    MCP
+                    {builtinExtensionsEnabled.includes(option.id) && <span className="agent-config-mcp-dot" />}
+                  </button>
+                ) : option.id === "codemode" ? (
+                  // codemode 有 mode / inlineBudget 两个可配项，也走弹窗。
+                  <button
+                    key={option.id}
+                    type="button"
+                    className="btn-action agent-config-mcp-button"
+                    onClick={() => setCodemodeModalOpen(true)}
+                    disabled={loading || savingBuiltinExtensions}
+                    title={option.description}
+                  >
+                    <Terminal size={13} />
+                    Codemode
+                    {builtinExtensionsEnabled.includes(option.id) && <span className="agent-config-mcp-dot" />}
+                  </button>
+                ) : (
+                  <label
+                    key={option.id}
+                    className="agent-config-model-visibility"
+                    title={option.description}
+                  >
+                    <span>{option.label}</span>
+                    <input
+                      type="checkbox"
+                      checked={builtinExtensionsEnabled.includes(option.id)}
+                      disabled={loading || savingBuiltinExtensions}
+                      onChange={(event) => void handleBuiltinExtensionToggle(option.id, event.target.checked).catch(() => {})}
+                    />
+                  </label>
+                )
               ))}
               <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
                 <RefreshCw size={13} />
@@ -2114,6 +2176,23 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           capabilities={subagentCapabilities}
           modelOptions={providerModelOptions}
           onClose={() => setSubagentModalOpen(false)}
+        />
+      )}
+      {mcpModalOpen && (
+        <AgentMcpModal
+          agentName={activeAgent?.name || getAgentName(agentId)}
+          enabled={builtinExtensionsEnabled.includes("mcp")}
+          onEnabledChange={async (next) => { await handleBuiltinExtensionToggle("mcp", next); }}
+          codemodeEnabled={builtinExtensionsEnabled.includes("codemode")}
+          projects={mcpEditableProjects}
+          onClose={() => setMcpModalOpen(false)}
+        />
+      )}
+      {codemodeModalOpen && (
+        <AgentCodemodeModal
+          enabled={builtinExtensionsEnabled.includes("codemode")}
+          onEnabledChange={async (next) => { await handleBuiltinExtensionToggle("codemode", next); }}
+          onClose={() => setCodemodeModalOpen(false)}
         />
       )}
       {compactionModalOpen && compactionCapabilities && compactionCapabilities !== "none" && (

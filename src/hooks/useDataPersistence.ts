@@ -634,6 +634,7 @@ export class PersistenceHydrationGate {
 const persistenceHydration = new PersistenceHydrationGate();
 
 function flushProjectsToDisk() {
+  if (typeof window === "undefined" || typeof window.electronAPI?.saveData !== "function") return;
   saveScheduler.clear("projects");
   if (!persistenceHydration.canPersist()) {
     _pendingProjectsData = null;
@@ -692,6 +693,7 @@ const queueSessionMessageChanges = (
 };
 
 function flushMessagesToDisk() {
+  if (typeof window === "undefined" || typeof window.electronAPI?.saveSessionMessages !== "function") return;
   saveScheduler.clearMany(["messages", "streamingMessages"]);
   if (!persistenceHydration.canPersist()) {
     _pendingMessagesData = null;
@@ -746,6 +748,12 @@ function scheduleStreamingMessagesSave(data?: PersistedMessages) {
 }
 
 function flushPendingDataToDisk() {
+  if (
+    typeof window === "undefined"
+    || !window.electronAPI
+    || (typeof window.electronAPI.saveData !== "function"
+      && typeof window.electronAPI.saveSessionMessages !== "function")
+  ) return;
   if (_cacheDirty) {
     flushModelsToDisk();
   }
@@ -754,6 +762,7 @@ function flushPendingDataToDisk() {
 }
 
 function flushModelsToDisk() {
+  if (typeof window === "undefined" || typeof window.electronAPI?.saveData !== "function") return;
   saveScheduler.clear("models");
   if (!_cacheDirty) return;
   _cacheDirty = false;

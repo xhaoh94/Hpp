@@ -212,6 +212,86 @@ export interface AgentBuiltinExtensionCapabilities {
 
 export type AgentBuiltinExtensionSupport = AgentBuiltinExtensionCapabilities | "none";
 
+/** MCP 配置的作用域。global 是 `~/.pi/agent/mcp.json`，project 是 `<项目>/.pi/mcp.json`。 */
+export type McpConfigScope = "global" | "project";
+
+/**
+ * 一个 MCP server 的连接配置，字段与 pi 的 `validateMcpServerConfig` 一致。
+ * stdio 用 command/args/env/cwd；http 用 url/headers/auth。
+ */
+export interface McpServerConfig {
+  type?: "stdio" | "http" | "streamable-http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  auth?: { provider: string };
+  timeout?: number;
+  description?: string;
+  enabled?: boolean;
+  exposure?: "codemode" | "deferred" | "direct" | "hidden";
+  toolExposure?: Record<string, "codemode" | "deferred" | "direct" | "hidden">;
+}
+
+export interface McpServerEntry {
+  name: string;
+  config: McpServerConfig;
+  scope: McpConfigScope;
+  /** 项目级覆盖条目（只有 enabled/exposure/toolExposure，没有连接信息）。 */
+  isOverride: boolean;
+  /** 覆盖条目缺少同名全局 server —— pi 会拒绝加载，UI 需标出来。 */
+  overrideMissing: boolean;
+}
+
+export interface McpConfigSnapshot {
+  scope: McpConfigScope;
+  /** 该作用域的配置文件绝对路径。文件不存在时 exists 为 false。 */
+  filePath: string;
+  exists: boolean;
+  servers: McpServerEntry[];
+  /** mcp.json 顶层的 autoEnableCodemode（缺省 true，不落盘）。 */
+  autoEnableCodemode?: boolean;
+  /** 语法/字段错误，来自与 pi 相同的校验规则。 */
+  errors: string[];
+  /** 可编辑的项目路径；scope 为 global 时为空。 */
+  projectPath?: string;
+}
+
+export interface McpConfigResult {
+  success: boolean;
+  error?: string;
+  snapshot?: McpConfigSnapshot;
+  /** MCP server 重连是否已触发；未触发时 UI 应提示「重启会话后生效」。 */
+  reconnected?: boolean;
+}
+
+/**
+ * codemode 扩展的配置。存pi 自己的 `~/.pi/agent/settings.json` 的 `codemode` 字段
+ * （扩展侧 `readMode` / `readInlineBudget` 读的就是它）。
+ */
+export interface AgentCodemodeConfig {
+  /**
+   * `on`：脚本能调所有工具。
+   * `only`：脚本只调非 direct 的工具（codemode / deferred 档），
+   * 把 read/write/bash 这些从脚本可见范围里剔除。
+   */
+  mode: "on" | "only";
+  /** 写进 codemode 工具描述里的工具说明预算上限（estimated tokens）。 */
+  inlineBudget: number;
+}
+
+export interface AgentCodemodeConfigResult {
+  success: boolean;
+  error?: string;
+  config?: AgentCodemodeConfig;
+  /** settings.json 里是否已存在 codemode 字段；false 表示本次是首次写入。 */
+  stored?: boolean;
+  /** 是否真的重载了运行中的会话（没开会话时为 false，改动要等下次 init）。 */
+  reconnected?: boolean;
+}
+
 export interface AgentCapabilities {
   planMode: AgentPlanModeSupport;
   permissions: boolean;

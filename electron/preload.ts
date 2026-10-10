@@ -13,6 +13,8 @@ import type {
 } from "../src/types/ipc";
 import { isAgentEvent, isAppUpdateStatus } from "../src/types/ipc";
 import type { FileSystemChange } from "../src/types/ipc";
+import type { McpConfigScope, McpServerConfig } from "../src/types/ipc";
+import type { AgentCodemodeConfig } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
 import type { AgentSubagentConfig } from "../shared/agent-subagent";
 import type {
@@ -176,6 +178,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:setAgentCompactionConfig", agentId, config),
   agentSetAgentSubagentConfig: (agentId: string, config: AgentSubagentConfig) =>
     ipcRenderer.invoke("agent:setAgentSubagentConfig", agentId, config),
+  agentConfigSaveSubagent: (agentId: string, config: AgentSubagentConfig) =>
+    ipcRenderer.invoke("agentConfig:saveSubagent", agentId, config),
   agentConfigList: (agentId: string) =>
     ipcRenderer.invoke("agentConfig:list", agentId),
   agentConfigLookupModel: (agentId: string, modelId: string) =>
@@ -188,6 +192,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:getBuiltinExtensions", agentId),
   agentConfigSetBuiltinExtensions: (agentId: string, enabledIds: string[]) =>
     ipcRenderer.invoke("agentConfig:setBuiltinExtensions", agentId, enabledIds),
+  // MCP / codemode 的配置在 pi 侧是全局的，不按 Agent 区分 —— 所以不带 agentId。
+  agentMcpReadConfig: (scope: McpConfigScope, projectPath?: string) =>
+    ipcRenderer.invoke("agentMcp:readConfig", scope, projectPath),
+  agentMcpWriteConfig: (
+    scope: McpConfigScope,
+    payload: { servers: Record<string, McpServerConfig>; autoEnableCodemode?: boolean },
+    projectPath?: string,
+  ) => ipcRenderer.invoke("agentMcp:writeConfig", scope, payload, projectPath),
+  agentCodemodeGetConfig: () => ipcRenderer.invoke("agentCodemode:getConfig"),
+  agentCodemodeSetConfig: (config: AgentCodemodeConfig) =>
+    ipcRenderer.invoke("agentCodemode:setConfig", config),
   agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: "bearer" | "x-api-key") =>
     ipcRenderer.invoke("agentConfig:fetchModels", baseUrl, apiKey, endpoint, authMode),
   agentConfigSave: (agentId: string, config: unknown) =>

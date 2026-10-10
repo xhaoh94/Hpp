@@ -861,17 +861,24 @@ export class PiSDKAgent {
   }
 
   /**
-   * 热更新内置扩展（codemode / tool_search）启用状态。
+   * 热更新内置扩展（codemode / tool_search / mcp）启用状态。
    *
    * 不重启 worker：pi 的 session 只有 resourceLoader 的 getter，换 loader 实例它看不到；
    * 必须在原实例上换 extensionFactories/builtinExtensions 再 session.reload()。
    * 未初始化的 worker 仅记录配置，等下次 init 下发。
+   *
+   * `force` 用于「开关没变但外部状态变了」的场景 —— 例如 mcp.json 被改写后，
+   * 扩展开关仍是开着的，但需要重连 server 才能读到新配置。
    */
-  async setBuiltinExtensions(value: unknown): Promise<void> {
+  async setBuiltinExtensions(value: unknown, options?: { force?: boolean }): Promise<void> {
     const config = normalizeAgentBuiltinExtensionConfig(value);
     this.builtinExtensionConfig = config;
     if (!this.process) return;
-    const data = await this.requestWorkerCommand({ type: "setBuiltinExtensions", config }, 15_000);
+    const data = await this.requestWorkerCommand({
+      type: "setBuiltinExtensions",
+      config,
+      force: options?.force === true,
+    }, 15_000);
     if (data.type !== "builtin_extensions_changed") {
       throw new Error(optionalString(data.error) || "Pi SDK set builtin extensions failed");
     }

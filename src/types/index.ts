@@ -26,6 +26,14 @@ import type {
   FileSystemChange,
 } from "./ipc";
 import type { AgentConfigExportData } from "../../shared/agent-config-io";
+// 供本文件的接口字段引用（下面 export type 块只是再导出，不提供本地绑定）。
+import type {
+  AgentCodemodeConfig,
+  AgentCodemodeConfigResult,
+  McpConfigResult,
+  McpConfigScope,
+  McpServerConfig,
+} from "./ipc";
 import type {
   RemoteAccessStatus,
   RemotePairingOffer,
@@ -113,6 +121,13 @@ export type {
   DiskUsageStats,
   DiskCleanupResult,
   FileSystemChange,
+  McpConfigSnapshot,
+  McpConfigScope,
+  McpConfigResult,
+  McpServerConfig,
+  McpServerEntry,
+  AgentCodemodeConfig,
+  AgentCodemodeConfigResult,
 } from "./ipc";
 
 export interface FileEntry {
@@ -350,12 +365,21 @@ export interface ElectronAPI {
   agentSetCompactionConfig: (config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentSetAgentSubagentConfig: (agentId: string, config: AgentSubagentConfig) => Promise<AgentSubagentConfigResult>;
+  agentConfigSaveSubagent: (agentId: string, config: AgentSubagentConfig) => Promise<{ success: boolean; error?: string; config?: AgentSubagentConfig }>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;
   agentConfigLookupModel: (agentId: string, modelId: string) => Promise<AgentModelLookupResult>;
   agentConfigGetModelVisibility: (agentId: string) => Promise<AgentModelVisibilityResult>;
   agentConfigSetBackendModelsVisible: (agentId: string, visible: boolean) => Promise<AgentModelVisibilityResult>;
   agentConfigGetBuiltinExtensions: (agentId: string) => Promise<AgentBuiltinExtensionsResult>;
   agentConfigSetBuiltinExtensions: (agentId: string, enabledIds: string[]) => Promise<AgentBuiltinExtensionsResult>;
+  agentMcpReadConfig: (scope: McpConfigScope, projectPath?: string) => Promise<McpConfigResult>;
+  agentMcpWriteConfig: (
+    scope: McpConfigScope,
+    payload: { servers: Record<string, McpServerConfig>; autoEnableCodemode?: boolean },
+    projectPath?: string,
+  ) => Promise<McpConfigResult>;
+  agentCodemodeGetConfig: () => Promise<AgentCodemodeConfigResult>;
+  agentCodemodeSetConfig: (config: AgentCodemodeConfig) => Promise<AgentCodemodeConfigResult>;
   agentConfigFetchModels: (baseUrl: string, apiKey: string, endpoint?: string, authMode?: AgentProviderAuthMode) => Promise<AgentConfigFetchModelsResult>;
   agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
   agentConfigCopy: (sourceAgentId: string, sourceProviderId: string, targetAgentId: string) => Promise<AgentConfigResult>;

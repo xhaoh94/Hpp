@@ -80,8 +80,11 @@ export interface AgentBackend {
   /**
    * 热更新上游可选内置扩展的启用状态；未实现时只能下次初始化读取。
    * 返回的 config 只含启用项（`{ [id]: true }`）。
+   *
+   * `force` 用于「开关值未变但外部状态变了」——例如 mcp.json 被改写后需要让
+   * MCP server 重新连接。默认 false，此时后端可跳过重载。
    */
-  setBuiltinExtensions?(config: AgentBuiltinExtensionConfig): Promise<void>;
+  setBuiltinExtensions?(config: AgentBuiltinExtensionConfig, options?: { force?: boolean }): Promise<void>;
   sendUIResponse(response: AgentUIResponse): Promise<void>;
   dispose(): void | Promise<void>;
   readonly sessionFilePath: string | null;

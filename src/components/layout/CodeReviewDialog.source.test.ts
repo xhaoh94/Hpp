@@ -27,6 +27,24 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("chat-review-unified");
   });
 
+  it("defaults to unified view", () => {
+    // 上面那条只证明「两个模式都有」，管不住默认值；这里单独钉住。
+    expect(dialogSource).toContain(
+      "useState<ReviewViewMode>(getStoredReviewViewMode)",
+    );
+    // 并排视图仍然可达，但由用户主动选择。
+    expect(dialogSource).toContain('handleViewModeChange("split")');
+  });
+
+  it("persists and restores the user's selected view mode", () => {
+    expect(dialogSource).toContain('CODE_REVIEW_VIEW_MODE_STORAGE_KEY = "hpp.codeReview.viewMode"');
+    expect(dialogSource).toContain("window.localStorage.getItem(CODE_REVIEW_VIEW_MODE_STORAGE_KEY)");
+    expect(dialogSource).toContain("window.localStorage.setItem(CODE_REVIEW_VIEW_MODE_STORAGE_KEY, viewMode)");
+    // 打开 review 时不能再强制 setViewMode("split") 覆盖用户选择。
+    expect(dialogSource).not.toContain('setViewMode("split")');
+    expect(dialogSource).not.toContain('setViewMode("unified")');
+  });
+
   it("renders a full-screen overlay above the chat area", () => {
     const overlay = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-review-overlay"),

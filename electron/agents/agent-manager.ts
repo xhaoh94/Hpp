@@ -12,6 +12,9 @@ import type {
   AgentActionListOptions,
   AgentCompactionSupport,
   AgentUIResponse,
+  AgentCodemodeConfig,
+  McpConfigScope,
+  McpServerConfig,
 } from "../../src/types/ipc";
 import {
   activateAgentProviderConfig,
@@ -31,8 +34,16 @@ import {
   setAgentBuiltinExtensions,
   setActiveAgentProviderConfig,
   shouldShowAgentBackendModels,
+  saveAgentSubagentConfig,
 } from "./agent-config";
 import { fetchProviderModels } from "./agent-model-fetch";
+import {
+  readMcpConfigSnapshot,
+  resolvePiAgentDir,
+  writeMcpConfig,
+  type McpConfigAgentContext,
+} from "./mcp-config";
+import { readCodemodeConfig, writeCodemodeConfig } from "./codemode-config";
 import { isValidAgentConfigExport } from "../../shared/agent-config-io";
 import { combineAgentModels } from "./agent-model-list";
 import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
@@ -158,6 +169,23 @@ function normalizeCompactionForSupport(
   };
 }
 
+/**
+ * MCP 配置所在的 pi agentDir。
+ *
+ * 主进程不加载 pi SDK，所以用 `~/.pi/agent` 回退 —— 这与 backend.ts 里让 Pi
+ * 使用默认配置目录的做法一致（SDK 与 CLI 共用 auth.json/models.json）。
+ */
+function mcpAgentContext(): McpConfigAgentContext {
+  return { agentDir: resolvePiAgentDir() };
+}
+
+/**
+ * MCP / codemode 的配置在 pi 侧是**全局**的（`~/.pi/agent/mcp.json`、
+ * `~/.pi/agent/settings.json`），不随 Agent 变化 —— 所以这几个 handler 不收 agentId，
+ * 收了会让人以为配置是按 Agent 存的。要重载的会话也只能是 pi 的。
+ */
+const PI_AGENT_ID = "pi";
+
 async function loadSavedAgentSubagentConfig(agentId: string): Promise<AgentSubagentConfig | undefined> {
   try {
     const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
@@ -206,6 +234,8 @@ export class AgentManager {
   private sessionInitializations = new Map<string, Promise<void>>();
   private disposingSessionIds = new Set<string>();
   private pluginCatalogMutating = false;
+  /** 每次 runtime shutdown 递增，阻止已开始的异步初始化在关闭后重新挂回管理器。 */
+  private lifecycleGeneration = 0;
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
 
@@ -304,6 +334,12 @@ export class AgentManager {
     if (this.disposingSessionIds.has(sessionId)) {
       throw new Error("Agent 会话正在关闭，请稍后重试。");
     }
+    const existingAgent = this.sessionAgents.get(sessionId);
+    const existingAgentType = this.sessionAgentTypes.get(sessionId);
+    if (existingAgent && existingAgentType && existingAgentType !== agentId) {
+      throw new Error(`会话 ${sessionId} 已绑定 Agent ${existingAgentType}，不能复用到 ${agentId}。`);
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
     // 同一会话的并发初始化合并到同一次尝试：渲染层在切换/重试时会重复触发，
     // 各自抛「正在初始化」只会让重试瞬间失败、永远拿不到真实结果。后端不同
     // （agentId 不一致）时不能合并 —— 那是真的冲突。
@@ -328,24 +364,54 @@ export class AgentManager {
       console.log("[agent-manager] createSession:", sessionId, "agent:", agentId, "existingSessionFilePath:", existingSessionFilePath);
       let agent = this.sessionAgents.get(sessionId);
       if (!agent) {
-        agent = await withTimeout(
-          this.createAgentBackend(agentId, sessionId),
-          AGENT_SESSION_INIT_TIMEOUT_MS,
-          "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
-        );
+        let backendSettled = false;
+        const backendPromise = this.createAgentBackend(agentId, sessionId).finally(() => {
+          backendSettled = true;
+        });
+        try {
+          agent = await withTimeout(
+            backendPromise,
+            AGENT_SESSION_INIT_TIMEOUT_MS,
+            "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
+          );
+        } catch (error) {
+          // withTimeout 不能取消插件宿主 RPC。若 createBackend 晚到，必须马上
+          // dispose 这个没有交给 sessionAgents 的 backend，避免宿主内遗留孤儿会话。
+          if (!backendSettled) {
+            void backendPromise.then((lateAgent) => Promise.resolve().then(() => lateAgent.dispose())).catch(() => undefined);
+          }
+          throw error;
+        }
+        if (lifecycleGeneration !== this.lifecycleGeneration) {
+          await Promise.resolve().then(() => agent!.dispose()).catch(() => undefined);
+          throw new Error("Agent 运行时正在关闭，会话初始化已取消。");
+        }
         this.sessionAgents.set(sessionId, agent);
         this.sessionAgentTypes.set(sessionId, agentId);
         console.log("[agent-manager] Created new agent:", agent.constructor.name);
       } else {
         console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
       }
+      if (!agent) throw new Error("Agent backend 创建失败。");
       this.sessionProjectPaths.set(sessionId, projectPath);
       if (this.window) agent.setWindow(this.window);
+      let initSettled = false;
+      const initPromise = this.initAgentBackend(agent, agentId, projectPath, existingSessionFilePath).finally(() => {
+        initSettled = true;
+      });
       try {
-        await this.initAgentBackend(agent, agentId, projectPath, existingSessionFilePath);
+        await initPromise;
+        if (lifecycleGeneration !== this.lifecycleGeneration) {
+          throw new Error("Agent 运行时正在关闭，会话初始化已取消。");
+        }
       } catch (error) {
+        if (!initSettled) {
+          // 初始化超时后仍可能在 backend 内部启动 CLI/worker。当前调用先做一次
+          // 有界清理，底层 init 晚到时再补一次幂等 dispose。
+          void initPromise.then(() => Promise.resolve().then(() => agent!.dispose())).catch(() => undefined);
+        }
         if (this.sessionAgents.get(sessionId) === agent) {
-          await Promise.resolve().then(() => agent.dispose()).catch(() => undefined);
+          await Promise.resolve().then(() => agent!.dispose()).catch(() => undefined);
           this.sessionAgents.delete(sessionId);
           this.sessionAgentTypes.delete(sessionId);
           this.sessionFilePaths.delete(sessionId);
@@ -555,6 +621,7 @@ export class AgentManager {
   async applyBuiltinExtensions(
     agentId: string,
     enabledIds: string[],
+    options?: { force?: boolean },
   ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[]; pendingSessions: number }> {
     const capabilities = await agentRegistry.getCapabilities(agentId);
     if (!capabilities.builtinExtensions || capabilities.builtinExtensions === "none") {
@@ -571,9 +638,10 @@ export class AgentManager {
     const pendingSessions = Array.from(this.sessionAgents.entries()).filter(([sessionId]) =>
       this.sessionAgentTypes.get(sessionId) === agentId
     ).length - supportedSessions.length;
+    const force = options?.force === true;
     const result = await this.applyBackendConfigToSessions(
       supportedSessions,
-      (agent) => agent.setBuiltinExtensions!(config),
+      (agent) => agent.setBuiltinExtensions!(config, { force }),
     );
     // pendingSessions > 0 表示有会话拿不到热更新：配置已落盘，但要等重启才生效。
     // 这不算失败，UI 据此提示用户。
@@ -1036,6 +1104,12 @@ export class AgentManager {
   }
 
   async shutdown(): Promise<void> {
+    this.lifecycleGeneration += 1;
+    // 先等待正在进行的初始化自然结束或超时。否则直接清空 map 后，晚到的
+    // createBackend/init 可能在 shutdown 返回后重新占用插件宿主资源。
+    const initializations = [...this.sessionInitializations.values()];
+    await Promise.allSettled(initializations);
+
     const agents = Array.from(this.sessionAgents.values());
     this.sessionAgents.clear();
     this.sessionAgentTypes.clear();
@@ -1540,6 +1614,10 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
   });
 
+  ipcMain.handle("agentConfig:saveSubagent", async (_event, agentId: string, config: unknown) => (
+    saveAgentSubagentConfig(agentId, config)
+  ));
+
   ipcMain.handle("agentConfig:list", async (_event, agentId: string) => {
     return listAgentConfig(agentId);
   });
@@ -1566,13 +1644,114 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agentConfig:setBuiltinExtensions", async (_event, agentId: string, enabledIds: string[]) => {
+    // 先记住磁盘上的旧值。热更新是跨多个会话的 best-effort 操作，若其中一个
+    // backend 失败，不能让 UI 显示保存失败但重启后又悄悄使用新配置。
+    const previousEnabledIds = await getAgentBuiltinExtensions(agentId);
     const result = await setAgentBuiltinExtensions(agentId, enabledIds);
     if (!result.success) return result;
-    // 落盘成功后才推给运行中的后端：反过来的话一旦热切换失败，
-    // UI 已经显示「已开启」而实际没开，且下次启动又变了。
     const applied = await agentManager.applyBuiltinExtensions(agentId, result.enabledIds || []);
-    if (!applied.success) return { ...result, success: false, error: applied.error };
+    if (!applied.success) {
+      let rollbackError = "";
+      if (previousEnabledIds !== null) {
+        const rollback = await setAgentBuiltinExtensions(agentId, previousEnabledIds);
+        if (!rollback.success) {
+          rollbackError = rollback.error || "持久化回滚失败";
+        } else {
+          const restored = await agentManager.applyBuiltinExtensions(agentId, previousEnabledIds);
+          if (!restored.success) rollbackError = restored.error || "运行中会话回滚失败";
+        }
+      }
+      return {
+        ...result,
+        success: false,
+        error: `${applied.error || "内置扩展热更新失败"}${rollbackError ? `；${rollbackError}` : "；已恢复旧配置"}`,
+      };
+    }
     return result;
+  });
+
+  ipcMain.handle("agentMcp:readConfig", async (
+    _event,
+    scope: McpConfigScope,
+    projectPath?: string,
+  ) => {
+    try {
+      const snapshot = await readMcpConfigSnapshot(scope, mcpAgentContext(), projectPath);
+      return { success: true, snapshot };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle("agentMcp:writeConfig", async (
+    _event,
+    scope: McpConfigScope,
+    payload: { servers: Record<string, McpServerConfig>; autoEnableCodemode?: boolean },
+    projectPath?: string,
+  ) => {
+    try {
+      const written = await writeMcpConfig(
+        { scope, servers: payload?.servers || {}, autoEnableCodemode: payload?.autoEnableCodemode, projectPath },
+        mcpAgentContext(),
+      );
+      // pi 的 MCP 扩展在 bindExtensions 时连接 server，没有「重连」API。
+      // applyBuiltinExtensions 会走 worker 的 applyBuiltinExtensionConfig —— 原地改 loader
+      // 字段 + session.reload()，session_shutdown/startup 会让扩展重新走一遍连接流程。
+      // force 必须为 true：开关值可能没变（mcp.json 改了而已），worker 的「未变化就提前
+      // 返回」优化会跳过 reload，server 连的还是旧配置。
+      const enabledIds = (await getAgentBuiltinExtensions(PI_AGENT_ID)) || [];
+      const applied = await agentManager.applyBuiltinExtensions(PI_AGENT_ID, enabledIds, { force: true });
+      // 「已重连」要看**实际重载了几个会话**：没开着的会话时 applyBuiltinExtensions 也返回
+      // success（配置已落盘，下次 init 生效），拿 success 当重连成功会让 UI 谎报。
+      const reconnected = applied.appliedSessionIds.length > 0;
+      const notice = !applied.success
+        ? `配置已保存，但让运行中的会话重连失败：${applied.error || "未知原因"}`
+        : applied.pendingSessions > 0
+          ? `配置已保存，但有 ${applied.pendingSessions} 个会话不支持热重连，需重启会话后生效。`
+          : undefined;
+      return {
+        success: true,
+        snapshot: written.snapshot,
+        reconnected,
+        ...(notice ? { error: notice } : {}),
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle("agentCodemode:getConfig", async () => {
+    try {
+      const result = await readCodemodeConfig();
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle("agentCodemode:setConfig", async (_event, config: AgentCodemodeConfig) => {
+    try {
+      const saved = await writeCodemodeConfig(config);
+      // codemode 的 mode / inlineBudget 是在扩展定义时读进工具的
+      // （extensions/codemode/index.js:18-19），改完必须重载才生效。
+      const enabledIds = (await getAgentBuiltinExtensions(PI_AGENT_ID)) || [];
+      const applied = await agentManager.applyBuiltinExtensions(PI_AGENT_ID, enabledIds, { force: true });
+      // 同 agentMcp:writeConfig：只有真的重载了会话才算「已生效」。
+      const notice = !applied.success
+        ? `配置已保存，但让运行中的会话重载失败：${applied.error || "未知原因"}`
+        : applied.pendingSessions > 0
+          ? `配置已保存，但有 ${applied.pendingSessions} 个会话不支持热重载，需重启会话后生效。`
+          : undefined;
+      return {
+        success: true,
+        config: saved,
+        stored: true,
+        reconnected: applied.appliedSessionIds.length > 0,
+        ...(notice ? { error: notice } : {}),
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   ipcMain.handle("agentConfig:fetchModels", async (

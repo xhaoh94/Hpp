@@ -5,6 +5,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { app } from "electron";
 import type { SessionDataPurgeRequest } from "../../src/types/ipc";
+import { queueNamedWrite } from "../utils/write-queue";
 
 const dataDir = join(app.getPath("userData"), "hpp-data");
 const ALLOWED_STORE_KEYS = new Set(["settings", "projects", "currentModel", "editor"]);
@@ -15,7 +16,6 @@ const LEGACY_SESSION_MESSAGES_JSON_PATH = join(dataDir, "sessionMessages.json");
 /** freelist 占比达到该值且空闲页够多时才做 VACUUM（它会阻塞主进程并需要约两倍临时空间）。 */
 const VACUUM_MIN_FREE_PAGES = 64;
 const VACUUM_FREE_PAGE_RATIO = 0.2;
-const storeWriteQueues = new Map<string, Promise<void>>();
 let sessionMessagesDb: DatabaseSync | null = null;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -538,14 +538,7 @@ async function purgeSessionStore(request: SessionDataPurgeRequest) {
 }
 
 async function queueStoreWrite(key: string, write: () => Promise<void>): Promise<void> {
-  const previous = storeWriteQueues.get(key) || Promise.resolve();
-  const current = previous.catch(() => undefined).then(write);
-  storeWriteQueues.set(key, current);
-  try {
-    await current;
-  } finally {
-    if (storeWriteQueues.get(key) === current) storeWriteQueues.delete(key);
-  }
+  await queueNamedWrite(key, write);
 }
 
 export function registerStoreHandlers() {

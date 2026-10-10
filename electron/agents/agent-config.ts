@@ -10,6 +10,8 @@ import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "../..
 import { normalizeSupportedThinkingLevels } from "../../shared/models";
 import { asString, isRecord } from "../utils/unknown-value";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
+import { queueNamedWrite } from "../utils/write-queue";
+import { normalizeAgentSubagentConfig, type AgentSubagentConfig } from "../../shared/agent-subagent";
 
 export interface AgentCustomModelConfig {
   id: string;
@@ -108,6 +110,33 @@ async function readJsonObject(filePath: string): Promise<JsonRecord> {
 async function writeSettings(settings: JsonRecord) {
   await mkdir(getDataDir(), { recursive: true });
   await writeFile(getSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+/** 所有 Agent settings 的读改写与 store:save 共用同一进程内队列。 */
+async function updateSettings<T>(update: (settings: JsonRecord) => Promise<T> | T): Promise<T> {
+  return queueNamedWrite("settings", async () => {
+    const settings = await readJsonObject(getSettingsPath());
+    const result = await update(settings);
+    await writeSettings(settings);
+    return result;
+  });
+}
+
+/** 原子地更新单个 Agent 的 SubAgent 配置，避免 renderer 读改写整个 settings 丢失并发字段。 */
+export async function saveAgentSubagentConfig(
+  agentId: string,
+  value: unknown,
+): Promise<{ success: boolean; error?: string; config?: AgentSubagentConfig }> {
+  const config = normalizeAgentSubagentConfig(value);
+  try {
+    await updateSettings((settings) => {
+      const all = isRecord(settings.subagentConfigs) ? settings.subagentConfigs : {};
+      settings.subagentConfigs = { ...all, [agentId]: config };
+    });
+    return { success: true, config };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function normalizeModel(value: unknown): AgentCustomModelConfig | null {
@@ -236,14 +265,14 @@ export async function setAgentBackendModelsVisible(
     if (!declaration?.userConfigurable) {
       throw new Error("当前 Agent 不允许修改模型来源显示选项。");
     }
-    const settings = await readJsonObject(getSettingsPath());
-    const allPreferences = isRecord(settings[MODEL_PREFERENCES_KEY]) ? settings[MODEL_PREFERENCES_KEY] : {};
-    const currentPreferences = isRecord(allPreferences[agentId]) ? allPreferences[agentId] : {};
-    settings[MODEL_PREFERENCES_KEY] = {
-      ...allPreferences,
-      [agentId]: { ...currentPreferences, backendModelsVisible: visible },
-    };
-    await writeSettings(settings);
+    await updateSettings((settings) => {
+      const allPreferences = isRecord(settings[MODEL_PREFERENCES_KEY]) ? settings[MODEL_PREFERENCES_KEY] : {};
+      const currentPreferences = isRecord(allPreferences[agentId]) ? allPreferences[agentId] : {};
+      settings[MODEL_PREFERENCES_KEY] = {
+        ...allPreferences,
+        [agentId]: { ...currentPreferences, backendModelsVisible: visible },
+      };
+    });
     return { success: true, backendModelsVisible: visible };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -303,10 +332,10 @@ export async function setAgentBuiltinExtensions(
     }
     const known = new Set(declaration.options.map((option) => option.id));
     const next = [...new Set((enabledIds || []).map(String).filter((id) => known.has(id)))];
-    const settings = await readJsonObject(getSettingsPath());
-    const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
-    settings[BUILTIN_EXTENSIONS_KEY] = { ...all, [agentId]: next };
-    await writeSettings(settings);
+    await updateSettings((settings) => {
+      const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
+      settings[BUILTIN_EXTENSIONS_KEY] = { ...all, [agentId]: next };
+    });
     return { success: true, enabledIds: next };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -326,10 +355,10 @@ async function readSavedAgentConfigEntry(
 }
 
 async function writeAgentConfigState(agentId: string, state: AgentConfigState) {
-  const settings = await readJsonObject(getSettingsPath());
-  const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-  settings[SETTINGS_KEY] = { ...allConfigs, [agentId]: state };
-  await writeSettings(settings);
+  await updateSettings((settings) => {
+    const allConfigs = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
+    settings[SETTINGS_KEY] = { ...allConfigs, [agentId]: state };
+  });
 }
 
 // 旧版保存的 hpp 配置里没有 hasThinkingLevels/isBuiltin 字段（能力标记是派生信息）。

@@ -283,16 +283,9 @@ export function AgentSubagentModal({
     setSaving(true);
     setStatus(null);
     try {
-      const value = await window.electronAPI.loadData("settings");
-      const settings = asRecord(value);
-      const subagentConfigs = asRecord(settings.subagentConfigs);
-      const saved = await window.electronAPI.saveData("settings", {
-        ...settings,
-        subagentConfigs: {
-          ...subagentConfigs,
-          [agentId]: normalized,
-        },
-      });
+      // 由主进程按字段原子更新 settings，避免 renderer 读改写整个文件时覆盖
+      // 其他窗口或其他设置项的并发修改。
+      const saved = await window.electronAPI.agentConfigSaveSubagent(agentId, normalized);
       if (!saved.success) throw new Error(saved.error || "保存 SubAgent 设置失败");
 
       // 模型、profile 模型和热禁用可以直接热更新到运行中的会话：下一次

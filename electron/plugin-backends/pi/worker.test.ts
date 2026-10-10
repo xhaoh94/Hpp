@@ -635,6 +635,7 @@ export const createToolSearchExtension = () => (pi) => {
 const MCP_PROBE_TOOLS = [
   { name: "mcp__docs__fetch_note", annotations: { readOnlyHint: true } },
   { name: "mcp__docs__delete_note", annotations: { destructiveHint: true, idempotentHint: false } },
+  { name: "mcp__docs__conflict_tool", annotations: { readOnlyHint: true, destructiveHint: true } },
   { name: "mcp__docs__no_hint_tool" },
 ];
 export const createMcpExtension = () => (pi) => {
@@ -1097,6 +1098,32 @@ describe("Pi SDK worker protocol", () => {
       // 开了 MCP 不等于开了 codemode：后两者的激活仍需显式开启。
       expect(reported).not.toContain("codemode");
       expect(reported).not.toContain("tool_search");
+    } finally {
+      delete process.env.PI_TEST_MCP_TOOLS;
+    }
+  });
+
+  it("keeps an already-activated discovery tool in the whitelist", async () => {
+    process.env.PI_TEST_MCP_TOOLS = "1";
+    try {
+      const worker = startWorker(runtimeRoot, agentDir);
+      children.push(worker.child);
+      worker.send({
+        id: "init",
+        type: "init",
+        projectPath: tempRoot,
+        builtinExtensions: { mcp: true, tool_search: true },
+      });
+      await worker.waitFor((message) => message.type === "ready");
+      worker.send({ id: "tools-discovery", type: "prompt", message: "active-tool-names", permissionMode: "full-access" });
+
+      const ended = await worker.waitFor((message) => message.type === "message_end");
+      const reported: string[] = JSON.parse(ended.message.text);
+      // 白名单口径：exposure 非 direct 的工具只在「已被激活」时保留。
+      // MCP 扩展会按 server 的 exposure 用 setActiveTools 自动激活
+      // codemode/tool_search（ensureDiscoveryActive），那是 mcp.json 配置的
+      // 直接结果，被白名单抹掉会让 exposure=deferred/codemode 档位形同虚设。
+      expect(reported).toContain("tool_search");
     } finally {
       delete process.env.PI_TEST_MCP_TOOLS;
     }
@@ -1866,7 +1893,7 @@ describe("Pi SDK worker protocol", () => {
       "const rl = createInterface({input: process.stdin});",
       "rl.on('line', (line) => { const command = JSON.parse(line);",
       "if (command.type === 'prompt') { const question = process.env.PI_TEST_SUBAGENT_QUESTION === '1'; const request = question ? {type:'extension_ui_request', id:'child-question-1', method:'select', title:'Child question', options:['Yes','No']} : {type:'extension_ui_request', id:'child-permission-1', method:'confirm', title:'Child permission', message:'Allow edit?'}; process.stdout.write(JSON.stringify(request)+'\\n'); }",
-      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); } });",
+      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
     ].join("\n"), "utf8");
 
     const worker = startWorker(runtimeRoot, agentDir);
@@ -1911,7 +1938,7 @@ describe("Pi SDK worker protocol", () => {
       "const rl = createInterface({input: process.stdin});",
       "rl.on('line', (line) => { const command = JSON.parse(line);",
       "if (command.type === 'prompt') { const question = process.env.PI_TEST_SUBAGENT_QUESTION === '1'; const request = question ? {type:'extension_ui_request', id:'child-question-1', method:'select', title:'Child question', options:['Yes','No']} : {type:'extension_ui_request', id:'child-permission-1', method:'confirm', title:'Child permission', message:'Allow edit?'}; process.stdout.write(JSON.stringify(request)+'\\n'); }",
-      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); } });",
+      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
     ].join("\n"), "utf8");
 
     const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_SUBAGENT_QUESTION: "1" });
@@ -1948,6 +1975,50 @@ describe("Pi SDK worker protocol", () => {
       }),
     }));
   }, 20_000);
+
+  it("treats a conflicting MCP readOnly/destructive annotation as requiring approval", async () => {
+    process.env.PI_TEST_MCP_TOOLS = "1";
+    try {
+      const worker = startWorker(runtimeRoot, agentDir);
+      children.push(worker.child);
+      worker.send({
+        id: "init-mcp-conflict",
+        type: "init",
+        projectPath: tempRoot,
+        builtinExtensions: { mcp: true },
+      });
+      await worker.waitFor((message) => message.type === "ready");
+
+      worker.send({
+        id: "mcp-conflict",
+        type: "prompt",
+        message: `tool-call:${JSON.stringify({
+          toolName: "mcp__docs__conflict_tool",
+          input: {},
+        })}`,
+        permissionMode: "auto",
+      });
+      const request = await worker.waitFor((message) => message.type === "extension_ui_request");
+      expect(request.request).toMatchObject({ method: "confirm", title: "Pi 请求权限" });
+      worker.send({
+        id: "deny-mcp-conflict",
+        type: "uiResponse",
+        response: {
+          id: String((request.request as { id?: unknown }).id || ""),
+          confirmed: false,
+        },
+      });
+      const resultMessage = await worker.waitFor((message) =>
+        message.type === "message_end"
+        && String((message.message as { text?: unknown })?.text || "").includes("block"));
+      expect(JSON.parse(String((resultMessage.message as { text?: unknown }).text))).toMatchObject({
+        block: true,
+        reason: "用户拒绝了该操作",
+      });
+    } finally {
+      delete process.env.PI_TEST_MCP_TOOLS;
+    }
+  });
 
   it("uses Pi's tool_call hook for Hpp permission approval", async () => {
     const worker = startWorker(runtimeRoot, agentDir);

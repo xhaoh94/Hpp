@@ -52,6 +52,26 @@ import { resolveProjectFilePath } from "@/lib/project-file-path";
 
 export type ReviewViewMode = "split" | "unified";
 
+const CODE_REVIEW_VIEW_MODE_STORAGE_KEY = "hpp.codeReview.viewMode";
+
+function getStoredReviewViewMode(): ReviewViewMode {
+  try {
+    if (typeof window === "undefined") return "unified";
+    const value = window.localStorage.getItem(CODE_REVIEW_VIEW_MODE_STORAGE_KEY);
+    return value === "split" || value === "unified" ? value : "unified";
+  } catch {
+    return "unified";
+  }
+}
+
+function persistReviewViewMode(viewMode: ReviewViewMode) {
+  try {
+    window.localStorage.setItem(CODE_REVIEW_VIEW_MODE_STORAGE_KEY, viewMode);
+  } catch {
+    // localStorage 可能被禁用；内存中的本次选择仍然有效。
+  }
+}
+
 export type CodeReviewDialogProps = {
   open: boolean;
   reviewId: string;
@@ -278,7 +298,12 @@ export function CodeReviewDialog({
   onUndoStateChange,
 }: CodeReviewDialogProps) {
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ReviewViewMode>("split");
+  // 首次默认统一视图；用户切换后保存偏好，后续打开 review 按用户上次选择恢复。
+  const [viewMode, setViewMode] = useState<ReviewViewMode>(getStoredReviewViewMode);
+  const handleViewModeChange = (next: ReviewViewMode) => {
+    setViewMode(next);
+    persistReviewViewMode(next);
+  };
   const [filesCollapsed, setFilesCollapsed] = useState(false);
   const [filesWidth, setFilesWidth] = useState(220);
   const [filesResizing, setFilesResizing] = useState(false);
@@ -310,13 +335,13 @@ export function CodeReviewDialog({
   );
   const reviewSourceFingerprint = useMemo(() => JSON.stringify(reviewSources), [reviewSources]);
 
-  // 打开时回到初始选中的文件（或第一个有补丁的文件），保持视图为并排对比。
+  // 打开时回到初始选中的文件（或第一个有补丁的文件）。视图模式不在这里重置，
+  // 这样用户选择的 unified/split 偏好会跨 review、关闭和重新打开保持。
   // useLayoutEffect（声明靠前）确保在默认定位 useLayoutEffect 之前重置 scrolledRef，
   // 使重新打开同一文件时能再次以 auto 立即定位。
   useLayoutEffect(() => {
     if (!open) return;
     setActiveFileKey(initialFile ?? null);
-    setViewMode("split");
     setDiffCursor(0);
     setUndoError(null);
     scrolledRef.current = null;
@@ -817,7 +842,7 @@ export function CodeReviewDialog({
               <button
                 type="button"
                 className={viewMode === "split" ? "active" : ""}
-                onClick={() => setViewMode("split")}
+                onClick={() => handleViewModeChange("split")}
                 title={uiText.review.splitView}
                 aria-pressed={viewMode === "split"}
               >
@@ -827,7 +852,7 @@ export function CodeReviewDialog({
               <button
                 type="button"
                 className={viewMode === "unified" ? "active" : ""}
-                onClick={() => setViewMode("unified")}
+                onClick={() => handleViewModeChange("unified")}
                 title={uiText.review.unifiedView}
                 aria-pressed={viewMode === "unified"}
               >

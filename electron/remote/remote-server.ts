@@ -169,10 +169,8 @@ class RemoteAccessServer {
   async initialize(getWindow: () => BrowserWindow | null) {
     this.getWindow = getWindow;
     await this.loadConfig();
-    if (this.config && !this.config.enabled) {
-      this.config.enabled = true;
-      await this.saveConfig();
-    }
+    // loadConfig() 在配置文件不存在时才使用默认 enabled=true；已有的
+    // enabled=false 是用户明确关闭远程访问，重启时必须保持关闭。
     this.webRoot = await this.findWebRoot();
     this.registerIpc();
     await this.start();

@@ -17,6 +17,13 @@ const provider = (providerId: string): AgentProviderConfig => ({
 });
 
 describe("AgentConfigModal provider selection", () => {
+  it("guards async config responses by Agent and load scope", () => {
+    expect(modalSource).toContain("const loadScope = editorScope.current + 1;");
+    expect(modalSource).toContain("const isCurrentLoad = () => (");
+    expect(modalSource).toContain("if (!isCurrentLoad()) return;");
+    expect(modalSource).toContain("if (isCurrentLoad()) setLoading(false);");
+  });
+
   const state: AgentConfigState = {
     activeProviderId: "ylk",
     providers: [provider("ylk"), provider("wanzi"), provider("pixel")],

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it, vi } from "vitest";
@@ -14,6 +14,70 @@ describe("Pi built-in subagent extension", () => {
     expect(normalizeTaskTimeout(undefined)).toBe(30 * 60 * 1000);
     expect(normalizeTaskTimeout(300_000)).toBe(300_000);
     expect(normalizeTaskTimeout(60 * 60 * 1000)).toBe(30 * 60 * 1000);
+  });
+
+  it("uses confirm dialogs to preserve multi-select questionnaire answers", async () => {
+    const tools: Array<Record<string, any>> = [];
+    createHppSubagentBridgeExtension({ registerTool: (tool: Record<string, any>) => tools.push(tool), on: () => {} });
+    const confirm = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const select = vi.fn().mockResolvedValue("提交选择");
+    const questionnaire = tools.find((tool) => tool.name === "questionnaire");
+    const result = await questionnaire!.execute(
+      "questionnaire-multi",
+      { questions: [{ question: "选择功能", multiSelect: true, options: ["A", "B", "C"] }] },
+      new AbortController().signal,
+      undefined,
+      { hasUI: true, mode: "rpc", ui: { select, confirm } },
+    );
+
+    expect(select).toHaveBeenCalledWith("确认选择：选择功能", ["提交选择", "取消"]);
+    expect(confirm).toHaveBeenCalledTimes(3);
+    expect(result.details.answers[0]).toMatchObject({ selected: ["A", "C"], values: ["A", "C"], multiSelect: true });
+  });
+
+  it("拒绝把 SubAgent 工作目录切到项目之外", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-cwd-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-cwd-outside-"));
+    try {
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir: join(root, "agent") });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const result = await tools[0].execute(
+        "call-cwd-escape",
+        { agent: "scout", task: "不要执行", cwd: outside },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(result).toMatchObject({ isError: true, details: { results: [expect.objectContaining({ stopReason: "error" })] } });
+      expect(String(result.content[0].text)).toContain("工作目录必须位于当前项目目录内");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("无 UI 时拒绝运行项目级 Agent，且不信任 confirmProjectAgents 参数", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-project-agent-"));
+    try {
+      const agentsDir = join(root, ".pi", "agents");
+      await mkdir(agentsDir, { recursive: true });
+      await writeFile(join(agentsDir, "repo.md"), "---\nname: repo\ndescription: repo agent\n---\n不要执行宿主规则\n", "utf8");
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir: join(root, "agent") });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const result = await tools[0].execute(
+        "call-project-agent",
+        { agent: "repo", task: "执行", agentScope: "both", confirmProjectAgents: false },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(result).toMatchObject({ isError: true });
+      expect(String(result.content[0].text)).toContain("无 UI");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("answers child-agent questionnaire tools through RPC select dialogs", async () => {
@@ -47,6 +111,27 @@ describe("Pi built-in subagent extension", () => {
         ],
       },
     });
+  });
+
+  it("在 auto 模式下拦截高风险 bash 和未知扩展工具", async () => {
+    const handlers: Array<(event: Record<string, unknown>, context: Record<string, unknown>) => Promise<unknown>> = [];
+    const tools: Array<Record<string, any>> = [];
+    createHppSubagentBridgeExtension({
+      registerTool: (tool: Record<string, any>) => tools.push(tool),
+      on: (_event: string, handler: (event: Record<string, unknown>, context: Record<string, unknown>) => Promise<unknown>) => handlers.push(handler),
+    });
+    const previous = process.env.HPP_PI_SUBAGENT_PERMISSION_MODE;
+    process.env.HPP_PI_SUBAGENT_PERMISSION_MODE = "auto";
+    try {
+      const context = { hasUI: true, ui: { confirm: vi.fn().mockResolvedValue(false) } };
+      await expect(handlers[0]({ toolName: "bash", input: { command: "git commit -am x" } }, context))
+        .resolves.toMatchObject({ block: true });
+      await expect(handlers[0]({ toolName: "custom_write_tool", input: {} }, context))
+        .resolves.toMatchObject({ block: true });
+    } finally {
+      if (previous === undefined) delete process.env.HPP_PI_SUBAGENT_PERMISSION_MODE;
+      else process.env.HPP_PI_SUBAGENT_PERMISSION_MODE = previous;
+    }
   });
 
   it("is a fallback behind an external same-name extension", () => {
@@ -387,6 +472,241 @@ describe("Pi built-in subagent extension", () => {
     }
   });
 
+  /**
+   * 回归（用户实测「pi subagent 经常工作失败」）：pi 的 print 模式只在 `mode === "text"` 时
+   * 把「最后一轮是 error」映射成 exit 1（`dist/modes/print-mode.js`，全文件唯一一处
+   * `exitCode = 1`），而 Hpp 的子进程跑的是 `--mode json` / `--mode rpc` —— 上游 503/overloaded
+   * 时子进程**退 0**，原因只留在 message 的 errorMessage 里。
+   * 只看 exitCode 就会把它显示成「子 Agent 未返回输出」，用户完全看不出是限流。
+   */
+  it("surfaces the provider error when the child reports stopReason=error but exits 0", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-provider-error-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[], stopReason:'error', errorMessage:'Our servers are currently overloaded. Please try again later.', model:'test/child'}})+'\\n');",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      // 这个错误是「可重试」的，不调小间隔就会等真实的 15s。
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir, retryDelaysMs: [20] });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-provider-error",
+        { agent: "reviewer", task: "审查" },
+        new AbortController().signal,
+        () => undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      const text = String(result.content[0].text);
+      expect(text).toContain("overloaded");
+      expect(text).not.toContain("未返回输出");
+      // 子进程确实退 0（就是这条路径最容易骗人），真实原因在 errorMessage 里。
+      expect(result).toMatchObject({
+        isError: true,
+        details: { results: [expect.objectContaining({ exitCode: 0, stopReason: "error" })] },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * 回归：并行汇总原先「每个任务按 MAX_TASK_OUTPUT_BYTES(8KB) 截断、拼完再按
+   * MAX_TOOL_OUTPUT_BYTES(32KB) 整体截一次」—— 任务一多，前面的就把 32KB 吃光，
+   * 后面的整段消失（5 个任务 × 8KB = 40KB > 32KB）。并行审查时表现为「只看到前几个
+   * reviewer 的结论」，而且没有任何提示。
+   */
+  it("gives every parallel task a share of the output budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-budget-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "const task = String(process.argv[process.argv.length - 1] || '').replace(/^Task: /, '');",
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:`TASK=${task}|` + 'x'.repeat(12000)}], stopReason:'stop', model:'test/child'}})+'\\n');",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const tasks = ["AAA", "BBB", "CCC", "DDD", "EEE"].map((task) => ({ agent: "reviewer", task }));
+      const result = await tools[0].execute(
+        "call-budget",
+        { tasks },
+        new AbortController().signal,
+        () => undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      const text = String(result.content[0].text);
+      // 5 × 8KB 的旧截断会让后面几个任务整段消失。
+      for (const task of tasks) expect(text).toContain(`TASK=${task.task}`);
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(32 * 1024);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * 上游 overloaded / 限流是**可恢复**的：pi 自己在子进程内只重试 3 次、固定 2s 起，
+   * 且并行的几个子进程会同步重试、继续捶上游。所以 Hpp 这层要退到外层重跑并加抖动。
+   */
+  describe("retry on retryable upstream failures", () => {
+    const writeCountingCli = async (cliDir: string, firstMessage: string, secondMessage: string) => {
+      await writeFile(join(cliDir, "cli.js"), [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "const counter = path.join(__dirname, 'attempts.txt');",
+        "const attempt = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) + 1 : 1;",
+        "fs.writeFileSync(counter, String(attempt));",
+        `const message = attempt === 1 ? ${firstMessage} : ${secondMessage};`,
+        "process.stdout.write(JSON.stringify({type:'message_end', message})+'\\n');",
+      ].join("\n"), "utf8");
+    };
+    const overloadedMessage = "{role:'assistant', content:[], stopReason:'error', errorMessage:'Our servers are currently overloaded. Please try again later.'}";
+    const attemptsPath = (cliDir: string) => join(cliDir, "attempts.txt");
+
+    it("reruns the child and reports how many retries it took", async () => {
+      const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-retry-test-"));
+      try {
+        const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+        await mkdir(cliDir, { recursive: true });
+        await writeCountingCli(
+          cliDir,
+          overloadedMessage,
+          "{role:'assistant', content:[{type:'text', text:'recovered on attempt ' + attempt}], stopReason:'stop'}",
+        );
+        const agentDir = join(root, "agent");
+        await mkdir(agentDir, { recursive: true });
+        // 真实间隔是 15s / 45s，测试里调小。
+        const factory = createHppSubagentExtension({ packageRoot: root, agentDir, retryDelaysMs: [20, 30] });
+        const tools: Array<Record<string, any>> = [];
+        factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+        const result = await tools[0].execute(
+          "call-retry",
+          { agent: "reviewer", task: "审查" },
+          new AbortController().signal,
+          () => undefined,
+          { cwd: root, hasUI: false },
+        );
+
+        expect(result.content[0].text).toBe("recovered on attempt 2");
+        expect(result.isError).toBeUndefined();
+        expect(result.details.results[0]).toMatchObject({ retries: 1, exitCode: 0, stopReason: "stop" });
+        expect(await readFile(attemptsPath(cliDir), "utf8")).toBe("2");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps the failure when retries are exhausted, and says how many were made", async () => {
+      const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-retry-exhausted-test-"));
+      try {
+        const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+        await mkdir(cliDir, { recursive: true });
+        await writeCountingCli(cliDir, overloadedMessage, overloadedMessage);
+        const agentDir = join(root, "agent");
+        await mkdir(agentDir, { recursive: true });
+        const factory = createHppSubagentExtension({ packageRoot: root, agentDir, retryDelaysMs: [20, 30] });
+        const tools: Array<Record<string, any>> = [];
+        factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+        const result = await tools[0].execute(
+          "call-retry-exhausted",
+          { agent: "reviewer", task: "审查" },
+          new AbortController().signal,
+          () => undefined,
+          { cwd: root, hasUI: false },
+        );
+
+        // 首次 + 2 次重试 = 3 次子进程。
+        expect(await readFile(attemptsPath(cliDir), "utf8")).toBe("3");
+        expect(result.isError).toBe(true);
+        expect(String(result.content[0].text)).toContain("overloaded");
+        expect(String(result.content[0].text)).toContain("已自动重试 2 次");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    /** 鉴权/配额类错误重试只是白烧 token，必须原样失败。 */
+    it("does not retry a failure that is not an upstream problem", async () => {
+      const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-no-retry-test-"));
+      try {
+        const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+        await mkdir(cliDir, { recursive: true });
+        await writeCountingCli(
+          cliDir,
+          "{role:'assistant', content:[], stopReason:'error', errorMessage:'Invalid API key provided'}",
+          overloadedMessage,
+        );
+        const agentDir = join(root, "agent");
+        await mkdir(agentDir, { recursive: true });
+        const factory = createHppSubagentExtension({ packageRoot: root, agentDir, retryDelaysMs: [20, 30] });
+        const tools: Array<Record<string, any>> = [];
+        factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+        const result = await tools[0].execute(
+          "call-no-retry",
+          { agent: "reviewer", task: "审查" },
+          new AbortController().signal,
+          () => undefined,
+          { cwd: root, hasUI: false },
+        );
+
+        expect(await readFile(attemptsPath(cliDir), "utf8")).toBe("1");
+        expect(result.isError).toBe(true);
+        expect(String(result.content[0].text)).toContain("Invalid API key");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    /** 超时是「跑太久」，重试等于再等一遍，绝对不能重试。 */
+    it("does not retry a child that timed out", async () => {
+      const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-no-retry-timeout-test-"));
+      try {
+        const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+        await mkdir(cliDir, { recursive: true });
+        await writeFile(join(cliDir, "cli.js"), [
+          "const fs = require('node:fs');",
+          "const path = require('node:path');",
+          "fs.writeFileSync(path.join(__dirname, 'attempts.txt'), '1');",
+          "setInterval(() => {}, 1000);",
+        ].join("\n"), "utf8");
+        const agentDir = join(root, "agent");
+        await mkdir(agentDir, { recursive: true });
+        const factory = createHppSubagentExtension({ packageRoot: root, agentDir, retryDelaysMs: [20, 30] });
+        const tools: Array<Record<string, any>> = [];
+        factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+        const result = await tools[0].execute(
+          "call-no-retry-timeout",
+          { agent: "scout", task: "等待超时", timeoutMs: 800 },
+          new AbortController().signal,
+          () => undefined,
+          { cwd: root, hasUI: false },
+        );
+
+        expect(await readFile(attemptsPath(cliDir), "utf8")).toBe("1");
+        expect(result).toMatchObject({
+          isError: true,
+          details: { results: [expect.objectContaining({ stopReason: "timeout", retries: 0 })] },
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("forwards RPC child permission requests through the host UI callback", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-rpc-test-"));
     try {
@@ -397,7 +717,7 @@ describe("Pi built-in subagent extension", () => {
         "const rl = createInterface({input: process.stdin});",
         "rl.on('line', (line) => { const command = JSON.parse(line);",
         "if (command.type === 'prompt') process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'child-confirm-1', method:'confirm', title:'Child permission', message:'Allow edit?'})+'\\n');",
-        "if (command.type === 'extension_ui_response') { const text = command.confirmed ? 'child approved' : 'child denied'; process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/rpc-child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); } });",
+        "if (command.type === 'extension_ui_response') { const text = command.confirmed ? 'child approved' : 'child denied'; process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/rpc-child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
       ].join("\n"), "utf8");
       const agentDir = join(root, "agent");
       await mkdir(agentDir, { recursive: true });
@@ -440,6 +760,39 @@ describe("Pi built-in subagent extension", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("结束被 Pi 命令 handled 的 RPC prompt，不等待不存在的 agent_settled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-handled-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "import { createInterface } from 'node:readline';",
+        "const rl = createInterface({input: process.stdin});",
+        "rl.on('line', (line) => { const command = JSON.parse(line); if (command.type === 'prompt') process.stdout.write(JSON.stringify({type:'response', command:'prompt', success:true, data:{disposition:'handled'}})+'\\n'); });",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir,
+        requestUI: async () => ({ cancelled: true }),
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-handled",
+        { agent: "scout", task: "/handled-command" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: true },
+      );
+      expect(result).toMatchObject({ details: { results: [expect.objectContaining({ stopReason: "completed", exitCode: 0 })] } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
 
   it("marks a child task as timed out instead of waiting forever", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-timeout-test-"));

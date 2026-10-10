@@ -452,6 +452,7 @@ const getUpstreamError = async (response) => {
 export const startOpenAIChatAdapter = async (provider, fetchImpl = fetch) => {
   const localToken = randomBytes(32).toString("hex");
   const upstreamUrl = buildChatCompletionsUrl(provider.baseUrl);
+  const activeControllers = new Set();
   const server = createServer(async (request, response) => {
     try {
       if (!safeTokenEqual(getRequestToken(request), localToken)) {
@@ -476,6 +477,7 @@ export const startOpenAIChatAdapter = async (provider, fetchImpl = fetch) => {
       const openAIBody = convertAnthropicRequest(anthropicBody);
       if (provider.modelId) openAIBody.model = String(provider.modelId);
       const controller = new AbortController();
+      activeControllers.add(controller);
       const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
       timeout.unref?.();
       response.on("close", () => { if (!response.writableEnded) controller.abort(); });
@@ -493,24 +495,29 @@ export const startOpenAIChatAdapter = async (provider, fetchImpl = fetch) => {
           body: JSON.stringify(openAIBody),
           signal: controller.signal,
         });
+        if (!upstream.ok) {
+          const message = await getUpstreamError(upstream);
+          writeJSON(response, upstream.status, {
+            type: "error",
+            error: { type: "api_error", message: `OpenAI 转发失败：${message}` },
+          });
+          return;
+        }
+        const contentType = upstream.headers.get("content-type") || "";
+        if (openAIBody.stream) {
+          if (contentType.includes("text/event-stream")) await translateEventStream(upstream, response, anthropicBody);
+          else streamJSONResponse(await upstream.json(), response, anthropicBody);
+          return;
+        }
+        writeJSON(response, 200, convertOpenAIResponse(await upstream.json(), anthropicBody));
       } finally {
+        // timeout 必须覆盖整个 body/SSE 读取阶段，而不只是 fetch 返回响应头。
         clearTimeout(timeout);
+        activeControllers.delete(controller);
+        if (controller.signal.aborted && upstream?.body?.cancel) {
+          try { await upstream.body.cancel(); } catch { /* ignore cleanup errors */ }
+        }
       }
-      if (!upstream.ok) {
-        const message = await getUpstreamError(upstream);
-        writeJSON(response, upstream.status, {
-          type: "error",
-          error: { type: "api_error", message: `OpenAI 转发失败：${message}` },
-        });
-        return;
-      }
-      const contentType = upstream.headers.get("content-type") || "";
-      if (openAIBody.stream) {
-        if (contentType.includes("text/event-stream")) await translateEventStream(upstream, response, anthropicBody);
-        else streamJSONResponse(await upstream.json(), response, anthropicBody);
-        return;
-      }
-      writeJSON(response, 200, convertOpenAIResponse(await upstream.json(), anthropicBody));
     } catch (error) {
       if (response.headersSent) {
         if (!response.writableEnded) {
@@ -545,6 +552,9 @@ export const startOpenAIChatAdapter = async (provider, fetchImpl = fetch) => {
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     apiKey: localToken,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () => new Promise((resolve) => {
+      for (const controller of activeControllers) controller.abort();
+      server.close(() => resolve());
+    }),
   };
 };

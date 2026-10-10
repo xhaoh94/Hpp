@@ -1623,19 +1623,20 @@
   z-index: 1060;
 }
 
-.settings-modal.agent-compaction-modal,
-.settings-modal.agent-subagent-modal {
+.settings-modal.agent-compaction-modal {
   width: min(640px, calc(100vw - 32px));
   max-height: min(86vh, 760px);
 }
 
-.settings-modal.agent-subagent-modal {
+.settings-modal.agent-subagent-modal,
+.settings-modal.agent-mcp-modal {
   width: min(720px, calc(100vw - 32px));
   max-height: min(86vh, 820px);
 }
 
 .agent-compaction-modal-title,
-.agent-subagent-modal-title {
+.agent-subagent-modal-title,
+.agent-mcp-modal-title {
   display: flex;
   align-items: center;
   min-width: 0;
@@ -1645,19 +1646,23 @@
 .agent-compaction-modal-title h3,
 .agent-compaction-modal-title p,
 .agent-subagent-modal-title h3,
-.agent-subagent-modal-title p {
+.agent-subagent-modal-title p,
+.agent-mcp-modal-title h3,
+.agent-mcp-modal-title p {
   margin: 0;
 }
 
 .agent-compaction-modal-title p,
-.agent-subagent-modal-title p {
+.agent-subagent-modal-title p,
+.agent-mcp-modal-title p {
   margin-top: 3px;
   color: var(--text-secondary);
   font-size: 11px;
 }
 
 .agent-compaction-modal-content,
-.agent-subagent-modal-content {
+.agent-subagent-modal-content,
+.agent-mcp-modal-content {
   overscroll-behavior: contain;
 }
 
@@ -4683,4 +4688,559 @@
   padding: 10px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-primary);
+}
+
+/* ---------- MCP 设置弹窗 ---------- */
+
+.agent-mcp-modal-overlay {
+  z-index: 1070;
+}
+
+.agent-mcp-modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 内容少时不让 modal 贴内容高度收缩 —— 否则底部会露出背景层的渠道列表。 */
+.settings-modal.agent-mcp-modal {
+  min-height: min(420px, 72vh);
+}
+
+.agent-mcp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-mcp-enabled-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+}
+
+.agent-mcp-enabled-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.agent-mcp-enabled-row small {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.agent-mcp-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-mcp-scope-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-secondary);
+}
+
+.agent-mcp-scope-toggle > button {
+  height: 24px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.agent-mcp-scope-toggle > button.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.agent-mcp-scope-toggle > button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agent-mcp-project-select {
+  height: 26px;
+  max-width: 220px;
+  padding: 0 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11.5px;
+}
+
+.agent-mcp-file-path {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.agent-mcp-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.agent-mcp-hint code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.agent-mcp-empty {
+  padding: 22px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.agent-mcp-errors,
+.agent-mcp-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.agent-mcp-errors {
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid var(--color-border-danger, #a32d2d);
+  background: color-mix(in srgb, var(--color-background-danger, #fcebeb) 60%, transparent);
+  color: var(--text-primary);
+}
+
+.agent-mcp-errors > div,
+.agent-mcp-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.agent-mcp-errors svg,
+.agent-mcp-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.agent-mcp-warning {
+  border: 1px solid var(--color-border-warning, #854f0b);
+  background: color-mix(in srgb, var(--color-background-warning, #faeeda) 55%, transparent);
+  color: var(--text-primary);
+}
+
+.agent-mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-mcp-server {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.agent-mcp-server-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+}
+
+.agent-mcp-server-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-mcp-server-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.agent-mcp-server-kind {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+}
+
+.agent-mcp-server-delete {
+  flex: 0 0 auto;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.agent-mcp-server-delete:hover:not(:disabled) {
+  border-color: var(--border-color);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.agent-mcp-server-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 10px 11px;
+  border-top: 1px solid var(--border-color);
+}
+
+.agent-mcp-field {
+  display: grid;
+  grid-template-columns: 108px 1fr;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.agent-mcp-field > input[type="text"],
+.agent-mcp-field > input[type="number"],
+.agent-mcp-field > select {
+  height: 26px;
+  min-width: 0;
+  padding: 0 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11.5px;
+}
+
+.agent-mcp-field > input:focus,
+.agent-mcp-field > select:focus,
+.agent-mcp-advanced-body textarea:focus {
+  border-color: var(--border-color);
+  outline: 1px solid var(--accent-color, #378add);
+}
+
+.agent-mcp-advanced {
+  margin-top: 2px;
+}
+
+.agent-mcp-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.agent-mcp-advanced-toggle:hover {
+  color: var(--text-primary);
+}
+
+.agent-mcp-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.agent-mcp-advanced-body textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.agent-mcp-advanced-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.agent-mcp-advanced-note {
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+}
+
+.agent-mcp-advanced-error,
+.agent-mcp-field-error {
+  color: var(--text-danger, #e24b4a);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-mcp-status {
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.agent-mcp-status.success {
+  border: 1px solid var(--color-border-success, #3b6d11);
+  background: color-mix(in srgb, var(--color-background-success, #eaf3de) 55%, transparent);
+  color: var(--text-primary);
+}
+
+.agent-mcp-status.error {
+  border: 1px solid var(--color-border-danger, #a32d2d);
+  background: color-mix(in srgb, var(--color-background-danger, #fcebeb) 60%, transparent);
+  color: var(--text-primary);
+}
+
+.agent-mcp-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: nowrap;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+.agent-mcp-add-actions,
+.agent-mcp-footer-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 添加按钮组允许换行（按钮多的时候），但保留组本身不被压扁。 */
+.agent-mcp-add-actions {
+  flex-wrap: wrap;
+}
+
+/* 主操作组不换行、不压缩 —— 之前被挤压导致「保存」两个字挤在一起。 */
+.agent-mcp-footer-main {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+/*
+ * btn-primary 在这个项目里只定义背景色（无 padding/height），
+ * 所以主按钮要叠 btn-action 才有尺寸；关闭按钮直接用 btn-action。
+ */
+.agent-mcp-save {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 6px 16px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: white;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.agent-mcp-save:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.agent-mcp-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 配置弹窗里的 MCP 按钮：勾选状态用一个小圆点表示，避免点进弹窗才知道开没开。 */
+.agent-config-mcp-button {
+  position: relative;
+}
+
+.agent-config-mcp-dot {
+  width: 5px;
+  height: 5px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ---------- Codemode 设置弹窗 ---------- */
+
+.agent-codemode-modal-overlay {
+  z-index: 1070;
+}
+
+.settings-modal.agent-codemode-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(80vh, 700px);
+}
+
+.agent-codemode-modal-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.agent-codemode-modal-title h3,
+.agent-codemode-modal-title p {
+  margin: 0;
+}
+
+.agent-codemode-modal-title p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.agent-codemode-modal-content {
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.agent-codemode-inactive-hint {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-warning, #854f0b);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-background-warning, #faeeda) 55%, transparent);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.agent-codemode-field-label {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.agent-codemode-mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-codemode-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  cursor: pointer;
+}
+
+.agent-codemode-mode-option:hover {
+  border-color: var(--border-color);
+  background: var(--bg-hover);
+}
+
+.agent-codemode-mode-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.agent-codemode-mode-option strong {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.agent-codemode-mode-option small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-codemode-budget-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-codemode-budget-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-codemode-budget-input > input {
+  width: 96px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  text-align: right;
+}
+
+.agent-codemode-budget-unit {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.agent-codemode-default-note {
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+}
+
+/* MCP 弹窗里的 autoEnableCodemode 行：说明文字里有 code 标签，缩进对齐。 */
+.agent-mcp-auto-codemode small code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.agent-mcp-codemode-warning {
+  color: var(--text-primary);
 }

@@ -1,8 +1,8 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { isSubagentPathWithinProject, isSafeSubagentShellCommand } from "./subagent-policy.mjs";
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const QUESTION_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
-const HIGH_RISK_COMMAND_PATTERN = /(?:\brm\s+(?:-[^\s]*r|--recursive)|\bsudo\b|\b(?:chmod|chown)\b|\bgit\s+(?:push|clean|reset\s+--hard)|\b(?:curl|wget|ssh|scp|rsync)\b|\b(?:npm|pnpm|yarn|pip|cargo)\s+(?:install|add|publish)|invoke-webrequest|start-process|\bshutdown\b|\breboot\b|\btaskkill\b)/i;
+const HIGH_RISK_COMMAND_PATTERN = /(?:\b(?:rm|mv|cp|del|erase|format)\b|\bsudo\b|\b(?:chmod|chown)\b|\bgit\s+(?:commit|checkout|restore|reset|revert|merge|rebase|cherry-pick|stash|tag|push|clean)\b|\b(?:curl|wget|ssh|scp|rsync|docker|kubectl|terraform|make)\b|\b(?:python|python3|node|deno|bun|ruby|perl|php|powershell|pwsh|cmd)\b|\b(?:npm|pnpm|yarn|pip|cargo)\s+(?:install|add|publish)|invoke-webrequest|start-process|\bshutdown\b|\breboot\b|\btaskkill\b|[<>`]|&&|\|)/i;
 
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const normalizeToolName = (value) => String(value || "").trim().toLowerCase().replace(/-/g, "_");
@@ -40,15 +40,9 @@ const getToolPaths = (event) => {
     .map(String);
 };
 
-const isOutsideProject = (filePath) => {
-  try {
-    const absolutePath = isAbsolute(filePath) ? resolve(filePath) : resolve(process.cwd(), filePath);
-    const projectRelativePath = relative(resolve(process.cwd()), absolutePath);
-    return projectRelativePath === ".." || projectRelativePath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(projectRelativePath);
-  } catch {
-    return true;
-  }
-};
+const getProjectRoot = () => process.env.HPP_PI_SUBAGENT_PROJECT_ROOT || process.cwd();
+
+const isOutsideProject = (filePath) => !isSubagentPathWithinProject(getProjectRoot(), filePath, process.cwd());
 
 const describeTool = (event) => {
   const toolName = String(event?.toolName || "工具");
@@ -69,8 +63,12 @@ const shouldRequestPermission = (event) => {
   if (mode === "ask") return outsideProject || !READ_ONLY_TOOLS.has(toolName);
   if (outsideProject) return true;
   if (READ_ONLY_TOOLS.has(toolName)) return false;
-  if (toolName === "bash") return HIGH_RISK_COMMAND_PATTERN.test(String(getToolInput(event).command || ""));
-  return false;
+  if (toolName === "bash") {
+    const command = String(getToolInput(event).command || "");
+    return !isSafeSubagentShellCommand(command) || HIGH_RISK_COMMAND_PATTERN.test(command);
+  }
+  // edit/write 以及未知扩展工具都要求确认；auto 不是信任任意工具的白名单。
+  return true;
 };
 
 const makeQuestionResult = (questions, answers, cancelled = false) => ({
@@ -113,26 +111,62 @@ const createQuestionTool = (name) => ({
 
     const answers = [];
     for (const question of questions) {
-      const selected = await ctx.ui.select(
-        `子 Agent 提问：${question.question}`,
-        question.options.map((option) => option.label),
-      );
-      if (!selected) {
-        return {
-          content: [{ type: "text", text: "用户取消了提问" }],
-          details: makeQuestionResult(questions, answers, true),
-        };
+      if (question.multiSelect) {
+        if (typeof ctx.ui?.confirm !== "function") {
+          return {
+            content: [{ type: "text", text: "Error: 当前 RPC UI 不支持多选确认" }],
+            details: makeQuestionResult(questions, answers, true),
+          };
+        }
+        const selectedOptions = [];
+        for (const option of question.options) {
+          const checked = await ctx.ui.confirm(
+            `子 Agent 提问：${question.question}`,
+            `选择「${option.label}」？`,
+          );
+          if (checked) selectedOptions.push(option);
+        }
+        const committed = await ctx.ui.select(
+          `确认选择：${question.question}`,
+          ["提交选择", "取消"],
+        );
+        if (committed !== "提交选择") {
+          return {
+            content: [{ type: "text", text: "用户取消了提问" }],
+            details: makeQuestionResult(questions, answers, true),
+          };
+        }
+        answers.push({
+          id: question.id,
+          question: question.question,
+          answer: selectedOptions.map((option) => option.label).join(", "),
+          selected: selectedOptions.map((option) => option.label),
+          values: selectedOptions.map((option) => option.value),
+          selectedOptions,
+          multiSelect: true,
+        });
+      } else {
+        const selected = await ctx.ui.select(
+          `子 Agent 提问：${question.question}`,
+          question.options.map((option) => option.label),
+        );
+        if (!selected) {
+          return {
+            content: [{ type: "text", text: "用户取消了提问" }],
+            details: makeQuestionResult(questions, answers, true),
+          };
+        }
+        const selectedOption = question.options.find((option) => option.label === selected);
+        answers.push({
+          id: question.id,
+          question: question.question,
+          answer: selected,
+          selected: [selected],
+          values: [selectedOption?.value ?? selected],
+          selectedOptions: selectedOption ? [selectedOption] : [],
+          multiSelect: false,
+        });
       }
-      const selectedOption = question.options.find((option) => option.label === selected);
-      answers.push({
-        id: question.id,
-        question: question.question,
-        answer: selected,
-        selected: [selected],
-        values: [selectedOption?.value ?? selected],
-        selectedOptions: selectedOption ? [selectedOption] : [],
-        multiSelect: question.multiSelect,
-      });
     }
 
     return {

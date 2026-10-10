@@ -1,8 +1,10 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePiAgentDir } from "./pi-agent-dir.mjs";
+import { resolveSubagentCwd } from "./subagent-policy.mjs";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -12,7 +14,35 @@ const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_MESSAGE_COUNT = 80;
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_TASK_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_JSON_TASK_BYTES = 24 * 1024;
+const MAX_STDOUT_LINE_BYTES = 256 * 1024;
 const SUBAGENT_BRIDGE_EXTENSION_PATH = join(dirname(fileURLToPath(import.meta.url)), "subagent-bridge-extension.mjs");
+
+/** 只终止当前 SubAgent 拥有的进程组/进程树，不能影响 Hpp 或用户的其他 Node 进程。 */
+const killSubagentTree = (child, signal = "SIGTERM") => {
+  if (!child) return;
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        windowsHide: true,
+        stdio: "ignore",
+        timeout: 5000,
+      });
+      return;
+    } catch {
+      // 回退到直接终止；调用方仍会等待 hard deadline。
+    }
+  }
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // 子进程未创建独立进程组或已经退出时回退到直接终止。
+    }
+  }
+  try { child.kill(signal); } catch { /* ignore */ }
+};
 const PI_FFF_PACKAGE_NAME = "@ff-labs/pi-fff";
 const PI_FFF_TOOL_NAMES = ["fffind", "ffgrep", "fff-multi-grep"];
 const PI_FFF_SUBAGENT_NAMES = new Set(["scout", "planner", "reviewer"]);
@@ -134,16 +164,76 @@ const getFinalOutput = (result) => {
   return "";
 };
 
+/**
+ * 子 Agent 的结果文本。
+ *
+ * 关键：**不能按 exitCode 判断有没有出错**。pi 的 print 模式只在 `mode === "text"` 时把
+ * 「最后一轮是 error/aborted」映射成 exit 1（`dist/modes/print-mode.js`，全文件唯一一处
+ * `exitCode = 1`），而 Hpp 的子进程用的是 `--mode json` / `--mode rpc` —— 上游 503/overloaded
+ * 时子进程照样退 0，错误只留在 message 的 errorMessage 里。只看 exitCode 就会把
+ * 「Our servers are currently overloaded」显示成「子 Agent 未返回输出」。
+ */
 const getResultOutput = (result) => {
-  if (result?.stopReason === "aborted") return result.errorMessage || "子 Agent 已中断";
-  if (result?.exitCode !== 0) {
-    return result.errorMessage || result.stderr || getFinalOutput(result) || "子 Agent 未返回输出";
+  const error = nonEmptyString(result?.errorMessage);
+  if (result?.stopReason === "aborted") return error || "子 Agent 已中断";
+  const failed = result?.stopReason === "error"
+    || (typeof result?.exitCode === "number" && result.exitCode !== 0);
+  if (failed) {
+    const reason = error
+      || nonEmptyString(result?.stderr)
+      || (result?.stopReason === "error" ? "上游返回错误但未给出原因" : `子 Agent 进程异常退出（exit ${result?.exitCode}）`);
+    const retried = Number(result?.retries) > 0 ? `（已自动重试 ${result.retries} 次）` : "";
+    // 失败前可能已经吐出一部分内容，别丢 —— 但要挂在原因后面，原因才是可行动的信息。
+    const partial = getFinalOutput(result);
+    const detail = `${reason}${retried}`;
+    return partial && partial !== reason ? `${detail}\n\n${partial}` : detail;
   }
   return getFinalOutput(result) || "子 Agent 未返回输出";
 };
 
 const isFailedResult = (result) =>
   result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted";
+
+/**
+ * 可重试的上游错误。关键词与 pi-ai 的 `RETRYABLE_PROVIDER_ERROR_PATTERN`
+ * （`dist/utils/retry.js`）对齐：过载 / 限流 / 5xx / 连接层抖动。
+ * 不含鉴权与配额类 —— 那是配置问题，重试只是白烧 token。
+ */
+const RETRYABLE_UPSTREAM_ERROR = /overloaded|server_?busy|servers are currently busy|currently experiencing high demand|model is at capacity|rate.?limit|too many requests|\b429\b|\b5\d\d\b|temporarily unavailable|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed/i;
+
+/** 重试间隔（先短后长），实际等待再叠加 0~50% 抖动。 */
+const SUBAGENT_RETRY_DELAYS_MS = [15_000, 45_000];
+
+const isRetryableSubagentFailure = (result) => {
+  if (!result || !isFailedResult(result)) return false;
+  // 中断与超时跟上游无关，重试只会把等待再来一遍。
+  if (result.stopReason === "aborted" || result.stopReason === "timeout") return false;
+  const text = nonEmptyString(result.errorMessage) || nonEmptyString(result.stderr);
+  return Boolean(text) && RETRYABLE_UPSTREAM_ERROR.test(text);
+};
+
+/**
+ * 重试前的等待。返回 false 表示期间被中断，调用方应停止重试。
+ *
+ * 必须带抖动：并行跑的几个子进程会在同一时刻撞上限流，固定间隔会让它们同步重试、
+ * 继续捶上游 —— 那正是 overloaded 迟迟不退的原因之一。
+ */
+const waitBeforeRetry = (attempt, signal, delays = SUBAGENT_RETRY_DELAYS_MS) => {
+  const base = delays[Math.min(attempt, delays.length - 1)];
+  const delay = base + Math.floor(Math.random() * base * 0.5);
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let timer;
+    const finish = (value) => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(false);
+    timer = setTimeout(() => finish(true), delay);
+    signal?.addEventListener?.("abort", onAbort);
+  });
+};
 
 const createUsage = () => ({
   input: 0,
@@ -390,6 +480,8 @@ const toPublicResult = (result) => ({
   model: result.model,
   stopReason: result.stopReason,
   errorMessage: result.errorMessage,
+  /** 因可重试的上游错误自动重跑的次数；0 表示没重试过。 */
+  retries: Number(result.retries) || 0,
   step: result.step,
 });
 
@@ -501,6 +593,25 @@ const runSingleAgent = async ({
   }
 
   const interactive = typeof requestUI === "function" && existsSync(bridgeExtensionPath);
+  let cwdResult;
+  try {
+    cwdResult = resolveSubagentCwd(cwd, defaultCwd);
+  } catch (error) {
+    result.exitCode = 1;
+    result.stopReason = "error";
+    result.errorMessage = error instanceof Error ? error.message : String(error);
+    emitUpdate();
+    return result;
+  }
+  const childCwd = cwdResult.cwd;
+  const projectRoot = cwdResult.projectRoot;
+  if (!interactive && Buffer.byteLength(task, "utf8") > MAX_JSON_TASK_BYTES) {
+    result.exitCode = 1;
+    result.stopReason = "error";
+    result.errorMessage = `SubAgent 任务过长，非交互模式最多支持 ${MAX_JSON_TASK_BYTES} 字节。`;
+    emitUpdate();
+    return result;
+  }
   const extensionIntegrations = getSubagentExtensionIntegration(agent.name, agentDir);
   const approvedExtensionPaths = extensionIntegrations.flatMap((integration) => integration.extensionPaths);
   const args = interactive
@@ -526,13 +637,16 @@ const runSingleAgent = async ({
   try {
     const invocation = getPiInvocation(packageRoot, args, nodePath);
     child = spawn(invocation.command, invocation.args, {
-      cwd: cwd || defaultCwd,
+      cwd: childCwd,
       shell: false,
       windowsHide: true,
       stdio: [interactive ? "pipe" : "ignore", "pipe", "pipe"],
+      // POSIX 下创建独立进程组，取消/超时时可只回收本 SubAgent 及其后代。
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
-        PI_CODING_AGENT_DIR: agentDir || process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
+        PI_CODING_AGENT_DIR: resolvePiAgentDir(agentDir),
+        HPP_PI_SUBAGENT_PROJECT_ROOT: projectRoot,
         HPP_PI_SUBAGENT_CHILD: "1",
         HPP_PI_SUBAGENT_PERMISSION_MODE: permissionMode,
       },
@@ -583,16 +697,35 @@ const runSingleAgent = async ({
         return;
       }
       if (interactive && event.type === "agent_end") {
+        // agent_end 只结束一次低层 run；Pi 还可能重试、压缩恢复或消费引导队列。
+        setCurrentActivity("正在等待 Pi 完成收尾或自动恢复…");
+        return;
+      }
+      if (interactive && event.type === "agent_settled") {
         setCurrentActivity("正在整理最终结果…");
         rpcCompleted = true;
+        if (event.aborted === true) {
+          aborted = true;
+          result.stopReason = "aborted";
+          result.errorMessage = "子 Agent 已中断";
+        }
         requestRpcExit();
         return;
       }
       if (interactive && event.type === "response") {
-        if (event.command === "prompt" && event.success === false) {
-          result.stopReason = "error";
-          result.errorMessage = nonEmptyString(event.error) || "子 Agent RPC prompt 被拒绝";
-          requestRpcExit();
+        if (event.command === "prompt") {
+          if (event.success === false) {
+            result.stopReason = "error";
+            result.errorMessage = nonEmptyString(event.error) || "子 Agent RPC prompt 被拒绝";
+            requestRpcExit();
+          } else if (event.data?.disposition === "handled") {
+            // Pi 官方协议：handled 表示命令已被扩展处理，没有 agent run，
+            // 因此不会发送 agent_settled，必须在这里结束等待。
+            rpcCompleted = true;
+            result.stopReason = "completed";
+            result.currentActivity = "Pi 命令已处理";
+            requestRpcExit();
+          }
         }
         return;
       }
@@ -663,8 +796,16 @@ const runSingleAgent = async ({
 
     let stdoutBuffer = "";
     let stderrBuffer = "";
+    let protocolOutputExceeded = false;
     child.stdout?.on("data", (chunk) => {
       stdoutBuffer += chunk.toString();
+      if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_STDOUT_LINE_BYTES) {
+        // 协议要求 JSONL；单条记录过大不能静默截断，否则可能把 JSON
+        // 截成看似正常的空结果。标记失败并回收当前子进程。
+        protocolOutputExceeded = true;
+        killSubagentTree(child, "SIGTERM");
+        stdoutBuffer = "";
+      }
       const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop() || "";
       for (const line of lines) processLine(line);
@@ -676,18 +817,26 @@ const runSingleAgent = async ({
 
     const exitCode = await new Promise((resolveExit) => {
       let settled = false;
+      let hardAbortTimer = null;
       const finish = (code) => {
         if (settled) return;
         settled = true;
         if (timeoutId) clearTimeout(timeoutId);
+        if (hardAbortTimer) clearTimeout(hardAbortTimer);
         resolveExit(rpcCompleted ? 0 : typeof code === "number" ? code : 1);
       };
       requestRpcExit = () => {
         if (!interactive || settled) return;
         setTimeout(() => {
-          if (!settled) {
-            try { child.kill("SIGTERM"); } catch { /* ignore */ }
-          }
+          if (settled) return;
+          // agent_settled 后先走 RPC 的 orderly shutdown，避免正常完成也被
+          // taskkill 直接打断；只有子进程/后代不收敛时才强制回收。
+          try { child.stdin?.end(); } catch { /* ignore */ }
+          hardAbortTimer = setTimeout(() => {
+            if (settled) return;
+            killSubagentTree(child, "SIGKILL");
+            finish(0);
+          }, 2000);
         }, 25);
       };
       child.once("close", finish);
@@ -697,13 +846,15 @@ const runSingleAgent = async ({
         aborted = true;
         try {
           if (interactive) writeRpc({ type: "abort" });
-          child.kill("SIGTERM");
         } catch { /* ignore */ }
-        setTimeout(() => {
+        killSubagentTree(child, "SIGTERM");
+        hardAbortTimer = setTimeout(() => {
           if (!settled) {
-            try { child.kill("SIGKILL"); } catch { /* ignore */ }
+            killSubagentTree(child, "SIGKILL");
+            // child 的 close 事件可能被后代持有的 pipe 阻塞；主动结算任务。
+            finish(1);
           }
-        }, 1500);
+        }, 2000);
       };
       if (signal) {
         if (signal.aborted) abortHandler();
@@ -721,7 +872,11 @@ const runSingleAgent = async ({
 
     if (stdoutBuffer.trim()) processLine(stdoutBuffer);
     result.exitCode = exitCode;
-    if (timedOut) {
+    if (protocolOutputExceeded) {
+      result.exitCode = 1;
+      result.stopReason = "error";
+      result.errorMessage = `子 Agent 协议输出超过 ${MAX_STDOUT_LINE_BYTES} 字节限制`;
+    } else if (timedOut) {
       result.exitCode = 1;
       result.stopReason = "timeout";
       result.errorMessage = `子 Agent 超时（${Math.round(timeoutMs / 1000)} 秒）`;
@@ -819,7 +974,7 @@ const resolveConfiguredModel = (config, agentName, inheritedModel) => {
 
 export const createHppSubagentExtension = ({
   packageRoot = process.env.PI_SDK_PACKAGE_ROOT || "",
-  agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
+  agentDir = resolvePiAgentDir(),
   hostSystemPrompt = "",
   nodePath = process.env.PI_NODE_PATH || process.execPath,
   getPermissionMode = () => "auto",
@@ -828,6 +983,8 @@ export const createHppSubagentExtension = ({
   bridgeExtensionPath = SUBAGENT_BRIDGE_EXTENSION_PATH,
   subagentConfig,
   getSubagentConfig,
+  // 仅测试注入口：真实间隔是 15s / 45s，跑测试要能调小。
+  retryDelaysMs = SUBAGENT_RETRY_DELAYS_MS,
 } = {}) => (pi) => {
   if (!pi || typeof pi.registerTool !== "function") return;
   // Hpp can hot-update the subagent config while this worker keeps running
@@ -881,7 +1038,8 @@ export const createHppSubagentExtension = ({
           },
         },
         agentScope: { type: "string", enum: ["user", "project", "both"], default: "user" },
-        confirmProjectAgents: { type: "boolean", default: true },
+        // 兼容旧调用方但不信任模型传入的值；项目 Agent 是否批准由宿主 UI 决定。
+        confirmProjectAgents: { type: "boolean", default: true, description: "由宿主控制，模型传入的值不会关闭安全确认" },
         cwd: { type: "string", description: "单任务子进程的工作目录" },
         timeoutMs: { type: "number", default: 1800000, description: "可选；仅在用户明确要求自定义时填写，未填写默认 30 分钟，最长 30 分钟；单位为毫秒" },
       },
@@ -923,12 +1081,21 @@ export const createHppSubagentExtension = ({
         };
       }
 
-      if ((agentScope === "project" || agentScope === "both") && params.confirmProjectAgents !== false && ctx?.hasUI) {
+      if (agentScope === "project" || agentScope === "both") {
         const projectNames = [...requestedAgentNames(params)].filter((name) => agentByName.get(name)?.source === "project");
         if (projectNames.length > 0) {
+          // 不能信任模型传入的 confirmProjectAgents:false；没有 UI 也必须 fail closed，
+          // 否则仓库里的 .pi/agents/*.md 可以在无用户确认时注入完整系统提示和工具权限。
+          if (!ctx?.hasUI || typeof ctx.ui?.confirm !== "function") {
+            return {
+              content: [{ type: "text", text: "无法在当前无 UI 的环境中运行项目级 Agent；请在可信项目中由用户明确批准。" }],
+              details: details([]),
+              isError: true,
+            };
+          }
           const approved = await ctx.ui.confirm(
             "运行项目级 Agent？",
-            `Agent：${projectNames.join(", ")}\n来源：${discovery.projectAgentsDir || "未知"}\n\n项目级 Agent 由仓库内容控制，请仅在可信仓库中继续。`,
+            `Agent：${projectNames.join(", ")}\n来源：${discovery.projectAgentsDir || "未知"}\n\nAgent 定义由仓库内容控制，请仅在可信仓库中继续。`,
           );
           if (!approved) {
             return {
@@ -990,13 +1157,46 @@ export const createHppSubagentExtension = ({
         });
       };
 
+      /**
+       * 带重试的执行：撞上可重试的上游错误（overloaded / 限流 / 5xx）时重跑，间隔带抖动。
+       *
+       * 为什么退到外层重跑，而不是指望子进程内的重试：pi 自己会重试 3 次（`retry.enabled`
+       * 默认 true、固定 2s 起），但并行跑的几个子进程是**同时**重试的，同步捶上游正是
+       * overloaded 不退的原因之一。这里间隔更长、且加抖动把各个子进程的重试时刻错开。
+       */
+      const runWithRetry = async (item, step, update, runKey = step ?? "single") => {
+        let result = await run(item, step, update, runKey);
+        let attempt = 0;
+        while (attempt < retryDelaysMs.length && isRetryableSubagentFailure(result)) {
+          const next = attempt + 1;
+          // 写进 currentActivity，并行/链式/单个三条路径的进度文案都会把它带出来。
+          result.currentActivity = `上游错误，等待第 ${next}/${retryDelaysMs.length} 次重试…`;
+          update?.({
+            content: [{ type: "text", text: truncateText(`[${result.agent || item.agent}] ${getResultOutput(result)}`, MAX_TASK_OUTPUT_BYTES) }],
+            details: details([result]),
+          });
+          if (!await waitBeforeRetry(attempt, signal, retryDelaysMs) || signal?.aborted) {
+            result.exitCode = 1;
+            result.stopReason = "aborted";
+            result.errorMessage = "子 Agent 已中断";
+            result.currentActivity = result.errorMessage;
+            break;
+          }
+          const retried = await run(item, step, update, runKey);
+          retried.retries = next;
+          result = retried;
+          attempt = next;
+        }
+        return result;
+      };
+
       if (chain.length > 0) {
         const results = [];
         let previous = "";
         for (let index = 0; index < chain.length; index += 1) {
           const item = chain[index];
           const current = { ...item, task: item.task.replace(/\{previous\}/g, previous) };
-          const result = await run(current, index + 1, (partial) => {
+          const result = await runWithRetry(current, index + 1, (partial) => {
             const partialResult = getPartialResultFromUpdate(partial) || partial;
             onUpdate?.({
               content: [{ type: "text", text: truncateText(getFinalOutput(partialResult) || partialResult.message || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],
@@ -1043,15 +1243,22 @@ export const createHppSubagentExtension = ({
           details: details(allResults),
         });
         emitParallelUpdate();
-        const results = await mapWithConcurrencyLimit(tasks, MAX_CONCURRENCY, (item, index) => run(item, undefined, (partial) => {
+        const results = await mapWithConcurrencyLimit(tasks, MAX_CONCURRENCY, (item, index) => runWithRetry(item, undefined, (partial) => {
           const partialResult = getPartialResultFromUpdate(partial);
           if (partialResult) allResults[index] = partialResult;
           emitParallelUpdate();
         }, index));
         const successCount = results.filter((result) => !isFailedResult(result)).length;
+        // 每个子任务分一份总预算。原先各自按 MAX_TASK_OUTPUT_BYTES(8KB) 截断、拼完再按
+        // MAX_TOOL_OUTPUT_BYTES(32KB) 整体截一次：任务数一多，前面的就把 32KB 吃光，
+        // 后面的整段被静默丢掉（8 个任务时只有前 4 个到得了模型）。留 512 字节给标题与分隔符。
+        const perTaskBudget = Math.max(
+          1024,
+          Math.floor((MAX_TOOL_OUTPUT_BYTES - 512) / Math.max(1, results.length)),
+        );
         const summary = results.map((result) => {
           const status = isFailedResult(result) ? "failed" : "completed";
-          return `### [${result.agent}] ${status}\n\n${truncateText(getResultOutput(result), MAX_TASK_OUTPUT_BYTES)}`;
+          return `### [${result.agent}] ${status}\n\n${truncateText(getResultOutput(result), perTaskBudget)}`;
         }).join("\n\n---\n\n");
         return {
           content: [{ type: "text", text: truncateText(`Parallel：${successCount}/${results.length} 成功\n\n${summary}`, MAX_TOOL_OUTPUT_BYTES) }],
@@ -1061,7 +1268,7 @@ export const createHppSubagentExtension = ({
       }
 
       const item = { agent: nonEmptyString(params.agent) || "", task: nonEmptyString(params.task) || "", cwd: nonEmptyString(params.cwd) };
-      const result = await run(item, undefined, onUpdate ? (partial) => {
+      const result = await runWithRetry(item, undefined, onUpdate ? (partial) => {
         const partialResult = getPartialResultFromUpdate(partial) || partial;
         onUpdate({
           content: [{ type: "text", text: truncateText(getFinalOutput(partialResult) || partialResult.message || "正在运行…", MAX_TASK_OUTPUT_BYTES) }],

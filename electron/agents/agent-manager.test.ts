@@ -174,6 +174,43 @@ describe("AgentManager runtime updates", () => {
     });
   });
 
+  it("拒绝用不同 Agent 复用已有 sessionId 的 backend", async () => {
+    const backend = createBackend(true);
+    testState.createBackend.mockResolvedValueOnce(backend);
+    const manager = new AgentManager();
+
+    await manager.createSession("same-session", "pi", "C:\\project");
+    await expect(manager.createSession("same-session", "codex", "C:\\project"))
+      .rejects.toThrow("已绑定 Agent pi");
+
+    expect(testState.createBackend).toHaveBeenCalledTimes(1);
+    expect(backend.init).toHaveBeenCalledTimes(1);
+    await manager.shutdown();
+  });
+
+  it("会清理超时后晚到的 backend 创建结果", async () => {
+    vi.useFakeTimers();
+    try {
+      const creation = createDeferred<ReturnType<typeof createBackend>>();
+      const lateBackend = createBackend(true);
+      testState.createBackend.mockReturnValueOnce(creation.promise);
+      const manager = new AgentManager();
+
+      const pending = manager.createSession("late-session", "pi", "C:\\project");
+      const pendingExpectation = expect(pending).rejects.toThrow("Agent 会话初始化超时");
+      await vi.advanceTimersByTimeAsync(90_000);
+      await pendingExpectation;
+
+      creation.resolve(lateBackend);
+      await vi.runOnlyPendingTimersAsync();
+      await Promise.resolve();
+      expect(lateBackend.dispose).toHaveBeenCalledTimes(1);
+      await manager.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("suspends and restores idle sessions without closing them", async () => {
     const originalBackend = createBackend(true);
     const restoredBackend = createBackend(true);
