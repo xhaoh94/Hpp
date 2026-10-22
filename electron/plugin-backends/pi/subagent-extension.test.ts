@@ -16,23 +16,15 @@ describe("Pi built-in subagent extension", () => {
     expect(normalizeTaskTimeout(60 * 60 * 1000)).toBe(30 * 60 * 1000);
   });
 
-  it("uses confirm dialogs to preserve multi-select questionnaire answers", async () => {
+  it("does not give subagents any question tool", async () => {
+    // 子 Agent 不允许向用户提问：多个子任务并行时，宿主无法判断该由哪个子 agent
+    // 承担这次交互，用户的回答也只会卡住其中一个子任务。需要决策时子 agent
+    // 只能把问题写进结果，由主 agent 转述。
     const tools: Array<Record<string, any>> = [];
-    createHppSubagentBridgeExtension({ registerTool: (tool: Record<string, any>) => tools.push(tool), on: () => {} });
-    const confirm = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    const select = vi.fn().mockResolvedValue("提交选择");
-    const questionnaire = tools.find((tool) => tool.name === "questionnaire");
-    const result = await questionnaire!.execute(
-      "questionnaire-multi",
-      { questions: [{ question: "选择功能", multiSelect: true, options: ["A", "B", "C"] }] },
-      new AbortController().signal,
-      undefined,
-      { hasUI: true, mode: "rpc", ui: { select, confirm } },
-    );
-
-    expect(select).toHaveBeenCalledWith("确认选择：选择功能", ["提交选择", "取消"]);
-    expect(confirm).toHaveBeenCalledTimes(3);
-    expect(result.details.answers[0]).toMatchObject({ selected: ["A", "C"], values: ["A", "C"], multiSelect: true });
+    const on = vi.fn();
+    createHppSubagentBridgeExtension({ registerTool: (tool: Record<string, any>) => tools.push(tool), on });
+    expect(tools).toEqual([]);
+    expect(on).toHaveBeenCalledWith("tool_call", expect.any(Function));
   });
 
   it("拒绝把 SubAgent 工作目录切到项目之外", async () => {
@@ -78,39 +70,6 @@ describe("Pi built-in subagent extension", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
-
-  it("answers child-agent questionnaire tools through RPC select dialogs", async () => {
-    const tools: Array<Record<string, any>> = [];
-    createHppSubagentBridgeExtension({ registerTool: (tool: Record<string, any>) => tools.push(tool), on: () => {} });
-    const select = vi.fn()
-      .mockResolvedValueOnce("Yes")
-      .mockResolvedValueOnce("No");
-    const questionnaire = tools.find((tool) => tool.name === "questionnaire");
-    expect(questionnaire).toBeDefined();
-    const result = await questionnaire!.execute(
-      "questionnaire-1",
-      {
-        questions: [
-          { id: "one", question: "继续吗？", options: [{ label: "Yes" }, { label: "No" }] },
-          { id: "two", question: "发布吗？", options: [{ label: "Yes" }, { label: "No" }] },
-        ],
-      },
-      new AbortController().signal,
-      undefined,
-      { hasUI: true, mode: "rpc", ui: { select } },
-    );
-
-    expect(select).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({
-      details: {
-        cancelled: false,
-        answers: [
-          { id: "one", answer: "Yes", values: ["Yes"] },
-          { id: "two", answer: "No", values: ["No"] },
-        ],
-      },
-    });
   });
 
   it("在 auto 模式下拦截高风险 bash 和未知扩展工具", async () => {
@@ -761,6 +720,154 @@ describe("Pi built-in subagent extension", () => {
     }
   });
 
+  it("ignores RPC child UI commands that do not need an answer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-rpc-commands-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      // 子进程在 rpc 模式下会把 setStatus / setWidget / setTitle / notify 这类单向 UI
+      // 指令也写成 extension_ui_request。Hpp 若把它们当成「询问用户」，就会弹出一个
+      // 没有题目、也没有选项的空问卷，用户既看不到问题也回答不了。
+      await writeFile(join(cliDir, "cli.js"), [
+        "import { createInterface } from 'node:readline';",
+        "const rl = createInterface({input: process.stdin});",
+        "rl.on('line', (line) => { const command = JSON.parse(line);",
+        "if (command.type === 'prompt') {",
+        "  process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'status-1', method:'setStatus', statusKey:'phase', statusText:'reading'})+'\\n');",
+        "  process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'widget-1', method:'setWidget', widgetKey:'progress', widgetLines:['1/2']})+'\\n');",
+        "  process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'title-1', method:'setTitle', title:'reviewer'})+'\\n');",
+        "  process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'notify-1', method:'notify', message:'running'})+'\\n');",
+        "  process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'child-confirm-1', method:'confirm', title:'Child permission', message:'Allow edit?'})+'\\n');",
+        "}",
+        "if (command.type === 'extension_ui_response') { const text = command.confirmed ? 'child approved' : 'child denied'; process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/rpc-child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const requests: Array<Record<string, unknown>> = [];
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir,
+        requestUI: async (request: Record<string, unknown>) => {
+          requests.push(request);
+          return { confirmed: true };
+        },
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-rpc-commands",
+        { agent: "worker", task: "检查认证逻辑" },
+        new AbortController().signal,
+        () => undefined,
+        {
+          cwd: root,
+          model: { provider: "test", id: "parent" },
+          thinkingLevel: "low",
+          hasUI: true,
+        },
+      );
+
+      expect(requests.map((request) => request.method)).toEqual(["confirm"]);
+      expect(result).toMatchObject({
+        content: [{ type: "text", text: "child approved" }],
+        details: { results: [expect.objectContaining({ exitCode: 0 })] },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("auto-cancels child select dialogs so subagents never prompt the user", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-rpc-select-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "import { createInterface } from 'node:readline';",
+        "const rl = createInterface({input: process.stdin});",
+        "rl.on('line', (line) => { const command = JSON.parse(line);",
+        "if (command.type === 'prompt') { process.stdout.write(JSON.stringify({type:'extension_ui_request', id:'child-select-1', method:'select', title:'Child question', options:['Yes','No']})+'\\n'); }",
+        "if (command.type === 'extension_ui_response') { const text = command.cancelled ? 'cancelled' : 'selected:' + command.value; process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/rpc-child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const requests: Array<Record<string, unknown>> = [];
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir,
+        requestUI: async (request: Record<string, unknown>) => {
+          requests.push(request);
+          return { value: "Yes" };
+        },
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-rpc-select",
+        { agent: "worker", task: "检查认证逻辑" },
+        new AbortController().signal,
+        () => undefined,
+        { cwd: root, hasUI: true },
+      );
+
+      // select 不能冒泡成问卷：宿主直接回 cancelled，子 Agent 把结果写进输出。
+      expect(requests).toEqual([]);
+      expect(result).toMatchObject({
+        content: [{ type: "text", text: "cancelled" }],
+        details: { results: [expect.objectContaining({ exitCode: 0 })] },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("denylists question tools for child sessions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-rpc-tools-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      const argvPath = join(root, "argv.json");
+      await writeFile(join(cliDir, "cli.js"), [
+        "import { writeFileSync } from 'node:fs';",
+        "import { createInterface } from 'node:readline';",
+        `writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv));`,
+        "const rl = createInterface({input: process.stdin});",
+        "rl.on('line', (line) => { const command = JSON.parse(line);",
+        "if (command.type === 'prompt') { process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir,
+        requestUI: async () => ({}),
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      await tools[0].execute(
+        "call-rpc-tools",
+        { agent: "worker", task: "检查认证逻辑" },
+        new AbortController().signal,
+        () => undefined,
+        { cwd: root, hasUI: true },
+      );
+
+      const argv = JSON.parse(await readFile(argvPath, "utf8")) as string[];
+      const excludeIndex = argv.indexOf("--exclude-tools");
+      expect(excludeIndex).toBeGreaterThan(-1);
+      const denylist = String(argv[excludeIndex + 1] || "");
+      expect(denylist).toContain("subagent");
+      expect(denylist).toContain("ask_user_question");
+      expect(denylist).toContain("questionnaire");
+      expect(denylist).toContain("question");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("结束被 Pi 命令 handled 的 RPC prompt，不等待不存在的 agent_settled", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-handled-test-"));
     try {
@@ -835,4 +942,51 @@ describe("Pi built-in subagent extension", () => {
       properties: { timeoutMs: { default: 30 * 60 * 1000 } },
     });
   });
+});
+
+/**
+ * 回归：子 Agent 单条 JSONL 记录（例如带完整文件内容的 tool_execution_end）
+ * 曾超过旧的 256KB 上限就被直接终止，用户看到「子 Agent 协议输出超过
+ * 262144 字节限制」。合法的大事件必须能通过，只有真正失控（一直不换行）
+ * 的输出才需要跳过。
+ */
+describe("SubAgent 协议输出上限", () => {
+  it("跳过超大记录但不终止子 Agent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-oversize-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        // 一条 17MB 的记录（超过 16MB 上限），随后是正常收尾事件。
+        "const huge = 'x'.repeat(17 * 1024 * 1024);",
+        "process.stdout.write(JSON.stringify({type:'tool_execution_end', toolName:'read', toolCallId:'big', result:{content:[{type:'text', text:huge}]}})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'survived'}], stopReason:'stop', model:'test/child'}})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'tool_execution_end', toolName:'read', toolCallId:'big', result:{content:[{type:'text', text:huge}]}})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'survived'}], stopReason:'stop', model:'test/child'}})+'\\n');",
+        "process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n');",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-oversize",
+        { agent: "scout", task: "读取超大文件" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      // 任务必须继续完成，而不是被协议上限判为失败。
+      expect(result).toMatchObject({
+        details: { results: [expect.objectContaining({ output: "survived", exitCode: 0 })] },
+      });
+      expect(result.isError).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

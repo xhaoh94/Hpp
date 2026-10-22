@@ -347,4 +347,21 @@ describe("shared process view model", () => {
     expect(isUserGuidanceProcessEntry(legacy)).toBe(true);
     expect(getUserGuidanceText(legacy)).toBe("继续检查旧记录");
   });
+
+  // 旧数据可能只剩发给 Agent 的信封 XML，不能在引导气泡里原样显示。
+  it("normalizes internal envelope tags in guidance detail", () => {
+    expect(getUserGuidanceText(entry({
+      id: "guidance-envelope",
+      type: "status",
+      title: "引导",
+      detail: '看下旧项目\n<folder path="C:\\Project\\EchoMusicMobile" />',
+    }))).toBe("看下旧项目\n[folder: EchoMusicMobile]");
+
+    expect(getUserGuidanceText(entry({
+      id: "guidance-envelope-file",
+      type: "status",
+      title: "引导",
+      detail: '<file path="G:\\Work\\src\\main.ts" lines="2-3">\ncode\n</file>',
+    }))).toBe("[file: main.ts:2-3]");
+  });
 });

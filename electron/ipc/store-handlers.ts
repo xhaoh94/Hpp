@@ -238,7 +238,12 @@ function loadSessionMessageSummaries(sessionIds: string[]): Record<string, unkno
     if (typeof row.payload !== "string") continue;
     try {
       const message = JSON.parse(row.payload);
-      if (isRecord(message) && message.role === "user") summaries[row.session_id] = message;
+      // 与渲染层 isUserSpeechMessage 保持同一口径：uiGenerated 的系统注入消息
+      // 不是用户发言。若首条注入消息占了这个位置，真实的首条用户请求就永远
+      // 拿不到摘要，侧栏页签只能回退到「新会话 - <时间>」占位标题。
+      if (isRecord(message) && message.role === "user" && message.uiGenerated !== true) {
+        summaries[row.session_id] = message;
+      }
     } catch {
       // Skip one damaged row and continue looking for the first valid user message.
     }

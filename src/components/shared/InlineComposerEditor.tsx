@@ -45,6 +45,8 @@ import {
   type ComposerNode,
   type ComposerTextNode,
 } from "@shared/composer-document";
+import { openVideoPreview } from "@/lib/media-preview";
+import { VideoThumbnail } from "./VideoThumbnail";
 import {
   COMPOSER_CLIPBOARD_MIME,
   readCopiedComposer,
@@ -77,6 +79,7 @@ type SerializedComposerEntityNode = Spread<{
 const EditorCallbacksContext = createContext<{
   disabled: boolean;
   onOpenImage?: (src: string) => void;
+  onOpenVideo?: (path: string) => void;
 }>({ disabled: false });
 
 class ComposerEntityNode extends DecoratorNode<ReactNode> {
@@ -117,7 +120,7 @@ const $isComposerEntityNode = (node: LexicalNode | null | undefined): node is Co
 function ComposerEntityView({ entity, nodeKey }: { entity: EntityNodeValue; nodeKey: NodeKey }) {
   const [editor] = useLexicalComposerContext();
   const [selected, setSelected, clearSelection] = useLexicalNodeSelection(nodeKey);
-  const { disabled, onOpenImage } = useContext(EditorCallbacksContext);
+  const { disabled, onOpenImage, onOpenVideo } = useContext(EditorCallbacksContext);
   const remove = useCallback(() => {
     if (disabled) return;
     editor.update(() => $getNodeByKey(nodeKey)?.remove());
@@ -167,6 +170,21 @@ function ComposerEntityView({ entity, nodeKey }: { entity: EntityNodeValue; node
             onOpenImage?.(entity.src);
           }}
         />
+      ) : entity.type === "video" ? (
+        <button
+          type="button"
+          className="inline-composer-video-preview"
+          title="点击预览视频"
+          aria-label={`预览视频 ${entity.name}`}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (onOpenVideo) onOpenVideo(entity.path);
+            else openVideoPreview(entity.path);
+          }}
+        >
+          <VideoThumbnail path={entity.path} name={entity.name} />
+        </button>
       ) : <ComposerEntityIcon node={entity} />}
       <span>{label}</span>
       {!disabled && (
@@ -488,6 +506,7 @@ export type InlineComposerEditorProps = {
   disabled?: boolean;
   className?: string;
   onOpenImage?: (src: string) => void;
+  onOpenVideo?: (path: string) => void;
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
   onKeyUp?: (event: KeyboardEvent<HTMLDivElement>) => void;
   onClick?: () => void;
@@ -507,6 +526,7 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
   disabled = false,
   className = "",
   onOpenImage,
+  onOpenVideo,
   onKeyDown,
   ...events
 }, ref) {
@@ -626,7 +646,7 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
   };
 
   return (
-    <EditorCallbacksContext.Provider value={{ disabled, onOpenImage }}>
+    <EditorCallbacksContext.Provider value={{ disabled, onOpenImage, onOpenVideo }}>
       <LexicalComposer initialConfig={initialConfig}>
         <div className={`inline-composer-editor ${className}`} onClick={handleEditorContainerClick}>
           <RichTextPlugin

@@ -286,11 +286,15 @@ export interface ElectronAPI {
   unwatchPath: (targetPath: string, recursive?: boolean) => Promise<{ success: boolean; error?: string }>;
   onFileSystemChange: (callback: (change: FileSystemChange) => void) => () => void;
   showItemInFolder: (targetPath: string) => Promise<{ success: boolean; error?: string }>;
+  revealPath: (targetPath: string) => Promise<{ success: boolean; error?: string }>;
+  runHtmlPreview: (request: { code: string; language: string }) => Promise<{ success: boolean; path?: string; error?: string }>;
   indexProjectFiles?: (dirPath: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; binary?: boolean; error?: string }>;
   writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
   readFileDataUrl: (filePath: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>;
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
+  /** 本地视频流的 HTTP 服务前缀；拼接 encodeURIComponent(path) 后给 <video>。 */
+  getLocalMediaBaseUrl: () => Promise<string>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
   loadReviewUndo: (request: PrepareReviewUndoRequest) => Promise<ReviewUndoLoadResult>;
@@ -311,7 +315,6 @@ export interface ElectronAPI {
   agentGetStatus: (agentId: string) => Promise<AgentPackageStatus>;
   agentGetVersions: (agentId: string) => Promise<AgentPackageVersions>;
   agentUpdate: (agentId: string, versionSpec?: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
-  agentRollback: (agentId: string) => Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }>;
   agentGetDefaultThinkingLevel: (agentId: string) => Promise<string>;
   agentPluginChoosePath: (kind?: "zip" | "directory") => Promise<{ canceled: boolean; path: string }>;
   agentPluginInstallFromPath: (pluginPath: string) => Promise<AgentPluginInstallResult>;
@@ -343,9 +346,13 @@ export interface ElectronAPI {
   remotePublish: (update: RemoteRendererPublish) => void;
   remoteCommandResult: (result: RemoteRendererCommandResult) => void;
   onRemoteCommand: (callback: (command: RemoteRendererCommand) => void) => () => void;
+  onRemoteClientsChanged: (callback: (status: { connected: number }) => void) => () => void;
+  onRemoteClientDisconnected: (callback: (event: { deviceId: string }) => void) => () => void;
 
   // Clipboard
   writeImageToClipboard: (imageDataUrl: string) => Promise<{ success: boolean; error?: string }>;
+  /** 把本地视频文件放进系统剪贴板；mode=path 表示文件剪贴板不可用、退化为复制路径。 */
+  writeFileToClipboard: (filePath: string) => Promise<{ success: boolean; mode?: "file" | "path"; error?: string }>;
 
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;

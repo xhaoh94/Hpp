@@ -45,6 +45,20 @@ describe("project file path resolution", () => {
       .toBe("C:/work/project/README.md");
   });
 
+  it("strips the file:// scheme so file URLs resolve as local paths", () => {
+    expect(getLocalMarkdownFilePath("file:///C:/work/project/README.md"))
+      .toBe("C:/work/project/README.md");
+    expect(getLocalMarkdownFilePath("file://C:/work/a.lua"))
+      .toBe("C:/work/a.lua");
+    expect(getLocalMarkdownFilePath("file:///home/user/project/README.md"))
+      .toBe("/home/user/project/README.md");
+    expect(getLocalMarkdownFilePath("file:///C:/work/space%20name.md"))
+      .toBe("C:/work/space name.md");
+    // 带 hash/query 的 file URL 同样先剥离再定位
+    expect(getLocalMarkdownFilePath("file:///C:/work/a.lua#L12"))
+      .toBe("C:/work/a.lua");
+  });
+
   it("leaves web URLs and document anchors to normal link handling", () => {
     expect(getLocalMarkdownFilePath("https://example.com/docs.md")).toBeNull();
     expect(getLocalMarkdownFilePath("mailto:test@example.com")).toBeNull();

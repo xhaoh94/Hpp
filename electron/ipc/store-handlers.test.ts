@@ -105,6 +105,21 @@ describe("store handlers", () => {
     });
   });
 
+  it("skips uiGenerated user messages when picking the session summary", async () => {
+    const save = electronState.handlers.get("store:saveSessionMessages")!;
+    const summaries = electronState.handlers.get("store:loadSessionMessageSummaries")!;
+
+    await save({}, "injected-session", { replace: true, upserts: [
+      { message: { id: "injected", role: "user", uiGenerated: true, content: "系统注入的上下文", timestamp: 1 }, sequence: 0 },
+      { message: { id: "real", role: "user", content: "真正的首条请求", timestamp: 2 }, sequence: 1 },
+      { message: { id: "assistant", role: "assistant", content: "回复", timestamp: 3 }, sequence: 2 },
+    ] });
+
+    expect(summaries({}, ["injected-session"])).toEqual({
+      "injected-session": { id: "real", role: "user", content: "真正的首条请求", timestamp: 2 },
+    });
+  });
+
   it("loads the backup when the primary file is corrupt", async () => {
     const save = electronState.handlers.get("store:save")!;
     const load = electronState.handlers.get("store:load")!;

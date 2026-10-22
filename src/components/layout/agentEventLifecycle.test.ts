@@ -571,6 +571,44 @@ describe("agent event terminal reconciliation", () => {
     expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("idle");
   });
 
+  it("notifies with the latest message instead of the session title", () => {
+    // 通知正文曾用 session.title（首条用户消息），在系统弹窗里看起来像
+    // 把最开始的问题又发了一遍；应当展示本次任务最后一条消息的摘要。
+    vi.stubGlobal("document", { visibilityState: "hidden", hasFocus: () => false });
+    const harness = createHarness();
+    useProjectStore.setState((state) => ({
+      projects: state.projects.map((project) => ({
+        ...project,
+        sessions: project.sessions.map((session) => (
+          session.id === SESSION_ID
+            ? { ...session, title: "最初的问题：帮我配 MCP" }
+            : session
+        )),
+      })),
+    }));
+    const chat = useChatStore.getState();
+    chat.addMessage({
+      id: "first-user",
+      role: "user",
+      content: "最初的问题：帮我配 MCP",
+      timestamp: 1,
+    }, SESSION_ID);
+    startRunningProcess(harness);
+    chat.addMessage({
+      id: "last-assistant",
+      role: "assistant",
+      content: "最后结论：MCP 已经配好，可以直接用 concat 工具了",
+      timestamp: 2,
+    }, SESSION_ID);
+
+    dispatchAgentEvent({ type: "stream_end", sessionId: SESSION_ID }, harness.controller);
+
+    expect(showNotification).toHaveBeenCalledTimes(1);
+    const body = String((showNotification.mock.calls[0] as [{ body?: string }])[0].body || "");
+    expect(body).toContain("最后结论：MCP 已经配好");
+    expect(body).not.toContain("最初的问题：帮我配 MCP");
+  });
+
   it("terminalizes an empty stream_end runtime and allows the next revision", () => {
     const harness = createHarness();
     useChatStore.getState().addMessage({

@@ -341,6 +341,14 @@ export interface DiskCleanupResult {
   stats: DiskUsageStats;
 }
 
+export interface AgentCliPackage {
+  /** 版本线：按安装版本的主号匹配（v1 / v2）。 */
+  line: "v1" | "v2";
+  /** npm 包名。 */
+  name: string;
+  label?: string;
+}
+
 export interface AgentPluginManifest {
   schemaVersion: 3;
   id: string;
@@ -352,6 +360,7 @@ export interface AgentPluginManifest {
   runtime?: "cli" | "sdk" | "plugin";
   command?: string;
   packageName?: string;
+  packages?: AgentCliPackage[];
   order?: number;
   installHint?: string;
   updateCommand?: string;
@@ -369,6 +378,7 @@ export interface AgentDescriptor {
   runtime: "cli" | "sdk" | "plugin";
   command?: string;
   packageName?: string;
+  packages?: AgentCliPackage[];
   order: number;
   capabilities: AgentCapabilities;
   source: AgentSource;
@@ -400,6 +410,7 @@ export interface OfficialAgentPluginDescriptor {
   runtime: "cli" | "sdk" | "plugin";
   command?: string;
   packageName?: string;
+  packages?: AgentCliPackage[];
   order: number;
   installHint?: string;
   updateCommand?: string;
@@ -429,8 +440,6 @@ export interface AgentPackageStatus {
   source?: AgentSource;
   installedPath?: string;
   removable?: boolean;
-  rollbackVersion?: string;
-  canRollback?: boolean;
   error?: string;
 }
 

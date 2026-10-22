@@ -31,6 +31,18 @@ export type ComposerPathNode = {
   kind: "file" | "folder";
 };
 
+/**
+ * 视频附件：和图片一样独立显示在草稿/消息里，但内容不进消息体（只引用磁盘路径），
+ * 预览时由渲染层通过 hpp-file:// 协议按需播放。
+ */
+export type ComposerVideoNode = {
+  id: string;
+  type: "video";
+  name: string;
+  path: string;
+  mimeType: string;
+};
+
 export type ComposerSnippetNode = {
   id: string;
   type: "snippet";
@@ -50,6 +62,7 @@ export type ComposerNode =
   | ComposerTextNode
   | ComposerImageNode
   | ComposerPathNode
+  | ComposerVideoNode
   | ComposerSnippetNode
   | ComposerSessionNode;
 
@@ -81,6 +94,14 @@ export const getComposerImageNodes = (document: ComposerDocument) => document.no
 
 export const withoutComposerImages = (document: ComposerDocument): ComposerDocument =>
   createComposerDocument(document.nodes.filter((node) => node.type !== "image"));
+
+export const getComposerVideoNodes = (document: ComposerDocument) => document.nodes
+  .filter((node): node is ComposerVideoNode => node.type === "video")
+  .map((node) => ({ ...node }));
+
+/** 视频和图片一样从正文文档里摘出来，在气泡里单独渲染成媒体块。 */
+export const withoutComposerVideos = (document: ComposerDocument): ComposerDocument =>
+  createComposerDocument(document.nodes.filter((node) => node.type !== "video"));
 
 export function normalizeComposerNodes(nodes: ComposerNode[]): ComposerNode[] {
   const normalized: ComposerNode[] = [];
@@ -127,6 +148,12 @@ function parseNode(value: unknown, index: number): ComposerNode | null {
     const path = stringValue(value.path);
     const kind = value.kind === "file" || value.kind === "folder" ? value.kind : undefined;
     return name && path && kind ? { id, type: "path", name, path, kind } : fallbackNode(value, index);
+  }
+  if (value.type === "video") {
+    const name = stringValue(value.name);
+    const path = stringValue(value.path);
+    const mimeType = stringValue(value.mimeType) || "video/mp4";
+    return name && path ? { id, type: "video", name, path, mimeType } : fallbackNode(value, index);
   }
   if (value.type === "snippet") {
     const fileName = stringValue(value.fileName);
@@ -202,6 +229,7 @@ export const truncateComposerDocumentLines = (
 
 export const getComposerNodeLabel = (node: Exclude<ComposerNode, ComposerTextNode>) => {
   if (node.type === "image") return `[image: ${node.name}]`;
+  if (node.type === "video") return `[video: ${node.name}]`;
   if (node.type === "path") return `[${node.kind}: ${node.name}]`;
   if (node.type === "snippet") return `[${node.fileName}:${node.startLine}-${node.endLine}]`;
   return `[引用会话: ${node.reference.sourceTitle}]`;

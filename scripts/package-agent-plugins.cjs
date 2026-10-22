@@ -230,6 +230,20 @@ function descriptorFromManifest(manifest) {
     runtime: manifest.runtime === "cli" || manifest.runtime === "sdk" ? manifest.runtime : "plugin",
     command: typeof manifest.command === "string" ? manifest.command : undefined,
     packageName: typeof manifest.packageName === "string" ? manifest.packageName : undefined,
+    // 同一条命令可能对应多个 npm 包（OpenCode 1.x/2.x），目录里要透传，否则
+    // 从官方插件列表安装后，更新/卸载会退化成只认 packageName。
+    packages: Array.isArray(manifest.packages)
+      ? manifest.packages.filter((entry) => (
+        entry
+        && typeof entry === "object"
+        && (entry.line === "v1" || entry.line === "v2")
+        && typeof entry.name === "string"
+      )).map((entry) => ({
+        line: entry.line,
+        name: entry.name,
+        ...(typeof entry.label === "string" ? { label: entry.label } : {}),
+      }))
+      : undefined,
     order: typeof manifest.order === "number" && Number.isFinite(manifest.order) ? manifest.order : 1000,
     installHint: typeof manifest.installHint === "string" ? manifest.installHint : undefined,
     updateCommand: typeof manifest.updateCommand === "string" ? manifest.updateCommand : undefined,

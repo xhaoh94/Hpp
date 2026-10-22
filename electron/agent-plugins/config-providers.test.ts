@@ -394,6 +394,43 @@ describe("official plugin config providers", () => {
     });
   });
 
+  it("reads and writes the OpenCode V2 providers shape", async () => {
+    await writeFile(process.env.OPENCODE_CONFIG!, JSON.stringify({
+      providers: {
+        custom: {
+          name: "Custom",
+          package: "@opencode/ai/providers/openai-compatible",
+          settings: { baseURL: "https://v2.example/v1", apiKey: "v2-key" },
+          models: { model: { name: "Model", reasoning: true } },
+        },
+        google: { name: "Google", package: "@ai-sdk/google" },
+      },
+    }), "utf8");
+
+    const opencode = await import("./opencode/config.mjs");
+    await expect(opencode.readProviderConfig()).resolves.toMatchObject({
+      providers: [{
+        providerId: "custom",
+        endpoint: "chat-completions",
+        baseUrl: "https://v2.example/v1",
+        apiKey: "v2-key",
+      }],
+    });
+
+    await opencode.writeProviderConfig({ providers: [provider("responses")] });
+
+    const config = JSON.parse(await readFile(process.env.OPENCODE_CONFIG!, "utf8"));
+    // 已有 providers 段时保持 V2 结构，不额外写出 V1 的 provider 段。
+    expect(config.provider).toBeUndefined();
+    expect(config.providers.custom).toMatchObject({
+      package: "@opencode/ai/providers/openai",
+      settings: { baseURL: "https://api.example/v1", apiKey: "key" },
+      models: { model: { reasoning: true, attachment: true } },
+    });
+    // 非 Hpp 管理的 provider 原样保留。
+    expect(config.providers.google).toEqual({ name: "Google", package: "@ai-sdk/google" });
+  });
+
   it("refuses to overwrite an invalid OpenCode config", async () => {
     const invalid = "{ invalid jsonc";
     await writeFile(process.env.OPENCODE_CONFIG!, invalid, "utf8");

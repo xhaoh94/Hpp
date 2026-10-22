@@ -40,5 +40,7 @@ describe("context usage modal", () => {
     expect(modalSource).toContain("用量来自后端上报值");
     expect(modalSource).toContain("用量来自后端精确统计");
     expect(modalSource).not.toContain("usage.estimated");
+    // 还没有任何用量时，不要顺带断言“模型未提供上下文窗口”。
+    expect(modalSource).toContain('{usage && !contextWindow ? " · 当前模型未提供上下文窗口" : ""}');
   });
 });

@@ -1,6 +1,7 @@
 import { getAgentName } from "@/lib/agents";
 import { formatModelRequestFailure, uiText } from "@/i18n/text";
 import { cancelPendingGuidance } from "@/lib/session-command-coordinator";
+import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 import {
   ASSISTANT_NARRATION_PROCESS_KIND,
 } from "@shared/process-view";
@@ -13,7 +14,7 @@ import {
 } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
 import type { AgentEvent } from "@/types";
-import { normalizeAskQuestionsFromCandidates } from "./QuestionnairePanel";
+import { normalizeAskQuestionsFromCandidates, type AskQuestionPayload } from "./QuestionnairePanel";
 import {
   activateSessionRuntimeTurn,
   asRecord,
@@ -672,16 +673,19 @@ export function createAgentEventController({
         ? "ask_user_question"
         : method;
     const isConfirmation = normalizedMethod.toLowerCase() === "confirm";
+    // 原始 UI 请求（event.detail）里才有完整的 title / options；包装后的事件可能只剩
+    // 主进程补的兜底标题。放在前面，避免用「正在询问用户」这种占位文案生成问题，
+    // 结果把真实选项丢掉。
     const questions = normalizeAskQuestionsFromCandidates(
       event.questions,
       detail.questions,
       args.questions,
       input.questions,
+      event.detail,
       event,
       detail,
       args,
-      input,
-      event.detail
+      input
     );
     const fallbackQuestion =
       questions.length > 0
@@ -696,6 +700,21 @@ export function createAgentEventController({
             detail.message,
             detail.title
           );
+    const resolveQuestions = (list: AskQuestionPayload[]): AskQuestionPayload[] => list.map((question) => {
+      const text = question.question.trim();
+      // 主进程在缺少标题时会写「正在询问用户」这类占位文案；它被当成问题显示时
+      // 用户只会看到一句废话。没有选项又没有真实题干时，换成明确的说明。
+      const isPlaceholder = /^正在询问用户(?:\s*[:：]\s*正在询问用户)?$/.test(text);
+      if (!isPlaceholder || question.options?.length) return question;
+      return { ...question, question: "Agent 正在等待你的回答（未提供具体问题）" };
+    });
+    const readableQuestions = resolveQuestions(
+      isConfirmation
+        ? []
+        : fallbackQuestion.length > 0
+          ? fallbackQuestion
+          : [{ question: "请回答 Agent 的问题", options: [] }],
+    );
     return {
       sessionId,
       requestId: typeof event.requestId === "string"
@@ -716,11 +735,7 @@ export function createAgentEventController({
         detail.message,
         detail.question,
       ),
-      questions: isConfirmation
-        ? undefined
-        : fallbackQuestion.length > 0
-          ? fallbackQuestion
-          : [{ question: "请回答 Agent 的问题", options: [] }],
+      questions: isConfirmation ? undefined : readableQuestions,
     };
   };
 
@@ -736,6 +751,13 @@ export function createAgentEventController({
     }
   };
 
+  const truncateNotificationText = (value: string) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    const limit = 160;
+    if (text.length <= limit) return text;
+    return `${text.slice(0, limit - 3).trimEnd()}...`;
+  };
+
   const notifyAgentTaskCompleted = (sessionId: string, timedOut: boolean) => {
     if (typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus())) return;
 
@@ -746,9 +768,23 @@ export function createAgentEventController({
     const session = project?.sessions.find((candidate) => candidate.id === sessionId);
     const agentName = getSessionAgentName(sessionId);
     const title = timedOut ? `${agentName} 任务已停止` : `${agentName} 任务已完成`;
+
+    // 通知正文用「当前最后一条有内容的消息」，而不是 session.title：
+    // 标题来自会话首条用户消息，通知里读起来像把最开始的问题又发了一遍，
+    // 完全看不出这次任务完成了什么。
+    const chat = useChatStore.getState();
+    const messages = chat.activeSessionId === sessionId
+      ? chat.messages
+      : chat.sessionMessages[sessionId] || [];
+    const lastMessagePreview = [...messages]
+      .reverse()
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => getChatMessagePreviewText(message))
+      .find((preview) => !!preview.trim());
+    const bodyPreview = truncateNotificationText(lastMessagePreview || session?.title || "");
     const context = [
       project?.name,
-      session?.title,
+      bodyPreview,
     ].filter(Boolean).join(" · ");
 
     void window.electronAPI.showNotification({
@@ -871,7 +907,7 @@ export function createAgentEventController({
       promoteCompaction: !timedOut,
       errorEntry: timedOut ? {
         title: "未收到响应结束事件",
-        detail: "Agent 连接已经结束，已停止等待后续事件。",
+        detail: "会话后端已经结束或丢失（可能被重建/释放），已停止等待后续事件。可以重试；如果反复出现，请附上终端日志里 [agent] getSessionState 相关行反馈。",
         onlyWhenEmpty: true,
       } : undefined,
       notify: timedOut ? "stopped" : "completed",

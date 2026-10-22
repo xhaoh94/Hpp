@@ -25,6 +25,23 @@ const fileSearchStyles = readFileSync(
   "utf8",
 );
 
+describe("video attachments", () => {
+  it("renders videos as standalone media blocks instead of inline chips", () => {
+    expect(chatPanelSource).toContain('className="chat-videos"');
+    expect(chatPanelSource).toContain('className="chat-video"');
+    expect(chatPanelSource).toContain("onVideoContextMenu");
+    // 正文流里不再重复渲染视频卡片。
+    expect(chatPanelSource).toContain("withoutComposerVideos");
+  });
+
+  it("offers copy actions in the video context menu", () => {
+    expect(chatPanelSource).toContain("复制视频");
+    expect(chatPanelSource).toContain("复制视频路径");
+    expect(chatPanelSource).toContain("writeFileToClipboard");
+    expect(chatPanelSource).toContain("showItemInFolder");
+  });
+});
+
 describe("chat interaction regression constraints", () => {
   it("does not leave persisted-message debug payloads in the production render path", () => {
     expect(chatPanelSource).not.toContain("title={JSON.stringify({");
@@ -352,6 +369,23 @@ describe("chat interaction regression constraints", () => {
     expect(dispatcherSource).toContain("if (!isOpenQueueSession(sessionId))");
     const beforeBackendAdmission = dispatcherSource.slice(0, dispatcherSource.indexOf("void sendPayloadNow"));
     expect(beforeBackendAdmission).not.toContain("removeQueuedMessage(sessionId, nextItem.id)");
+  });
+
+  it("pauses dispatching the queue head while the user is editing it", () => {
+    const dispatcherSource = chatPanelSource.slice(
+      chatPanelSource.indexOf("const MessageQueueDispatcher"),
+      chatPanelSource.indexOf("const ChatMessagesViewport"),
+    );
+    expect(dispatcherSource).toContain("editingQueuedMessageId");
+    expect(dispatcherSource).toContain("queueEditLocks[nextItem.id]");
+    const headGuard = dispatcherSource.slice(
+      dispatcherSource.indexOf("const nextItem = queue.find"),
+      dispatcherSource.indexOf("const runtime = sessionRuntimeRef.current[sessionId]"),
+    );
+    expect(headGuard).toContain("if (nextItem.id === editingQueuedMessageId || queueEditLocks[nextItem.id]) continue;");
+    // 编辑中的队首消息只能等待，不能跳过它去派发后面的消息。
+    expect(headGuard).not.toContain("queue.filter");
+    expect(chatPanelSource).toContain("editingQueuedMessageId={queueEditingId}");
   });
 
   it("preserves the visible reading anchor when the process auto-collapses", () => {

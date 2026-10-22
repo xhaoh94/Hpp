@@ -1930,48 +1930,36 @@ describe("Pi SDK worker protocol", () => {
     }));
   }, 20_000);
 
-  it("routes a child subagent question through the parent questionnaire protocol", async () => {
+  it("auto-cancels a child subagent select dialog instead of asking the user", async () => {
     const cliDir = join(runtimeRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
     await mkdir(cliDir, { recursive: true });
     await writeFile(join(cliDir, "cli.js"), [
       "import { createInterface } from 'node:readline';",
       "const rl = createInterface({input: process.stdin});",
       "rl.on('line', (line) => { const command = JSON.parse(line);",
-      "if (command.type === 'prompt') { const question = process.env.PI_TEST_SUBAGENT_QUESTION === '1'; const request = question ? {type:'extension_ui_request', id:'child-question-1', method:'select', title:'Child question', options:['Yes','No']} : {type:'extension_ui_request', id:'child-permission-1', method:'confirm', title:'Child permission', message:'Allow edit?'}; process.stdout.write(JSON.stringify(request)+'\\n'); }",
-      "if (command.type === 'extension_ui_response') { const text = process.env.PI_TEST_SUBAGENT_QUESTION === '1' ? 'selected:' + command.value : (command.confirmed ? 'approved' : 'denied'); process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
+      "if (command.type === 'prompt') { const request = {type:'extension_ui_request', id:'child-question-1', method:'select', title:'Child question', options:['Yes','No']}; process.stdout.write(JSON.stringify(request)+'\\n'); }",
+      "if (command.type === 'extension_ui_response') { const text = command.cancelled ? 'cancelled' : 'selected:' + command.value; process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text}], stopReason:'stop', model:'test/child'}})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n'); process.stdout.write(JSON.stringify({type:'agent_settled', aborted:false})+'\\n'); } });",
     ].join("\n"), "utf8");
 
-    const worker = startWorker(runtimeRoot, agentDir, { PI_TEST_SUBAGENT_QUESTION: "1" });
+    const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
 
     worker.send({ id: "subagent-question", type: "prompt", message: "subagent-ui", permissionMode: "ask" });
-    const request = await worker.waitFor((message) => message.type === "extension_ui_request" && (message.request as Record<string, unknown>)?.source === "pi-subagent");
-    expect(request.request).toMatchObject({
-      method: "select",
-      source: "pi-subagent",
-      subagentAgent: "worker",
-      subagentTask: "检查认证逻辑",
-      options: ["Yes", "No"],
-    });
-
-    worker.send({
-      id: "subagent-question-response",
-      type: "uiResponse",
-      response: {
-        id: String((request.request as Record<string, unknown>).id),
-        value: "Yes",
-      },
-    });
-    await worker.waitFor((message) => message.type === "ui_response_done" && message.id === "subagent-question-response");
     await worker.waitFor((message) => message.type === "prompt_done" && message.id === "subagent-question");
 
+    // 子 Agent 不允许向用户提问：select 不再冒泡成问卷，宿主直接回 cancelled，
+    // 子 Agent 只能把这个结果写进最终输出（由主 Agent 决定是否向用户转述）。
+    expect(worker.messages.some((message) => (
+      message.type === "extension_ui_request"
+      && (message.request as Record<string, unknown>)?.source === "pi-subagent"
+    ))).toBe(false);
     expect(worker.messages).toContainEqual(expect.objectContaining({
       type: "tool_execution_end",
       toolName: "subagent",
       result: expect.objectContaining({
-        results: [expect.objectContaining({ output: "selected:Yes", model: "test/child", exitCode: 0 })],
+        results: [expect.objectContaining({ output: "cancelled", model: "test/child", exitCode: 0 })],
       }),
     }));
   }, 20_000);

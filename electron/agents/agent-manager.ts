@@ -419,11 +419,6 @@ export class AgentManager {
         }
         clearPendingUIEvents(sessionId);
         if (this.activeSessionId === sessionId) this.activeSessionId = null;
-        const message = getErrorMessage(error);
-        const status = await agentRegistry.getStatus(agentId).catch(() => undefined);
-        if (status?.canRollback && status.rollbackVersion) {
-          throw new Error(`${message}\n可在 Agent 设置中一键回退到 v${status.rollbackVersion}。`);
-        }
         throw error;
       }
 
@@ -1166,9 +1161,8 @@ export async function shutdownAgentRuntime(): Promise<void> {
 export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   const runAgentRuntimeChange = async (
     agentId: string,
-    operation: "update" | "rollback",
     versionSpec?: string,
-  ) => agentRuntimeOperationQueue.run(agentId, operation, async () => {
+  ) => agentRuntimeOperationQueue.run(agentId, "update", async () => {
       const suspension = await agentManager.suspendAgentSessionsForRuntimeUpdate(agentId);
       if (!suspension.success) {
         return {
@@ -1181,9 +1175,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       let updateResult: Awaited<ReturnType<typeof agentRegistry.updateAgent>> | undefined;
       let updateError = "";
       try {
-        updateResult = operation === "rollback"
-          ? await agentRegistry.rollbackAgent(agentId)
-          : await agentRegistry.updateAgent(agentId, versionSpec);
+        updateResult = await agentRegistry.updateAgent(agentId, versionSpec);
       } catch (error) {
         updateError = getErrorMessage(error);
       }
@@ -1217,8 +1209,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   });
 
   ipcMain.handle("agent:update", async (_event, agentId: string, versionSpec?: string) =>
-    runAgentRuntimeChange(agentId, "update", typeof versionSpec === "string" ? versionSpec : undefined));
-  ipcMain.handle("agent:rollback", async (_event, agentId: string) => runAgentRuntimeChange(agentId, "rollback"));
+    runAgentRuntimeChange(agentId, typeof versionSpec === "string" ? versionSpec : undefined));
   ipcMain.handle("agent:versions", async (_event, agentId: string) => agentRegistry.getPackageVersions(agentId));
 
   ipcMain.handle("agentPlugin:choosePath", async (event, kind?: "zip" | "directory") => {
@@ -1474,7 +1465,16 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
 
   ipcMain.handle("agent:getSessionState", async (_event, sessionId: string) => {
     const agent = agentManager.getAgentBySessionId(sessionId);
-    if (!agent) return { success: false, idle: true, error: "No active agent" };
+    if (!agent) {
+      // 渲染层用这个结果判断 turn 是否还能继续；"backend 不存在"会直接让
+      // turn 以断连收尾（界面上是「未收到响应结束事件」）。留一条日志便于
+      // 区分「会话本来就没初始化」和「turn 期间 backend 被重建/释放」。
+      console.warn("[agent] getSessionState: no active agent", {
+        sessionId,
+        agentType: agentManager.getSessionAgentType(sessionId),
+      });
+      return { success: false, idle: true, error: "No active agent" };
+    }
     const cachedIdle = agent.isIdle();
     const pendingUI = hasPendingUIEvents(sessionId);
     if (typeof agent.refreshIdle !== "function") {

@@ -7,13 +7,14 @@ import {
   useCallback,
   useMemo,
   type RefObject,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
   type UIEvent as ReactUIEvent,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -25,6 +26,7 @@ import {
   type PendingFile,
   type PendingImage,
   type PendingPathAttachment,
+  type PendingVideo,
   type QueuedMessageEditableDraft,
   EMPTY_CHAT_DRAFT,
   cloneChatDraft,
@@ -62,7 +64,16 @@ import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+import { partitionPastedFiles, readClipboardFiles } from "@/lib/paste-attachments";
+import {
+  OPEN_VIDEO_PREVIEW_EVENT,
+  ensureLocalMediaBaseUrl,
+  openVideoPreview,
+  isVideoAttachment,
+  toLocalMediaUrl,
+} from "@/lib/media-preview";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
+import { VideoThumbnail } from "@/components/shared/VideoThumbnail";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ContextUsageModal } from "./ContextUsageModal";
@@ -137,9 +148,11 @@ import {
   composerDocumentHasContent,
   createComposerDocument,
   getComposerImageNodes,
+  getComposerVideoNodes,
   getComposerPlainText,
   truncateComposerDocumentLines,
   withoutComposerImages,
+  withoutComposerVideos,
   type ComposerDocument,
   type ComposerNode,
 } from "@shared/composer-document";
@@ -220,6 +233,8 @@ type SendPayloadNow = (
 type MessageQueueDispatcherProps = {
   sessionRuntimeRef: { current: Record<string, SessionRuntime> };
   sendPayloadNow: SendPayloadNow;
+  /** 正在编辑的队列消息：编辑期间暂停派发该条消息，退出编辑后再发送。 */
+  editingQueuedMessageId: string | null;
 };
 
 type QueuePanelProps = {
@@ -580,7 +595,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage 
     });
   }, [draft, sessionMessages]);
 
-  const hasContent = !!draft.text.trim() || draft.images.length > 0 || draft.pendingFiles.length > 0
+  const hasContent = !!draft.text.trim() || draft.images.length > 0 || (draft.pendingVideos?.length ?? 0) > 0 || draft.pendingFiles.length > 0
     || draft.pendingPathAttachments.length > 0 || draft.sessionReferences.length > 0 || !!draft.action;
   const submit = async () => {
     if (!hasContent || saving) return;
@@ -1024,6 +1039,7 @@ type ChatMessagesViewProps = {
   onContentChange: () => void;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
+  onVideoContextMenu: (event: React.MouseEvent, videoPath: string) => void;
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
@@ -1047,6 +1063,7 @@ type ChatMessageItemProps = {
   projectPath?: string;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
+  onVideoContextMenu: (event: React.MouseEvent, videoPath: string) => void;
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
@@ -1073,6 +1090,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   projectPath,
   onEditMessage,
   onImageContextMenu,
+  onVideoContextMenu,
   onOpenImage,
   onOpenFile,
   onToggleAssistantProcess,
@@ -1159,7 +1177,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
     ? msg.composerDocument || msg.composerDraft?.document
     : undefined;
   const orderedComposerDocument = sourceComposerDocument
-    ? withoutComposerImages(sourceComposerDocument)
+    ? withoutComposerVideos(withoutComposerImages(sourceComposerDocument))
     : undefined;
   const displayedImages = msg.images?.length
     ? msg.images
@@ -1167,6 +1185,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
       ? getComposerImageNodes(sourceComposerDocument).map(({ id, src, name }) => ({ id, src, name }))
       : [];
   const hasImages = displayedImages.length > 0;
+  // 视频和图片一样从正文流里摘出来，在气泡里独立成媒体块。
+  const displayedVideos = sourceComposerDocument ? getComposerVideoNodes(sourceComposerDocument) : [];
+  const hasVideos = displayedVideos.length > 0;
   const hasSessionReferences = !!msg.sessionReferences?.length;
   const hasAction = !!msg.action;
   const commentary = msg.role === "assistant"
@@ -1200,7 +1221,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const hasVisibleBubble =
     msg.role === "assistant"
       ? !processRunning && (hasContent || hasImages || hasDiffs || hasSessionReferences || hasAction)
-      : hasContent || hasOrderedContent || hasTextAttachments || hasImages || hasDiffs || hasSessionReferences || hasAction;
+      : hasContent || hasOrderedContent || hasTextAttachments || hasImages || hasVideos || hasDiffs || hasSessionReferences || hasAction;
   const showAssistantActions = hasVisibleBubble && areAssistantMessageActionsVisible({
     ...msg,
     isStreaming: turnRunning && msg.isStreaming,
@@ -1255,6 +1276,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
               <MarkdownRenderer
                 content={item.content}
                 deferHighlight={turnRunning && item.isStreaming === true}
+                projectPath={projectPath}
               />
             </div>
           ))}
@@ -1276,6 +1298,23 @@ const ChatMessageItem = memo(function ChatMessageItem({
               ))}
             </div>
           )}
+          {hasVideos && (
+            <div className="chat-videos">
+              {displayedVideos.map((video) => (
+                <button
+                  type="button"
+                  key={video.id}
+                  className="chat-video"
+                  title={`点击预览视频：${video.name}`}
+                  onClick={() => openVideoPreview(video.path)}
+                  onContextMenu={msg.role === "user" ? (event) => onVideoContextMenu(event, video.path) : undefined}
+                >
+                  <VideoThumbnail path={video.path} name={video.name} />
+                  <span className="chat-video-name">{video.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {(hasContent || hasAction || msg.role === "user") && (
             <div className="chat-bubble-row">
               <div className="chat-bubble-stack">
@@ -1294,12 +1333,20 @@ const ChatMessageItem = memo(function ChatMessageItem({
                           <ComposerMessageFlow document={displayedComposerDocument} onOpenImage={onOpenImage} />
                         ) : (
                           <>
-                        {userMessagePresentation.attachments.map((attachment, index) => (
-                          <span className={`chat-attached-path-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
-                            {attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
-                            <span>{attachment.label}</span>
-                          </span>
-                        ))}
+                        {/* 图片已有缩略图时不再重复显示同名芯片，只保留没有缩略图的
+                            （旧消息只留下 [image: 名字] 文本，缩略图数据已丢失）。 */}
+                        {userMessagePresentation.attachments
+                          .filter((attachment) => attachment.kind !== "image" || !hasImages)
+                          .map((attachment, index) => (
+                            <span className={`chat-attached-path-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
+                              {attachment.kind === "folder"
+                                ? <Folder size={13} />
+                                : attachment.kind === "image"
+                                  ? <ImageIcon size={13} />
+                                  : <FileText size={13} />}
+                              <span>{attachment.label}</span>
+                            </span>
+                          ))}
                         {msg.sessionReferences?.map((reference) => (
                           <span key={reference.sourceSessionId} className="chat-message-reference-chip">
                             <Link2 size={12} strokeWidth={2} />
@@ -1334,6 +1381,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
                         <MarkdownRenderer
                           content={msg.content}
                           deferHighlight={turnRunning}
+                          projectPath={projectPath}
                         />
                       </div>
                     )}
@@ -1533,6 +1581,7 @@ type ChatMessagesViewportProps = {
   onContentChange: () => void;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
+  onVideoContextMenu: (event: React.MouseEvent, videoPath: string) => void;
   onOpenImage: (src: string) => void;
   onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   onToggleAssistantProcess: (messageId: string, anchor?: HTMLElement | null) => void;
@@ -1562,6 +1611,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   onContentChange,
   onEditMessage,
   onImageContextMenu,
+  onVideoContextMenu,
   onOpenImage,
   onOpenFile,
   onToggleAssistantProcess,
@@ -1671,6 +1721,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
                 projectPath={projectPath}
                 onEditMessage={onEditMessage}
                 onImageContextMenu={onImageContextMenu}
+                onVideoContextMenu={onVideoContextMenu}
                 onOpenImage={onOpenImage}
                 onOpenFile={onOpenFile}
                 onToggleAssistantProcess={onToggleAssistantProcess}
@@ -1711,6 +1762,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   onContentChange,
   onEditMessage,
   onImageContextMenu,
+  onVideoContextMenu,
   onOpenImage,
   onOpenFile,
   onToggleAssistantProcess,
@@ -1962,6 +2014,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
               onContentChange={onContentChange}
               onEditMessage={onEditMessage}
               onImageContextMenu={onImageContextMenu}
+              onVideoContextMenu={onVideoContextMenu}
               onOpenImage={onOpenImage}
               onOpenFile={onOpenFile}
               onToggleAssistantProcess={onToggleAssistantProcess}
@@ -1995,8 +2048,10 @@ const ChatMessagesView = memo(function ChatMessagesView({
 const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
   sessionRuntimeRef,
   sendPayloadNow,
+  editingQueuedMessageId,
 }: MessageQueueDispatcherProps) {
   const messageQueues = useChatStore((state) => state.messageQueues);
+  const queueEditLocks = useChatStore((state) => state.queueEditLocks);
   const compactingSessions = useChatStore((state) => state.compactingSessions);
   const {
     clearQueuedMessageError,
@@ -2060,6 +2115,9 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
       if (!initializedSessionIds.has(sessionId)) continue;
       const nextItem = queue.find((item) => item.status === "queued");
       if (!nextItem) continue;
+      // 队列头部的消息正在被编辑（本地弹窗或远程客户端）时暂停本会话派发：
+      // 不跳过它去发后面的消息，保持队列顺序；编辑结束后恢复发送。
+      if (nextItem.id === editingQueuedMessageId || queueEditLocks[nextItem.id]) continue;
       const runtime = sessionRuntimeRef.current[sessionId];
       const forceBackendRecheck = queueRetryReadyRef.current.has(sessionId);
       if (
@@ -2127,10 +2185,12 @@ const MessageQueueDispatcher = memo(function MessageQueueDispatcher({
     clearQueueRetry,
     clearQueuedMessageError,
     compactingSessions,
+    editingQueuedMessageId,
     initializedSessionIds,
     markQueuedMessageSending,
     messageQueues,
     queueRetryVersion,
+    queueEditLocks,
     removeQueuedMessage,
     scheduleQueueRetry,
     sendPayloadNow,
@@ -2188,7 +2248,9 @@ export function ChatPanel({
     setDraftDocument,
     replaceSessionDraft,
     addPendingImage: addPendingImageToDraft,
+    addPendingVideo: addPendingVideoToDraft,
     removePendingImage,
+    removePendingVideo,
     removePendingFile,
     addPendingPathAttachment,
     removePendingPathAttachment,
@@ -2209,7 +2271,9 @@ export function ChatPanel({
     setDraftDocument: state.setDraftDocument,
     replaceSessionDraft: state.replaceSessionDraft,
     addPendingImage: state.addPendingImage,
+    addPendingVideo: state.addPendingVideo,
     removePendingImage: state.removePendingImage,
+    removePendingVideo: state.removePendingVideo,
     removePendingFile: state.removePendingFile,
     addPendingPathAttachment: state.addPendingPathAttachment,
     removePendingPathAttachment: state.removePendingPathAttachment,
@@ -2260,11 +2324,13 @@ export function ChatPanel({
       action: draft.action,
       pendingFiles: draft.pendingFiles,
       pendingImages: draft.pendingImages,
+      pendingVideos: draft.pendingVideos,
       pendingPathAttachments: draft.pendingPathAttachments,
       sessionReferences: draft.sessionReferences,
     };
   }));
   const pendingImages = activeDraft.pendingImages;
+  const pendingVideos = activeDraft.pendingVideos || [];
   const pendingFiles = activeDraft.pendingFiles;
   const pendingPathAttachments = activeDraft.pendingPathAttachments;
   const activeComposerDocument = useMemo(
@@ -2344,6 +2410,9 @@ export function ChatPanel({
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
+  const [zoomVideo, setZoomVideo] = useState<string | null>(null);
+  const [videoContextMenu, setVideoContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [mediaBaseUrl, setMediaBaseUrl] = useState("");
   const [imageContextMenu, setImageContextMenu] = useState<{ x: number; y: number; src: string } | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [userMsgHistoryOpen, setUserMsgHistoryOpen] = useState(false);
@@ -2798,18 +2867,22 @@ export function ChatPanel({
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (!imageContextMenu) return;
-    const close = () => setImageContextMenu(null);
+    if (!imageContextMenu && !videoContextMenu) return;
+    const close = () => {
+      setImageContextMenu(null);
+      setVideoContextMenu(null);
+    };
     document.addEventListener("mousedown", close);
     window.addEventListener("scroll", close, true);
     return () => {
       document.removeEventListener("mousedown", close);
       window.removeEventListener("scroll", close, true);
     };
-  }, [imageContextMenu]);
+  }, [imageContextMenu, videoContextMenu]);
 
   useEffect(() => {
     setImageContextMenu(null);
+    setVideoContextMenu(null);
   }, [activeSessionId]);
 
   const handleImageContextMenu = useCallback((event: React.MouseEvent, imageSrc: string) => {
@@ -2835,6 +2908,71 @@ export function ChatPanel({
 
   const handleOpenImage = useCallback((src: string) => {
     setZoomImage(src);
+  }, []);
+
+  const handleVideoContextMenu = useCallback((event: React.MouseEvent, videoPath: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setVideoContextMenu({ x: event.clientX, y: event.clientY, path: videoPath });
+  }, []);
+
+  const handleCopyVideo = useCallback(async () => {
+    const targetPath = videoContextMenu?.path;
+    setVideoContextMenu(null);
+    if (!targetPath) return;
+    const result = await window.electronAPI.writeFileToClipboard(targetPath);
+    if (!result.success) {
+      addMessage({
+        id: crypto.randomUUID(),
+        role: "system",
+        content: `复制视频失败: ${result.error || "未知错误"}`,
+        timestamp: Date.now(),
+      }, activeSessionId);
+      return;
+    }
+    if (result.mode === "path") {
+      // PowerShell 拿不到文件剪贴板时（远程/非交互桌面）退化成路径，
+      // 明确告诉用户复制到的是什么，避免粘贴时才发现不对。
+      showFloatingToastMessage("文件剪贴板不可用，已复制视频路径");
+    }
+  }, [activeSessionId, addMessage, showFloatingToastMessage, videoContextMenu]);
+
+  const handleCopyVideoPath = useCallback(() => {
+    const targetPath = videoContextMenu?.path;
+    setVideoContextMenu(null);
+    if (!targetPath) return;
+    void navigator.clipboard.writeText(targetPath).catch(() => {
+      showFloatingToastMessage("复制视频路径失败");
+    });
+  }, [showFloatingToastMessage, videoContextMenu]);
+
+  const handleRevealVideo = useCallback(() => {
+    const targetPath = videoContextMenu?.path;
+    setVideoContextMenu(null);
+    if (!targetPath) return;
+    void window.electronAPI.showItemInFolder(targetPath).catch(() => undefined);
+  }, [videoContextMenu]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ensureLocalMediaBaseUrl()
+      .then((baseUrl) => {
+        if (!cancelled && baseUrl) setMediaBaseUrl(baseUrl);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 视频预览统一走事件（消息列表/流程块/输入框都可能触发）。
+  useEffect(() => {
+    const handleOpenVideo = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: string }>).detail;
+      if (typeof detail?.path === "string" && detail.path) setZoomVideo(detail.path);
+    };
+    window.addEventListener(OPEN_VIDEO_PREVIEW_EVENT, handleOpenVideo);
+    return () => window.removeEventListener(OPEN_VIDEO_PREVIEW_EVENT, handleOpenVideo);
   }, []);
 
   const handleOpenFile = useCallback((path: string, options: { preview?: boolean } = {}) => {
@@ -2983,10 +3121,32 @@ export function ChatPanel({
           continue;
         }
 
+        // 视频和图片一样进输入框上方的预览条（缩略图 + 移除），不进文档正文；
+        // 发送时再由 payload 注入 video 节点，消息气泡里仍是一张视频卡片。
+        if (isVideoAttachment(file)) {
+          const path = getDroppedFilePath(file);
+          if (!path) {
+            showAttachmentError(`无法获取视频路径：${file.name || "该文件"}`);
+            continue;
+          }
+          const result = await window.electronAPI.statPath(path);
+          if (!result.success || !result.attachment || result.attachment.kind !== "file") {
+            showAttachmentError(result.error ? `无法添加视频：${result.error}` : "无法添加视频");
+            continue;
+          }
+          addPendingVideoToDraft({
+            id: crypto.randomUUID(),
+            name: file.name || result.attachment.name,
+            path,
+            mimeType: file.type || "video/mp4",
+          });
+          continue;
+        }
+
         await addPathAttachmentFromPath(getDroppedFilePath(file));
       }
     })();
-  }, [addPathAttachmentFromPath, addPendingImageFile, getDroppedFilePath]);
+  }, [addPathAttachmentFromPath, addPendingImageFile, addPendingVideoToDraft, getDroppedFilePath, showAttachmentError]);
 
   const handleOpenAttachmentFolder = useCallback(() => {
     void (async () => {
@@ -3003,6 +3163,27 @@ export function ChatPanel({
       clearAttachmentError();
     })();
   }, [activeComposerDocument.nodes, clearAttachmentError, showAttachmentError]);
+
+  /**
+   * 输入框粘贴：图片仍走图片附件（转 base64）；视频等其它文件按「路径附件」
+   * 处理，和拖拽复用同一条 addInputFiles 通路（不读入内存、不复制文件）。
+   * 从资源管理器复制文件后粘贴时，Electron 的 webUtils 能拿到真实路径。
+   */
+  const handleComposerPaste = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+    const data = event.clipboardData;
+    if (!data) {
+      handlePaste(event as unknown as ReactClipboardEvent<HTMLTextAreaElement>);
+      return;
+    }
+    const files = readClipboardFiles(data.items);
+    const { otherFiles } = partitionPastedFiles(files, isSupportedImageAttachment);
+    if (otherFiles.length > 0) {
+      event.preventDefault();
+      void handleAddInputFiles(otherFiles);
+      return;
+    }
+    handlePaste(event as unknown as ReactClipboardEvent<HTMLTextAreaElement>);
+  }, [handleAddInputFiles, handlePaste]);
 
   const handleDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -3182,6 +3363,7 @@ export function ChatPanel({
     text: string,
     files: PendingFile[],
     images: PendingImage[],
+    videos: PendingVideo[],
     pathAttachments: PendingPathAttachment[],
     sessionReferences: SessionReference[] = activeSessionReferences,
     action: AgentActionInvocation | undefined = activeDraft.action,
@@ -3196,6 +3378,7 @@ export function ChatPanel({
         name: image.name,
         mimeType: image.file.type || "image/png",
       })),
+      pendingVideos: videos,
       pendingFiles: files,
       pendingPathAttachments: pathAttachments,
       sessionReferences,
@@ -3303,6 +3486,7 @@ export function ChatPanel({
       !targetSessionId ||
       (!composerDocumentHasContent(activeComposerDocument) &&
         pendingImages.length === 0 &&
+        pendingVideos.length === 0 &&
         pendingFiles.length === 0 &&
         pendingPathAttachments.length === 0 &&
         activeSessionReferences.length === 0 &&
@@ -3325,7 +3509,7 @@ export function ChatPanel({
       return;
     }
 
-    const payload = await buildMessagePayload(rawText, pendingFiles, pendingImages, pendingPathAttachments);
+    const payload = await buildMessagePayload(rawText, pendingFiles, pendingImages, pendingVideos, pendingPathAttachments);
     composerHistoryRef.current.reset(targetSessionId);
     if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
     clearSessionDraft(targetSessionId);
@@ -3349,6 +3533,7 @@ export function ChatPanel({
     isAwaitingUIResponse,
     pendingFiles,
     pendingImages,
+    pendingVideos,
     pendingPathAttachments,
     planModeEnabled,
     permissionMode,
@@ -3698,6 +3883,7 @@ export function ChatPanel({
       <MessageQueueDispatcher
         sessionRuntimeRef={sessionRuntimeRef}
         sendPayloadNow={sendPayloadNow}
+        editingQueuedMessageId={queueEditingId}
       />
       <div
         ref={chatPanelRef}
@@ -3791,6 +3977,7 @@ export function ChatPanel({
         onContentChange={handleContentChange}
         onEditMessage={handleEditMessage}
         onImageContextMenu={handleImageContextMenu}
+        onVideoContextMenu={handleVideoContextMenu}
         onOpenImage={handleOpenImage}
         onOpenFile={handleOpenFile}
         onToggleAssistantProcess={handleToggleAssistantProcess}
@@ -3871,6 +4058,7 @@ export function ChatPanel({
           inputHasText={inputHasText}
           pendingFiles={pendingFiles}
           pendingImages={pendingImages}
+          pendingVideos={pendingVideos}
           pendingPathAttachments={pendingPathAttachments}
           sessionReferences={activeSessionReferences}
           selectedAction={activeDraft.action}
@@ -3905,12 +4093,13 @@ export function ChatPanel({
           onClearAttachmentError={clearAttachmentError}
           onRemovePendingFile={removePendingFile}
           onRemovePendingImage={removePendingImage}
+          onRemovePendingVideo={removePendingVideo}
           onRemovePathAttachment={removePendingPathAttachment}
           onRemoveSessionReference={handleRemoveReference}
           onOpenImage={handleOpenImage}
           onSyncInputValue={syncInputValue}
           onKeyDown={handleKeyDown}
-          onPaste={(event) => handlePaste(event as unknown as React.ClipboardEvent<HTMLTextAreaElement>)}
+          onPaste={handleComposerPaste}
           onDrop={handleDrop}
           onDragOver={handleDragOver}
           onSend={handleSend}
@@ -4010,6 +4199,22 @@ export function ChatPanel({
           </button>
         </div>
       )}
+      {zoomVideo && (
+        <div className="chat-image-zoom-overlay" onClick={() => setZoomVideo(null)}>
+          <video
+            className="chat-video-zoom"
+            src={toLocalMediaUrl(zoomVideo, mediaBaseUrl)}
+            controls
+            autoPlay
+            onClick={(event) => event.stopPropagation()}
+          />
+          <button className="chat-image-zoom-close" onClick={() => setZoomVideo(null)}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
       {imageContextMenu && (
         <div
           className="chat-image-context-menu"
@@ -4018,6 +4223,23 @@ export function ChatPanel({
         >
           <button className="chat-image-context-menu-btn" onClick={handleCopyImage}>
             复制图片
+          </button>
+        </div>
+      )}
+      {videoContextMenu && (
+        <div
+          className="chat-image-context-menu"
+          style={{ left: videoContextMenu.x, top: videoContextMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button className="chat-image-context-menu-btn" onClick={handleCopyVideo}>
+            复制视频
+          </button>
+          <button className="chat-image-context-menu-btn" onClick={handleCopyVideoPath}>
+            复制视频路径
+          </button>
+          <button className="chat-image-context-menu-btn" onClick={handleRevealVideo}>
+            在文件夹中显示
           </button>
         </div>
       )}

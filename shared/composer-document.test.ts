@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   createComposerDocument,
+  getComposerNodeLabel,
   getComposerPlainText,
+  parseComposerDocument,
   truncateComposerDocumentLines,
 } from "./composer-document";
 
@@ -12,6 +14,38 @@ const pathNode = (id: string, name: string) => ({
   name,
   path: `/tmp/${name}`,
   kind: "file" as const,
+});
+
+describe("video attachments in composer documents", () => {
+  it("keeps video nodes through serialization and labels them for plain text", () => {
+    const parsed = parseComposerDocument({
+      version: 1,
+      nodes: [{
+        id: "video-1",
+        type: "video",
+        name: "clip.mp4",
+        path: "C:/repo/clip.mp4",
+        mimeType: "video/mp4",
+      }],
+    });
+    expect(parsed?.nodes).toEqual([{
+      id: "video-1",
+      type: "video",
+      name: "clip.mp4",
+      path: "C:/repo/clip.mp4",
+      mimeType: "video/mp4",
+    }]);
+    expect(getComposerNodeLabel(parsed!.nodes[0] as never)).toBe("[video: clip.mp4]");
+  });
+
+  it("rejects video nodes without a path instead of inventing one", () => {
+    const parsed = parseComposerDocument({
+      version: 1,
+      nodes: [{ id: "video-bad", type: "video", name: "clip.mp4", mimeType: "video/mp4" }],
+    });
+    // 无法预览/发送的节点退回为文本占位，不会生成指向空路径的卡片。
+    expect(parsed?.nodes[0]).toMatchObject({ type: "text" });
+  });
 });
 
 describe("truncateComposerDocumentLines", () => {

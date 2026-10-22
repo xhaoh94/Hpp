@@ -91,8 +91,6 @@ interface AgentHostApi {
   updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }>;
 }
 
-type RuntimeVersionRecord = Record<string, { rollbackVersion?: string }>;
-
 interface CommandResult {
   stdout: string;
   stderr: string;
@@ -111,6 +109,12 @@ const MANIFEST_FILE = "hpp-agent-plugin.json";
 const DEFAULT_THINKING_LEVEL = "medium";
 const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
 const AGENT_STATUS_CACHE_TTL_MS = 30_000;
+/**
+ * CLI 安装的超时。OpenCode 2.x 的 npm 包下载约 100MB、解压后约 200MB，
+ * 实测国内网络单是下载就要 5 分钟左右，180s 必然超时。给到 15 分钟，
+ * 卸载/探测仍用短超时。
+ */
+const CLI_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
 const AGENT_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 const IDLE_ACTIVITY_RECHECK_MS = 5_000;
 const IDLE_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000] as const;
@@ -147,25 +151,6 @@ function getPluginInstallDir() {
     return join(app.getAppPath(), "electron", "agent-plugins");
   }
   return join(getDataDir(), "agent-plugins");
-}
-
-function getRuntimeVersionRecordPath() {
-  return join(getDataDir(), "agent-runtime-versions.json");
-}
-
-async function readRuntimeVersionRecords(): Promise<RuntimeVersionRecord> {
-  try {
-    const value = JSON.parse(await readFile(getRuntimeVersionRecordPath(), "utf8"));
-    return isRecord(value) ? value as RuntimeVersionRecord : {};
-  } catch { return {}; }
-}
-
-async function writeRuntimeVersionRecord(agentId: string, rollbackVersion?: string) {
-  const records = await readRuntimeVersionRecords();
-  if (rollbackVersion) records[agentId] = { rollbackVersion };
-  else delete records[agentId];
-  await mkdir(getDataDir(), { recursive: true });
-  await writeFile(getRuntimeVersionRecordPath(), `${JSON.stringify(records, null, 2)}\n`, "utf8");
 }
 
 function normalizeVersionSpec(value: unknown): string | undefined {
@@ -443,6 +428,77 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
+const CLI_PACKAGE_LINES = new Set(["v1", "v2"]);
+
+/**
+ * 旧版插件（未声明 packages）的内置包映射。
+ *
+ * OpenCode 1.x/2.x 使用不同 npm 包，但已发布的旧插件只写了 opencode-ai；
+ * 没有这层兜底，旧插件用户在版本管理里选 2.x 会被装成 opencode-ai@2.x
+ * （npm ETARGET）。插件升级到带 packages 的版本后以此为准。
+ */
+const BUILTIN_CLI_PACKAGE_FALLBACKS: Record<string, Array<{ line: "v1" | "v2"; name: string }>> = {
+  opencode: [
+    { line: "v2", name: "@opencode/cli" },
+    { line: "v1", name: "opencode-ai" },
+  ],
+};
+
+function resolveCliPackages(
+  descriptor: Pick<AgentDescriptor, "packages" | "packageName"> & { id?: string },
+) {
+  if (descriptor.packages && descriptor.packages.length > 0) return descriptor.packages;
+  const fallback = descriptor.id ? BUILTIN_CLI_PACKAGE_FALLBACKS[descriptor.id] : undefined;
+  if (fallback) return fallback;
+  return descriptor.packageName ? [{ line: "v1" as const, name: descriptor.packageName }] : [];
+}
+
+
+/**
+ * 同一条命令可能有多个 npm 包（例如 OpenCode 1.x 是 opencode-ai、2.x 是
+ * @opencode/cli）。插件可以声明 packages，更新/卸载时按已安装的主版本选包，
+ * 否则「更新」会把 2.x 静默装回 1.x。
+ */
+function normalizeCliPackages(value: unknown, fallbackPackageName?: string) {
+  const packages = Array.isArray(value)
+    ? value.flatMap((raw) => {
+      const record = isRecord(raw) ? raw : {};
+      const line = asString(record.line).trim().toLowerCase();
+      const name = asString(record.name).trim();
+      if (!name || !CLI_PACKAGE_LINES.has(line)) return [];
+      const label = asString(record.label).trim();
+      return [{ line: line as "v1" | "v2", name, ...(label ? { label } : {}) }];
+    })
+    : [];
+  if (packages.length > 0) return packages;
+  if (!fallbackPackageName) return undefined;
+  return [{ line: "v1" as const, name: fallbackPackageName }];
+}
+
+function parseMajorVersion(version?: string): number | null {
+  const match = String(version || "").trim().match(/v?(\d+)/);
+  if (!match) return null;
+  const major = Number.parseInt(match[1], 10);
+  return Number.isFinite(major) ? major : null;
+}
+
+/** 按版本主号选择对应的 npm 包；版本未知时用第一条（通常是默认线）。 */
+export function getCliPackageForVersion(
+  descriptor: Pick<AgentDescriptor, "packages" | "packageName"> & { id?: string },
+  version?: string,
+) {
+  const packages = resolveCliPackages(descriptor);
+  if (packages.length === 0) return undefined;
+  const major = parseMajorVersion(version);
+  if (major !== null) {
+    const matched = packages.find((entry) => entry.line === `v${major}`);
+    if (matched) return matched;
+    // 未知的大版本线：用最高的一条，避免把新版本装回旧包。
+    return packages[packages.length - 1];
+  }
+  return packages[0];
+}
+
 function descriptorFromManifest(
   manifest: RawAgentPluginManifest,
   source: AgentDescriptor["source"],
@@ -480,6 +536,7 @@ function descriptorFromManifest(
   const runtime = manifest.runtime === "cli" || manifest.runtime === "sdk" ? manifest.runtime : "plugin";
   const command = asString(manifest.command) || undefined;
   const packageName = asString(manifest.packageName) || undefined;
+  const packages = normalizeCliPackages(manifest.packages, packageName);
   const capabilities = normalizeCapabilities(manifest.capabilities);
   const order = typeof manifest.order === "number" && Number.isFinite(manifest.order) ? manifest.order : 1000;
 
@@ -493,6 +550,7 @@ function descriptorFromManifest(
     runtime,
     command,
     packageName,
+    packages,
     order,
     capabilities,
     source,
@@ -695,9 +753,12 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
     ? `${descriptor.name} 命令无法执行，请点击安装进行修复。${versionResult.error ? `\n${versionResult.error}` : ""}`
     : undefined;
 
-  if (descriptor.packageName) {
+  if (descriptor.packageName || descriptor.packages?.length) {
     try {
-      latestVersion = await getLatestNpmPackageVersion(descriptor.packageName);
+      // 1.x/2.x 是不同 npm 包：按已安装版本选包查最新，否则装了 2.x 也会
+      // 拿 1.x 的 latest 去比较，更新时还会把 2.x 装回 1.x。
+      const currentPackage = getCliPackageForVersion(descriptor, currentVersion);
+      latestVersion = await getLatestNpmPackageVersion(currentPackage?.name || descriptor.packageName!);
     } catch (err) {
       const latestVersionError = `无法检查 ${descriptor.name} 最新版本：${formatError(err)}`;
       error = error ? `${error}\n${latestVersionError}` : latestVersionError;
@@ -716,7 +777,7 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
     currentVersion,
     latestVersion,
     updateAvailable,
-    canUpdate: !!descriptor.packageName && npmAvailable && nodeStatus.nodeOk,
+    canUpdate: !!(descriptor.packageName || descriptor.packages?.length) && npmAvailable && nodeStatus.nodeOk,
     nodeVersion: nodeStatus.nodeVersion,
     nodeOk: nodeStatus.nodeOk,
     source: descriptor.source,
@@ -727,7 +788,7 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
 }
 
 async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }> {
-  if (!descriptor.packageName) {
+  if (!descriptor.packageName && !descriptor.packages?.length) {
     return { success: false, error: `${descriptor.name} 不支持自动更新`, status: await getCliAgentStatus(descriptor) };
   }
   const nodeStatus = await getNodeRuntimeStatus();
@@ -759,10 +820,74 @@ async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string)
 
     await terminateOrphanedWindowsCliProcesses(descriptor.command || descriptor.id);
     const requestedVersion = normalizeVersionSpec(versionSpec) || "latest";
-    await runNpmCommand(["install", "-g", `${descriptor.packageName}@${requestedVersion}`], { timeout: 180000 });
+    // 显式选版本时按该版本的主号选包（2.x → @opencode/cli，1.x → opencode-ai）；
+    // 未指定版本时跟随当前已安装的主版本。
+    const targetPackage = getCliPackageForVersion(
+      descriptor,
+      requestedVersion === "latest" ? currentStatus.currentVersion : requestedVersion,
+    );
+    const packageName = targetPackage?.name || descriptor.packageName!;
+    // 1.x / 2.x 是不同 npm 包但都提供 opencode 命令，npm 不会覆盖已存在的
+    // bin shim（EEXIST）。跨包线切换时先卸载当前包，官方迁移文档也是这个顺序。
+    const currentPackage = getCliPackageForVersion(descriptor, currentStatus.currentVersion);
+    if (currentStatus.installed && currentPackage?.name && currentPackage.name !== packageName) {
+      await runNpmCommand(["uninstall", "-g", currentPackage.name], { timeout: 180000 });
+    }
+    await runNpmCommand(
+      ["install", "-g", `${packageName}@${requestedVersion}`, "--no-audit", "--no-fund", "--loglevel=error"],
+      { timeout: CLI_INSTALL_TIMEOUT_MS },
+    );
     return { success: true, status: await getCliAgentStatus(descriptor) };
   } catch (err) {
-    return { success: false, error: formatError(err), status: await getCliAgentStatus(descriptor) };
+    const rawMessage = formatError(err);
+    const requestedVersion = normalizeVersionSpec(versionSpec) || "latest";
+    const statusForError = await getCliAgentStatus(descriptor);
+    const failedPackageName = getCliPackageForVersion(
+      descriptor,
+      requestedVersion === "latest" ? statusForError.currentVersion : requestedVersion,
+    )?.name || descriptor.packageName || "";
+    // npm ETARGET 表示目标版本不在所选包里。最常见的原因是插件还没声明新版本线
+    // 的包（OpenCode 2.x 在 @opencode/cli，而旧插件只知道 opencode-ai），
+    // 直接抛 npm 原始报错用户看不懂要做什么。
+    const commandError = err as CommandError;
+    const timedOut = commandError?.killed === true
+      || commandError?.signal === "SIGTERM"
+      || /timed?\s*out|ETIMEDOUT/i.test(rawMessage);
+    if (timedOut) {
+      return {
+        success: false,
+        error: `${descriptor.name} 安装 ${requestedVersion} 超时（${Math.round(CLI_INSTALL_TIMEOUT_MS / 60000)} 分钟未完成）。`
+          + `OpenCode 2.x 的 npm 包解压后约 200MB，网络慢时首次安装可能超过 10 分钟。`
+          + `可以重试（已下载的部分会走 npm 缓存加速），或手动执行：`
+          + `npm install -g ${failedPackageName}@${requestedVersion}`
+          + `；国内网络可先把镜像切到 https://registry.npmmirror.com 再重试。`,
+        status: statusForError,
+      };
+    }
+    if (/EEXIST/i.test(rawMessage) && /opencode/i.test(rawMessage)) {
+      return {
+        success: false,
+        error: `${descriptor.name} 安装 ${failedPackageName}@${requestedVersion} 失败：已存在的 opencode 命令挡住了覆盖。`
+          + `请先卸载当前的 OpenCode 包（npm uninstall -g ${descriptor.packageName || "opencode-ai"} 或 @opencode/cli），再重试安装。`,
+        status: statusForError,
+      };
+    }
+    if (/ETARGET|No matching version found for /i.test(rawMessage)) {
+      const packageList = (descriptor.packages?.length
+        ? descriptor.packages.map((entry) => entry.name)
+        : [descriptor.packageName].filter(Boolean) as string[]
+      ).join(" / ");
+      const hint = requestedVersion === "latest"
+        ? "该 npm 包没有可用的 latest 版本。"
+        : `要安装 ${requestedVersion}，需要它在某个已声明的 npm 包里；当前插件声明的包：${packageList || "未声明"}。`
+          + `如果这是新的大版本线（如 OpenCode 2.x 使用 @opencode/cli），请先在「官方插件」里更新 ${descriptor.name} 插件，再重新选择版本。`;
+      return {
+        success: false,
+        error: `${descriptor.name} 安装 ${requestedVersion} 失败：${hint}`,
+        status: statusForError,
+      };
+    }
+    return { success: false, error: rawMessage, status: statusForError };
   }
 }
 
@@ -1036,9 +1161,7 @@ export class AgentPluginRegistry {
     }
 
     if (record.descriptor.command) {
-      const status = await getCliAgentStatus(record.descriptor);
-      const rollbackVersion = (await readRuntimeVersionRecords())[agentId]?.rollbackVersion;
-      return { ...status, rollbackVersion, canRollback: !!rollbackVersion };
+      return getCliAgentStatus(record.descriptor);
     }
 
     return {
@@ -1054,25 +1177,66 @@ export class AgentPluginRegistry {
 
   async getPackageVersions(agentId: string): Promise<AgentPackageVersions> {
     await this.ensureLoaded();
-    const packageName = this.pluginRecords.get(agentId)?.descriptor.packageName;
-    if (!packageName) return { packageName: "", distTags: {}, versions: [], error: "此 Agent 不支持 npm 版本管理。" };
-    try {
-      const info = await getNpmPackageVersionInfo(packageName);
-      const platform = process.platform;
-      const architecture = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch;
-      const currentPlatformVersions = new RegExp(`^\\d+\\.\\d+\\.\\d+(?:-${platform}-${architecture})?$`);
-      const stableVersions = info.versions.filter((version) => currentPlatformVersions.test(version));
-      return { packageName, ...info, versions: stableVersions.reverse() };
-    } catch (error) {
-      return { packageName, distTags: {}, versions: [], error: formatError(error) };
+    const descriptor = this.pluginRecords.get(agentId)?.descriptor;
+    const packages = descriptor ? resolveCliPackages(descriptor) : [];
+    if (!descriptor || packages.length === 0) {
+      return { packageName: "", distTags: {}, versions: [], error: "此 Agent 不支持 npm 版本管理。" };
     }
+    const status = await this.getStatus(agentId).catch(() => undefined);
+    const currentPackage = getCliPackageForVersion(descriptor, status?.currentVersion);
+    const platform = process.platform;
+    const architecture = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch;
+    const currentPlatformVersions = new RegExp(`^\\d+\\.\\d+\\.\\d+(?:-${platform}-${architecture})?$`);
+    const seen = new Set<string>();
+    const versions: string[] = [];
+    const distTags: Record<string, string> = {};
+    let latestVersion: string | undefined;
+    let lastError: unknown;
+    for (const pkg of packages) {
+      try {
+        const info = await getNpmPackageVersionInfo(pkg.name);
+        for (const version of info.versions) {
+          if (!seen.has(version)) {
+            seen.add(version);
+            versions.push(version);
+          }
+        }
+        for (const [tag, version] of Object.entries(info.distTags)) {
+          if (!(tag in distTags)) distTags[tag] = version;
+        }
+        if (pkg.name === currentPackage?.name) latestVersion = info.latestVersion;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (versions.length === 0) {
+      return {
+        packageName: currentPackage?.name || packages[0].name,
+        distTags: {},
+        versions: [],
+        error: formatError(lastError),
+      };
+    }
+    const stableVersions = versions.filter((version) => currentPlatformVersions.test(version));
+    stableVersions.sort((left, right) => {
+      try {
+        return compareVersions(right, left);
+      } catch {
+        return 0;
+      }
+    });
+    return {
+      packageName: currentPackage?.name || packages[0].name,
+      latestVersion: latestVersion ?? distTags.latest,
+      distTags,
+      versions: stableVersions,
+    };
   }
 
   async updateAgent(agentId: string, versionSpec?: string): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }> {
     await this.ensureLoaded();
     const record = this.pluginRecords.get(agentId);
     if (!record) return { success: false, error: `未安装 Agent 插件：${agentId}` };
-    const previousStatus = await this.getStatus(agentId);
     this.invalidateStatus(agentId);
     const pluginProcess = await this.getPluginProcess(record).catch(() => undefined);
     const normalizedVersion = normalizeVersionSpec(versionSpec);
@@ -1084,24 +1248,8 @@ export class AgentPluginRegistry {
     } else {
       result = { success: false, error: "此插件不支持运行时版本更新。" };
     }
-    if (result.success && previousStatus.currentVersion) {
-      await writeRuntimeVersionRecord(agentId, previousStatus.currentVersion);
-    }
     this.invalidateStatus(agentId);
     const status = result.status
-      ? await this.normalizeManagedStatus(record, result.status)
-      : await this.getStatus(agentId);
-    return { ...result, status };
-  }
-
-  async rollbackAgent(agentId: string): Promise<{ success: boolean; error?: string; status?: AgentPackageStatus }> {
-    const rollbackVersion = (await readRuntimeVersionRecords())[agentId]?.rollbackVersion;
-    if (!rollbackVersion) return { success: false, error: "没有可回退的版本。", status: await this.getStatus(agentId) };
-    const result = await this.updateAgent(agentId, rollbackVersion);
-    if (result.success) await writeRuntimeVersionRecord(agentId, undefined);
-    this.invalidateStatus(agentId);
-    const record = this.pluginRecords.get(agentId);
-    const status = result.status && record
       ? await this.normalizeManagedStatus(record, result.status)
       : await this.getStatus(agentId);
     return { ...result, status };
@@ -1259,14 +1407,26 @@ export class AgentPluginRegistry {
           if (result?.success !== true) {
             return { success: false, error: result?.error || `${record.descriptor.name} 运行时卸载失败`, agents: await this.listAgents() };
           }
-        } else if (record.descriptor.packageName) {
+        } else if (record.descriptor.packageName || record.descriptor.packages?.length) {
           if (!(await commandExists("npm"))) {
             return { success: false, error: "未找到 npm，无法卸载本地 Agent", agents: await this.listAgents() };
           }
-          try {
-            await runNpmCommand(["uninstall", "-g", record.descriptor.packageName], { timeout: 180000 });
-          } catch (error) {
-            return { success: false, error: formatError(error), agents: await this.listAgents() };
+          // 同一个命令可能对应多个 npm 包（OpenCode 1.x/2.x），全部卸载，
+          // 否则用户装过两条线时会残留另一个包继续占用 opencode 命令。
+          const packages = resolveCliPackages(record.descriptor);
+          const status = await this.getStatus(agentId).catch(() => undefined);
+          const currentPackage = getCliPackageForVersion(record.descriptor, status?.currentVersion);
+          const ordered = [...packages].sort((left, right) => (
+            left.name === currentPackage?.name ? -1 : right.name === currentPackage?.name ? 1 : 0
+          ));
+          for (const pkg of ordered) {
+            try {
+              await runNpmCommand(["uninstall", "-g", pkg.name], { timeout: 180000 });
+            } catch (error) {
+              if (pkg.name === currentPackage?.name) {
+                return { success: false, error: formatError(error), agents: await this.listAgents() };
+              }
+            }
           }
         }
       }
@@ -1396,7 +1556,6 @@ export class AgentPluginRegistry {
     record: PluginRecord,
     status: Partial<AgentPackageStatus>,
   ): Promise<AgentPackageStatus> {
-    const rollbackVersion = (await readRuntimeVersionRecords())[record.descriptor.id]?.rollbackVersion;
     return {
       ...status,
       installed: status.installed !== false,
@@ -1406,8 +1565,6 @@ export class AgentPluginRegistry {
       source: status.source || "plugin",
       installedPath: status.installedPath || record.pluginDir,
       removable: status.removable !== false,
-      rollbackVersion,
-      canRollback: !!rollbackVersion,
     };
   }
 

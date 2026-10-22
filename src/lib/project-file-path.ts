@@ -13,6 +13,10 @@ function decodeMarkdownHrefPath(href: string): string {
 
 const EXTERNAL_HREF = /^https?:\/\//i;
 
+/** `file:///C:/a/b.ts`、`file://C:/a/b.ts` 去掉 scheme 后就是普通本地路径。 */
+const FILE_URI_PREFIX = /^file:\/\//i;
+const DRIVE_AFTER_SLASH = /^\/[a-z]:/i;
+
 /**
  * http(s) 是唯一有「系统浏览器」这条出路的链接。
  * 其余 href（本地路径、#锚点、mailto:、vscode: 等自定义 scheme）在 Electron 里都没有
@@ -23,7 +27,10 @@ export function isExternalMarkdownHref(href: string | null | undefined): boolean
 }
 
 export function getLocalMarkdownFilePath(href: string): string | null {
-  const path = decodeMarkdownHrefPath(href);
+  const withoutScheme = decodeMarkdownHrefPath(href).replace(FILE_URI_PREFIX, "");
+  // file:///C:/a 去掉 scheme 后是 /C:/a，盘符前多一个斜杠，补一刀；
+  // file:///home/a 的斜杠是 POSIX 绝对路径的一部分，必须保留。
+  const path = DRIVE_AFTER_SLASH.test(withoutScheme) ? withoutScheme.slice(1) : withoutScheme;
   if (!path || href.trim().startsWith("#") || path.startsWith("//")) return null;
   if (WINDOWS_ABSOLUTE_PATH.test(path) || path.startsWith("/") || path.startsWith("\\")) {
     return path;

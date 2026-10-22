@@ -2978,7 +2978,7 @@
 
 .agent-runtime-version-modal { width: min(520px, calc(100vw - 32px)); }
 .agent-runtime-version-content { display: flex; flex-direction: column; gap: 10px; }
-.agent-runtime-version-meta, .agent-runtime-version-label, .agent-runtime-version-rollback { color: var(--text-secondary); font-size: 12px; }
+.agent-runtime-version-meta, .agent-runtime-version-label { color: var(--text-secondary); font-size: 12px; }
 .agent-runtime-version-list { display: flex; min-height: 120px; max-height: 260px; flex-direction: column; overflow: auto; border: 1px solid var(--border-color); border-radius: 6px; }
 .agent-runtime-version-list button { padding: 7px 10px; border: 0; border-bottom: 1px solid var(--border-color); background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
 .agent-runtime-version-list button:hover, .agent-runtime-version-list button.selected { background: var(--bg-hover); color: var(--accent-color); }

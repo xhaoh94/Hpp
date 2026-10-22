@@ -20,9 +20,10 @@ import {
   type SessionContextUsage,
 } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
-import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+import { getChatMessagePreviewText, sanitizeSessionPreview } from "@/lib/chat-message-preview";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 import { parseComposerDocument } from "@shared/composer-document";
+import { resolveSessionTitle } from "@/lib/session-title";
 
 export interface PersistedData {
   projects: Project[];
@@ -130,19 +131,25 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
   const id = getString(value.id);
   const agentId = getString(value.agentId);
   const agentSessionId = getString(value.agentSessionId);
-  const title = getString(value.title);
+  const persistedTitle = getString(value.title);
   const createdAt = getString(value.createdAt);
   const lastActiveAt = getString(value.lastActiveAt);
-  if (!id || !agentId || !agentSessionId || !title || !createdAt || !lastActiveAt) return null;
+  if (!id || !agentId || !agentSessionId || !persistedTitle || !createdAt || !lastActiveAt) return null;
 
   const forkContext = parseSessionForkContext(value.forkContext);
+  // 旧版本写入的 preview 可能是未清洗的裸 content（含 `<file path=… />`），
+  // 读回时统一规范化，避免侧栏与远端目录直接显示内部 XML。
+  const preview = sanitizeSessionPreview(getString(value.preview) || "");
+  // 旧数据里 title 可能还停在创建时的占位标题，而首条用户消息的 preview
+  // 已经落盘：直接用它迁移，避免会话列表继续把真实会话显示成「新会话」。
+  const title = resolveSessionTitle(persistedTitle, preview);
 
   return {
     id,
     agentId,
     agentSessionId,
     title,
-    ...(getString(value.preview) ? { preview: getString(value.preview) } : {}),
+    ...(preview ? { preview } : {}),
     createdAt,
     lastActiveAt,
     sessionFilePath: getString(value.sessionFilePath),
@@ -175,7 +182,7 @@ const parseProject = (value: unknown): Project | null => {
   };
 };
 
-const parsePersistedData = (value: unknown): PersistedData | null => {
+export const parsePersistedData = (value: unknown): PersistedData | null => {
   if (!isRecord(value) || !Array.isArray(value.projects)) return null;
   const projects = value.projects.map(parseProject).filter((project): project is Project => !!project);
   const activeProjectId = getString(value.activeProjectId) || null;
@@ -273,14 +280,19 @@ export const parsePersistedChatMessage = (value: unknown): ChatMessage | null =>
 
 const updatePersistedSessionPreview = (sessionId: string, preview: string) => {
   if (!preview) return;
+  // 正文按需加载，未加载时侧栏页签、历史列表和顶部标题都会回退到 title；
+  // 所以首次拿到首条用户消息时要顺手把占位标题「新会话 - <时间>」替换掉，
+  // 否则很久没打开的会话会一直显示成刚建的空会话。
   const projects = useProjectStore.getState().projects;
   let changed = false;
   const nextProjects = projects.map((project) => ({
     ...project,
     sessions: project.sessions.map((session) => {
-      if (session.id !== sessionId || session.preview === preview) return session;
+      if (session.id !== sessionId) return session;
+      const title = resolveSessionTitle(session.title, preview);
+      if (session.preview === preview && session.title === title) return session;
       changed = true;
-      return { ...session, preview };
+      return { ...session, preview, title };
     }),
   }));
   if (changed) useProjectStore.setState({ projects: nextProjects });
@@ -469,6 +481,15 @@ const createEmptySessionMessagePage = (): SessionMessagePageState => ({
   loadedMessages: [],
   loading: null,
 });
+
+/**
+ * 只有完整加载过、读取成功且没有更早分页的会话才允许整段 replace。
+ * 否则内存里可能只有最近一页（甚至一条都没加载），整段替换会删掉 SQLite
+ * 里尚未加载的历史。
+ */
+export const canReplaceSessionMessageRows = (
+  page: { loaded: boolean; loadFailed: boolean; hasMore: boolean } | undefined,
+) => page?.loaded === true && page.loadFailed !== true && page.hasMore !== true;
 
 const mergeSessionMessageLists = (loadedMessages: ChatMessage[], currentMessages: ChatMessage[]) => {
   if (currentMessages.length === 0 || loadedMessages === currentMessages) return loadedMessages;
@@ -672,23 +693,17 @@ const queueSessionMessageChanges = (
   };
   current.replace ||= replace;
 
-  const nextIds = new Set<string>();
   for (let sequence = 0; sequence < next.length; sequence += 1) {
     const message = next[sequence];
-    nextIds.add(message.id);
     const previousEntry = previousById.get(message.id);
     const absoluteSequence = sequenceOffset + sequence;
     if (replace || !previousEntry || previousEntry.message !== message || previousEntry.sequence !== absoluteSequence) {
       current.upserts.set(message.id, { message, sequence: absoluteSequence });
-      current.deletedIds.delete(message.id);
     }
   }
-  for (const message of previous) {
-    if (!nextIds.has(message.id)) {
-      current.deletedIds.add(message.id);
-      current.upserts.delete(message.id);
-    }
-  }
+  // 分页加载后内存里只有最近一页，下一段之前的消息本来就不在数组里；
+  // 因此绝不能根据数组差异推断「这些消息被删了」。整会话删除由
+  // purgeSessionData 显式清理 SQLite，这里只负责新增/更新。
   _pendingMessageChanges.set(sessionId, current);
 };
 
@@ -710,7 +725,7 @@ function flushMessagesToDisk() {
       const page = sessionMessagePages.get(sessionId);
       const sequenceOffset = page?.sequenceOffset || 0;
       // 只加载最近一页时，不能 replace 整个会话，否则会误删尚未加载的旧消息。
-      const replace = page?.hasMore !== true && page?.loadFailed !== true;
+      const replace = canReplaceSessionMessageRows(page);
       _pendingMessageChanges.set(sessionId, {
         replace,
         upserts: new Map(persisted.map((message, sequence) => [
@@ -1080,6 +1095,17 @@ export function useDataPersistence() {
       if (hydratedMessagesLoaded) {
         scheduleMessagesSave(undefined, true);
       }
+      // 同一原因：hydration 期内的项目规范化（如把仍是「新会话 - <时间>」的
+      // 占位标题迁移成首条用户消息预览）也要落盘，否则下次启动又得靠
+      // preview 重新推导，旧数据一旦缺 preview 就会退回占位标题。
+      if (d) {
+        const projectState = useProjectStore.getState();
+        scheduleProjectsSave({
+          projects: projectState.projects,
+          activeProjectId: projectState.activeProjectId,
+          activeSessionId: projectState.activeSessionId,
+        });
+      }
 
       if (validSessionIds) {
         loadSessionMessageSummaries([...validSessionIds]);
@@ -1148,7 +1174,8 @@ export function useDataPersistence() {
       for (const sessionId of Object.keys(previousSessionMessages)) {
         if (!(sessionId in state.sessionMessages)) {
           streamingSessionIds.delete(sessionId);
-          queueSessionMessageChanges(sessionId, previousSessionMessages[sessionId] || [], []);
+          // 不能因为内存快照里没有这个会话就删 SQLite 里的消息：这里可能只是
+          // hydration 快照替换或渲染进程重挂载。删除会话有显式的 purge 流程。
         }
       }
       for (const [sessionId, messages] of Object.entries(state.sessionMessages)) {

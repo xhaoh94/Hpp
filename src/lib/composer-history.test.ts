@@ -16,6 +16,13 @@ const reference = {
   summary: "Context",
 };
 
+const videoAttachment = {
+  id: "video-1",
+  name: "clip.mp4",
+  path: "C:/repo/clip.mp4",
+  mimeType: "video/mp4",
+};
+
 const fullDraft = (text: string): ChatDraft => ({
   text,
   pendingImages: [{
@@ -24,6 +31,7 @@ const fullDraft = (text: string): ChatDraft => ({
     name: "screen.png",
     file: { name: "screen.png", type: "image/png", size: 0 } as File,
   }],
+  pendingVideos: [videoAttachment],
   pendingFiles: [{ id: "snippet-1", fileName: "main.ts", filePath: "C:\\repo\\main.ts", startLine: 2, endLine: 4 }],
   pendingPathAttachments: [{ id: "folder-1", name: "src", path: "C:\\repo\\src", kind: "folder" }],
   sessionReferences: [reference],
@@ -41,6 +49,7 @@ const message = (id: string, text: string, draft?: QueuedMessageEditableDraft): 
 const editableDraft = (text: string): QueuedMessageEditableDraft => ({
   text,
   images: [{ id: "image-1", src: "data:image/png;base64,YWJj", name: "screen.png", mimeType: "image/png" }],
+  pendingVideos: [videoAttachment],
   pendingFiles: [{ id: "snippet-1", fileName: "main.ts", filePath: "C:\\repo\\main.ts", startLine: 2, endLine: 4 }],
   pendingPathAttachments: [{ id: "folder-1", name: "src", path: "C:\\repo\\src", kind: "folder" }],
   sessionReferences: [reference],
@@ -54,6 +63,7 @@ describe("composer draft snapshots", () => {
     expect(snapshot).toMatchObject({
       text: "  raw text  ",
       images: [{ mimeType: "image/png" }],
+      pendingVideos: [videoAttachment],
       pendingFiles: [{ filePath: "C:\\repo\\main.ts" }],
       pendingPathAttachments: [{ path: "C:\\repo\\src" }],
       sessionReferences: [reference],
@@ -63,6 +73,7 @@ describe("composer draft snapshots", () => {
     expect(draftFromMessage(message("one", "display", editableDraft("raw")))).toMatchObject({
       text: "raw",
       pendingImages: [{ name: "screen.png" }],
+      pendingVideos: [videoAttachment],
       pendingFiles: [{ filePath: "C:\\repo\\main.ts" }],
       pendingPathAttachments: [{ kind: "folder" }],
       sessionReferences: [reference],

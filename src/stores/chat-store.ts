@@ -175,9 +175,21 @@ export interface QueuedMessageImage {
   mimeType: string;
 }
 
+/**
+ * 草稿里的视频附件：只保存磁盘路径（内容不进内存），
+ * 在输入框上方和图片一起以缩略图预览条展示。
+ */
+export interface PendingVideo {
+  id: string;
+  name: string;
+  path: string;
+  mimeType: string;
+}
+
 export interface QueuedMessageEditableDraft {
   text: string;
   images: QueuedMessageImage[];
+  pendingVideos?: PendingVideo[];
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
@@ -189,6 +201,7 @@ export interface QueuedMessageEditableDraft {
 export interface ComposerDraftSnapshot {
   text: string;
   images: QueuedMessageImage[];
+  pendingVideos?: PendingVideo[];
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
@@ -200,6 +213,7 @@ export interface ChatDraft {
   text: string;
   document?: ComposerDocument;
   pendingImages: PendingImage[];
+  pendingVideos: PendingVideo[];
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
@@ -256,6 +270,8 @@ interface ChatState {
   activeAgentId: string;
   sessionDrafts: Record<string, ChatDraft>;
   messageQueues: Record<string, QueuedMessage[]>;
+  /** 远程客户端正在编辑的队列消息：queueItemId -> 锁信息。派发时跳过被锁定的消息。 */
+  queueEditLocks: Record<string, { sessionId: string; deviceId: string }>;
   compactingSessions: Record<string, boolean>;
   /** 压缩阶段：true=收尾型（本轮已结束），false=运行中，缺省=未知（旧后端）。 */
   compactionPostTurnSessions: Record<string, boolean>;
@@ -308,6 +324,9 @@ interface ChatState {
   addPendingImage: (image: PendingImage, sessionId?: string | null) => void;
   removePendingImage: (id: string, sessionId?: string | null) => void;
   clearPendingImages: (sessionId?: string | null) => void;
+  addPendingVideo: (video: PendingVideo, sessionId?: string | null) => void;
+  removePendingVideo: (id: string, sessionId?: string | null) => void;
+  clearPendingVideos: (sessionId?: string | null) => void;
   addPendingFile: (file: PendingFile, sessionId?: string | null) => void;
   removePendingFile: (id: string, sessionId?: string | null) => void;
   clearPendingFiles: (sessionId?: string | null) => void;
@@ -325,6 +344,9 @@ interface ChatState {
   markQueuedMessageSending: (sessionId: string, itemId: string) => void;
   markQueuedMessageFailed: (sessionId: string, itemId: string, error: string) => void;
   clearQueuedMessageError: (sessionId: string, itemId: string) => void;
+  setQueueEditLock: (sessionId: string, queueItemId: string, deviceId: string) => void;
+  clearQueueEditLock: (queueItemId: string) => void;
+  clearQueueEditLocksForDevice: (deviceId: string) => void;
   clearSessionQueue: (sessionId: string) => void;
   deleteSessionMessages: (sessionId: string) => void;
   deleteSessionsMessages: (sessionIds: string[]) => void;
@@ -699,6 +721,7 @@ const setNativeTurnIdForMessages = (
 export const createEmptyChatDraft = (): ChatDraft => ({
   text: "",
   pendingImages: [],
+  pendingVideos: [],
   pendingFiles: [],
   pendingPathAttachments: [],
   sessionReferences: [],
@@ -711,6 +734,7 @@ export const cloneChatDraft = (draft: ChatDraft): ChatDraft => ({
     draft.text ? [{ id: "legacy-text", type: "text", text: draft.text }] : [],
   ),
   pendingImages: draft.pendingImages.map((image) => ({ ...image })),
+  pendingVideos: (draft.pendingVideos || []).map((video) => ({ ...video })),
   pendingFiles: draft.pendingFiles.map((file) => ({ ...file })),
   pendingPathAttachments: draft.pendingPathAttachments.map((attachment) => ({ ...attachment })),
   sessionReferences: draft.sessionReferences.map((reference) => ({ ...reference })),
@@ -752,6 +776,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeAgentId: "",
   sessionDrafts: {},
   messageQueues: {},
+  queueEditLocks: {},
   compactingSessions: {},
   compactionPostTurnSessions: {},
   contextUsageBySession: {},
@@ -1292,7 +1317,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       for (const image of migratedImages) {
         if (!pendingImages.some((current) => current.id === image.id)) pendingImages.push(image);
       }
-      const nextDocument = createComposerDocument(incomingDocument.nodes.filter((node) => node.type !== "image"));
+      const migratedVideos: PendingVideo[] = incomingDocument.nodes.flatMap((node) => node.type === "video"
+        ? [{ id: node.id, name: node.name, path: node.path, mimeType: node.mimeType }]
+        : []);
+      const nextPendingVideos = [...draft.pendingVideos];
+      for (const video of migratedVideos) {
+        if (!nextPendingVideos.some((current) => current.id === video.id)) nextPendingVideos.push(video);
+      }
+      const nextDocument = createComposerDocument(incomingDocument.nodes.filter(
+        (node) => node.type !== "image" && node.type !== "video",
+      ));
       const pendingFiles = nextDocument.nodes.flatMap((node) => node.type === "snippet" ? [{
         id: node.id,
         fileName: node.fileName,
@@ -1324,6 +1358,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         document: nextDocument,
         text: getComposerPlainText(nextDocument),
         pendingImages,
+        pendingVideos: nextPendingVideos,
         pendingFiles,
         pendingPathAttachments,
         sessionReferences,
@@ -1351,6 +1386,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearPendingImages: (sessionId) =>
     set((s) => updateSessionDraft(s, sessionId, (draft) => (
       draft.pendingImages.length === 0 ? draft : { ...draft, pendingImages: [] }
+    ))),
+  addPendingVideo: (video, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingVideos: [...draft.pendingVideos, video],
+    }))),
+  removePendingVideo: (id, sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => ({
+      ...draft,
+      pendingVideos: draft.pendingVideos.filter((video) => video.id !== id),
+    }))),
+  clearPendingVideos: (sessionId) =>
+    set((s) => updateSessionDraft(s, sessionId, (draft) => (
+      draft.pendingVideos.length === 0 ? draft : { ...draft, pendingVideos: [] }
     ))),
   addPendingFile: (file, sessionId) =>
     set((s) => updateSessionDraft(s, sessionId, (draft) => ({
@@ -1443,12 +1492,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { messageQueues: { ...s.messageQueues, [sessionId]: nextQueue } };
     }),
   removeQueuedMessage: (sessionId, itemId) =>
-    set((s) => ({
-      messageQueues: {
-        ...s.messageQueues,
-        [sessionId]: (s.messageQueues[sessionId] || []).filter((item) => item.id !== itemId),
-      },
-    })),
+    set((s) => {
+      const nextQueueEditLocks = { ...s.queueEditLocks };
+      delete nextQueueEditLocks[itemId];
+      return {
+        messageQueues: {
+          ...s.messageQueues,
+          [sessionId]: (s.messageQueues[sessionId] || []).filter((item) => item.id !== itemId),
+        },
+        queueEditLocks: nextQueueEditLocks,
+      };
+    }),
   markQueuedMessageSending: (sessionId, itemId) =>
     set((s) => ({
       messageQueues: {
@@ -1476,11 +1530,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
       },
     })),
+  setQueueEditLock: (sessionId, queueItemId, deviceId) =>
+    set((s) => {
+      const current = s.queueEditLocks[queueItemId];
+      if (current?.sessionId === sessionId && current.deviceId === deviceId) return {};
+      return { queueEditLocks: { ...s.queueEditLocks, [queueItemId]: { sessionId, deviceId } } };
+    }),
+  clearQueueEditLock: (queueItemId) =>
+    set((s) => {
+      if (!(queueItemId in s.queueEditLocks)) return {};
+      const nextQueueEditLocks = { ...s.queueEditLocks };
+      delete nextQueueEditLocks[queueItemId];
+      return { queueEditLocks: nextQueueEditLocks };
+    }),
+  clearQueueEditLocksForDevice: (deviceId) =>
+    set((s) => {
+      const nextQueueEditLocks = Object.fromEntries(
+        Object.entries(s.queueEditLocks).filter(([, lock]) => lock.deviceId !== deviceId),
+      );
+      if (Object.keys(nextQueueEditLocks).length === Object.keys(s.queueEditLocks).length) return {};
+      return { queueEditLocks: nextQueueEditLocks };
+    }),
   clearSessionQueue: (sessionId) =>
     set((s) => {
       const next = { ...s.messageQueues };
       delete next[sessionId];
-      return { messageQueues: next };
+      const nextQueueEditLocks = Object.fromEntries(
+        Object.entries(s.queueEditLocks).filter(([, lock]) => lock.sessionId !== sessionId),
+      );
+      return { messageQueues: next, queueEditLocks: nextQueueEditLocks };
     }),
   deleteSessionMessages: (sessionId) =>
     set((s) => {
@@ -1496,9 +1574,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextCompactionPostTurnSessions[sessionId];
       const nextContextUsageBySession = { ...s.contextUsageBySession };
       delete nextContextUsageBySession[sessionId];
+      const nextQueueEditLocks = Object.fromEntries(
+        Object.entries(s.queueEditLocks).filter(([, lock]) => lock.sessionId !== sessionId),
+      );
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
+        queueEditLocks: nextQueueEditLocks,
         sessionDrafts: nextSessionDrafts,
         compactingSessions: nextCompactingSessions,
         compactionPostTurnSessions: nextCompactionPostTurnSessions,
@@ -1526,9 +1608,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextContextUsageBySession[sessionId];
       }
       const deletingActiveSession = !!s.activeSessionId && sessionIdSet.has(s.activeSessionId);
+      const nextQueueEditLocks = Object.fromEntries(
+        Object.entries(s.queueEditLocks).filter(([, lock]) => !sessionIdSet.has(lock.sessionId)),
+      );
       return {
         sessionMessages: nextSessionMessages,
         messageQueues: nextMessageQueues,
+        queueEditLocks: nextQueueEditLocks,
         sessionDrafts: nextSessionDrafts,
         compactingSessions: nextCompactingSessions,
         compactionPostTurnSessions: nextCompactionPostTurnSessions,

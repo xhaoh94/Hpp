@@ -7,11 +7,13 @@ import type {
 } from "react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { FileText, Folder, Link2, RefreshCw, Search, Square, WandSparkles, X } from "lucide-react";
+import { VideoThumbnail } from "@/components/shared/VideoThumbnail";
+import { openVideoPreview } from "@/lib/media-preview";
 import { useFileFilters } from "@/hooks/useFileFilters";
 import { parseActiveFileMention, type ActiveFileMention } from "@/lib/file-mention";
 import { queryProjectFileIndex, type ProjectFileIndexItem } from "@/lib/project-file-index";
 import { scheduleAbortableTask } from "@/lib/abortable-task-scheduler";
-import type { PendingFile, PendingImage, PendingPathAttachment } from "@/stores/chat-store";
+import type { PendingFile, PendingImage, PendingPathAttachment, PendingVideo } from "@/stores/chat-store";
 import { useProjectStore, type SessionReference } from "@/stores/project-store";
 import { getFileFilterKey } from "@shared/file-filters";
 import {
@@ -64,6 +66,7 @@ type ChatComposerProps = {
   inputHasText: boolean;
   pendingFiles: PendingFile[];
   pendingImages: PendingImage[];
+  pendingVideos: PendingVideo[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
   selectedAction?: AgentActionInvocation;
@@ -85,6 +88,7 @@ type ChatComposerProps = {
   onClearAttachmentError: () => void;
   onRemovePendingFile: (id: string) => void;
   onRemovePendingImage: (id: string) => void;
+  onRemovePendingVideo: (id: string) => void;
   onRemovePathAttachment: (id: string) => void;
   onRemoveSessionReference: (sourceSessionId: string) => void;
   onOpenImage: (src: string) => void;
@@ -107,6 +111,7 @@ export const ChatComposer = memo(function ChatComposer({
   inputHasText,
   pendingFiles,
   pendingImages,
+  pendingVideos,
   pendingPathAttachments,
   sessionReferences,
   selectedAction,
@@ -128,6 +133,7 @@ export const ChatComposer = memo(function ChatComposer({
   onClearAttachmentError,
   onRemovePendingFile,
   onRemovePendingImage,
+  onRemovePendingVideo,
   onRemovePathAttachment,
   onRemoveSessionReference,
   onOpenImage,
@@ -142,6 +148,7 @@ export const ChatComposer = memo(function ChatComposer({
   const hasPendingContent =
     inputHasText ||
     pendingImages.length > 0 ||
+    pendingVideos.length > 0 ||
     pendingFiles.length > 0 ||
     pendingPathAttachments.length > 0 ||
     sessionReferences.length > 0 ||
@@ -565,6 +572,33 @@ export const ChatComposer = memo(function ChatComposer({
                   disabled={interactionDisabled}
                   title="移除图片"
                   aria-label="移除图片"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {pendingVideos.length > 0 && (
+          <div className="chat-input-image-previews">
+            {pendingVideos.map((video) => (
+              <div className="chat-input-image-preview" key={video.id}>
+                <button
+                  type="button"
+                  className="chat-input-video-preview"
+                  onClick={() => openVideoPreview(video.path)}
+                  title="点击预览视频"
+                  aria-label={`预览视频 ${video.name}`}
+                >
+                  <VideoThumbnail path={video.path} name={video.name} />
+                  <span className="chat-input-video-name">{video.name}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onRemovePendingVideo(video.id)}
+                  disabled={interactionDisabled}
+                  title="移除视频"
+                  aria-label="移除视频"
                 >
                   <X size={14} />
                 </button>

@@ -1,3 +1,5 @@
+import { MESSAGE_WRAPPER_TAG, stripInternalTags } from "./message-internal-tags";
+
 export type ProcessSubagentStopReason = "timeout" | "aborted" | "cancelled" | "error";
 
 export type ProcessSubagentUsage = {
@@ -274,6 +276,14 @@ export const isUserGuidanceProcessEntry = (entry: ProcessEntryView) =>
   entry.toolKind === "guidance" ||
   /^收到引导(?:[:：]|$)/.test(entry.title);
 
+/**
+ * 引导气泡的兜底文本。旧版本没有分开保存展示/发送正文，历史记录里可能留着
+ * 发给 Agent 的信封 XML（`<folder path="…" />` 等），渲染前统一规范化。
+ * 保留行结构：引导内容按行显示，不做空白压缩。
+ */
+const sanitizeGuidanceText = (value: string) =>
+  stripInternalTags(String(value || "")).replace(MESSAGE_WRAPPER_TAG, "").trim();
+
 export const getUserGuidanceText = (entry: ProcessEntryView) => {
   const isLegacyEntry = /^收到引导(?:[:：]|$)/.test(entry.title);
   if (isLegacyEntry) {
@@ -281,10 +291,10 @@ export const getUserGuidanceText = (entry: ProcessEntryView) => {
       .replace(/^收到引导\s*[:：]?\s*/, "")
       .replace(/^["“](.*)["”]$/, "$1")
       .trim();
-    return legacyTitle || entry.detail || "";
+    return sanitizeGuidanceText(legacyTitle || entry.detail || "");
   }
-  if (entry.detail?.trim()) return entry.detail;
-  return entry.title === "引导" ? "" : entry.title;
+  if (entry.detail?.trim()) return sanitizeGuidanceText(entry.detail);
+  return entry.title === "引导" ? "" : sanitizeGuidanceText(entry.title);
 };
 
 export const getStreamIdleNoticeDuration = (

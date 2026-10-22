@@ -37,8 +37,11 @@ describe("diff block viewport constraints", () => {
   it("uses the message id as the stable persisted review identity", () => {
     expect(diffBlockSource).toContain("reviewId: string");
     expect(diffBlockSource).toContain("reviewId={reviewId}");
-    expect(diffBlockSource).toContain("window.electronAPI.loadReviewUndo({");
-    expect(diffBlockSource).toContain("onUndoStateChange={setUndoState}");
+    // 撤销状态经缓存加载：虚拟列表反复挂载时不再每次 IPC + 主进程重算 diff。
+    expect(diffBlockSource).toContain("loadReviewUndoState({");
+    // 撤销改写磁盘后必须作废缓存，否则滚动回来会展示过期的可撤销摘要。
+    expect(diffBlockSource).toContain("invalidateReviewUndoCache(reviewId, projectPath)");
+    expect(diffBlockSource).toContain("onUndoStateChange={");
     expect(diffBlockSource).not.toContain("reverseApplyPatch");
   });
 
@@ -66,6 +69,20 @@ describe("diff block viewport constraints", () => {
     expect(diffBlockSource).toContain("if (!undoFile || undoFile.error) return file;");
     expect(diffBlockSource).toContain("additions: undoFile.additions");
     expect(diffBlockSource).toContain("deletions: undoFile.deletions");
+  });
+
+  it("preloads the review dialog chunk while idle", () => {
+    // 审核弹窗的 chunk 里带着 diff 渲染与语法高亮语言包，首次下载/解析要几百毫秒。
+    // 等点“审核”再加载会让弹窗先出现壳、稍后才定位到第一个改动处。
+    expect(diffBlockSource).toContain("preloadCodeReviewDialog");
+    expect(diffBlockSource).toContain("requestIdleCallback");
+  });
+
+  it("opens the shared file context menu on right-click of a diff file row", () => {
+    expect(diffBlockSource).toContain("<FileContextMenu");
+    expect(diffBlockSource).toContain("onContextMenu={(event) => {");
+    expect(diffBlockSource).toContain('resolveProjectFilePath(file.file, projectPath || "")');
+    expect(diffBlockSource).toContain("setFileContextMenu(");
   });
 
   it("keeps the edited-file title and totals on one line", () => {

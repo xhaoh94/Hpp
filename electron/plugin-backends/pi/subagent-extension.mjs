@@ -15,8 +15,22 @@ const MAX_MESSAGE_COUNT = 80;
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_JSON_TASK_BYTES = 24 * 1024;
-const MAX_STDOUT_LINE_BYTES = 256 * 1024;
+// Pi 的 JSONL 里单条记录可能非常大：message_end 带完整正文/补丁、
+// tool_execution_end 带整个文件内容，很容易超过几百 KB。上限只用于
+// 防御「一直没有换行符的失控输出」，不能低到误杀合法事件。
+const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
 const SUBAGENT_BRIDGE_EXTENSION_PATH = join(dirname(fileURLToPath(import.meta.url)), "subagent-bridge-extension.mjs");
+/** RPC 模式下会阻塞等待响应的对话框方法；其余（setStatus/setWidget/setTitle/…）是单向指令。 */
+const RPC_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+/**
+ * 子 Agent 只允许「权限确认」冒泡给宿主。
+ *
+ * 参考 Claude Code 的子 agent 设计：子 agent 的权限提示会透传给用户，但
+ * AskUserQuestion 这类主动提问在子 agent 里不可用；Codex 的子 agent 同样只
+ * 冒泡 approval。子任务跑在隔离上下文里，主动提问会打断主会话，而且并行
+ * 多个子 agent 时宿主无法判断该由谁承担这次交互。
+ */
+const SUBAGENT_ALLOWED_DIALOG_METHODS = new Set(["confirm"]);
 
 /** 只终止当前 SubAgent 拥有的进程组/进程树，不能影响 Hpp 或用户的其他 Node 进程。 */
 const killSubagentTree = (child, signal = "SIGTERM") => {
@@ -445,6 +459,10 @@ const getSubagentExtensionIntegration = (agentName, agentDir) => {
   return integrations;
 };
 
+/** 子 Agent 不允许向用户提问：这些工具即使写在 agent 的 tools 里也要剔除。 */
+const SUBAGENT_QUESTION_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
+const SUBAGENT_QUESTION_TOOL_DENYLIST = [...SUBAGENT_QUESTION_TOOLS].join(",");
+
 const getSubagentTools = (agent, integrations) => {
   const tools = Array.isArray(agent?.tools) ? [...agent.tools] : [];
   for (const integration of integrations) {
@@ -452,7 +470,9 @@ const getSubagentTools = (agent, integrations) => {
       if (!tools.includes(toolName)) tools.push(toolName);
     }
   }
-  return tools;
+  return tools.filter((toolName) => (
+    !SUBAGENT_QUESTION_TOOLS.has(String(toolName || "").trim().toLowerCase().replace(/[\s-]+/g, "_"))
+  ));
 };
 
 const getPiInvocation = (packageRoot, args, nodePath) => {
@@ -614,9 +634,17 @@ const runSingleAgent = async ({
   }
   const extensionIntegrations = getSubagentExtensionIntegration(agent.name, agentDir);
   const approvedExtensionPaths = extensionIntegrations.flatMap((integration) => integration.extensionPaths);
+  // 子 Agent 只汇报结果，不向用户提问：bridge 侧不再注册 question 工具，
+  // 这里再用 denylist 兜底，避免扩展或历史配置把它们重新带回工具集。
   const args = interactive
-    ? ["--mode", "rpc", "--no-session", "--no-extensions", "--extension", bridgeExtensionPath, "--exclude-tools", "subagent"]
-    : ["--mode", "json", "-p", "--no-session", "--no-extensions", "--exclude-tools", "subagent"];
+    ? [
+      "--mode", "rpc",
+      "--no-session",
+      "--no-extensions",
+      "--extension", bridgeExtensionPath,
+      "--exclude-tools", `subagent,${SUBAGENT_QUESTION_TOOL_DENYLIST}`,
+    ]
+    : ["--mode", "json", "-p", "--no-session", "--no-extensions", "--exclude-tools", `subagent,${SUBAGENT_QUESTION_TOOL_DENYLIST}`];
   for (const extensionPath of approvedExtensionPaths) args.push("--extension", extensionPath);
   const model = agent.model || dispatchDefaults.model;
   if (model) args.push("--model", model);
@@ -625,7 +653,7 @@ const runSingleAgent = async ({
   if (tools.length > 0) args.push("--tools", tools.join(","));
   if (agent.systemPrompt) args.push("--append-system-prompt", truncateText(agent.systemPrompt, 24 * 1024));
   if (hostSystemPrompt) args.push("--append-system-prompt", truncateText(hostSystemPrompt, 24 * 1024));
-  args.push("--append-system-prompt", "当前进程是 Hpp 内置 subagent。不要调用 subagent，不要尝试递归委派；只完成当前任务并返回结构化摘要。\n\nTask 输出建议包含：Goal、Findings、Files Read/Changed、Tests、Risks、Next Steps。\n\n超时策略：默认允许运行 30 分钟，最长也是 30 分钟。除非用户明确要求更短的时间，否则不要传入 timeoutMs，也不要把 5 分钟作为默认值。\n");
+  args.push("--append-system-prompt", "当前进程是 Hpp 内置 subagent。不要调用 subagent，不要尝试递归委派；只完成当前任务并返回结构化摘要。\n\n不要向用户提问（question / ask_user_question 工具在本进程不可用）；需要用户决策时，把问题、可选方案和建议写进结果，由主 Agent 转述给用户。\n\nTask 输出建议包含：Goal、Findings、Files Read/Changed、Tests、Risks、Next Steps。\n\n超时策略：默认允许运行 30 分钟，最长也是 30 分钟。除非用户明确要求更短的时间，否则不要传入 timeoutMs，也不要把 5 分钟作为默认值。\n");
   if (!interactive) args.push(`Task: ${task}`);
 
   emitUpdate();
@@ -675,10 +703,18 @@ const runSingleAgent = async ({
       if (interactive && event.type === "extension_ui_request") {
         const request = isRecord(event.request) ? event.request : event;
         const method = String(request.method || request.type || "").toLowerCase();
-        setCurrentActivity(
-          method === "select" || method === "questionnaire" ? "等待用户选择…" : "等待用户确认…",
-          true,
-        );
+        // 子进程在 rpc 模式下会把 setStatus / setWidget / setTitle / set_editor_text
+        // 这类「单向 UI 指令」也发成 extension_ui_request：它们不需要用户回答，
+        // 转发给宿主只会被当成「询问用户」，弹出一个没有内容的空问卷。
+        if (!RPC_DIALOG_METHODS.has(method)) return;
+        if (!SUBAGENT_ALLOWED_DIALOG_METHODS.has(method)) {
+          // select / input / editor 是子 Agent 主动向用户提问或索要输入，一律自动取消。
+          // 必须回一个 cancelled 响应：RPC 的对话框方法是阻塞的，不回会让子进程永远卡住。
+          // 子 Agent 需要用户决策时，应把问题写进结果，由主 Agent 转述。
+          writeRpc({ type: "extension_ui_response", id: event.id, cancelled: true });
+          return;
+        }
+        setCurrentActivity("等待用户确认…", true);
         void (async () => {
           let response;
           try {
@@ -796,15 +832,28 @@ const runSingleAgent = async ({
 
     let stdoutBuffer = "";
     let stderrBuffer = "";
-    let protocolOutputExceeded = false;
+    // 单条记录超过上限时只丢弃这一条并继续读取，而不是终止子 Agent：
+    // 丢掉末尾一个大工具结果远比让整个任务失败代价小。
+    let skippingOversizedLine = false;
+    let oversizedLineCount = 0;
     child.stdout?.on("data", (chunk) => {
       stdoutBuffer += chunk.toString();
+      if (skippingOversizedLine) {
+        const newlineIndex = stdoutBuffer.indexOf("\n");
+        if (newlineIndex === -1) {
+          // 仍未到记录结尾，避免缓冲区无限增长。
+          stdoutBuffer = stdoutBuffer.slice(-1024);
+          return;
+        }
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        skippingOversizedLine = false;
+      }
       if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_STDOUT_LINE_BYTES) {
-        // 协议要求 JSONL；单条记录过大不能静默截断，否则可能把 JSON
-        // 截成看似正常的空结果。标记失败并回收当前子进程。
-        protocolOutputExceeded = true;
-        killSubagentTree(child, "SIGTERM");
+        oversizedLineCount += 1;
         stdoutBuffer = "";
+        skippingOversizedLine = true;
+        setCurrentActivity("已跳过一条超大协议记录，继续执行…");
+        return;
       }
       const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop() || "";
@@ -870,13 +919,9 @@ const runSingleAgent = async ({
       }
     });
 
-    if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+    if (!skippingOversizedLine && stdoutBuffer.trim()) processLine(stdoutBuffer);
     result.exitCode = exitCode;
-    if (protocolOutputExceeded) {
-      result.exitCode = 1;
-      result.stopReason = "error";
-      result.errorMessage = `子 Agent 协议输出超过 ${MAX_STDOUT_LINE_BYTES} 字节限制`;
-    } else if (timedOut) {
+    if (timedOut) {
       result.exitCode = 1;
       result.stopReason = "timeout";
       result.errorMessage = `子 Agent 超时（${Math.round(timeoutMs / 1000)} 秒）`;
@@ -889,6 +934,10 @@ const runSingleAgent = async ({
       result.errorMessage = result.stderr || "子 Agent 进程异常退出";
     }
     result.output = truncateText(getFinalOutput(result), MAX_TASK_OUTPUT_BYTES);
+    if (oversizedLineCount > 0 && !result.stopReason) {
+      result.protocolWarning = `已跳过 ${oversizedLineCount} 条超大协议记录`;
+      result.stderr = truncateText(`${result.stderr}${result.stderr ? "\n" : ""}${result.protocolWarning}`, MAX_STDERR_BYTES);
+    }
     result.currentActivity = result.stopReason
       ? result.errorMessage || (result.stopReason === "timeout" ? "已超时" : "已停止")
       : result.output ? "已完成" : "已完成（未返回正文）";

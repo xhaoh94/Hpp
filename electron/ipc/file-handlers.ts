@@ -1,7 +1,8 @@
 import { ipcMain, dialog, BrowserWindow, shell, app } from "electron";
-import { readdir, readFile, access, stat, open } from "fs/promises";
+import { readdir, readFile, access, stat, open, writeFile, mkdir } from "fs/promises";
 import { writeTextFile } from "./write-text-file";
-import { basename, extname, join } from "path";
+import { basename, dirname, extname, join } from "path";
+import { createHash } from "crypto";
 import { homedir } from "os";
 import { commandExists } from "../utils/command-utils";
 import { ReviewUndoService } from "./rebuild-file";
@@ -16,6 +17,7 @@ import { startFileWatch, stopFileWatch } from "./file-watchers";
 const SEARCH_RESULT_LIMIT = 50;
 const MAX_IMAGE_PREVIEW_BYTES = 25 * 1024 * 1024;
 const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024; // 10 MB — files larger than this are not loaded as text
+const MAX_HTML_PREVIEW_BYTES = 5 * 1024 * 1024; // 本地运行的代码块大小上限
 const IMAGE_MIME_TYPES: Record<string, string> = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
@@ -81,6 +83,53 @@ export function registerFileHandlers() {
       // on Windows), which opens the file manager and selects the target atomically.
       shell.showItemInFolder(targetPath);
       return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // 「打开到本地文件夹目录」：目录用资源管理器打开自身，文件则打开所在文件夹并选中；
+  // 路径不存在时退化为打开父目录，让用户至少落到正确的位置。
+  ipcMain.handle("fs:revealPath", async (_event, targetPath: string) => {
+    if (typeof targetPath !== "string" || !targetPath.trim()) {
+      return { success: false, error: "Path is required" };
+    }
+    try {
+      const info = await stat(targetPath).catch(() => null);
+      if (info?.isDirectory()) {
+        const error = await shell.openPath(targetPath);
+        return error ? { success: false, error } : { success: true };
+      }
+      if (info) {
+        shell.showItemInFolder(targetPath);
+        return { success: true };
+      }
+      shell.showItemInFolder(dirname(targetPath));
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // 运行聊天里的 HTML/SVG 代码块：落盘到临时目录后用默认浏览器打开，
+  // 让用户本地直接看效果。内容寻址命名，同一段代码重复运行会覆盖同一文件。
+  ipcMain.handle("fs:runHtmlPreview", async (_event, request: { code?: unknown; language?: unknown }) => {
+    const code = typeof request?.code === "string" ? request.code : "";
+    const language = typeof request?.language === "string" ? request.language : "";
+    if (!code.trim()) return { success: false, error: "Code is required" };
+    if (code.length > MAX_HTML_PREVIEW_BYTES) {
+      return { success: false, error: `代码超过 ${Math.round(MAX_HTML_PREVIEW_BYTES / 1024 / 1024)}MB，无法本地运行` };
+    }
+    const extension = language.toLowerCase() === "svg" ? ".svg" : ".html";
+    const hash = createHash("sha1").update(code).digest("hex").slice(0, 16);
+    const previewDir = join(app.getPath("temp"), "hpp-run");
+    const previewPath = join(previewDir, `${hash}${extension}`);
+    try {
+      await mkdir(previewDir, { recursive: true });
+      await writeFile(previewPath, code, "utf8");
+      const error = await shell.openPath(previewPath);
+      if (error) return { success: false, error };
+      return { success: true, path: previewPath };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }

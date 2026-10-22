@@ -70,6 +70,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("fs:change", handler);
   },
   showItemInFolder: (targetPath: string) => ipcRenderer.invoke("fs:showItemInFolder", targetPath),
+  revealPath: (targetPath: string) => ipcRenderer.invoke("fs:revealPath", targetPath),
+  runHtmlPreview: (request: { code: string; language: string }) =>
+    ipcRenderer.invoke("fs:runHtmlPreview", request),
   indexProjectFiles: (dirPath: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:indexProjectFiles", dirPath, filters),
   readFile: (filePath: string) => ipcRenderer.invoke("fs:readFile", filePath),
@@ -77,6 +80,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("fs:writeFile", filePath, content),
   readFileDataUrl: (filePath: string) => ipcRenderer.invoke("fs:readFileDataUrl", filePath),
   statPath: (filePath: string) => ipcRenderer.invoke("fs:statPath", filePath),
+  getLocalMediaBaseUrl: () => ipcRenderer.invoke("media:getBaseUrl"),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
     ipcRenderer.invoke("fs:fileExists", filePath),
@@ -100,7 +104,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentGetStatus: (agentId: string) => ipcRenderer.invoke("agent:getStatus", agentId),
   agentGetVersions: (agentId: string) => ipcRenderer.invoke("agent:versions", agentId),
   agentUpdate: (agentId: string, versionSpec?: string) => ipcRenderer.invoke("agent:update", agentId, versionSpec),
-  agentRollback: (agentId: string) => ipcRenderer.invoke("agent:rollback", agentId),
   agentGetDefaultThinkingLevel: (agentId: string) =>
     ipcRenderer.invoke("agent:getDefaultThinkingLevel", agentId),
   agentList: () => ipcRenderer.invoke("agent:list"),
@@ -147,6 +150,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("remote:revokeDevice", deviceId),
   remotePublish: (update: RemoteRendererPublish) =>
     ipcRenderer.send("remote:publish", update),
+  onRemoteClientsChanged: (callback: (status: { connected: number }) => void) => {
+    const handler = (_event: unknown, status: { connected: number }) => callback(status);
+    ipcRenderer.on("remote:clients", handler);
+    return () => ipcRenderer.removeListener("remote:clients", handler);
+  },
+  onRemoteClientDisconnected: (callback: (event: { deviceId: string }) => void) => {
+    const handler = (_event: unknown, event: { deviceId: string }) => callback(event);
+    ipcRenderer.on("remote:clientDisconnected", handler);
+    return () => ipcRenderer.removeListener("remote:clientDisconnected", handler);
+  },
   remoteCommandResult: (result: RemoteRendererCommandResult) =>
     ipcRenderer.send("remote:commandResult", result),
   onRemoteCommand: (callback: (command: RemoteRendererCommand) => void) => {
@@ -158,6 +171,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Clipboard
   writeImageToClipboard: (imageDataUrl: string) =>
     ipcRenderer.invoke("clipboard:writeImage", imageDataUrl),
+  writeFileToClipboard: (filePath: string) =>
+    ipcRenderer.invoke("clipboard:writeFile", filePath),
 
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) =>

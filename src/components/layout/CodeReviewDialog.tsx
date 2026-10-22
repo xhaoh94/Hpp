@@ -1,6 +1,9 @@
 import {
+  forwardRef,
+  memo,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -38,7 +41,6 @@ import {
   buildFullFileDiff,
   buildReviewDiff,
   linesToPairs,
-  type DiffLineCell,
   type FullDiffPair,
   type ReviewFileDiff,
 } from "@shared/patch-split";
@@ -89,22 +91,10 @@ const MAX_HIGHLIGHT_CHARS = 2000;
 const FILES_MIN_WIDTH = 180;
 const FILES_MAX_WIDTH = 420;
 const DIFF_MIN_WIDTH = 320;
-
-type HighlightedCell = {
-  cell: DiffLineCell;
-  tokens: SyntaxToken[];
-};
-
-type HighlightedPair = {
-  left?: HighlightedCell;
-  right?: HighlightedCell;
-  /** 透传自 FullDiffPair：该行所属 hunk 的全局序号（用于「已撤销」样式）。 */
-  hunkIdx?: number;
-  /** 该行所属修改点在 hunk 内的序号（局部撤销的粒度）。 */
-  changeIdx?: number;
-  /** 该 pair 是否是其所属修改点的首个 pair（「撤销此段修改」按钮只在这行渲染）。 */
-  changeStart?: boolean;
-};
+/** 与 `.chat-review-unified` / `.chat-review-split` 的固定行高保持一致。 */
+const REVIEW_ROW_HEIGHT = 22;
+/** 完整文件对比读取慢于这个阈值才显示加载态，避免一闪而过的占位。 */
+const CONTENT_LOADING_DELAY_MS = 120;
 
 type DialogReviewFile = ReviewFileDiff & {
   canonical: boolean;
@@ -139,147 +129,227 @@ const highlightText = (text: string, language?: string): SyntaxToken[] => {
   return tokens;
 };
 
-const isDiffPair = (pair: HighlightedPair) =>
-  !!(pair.left && pair.left.cell.type === "del") || !!(pair.right && pair.right.cell.type === "add");
+const isDiffPair = (pair: FullDiffPair) =>
+  pair.left?.type === "del" || pair.right?.type === "add";
 
-type ReviewVirtualRowsProps = {
-  pairs: HighlightedPair[];
-  viewMode: ReviewViewMode;
-  showDeletedInRight: boolean;
-  scrollRef: RefObject<HTMLDivElement | null>;
-  undoable: boolean;
-  undoBusy: boolean;
-  isHunkUndoing: (hunkIndex: number, changeIndex: number) => boolean;
-  onHunkUndo: (hunkIndex: number, changeIndex: number) => void;
+/** 虚拟列表向父组件暴露的定位能力：按行下标精确滚动，不依赖 DOM 查询。 */
+export type ReviewRowsHandle = {
+  scrollToIndex: (index: number, behavior?: "auto" | "smooth") => void;
 };
 
-function ReviewVirtualRows({
-  pairs,
+type ReviewVirtualRowsProps = {
+  pairs: FullDiffPair[];
+  viewMode: ReviewViewMode;
+  showDeletedInRight: boolean;
+  language?: string;
+  scrollRef: RefObject<HTMLDivElement | null>;
+  displayFile: string;
+  undoable: boolean;
+  undoBusy: boolean;
+  undoingKey: string | null;
+  onHunkUndoRef: RefObject<((hunkIndex: number, changeIndex: number) => void) | null>;
+};
+
+type ReviewRowProps = ReviewVirtualRowsProps & {
+  pair: FullDiffPair;
+  index: number;
+};
+
+const EMPTY_TOKENS: SyntaxToken[] = [];
+
+/**
+ * 单行惰性渲染。
+ *
+ * 高亮曾经在父组件里对整份 diff（最多 MAX_RENDER_LINES 行）一次性计算，
+ * 打开审核时同步算几千行 —— 首次定位被高亮算力拖到几百毫秒之后，
+ * 而且文件内容读回来后还要整份重算一次。虚拟列表实际只渲染几十行，
+ * 把高亮下沉到行组件后，首帧与二次定位都只剩可见行的开销。
+ */
+const ReviewRow = memo(function ReviewRow({
+  pair,
+  index,
   viewMode,
   showDeletedInRight,
-  scrollRef,
+  language,
+  displayFile,
   undoable,
   undoBusy,
-  isHunkUndoing,
-  onHunkUndo,
-}: ReviewVirtualRowsProps) {
-  const getScrollElement = useCallback(() => scrollRef.current, [scrollRef]);
-  const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
-    count: pairs.length,
-    getScrollElement,
-    estimateSize: () => 26,
-    // 行 key 只能用下标。行号不是唯一标识：同一份补丁里旧/新行号会撞车（换位、合并补丁尤甚），
-    // 撞车的 key 会让 React 把多行重复渲染到同一个 transform 上，视觉上就是同一行的文字叠在一起。
-    getItemKey: (index) => index,
-    overscan: 20,
-    useAnimationFrameWithResizeObserver: true,
-  });
+  undoingKey,
+  onHunkUndoRef,
+}: ReviewRowProps) {
+  const leftText = pair.left?.text;
+  const rightText = pair.right?.text;
+  const leftTokens = useMemo(
+    () => (leftText === undefined ? EMPTY_TOKENS : highlightText(leftText, language)),
+    [leftText, language],
+  );
+  const rightTokens = useMemo(
+    () => (rightText === undefined ? EMPTY_TOKENS : highlightText(rightText, language)),
+    [rightText, language],
+  );
 
-  const renderUndoButton = (pair: HighlightedPair) => {
-    if (!pair.changeStart || pair.hunkIdx === undefined || pair.changeIdx === undefined || !undoable) return null;
-    return (
+  const undoButton = pair.changeStart
+    && pair.hunkIdx !== undefined
+    && pair.changeIdx !== undefined
+    && undoable
+    ? (
       <button
         type="button"
         className="chat-review-hunk-undo"
-        onClick={() => onHunkUndo(pair.hunkIdx!, pair.changeIdx!)}
+        onClick={() => onHunkUndoRef.current?.(pair.hunkIdx!, pair.changeIdx!)}
         disabled={undoBusy}
         title="撤销此段修改"
       >
-        {isHunkUndoing(pair.hunkIdx, pair.changeIdx) ? (
+        {undoingKey === `hunk:${displayFile}:${pair.hunkIdx}:${pair.changeIdx}` ? (
           <Loader2 className="chat-review-spin" size={11} />
         ) : (
           <Undo2 size={11} strokeWidth={2.2} />
         )}
         <span>撤销</span>
       </button>
-    );
-  };
+    )
+    : null;
 
-  const renderUnified = (pair: HighlightedPair, index: number) => {
-    const type = pair.left?.cell.type === "del"
+  if (viewMode === "unified") {
+    const type = pair.left?.type === "del"
       ? "del"
-      : pair.right?.cell.type === "add"
+      : pair.right?.type === "add"
         ? "add"
         : "context";
-    const text = pair.left ?? pair.right;
+    const cell = pair.left ?? pair.right;
+    const tokens = pair.left ? leftTokens : rightTokens;
     return (
       <div
         className={`chat-review-line ${type}`}
         data-review-diff-index={isDiffPair(pair) ? index : undefined}
+        data-review-row-index={index}
       >
         <span className="chat-review-line-no">
           {type === "del"
-            ? pair.left?.cell.lineNo ?? ""
-            : pair.right?.cell.lineNo ?? pair.left?.cell.lineNo ?? ""}
+            ? pair.left?.lineNo ?? ""
+            : pair.right?.lineNo ?? pair.left?.lineNo ?? ""}
         </span>
         <span className="chat-review-marker" aria-hidden="true">
           {type === "del" ? "-" : type === "add" ? "+" : " "}
         </span>
         <span className="chat-review-code">
-          {text ? renderTokens(text.tokens) : <span className="chat-review-code-empty" />}
+          {cell ? renderTokens(tokens) : <span className="chat-review-code-empty" />}
         </span>
-        {renderUndoButton(pair)}
+        {undoButton}
       </div>
     );
-  };
+  }
 
-  const renderSplitCell = (pair: HighlightedPair, side: "left" | "right", index: number) => {
+  const renderSide = (side: "left" | "right") => {
     const cell = side === "left"
       ? pair.left
-      : pair.right || (showDeletedInRight && pair.left?.cell.type === "del" ? pair.left : undefined);
+      : pair.right || (showDeletedInRight && pair.left?.type === "del" ? pair.left : undefined);
     if (!cell) return <div className="chat-review-col-line empty" aria-hidden="true" />;
-    const isDiff = cell.cell.type === (side === "left" ? "del" : "add");
+    const isDiff = cell.type === (side === "left" ? "del" : "add");
     const hiddenDeletedOnRight = side === "left"
       && !!pair.left
-      && pair.left.cell.type === "del"
+      && pair.left.type === "del"
       && !pair.right
       && !showDeletedInRight;
     return (
       <div
-        className={`chat-review-col-line ${cell.cell.type}`}
+        className={`chat-review-col-line ${cell.type}`}
         data-review-diff-index={isDiff ? index : undefined}
       >
-        <span className="chat-review-line-no">{cell.cell.lineNo}</span>
-        <span className="chat-review-code">{renderTokens(cell.tokens)}</span>
-        {hiddenDeletedOnRight ? renderUndoButton(pair) : side === "right" ? renderUndoButton(pair) : null}
+        <span className="chat-review-line-no">{cell.lineNo}</span>
+        <span className="chat-review-code">
+          {renderTokens(side === "left" ? leftTokens : rightTokens)}
+        </span>
+        {hiddenDeletedOnRight ? undoButton : side === "right" ? undoButton : null}
       </div>
     );
   };
 
   return (
-    <div
-      className={`chat-review-virtual-list ${viewMode === "split" ? "split" : "unified"}`}
-      style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}
-    >
-      {virtualizer.getVirtualItems().map((virtualRow) => {
-        const pair = pairs[virtualRow.index];
-        if (!pair) return null;
-        return (
-          <div
-            key={virtualRow.key}
-            ref={virtualizer.measureElement}
-            data-index={virtualRow.index}
-            className="chat-review-virtual-row"
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              transform: `translateY(${virtualRow.start}px)`,
-            }}
-          >
-            {viewMode === "unified" ? renderUnified(pair, virtualRow.index) : (
-              <div className="chat-review-split-row">
-                <div className="chat-review-col left">{renderSplitCell(pair, "left", virtualRow.index)}</div>
-                <div className="chat-review-col right">{renderSplitCell(pair, "right", virtualRow.index)}</div>
-              </div>
-            )}
-          </div>
-        );
-      })}
+    <div className="chat-review-split-row" data-review-row-index={index}>
+      <div className="chat-review-col left">{renderSide("left")}</div>
+      <div className="chat-review-col right">{renderSide("right")}</div>
     </div>
   );
-}
+});
+
+const ReviewVirtualRows = forwardRef<ReviewRowsHandle, ReviewVirtualRowsProps>(
+  function ReviewVirtualRows({
+    pairs,
+    viewMode,
+    showDeletedInRight,
+    language,
+    scrollRef,
+    displayFile,
+    undoable,
+    undoBusy,
+    undoingKey,
+    onHunkUndoRef,
+  }, ref) {
+    const getScrollElement = useCallback(() => scrollRef.current, [scrollRef]);
+    const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+      count: pairs.length,
+      getScrollElement,
+      // 估算行高必须等于真实行高，否则定位到文件深处时会按行数累计出上千像素的偏移。
+      estimateSize: () => REVIEW_ROW_HEIGHT,
+      // 行 key 只能用下标。行号不是唯一标识：同一份补丁里旧/新行号会撞车（换位、合并补丁尤甚），
+      // 撞车的 key 会让 React 把多行重复渲染到同一个 transform 上，视觉上就是同一行的文字叠在一起。
+      getItemKey: (index) => index,
+      overscan: 20,
+      useAnimationFrameWithResizeObserver: true,
+    });
+
+    // 父组件直接按下标定位（不查 DOM）。虚拟列表在目标行尚未测量时按行高估算，
+    // 换行长行会有少量偏差，由定位后的居中校正负责收敛。
+    useImperativeHandle(ref, () => ({
+      scrollToIndex: (index: number, behavior: "auto" | "smooth" = "auto") => {
+        virtualizer.scrollToIndex(index, { align: "center", behavior });
+      },
+    }), [virtualizer]);
+
+    return (
+      <div
+        className={`chat-review-virtual-list ${viewMode === "split" ? "split" : "unified"}`}
+        style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}
+      >
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const pair = pairs[virtualRow.index];
+          if (!pair) return null;
+          return (
+            <div
+              key={virtualRow.key}
+              ref={virtualizer.measureElement}
+              data-index={virtualRow.index}
+              className="chat-review-virtual-row"
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
+            >
+              <ReviewRow
+                pair={pair}
+                index={virtualRow.index}
+                pairs={pairs}
+                viewMode={viewMode}
+                showDeletedInRight={showDeletedInRight}
+                language={language}
+                scrollRef={scrollRef}
+                displayFile={displayFile}
+                undoable={undoable}
+                undoBusy={undoBusy}
+                undoingKey={undoingKey}
+                onHunkUndoRef={onHunkUndoRef}
+              />
+            </div>
+          );
+        })}
+      </div>
+    );
+  },
+);
 
 function FileStatusIcon({ status }: { status: ReviewFileDiff["status"] }) {
   if (status === "added") return <FilePlus2 size={14} strokeWidth={2} />;
@@ -314,6 +384,8 @@ export function CodeReviewDialog({
   const scrolledRef = useRef<string | null>(null);
   const diffPairIndicesRef = useRef<number[]>([]);
   const diffScrollRef = useRef<HTMLDivElement | null>(null);
+  const rowsRef = useRef<ReviewRowsHandle | null>(null);
+  const onHunkUndoRef = useRef<((hunkIndex: number, changeIndex: number) => void) | null>(null);
   const reviewBodyRef = useRef<HTMLDivElement | null>(null);
   const reviewGenerationRef = useRef(0);
   const operationCounterRef = useRef(0);
@@ -567,36 +639,42 @@ export function CodeReviewDialog({
     [active],
   );
 
-  const highlightedPairs = useMemo(() => {
-    if (!pairs) return [];
-    const result: HighlightedPair[] = [];
-    const count = Math.min(pairs.length, MAX_RENDER_LINES);
-    for (let index = 0; index < count; index += 1) {
-      const pair = pairs[index];
-      const entry: HighlightedPair = {};
-      if (pair.left) entry.left = { cell: pair.left, tokens: highlightText(pair.left.text, language) };
-      if (pair.right) entry.right = { cell: pair.right, tokens: highlightText(pair.right.text, language) };
-      if (pair.hunkIdx !== undefined) entry.hunkIdx = pair.hunkIdx;
-      if (pair.changeIdx !== undefined) entry.changeIdx = pair.changeIdx;
-      if (pair.changeStart) entry.changeStart = true;
-      result.push(entry);
+  // 完整文件对比未就绪时先不展示 diff 区（也就不会先停在文件顶部再等一次跳转）。
+  // 读取很快时静默等待，避免闪一下加载态。
+  const needsFullContent = !!active && active.canonical && !active.reverted && active.patch.trim().length > 0;
+  const activeContentReady = !!active && fileContent[active.displayFile] !== undefined;
+  const waitingForContent = needsFullContent && !activeContentReady;
+  const [showContentLoading, setShowContentLoading] = useState(false);
+  useEffect(() => {
+    if (!waitingForContent) {
+      setShowContentLoading(false);
+      return;
     }
-    return result;
-  }, [pairs, language]);
+    const timer = setTimeout(() => setShowContentLoading(true), CONTENT_LOADING_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [waitingForContent, active?.displayFile]);
+
+  // 虚拟列表按需渲染，只把前 MAX_RENDER_LINES 行交给它；高亮下沉到行组件，
+  // 这里不再整份预计算。
+  const renderPairs = useMemo(() => {
+    if (!pairs) return [];
+    return pairs.length > MAX_RENDER_LINES ? pairs.slice(0, MAX_RENDER_LINES) : pairs;
+  }, [pairs]);
 
   const truncated = !!pairs && pairs.length > MAX_RENDER_LINES;
 
   // 修改点定位：连续的增删行合并为同一个修改点，只记录每个连续块的首个下标。
+  // 直接算在未高亮的 pair 上，首次定位不必等高亮完成。
   const diffPairIndices = useMemo(() => {
     const indices: number[] = [];
     let prevIsDiff = false;
-    highlightedPairs.forEach((pair, index) => {
+    renderPairs.forEach((pair, index) => {
       const isDiff = isDiffPair(pair);
       if (isDiff && !prevIsDiff) indices.push(index);
       prevIsDiff = isDiff;
     });
     return indices;
-  }, [highlightedPairs]);
+  }, [renderPairs]);
 
   const totalDiffs = diffPairIndices.length;
   diffPairIndicesRef.current = diffPairIndices;
@@ -674,74 +752,87 @@ export function CodeReviewDialog({
     void applyUndo({ kind: "all" }, "all");
   };
 
-  const isHunkUndoing = (hunkIdx: number, changeIdx: number) =>
-    !!active && undoingKey === `hunk:${active.displayFile}:${hunkIdx}:${changeIdx}`;
-
   const fileUndoing = !!active && undoingKey === `file:${active.displayFile}`;
   const allUndoing = undoingKey === "all";
 
+  // 行组件通过 ref 拿到撤销回调：函数引用不再参与 memo 比较，
+  // 否则每次父组件重渲染都会让所有可见行失效。
+  useLayoutEffect(() => {
+    onHunkUndoRef.current = handleHunkUndo;
+  });
+
+  /**
+   * 定位到第 cursor 个修改点。
+   *
+   * 直接交给虚拟列表按行下标滚到居中位置，不再先查 DOM / 找 fallback 行：
+   * 目标行在文件深处时一定没被渲染，查 DOM 必然失败，只能退回“按估算行高猜一个位置”，
+   * 这一猜就是首次打开时那段看起来像延迟的无效滚动。
+   */
   const scrollToDiff = (cursor: number, smooth = false) => {
     const container = diffScrollRef.current;
-    if (!container) return;
-    const indices = diffPairIndicesRef.current;
-    const pairIndex = indices[cursor];
+    const rows = rowsRef.current;
+    if (!container || !rows) return;
+    const pairIndex = diffPairIndicesRef.current[cursor];
     if (pairIndex === undefined) return;
 
-    const scrollTargetToCenter = (el: Element) => {
-      const containerRect = container.getBoundingClientRect();
-      const targetRect = el.getBoundingClientRect();
-      const relativeTop = targetRect.top - containerRect.top + container.scrollTop;
-      const centerOffset = relativeTop - container.clientHeight / 2 + targetRect.height / 2;
-      container.scrollTo({ top: Math.max(0, centerOffset), behavior: smooth ? "smooth" : "auto" });
-    };
-
-    // split 视图下左右两列行数不同，优先以右列（修改后内容）定位。
-    const queryTarget = (idx: number): Element | null => {
-      const right = container.querySelector(
-        `.chat-review-col.right [data-review-diff-index="${idx}"]`,
-      );
-      return right ?? container.querySelector(`[data-review-diff-index="${idx}"]`);
-    };
-
-    const target = queryTarget(pairIndex);
-    if (target) {
-      scrollTargetToCenter(target);
-      return;
-    }
-    // 目标行可能因「隐藏被删除行」而未渲染，向后找下一个可见的修改点。
-    for (let index = cursor; index < indices.length; index += 1) {
-      const fallback = queryTarget(indices[index]);
-      if (fallback) {
-        scrollTargetToCenter(fallback);
-        return;
-      }
-    }
-    // 虚拟列表中目标行尚未挂载时，先按估算行高定位；下一帧虚拟器会挂载
-    // 目标附近的行，随后用户仍可继续使用导航按钮精确定位。
-    container.scrollTo({
-      top: Math.max(0, pairIndex * 26 - container.clientHeight / 2),
-      behavior: smooth ? "smooth" : "auto",
+    rows.scrollToIndex(pairIndex, smooth ? "smooth" : "auto");
+    if (smooth) return;
+    // 虚拟列表对尚未测量的行只能按固定行高估算，换行行会让位置略微偏移：
+    // 下一帧目标行渲染出来后再居中一次，且只在明显偏离时校正，
+    // 避免“到位后又跳一下”。
+    requestAnimationFrame(() => {
+      const scrollContainer = diffScrollRef.current;
+      const target = scrollContainer?.querySelector(`[data-review-row-index="${pairIndex}"]`);
+      if (!scrollContainer || !target) return;
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      if (targetRect.top >= containerRect.top + 24 && targetRect.bottom <= containerRect.bottom - 24) return;
+      const relativeTop = targetRect.top - containerRect.top + scrollContainer.scrollTop;
+      scrollContainer.scrollTo({
+        top: Math.max(0, relativeTop - scrollContainer.clientHeight / 2 + targetRect.height / 2),
+      });
     });
   };
 
+  // 行集合是否已经稳定到可以定位：补丁视图（无法规范化/没有完整内容可用）
+  // 或完整文件对比（规范化补丁 + 磁盘内容都就绪）。
+  // 规范化状态（canonical）和文件内容都会异步到达，每变一次行下标就整体洗一次牌，
+  // 提前定位只会先停在一个临时位置，等下一次变化再纠正 —— 这就是“延迟一会儿才跳”。
+  const diffLayoutReady = !active
+    || !active.canonical
+    || activeContentReady
+    || active.patch.trim().length === 0;
+  // 视图模式也算行集合的一部分：unified/split 的行结构与行高不同，切换后要立即
+  // 重新定位，而不是从旧偏移平滑滚过去。
+  const diffLayoutKey = active
+    ? `${active.displayFile}::${active.canonical ? "full" : "patch"}::${viewMode}`
+    : "";
+
   // 默认定位到当前文件的第一个变化点。
-  // 用 useLayoutEffect（commit 后、paint 前同步执行）立即定位，无帧延迟、无闪烁。
-  // 打开瞬间用补丁行对定位（不等文件内容读取完成），文件内容读取完成后若修改点位置
-  // 变化则平滑过渡到完整对比的精确位置；文件已缓存时打开即精确、无延迟。
-  // 依赖含 open：重新打开同一文件时 scrolledRef 已在打开时重置，会再次定位。
+  // 用 useLayoutEffect（commit 后、paint 前执行）：行集合稳定后的第一帧就已经
+  // 在修改点上，没有可见的滚动过程。行集合变化（切换文件、规范化完成、文件内容
+  // 读回、切换视图）会以 auto 重新定位；同一行集合内翻页仍沿用平滑滚动。
   useLayoutEffect(() => {
     if (!open || !active || pairs === null) return;
+    if (!diffLayoutReady) return;
     if (diffPairIndices.length === 0) return;
-    const key = active.displayFile;
-    const contentReady = fileContent[key] !== undefined;
-    const isFirst = scrolledRef.current !== key;
-    if (isFirst) scrolledRef.current = key;
-    // 用户可能在文件内容加载前已翻页，定位到当前游标而非总是第一个。
+    if (!rowsRef.current) return;
+    const isFirst = scrolledRef.current !== diffLayoutKey;
+    if (isFirst) scrolledRef.current = diffLayoutKey;
+    // 用户可能已翻页，定位到当前游标而非总是第一个。
     const cursor = Math.min(diffCursor, diffPairIndices.length - 1);
     if (cursor !== diffCursor) setDiffCursor(cursor);
-    // 首次（打开/切换文件）立即 auto 定位；内容升级为完整对比后平滑过渡，避免突兀跳动。
-    scrollToDiff(cursor, !isFirst && contentReady);
-  }, [open, active, pairs, diffPairIndices, fileContent, diffCursor]);
+    scrollToDiff(cursor, !isFirst);
+  }, [
+    open,
+    active,
+    pairs,
+    diffPairIndices,
+    fileContent,
+    diffCursor,
+    diffLayoutReady,
+    diffLayoutKey,
+  ]);
 
   const goPrevDiff = () => {
     const next = Math.max(0, diffCursor - 1);
@@ -1015,7 +1106,7 @@ export function CodeReviewDialog({
                   <div className="chat-review-diff" ref={diffScrollRef}>
                     {fileReverted ? (
                       <div className="chat-review-empty">已撤销此文件的所有修改</div>
-                    ) : pairs === null ? (
+                    ) : pairs === null || showContentLoading ? (
                       <div className="chat-review-loading">
                         <Loader2 className="chat-review-spin" size={16} />
                         <span>{uiText.review.loading}</span>
@@ -1023,14 +1114,17 @@ export function CodeReviewDialog({
                     ) : viewMode === "split" ? (
                       <div className="chat-review-split">
                         <ReviewVirtualRows
-                          pairs={highlightedPairs}
+                          ref={rowsRef}
+                          pairs={renderPairs}
                           viewMode="split"
                           showDeletedInRight={showDeletedInRight}
+                          language={language}
                           scrollRef={diffScrollRef}
+                          displayFile={active.displayFile}
                           undoable={!!active.undoable}
                           undoBusy={undoBusy}
-                          isHunkUndoing={isHunkUndoing}
-                          onHunkUndo={handleHunkUndo}
+                          undoingKey={undoingKey}
+                          onHunkUndoRef={onHunkUndoRef}
                         />
                         {truncated && (
                           <div className="chat-review-truncated">{uiText.review.truncated(MAX_RENDER_LINES)}</div>
@@ -1039,14 +1133,17 @@ export function CodeReviewDialog({
                     ) : (
                       <div className="chat-review-unified">
                         <ReviewVirtualRows
-                          pairs={highlightedPairs}
+                          ref={rowsRef}
+                          pairs={renderPairs}
                           viewMode="unified"
                           showDeletedInRight={false}
+                          language={language}
                           scrollRef={diffScrollRef}
+                          displayFile={active.displayFile}
                           undoable={!!active.undoable}
                           undoBusy={undoBusy}
-                          isHunkUndoing={isHunkUndoing}
-                          onHunkUndo={handleHunkUndo}
+                          undoingKey={undoingKey}
+                          onHunkUndoRef={onHunkUndoRef}
                         />
                         {truncated && (
                           <div className="chat-review-truncated">{uiText.review.truncated(MAX_RENDER_LINES)}</div>

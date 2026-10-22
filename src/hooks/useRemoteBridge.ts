@@ -444,9 +444,22 @@ export function flushPendingMessageUpdates(
   pendingUpdates.clear();
 }
 
-type RemoteMessagePublishIntent =
+export type RemoteMessagePublishIntent =
   | { type: "session.message.upsert"; sessionId: string; message: ChatMessage }
   | { type: "session.messages.replace"; sessionId: string; messages: ChatMessage[] };
+
+/**
+ * 没有远程客户端时，流式 upsert 的 sanitize + IPC structured clone 是纯浪费
+ * ——主进程缓存只有客户端 session.get 会读。跳过它；下一个回合边界的
+ * replace 仍会带上权威全量状态，客户端连上来的瞬间由快照和后续 upsert 补齐。
+ */
+export function shouldPublishMessageUpdate(
+  update: RemoteMessagePublishIntent,
+  remoteClientCount: number,
+): boolean {
+  if (remoteClientCount > 0) return true;
+  return update.type === "session.messages.replace";
+}
 
 function coalescePendingMessageIntent(
   pending: RemoteMessagePublishIntent | undefined,
@@ -569,6 +582,29 @@ export function useRemoteBridge({
       configs,
     });
   }, [getPendingInteraction, publish]);
+
+  // 远程客户端数量决定流式 upsert 是否值得 sanitize + IPC 序列化。
+  // 启动时先拉一次快照（渲染层加载完成时可能已有客户端连着），之后靠事件更新。
+  const remoteClientCountRef = useRef(0);
+  useEffect(() => {
+    let cancelled = false;
+    void window.electronAPI.remoteGetAccessStatus()
+      .then((status) => {
+        if (!cancelled) remoteClientCountRef.current = Math.max(0, Number(status?.connectedClients) || 0);
+      })
+      .catch(() => undefined);
+    const unsubscribe = window.electronAPI.onRemoteClientsChanged((status) => {
+      const next = Math.max(0, Number(status?.connected) || 0);
+      const previous = remoteClientCountRef.current;
+      remoteClientCountRef.current = next;
+      // 门控期间跳过的流式 upsert 没进主进程缓存，客户端连上来的瞬间补全量快照。
+      if (previous === 0 && next > 0) publishSnapshot();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [publishSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -754,19 +790,11 @@ export function useRemoteBridge({
           const project = getProjectForSession(projects, sessionId);
           if (!project) continue;
           const sessionStatus = useProjectStore.getState().agentStatuses[sessionId] || "idle";
-          if (!shouldPublishRemoteMessagesReplace(previous, next, sessionStatus)) {
-            scheduleMessagePublish(sessionId, {
-              type: "session.message.upsert",
-              sessionId,
-              message: next[next.length - 1],
-            });
-          } else {
-            scheduleMessagePublish(sessionId, {
-              type: "session.messages.replace",
-              sessionId,
-              messages: next,
-            });
-          }
+          const intent: RemoteMessagePublishIntent = shouldPublishRemoteMessagesReplace(previous, next, sessionStatus)
+            ? { type: "session.messages.replace", sessionId, messages: next }
+            : { type: "session.message.upsert", sessionId, message: next[next.length - 1] };
+          if (!shouldPublishMessageUpdate(intent, remoteClientCountRef.current)) continue;
+          scheduleMessagePublish(sessionId, intent);
         }
         if (catalogTitleChanged) {
           publish({ type: "catalog", catalog: buildCatalog(projects, planModeRef.current, permissionModeRef.current), agents: remoteAgentsRef.current });
@@ -812,6 +840,11 @@ export function useRemoteBridge({
     for (const update of getRemoteInteractionUpdates(previous, pendingInteractions)) publish(update);
     publishedInteractionsRef.current = pendingInteractions;
   }, [pendingInteractions, publish]);
+
+  useEffect(() => window.electronAPI.onRemoteClientDisconnected(({ deviceId }) => {
+    // 设备离线后它留下的队列编辑锁必须释放，否则该条消息会一直卡住派发。
+    if (deviceId) useChatStore.getState().clearQueueEditLocksForDevice(deviceId);
+  }), []);
 
   useEffect(() => window.electronAPI.onRemoteCommand((command) => {
     void executeRemoteSessionCommand(command, {

@@ -34,6 +34,7 @@ import {
   GitBranch,
   GripVertical,
   History,
+  Image as ImageIcon,
   Link2,
   Lightbulb,
   LoaderCircle,
@@ -1674,12 +1675,19 @@ const MessageItem = memo(function MessageItem({
                 <ComposerMessageFlow document={orderedDocument} />
               ) : (
                 <>
-              {messagePresentation.attachments.map((attachment, index) => (
-                <span className={`message-text-attachment-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
-                  {attachment.kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
-                  <span>{attachment.label}</span>
-                </span>
-              ))}
+              {/* 图片已有缩略图时不重复显示同名芯片。 */}
+              {messagePresentation.attachments
+                .filter((attachment) => attachment.kind !== "image" || displayedImages.length === 0)
+                .map((attachment, index) => (
+                  <span className={`message-text-attachment-chip ${attachment.kind}`} key={`${attachment.kind}:${attachment.label}:${index}`}>
+                    {attachment.kind === "folder"
+                      ? <Folder size={13} />
+                      : attachment.kind === "image"
+                        ? <ImageIcon size={13} />
+                        : <FileText size={13} />}
+                    <span>{attachment.label}</span>
+                  </span>
+                ))}
               {message.sessionReferences?.map((reference) => (
                 <span className="message-reference-chip" key={reference.sourceSessionId}>
                   <Link2 size={11} />
@@ -2611,6 +2619,7 @@ export default function App() {
   const [updateError, setUpdateError] = useState("");
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const clientRef = useRef<RemoteClient | null>(null);
+  const editingQueueItemRef = useRef<RemoteQueuedMessage | null>(null);
   const activeHostRef = useRef<PairedHost | null>(null);
   const hostsRef = useRef<PairedHost[]>([]);
   const selectedSessionRef = useRef<string | null>(null);
@@ -2682,6 +2691,7 @@ export default function App() {
   projectsRef.current = projects;
   agentsRef.current = agents;
   configsRef.current = configs;
+  editingQueueItemRef.current = editingQueueItem;
   updateStageRef.current = updateStage;
   draftValueRef.current = { text: composer, document: composerDocument, referenceSessionIds: pendingReferenceIds, action: pendingAction };
   backNavigationStateRef.current = {
@@ -2701,6 +2711,32 @@ export default function App() {
     composerAddMenuOpen,
     commandBusy,
   };
+
+  // 编辑锁命令静默发送：不占用 commandBusy，也不弹全局错误横幅。
+  // 发送失败时桌面端会在设备断开时按 deviceId 兜底释放锁。
+  const sendQueueEditLock = useCallback((item: Pick<RemoteQueuedMessage, "id" | "sessionId">, locked: boolean) => {
+    if (demoMode) return;
+    const client = clientRef.current;
+    if (!client) return;
+    void client.request("session.queue.editLock", {
+      sessionId: item.sessionId,
+      queueItemId: item.id,
+      locked,
+    }).catch(() => undefined);
+  }, [demoMode]);
+
+  // 打开编辑：锁定这条队列消息，桌面端会暂停派发它（保持队列顺序），
+  // 直到关闭或保存后解锁。
+  const openQueueEditor = useCallback((item: RemoteQueuedMessage) => {
+    setEditingQueueItem(item);
+    sendQueueEditLock(item, true);
+  }, [sendQueueEditLock]);
+
+  const closeQueueEditor = useCallback(() => {
+    const item = editingQueueItemRef.current;
+    if (item) sendQueueEditLock(item, false);
+    setEditingQueueItem(null);
+  }, [sendQueueEditLock]);
 
   const flushCurrentDraft = useCallback(() => {
     if (draftSaveTimerRef.current) {
@@ -3383,6 +3419,9 @@ export default function App() {
 
   const leaveActiveHost = useCallback(() => {
     flushCurrentDraft();
+    // 断开连接前先解锁编辑中的队列消息（disconnect 之后命令发不出去，
+    // 桌面端要等 socket 关闭通知才会兜底清理）。
+    closeQueueEditor();
     const client = clientRef.current;
     clientRef.current = null;
     client?.disconnect();
@@ -3392,7 +3431,6 @@ export default function App() {
     setConnectionState("disconnected");
     setSelectedSessionId(null);
     setDrawerOpen(false);
-    setEditingQueueItem(null);
     setReloadConfirmOpen(false);
     setHistoryProjectId(null);
     setCreateProject(null);
@@ -3401,7 +3439,7 @@ export default function App() {
     setActionSheetOpen(false);
     setComposerAddMenuOpen(false);
     setPairingMode("closed");
-  }, [flushCurrentDraft]);
+  }, [closeQueueEditor, flushCurrentDraft]);
 
   const openSavedHost = useCallback((host: PairedHost, availability: HostAvailability) => {
     if (availability !== "online") {
@@ -3465,7 +3503,7 @@ export default function App() {
       return;
     }
     if (state.editingQueueItem) {
-      setEditingQueueItem(null);
+      closeQueueEditor();
       return;
     }
     if (state.reloadConfirmOpen) {
@@ -4352,8 +4390,8 @@ export default function App() {
   useEffect(() => {
     setReloadConfirmOpen(false);
     setReloadingSession(false);
-    setEditingQueueItem(null);
-  }, [selectedSessionId]);
+    closeQueueEditor();
+  }, [closeQueueEditor, selectedSessionId]);
 
   const guideQueuedMessage = useCallback(async (item: RemoteQueuedMessage) => {
     if (
@@ -4976,7 +5014,7 @@ export default function App() {
           key={`${selected.session.id}:${editingQueueItem.id}`}
           item={editingQueueItem}
           referenceCandidates={referenceCandidates}
-          onClose={() => setEditingQueueItem(null)}
+          onClose={closeQueueEditor}
           onSave={saveQueuedMessage}
         />
       )}
@@ -5412,7 +5450,7 @@ export default function App() {
                 disabled={commandBusy}
                 canGuide={selectedAgent?.supportsGuidance === true}
                 currentSessionRunning={selected.session.status === "running"}
-                onEdit={setEditingQueueItem}
+                onEdit={openQueueEditor}
                 onGuide={(item) => void guideQueuedMessage(item)}
                 onReorder={(itemId, toIndex) => void reorderQueuedMessage(itemId, toIndex)}
                 onRemove={(item) => void removeQueuedMessage(item)}

@@ -12,6 +12,7 @@
     "resolveJsonModule": true,
     "noEmit": true,
     "paths": {
+      "@/*": ["../src/*"],
       "@mobile/*": ["./src/*"],
       "@shared/*": ["../shared/*"]
     }

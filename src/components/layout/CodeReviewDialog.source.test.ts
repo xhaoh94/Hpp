@@ -131,7 +131,7 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("pair.changeIdx");
     expect(dialogSource).toContain("pair.changeStart");
     expect(dialogSource).toContain("pair.hunkIdx");
-    expect(dialogSource).toContain("renderUndoButton");
+    expect(dialogSource).toContain("chat-review-hunk-undo");
     expect(dialogSource).not.toContain("pair.hunkStart");
     expect(dialogSource).not.toContain("hunkStartMap.get(index)");
     expect(dialogSource).not.toContain("hunkStartMap");
@@ -140,9 +140,13 @@ describe("code review dialog", () => {
 
   it("keeps canonical hunk fields and derives the reverted state from the transaction", () => {
     expect(dialogSource).toContain("const fileReverted = !!active?.reverted;");
-    expect(dialogSource).toContain("if (pair.hunkIdx !== undefined) entry.hunkIdx = pair.hunkIdx;");
-    expect(dialogSource).toContain("if (pair.changeIdx !== undefined) entry.changeIdx = pair.changeIdx;");
-    expect(dialogSource).toContain("if (pair.changeStart) entry.changeStart = true;");
+    // 行组件直接读 FullDiffPair 上的 hunk/change 字段，不再整份复制成 HighlightedPair：
+    // 全量复制意味着全量高亮，会把首次定位推迟到几百毫秒之后。
+    expect(dialogSource).toContain("pair.changeStart");
+    expect(dialogSource).toContain("pair.hunkIdx !== undefined");
+    expect(dialogSource).not.toContain("entry.hunkIdx");
+    expect(dialogSource).not.toContain("entry.changeIdx");
+    expect(dialogSource).not.toContain("entry.changeStart");
   });
 
   it("serializes every undo command and disables all undo controls while busy", () => {
@@ -170,9 +174,11 @@ describe("code review dialog", () => {
   it("navigates between diff points from the header toolbar", () => {
     expect(dialogSource).toContain("goNextDiff");
     expect(dialogSource).toContain("goPrevDiff");
-    // 使用 container.scrollTo 手动居中（无平滑动画）定位到修改点。
-    expect(dialogSource).toContain("container.scrollTo");
+    // 定位交给虚拟列表按行下标滚动，不再靠查 DOM 找目标行（文件深处的目标行
+    // 一定没渲染，查不到就只能按估算行高乱猜一次）。
+    expect(dialogSource).toContain("scrollToIndex");
     expect(dialogSource).toContain("data-review-diff-index");
+    expect(dialogSource).toContain("data-review-row-index");
     expect(dialogSource).toContain("chat-review-nav");
   });
 
@@ -209,7 +215,7 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("EyeOff");
     expect(dialogSource).toContain("aria-pressed={showDeletedInRight}");
     // 虚拟行中右列仅在开关开启时复用被删除的左侧 cell。
-    expect(dialogSource).toContain("showDeletedInRight && pair.left?.cell.type === \"del\"");
+    expect(dialogSource).toContain("showDeletedInRight && pair.left?.type === \"del\"");
     expect(dialogSource).toContain("chat-review-split-row");
     expect(chatPanelStyles).toContain(".chat-review-split-row");
     expect(chatPanelStyles).toContain(".chat-review-col-line");
@@ -233,14 +239,27 @@ describe("code review dialog", () => {
     expect(dialogSource).toContain("scrollToDiff(cursor,");
     // useLayoutEffect：commit 后、paint 前同步定位，无帧延迟、无闪烁。
     expect(dialogSource).toContain("useLayoutEffect");
-    expect(dialogSource).not.toContain("requestAnimationFrame(() => {");
-    // 打开瞬间用补丁行对立即定位，不等文件内容读取完成；内容就绪后平滑过渡。
-    expect(dialogSource).toContain("contentReady");
-    expect(dialogSource).toContain("scrollToDiff(cursor, !isFirst && contentReady)");
+    // 等行集合稳定（规范化补丁 + 完整文件内容）后一次定位到位：
+    // 补丁视图的行下标和完整文件不一致，先定位再纠正就是用户感知到的“延迟一会儿才跳”。
+    expect(dialogSource).toContain("if (!diffLayoutReady) return;");
+    expect(dialogSource).toContain("scrollToDiff(cursor, !isFirst)");
+    // 行集合每变一次就 auto 重新定位一次（切换文件、规范化完成、内容读回）。
+    expect(dialogSource).toContain("const isFirst = scrolledRef.current !== diffLayoutKey;");
     // 重新打开同一文件也会再次定位：依赖含 open，且打开时重置 scrolledRef。
     expect(dialogSource).toContain("if (!open || !active || pairs === null) return;");
-    expect(dialogSource).toContain(
-      "[open, active, pairs, diffPairIndices, fileContent, diffCursor]",
-    );
+    expect(dialogSource).toContain("diffLayoutKey,");
+    // 视图切换也算行集合变化：切到 split/unified 后立即重新定位。
+    expect(dialogSource).toContain("::${viewMode}`");
+  });
+
+  it("starts the diff at the change point instead of parking at the file top", () => {
+    // 完整对比未就绪时先不展示 diff（也就不会先停在文件顶部），
+    // 读取很快时静默等待，避免加载态闪烁。
+    expect(dialogSource).toContain("CONTENT_LOADING_DELAY_MS");
+    expect(dialogSource).toContain("waitingForContent");
+    expect(dialogSource).toContain("showContentLoading");
+    // 高亮按可见行惰性计算，不能回到“整份 diff 一次性高亮”。
+    expect(dialogSource).not.toContain("highlightedPairs");
+    expect(dialogSource).toContain("const ReviewRow = memo(");
   });
 });

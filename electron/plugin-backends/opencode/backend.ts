@@ -14,7 +14,13 @@ import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProc
 import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
 import { normalizeOpenCodeSessionDiffResult, normalizeOpenCodeSessionDiffs } from "./session-diff";
 import {
+  getOpenCodeProtocol,
+  resolveOpenCodeProtocolId,
+  type OpenCodeProtocol,
+} from "./protocol";
+import {
   getCommandEnv,
+  getExecFileInvocation,
   getNpmPackageBinTarget,
   isWindowsShellShim,
   resolveCommand,
@@ -81,7 +87,39 @@ interface AgentForkResult {
 function resolveOpenCodeCommand(): string {
   const command = resolveCommand("opencode");
   if (!isWindowsShellShim(command)) return command;
-  return getNpmPackageBinTarget(command, "opencode-ai", join("bin", "opencode.exe")) || command;
+  // npm 全局 shim 指向真正的二进制；1.x 与 2.x 是不同的包，两个都要试，
+  // 否则装了 2.x 仍会拿到 .cmd shim（execFile 在 Windows 上无法直接执行它）。
+  for (const packageName of ["opencode-ai", "@opencode/cli"]) {
+    const target = getNpmPackageBinTarget(command, packageName, join("bin", "opencode.exe"));
+    if (target) return target;
+  }
+  return command;
+}
+
+/**
+ * `opencode --version` 的结果（每次进程内只探测一次）。
+ * null 表示还没探测过；undefined 表示探测失败。
+ */
+let detectedOpenCodeVersion: string | undefined | null = null;
+
+async function detectOpenCodeVersion(command: string): Promise<string | undefined> {
+  if (detectedOpenCodeVersion !== null) return detectedOpenCodeVersion;
+  detectedOpenCodeVersion = await new Promise<string | undefined>((resolve) => {
+    try {
+      const invocation = getExecFileInvocation(command, ["--version"], getCommandEnv());
+      execFile(invocation.command, invocation.args, { timeout: 5000, windowsHide: true }, (error, stdout) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        const firstLine = String(stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+        resolve(firstLine || undefined);
+      });
+    } catch {
+      resolve(undefined);
+    }
+  });
+  return detectedOpenCodeVersion;
 }
 
 interface PendingOpenCodeUIRequest {
@@ -92,6 +130,8 @@ interface PendingOpenCodeUIRequest {
 type OpenCodePromptPart =
   | { type: "text"; text: string }
   | { type: "file"; mime: string; filename: string; url: string };
+
+type HttpMethod = "POST" | "PUT" | "DELETE";
 
 interface OpenCodePromptBody {
   parts: OpenCodePromptPart[];
@@ -498,10 +538,13 @@ export function buildOpenCodeConfigContent(
   source: string | undefined,
   value: unknown,
   currentModel?: { provider: string; id: string } | null,
+  protocolId: "v1" | "v2" = "v1",
 ): string {
   const config = normalizeAgentCompactionConfig(value);
   const parsed = parseOpenCodeConfigContent(source);
+  const useV2 = protocolId === "v2";
   const providers = { ...asRecord(parsed.provider) };
+  const providersV2 = { ...asRecord(parsed.providers) };
   const agents = { ...asRecord(parsed.agent) };
   const compactionAgent = { ...asRecord(agents.compaction) };
   delete compactionAgent.model;
@@ -509,24 +552,39 @@ export function buildOpenCodeConfigContent(
 
   const customConfigured = isCustomAgentCompactionModelConfigured(config);
   if (customConfigured) {
-    const providerId = getAvailableCompactionProviderId(providers);
+    // 判断 id 是否被占用时把两种配置结构都算上。
+    const providerId = getAvailableCompactionProviderId({ ...providers, ...providersV2 });
     const custom = config.customModel;
-    providers[providerId] = {
-      npm: custom.api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible",
-      name: HPP_OPENCODE_COMPACTION_PROVIDER_NAME,
-      options: {
-        baseURL: custom.baseUrl,
-        ...(custom.apiKey ? { apiKey: custom.apiKey } : {}),
-      },
-      models: {
-        [custom.modelId]: {
-          name: custom.modelId,
-          reasoning: custom.reasoning,
-          attachment: false,
-          modalities: { input: ["text"], output: ["text"] },
-        },
-      },
+    const modelEntry = {
+      name: custom.modelId,
+      reasoning: custom.reasoning,
+      attachment: false,
+      modalities: { input: ["text"], output: ["text"] },
     };
+    if (useV2) {
+      // 2.x 的 provider 声明用 package/settings；推理模型走 openai 包。
+      providersV2[providerId] = {
+        package: custom.api === "openai-responses"
+          ? "@opencode/ai/providers/openai"
+          : "@opencode/ai/providers/openai-compatible",
+        name: HPP_OPENCODE_COMPACTION_PROVIDER_NAME,
+        settings: {
+          baseURL: custom.baseUrl,
+          ...(custom.apiKey ? { apiKey: custom.apiKey } : {}),
+        },
+        models: { [custom.modelId]: modelEntry },
+      };
+    } else {
+      providers[providerId] = {
+        npm: custom.api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible",
+        name: HPP_OPENCODE_COMPACTION_PROVIDER_NAME,
+        options: {
+          baseURL: custom.baseUrl,
+          ...(custom.apiKey ? { apiKey: custom.apiKey } : {}),
+        },
+        models: { [custom.modelId]: modelEntry },
+      };
+    }
     compactionAgent.model = `${providerId}/${custom.modelId}`;
   } else if (config.thinkingLevel !== "inherit" && currentModel?.provider && currentModel.id) {
     // OpenCode 仅在 compaction agent 显式指定模型时应用 variant。
@@ -542,9 +600,17 @@ export function buildOpenCodeConfigContent(
     ...parsed,
     provider: providers,
     agent: agents,
-    ...(!("permission" in parsed) ? { permission: "allow" } : {}),
+    ...(!useV2 && !("permission" in parsed) ? { permission: "allow" } : {}),
   };
-  if (customConfigured && Array.isArray(parsed.enabled_providers)) {
+  if (useV2) {
+    // 2.x 用 providers.* 声明渠道；用户原有的 provider.* 段在迁移期仍被接受，
+    // 所以这里只补 Hpp 需要注入的条目，不整体改写用户配置。
+    if (Object.keys(providersV2).length > 0) nextConfig.providers = providersV2;
+    // 2.x 的权限是 ordered rules（permissions 数组）；schema 细节还在演进，
+    // 这里不主动写权限，让 OpenCode 走默认策略，Hpp 在事件层自动批准。
+    delete nextConfig.permission;
+  }
+  if (!useV2 && customConfigured && Array.isArray(parsed.enabled_providers)) {
     const customProviderId = String(compactionAgent.model).split("/")[0];
     nextConfig.enabled_providers = [...new Set([...parsed.enabled_providers.map(String), customProviderId])];
   }
@@ -619,16 +685,47 @@ function parseHttpBody(body: string): unknown {
   }
 }
 
+function isMissingEndpointError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /failed \((?:(?:404)|(?:405))\)/.test(message);
+}
+
 function createHttpError(method: string, path: string, statusCode: number, body: string) {
   const detail = body.trim().slice(0, 500);
   return new Error(`OpenCode ${method} ${path} failed (${statusCode})${detail ? `: ${detail}` : ""}`);
 }
 
+/**
+ * 2.x 的部分路由把结果包在 `{ data: ... }` 里，V1 是裸对象/数组。
+ * 这里统一解包，解析逻辑两个版本共用。
+ */
+function unwrapData(value: unknown): unknown {
+  const record = asRecord(value);
+  return record.data !== undefined ? record.data : value;
+}
+
+function unwrapList(value: unknown): unknown[] {
+  const unwrapped = unwrapData(value);
+  if (Array.isArray(unwrapped)) return unwrapped;
+  const record = asRecord(unwrapped);
+  for (const key of ["items", "messages"]) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
+  }
+  return [];
+}
+
 function getUIAnswerValues(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String).filter(Boolean);
   const answer = asRecord(value);
-  const selected = Array.isArray(answer.selected) ? answer.selected : Array.isArray(answer.values) ? answer.values : null;
-  if (selected) return selected.map(String).filter(Boolean);
+  const collect = (candidate: unknown) => (
+    Array.isArray(candidate) ? candidate.map(String).filter(Boolean) : []
+  );
+  // 渲染端会同时带 values（选项值，如 once/always/reject）和 selected
+  // （展示用 label）；协议侧要的是前者，退回 selected 只是兜底。
+  const values = collect(answer.values);
+  if (values.length > 0) return values;
+  const selected = collect(answer.selected);
+  if (selected.length > 0) return selected;
   const scalar = answer.value ?? answer.answer ?? answer.label;
   return scalar === undefined || scalar === null || scalar === "" ? [] : [String(scalar)];
 }
@@ -644,11 +741,14 @@ function getPermissionReply(response: AgentUIResponse): "once" | "always" | "rej
 
 const OPENCODE_BUILTIN_COMMANDS = new Set(["init", "review"]);
 
-function normalizeOpenCodeCatalog(value: unknown, kind: "skill" | "command"): AgentActionCatalogEntry[] {
+function normalizeOpenCodeCatalog(rawValue: unknown, kind: "skill" | "command"): AgentActionCatalogEntry[] {
+  const value = unwrapData(rawValue);
   const source = Array.isArray(value)
     ? value
     : isRecord(value)
-      ? Object.entries(value).map(([name, item]) => ({ name, ...asRecord(item) }))
+      ? Object.entries(value)
+        .filter(([name]) => name !== "location")
+        .map(([name, item]) => ({ name, ...asRecord(item) }))
       : [];
   return source.flatMap((rawEntry) => {
     const entry = asRecord(rawEntry);
@@ -752,12 +852,37 @@ export class OpenCodeAgent {
   private settledCompactionIds = new Set<string>();
   private permissionMode: AgentPermissionMode = "auto";
   private hostSystemPrompt = "";
+  // 2.x 的会话级状态（agent/model+variant/instructions）已下发的签名，
+  // 没变就不重复发请求；换会话时由 createSession 清空。
+  private syncedAgent: string | null = null;
+  private syncedModelKey: string | null = null;
+  private syncedHostSystemPrompt: string | null = null;
+
+  /** 会话/进程切换后，2.x 的会话级 agent/model/instructions 需要重新下发。 */
+  private resetSessionRuntimeSync() {
+    this.syncedAgent = null;
+    this.syncedModelKey = null;
+    this.syncedHostSystemPrompt = null;
+  }
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
   private activeCompactionSignature = "";
   private openCodeConfigSource: string | undefined;
   private runtimeConfigPath: string | null = null;
   private actionKeys = new Set<string>();
   private eventBuffer: AgentEventBuffer;
+  /**
+   * 协议适配器：默认 V1，init() 里按 `opencode --version` 自动切到 V2。
+   * 连接/状态机与协议无关，只有路径、载荷和事件信封随版本变化。
+   */
+  private protocol: OpenCodeProtocol = getOpenCodeProtocol("v1");
+  /** HPP_OPENCODE_PROTOCOL 强制指定时不自动切换协议。 */
+  private protocolForced = false;
+  /**
+   * 2.x 的 server 默认要求认证（Authorization: Basic opencode:<password>）。
+   * 我们通过 OPENCODE_PASSWORD 注入固定密码，serve 会直接使用它，避免去解析
+   * stdout 里随机生成的密码。
+   */
+  private serverPassword = randomUUID();
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
@@ -774,7 +899,10 @@ export class OpenCodeAgent {
       && this.hostSystemPrompt === nextHostSystemPrompt
       && this.activeCompactionSignature === nextCompactionSignature
     ) {
-      if (existingSessionId) this.sessionId = existingSessionId;
+      if (existingSessionId && existingSessionId !== this.sessionId) {
+        this.sessionId = existingSessionId;
+        this.resetSessionRuntimeSync();
+      }
       return;
     }
     if (this.process && !this.isIdle()) {
@@ -792,14 +920,28 @@ export class OpenCodeAgent {
     this.sessionId = null;
     this.openCodeConfigSource = readOpenCodeConfigContent();
     this.runtimeConfigPath = join(tmpdir(), `hpp-opencode-${process.pid}-${randomUUID()}.json`);
-    await this.writeRuntimeConfig();
-    this.emitEvent({ type: "agent_init", agentId: "opencode" });
 
     const opencodeCommand = resolveOpenCodeCommand();
+    // 按用户实际安装的 CLI 版本自动选择协议：2.x 走 /api 路由与新事件信封。
+    // 必须在写 runtime config 之前确定，1.x/2.x 的渠道配置结构不同。
+    const cliVersion = await detectOpenCodeVersion(opencodeCommand);
+    const protocolOverride = String(process.env.HPP_OPENCODE_PROTOCOL || "").trim().toLowerCase();
+    this.protocolForced = protocolOverride === "v1" || protocolOverride === "1"
+      || protocolOverride === "v2" || protocolOverride === "2";
+    this.protocol = getOpenCodeProtocol(
+      resolveOpenCodeProtocolId(cliVersion, process.env.HPP_OPENCODE_PROTOCOL),
+    );
+    console.log(
+      `[opencode] protocol=${this.protocol.id}${cliVersion ? ` (cli ${cliVersion})` : " (cli version unknown)"}`,
+    );
+    await this.writeRuntimeConfig();
+    this.emitEvent({ type: "agent_init", agentId: "opencode" });
     const processEnv = getCommandEnv({
       OPENCODE_DISABLE_AUTOUPDATE: "true",
       // 使用进程专属临时配置，避免污染用户的 OpenCode 配置。
       OPENCODE_CONFIG: this.runtimeConfigPath,
+      // 2.x 的 serve 需要认证；固定密码避免解析随机输出。1.x 忽略该变量。
+      OPENCODE_PASSWORD: this.serverPassword,
     });
     // 即使父进程设置过内联配置，也必须移除该变量，确保本会话只读取
     // Hpp 生成的进程专属配置。
@@ -861,8 +1003,8 @@ export class OpenCodeAgent {
   /** Verify a session exists on the server */
   private async verifySession(sessionId: string): Promise<boolean> {
     try {
-      const result = await this.httpGet(`/session/${sessionId}`);
-      return asRecord(result).id !== undefined;
+      const result = asRecord(unwrapData(await this.httpGet(this.protocol.sessionPaths(sessionId))));
+      return result.id !== undefined;
     } catch {
       return false;
     }
@@ -875,13 +1017,23 @@ export class OpenCodeAgent {
         throw this.processError || new Error("OpenCode exited before becoming ready");
       }
       try {
-        const result = await this.httpGet("/global/health");
-        if (asRecord(result).healthy) {
+        const result = asRecord(await this.httpGet(this.protocol.healthPaths()));
+        // V1: { healthy: true }；V2: /api/info 返回 { version, pid, urls }。
+        if (result.healthy || typeof result.version === "string") {
           this.emitEvent({ type: "agent_ready", agentId: "opencode", mock: false });
           return;
         }
-      } catch {
-        // server not ready yet
+      } catch (error) {
+        // 版本探测失败时默认 V1。如果服务器根本不认 V1 的健康端点（2.x 只有
+        // /api/*），就有可能是探测失败选错了协议，这里自愈成 V2 再试。
+        if (
+          !this.protocolForced
+          && this.protocol.id === "v1"
+          && isMissingEndpointError(error)
+        ) {
+          this.protocol = getOpenCodeProtocol("v2");
+          console.log("[opencode] V1 health endpoint missing, switching to protocol=v2");
+        }
       }
       await new Promise((r) => setTimeout(r, 500));
     }
@@ -895,16 +1047,72 @@ export class OpenCodeAgent {
     if (this.sessionId) return this.sessionId;
 
     try {
-      const result = await this.httpPost("/session", {});
-      const sessionId = asRecord(result).id;
+      const result = asRecord(unwrapData(await this.httpPost(this.protocol.createSessionPaths(), {})));
+      const sessionId = result.id;
       if (sessionId !== undefined && sessionId !== null) {
         this.sessionId = String(sessionId);
+        // 2.x 的 agent/model/instructions 都是会话级状态：新会话必须重新下发。
+        this.resetSessionRuntimeSync();
         return this.sessionId;
       }
     } catch (e) {
       console.error("[opencode] createSession failed:", e);
     }
     return null;
+  }
+
+  /**
+   * 2.x 的 prompt/command 载荷没有 system/agent/variant 字段（Model.Ref 也只能
+   * 带一个默认 variant），这三项都由会话级状态决定，必须在发送前同步：
+   * agent → POST /api/session/:id/agent，model+variant → POST /api/session/:id/model，
+   * 宿主 system prompt → instructions 条目。
+   */
+  private async syncSessionRuntime(
+    agent: "plan" | "build",
+    model: { providerID: string; modelID: string } | undefined,
+    variant: string | undefined,
+    hostSystemPrompt: string,
+  ): Promise<void> {
+    if (!this.sessionId) return;
+    try {
+      if (this.protocol.agentPaths(this.sessionId) && this.syncedAgent !== agent) {
+        await this.httpSend("POST", this.protocol.agentPaths(this.sessionId) as string | string[], { agent });
+        this.syncedAgent = agent;
+      }
+    } catch (error) {
+      if (!isMissingEndpointError(error)) throw error;
+    }
+    try {
+      if (model && this.protocol.modelPaths(this.sessionId)) {
+        const key = `${model.providerID}:${model.modelID}:${variant ?? ""}`;
+        if (this.syncedModelKey !== key) {
+          const ref: UnknownRecord = { providerID: model.providerID, id: model.modelID };
+          if (variant) ref.variant = variant;
+          await this.httpSend("POST", this.protocol.modelPaths(this.sessionId) as string | string[], { model: ref });
+          this.syncedModelKey = key;
+        }
+      }
+    } catch (error) {
+      if (!isMissingEndpointError(error)) throw error;
+    }
+    try {
+      if (this.protocol.hostSystemPromptPaths(this.sessionId) && this.syncedHostSystemPrompt !== hostSystemPrompt) {
+        const paths = this.protocol.hostSystemPromptPaths(this.sessionId) as string | string[];
+        if (hostSystemPrompt) {
+          await this.httpPut(paths, { value: hostSystemPrompt });
+        } else {
+          // 宿主提示被清空时删除条目，避免复用旧会话遗留的 instructions。
+          await this.httpDelete(paths);
+        }
+        this.syncedHostSystemPrompt = hostSystemPrompt;
+      }
+    } catch (error) {
+      // instructions 是实验端点，同步失败只应退化成“宿主提示缺失”，
+      // 不能让整轮对话发送失败。
+      if (!isMissingEndpointError(error)) {
+        console.warn("[opencode] failed to sync host system prompt:", error);
+      }
+    }
   }
 
   /** Send a message to the opencode session */
@@ -974,6 +1182,8 @@ export class OpenCodeAgent {
         const variant = selectThinkingVariant(this.currentThinkingLevel, variants);
         if (variant) body.variant = variant;
       }
+      // 2.x 的 system/agent/model 都落到会话级状态上，发送前同步。
+      await this.syncSessionRuntime(body.agent, body.model, body.variant, hostSystemPrompt);
       if (selectedAction) {
         // OpenCode's native /command payload has no system field. Keep native
         // command/skill expansion intact instead of lowering host policy into
@@ -987,9 +1197,19 @@ export class OpenCodeAgent {
           ...(body.model ? { model: body.model } : {}),
           ...(body.variant ? { variant: body.variant } : {}),
         };
-        await this.httpPost(`/session/${this.sessionId}/command`, commandBody);
+        await this.httpPost(this.protocol.commandPaths(this.sessionId), this.protocol.commandBody(commandBody as unknown as UnknownRecord));
       } else {
-        await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
+        const result = unwrapData(await this.httpPost(
+          this.protocol.promptPaths(this.sessionId),
+          this.protocol.promptBody(body as unknown as UnknownRecord),
+        ));
+        // 2.x 不再广播 user 的 message.updated；prompt 响应里的 inbox user 就是
+        // 本轮 user 消息 id，diff 回读和 turn 元数据都依赖它。
+        const userMessageId = asRecord(result).id;
+        if (!this.guidancePendingResponse && typeof userMessageId === "string" && userMessageId) {
+          this.activeOpenCodeUserMessageIds.add(userMessageId);
+          this.activeOpenCodeUserMessageId = userMessageId;
+        }
       }
     } catch (e) {
       if (!this.isCurrentTurn(turnRevision)) return;
@@ -1036,7 +1256,19 @@ export class OpenCodeAgent {
     this.guidancePendingResponse = true;
     this.guidanceUserMessageId = null;
     try {
-      await this.httpPost(`/session/${this.sessionId}/prompt_async`, body);
+      // 引导可能带着新的 plan/模型选择，先同步会话级状态（失败不阻断引导）。
+      await this.syncSessionRuntime(body.agent, body.model, body.variant, hostSystemPrompt)
+        .catch((error) => console.warn("[opencode] guidance session sync failed:", error));
+      const result = unwrapData(await this.httpPost(
+        this.protocol.promptPaths(this.sessionId),
+        this.protocol.promptBody(body as unknown as UnknownRecord),
+      ));
+      // 2.x 的引导确认靠 session.inbox.delivered，这里先记住 prompt 响应里的
+      // inbox user id（1.x 由 message.updated 事件给出）。
+      const userMessageId = asRecord(result).id;
+      if (this.guidancePendingResponse && !this.guidanceUserMessageId && typeof userMessageId === "string" && userMessageId) {
+        this.guidanceUserMessageId = userMessageId;
+      }
     } catch (error) {
       this.guidancePendingResponse = false;
       this.guidanceUserMessageId = null;
@@ -1046,8 +1278,8 @@ export class OpenCodeAgent {
 
   async listActions(_options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
     const [skillsResult, commandsResult] = await Promise.allSettled([
-      this.httpGet("/skill"),
-      this.httpGet("/command"),
+      this.httpGet(this.protocol.skillsPaths()),
+      this.httpGet(this.protocol.commandsPaths()),
     ]);
     const actions = [
       ...(skillsResult.status === "fulfilled" ? normalizeOpenCodeCatalog(skillsResult.value, "skill") : []),
@@ -1097,46 +1329,68 @@ export class OpenCodeAgent {
     this.openCodeSubagentToolCallIdBySessionId.clear();
     this.partTokenUsage.clear();
 
+    const configuredEventPaths = this.protocol.eventPaths();
+    const eventPaths = Array.isArray(configuredEventPaths) ? configuredEventPaths : [configuredEventPaths];
     return new Promise((resolve, reject) => {
       let connected = false;
-      const req = http.get(
-        `http://${this.host}:${this.port}/event`,
-        { timeout: 10000 },
-        (res) => {
-          if (res.statusCode !== 200) {
-            res.resume();
-            this.eventSource = null;
-            req.destroy();
-            reject(new Error(`OpenCode event stream failed (${res.statusCode || 0})`));
+      const attempt = (remaining: string[]) => {
+        const [path, ...rest] = remaining;
+        if (!path) {
+          reject(new Error("OpenCode event stream failed for every candidate path"));
+          return;
+        }
+        const req = http.get(
+          `http://${this.host}:${this.port}${path}`,
+          { timeout: 10000, headers: this.authHeaders() },
+          (res) => {
+            if (res.statusCode !== 200) {
+              res.resume();
+              req.destroy();
+              // V2 的 /api/event 未落地时回退到 V1 的 /event。
+              if (!connected && rest.length > 0) {
+                attempt(rest);
+                return;
+              }
+              reject(new Error(`OpenCode event stream failed (${res.statusCode || 0})`));
+              return;
+            }
+            connected = true;
+            req.setTimeout(0);
+            res.setEncoding("utf-8");
+            res.on("data", (chunk: string) => {
+              if (this.eventSource !== req) return;
+              this.sseBuffer += chunk;
+              this.processSSEBuffer();
+            });
+            res.on("end", () => this.handleSSEDisconnect(req, "OpenCode event stream ended"));
+            res.on("aborted", () => this.handleSSEDisconnect(req, "OpenCode event stream was aborted"));
+            res.on("close", () => this.handleSSEDisconnect(req, "OpenCode event stream closed"));
+            res.on("error", (error) => this.handleSSEDisconnect(req, error.message));
+            resolve();
+          }
+        );
+
+        req.on("error", (error) => {
+          if (this.eventSource === req) this.eventSource = null;
+          if (!connected && rest.length > 0) {
+            attempt(rest);
             return;
           }
-          connected = true;
-          req.setTimeout(0);
-          res.setEncoding("utf-8");
-          res.on("data", (chunk: string) => {
-            if (this.eventSource !== req) return;
-            this.sseBuffer += chunk;
-            this.processSSEBuffer();
-          });
-          res.on("end", () => this.handleSSEDisconnect(req, "OpenCode event stream ended"));
-          res.on("aborted", () => this.handleSSEDisconnect(req, "OpenCode event stream was aborted"));
-          res.on("close", () => this.handleSSEDisconnect(req, "OpenCode event stream closed"));
-          res.on("error", (error) => this.handleSSEDisconnect(req, error.message));
-          resolve();
-        }
-      );
-
-      req.on("error", (error) => {
-        if (this.eventSource === req) this.eventSource = null;
-        if (!connected) reject(error);
-        else this.handleSSEDisconnect(req, error.message);
-      });
-      req.on("timeout", () => {
-        if (this.eventSource === req) this.eventSource = null;
-        req.destroy();
-        if (!connected) reject(new Error("OpenCode event stream timed out"));
-      });
-      this.eventSource = req;
+          if (!connected) reject(error);
+          else this.handleSSEDisconnect(req, error.message);
+        });
+        req.on("timeout", () => {
+          if (this.eventSource === req) this.eventSource = null;
+          req.destroy();
+          if (!connected && rest.length > 0) {
+            attempt(rest);
+            return;
+          }
+          if (!connected) reject(new Error("OpenCode event stream timed out"));
+        });
+        this.eventSource = req;
+      };
+      attempt(eventPaths);
     });
   }
 
@@ -1158,8 +1412,21 @@ export class OpenCodeAgent {
         if (!jsonStr) continue;
         let parsed: unknown;
         try { parsed = JSON.parse(jsonStr); } catch { continue; }
-        if (isRecord(parsed) && typeof parsed.type === "string") {
-          this.handleSSEEvent(parsed.type, parsed);
+        // V1 事件是 { type, properties }，V2 是 { id, type, time, context, payload }；
+        // 统一在协议适配层还原成 V1 形状，事件处理逻辑对两个版本共用。
+        const normalized = this.protocol.normalizeEvent(parsed);
+        if (normalized) {
+          if (process.env.HPP_OPENCODE_DEBUG_EVENTS) {
+            console.log(
+              "[opencode:event]",
+              normalized.type,
+              JSON.stringify(normalized.properties).slice(0, 400),
+            );
+          }
+          this.handleSSEEvent(normalized.type, {
+            type: normalized.type,
+            properties: normalized.properties,
+          });
         }
       }
     }
@@ -1299,7 +1566,10 @@ export class OpenCodeAgent {
             const requestId = props.id;
             const turnRevision = this.turnRevision;
             this.pendingUIRequests.set(requestId, { kind: "permission", sessionId: eventSessionId || undefined });
-            void this.httpPost(`/permission/${encodeURIComponent(props.id)}/reply`, { reply: "once" })
+            void this.httpPost(
+              this.protocol.permissionReplyPaths(eventSessionId || this.sessionId || "", String(props.id)),
+              this.protocol.permissionReplyBody("once"),
+            )
               .then(() => this.completePendingUIRequest(requestId, turnRevision))
               .catch((error) => {
                 if (this.turnRevision !== turnRevision || !this.pendingUIRequests.has(requestId)) return;
@@ -1332,15 +1602,50 @@ export class OpenCodeAgent {
         break;
       case "question.replied":
       case "question.rejected":
-      case "question.v2.replied":
-      case "question.v2.rejected":
-      case "permission.replied":
-      case "permission.v2.replied":
         {
           const requestId = typeof props.id === "string" ? props.id : typeof props.requestID === "string" ? props.requestID : "";
           if (requestId) this.completePendingUIRequest(requestId);
         }
         break;
+      case "session.inbox.enqueued":
+        // prompt 响应与事件存在竞态：如果 enqueued 先到，先用它记住引导的
+        // user 消息 id（inboxID 就是该 user 消息 id）。
+        if (
+          this.guidancePendingResponse
+          && !this.guidanceUserMessageId
+          && typeof props.inboxID === "string"
+          && props.inboxID
+        ) {
+          this.guidanceUserMessageId = props.inboxID;
+        }
+        break;
+      case "session.inbox.delivered":
+        // 2.x 真正开始处理引导消息的信号（prompt 响应只表示已入队）。
+        if (
+          this.guidancePendingResponse
+          && this.guidanceUserMessageId
+          && props.inboxID === this.guidanceUserMessageId
+        ) {
+          this.confirmGuidanceDelivered();
+        }
+        break;
+      case "token_usage": {
+        // 2.x 的 session.step.ended/failed 由协议层翻译成这个事件。
+        const inputTokens = Math.max(0, Number(props.inputTokens) || 0);
+        const outputTokens = Math.max(0, Number(props.outputTokens) || 0);
+        const cacheInputTokens = Math.max(0, Number(props.cacheInputTokens) || 0);
+        const contextTokens = Math.max(0, Number(props.contextTokens) || 0);
+        if (inputTokens <= 0 && outputTokens <= 0 && contextTokens <= 0) break;
+        this.emitEvent({
+          type: "token_usage",
+          inputTokens,
+          outputTokens,
+          cacheInputTokens,
+          ...(contextTokens > 0 ? { contextTokens } : {}),
+          contextPrecision: "official",
+        });
+        break;
+      }
       case "message.updated":
         if (info.role === "assistant") {
           if (info.summary) {
@@ -1368,11 +1673,7 @@ export class OpenCodeAgent {
             // 入队，不能据此移动引导气泡。OpenCode 真正开始处理该引导时会创建
             // 一条 parentID 指向该 user 消息的新 assistant 消息，这才与 Pi 的
             // guidance_delivered / message_start(user) 时机等价。
-            this.activeOpenCodeUserMessageIds.add(this.guidanceUserMessageId);
-            this.activeOpenCodeUserMessageId = this.guidanceUserMessageId;
-            this.guidancePendingResponse = false;
-            this.guidanceUserMessageId = null;
-            this.emitEvent({ type: "guidance_response_started" });
+            this.confirmGuidanceDelivered();
           }
         } else if (info.role === "user") {
           const summaryDiff = normalizeOpenCodeSessionDiffResult(asRecord(info.summary).diffs);
@@ -1583,6 +1884,9 @@ export class OpenCodeAgent {
         break;
       }
       case "session.status": {
+        // 2.x 的 status 只是 UI 状态，turn 收尾由 session.execution.* 决定；
+        // 透传给 idle 定时器会在工具执行中途误判结束。
+        if (this.protocol.executionLifecycle) break;
         const status = asRecord(props.status);
         const statusType = status.type || props.status;
         if (statusType === "busy") {
@@ -1624,7 +1928,35 @@ export class OpenCodeAgent {
         if (diffs.length > 0 && !this.activeTurnDiffsAuthoritative) this.activeTurnDiffs = diffs;
         break;
       }
+      case "aborted": {
+        // 2.x 的 execution.interrupted（inactivity/user/shutdown 等）翻译成 aborted。
+        // 用户主动 abort 时 turn 已经结束，这里靠 revision 做幂等。
+        const turnRevision = this.turnRevision;
+        if (!this.isCurrentTurn(turnRevision) || !this.turnActive) break;
+        const detail = typeof props.detail === "string" && props.detail.trim()
+          ? props.detail
+          : undefined;
+        this.emitCachedTurnDiffs();
+        this.turnRevision += 1;
+        this.clearTurnRuntime();
+        this.emitEvent({ type: "aborted", detail });
+        break;
+      }
       case "session.idle": {
+        if (this.protocol.executionLifecycle) {
+          // 2.x：session.execution.succeeded/failed/interrupted 是权威收尾信号，
+          // 立即走一次 idle 收尾（抓 diff、结束 turn）。
+          if (!this.turnActive || this.idleSettlementInFlight) break;
+          const turnRevision = this.turnRevision;
+          const settlementRevision = this.idleSettlementRevision;
+          const userMessageId = this.activeOpenCodeUserMessageId;
+          this.idleSettlementInFlight = true;
+          void this.finishIdleTurn(turnRevision, settlementRevision, userMessageId)
+            .finally(() => {
+              if (this.idleSettlementRevision === settlementRevision) this.idleSettlementInFlight = false;
+            });
+          break;
+        }
         // Don't end immediately - sub-agent may have finished but main agent continues
         // Schedule a delayed end; if session.status becomes "busy" again, the timer is cancelled
         this.scheduleIdleEnd();
@@ -1874,6 +2206,9 @@ export class OpenCodeAgent {
   }
 
   private scheduleIdleEnd() {
+    // 2.x 有明确的 session.execution.* 收尾信号；空闲 800ms 只代表当前 step
+    // 暂未产出增量（工具执行/思考），提前收尾会断开 SSE、丢掉后续输出。
+    if (this.protocol.executionLifecycle) return;
     this.cancelIdleTimer();
     if (!this.turnActive) return;
     if (this.pendingUIRequests.size > 0) {
@@ -1950,7 +2285,7 @@ export class OpenCodeAgent {
     if (!this.sessionId || !userMessageId) return;
     try {
       const result = await this.httpGet(
-        `/session/${encodeURIComponent(this.sessionId)}/diff?messageID=${encodeURIComponent(userMessageId)}`,
+        this.protocol.diffPaths(this.sessionId, userMessageId),
         2000,
       );
       if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
@@ -1972,10 +2307,10 @@ export class OpenCodeAgent {
       // 空的 message-scoped diff 既可能表示确实没有改动，也可能只是
       // summary 尚未写回。再读取一次消息列表，从已持久化的 user summary
       // 获取权威补丁，避免在 SSE 顺序稍晚时过早结束并丢失 diff。
-      const messages = await this.httpGet(
-        `/session/${encodeURIComponent(this.sessionId)}/message`,
+      const messages = this.protocol.normalizeMessages(unwrapList(await this.httpGet(
+        this.protocol.messagesPaths(this.sessionId),
         2000,
-      );
+      )));
       if (!this.isCurrentIdleSettlement(turnRevision, settlementRevision)) return;
       if (this.captureTurnSummaryDiffs(messages, userMessageId)) {
         this.emitCachedTurnDiffs();
@@ -2004,9 +2339,11 @@ export class OpenCodeAgent {
     }
 
     try {
-      const messages = await this.httpGet(`/session/${this.sessionId}/message`);
+      const messages = this.protocol.normalizeMessages(
+        unwrapList(await this.httpGet(this.protocol.messagesPaths(this.sessionId))),
+      );
       if (!isCurrent()) return;
-      if (Array.isArray(messages)) {
+      {
         const records = messages.map((message) => asRecord(message));
         // A summary assistant message is the persisted result of compaction,
         // not the response that should be copied into the chat bubble. Older
@@ -2090,7 +2427,8 @@ export class OpenCodeAgent {
     let errorMessage = "";
     if (this.sessionId) {
       try {
-        await this.httpPost(`/session/${this.sessionId}/abort`, {});
+        // 2.x 没有 abort，只有 POST /api/session/:id/interrupt。
+        await this.httpPost(this.protocol.abortPaths(this.sessionId), {});
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);
       }
@@ -2123,8 +2461,11 @@ export class OpenCodeAgent {
     }
 
     try {
-      const body = target.targetTurnId ? { messageID: target.targetTurnId } : {};
-      const result = asRecord(await this.httpPost(`/session/${sourceSessionId}/fork`, body));
+      // 2.x 的 fork 载荷是 { before: messageId }，1.x 是 { messageID }。
+      const body = target.targetTurnId
+        ? this.protocol.forkBody(target.targetTurnId)
+        : {};
+      const result = asRecord(unwrapData(await this.httpPost(this.protocol.forkPaths(sourceSessionId), body)));
       const forkedSessionId = typeof result.id === "string" ? result.id : "";
       if (!forkedSessionId) {
         return {
@@ -2157,7 +2498,47 @@ export class OpenCodeAgent {
     this.modelVariants.clear();
     this.actionKeys.clear();
     try {
-      const result = asRecord(await this.httpGet("/config/providers"));
+      const payload = unwrapData(await this.httpGet(this.protocol.modelsPaths()));
+      const result = asRecord(payload);
+      if (Array.isArray(payload)) {
+        const flatModels: AgentModel[] = [];
+        for (const rawModel of payload) {
+          const model = asRecord(rawModel);
+          if (model.enabled === false) continue;
+          const modelId = model.modelID ?? model.id;
+          const providerId = model.providerID ?? model.provider;
+          if (modelId === undefined || modelId === null || providerId === undefined || providerId === null) continue;
+          const variants = Array.isArray(model.variants)
+            ? model.variants.flatMap((variant) => {
+              // 2.x 的 Model.Variant 是对象（{ id, settings? }），不是字符串。
+              if (typeof variant === "string") return [variant];
+              const variantId = asRecord(variant).id;
+              return typeof variantId === "string" && variantId ? [variantId] : [];
+            })
+            : getModelVariants(model);
+          this.modelVariants.set(`${String(providerId)}:${String(modelId)}`, variants);
+          const thinkingLevels = normalizeOpenCodeThinkingLevels(variants);
+          const capabilities = asRecord(model.capabilities);
+          const input = capabilities.input;
+          const compatibility = asRecord(model.compatibility);
+          flatModels.push({
+            id: String(modelId),
+            name: String(model.name || modelId),
+            provider: String(providerId),
+            reasoning: capabilities.reasoning === true
+              || model.reasoning === true
+              || typeof compatibility.reasoningField === "string"
+              || thinkingLevels.some((level) => level !== "off"),
+            contextWindow: getOpenCodeContextWindow(model),
+            supportsImages: Array.isArray(input) ? input.includes("image") : modelSupportsImages(model),
+            supportedThinkingLevels: thinkingLevels,
+          });
+        }
+        if (flatModels.length > 0) {
+          this.models = flatModels;
+          return this.models;
+        }
+      }
       if (Array.isArray(result.providers)) {
         const models: AgentModel[] = [];
         for (const rawProvider of result.providers) {
@@ -2288,6 +2669,7 @@ export class OpenCodeAgent {
       this.clearTurnRuntime();
     }
     this.sessionId = null;
+    this.resetSessionRuntimeSync();
     this.activeCompactionSignature = "";
     this.models = [];
     this.modelVariants.clear();
@@ -2324,6 +2706,7 @@ export class OpenCodeAgent {
       this.currentProviderId && this.currentModelId
         ? { provider: this.currentProviderId, id: this.currentModelId }
         : null,
+      this.protocol.id,
     );
     await writeFile(this.runtimeConfigPath, `${content}\n`, "utf8");
   }
@@ -2340,11 +2723,39 @@ export class OpenCodeAgent {
 
   // ---- HTTP helpers ----
 
-  private httpGet(path: string, timeoutMs = 10000): Promise<unknown> {
+  /**
+   * 协议路径可以是候选列表：V2 优先 `/api/...`，个别端点未按 spec 落地时回退到
+   * V1 路径。只有 404/405 才继续尝试下一个候选，其它错误直接上抛。
+   */
+  private async httpGet(paths: string | string[], timeoutMs = 10000): Promise<unknown> {
+    const candidates = Array.isArray(paths) ? paths : [paths];
+    let lastError: unknown = new Error("OpenCode GET failed");
+    for (let index = 0; index < candidates.length; index += 1) {
+      const path = candidates[index];
+      try {
+        return await this.httpGetOnce(path, timeoutMs);
+      } catch (error) {
+        lastError = error;
+        if (index >= candidates.length - 1 || !isMissingEndpointError(error)) break;
+      }
+    }
+    throw lastError;
+  }
+
+  /** 2.x 的 server 认证头；1.x 没有该机制，带上也无害。 */
+  private authHeaders(): Record<string, string> {
+    const password = String(this.serverPassword || "");
+    if (!password) return {};
+    return {
+      authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
+    };
+  }
+
+  private httpGetOnce(path: string, timeoutMs: number): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const req = http.get(
         `http://${this.host}:${this.port}${path}`,
-        { timeout: timeoutMs },
+        { timeout: timeoutMs, headers: this.authHeaders() },
         (res) => {
           let body = "";
           res.on("data", (chunk) => (body += chunk));
@@ -2363,14 +2774,47 @@ export class OpenCodeAgent {
     });
   }
 
-  private httpPost(path: string, data: unknown): Promise<unknown> {
+  private async httpPost(paths: string | string[], data: unknown): Promise<unknown> {
+    return this.httpSend("POST", paths, data);
+  }
+
+  private async httpDelete(paths: string | string[], data?: unknown): Promise<unknown> {
+    return this.httpSend("DELETE", paths, data);
+  }
+
+  private async httpPut(paths: string | string[], data?: unknown): Promise<unknown> {
+    return this.httpSend("PUT", paths, data);
+  }
+
+  private async httpSend(method: HttpMethod, paths: string | string[], data?: unknown): Promise<unknown> {
+    const candidates = Array.isArray(paths) ? paths : [paths];
+    let lastError: unknown = new Error(`OpenCode ${method} failed`);
+    for (let index = 0; index < candidates.length; index += 1) {
+      const path = candidates[index];
+      try {
+        return await this.httpSendOnce(method, path, data);
+      } catch (error) {
+        lastError = error;
+        if (index >= candidates.length - 1 || !isMissingEndpointError(error)) break;
+      }
+    }
+    throw lastError;
+  }
+
+  private httpSendOnce(method: HttpMethod, path: string, data?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const body = JSON.stringify(data);
+      const hasBody = data !== undefined;
+      const body = hasBody ? JSON.stringify(data) : "";
       const req = http.request(
         `http://${this.host}:${this.port}${path}`,
         {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+          method,
+          headers: {
+            ...(hasBody
+              ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
+              : {}),
+            ...this.authHeaders(),
+          },
           timeout: 30000,
         },
         (res) => {
@@ -2379,7 +2823,7 @@ export class OpenCodeAgent {
           res.on("end", () => {
             const statusCode = res.statusCode || 0;
             if (statusCode < 200 || statusCode >= 300) {
-              reject(createHttpError("POST", path, statusCode, resBody));
+              reject(createHttpError(method, path, statusCode, resBody));
               return;
             }
             resolve(parseHttpBody(resBody));
@@ -2388,7 +2832,7 @@ export class OpenCodeAgent {
       );
       req.on("error", reject);
       req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-      req.write(body);
+      if (hasBody) req.write(body);
       req.end();
     });
   }
@@ -2421,20 +2865,43 @@ export class OpenCodeAgent {
     const kind = pending.kind;
     const turnRevision = this.turnRevision;
 
+    // 2.x 的回复路由挂在 session 下，需要请求所属会话；子 Agent 的交互用事件里的
+    // sessionID，普通交互回落到当前会话。
+    const requestSessionId = pending.sessionId || this.sessionId || "";
     if (kind === "permission") {
-      await this.httpPost(`/permission/${encodeURIComponent(requestId)}/reply`, {
-        reply: getPermissionReply(response),
-      });
+      await this.httpPost(
+        this.protocol.permissionReplyPaths(requestSessionId, requestId),
+        this.protocol.permissionReplyBody(getPermissionReply(response)),
+      );
     } else if (response.cancelled === true) {
-      await this.httpPost(`/question/${encodeURIComponent(requestId)}/reject`, {});
+      // 2.x 取消问卷是 DELETE /form/:id，1.x 是 POST /question/:id/reject。
+      const reject = this.protocol.questionRejectRequest(requestSessionId, requestId);
+      await this.httpSend(reject.method, reject.paths, reject.data);
     } else {
       const rawAnswers = Array.isArray(response.answers) ? response.answers : [];
       const answers = rawAnswers.length > 0
         ? rawAnswers.map(getUIAnswerValues)
         : [[String(response.text || response.value || "")].filter(Boolean)];
-      await this.httpPost(`/question/${encodeURIComponent(requestId)}/reply`, { answers });
+      await this.httpPost(
+        this.protocol.questionReplyPaths(requestSessionId, requestId),
+        this.protocol.questionReplyBody(requestSessionId, requestId, answers),
+      );
     }
     this.completePendingUIRequest(requestId, turnRevision);
+  }
+
+  /**
+   * 引导消息真正被处理的时刻：1.x 看 parentID 指向该 user 消息的新 assistant
+   * 消息，2.x 看 session.inbox.delivered（inboxID 就是该 user 消息 id）。
+   * 两者都在「已入队」之后，因此可以用来移动引导气泡。
+   */
+  private confirmGuidanceDelivered() {
+    if (!this.guidanceUserMessageId) return;
+    this.activeOpenCodeUserMessageIds.add(this.guidanceUserMessageId);
+    this.activeOpenCodeUserMessageId = this.guidanceUserMessageId;
+    this.guidancePendingResponse = false;
+    this.guidanceUserMessageId = null;
+    this.emitEvent({ type: "guidance_response_started" });
   }
 
   // step part 的 tokens（input/output/reasoning/cache）随流式输出可能多次更新，

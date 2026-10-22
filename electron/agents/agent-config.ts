@@ -279,6 +279,19 @@ export async function setAgentBackendModelsVisible(
   }
 }
 
+/**
+ * 开启 MCP 时必须有一个能"够到" MCP 工具的扩展：MCP 的默认 exposure 是
+ * `codemode`，没有 codemode/tool_search 时工具对模型不可见，Pi 每次会话都会
+ * 发「MCP tools are only reachable…」警告。这里在配置层做联动，保证 UI 显示
+ * 与实际运行一致（用户显式选了 tool_search 时不强加 codemode）。
+ */
+function withMcpReachableTool(enabled: string[], known: Set<string>): string[] {
+  if (!enabled.includes("mcp")) return enabled;
+  if (enabled.includes("codemode") || enabled.includes("tool_search")) return enabled;
+  if (!known.has("codemode")) return enabled;
+  return [...enabled, "codemode"];
+}
+
 async function getBuiltinExtensionDeclaration(
   agentId: string,
 ): Promise<AgentBuiltinExtensionCapabilities | undefined> {
@@ -302,8 +315,16 @@ export async function getAgentBuiltinExtensions(agentId: string): Promise<string
     const saved = Array.isArray(all[agentId]) ? all[agentId].map(String) : undefined;
     // 存过的值只保留插件仍声明的 id：插件升级删掉某个扩展后不该留下幽灵开关。
     const known = new Set(declaration.options.map((option) => option.id));
-    const enabled = (saved ?? declaration.defaultEnabled).filter((id) => known.has(id));
-    return [...new Set(enabled)];
+    const resolved = [...new Set((saved ?? declaration.defaultEnabled).filter((id) => known.has(id)))];
+    const enabled = withMcpReachableTool(resolved, known);
+    if (enabled.length !== resolved.length) {
+      // 老配置（只开了 MCP）自动补齐，保证下次读取和 UI 显示一致。
+      await updateSettings((settings) => {
+        const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
+        settings[BUILTIN_EXTENSIONS_KEY] = { ...all, [agentId]: enabled };
+      });
+    }
+    return enabled;
   } catch {
     return [];
   }
@@ -331,7 +352,10 @@ export async function setAgentBuiltinExtensions(
       throw new Error("当前 Agent 不允许修改内置扩展开关。");
     }
     const known = new Set(declaration.options.map((option) => option.id));
-    const next = [...new Set((enabledIds || []).map(String).filter((id) => known.has(id)))];
+    const next = withMcpReachableTool(
+      [...new Set((enabledIds || []).map(String).filter((id) => known.has(id)))],
+      known,
+    );
     await updateSettings((settings) => {
       const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
       settings[BUILTIN_EXTENSIONS_KEY] = { ...all, [agentId]: next };

@@ -2,6 +2,7 @@ import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme,
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
+import { execFile } from "child_process";
 import { is } from "@electron-toolkit/utils";
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { registerFileHandlers } from "./ipc/file-handlers";
@@ -20,11 +21,13 @@ import {
 import { AppShutdownCoordinator } from "./app-shutdown";
 import { detectDesktopEnvironment, getLinuxChromiumSwitches } from "./linux-desktop";
 import { getDefaultCloseToTray, resolveCloseToTraySetting } from "../shared/desktop-platform";
+import { createLocalMediaServer, type LocalMediaServer } from "./local-media-server";
 
 const env = detectDesktopEnvironment();
 // Bump the dev AppUserModelID when the taskbar icon changes to bypass
 // Windows' icon cache, which otherwise keeps showing the stale icon.
 const WINDOWS_APP_ID = is.dev ? "com.hpp.app.dev.v5" : "com.hpp.app";
+
 
 const isHttpUrl = (url: string): boolean => /^https?:\/\//i.test(url);
 
@@ -53,6 +56,7 @@ const DEFAULT_CLOSE_TO_TRAY = getDefaultCloseToTray(process.platform);
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let localMediaServer: LocalMediaServer | null = null;
 let closeToTray = DEFAULT_CLOSE_TO_TRAY;
 type WindowTheme = "system" | "light" | "dark";
 
@@ -439,6 +443,12 @@ if (singleInstanceLock) {
       await session.defaultSession.clearCache();
     }
 
+    // 视频预览走本地 HTTP 流（Chromium 拒绝自定义协议加载媒体）。
+    localMediaServer = await createLocalMediaServer().catch((error) => {
+      console.warn("[Hpp] local media server failed:", error);
+      return null;
+    });
+
     // 先把窗口建起来，让渲染进程尽早开始加载；读设置、起远程服务这类初始化放到
     // 后面，它们与渲染进程加载并行，不再叠加进首屏白屏时间。
     createWindow();
@@ -500,6 +510,7 @@ ipcMain.on("window:maximize", () => {
 });
 ipcMain.on("window:close", () => mainWindow?.close());
 
+ipcMain.handle("media:getBaseUrl", () => localMediaServer?.baseUrl || "");
 ipcMain.handle("app:getVersion", () => app.getVersion());
 ipcMain.handle("app:getEnv", () => ({
   platform: process.platform,
@@ -525,6 +536,47 @@ ipcMain.handle("app:setTheme", (_event, theme: unknown) => {
 });
 ipcMain.handle("app:showNotification", (_event, options: { title?: string; body?: string }) => {
   return showSystemNotification(options.title || "Hpp", options.body || "");
+});
+
+/**
+ * 把本地文件放进系统剪贴板，让用户可以直接在资源管理器里粘贴。
+ *
+ * Windows 的文件剪贴板（CF_HDROP）Electron 没有 API，只能借 PowerShell 5.1 的
+ * Set-Clipboard -Path。它依赖交互式桌面会话，失败时自动退化为复制路径，
+ * 并通过 mode 告诉渲染层实际复制的是什么。
+ */
+ipcMain.handle("clipboard:writeFile", async (_event, filePath: string) => {
+  if (typeof filePath !== "string" || !filePath || !existsSync(filePath)) {
+    return { success: false, error: "File not found" };
+  }
+  if (process.platform !== "win32") {
+    clipboard.writeText(filePath);
+    return { success: true, mode: "path" as const };
+  }
+  const powershell = join(
+    process.env.SystemRoot || "C:/Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  if (!existsSync(powershell)) {
+    clipboard.writeText(filePath);
+    return { success: true, mode: "path" as const };
+  }
+  const escaped = filePath.replace(/'/g, "''");
+  const succeeded = await new Promise<boolean>((resolve) => {
+    execFile(
+      powershell,
+      ["-NoProfile", "-NonInteractive", "-Command", `Set-Clipboard -LiteralPath '${escaped}'`],
+      { windowsHide: true, timeout: 10000 },
+      (error) => resolve(!error),
+    );
+  });
+  if (succeeded) return { success: true, mode: "file" as const };
+  // PowerShell 在非交互桌面（远程/服务会话）下可能拿不到剪贴板，退化为路径。
+  clipboard.writeText(filePath);
+  return { success: true, mode: "path" as const };
 });
 
 ipcMain.handle("clipboard:writeImage", async (_event, imageDataUrl: string) => {

@@ -30,7 +30,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { AgentPluginRegistry } from "./agent-plugin-registry";
+import { AgentPluginRegistry, getCliPackageForVersion } from "./agent-plugin-registry";
 
 const backendModule = `
 export function createAgentBackend(context) {
@@ -91,6 +91,44 @@ async function createPluginSource(
   await writeFile(join(pluginDir, "agent.mjs"), moduleSource);
   return pluginDir;
 }
+
+describe("agent CLI package lines", () => {
+  const descriptor = {
+    packageName: "opencode-ai",
+    packages: [
+      { line: "v2", name: "@opencode/cli" },
+      { line: "v1", name: "opencode-ai" },
+    ],
+  } as Parameters<typeof getCliPackageForVersion>[0];
+
+  it("selects the npm package matching the installed major version", () => {
+    // V1/V2 是不同 npm 包；更新时必须按已安装主版本选包，
+    // 否则装 2.x 的用户会被「更新」静默装回 1.x。
+    expect(getCliPackageForVersion(descriptor, "2.0.32")?.name).toBe("@opencode/cli");
+    expect(getCliPackageForVersion(descriptor, "opencode v2.0.32")?.name).toBe("@opencode/cli");
+    expect(getCliPackageForVersion(descriptor, "1.19.3")?.name).toBe("opencode-ai");
+    // 版本未知（未安装）时用第一条（默认推荐线）。
+    expect(getCliPackageForVersion(descriptor)?.name).toBe("@opencode/cli");
+  });
+
+  it("falls back to the single packageName declaration", () => {
+    expect(getCliPackageForVersion({ id: "droid", packageName: "droid-cli" }, "1.2.3")?.name).toBe("droid-cli");
+    expect(getCliPackageForVersion({ id: "droid", packageName: "droid-cli" })).toEqual({
+      line: "v1",
+      name: "droid-cli",
+    });
+    expect(getCliPackageForVersion({ id: "droid" })).toBeUndefined();
+  });
+
+  it("knows the OpenCode package lines even for older plugins without packages", () => {
+    // 已发布的旧插件只声明了 opencode-ai；没有这层兜底，选 2.x 会装成
+    // opencode-ai@2.x 并报 npm ETARGET。
+    const legacy = { id: "opencode", packageName: "opencode-ai" };
+    expect(getCliPackageForVersion(legacy, "2.0.32")?.name).toBe("@opencode/cli");
+    expect(getCliPackageForVersion(legacy, "1.19.0")?.name).toBe("opencode-ai");
+    expect(getCliPackageForVersion(legacy, undefined)?.name).toBe("@opencode/cli");
+  });
+});
 
 describe("AgentPluginRegistry", () => {
   let tempRoot = "";
@@ -297,60 +335,7 @@ export function update() {
 
     await expect(registry.updateAgent("update-status-agent")).resolves.toMatchObject({
       success: true,
-      status: {
-        currentVersion: "2.0.0",
-        rollbackVersion: "1.0.0",
-        canRollback: true,
-      },
-    });
-  });
-
-  it("preserves rollback status without a failing post-rollback probe", async () => {
-    const source = await createPluginSource(
-      tempRoot,
-      "rollback-status-agent",
-      "1.0.0",
-      undefined,
-      `
-${backendModule}
-let stage = 0;
-export function getStatus() {
-  if (stage === 2) throw new Error("post-rollback probe should not run");
-  return {
-    installed: true,
-    currentVersion: stage === 0 ? "1.0.0" : "2.0.0",
-    updateAvailable: stage === 0,
-    canUpdate: true,
-  };
-}
-export function update(_context, options = {}) {
-  const target = options.versionSpec;
-  stage = target === "1.0.0" ? 2 : 1;
-  return {
-    success: true,
-    status: {
-      installed: true,
-      currentVersion: stage === 2 ? "1.0.0" : "2.0.0",
-      updateAvailable: false,
-      canUpdate: true,
-    },
-  };
-}
-`,
-    );
-    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
-    await expect(registry.updateAgent("rollback-status-agent", "2.0.0")).resolves.toMatchObject({
-      success: true,
-      status: { currentVersion: "2.0.0", canRollback: true },
-    });
-
-    await expect(registry.rollbackAgent("rollback-status-agent")).resolves.toMatchObject({
-      success: true,
-      status: {
-        currentVersion: "1.0.0",
-        rollbackVersion: undefined,
-        canRollback: false,
-      },
+      status: { currentVersion: "2.0.0" },
     });
   });
 

@@ -6,6 +6,7 @@ import {
   type ComposerDraftSnapshot,
   type PendingImage,
   type PendingPathAttachment,
+  type PendingVideo,
   type QueuedMessageEditableDraft,
 } from "@/stores/chat-store";
 import type { SessionReference } from "@/stores/project-store";
@@ -73,6 +74,20 @@ const parseSessionReference = (value: unknown): SessionReference | null => {
   return { sourceSessionId, sourceAgentId, sourceTitle, sourceUpdatedAt, addedAt, summary };
 };
 
+const parsePendingVideo = (value: unknown): PendingVideo | undefined => {
+  if (!isRecord(value)) return undefined;
+  const id = typeof value.id === "string" ? value.id : "";
+  const name = typeof value.name === "string" ? value.name : "";
+  const path = typeof value.path === "string" ? value.path : "";
+  if (!id || !name || !path) return undefined;
+  return {
+    id,
+    name,
+    path,
+    mimeType: typeof value.mimeType === "string" && value.mimeType ? value.mimeType : "video/mp4",
+  };
+};
+
 export function parseComposerDraftSnapshot(value: unknown): ComposerDraftSnapshot | undefined {
   if (!isRecord(value) || typeof value.text !== "string") return undefined;
   if (
@@ -85,9 +100,13 @@ export function parseComposerDraftSnapshot(value: unknown): ComposerDraftSnapsho
   const action = value.action === undefined ? undefined : parseAction(value.action);
   if (value.action !== undefined && !action) return undefined;
   const document = parseComposerDocument(value.document);
+  const pendingVideos = Array.isArray(value.pendingVideos)
+    ? value.pendingVideos.map(parsePendingVideo).filter((item): item is NonNullable<typeof item> => !!item)
+    : [];
   return {
     text: value.text,
     images: value.images.map(parseImage).filter((item): item is NonNullable<typeof item> => !!item),
+    ...(pendingVideos.length > 0 ? { pendingVideos } : {}),
     pendingFiles: value.pendingFiles.map(parsePendingFile).filter((item): item is NonNullable<typeof item> => !!item),
     pendingPathAttachments: value.pendingPathAttachments
       .map(parsePathAttachment)
@@ -107,6 +126,7 @@ export function createComposerDraftSnapshot(
   return {
     text: draft.text,
     images: draft.images.map((image) => ({ ...image })),
+    pendingVideos: (draft.pendingVideos || []).map((video) => ({ ...video })),
     pendingFiles: draft.pendingFiles.map((file) => ({ ...file })),
     pendingPathAttachments: draft.pendingPathAttachments.map((attachment) => ({ ...attachment })),
     sessionReferences: draft.sessionReferences.map((reference) => ({ ...reference })),
@@ -172,6 +192,7 @@ export function draftFromSnapshot(snapshot: ComposerDraftSnapshot): ChatDraft {
       ? cloneComposerDocument(snapshot.document)
       : legacyDocument(snapshot),
     pendingImages: restoreImages(snapshot.images),
+    pendingVideos: (snapshot.pendingVideos || []).map((video) => ({ ...video })),
     pendingFiles: snapshot.pendingFiles.map((file) => ({ ...file })),
     pendingPathAttachments: snapshot.pendingPathAttachments.map((attachment) => ({ ...attachment })),
     sessionReferences: snapshot.sessionReferences.map((reference) => ({ ...reference })),

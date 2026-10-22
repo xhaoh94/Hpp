@@ -159,9 +159,15 @@ const normalizeOneDiff = (rawDiff: unknown): OpenCodeSessionDiff | null => {
 };
 
 export function normalizeOpenCodeSessionDiffResult(value: unknown): NormalizedOpenCodeSessionDiffResult {
-  if (!Array.isArray(value)) return { recognized: false, diffs: [] };
-  if (value.length === 0) return { recognized: true, diffs: [] };
-  const diffs = value.map(normalizeOneDiff).filter((diff): diff is OpenCodeSessionDiff => !!diff);
+  // 2.x 的路由可能把结果包在 { data: [...] } 里（与 V1 的裸数组并存）。
+  const unwrapped: unknown = Array.isArray(value)
+    ? value
+    : Array.isArray(asRecord(value).data)
+      ? asRecord(value).data
+      : value;
+  if (!Array.isArray(unwrapped)) return { recognized: false, diffs: [] };
+  if (unwrapped.length === 0) return { recognized: true, diffs: [] };
+  const diffs = unwrapped.map(normalizeOneDiff).filter((diff): diff is OpenCodeSessionDiff => !!diff);
   return { recognized: diffs.length > 0, diffs };
 }
 

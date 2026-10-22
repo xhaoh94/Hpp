@@ -1,11 +1,13 @@
 import type {
   PendingFile,
   PendingPathAttachment,
+  PendingVideo,
   QueuedMessageImage,
 } from "@/stores/chat-store";
 import type { SessionReference } from "@/stores/project-store";
 import type { PreparedSessionMessage } from "@/lib/session-command-coordinator";
 import { buildSessionReferencesContext } from "@/lib/session-references";
+import { detectImageMimeType } from "@shared/image-data";
 import type { AgentActionInvocation } from "@shared/agent-actions";
 import {
   cloneComposerDocument,
@@ -45,6 +47,7 @@ const legacyComposerDocument = (input: BuildSessionMessagePayloadInput): Compose
 export type BuildSessionMessagePayloadInput = {
   text: string;
   images: QueuedMessageImage[];
+  pendingVideos?: PendingVideo[];
   pendingFiles: PendingFile[];
   pendingPathAttachments: PendingPathAttachment[];
   sessionReferences: SessionReference[];
@@ -72,6 +75,18 @@ export async function buildSessionMessagePayload(
     : legacyComposerDocument(input);
   const legacyDocumentImages = getComposerImageNodes(sourceDocument);
   const document = withoutComposerImages(sourceDocument);
+  // 视频和图片一样不放在可编辑文档里（草稿中的预览条单独管理），
+  // 发送时再注入 document，保证消息气泡里仍是一张视频卡片。
+  for (const video of input.pendingVideos || []) {
+    if (document.nodes.some((node) => node.type === "video" && node.id === video.id)) continue;
+    document.nodes.push({
+      id: video.id,
+      type: "video",
+      name: video.name,
+      path: video.path,
+      mimeType: video.mimeType || "video/mp4",
+    });
+  }
   const displayParts: string[] = [];
   const sendParts: string[] = [];
   const images: QueuedMessageImage[] = [];
@@ -98,6 +113,13 @@ export async function buildSessionMessagePayload(
     if (node.type === "path") {
       paths.push({ id: node.id, name: node.name, path: node.path, kind: node.kind });
       sendParts.push(`<${node.kind} path="${escapeXmlAttribute(node.path)}" />`);
+      continue;
+    }
+
+    if (node.type === "video") {
+      // 视频只在界面上独立显示，消息体里仍按路径附件交给 Agent（不传二进制）。
+      paths.push({ id: node.id, name: node.name, path: node.path, kind: "file" });
+      sendParts.push(`<file path="${escapeXmlAttribute(node.path)}" />`);
       continue;
     }
 
@@ -142,16 +164,25 @@ export async function buildSessionMessagePayload(
     sendContent = [input.forkContext, "", "<current_user_message>", sendContent, "</current_user_message>"].join("\n");
   }
 
-  if (!displayContent && images.length > 0) displayContent = images.map((image) => `[image: ${image.name}]`).join(" ");
+  // 只发图片、没有文字时不再往正文补 `[image: 名字]`：图片由 messageImages
+  // 单独渲染成缩略图，队列里也有「N 张图片」的兵托显示。写进正文反而会让
+  // 气泡里多出一串不是用户输入的文字（历史消息还会被会话快照带回来）。
   const messageImages = images.length > 0
     ? images.map(({ id, src, name }) => ({ id, src, name }))
     : undefined;
+  // 只信真实字节：声明的 mimeType 与实际内容不一致时（例如 SVG 被改名成
+  // .png、粘贴板 type 与内容不符），渠道会以 unsupported image 拒绝整次请求。
+  // 所以这里按 magic number 重新判定，拿不到的格式一律不发给模型。
   const agentImages = images.length > 0
-    ? images.map((image) => ({
-        type: "image" as const,
-        data: image.src.includes(",") ? image.src.slice(image.src.indexOf(",") + 1) : image.src,
-        mimeType: image.mimeType || "image/png",
-      }))
+    ? images.flatMap((image) => {
+        const detected = detectImageMimeType(image.src);
+        if (!detected) return [];
+        return [{
+          type: "image" as const,
+          data: image.src.includes(",") ? image.src.slice(image.src.indexOf(",") + 1) : image.src,
+          mimeType: detected,
+        }];
+      })
     : undefined;
   const sessionReferences = references.length > 0
     ? references.map(({ sourceSessionId, sourceTitle }) => ({ sourceSessionId, sourceTitle }))
@@ -171,6 +202,7 @@ export async function buildSessionMessagePayload(
     editableDraft: {
       text: editableText,
       images,
+      pendingVideos: (input.pendingVideos || []).map((video) => ({ ...video })),
       pendingFiles: files,
       pendingPathAttachments: paths,
       sessionReferences: references,

@@ -4,8 +4,11 @@ import { buildDiffSummary, type DiffLike } from "@shared/diff-summary";
 import { buildReviewDiff } from "@shared/patch-split";
 import type { ReviewUndoState } from "@shared/review-undo";
 import { uiText } from "@/i18n/text";
-import { LazyCodeReviewDialog } from "./LazyCodeReviewDialog";
+import { invalidateReviewUndoCache, loadReviewUndoState } from "@/lib/review-undo-cache";
+import { resolveProjectFilePath } from "@/lib/project-file-path";
+import { LazyCodeReviewDialog, preloadCodeReviewDialog } from "./LazyCodeReviewDialog";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
+import { FileContextMenu, type FileContextMenuState } from "@/components/shared/FileContextMenu";
 import { useEditorStore } from "@/stores/editor-store";
 
 type DiffBlockProps = {
@@ -24,8 +27,25 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewInitialFile, setReviewInitialFile] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
+  const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState | null>(null);
   const [undoState, setUndoState] = useState<ReviewUndoState | null>(null);
   const summary = useMemo(() => buildDiffSummary(diffs, projectPath), [diffs, projectPath]);
+
+  // 空闲时预取审核弹窗，点“审核”时不必再等 chunk 下载/解析才开始定位。
+  useEffect(() => {
+    const idle = (window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    }).requestIdleCallback;
+    if (typeof idle === "function") {
+      const handle = idle(() => preloadCodeReviewDialog(), { timeout: 1500 });
+      return () => {
+        (window as Window & { cancelIdleCallback?: (handle: number) => void })
+          .cancelIdleCallback?.(handle);
+      };
+    }
+    const timer = window.setTimeout(() => preloadCodeReviewDialog(), 300);
+    return () => window.clearTimeout(timer);
+  }, []);
   const reviewSources = useMemo(
     () => buildReviewDiff(diffs, projectPath).map((file) => ({
       file: file.file,
@@ -59,12 +79,13 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
     setUndoState(null);
     if (!projectPath || reviewSources.length === 0) return;
     let cancelled = false;
-    void window.electronAPI.loadReviewUndo({
+    // 走缓存：虚拟列表反复挂载时不再每次 IPC + 主进程重算 diff。
+    void loadReviewUndoState({
       reviewId,
       projectPath,
       files: reviewSources,
-    }).then((result) => {
-      if (!cancelled && result.success && result.state) setUndoState(result.state);
+    }).then((state) => {
+      if (!cancelled && state) setUndoState(state);
     });
     return () => {
       cancelled = true;
@@ -121,6 +142,14 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
                     setPreviewFile(fullPath);
                   }
                 }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setFileContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    path: resolveProjectFilePath(file.file, projectPath || ""),
+                  });
+                }}
                 title={file.file}
                 aria-haspopup="dialog"
               >
@@ -164,6 +193,16 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
 
       <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />
 
+      {fileContextMenu && (
+        <FileContextMenu
+          x={fileContextMenu.x}
+          y={fileContextMenu.y}
+          path={fileContextMenu.path}
+          projectPath={projectPath}
+          onClose={() => setFileContextMenu(null)}
+        />
+      )}
+
       <CodeReviewDialog
         open={reviewOpen}
         reviewId={reviewId}
@@ -171,7 +210,12 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
         projectPath={projectPath}
         initialFile={reviewInitialFile ?? undefined}
         onClose={() => setReviewOpen(false)}
-        onUndoStateChange={setUndoState}
+        onUndoStateChange={(state) => {
+          // 撤销已改写磁盘文件：作废该 review 的缓存，否则滚动回来时
+          // 卡片会拿着过期的「可撤销」摘要。
+          invalidateReviewUndoCache(reviewId, projectPath);
+          setUndoState(state);
+        }}
       />
     </section>
   );

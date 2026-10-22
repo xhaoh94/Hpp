@@ -307,4 +307,16 @@ describe("process event normalization", () => {
       state: "running",
     });
   });
+
+  it("does not stack the placeholder prefix when the prompt is already a placeholder", () => {
+    // 上游（Pi UI 请求兜底）已经写了「正在询问用户」，再拼一次就会得到
+    // 「正在询问用户: 正在询问用户」这种毫无信息量的标题。
+    expect(normalizeQuestionProcessEvent({
+      id: "request-2",
+      method: "select",
+      title: "正在询问用户",
+    })).toMatchObject({
+      title: "正在询问用户",
+    });
+  });
 });

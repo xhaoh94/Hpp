@@ -1,6 +1,6 @@
 export type AgentRuntimeOperationKind =
   | "update"
-  | "rollback"
+
   | "uninstall"
   | "session-dispose"
   | "plugin-install"

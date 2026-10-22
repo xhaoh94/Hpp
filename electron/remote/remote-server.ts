@@ -161,6 +161,7 @@ class RemoteAccessServer {
   private commandResults = new Map<string, Map<string, unknown>>();
   private inFlightCommandResults = new Map<string, Map<string, Promise<unknown>>>();
   private webRoot: string | null = null;
+  private lastNotifiedClientCount = -1;
 
   private get configPath() {
     return join(app.getPath("userData"), "hpp-data", "remote-access.json");
@@ -286,6 +287,7 @@ class RemoteAccessServer {
     return {
       enabled: config.enabled,
       running: !!this.httpServer,
+      connectedClients: this.connectedClientCount(),
       bindAddress: config.bindAddress,
       port: config.port,
       advertiseAddress: config.advertiseAddress || addresses[0] || "127.0.0.1",
@@ -295,6 +297,41 @@ class RemoteAccessServer {
       devices: config.devices.map(({ tokenHash: _tokenHash, ...device }) => device),
       error: this.runningError,
     };
+  }
+
+  private connectedClientCount(): number {
+    let count = 0;
+    for (const socket of this.sockets) {
+      if (socket.authenticated && socket.readyState === WebSocket.OPEN) count += 1;
+    }
+    return count;
+  }
+
+  // 客户端数量变化必须通知渲染层：没有客户端看着时，渲染层会跳过流式
+  // upsert 的 sanitize + IPC structured clone（见 useRemoteBridge 的门控），
+  // 客户端连上来的瞬间再由渲染层补全量快照。
+  private notifyRendererClientCount(): void {
+    const count = this.connectedClientCount();
+    if (count === this.lastNotifiedClientCount) return;
+    this.lastNotifiedClientCount = count;
+    const window = this.getWindow();
+    if (!window || window.webContents.isDestroyed()) return;
+    window.webContents.send("remote:clients", { connected: count });
+  }
+
+  // 设备最后一个 socket 断开时通知渲染层：渲染层据此释放该设备的队列编辑锁，
+  // 避免设备离线后锁悬挂、阻塞队列派发。同设备还有在线 socket（多标签页）时不通知。
+  private notifyRendererDeviceDisconnected(socket: AuthenticatedSocket): void {
+    const deviceId = socket.deviceId;
+    if (!deviceId) return;
+    const stillConnected = [...this.sockets].some((candidate) => (
+      candidate !== socket && candidate.authenticated === true &&
+      candidate.deviceId === deviceId && candidate.readyState === WebSocket.OPEN
+    ));
+    if (stillConnected) return;
+    const window = this.getWindow();
+    if (!window || window.webContents.isDestroyed()) return;
+    window.webContents.send("remote:clientDisconnected", { deviceId });
   }
 
   private getConnectionUrls() {
@@ -342,6 +379,7 @@ class RemoteAccessServer {
   private async stop() {
     for (const socket of this.sockets) socket.close(1001, "Remote access stopped");
     this.sockets.clear();
+    this.notifyRendererClientCount();
     this.webSocketServer?.close();
     this.webSocketServer = null;
     if (this.httpServer) {
@@ -491,6 +529,7 @@ class RemoteAccessServer {
           socket.deviceId = device.id;
           device.lastConnectedAt = new Date().toISOString();
           void this.saveConfig();
+          this.notifyRendererClientCount();
           this.sendResponse(socket, auth.requestId, "auth", {
             hostId: this.config!.hostId,
             hostName: hostname(),
@@ -518,8 +557,14 @@ class RemoteAccessServer {
     socket.on("close", () => {
       clearTimeout(authTimer);
       this.sockets.delete(socket);
+      this.notifyRendererClientCount();
+      this.notifyRendererDeviceDisconnected(socket);
     });
-    socket.on("error", () => this.sockets.delete(socket));
+    socket.on("error", () => {
+      this.sockets.delete(socket);
+      this.notifyRendererClientCount();
+      this.notifyRendererDeviceDisconnected(socket);
+    });
   }
 
   private async handleRemoteRequest(socket: AuthenticatedSocket, name: string, payload: Record<string, unknown>) {
@@ -557,7 +602,7 @@ class RemoteAccessServer {
         this.inFlightCommandResults.set(deviceId, deviceCommands);
       }
       let command: Promise<unknown>;
-      command = this.sendRendererCommand(name, payload)
+      command = this.sendRendererCommand(name, payload, COMMAND_TIMEOUT_MS, deviceId)
         .then((result) => {
           if (this.inFlightCommandResults.get(deviceId)?.get(clientMessageId) === command) {
             this.rememberCommandResult(deviceId, clientMessageId, result);
@@ -580,10 +625,11 @@ class RemoteAccessServer {
       name === "session.create" || name === "session.fork" || name === "session.reload"
         ? SESSION_CREATE_TIMEOUT_MS
         : COMMAND_TIMEOUT_MS,
+      socket.deviceId,
     );
   }
 
-  private sendRendererCommand(name: string, payload: Record<string, unknown>, timeoutMs = COMMAND_TIMEOUT_MS) {
+  private sendRendererCommand(name: string, payload: Record<string, unknown>, timeoutMs = COMMAND_TIMEOUT_MS, deviceId?: string) {
     const window = this.getWindow();
     if (!window || window.isDestroyed()) return Promise.reject(new Error("Desktop UI is unavailable."));
     const commandId = randomUUID();
@@ -593,7 +639,7 @@ class RemoteAccessServer {
         reject(new Error("Desktop command timed out."));
       }, timeoutMs);
       this.pendingRendererCommands.set(commandId, { resolve, reject, timer });
-      window.webContents.send("remote:command", { commandId, name, payload });
+      window.webContents.send("remote:command", { commandId, name, payload, deviceId });
     });
   }
 

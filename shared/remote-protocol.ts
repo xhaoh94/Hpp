@@ -138,6 +138,12 @@ const sessionQueueReorderPayloadSchema = sessionQueueItemPayloadSchema.extend({
   toIndex: z.number().int().nonnegative(),
 });
 
+// 远程编辑锁：客户端打开队列消息编辑框时锁定该条消息（locked=true），
+// 关闭或保存后解锁（locked=false）。锁只影响该会话的自动派发顺序。
+const sessionQueueEditLockPayloadSchema = sessionQueueItemPayloadSchema.extend({
+  locked: z.boolean(),
+});
+
 const sessionSetModelPayloadSchema = z.object({
   sessionId: sessionIdSchema,
   provider: nonEmptyString,
@@ -229,6 +235,9 @@ export function parseRemoteRequest(value: unknown): RemoteRequestEnvelope {
       break;
     case "session.queue.edit":
       payload = sessionQueueEditPayloadSchema.parse(envelope.payload);
+      break;
+    case "session.queue.editLock":
+      payload = sessionQueueEditLockPayloadSchema.parse(envelope.payload);
       break;
     case "session.queue.reorder":
       payload = sessionQueueReorderPayloadSchema.parse(envelope.payload);
@@ -447,6 +456,8 @@ export interface RemoteDeviceInfo {
 export interface RemoteAccessStatus {
   enabled: boolean;
   running: boolean;
+  /** 当前已认证且在线的远程客户端数量；渲染层据此跳过无人观看的流式推送。 */
+  connectedClients: number;
   bindAddress: string;
   port: number;
   advertiseAddress: string;
@@ -485,6 +496,8 @@ export interface RemoteRendererCommand {
   commandId: string;
   name: RemoteRequestName;
   payload: Record<string, unknown>;
+  /** 发起请求的已认证设备：编辑锁在设备断开时按它清理。 */
+  deviceId?: string;
 }
 
 export interface RemoteRendererCommandResult {

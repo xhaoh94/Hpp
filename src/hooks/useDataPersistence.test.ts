@@ -12,9 +12,11 @@ import {
   SESSION_DATA_PURGED_EVENT,
   applyPersistedMessagesSnapshot,
   applyPersistedProjectSnapshot,
+  canReplaceSessionMessageRows,
   ensureSessionMessagesLoaded,
   loadOlderSessionMessages,
   parsePersistedChatMessage,
+  parsePersistedData,
   pickDefaultActiveSessionId,
   resolveHydratedActiveSessionId,
 } from "./useDataPersistence";
@@ -228,6 +230,44 @@ describe("启动时默认选中第一个会话", () => {
   });
 });
 
+describe("会话标题在正文加载前也要可读", () => {
+  const makeSession = (overrides: Record<string, unknown> = {}) => ({
+    id: "session-one",
+    agentId: "codex",
+    agentSessionId: "session-one",
+    title: "新会话 - 2025/10/15 21:26",
+    createdAt: "2025-10-15T13:26:00.000Z",
+    lastActiveAt: "2025-10-15T13:26:00.000Z",
+    ...overrides,
+  });
+  const parseFirstSession = (session: Record<string, unknown>) => parsePersistedData({
+    projects: [{
+      id: "project-one",
+      name: "project-one",
+      path: "C:\\project-one",
+      createdAt: "2025-10-15T13:26:00.000Z",
+      agents: ["codex"],
+      sessions: [session],
+    }],
+  })?.projects[0]?.sessions[0];
+
+  it("把仍是占位标题的旧数据迁移成首条用户消息预览", () => {
+    expect(parseFirstSession(makeSession({ preview: "修复侧栏会话标题" }))?.title)
+      .toBe("修复侧栏会话标题");
+  });
+
+  it("已有真实标题或分叉标题不会被 preview 覆盖", () => {
+    expect(parseFirstSession(makeSession({ title: "修复侧栏会话标题", preview: "另一个请求" }))?.title)
+      .toBe("修复侧栏会话标题");
+    expect(parseFirstSession(makeSession({ title: "分叉 - 修复侧栏会话标题", preview: "修复侧栏会话标题" }))?.title)
+      .toBe("分叉 - 修复侧栏会话标题");
+  });
+
+  it("没有 preview 时保持占位标题，等首条用户消息落盘后再迁移", () => {
+    expect(parseFirstSession(makeSession())?.title).toBe("新会话 - 2025/10/15 21:26");
+  });
+});
+
 describe("按需恢复会话消息", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -267,6 +307,19 @@ describe("按需恢复会话消息", () => {
     expect(loadPage).toHaveBeenCalledTimes(2);
     expect(useChatStore.getState().sessionMessages["session-on-demand"]?.map((message) => message.id))
       .toEqual(["message-1", "message-2", "message-3", "message-4", "message-5"]);
+  });
+});
+
+describe("分页会话的落盘保护", () => {
+  it("只有完整加载且读取成功的会话才允许整段替换", () => {
+    // 未加载过（内存里只有零散快照）时不能 replace。
+    expect(canReplaceSessionMessageRows(undefined)).toBe(false);
+    expect(canReplaceSessionMessageRows({ loaded: false, loadFailed: false, hasMore: false })).toBe(false);
+    // 读取失败时不能用空数组覆盖磁盘。
+    expect(canReplaceSessionMessageRows({ loaded: true, loadFailed: true, hasMore: false })).toBe(false);
+    // 只加载了最近一页时，磁盘里还有更早的消息。
+    expect(canReplaceSessionMessageRows({ loaded: true, loadFailed: false, hasMore: true })).toBe(false);
+    expect(canReplaceSessionMessageRows({ loaded: true, loadFailed: false, hasMore: false })).toBe(true);
   });
 });
 

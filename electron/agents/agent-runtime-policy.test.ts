@@ -40,7 +40,6 @@ vi.mock("./agent-plugin-registry", () => ({
     listAgents: vi.fn(async () => []),
     reload: vi.fn(async () => []),
     updateAgent: vi.fn(async () => ({ success: true, agents: [] })),
-    rollbackAgent: vi.fn(async () => ({ success: true, agents: [] })),
     removePlugin: vi.fn(async () => ({ success: true, agents: [] })),
     inspectInstallCandidate: vi.fn(),
     installFromPath: vi.fn(),

@@ -61,6 +61,20 @@ function normalizePlanMode(value: unknown): AgentPlanModeSupport {
   return DEFAULT_CAPABILITIES.planMode;
 }
 
+/** catalog 里的多包声明（同一条命令对应不同版本线的 npm 包）。 */
+function normalizeCliPackages(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  const packages = value.flatMap((raw) => {
+    const record = isRecord(raw) ? raw : {};
+    const line = asString(record.line).trim().toLowerCase();
+    const name = asString(record.name).trim();
+    if (!name || (line !== "v1" && line !== "v2")) return [];
+    const label = asString(record.label).trim();
+    return [{ line: line as "v1" | "v2", name, ...(label ? { label } : {}) }];
+  });
+  return packages.length > 0 ? packages : undefined;
+}
+
 function normalizeProviderConfiguration(value: unknown): AgentProviderConfiguration | "none" {
   if (!isRecord(value) || value.type !== "provider" || !Array.isArray(value.endpoints)) return "none";
   const seenEndpoints = new Set<string>();
@@ -267,6 +281,7 @@ export function validateOfficialPluginCatalog(
       runtime,
       command: asString(rawPlugin.command) || undefined,
       packageName: asString(rawPlugin.packageName) || undefined,
+      packages: normalizeCliPackages(rawPlugin.packages),
       order: typeof rawPlugin.order === "number" && Number.isFinite(rawPlugin.order) ? rawPlugin.order : 1000,
       installHint: asString(rawPlugin.installHint) || undefined,
       updateCommand: asString(rawPlugin.updateCommand) || undefined,

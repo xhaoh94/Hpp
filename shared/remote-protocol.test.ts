@@ -167,6 +167,23 @@ describe("remote protocol", () => {
     }))).toThrow();
   });
 
+  it("validates queue edit lock requests", () => {
+    expect(parseRemoteRequest(request("session.queue.editLock", {
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+      locked: true,
+    })).payload).toEqual({ sessionId: "session-1", queueItemId: "queued-message-1", locked: true });
+    expect(parseRemoteRequest(request("session.queue.editLock", {
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+      locked: false,
+    })).payload).toEqual({ sessionId: "session-1", queueItemId: "queued-message-1", locked: false });
+    expect(() => parseRemoteRequest(request("session.queue.editLock", {
+      sessionId: "session-1",
+      queueItemId: "queued-message-1",
+    }))).toThrow();
+  });
+
   it("validates questionnaire responses", () => {
     expect(parseRemoteRequest(request("interaction.respond", {
       sessionId: "session-1",

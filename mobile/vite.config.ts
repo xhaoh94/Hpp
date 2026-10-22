@@ -9,6 +9,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
+      "@": resolve(__dirname, "../src"),
       "@mobile": resolve(__dirname, "src"),
       "@shared": resolve(__dirname, "../shared"),
     },

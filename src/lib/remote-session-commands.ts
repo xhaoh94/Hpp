@@ -286,7 +286,25 @@ async function editRemoteQueuedMessage(payload: Record<string, unknown>) {
     action,
     readFile: (path) => window.electronAPI.readFile(path),
   });
-  return SessionCommandCoordinator.editQueuedMessage(sessionId, queueItemId, prepared);
+  const result = SessionCommandCoordinator.editQueuedMessage(sessionId, queueItemId, prepared);
+  // 保存即编辑结束：即使客户端稍后没有发解锁命令，也要恢复该条消息的正常派发。
+  useChatStore.getState().clearQueueEditLock(queueItemId);
+  return result;
+}
+
+// 远程编辑锁：客户端打开队列消息编辑框时锁定该条消息，派发器在锁存续期间
+// 暂停该会话队列（保持顺序），等编辑退出后继续。设备断开时按 deviceId 清理。
+function setRemoteQueueEditLock(payload: Record<string, unknown>, deviceId: string) {
+  const sessionId = getString(payload.sessionId);
+  const queueItemId = getString(payload.queueItemId);
+  const chat = useChatStore.getState();
+  if (payload.locked === true) {
+    getSessionCommandTarget(sessionId);
+    chat.setQueueEditLock(sessionId, queueItemId, deviceId || "unknown-device");
+  } else {
+    chat.clearQueueEditLock(queueItemId);
+  }
+  return { success: true, queueItemId, locked: payload.locked === true };
 }
 
 async function setRemoteThinking(payload: Record<string, unknown>) {
@@ -361,6 +379,8 @@ export async function executeRemoteSessionCommand(
       return SessionCommandCoordinator.guideQueuedMessage(getString(payload.sessionId), getString(payload.queueItemId));
     case "session.queue.edit":
       return editRemoteQueuedMessage(payload);
+    case "session.queue.editLock":
+      return setRemoteQueueEditLock(payload, getString(command.deviceId));
     case "session.queue.reorder":
       return SessionCommandCoordinator.reorderQueuedMessage(
         getString(payload.sessionId),

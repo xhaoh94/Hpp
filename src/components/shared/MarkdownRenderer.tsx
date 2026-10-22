@@ -6,13 +6,22 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
-  type MouseEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getLocalMarkdownCodePath, isExternalMarkdownHref } from "@/lib/project-file-path";
+import {
+  getLocalMarkdownCodePath,
+  getLocalMarkdownFilePath,
+  isExternalMarkdownHref,
+  resolveProjectFilePath,
+} from "@/lib/project-file-path";
+import { getRunnableCodeKind } from "@/lib/runnable-code";
+import { FileContextMenu, type FileContextMenuState } from "./FileContextMenu";
 import { splitMarkdownChunks } from "./markdown-chunks";
 import "./MarkdownRenderer.css";
 
@@ -71,9 +80,70 @@ function getTextContent(children: ReactNode): string {
   return "";
 }
 
+function RunButton({ text, language }: { text: string; language: string }) {
+  const [state, setState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [error, setError] = useState("");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  const handleRun = useCallback(async () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setState("running");
+    try {
+      const result = await window.electronAPI.runHtmlPreview({ code: text, language });
+      if (result?.success) {
+        setState("done");
+        timerRef.current = setTimeout(() => setState("idle"), 1500);
+      } else {
+        setError(result?.error || "运行失败");
+        setState("error");
+        timerRef.current = setTimeout(() => setState("idle"), 2500);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setState("error");
+      timerRef.current = setTimeout(() => setState("idle"), 2500);
+    }
+  }, [text, language]);
+
+  const title = state === "error" && error
+    ? `本地运行失败：${error}`
+    : `本地运行 ${language.toUpperCase()}`;
+
+  return (
+    <button
+      className="md-code-run-btn"
+      onClick={handleRun}
+      disabled={state === "running"}
+      title={title}
+    >
+      {state === "done" ? (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : state === "error" ? (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="8" x2="12" y2="12" />
+          <line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+      ) : (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <polygon points="6 3 20 12 6 21 6 3" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 interface MarkdownRendererProps {
   content: string;
-  onLinkClick?: (href: string, event: MouseEvent<HTMLAnchorElement>) => boolean | void;
+  onLinkClick?: (href: string, event: ReactMouseEvent<HTMLAnchorElement>) => boolean | void;
+  /** 相对路径链接按哪个项目根解析；不传时只有绝对路径链接可定位。 */
+  projectPath?: string;
   /** 流式输出期间跳过代码高亮，等内容稳定后再执行 rehype-highlight。 */
   deferHighlight?: boolean;
 }
@@ -125,9 +195,84 @@ function useRehypeHighlight(enabled: boolean) {
 // 链接点击处理器通过 context 下发，这样组件表可以完全稳定，分块渲染时
 // 各块之间也不需要重复传递回调。
 const MarkdownLinkClickContext = createContext<MarkdownRendererProps["onLinkClick"]>(undefined);
+const MarkdownProjectPathContext = createContext<string | undefined>(undefined);
+
+// 同一时刻只开一个链接菜单：新菜单打开时关掉上一个。
+let closeActiveLinkMenu: (() => void) | null = null;
+
+interface LinkMenuState {
+  x: number;
+  y: number;
+  href: string;
+  external: boolean;
+  localPath: string | null;
+}
+
+function LinkContextMenu({ state, onClose }: { state: LinkMenuState; onClose: () => void }) {
+  useEffect(() => {
+    closeActiveLinkMenu?.();
+    closeActiveLinkMenu = onClose;
+    const handleMouseDown = (event: globalThis.MouseEvent) => {
+      if ((event.target as HTMLElement | null)?.closest?.(".md-link-menu")) return;
+      onClose();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", handleMouseDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+      if (closeActiveLinkMenu === onClose) closeActiveLinkMenu = null;
+    };
+  }, [onClose]);
+
+  // 简单防溢出：估算菜单尺寸，贴住视口右下角。
+  const left = Math.min(state.x, window.innerWidth - 220);
+  const top = Math.min(state.y, window.innerHeight - 140);
+
+  const copyText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // 复制失败不阻塞菜单关闭
+    }
+    onClose();
+  }, [onClose]);
+
+  return createPortal(
+    <div className="md-link-menu" style={{ left, top }} role="menu">
+      {state.external ? (
+        <button
+          type="button"
+          className="md-link-menu-item"
+          role="menuitem"
+          onClick={() => {
+            window.open(state.href, "_blank", "noopener,noreferrer");
+            onClose();
+          }}
+        >
+          打开链接
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className="md-link-menu-item"
+        role="menuitem"
+        onClick={() => void copyText(state.href)}
+      >
+        复制链接地址
+      </button>
+    </div>,
+    document.body,
+  );
+}
 
 const MARKDOWN_COMPONENTS: Components = {
   code({ node, className, children, ...props }) {
+    const projectPath = useContext(MarkdownProjectPathContext);
+    const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
     const match = /language-(\w+)/.exec(className || "");
     const language = match ? match[1] : "";
     // react-markdown 解析代码块时 children 末尾总会带一个 \n，
@@ -137,10 +282,32 @@ const MARKDOWN_COMPONENTS: Components = {
     // Inline code (no language = no newline = likely inline)
     if (!language && !text.includes("\n")) {
       const localPath = getLocalMarkdownCodePath(text);
+      const resolvedPath = localPath
+        ? (projectPath ? resolveProjectFilePath(localPath, projectPath) : localPath)
+        : null;
       return (
-        <code className={`md-inline-code${localPath ? " md-path-reference" : ""}`} {...props}>
-          {children}
-        </code>
+        <>
+          <code
+            className={`md-inline-code${localPath ? " md-path-reference" : ""}`}
+            {...props}
+            onContextMenu={resolvedPath ? (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setContextMenu({ x: event.clientX, y: event.clientY, path: resolvedPath });
+            } : undefined}
+          >
+            {children}
+          </code>
+          {contextMenu && (
+            <FileContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              path={contextMenu.path}
+              projectPath={projectPath}
+              onClose={() => setContextMenu(null)}
+            />
+          )}
+        </>
       );
     }
 
@@ -149,6 +316,7 @@ const MARKDOWN_COMPONENTS: Components = {
     // 故在其外套一层不滚动的 wrapper 负责四边间距，pre 内部 padding 为 0。
     // 语言标签与复制按钮放在独立的 header 行，不再用 absolute 悬浮在内容上方，
     // 从根本上避免标签与长内容重叠，同时 wrapper 的左右 padding 可统一为 24px。
+    const runnableKind = getRunnableCodeKind(language, text);
     return (
       <div className={`md-code-block${language ? " md-code-block--with-lang" : ""}`}>
         <div className="md-code-header">
@@ -157,7 +325,10 @@ const MARKDOWN_COMPONENTS: Components = {
           ) : (
             <span />
           )}
-          <CopyButton text={text} />
+          <div className="md-code-actions">
+            {runnableKind && <RunButton text={text} language={runnableKind} />}
+            <CopyButton text={text} />
+          </div>
         </div>
         <div
           className="md-code-scroll-wrapper"
@@ -192,22 +363,57 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   a({ href, children, ...props }) {
     const onLinkClick = useContext(MarkdownLinkClickContext);
+    const projectPath = useContext(MarkdownProjectPathContext);
     // 只有 http(s) 交给系统浏览器（主进程的 setWindowOpenHandler 会接管），
     // 其余 href 一律拦掉默认跳转，否则 Electron 会新开一个没有 preload 的空白窗口。
     const external = isExternalMarkdownHref(href);
+    const [menu, setMenu] = useState<LinkMenuState | null>(null);
+
+    const localPath = useMemo(() => {
+      if (external || !href) return null;
+      const local = getLocalMarkdownFilePath(href);
+      if (!local) return null;
+      return projectPath ? resolveProjectFilePath(local, projectPath) : local;
+    }, [href, external, projectPath]);
+
+    const openMenu = useCallback((event: ReactMouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      if (!href) return;
+      setMenu({ x: event.clientX, y: event.clientY, href, external, localPath });
+    }, [href, external, localPath]);
+
     return (
-      <a
-        {...props}
-        href={href}
-        {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-        className="md-link"
-        onClick={(event) => {
-          if (href && onLinkClick?.(href, event)) return;
-          if (!external) event.preventDefault();
-        }}
-      >
-        {children}
-      </a>
+      <>
+        <a
+          {...props}
+          href={href}
+          {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+          className="md-link"
+          onClick={(event) => {
+            if (href && onLinkClick?.(href, event)) return;
+            if (!external) event.preventDefault();
+          }}
+          onContextMenu={openMenu}
+        >
+          {children}
+        </a>
+        {menu && (
+          menu.localPath ? (
+            <FileContextMenu
+              x={menu.x}
+              y={menu.y}
+              path={menu.localPath}
+              projectPath={projectPath}
+              onClose={() => setMenu(null)}
+            />
+          ) : (
+            <LinkContextMenu
+              state={menu}
+              onClose={() => setMenu(null)}
+            />
+          )
+        )}
+      </>
     );
   },
   table({ children, ...props }) {
@@ -256,7 +462,12 @@ const MarkdownChunk = memo(function MarkdownChunk({
   );
 });
 
-function MarkdownRendererImpl({ content, onLinkClick, deferHighlight = false }: MarkdownRendererProps) {
+function MarkdownRendererImpl({
+  content,
+  onLinkClick,
+  projectPath,
+  deferHighlight = false,
+}: MarkdownRendererProps) {
   // 切分是 O(长度) 的字符串扫描（微秒级），远低于一次 Markdown 解析，
   // 但能换来「已写完的前缀块不重新解析」。
   const chunks = useMemo(() => splitMarkdownChunks(content), [content]);
@@ -265,14 +476,16 @@ function MarkdownRendererImpl({ content, onLinkClick, deferHighlight = false }: 
   return (
     <div className="md-content">
       <MarkdownLinkClickContext.Provider value={onLinkClick}>
-        {chunks.map((chunk, index) => (
-          <MarkdownChunk
-            key={index}
-            content={chunk}
-            enableHighlight={enableHighlight}
-            highlightPlugin={highlightPlugin}
-          />
-        ))}
+        <MarkdownProjectPathContext.Provider value={projectPath}>
+          {chunks.map((chunk, index) => (
+            <MarkdownChunk
+              key={index}
+              content={chunk}
+              enableHighlight={enableHighlight}
+              highlightPlugin={highlightPlugin}
+            />
+          ))}
+        </MarkdownProjectPathContext.Provider>
       </MarkdownLinkClickContext.Provider>
     </div>
   );

@@ -1275,6 +1275,8 @@ button:disabled { opacity: 0.48; }
 .message-text-attachment-chip { display: inline-flex; max-width: min(100%, 320px); min-width: 0; height: 25px; align-items: center; gap: 5px; padding: 0 7px; border: 1px solid var(--accent-border); border-radius: 5px; background: var(--accent-soft); color: var(--text); font-size: 10px; }
 .message-text-attachment-chip > svg { flex: 0 0 auto; color: var(--muted); }
 .message-text-attachment-chip.folder > svg { color: #dcab5f; }
+.message-text-attachment-chip.image > svg { color: #6bc7a4; }
+.message-text-attachment-chip.image { border-style: dashed; }
 .message-text-attachment-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-reference-list { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
 .message-reference-list.user { justify-content: flex-end; }

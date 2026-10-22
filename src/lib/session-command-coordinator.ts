@@ -24,6 +24,7 @@ import {
 } from "@/hooks/useDataPersistence";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { archiveSessionsAfterBackendRemoval } from "@/lib/session-lifecycle";
+import { createDefaultSessionTitle } from "@/lib/session-title";
 import {
   getAssistantProcessLastActivityAt,
   hasOpenAssistantProcessState,
@@ -473,7 +474,7 @@ export async function createSession(input: {
     id: sessionId,
     agentId: input.agentId,
     agentSessionId: sessionId,
-    title: `新会话 - ${now.toLocaleString("zh-CN")}`,
+    title: createDefaultSessionTitle(now),
     createdAt: now.toISOString(),
     lastActiveAt: now.toISOString(),
   };

@@ -801,6 +801,14 @@ describe("ProcessBlock", () => {
     expect(markup.match(/已查看/g)).toHaveLength(1);
   });
 
+  it("opens the shared file context menu on right-click of a process file row", () => {
+    const source = readFileSync(resolve("src/components/layout/ProcessBlock.tsx"), "utf8");
+    expect(source).toContain("<FileContextMenu");
+    expect(source).toContain("onContextMenu={(event) => {");
+    expect(source).toContain('resolveProjectFilePath(file.file, projectPath || "")');
+    expect(source).toContain("setContextMenu(");
+  });
+
   it.each([
     ["read_file", "已读取 2 个文件", "read"],
     ["write_file", "已写入 2 个文件", "written"],

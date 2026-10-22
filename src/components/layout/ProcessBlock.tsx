@@ -27,7 +27,8 @@ import {
   mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
 import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
-import { relativeRemotePath } from "@/lib/project-file-path";
+import { relativeRemotePath, resolveProjectFilePath } from "@/lib/project-file-path";
+import { FileContextMenu, type FileContextMenuState } from "@/components/shared/FileContextMenu";
 import {
   formatProcessDuration,
   getProcessGroupState,
@@ -148,6 +149,7 @@ function ProcessEntryFiles({
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   projectPath?: string;
 }) {
+  const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
   return (
     <div className="chat-process-files">
       {files.map((file, index) => {
@@ -159,6 +161,14 @@ function ProcessEntryFiles({
               className="chat-process-file-name openable"
               title={displayPath}
               onClick={() => onOpenFile(file.file, { preview })}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setContextMenu({
+                  x: event.clientX,
+                  y: event.clientY,
+                  path: resolveProjectFilePath(file.file, projectPath || ""),
+                });
+              }}
             >
               {displayPath}
             </button>
@@ -171,6 +181,15 @@ function ProcessEntryFiles({
           </div>
         );
       })}
+      {contextMenu && (
+        <FileContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          path={contextMenu.path}
+          projectPath={projectPath}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -390,11 +409,13 @@ function SubagentEntryRow({
   entry,
   now,
   onToggleEntry,
+  projectPath,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
   now: number;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
+  projectPath?: string;
 }) {
   const subagents = entry.subagents || [];
   const progress = getSubagentProgressLabel(subagents);
@@ -446,7 +467,7 @@ function SubagentEntryRow({
       </button>
       {canExpand && entry.expanded && (
         <div className="chat-subagent-detail">
-          <MarkdownRenderer content={detail} />
+          <MarkdownRenderer content={detail} projectPath={projectPath} />
         </div>
       )}
     </div>
@@ -510,6 +531,7 @@ function ProcessEntryRow({
         entry={entry}
         now={now}
         onToggleEntry={onToggleEntry}
+        projectPath={projectPath}
       />
     );
   }
@@ -669,7 +691,7 @@ function ProcessEntryRow({
         )}
         {detailVisible && errorDetailMarkdown && (
           <div className={`chat-process-entry-detail chat-process-error-markdown ${canExpand ? "panel" : ""}`}>
-            <MarkdownRenderer content={errorDetailMarkdown} deferHighlight={running} />
+            <MarkdownRenderer content={errorDetailMarkdown} deferHighlight={running} projectPath={projectPath} />
           </div>
         )}
         {detailVisible && !errorDetailMarkdown && (

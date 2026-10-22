@@ -747,7 +747,14 @@ export const normalizeQuestionProcessEvent = (data: unknown) => {
     kind: "question",
     requestId: dataRecord.requestId || dataRecord.id || dataRecord.toolCallId || dataRecord.callId || detailObject.id,
     method: dataRecord.method || dataRecord.toolName || dataRecord.name || dataRecord.type,
-    title: prompt ? `正在询问用户: ${String(prompt)}` : "正在询问用户",
+    // 上游（例如 Pi 的 UI 请求兜底）可能已经带了「正在询问用户」前缀，
+    // 直接再拼一次会得到「正在询问用户: 正在询问用户」这种没有信息量的标题。
+    title: (() => {
+      const text = prompt ? String(prompt) : "";
+      if (!text) return "正在询问用户";
+      if (/^正在询问用户(?:\s*[:：].*)?$/.test(text)) return text;
+      return `正在询问用户: ${text}`;
+    })(),
     detail,
     prompt: prompt || undefined,
     question: dataRecord.question || detailObject.question || argsObject.question || inputObject.question || undefined,

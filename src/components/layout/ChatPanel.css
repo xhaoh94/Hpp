@@ -1553,6 +1553,10 @@
 
 .chat-attached-path-chip svg { color: var(--text-secondary); flex: 0 0 auto; }
 .chat-attached-path-chip.folder svg { color: #dcab5f; }
+.chat-attached-path-chip.image svg { color: #6bc7a4; }
+/* 图片本体缺失（旧消息只留下 `[image: 名字]`）时，用虚线框标示图片位置，
+   而不是让它看起来像普通文本标签。 */
+.chat-attached-path-chip.image { border-style: dashed; }
 .chat-attached-path-chip span { overflow-wrap: anywhere; }
 
 .chat-message-attachments {
@@ -1780,6 +1784,99 @@
   transform: scale(1.02);
 }
 
+.chat-videos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.chat-msg.user .chat-videos {
+  justify-content: flex-end;
+}
+
+.chat-msg.assistant .chat-videos {
+  justify-content: flex-start;
+}
+
+.chat-video {
+  position: relative;
+  display: block;
+  width: 220px;
+  max-width: min(220px, 70vw);
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: #000;
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+
+.chat-video:hover {
+  transform: scale(1.01);
+}
+
+.chat-video .composer-video-thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  border-radius: 0;
+}
+
+.chat-video .composer-video-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.chat-video .composer-video-thumb-play {
+  /* display:block 的容器里，绝对定位元素的静态位置会被 video 挤到下方，
+     必须显式贴左上，否则播放按钮跑到块外面（看不见）。 */
+  top: 0;
+  left: 0;
+  z-index: 1;
+  background: transparent;
+}
+
+/* 独立媒体块中间的圆形播放按钮（输入框小缩略图仍保留原来的小三角）。 */
+.chat-video .composer-video-thumb-play::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%);
+}
+
+.chat-video .composer-video-thumb-play svg {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+}
+
+.chat-video-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 4px 8px;
+  overflow: hidden;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+  color: #fff;
+  font-size: 11px;
+  line-height: 15px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-image-context-menu {
   position: fixed;
   z-index: 1200;
@@ -1827,6 +1924,14 @@
   max-width: 90vw;
   max-height: 90vh;
   border-radius: 8px;
+  cursor: default;
+}
+
+.chat-video-zoom {
+  max-width: min(1280px, 92vw);
+  max-height: 88vh;
+  border-radius: 8px;
+  background: #000;
   cursor: default;
 }
 
@@ -4360,7 +4465,57 @@ body.chat-questionnaire-resizing {
   cursor: zoom-in;
 }
 
-.chat-input-image-preview > button {
+.chat-input-video-preview {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: #000;
+  color: #fff;
+  cursor: pointer;
+}
+
+.chat-input-video-preview .composer-video-thumb {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+.chat-input-video-preview .composer-video-thumb video {
+  width: 100%;
+  height: 100%;
+}
+
+.chat-input-video-preview .composer-video-thumb-play {
+  top: 0;
+  left: 0;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.chat-input-video-preview .composer-video-thumb-play svg {
+  width: 26px;
+  height: 26px;
+}
+
+.chat-input-video-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 3px 6px;
+  overflow: hidden;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+  color: #fff;
+  font-size: 11px;
+  line-height: 15px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-input-image-preview > button:not(.chat-input-video-preview) {
   position: absolute;
   top: 4px;
   right: 4px;
@@ -4377,7 +4532,7 @@ body.chat-questionnaire-resizing {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
-.chat-input-image-preview > button:hover { background: #fff; }
+.chat-input-image-preview > button:not(.chat-input-video-preview):hover { background: #fff; }
 
 .chat-file-mention-picker {
   position: absolute;
@@ -4738,6 +4893,117 @@ body.chat-questionnaire-resizing .chat-bubble {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-video-thumb {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #000;
+}
+
+.composer-video-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.composer-video-thumb-play {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.composer-video-thumb-play svg {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
+}
+
+.composer-message-video {
+  display: inline-flex;
+  width: auto;
+  height: 26px;
+  max-width: min(200px, 70vw);
+  box-sizing: border-box;
+  align-items: center;
+  gap: 5px;
+  margin: 1px 2px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  transform: translateY(-2px);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.composer-message-video:hover {
+  border-color: color-mix(in srgb, var(--border-color) 50%, var(--accent-color, #58a6ff));
+}
+
+.composer-message-video-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-message-video-badge {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent-color, #58a6ff) 18%, transparent);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+}
+
+.chat-process-received-message .composer-message-video {
+  height: 18px;
+  margin: 0 1px;
+  padding: 0 5px;
+  font-size: inherit;
+  transform: none;
+}
+
+.chat-process-received-message .composer-message-video .composer-entity-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.chat-process-received-message .composer-message-video-badge {
+  display: none;
+}
+
+.inline-composer-video-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.inline-composer-video-preview:hover .composer-entity-icon {
+  color: var(--accent-color, #58a6ff);
 }
 
 .chat-send-btn {
@@ -6278,7 +6544,9 @@ body.chat-questionnaire-resizing .chat-bubble {
   min-width: 0;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
   font-size: 14px;
-  line-height: 1.6;
+  /* 与 CodeReviewDialog 的 REVIEW_ROW_HEIGHT 保持一致：虚拟列表按固定行高
+     估算滚动偏移，行高不一致时定位到文件深处会累计出上千像素误差。 */
+  line-height: 22px;
 }
 
 .chat-review-virtual-list {
@@ -6332,9 +6600,6 @@ body.chat-questionnaire-resizing .chat-bubble {
   align-items: flex-start;
   min-width: 0;
   position: relative;
-  /* 大 Diff 仍保持行号/滚动布局，但让 Chromium 跳过屏外行的绘制。 */
-  content-visibility: auto;
-  contain-intrinsic-size: 24px;
 }
 
 /* 左列（原文件）：被删除的行标红；右列（修改后）标出增删 */
@@ -6418,7 +6683,8 @@ body.chat-questionnaire-resizing .chat-bubble {
   min-width: 0;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
   font-size: 14px;
-  line-height: 1.6;
+  /* 同 .chat-review-split：固定行高供虚拟列表估算定位。 */
+  line-height: 22px;
 }
 
 .chat-review-line {
@@ -6426,8 +6692,9 @@ body.chat-questionnaire-resizing .chat-bubble {
   align-items: flex-start;
   min-width: 0;
   position: relative;
-  content-visibility: auto;
-  contain-intrinsic-size: 24px;
+  /* 注意：这里不能加 content-visibility/contain-intrinsic-size。
+     虚拟列表只渲染可见行，屏外行本来就不存在；而 contain-intrinsic-size
+     会让 measureElement 量到占位高度，行高失真后定位会漂移。 */
 }
 
 .chat-review-line.context {

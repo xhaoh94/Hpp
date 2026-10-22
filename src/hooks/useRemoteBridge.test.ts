@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage, QueuedMessage } from "@/stores/chat-store";
 import { createComposerDocument } from "@shared/composer-document";
 import type { RemoteMessagePublish } from "./useRemoteBridge";
+import type { RemoteMessagePublishIntent } from "./useRemoteBridge";
 import { ASSISTANT_NARRATION_PROCESS_KIND } from "@shared/process-view";
 import {
   buildRemoteInteractionSnapshot,
@@ -16,6 +17,7 @@ import {
   sanitizeRemoteMessage,
   sanitizeRemoteMessages,
   sanitizeQueue,
+  shouldPublishMessageUpdate,
   shouldPublishRemoteMessagesReplace,
   shouldFlushPendingMessageUpdate,
   toRemoteInteraction,
@@ -384,6 +386,28 @@ describe("remote renderer serialization", () => {
       [user, { ...runningAssistant, content: "stream chunk" }],
       "running",
     )).toBe(false);
+  });
+
+  it("skips streaming upserts while no remote client is connected", () => {
+    const upsert: RemoteMessagePublishIntent = {
+      type: "session.message.upsert",
+      sessionId: "session-1",
+      message: message("assistant-1"),
+    };
+    const replace: RemoteMessagePublishIntent = {
+      type: "session.messages.replace",
+      sessionId: "session-1",
+      messages: [message("assistant-1")],
+    };
+
+    // 有客户端在看：两条路都发。
+    expect(shouldPublishMessageUpdate(upsert, 1)).toBe(true);
+    expect(shouldPublishMessageUpdate(replace, 1)).toBe(true);
+
+    // 没有客户端：流式 upsert 的 sanitize + IPC structured clone 是纯浪费，
+    // 但回合边界的 replace 仍要发，否则主进程缓存会让后连上的客户端看到空会话。
+    expect(shouldPublishMessageUpdate(upsert, 0)).toBe(false);
+    expect(shouldPublishMessageUpdate(replace, 0)).toBe(true);
   });
 
   it("repairs remote message caches when a running session becomes terminal", () => {

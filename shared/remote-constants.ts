@@ -26,6 +26,7 @@ export const REMOTE_REQUEST_NAMES = [
   "session.reload",
   "session.queue.guide",
   "session.queue.edit",
+  "session.queue.editLock",
   "session.queue.reorder",
   "session.queue.remove",
   "session.setModel",

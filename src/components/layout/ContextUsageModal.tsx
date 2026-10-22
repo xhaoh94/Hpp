@@ -112,7 +112,7 @@ export function ContextUsageModal({ usage, anchorRef, onClose }: ContextUsageMod
         <div className="context-usage-footnote">
           {usage?.model ? `${usage.model.provider}/${usage.model.id} · ` : ""}
           {!usage ? "暂无用量数据，发送一次消息后即可看到" : SOURCE_NOTES[usage.source]}
-          {!contextWindow ? " · 当前模型未提供上下文窗口" : ""}
+          {usage && !contextWindow ? " · 当前模型未提供上下文窗口" : ""}
         </div>
       </div>
     </div>

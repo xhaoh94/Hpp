@@ -541,6 +541,43 @@ describe("agent provider config", () => {
     expect(settings.agentBuiltinExtensions["test-agent"]).toEqual(["codemode"]);
   });
 
+  it("enables codemode automatically when MCP is turned on", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerActivation: "none",
+      builtinExtensions: {
+        userConfigurable: true,
+        defaultEnabled: [],
+        options: [
+          { id: "codemode", label: "Codemode", hotReload: true },
+          { id: "mcp", label: "MCP", hotReload: true },
+          { id: "tool_search", label: "Tool search", hotReload: true },
+        ],
+      },
+    };
+
+    // MCP 默认 exposure=codemode：只开 MCP 时工具对模型不可见，Pi 每次会话都会
+    // 警告「MCP tools are only reachable…」，所以保存时联动打开 codemode。
+    await expect(setAgentBuiltinExtensions("test-agent", ["mcp"])).resolves.toMatchObject({
+      success: true,
+      enabledIds: ["mcp", "codemode"],
+    });
+
+    // 已经显式选了 tool_search 时不强加 codemode。
+    await expect(setAgentBuiltinExtensions("test-agent", ["mcp", "tool_search"])).resolves.toMatchObject({
+      enabledIds: ["mcp", "tool_search"],
+    });
+
+    // 旧配置（只写了 mcp）读取时自动补全并回写。
+    const settingsPath = join(tempRoot, "hpp-data", "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    settings.agentBuiltinExtensions["test-agent"] = ["mcp"];
+    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["mcp", "codemode"]);
+    const persisted = JSON.parse(await readFile(settingsPath, "utf8"));
+    expect(persisted.agentBuiltinExtensions["test-agent"]).toEqual(["mcp", "codemode"]);
+  });
+
   it("drops unknown and duplicated builtin extension ids", async () => {
     testState.capabilities = {
       configuration: providerConfiguration("hpp"),

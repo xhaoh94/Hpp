@@ -157,6 +157,20 @@ describe("OpenCode session diff normalization", () => {
     expect(patch).toContain("-旧\r\n+新\r");
   });
 
+  it("accepts the V2 { data } wrapper around the diff list", () => {
+    const diffs = normalizeOpenCodeSessionDiffs({
+      data: [{
+        file: "src/app.ts",
+        before: "one\ntwo\n",
+        after: "one\nchanged\n",
+        additions: 1,
+        deletions: 1,
+      }],
+    });
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]).toMatchObject({ file: "src/app.ts", additions: 1, deletions: 1 });
+  });
+
   it("drops unchanged, malformed, unsafe, and oversized entries", () => {
     const oversized = "x".repeat(20 * 1024 * 1024 + 1);
     expect(normalizeOpenCodeSessionDiffs([

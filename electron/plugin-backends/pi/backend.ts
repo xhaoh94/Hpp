@@ -94,6 +94,25 @@ const asRecord = (value: unknown): UnknownRecord =>
 const optionalString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
+/**
+ * 需要等待用户回答的 UI 请求。
+ *
+ * Pi 的 RPC 模式会把所有扩展 UI 调用都发成 extension_ui_request，其中
+ * setStatus/setWidget/setTitle/set_editor_text 只是一次性指令；把它们当成
+ * question 会生成一个没有内容的问卷，用户既看不到问题也回答不了。
+ */
+const INTERACTIVE_UI_METHODS = new Set([
+  "select",
+  "confirm",
+  "input",
+  "editor",
+  "custom",
+  "questionnaire",
+  "question",
+  "ask_user_question",
+  "ask_user",
+]);
+
 const normalizeModels = (value: unknown): AgentModel[] => {
   if (!Array.isArray(value)) return [];
   return value.flatMap((rawModel) => {
@@ -1310,22 +1329,55 @@ export class PiSDKAgent {
     const method = optionalString(requestRecord.method) || "";
     if (!method) return;
     if (method === "notify") {
+      const message = optionalString(requestRecord.message) || "Pi 通知";
+      // MCP 不可达是配置问题（缺少 codemode/tool_search），每次新建会话都会重复；
+      // 它属于设置层面的提示，不该作为对话里的流程条目出现。
+      if (/MCP tools are only reachable/i.test(message)) {
+        console.warn("[pi] MCP tools are unreachable:", message);
+        return;
+      }
       this.emitEvent({
         type: "process_event",
         entryType: "status",
         kind: "status",
-        title: optionalString(requestRecord.message) || "Pi 通知",
+        title: message,
         state: "completed",
       });
       return;
     }
+    // setStatus / setWidget / setTitle / set_editor_text 是单向 UI 指令，扩展只是
+    // 更新宿主状态，并不等待用户回答。把它们当成 question 处理会弹出一个
+    // 「正在询问用户」的空问卷（没有题目也没有选项），还会把会话卡在未回答状态。
+    if (!INTERACTIVE_UI_METHODS.has(method.toLowerCase())) return;
     const requestId = requestRecord.id !== undefined && requestRecord.id !== null ? String(requestRecord.id) : "";
     if (!requestId) return;
     const kind = optionalString(requestRecord.kind) || "";
-    const title =
-      method === "custom" && kind === "ask_user_question"
+    const rawTitle = optionalString(requestRecord.title);
+    const rawMessage = optionalString(requestRecord.message);
+    const selectOptions = Array.isArray(requestRecord.options)
+      ? requestRecord.options
+        .map((option) => (typeof option === "string" ? option : optionalString(asRecord(option).label)))
+        .filter((option): option is string => !!option && option.trim().length > 0)
+      : [];
+    // select 请求的选项就是问卷候选项：只把它留在 detail 里，渲染层一旦在
+    // 兜底标题上生成了问题，就再也看不到这些选项了。
+    const questions = method === "custom"
+      ? requestRecord.questions
+      : method === "select" && selectOptions.length > 0
+        ? [{
+          question: rawTitle || rawMessage || "请选择答案",
+          options: selectOptions.map((label) => ({ label, value: label })),
+          multiSelect: false,
+        }]
+        : undefined;
+    const subagentAgent = optionalString(requestRecord.subagentAgent);
+    const isSubagentRequest = requestRecord.source === "pi-subagent";
+    const title = isSubagentRequest && subagentAgent
+      // 子 Agent 只允许权限确认冒泡；标题里点明是谁在请求，避免用户以为是主 Agent。
+      ? `子 Agent「${subagentAgent}」请求确认`
+      : method === "custom" && kind === "ask_user_question"
         ? "请选择答案"
-        : optionalString(requestRecord.title) || optionalString(requestRecord.message) || "正在询问用户";
+        : rawTitle || rawMessage || (method === "select" ? "请选择答案" : "正在询问用户");
     this.pendingUIRequestIds.add(requestId);
     this.clearTurnFallback();
     this.emitPendingAssistantText();
@@ -1335,9 +1387,10 @@ export class PiSDKAgent {
       requestId,
       method: method === "custom" ? kind : method,
       title,
-      message: optionalString(requestRecord.message),
+      message: rawMessage,
       detail: request,
-      questions: method === "custom" ? requestRecord.questions : undefined,
+      questions,
+      options: selectOptions.length > 0 ? selectOptions : undefined,
       toolName: requestRecord.toolName,
       state: "running",
     }));

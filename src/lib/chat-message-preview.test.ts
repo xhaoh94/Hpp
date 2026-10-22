@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getChatMessagePreviewText } from "./chat-message-preview";
+import { getChatMessagePreviewText, sanitizeSessionPreview } from "./chat-message-preview";
 
 describe("getChatMessagePreviewText", () => {
   it("prefers user text over a leading ordered file reference", () => {
@@ -69,6 +69,18 @@ describe("裸 content 里的内部标签清洗", () => {
     })).toBe("[file: a.ts]");
   });
 
+  it("自闭合 file 标签只显示文件名", () => {
+    expect(getChatMessagePreviewText({
+      content: `<file path="G:\\Work\\Projects\\Pro2\\dev\\Assets\\Lua\\Logic\\MainUI\\WndMainBottom.lua" />`,
+    })).toBe("[file: WndMainBottom.lua]");
+  });
+
+  it("自闭合 file 标签支持单引号路径", () => {
+    expect(getChatMessagePreviewText({
+      content: `<file path='C:\\repo\\src\\main.ts' />`,
+    })).toBe("[file: main.ts]");
+  });
+
   it("正斜杠路径同样只取末段", () => {
     expect(getChatMessagePreviewText({
       content: `<file path="C:\\Users/me/project/src/main.ts" lines="1-3">\nx\n</file>`,
@@ -126,5 +138,27 @@ describe("裸 content 里的内部标签清洗", () => {
     expect(getChatMessagePreviewText({
       content: `<file path="G:\\a.ts">\n没闭合`,
     })).toContain("没闭合");
+  });
+});
+
+/**
+ * 回归：旧版本落盘的 preview 直接存了裸 content（未清洗），侧栏在会话正文
+ * 尚未加载时会直接用它，因此读回时必须兜底清洗。
+ */
+describe("持久化 preview 的兜底清洗", () => {
+  it("自闭合 file 标签的旧 preview 被规范为文件名", () => {
+    expect(sanitizeSessionPreview(
+      `<file path="G:\\Work\\Projects\\Pro2\\dev\\Assets\\Lua\\Logic\\MainUI\\WndMainBottom.lua" /> 底下的特殊按钮切营地`,
+    )).toBe("[file: WndMainBottom.lua] 底下的特殊按钮切营地");
+  });
+
+  it("成对 file 标签与包裹标签一并清洗", () => {
+    expect(sanitizeSessionPreview(
+      `<current_user_message>\n<file path="C:\\repo\\main.ts" lines="1-3">\nx\n</file>\n看一下\n</current_user_message>`,
+    )).toBe("[file: main.ts:1-3] 看一下");
+  });
+
+  it("已经干净的 preview 保持不变", () => {
+    expect(sanitizeSessionPreview("普通的一段话")).toBe("普通的一段话");
   });
 });

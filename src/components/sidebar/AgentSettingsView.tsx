@@ -237,17 +237,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     }
   }, [agentStatuses]);
 
-  const handleAgentRollback = useCallback(async (agentId: string) => {
-    setAgentUpdating((prev) => ({ ...prev, [agentId]: true }));
-    try {
-      const result = await window.electronAPI.agentRollback(agentId);
-      if (result.status) setAgentStatuses((prev) => ({ ...prev, [agentId]: result.status! }));
-      if (!result.success) setAgentUpdateErrors((prev) => ({ ...prev, [agentId]: result.error || "回退失败" }));
-    } finally {
-      setAgentUpdating((prev) => ({ ...prev, [agentId]: false }));
-    }
-  }, []);
-
   const activeAgentUpdateId = Object.entries(agentUpdating).find(([, updating]) => updating)?.[0] || null;
   const isAnyAgentUpdating = activeAgentUpdateId !== null;
 
@@ -817,11 +806,19 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                   <div className="agent-runtime-version-meta">
                     当前 {status?.currentVersion ? `v${status.currentVersion}` : "未安装"}
                     {packageVersions?.latestVersion && ` · 最新 v${packageVersions.latestVersion}`}
+                    {packageVersions?.packageName && ` · 包 ${packageVersions.packageName}`}
                   </div>
                 </div>
                 <button type="button" className="settings-modal-close" onClick={() => setVersionManagerAgentId(null)} aria-label="关闭"><X size={16} /></button>
               </div>
               <div className="settings-modal-content agent-runtime-version-content">
+                {(agent?.packages?.length || 0) > 1 && (
+                  <div className="agent-runtime-version-meta">
+                    该 Agent 有两个 npm 包线（
+                    {agent!.packages!.map((item) => `${item.line} → ${item.name}`).join("，")}
+                    ）；选择 2.x 版本会安装 2.x 对应的包。
+                  </div>
+                )}
                 <label className="agent-runtime-version-label">安装版本或 npm tag</label>
                 <input className="input-field" value={versionSpec} onChange={(event) => setVersionSpec(event.target.value)} placeholder="latest、0.81.1、beta" />
                 {packageVersions?.error && <div className="status-message error">无法获取版本列表：{packageVersions.error}</div>}
@@ -834,9 +831,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                   ))}
                   {!versionsLoading && filteredVersions.length === 0 && <span>没有匹配版本；仍可手动输入版本或 tag。</span>}
                 </div>
-                {status?.rollbackVersion && <div className="agent-runtime-version-rollback">可回退版本：v{status.rollbackVersion}</div>}
                 <div className="settings-modal-actions">
-                  {status?.canRollback && <button type="button" className="btn-action" disabled={isAnyAgentUpdating} onClick={() => void handleAgentRollback(versionManagerAgentId)}>回退到 v{status.rollbackVersion}</button>}
                   {(!versionsLoading && packageVersions) && (
                     <button type="button" className="filter-add-btn" disabled={isAnyAgentUpdating || !versionSpec.trim()} onClick={() => { void handleAgentUpdate(versionManagerAgentId, versionSpec.trim()); setVersionManagerAgentId(null); }}>
                       安装 {versionSpec.trim() || "版本"}

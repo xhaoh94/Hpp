@@ -301,6 +301,26 @@ describe("mobile capability source constraints", () => {
     expect(appSource).toContain("if (disposed || probing) return;");
   });
 
+  // 手机编辑队列消息期间，桌面端不能把这条消息自动发出去：打开编辑时锁定，
+  // 关闭/退出发送解锁；断开连接由桌面端按设备兜底释放。
+  it("locks the queued message while its editor is open", () => {
+    expect(appSource).toContain('client.request("session.queue.editLock"');
+    expect(appSource).toContain("sendQueueEditLock(item, true)");
+    expect(appSource).toContain("sendQueueEditLock(item, false)");
+    expect(appSource).toContain("onEdit={openQueueEditor}");
+    expect(appSource).toContain("onClose={closeQueueEditor}");
+    const leaveHostSource = appSource.slice(
+      appSource.indexOf("const leaveActiveHost = useCallback"),
+      appSource.indexOf("const openSavedHost"),
+    );
+    expect(leaveHostSource).toContain("closeQueueEditor();");
+    const navigationSource = appSource.slice(
+      appSource.indexOf("if (state.editingQueueItem)"),
+      appSource.indexOf("if (state.reloadConfirmOpen)"),
+    );
+    expect(navigationSource).toContain("closeQueueEditor()");
+  });
+
   // 空对话在服务端被直接删除（不是归档）：手机必须按服务端的 deleted 把它从本地
   // 列表移除，只清服务端的话它会以"已关闭"留在历史里，再打开必然失败。
   it("removes a discarded empty session locally instead of keeping it in history", () => {
