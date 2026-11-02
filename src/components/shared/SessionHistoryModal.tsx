@@ -3,7 +3,7 @@ import { GitBranch } from "lucide-react";
 import type { ProjectSession } from "@/stores/project-store";
 import { isUserSpeechMessage, type ChatMessage } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
-import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+import { getSessionPreviewLabel } from "@/lib/chat-message-preview";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import "./SessionHistory.css";
 
@@ -53,7 +53,7 @@ const getSessionPreviewText = (
 
   const msgs = sessionMessages[session.id];
   const firstUserMsg = msgs?.find((m) => isUserSpeechMessage(m));
-  const preview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
+  const preview = firstUserMsg ? getSessionPreviewLabel(firstUserMsg) : "";
   return preview || session.preview || session.title;
 };
 

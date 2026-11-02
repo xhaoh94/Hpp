@@ -44,6 +44,7 @@ import {
   type McpConfigAgentContext,
 } from "./mcp-config";
 import { readCodemodeConfig, writeCodemodeConfig } from "./codemode-config";
+import { logTiming } from "../utils/timing-log";
 import { isValidAgentConfigExport } from "../../shared/agent-config-io";
 import { combineAgentModels } from "./agent-model-list";
 import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
@@ -280,17 +281,31 @@ export class AgentManager {
     // hangs.
     await withTimeout(
       (async () => {
+        // 启动慢的定位点：能力查词和配置读盘可能阻塞在插件注册表或大文件上，
+        // 先把它们和真正的 agent.init 拆开计时。
+        const stageStartedAt = Date.now();
+        let lastStageAt = stageStartedAt;
+        const mark = (label: string) => {
+          const now = Date.now();
+          logTiming(
+            `[Hpp timing] agent:init agent=${agentId} project=${projectPath} ${label} +${now - lastStageAt}ms total=${now - stageStartedAt}ms`,
+          );
+          lastStageAt = now;
+        };
         const capabilities = await agentRegistry.getCapabilities(agentId);
+        mark("capabilities");
         const compactionSupport = capabilities.compaction;
         const savedCompaction = compactionSupport && compactionSupport !== "none"
           ? await loadSavedAgentCompactionConfig(agentId)
           : undefined;
+        mark("compactionConfig");
         const compaction = savedCompaction
           ? normalizeCompactionForSupport(savedCompaction, compactionSupport)
           : undefined;
         const subagent = capabilities.subagent && capabilities.subagent !== "none"
           ? await loadSavedAgentSubagentConfig(agentId)
           : undefined;
+        mark("subagentConfig");
         const builtinExtensionDeclaration = capabilities.builtinExtensions && capabilities.builtinExtensions !== "none"
           ? capabilities.builtinExtensions
           : undefined;
@@ -298,6 +313,7 @@ export class AgentManager {
         const builtinExtensions = builtinExtensionDeclaration
           ? await getAgentBuiltinExtensions(agentId)
           : null;
+        mark("builtinExtensions");
         await agent.init(projectPath, existingSessionFilePath, {
           hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
           ...(compaction ? { compaction } : {}),
@@ -311,6 +327,7 @@ export class AgentManager {
               }
             : {}),
         });
+        mark("agent.init");
       })(),
       AGENT_SESSION_INIT_TIMEOUT_MS,
       "Agent 会话初始化超时，请检查 Agent 是否已安装、可启动，或稍后重试。"
@@ -365,6 +382,7 @@ export class AgentManager {
       let agent = this.sessionAgents.get(sessionId);
       if (!agent) {
         let backendSettled = false;
+        const backendStartedAt = Date.now();
         const backendPromise = this.createAgentBackend(agentId, sessionId).finally(() => {
           backendSettled = true;
         });
@@ -388,6 +406,9 @@ export class AgentManager {
         }
         this.sessionAgents.set(sessionId, agent);
         this.sessionAgentTypes.set(sessionId, agentId);
+        logTiming(
+          `[Hpp timing] agent:createSession:backend sessionId=${sessionId} agent=${agentId} durationMs=${Date.now() - backendStartedAt}`,
+        );
         console.log("[agent-manager] Created new agent:", agent.constructor.name);
       } else {
         console.log("[agent-manager] Reusing existing agent:", agent.constructor.name);
@@ -513,9 +534,20 @@ export class AgentManager {
     return { success: true, reloadedSessionIds: targetEntries.map(([sid]) => sid) };
   }
 
-  async getModelsBySessionId(sessionId: string): Promise<AgentModel[]> {
+  async getModelsBySessionId(sessionId: string, agentIdHint?: string): Promise<AgentModel[]> {
     const agent = this.sessionAgents.get(sessionId);
-    if (!agent) return [];
+    const agentType = this.sessionAgentTypes.get(sessionId)
+      || this.initializingSessionAgentTypes.get(sessionId)
+      || agentIdHint;
+    // 模型目录是否依赖 worker 由插件的 modelListMode 决定。Pi / Claude / Codex 用的是
+    // "configured"：目录完全来自 Hpp 自己的配置（models.json / settings.json），
+    // 和 worker 启动无关。会话还在初始化、backend 尚未就绪时直接返回配置目录，
+    // 模型选择器不必等 worker 握手（实测那一步要 ~1s）。
+    // 注意 init 进行中时 agent 对象已存在但 worker 还没 ready，此时问 backend
+    // 会等到 4s 超时，所以也要走配置目录。
+    if (!agent || this.initializingSessionAgentTypes.has(sessionId)) {
+      return agentType ? mergeModelsWithConfiguredAgentModels(agentType, []) : [];
+    }
     // Model discovery is not part of session creation itself: degrade to an
     // empty list instead of hanging the creation response when the plugin
     // backend does not answer (the renderer refreshes models later).
@@ -528,9 +560,8 @@ export class AgentManager {
       );
     } catch (error) {
       console.warn("[agent-manager] getModelsBySessionId failed for", sessionId, ":", getErrorMessage(error));
-      return [];
+      models = [];
     }
-    const agentType = this.sessionAgentTypes.get(sessionId);
     return mergeModelsWithConfiguredAgentModels(agentType, models);
   }
 
@@ -1432,13 +1463,18 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agent:createSession", async (_event, agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => {
     const sid = sessionId || "default";
     const startedAt = Date.now();
-    console.log(`[Hpp timing] agent:createSession:start sessionId=${sid} agent=${agentId}`);
+    logTiming(`[Hpp timing] agent:createSession:start sessionId=${sid} agent=${agentId}`);
     try {
       const win = getWindow();
       if (win) agentManager.setWindow(win);
       await agentManager.createSession(sid, agentId, projectPath, sessionFilePath);
+      const initDoneAt = Date.now();
       const models = await agentManager.getModelsBySessionId(sid);
-      console.log(`[Hpp timing] agent:createSession:done sessionId=${sid} durationMs=${Date.now() - startedAt} models=${models.length}`);
+      // 把「初始化」和「取模型列表」拆开：模型列表可能触发磁盘/网络刷新，
+      // 混在一起时看不出慢在哪儿。
+      logTiming(
+        `[Hpp timing] agent:createSession:done sessionId=${sid} durationMs=${initDoneAt - startedAt} modelsMs=${Date.now() - initDoneAt} models=${models.length}`,
+      );
       return { success: true, sessionFilePath: agentManager.getSessionFilePath(sid), models };
     } catch (err: unknown) {
       console.log(`[Hpp timing] agent:createSession:failed sessionId=${sid} durationMs=${Date.now() - startedAt} error=${getErrorMessage(err)}`);
@@ -1988,15 +2024,20 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle("agent:getModels", async (_event, sessionId?: string) => {
+  ipcMain.handle("agent:getModels", async (_event, sessionId?: string, agentIdHint?: string) => {
     const startedAt = Date.now();
     const agent = sessionId
       ? agentManager.getAgentBySessionId(sessionId)
       : agentManager.getActiveAgent();
     console.log(`[Hpp timing] agent:getModels:start sessionId=${sessionId || "active"} agent=${agent ? agent.constructor.name : "null"}`);
     if (!agent) {
-      console.log(`[Hpp timing] agent:getModels:done sessionId=${sessionId || "active"} durationMs=${Date.now() - startedAt} models=0 no-agent`);
-      return [];
+      // 没有 backend 时仍能给出 Hpp 配置里的模型目录（见 getModelsBySessionId），
+      // 这样新会话在 worker 启动期间就能显示模型。
+      const configuredModels = await agentManager.getModelsBySessionId(sessionId || "", agentIdHint);
+      logTiming(
+        `[Hpp timing] agent:getModels:done sessionId=${sessionId || "active"} durationMs=${Date.now() - startedAt} models=${configuredModels.length} configured-only`,
+      );
+      return configuredModels;
     }
     let models: AgentModel[];
     try {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import diffBlockSource from "./DiffBlock.tsx?raw";
+import diffHoverCardSource from "./DiffHoverCard.tsx?raw";
 
 const chatPanelStyles = readFileSync(
   resolve(process.cwd(), "src/components/layout/ChatPanel.css"),
@@ -17,13 +18,17 @@ describe("diff block viewport constraints", () => {
     expect(diffBlockSource).toContain("initialFile");
   });
 
-  it("opens the file preview (not the review dialog) when a file row is clicked", () => {
-    expect(diffBlockSource).toContain("FilePreview");
-    expect(diffBlockSource).toContain("setPreviewFile(");
-    expect(diffBlockSource).toContain("filePath={previewFile}");
-    expect(diffBlockSource).toContain('aria-haspopup="dialog"');
-    // 点击文件不再直接弹审核弹窗；审核弹窗只由「审核」按钮触发。
+  it("expands the inline diff panel when a file row is clicked", () => {
+    // 点击文件行 = 就地展开该文件的 diff 面板；没有 patch 的文件仍然直接打开文件。
+    expect(diffBlockSource).toContain("toggleDiffPreview(file, event.currentTarget)");
+    expect(diffBlockSource).toContain("if (!hasPatch) {");
+    expect(diffBlockSource).toContain("openDiffFile(file)");
+    expect(diffBlockSource).toContain("anchorRect={diffPreview.anchor}");
+    expect(diffBlockSource).toContain('aria-expanded={hasPatch ? diffPreview?.file.file === file.file : undefined}');
+    // 点击不再直接进审核界面，也不再弹文件预览（那个入口收进了面板按钮）。
     expect(diffBlockSource).not.toContain("setReviewInitialFile(file.file)");
+    expect(diffBlockSource).not.toContain('aria-haspopup="dialog"');
+    expect(diffBlockSource).toContain("filePath={previewFile}");
   });
 
   it("keeps the audit button as the only entry to the review dialog", () => {
@@ -98,5 +103,48 @@ describe("diff block viewport constraints", () => {
     expect(titleGroup).toContain("align-items: center");
     expect(titleGroup).toContain("gap: 6px");
     expect(totals).toContain("margin-top: 0");
+  });
+});
+
+describe("diff file inline preview", () => {
+  it("opens the floating diff panel on click instead of hover", () => {
+    expect(diffBlockSource).toContain("toggleDiffPreview");
+    expect(diffBlockSource).toContain("<DiffHoverCard");
+    expect(diffBlockSource).toContain("anchorRect={diffPreview.anchor}");
+    // 悬停弹出的整套延迟逻辑已删除。
+    expect(diffBlockSource).not.toContain("scheduleHoverPreview");
+    expect(diffBlockSource).not.toContain("HOVER_PREVIEW_OPEN_DELAY_MS");
+    expect(diffBlockSource).not.toContain("onMouseLeave={() => scheduleCloseHoverPreview()}");
+    expect(diffBlockSource).not.toContain("onMouseEnter={cancelCloseHoverPreview}");
+  });
+
+  it("keeps the full-file entry point inside the panel", () => {
+    // 点击行不再直接打开文件，所以「看完整文件」要在面板里保留一个明确入口。
+    expect(diffHoverCardSource).toContain("onOpenFile");
+    expect(diffHoverCardSource).toContain("chat-diff-hover-card-open");
+    expect(diffHoverCardSource).toContain("打开文件");
+    expect(diffBlockSource).toContain("openDiffFile(diffPreview.file)");
+  });
+
+  it("dismisses the panel on outside click, scroll, resize and Escape", () => {
+    expect(diffBlockSource).toContain('window.addEventListener("scroll", handleScroll, true)');
+    expect(diffBlockSource).toContain('window.addEventListener("resize", dismiss)');
+    expect(diffBlockSource).toContain('window.addEventListener("mousedown", handlePointerDown, true)');
+    expect(diffBlockSource).toContain('event.key === "Escape"');
+    // 面板内部滚动、再点文件行都不应该被捕获阶段抢先关掉。
+    expect(diffBlockSource).toContain('target.closest("[data-diff-hover-card]")');
+    expect(diffBlockSource).toContain('target.closest(".chat-diff-file-row")');
+  });
+
+  it("renders the card through a portal, clamped to the viewport", () => {
+    expect(diffHoverCardSource).toContain("createPortal");
+    expect(diffHoverCardSource).toContain("fitsRight");
+    expect(diffHoverCardSource).toContain("data-diff-hover-card");
+    expect(diffHoverCardSource).toContain("buildDiffPreviewLines");
+    expect(chatPanelStyles).toContain(".chat-diff-hover-card {");
+    // 宽度/高度跟视口伸缩：窄窗口铺满可用宽度，宽屏最多 1120px。
+    expect(chatPanelStyles).toContain("width: clamp(420px, 72vw, 1120px);");
+    expect(chatPanelStyles).toContain("max-width: calc(100vw - 24px);");
+    expect(chatPanelStyles).toContain("max-height: min(64vh, calc(100vh - 24px));");
   });
 });

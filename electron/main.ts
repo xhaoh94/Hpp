@@ -46,6 +46,13 @@ for (const chromiumSwitch of getLinuxChromiumSwitches(process.platform, process.
 
 // Set app name
 app.setName("hpp");
+
+// 安装版里没有 dev 脚本注入的 HPP_DATA_DIR，而插件宿主、性能日志都要靠它
+// 定位 hpp-data。这里补上同一份 fallback（与 agent-manager / agent-config
+// 一致），避免同一个目录在不同进程里解析成两个位置。
+if (!String(process.env.HPP_DATA_DIR || "").trim()) {
+  process.env.HPP_DATA_DIR = join(app.getPath("userData"), "hpp-data");
+}
 if (process.platform === "win32") {
   app.setAppUserModelId(WINDOWS_APP_ID);
 }

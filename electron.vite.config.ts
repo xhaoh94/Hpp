@@ -1,5 +1,5 @@
 import { resolve } from "path";
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "fs";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import { buildSync } from "esbuild";
 import react from "@vitejs/plugin-react";
@@ -27,7 +27,17 @@ const copyAgentWorkerPlugin = () => ({
       ["electron/plugin-backends/claude/openai-anthropic-adapter.mjs", "openai-anthropic-adapter.mjs"],
     ];
     for (const [source, target] of workers) {
-      copyFileSync(resolve(__dirname, source), resolve(targetDir, target));
+      const sourcePath = resolve(__dirname, source);
+      const targetPath = resolve(targetDir, target);
+      if (!existsSync(sourcePath)) {
+        // worker 源文件被删除 / 改名时不能留下 out/ 里的旧副本：旧副本往往还
+        // import 着已删除的模块，而 copyFileSync 抛错会中断整轮复制，main 与
+        // worker 版本错位，症状是「Pi SDK worker output pipe closed」。
+        rmSync(targetPath, { force: true });
+        console.warn(`[copy-agent-workers] 跳过不存在的源文件：${source}`);
+        continue;
+      }
+      copyFileSync(sourcePath, targetPath);
     }
     const subagentPromptSourceDir = resolve(__dirname, "electron/plugin-backends/pi/subagent-prompts");
     const subagentPromptTargetDir = resolve(targetDir, "subagent-prompts");

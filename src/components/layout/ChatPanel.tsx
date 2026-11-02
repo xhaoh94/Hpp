@@ -63,7 +63,7 @@ import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { buildSessionMessagePayload } from "@/lib/session-message-payload";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
-import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+import { getChatMessagePreviewText, getSessionPreviewLabel } from "@/lib/chat-message-preview";
 import { partitionPastedFiles, readClipboardFiles } from "@/lib/paste-attachments";
 import {
   OPEN_VIDEO_PREVIEW_EVENT,
@@ -999,7 +999,8 @@ const SessionStarterList = memo(function SessionStarterList({
       {openSessions.map((session) => {
         const messages = sessionMessages[session.id];
         const firstUserMsg = messages?.find((message) => isUserSpeechMessage(message));
-        const firstUserPreview = firstUserMsg ? getChatMessagePreviewText(firstUserMsg) : "";
+        // 会话列表属于标题类位置：只带附件时列出具体名字（`[shot.png][src]`）。
+        const firstUserPreview = firstUserMsg ? getSessionPreviewLabel(firstUserMsg) : "";
         return (
           <button
             key={session.id}
@@ -1023,7 +1024,10 @@ const SessionStarterList = memo(function SessionStarterList({
 
 type ChatMessagesViewProps = {
   activeSessionId: string | null;
-  activeSessionInitialized: boolean;
+  /** 历史是否已经恢复完成；未完成时才允许用遮罩，完成后即使后端还在唤醒也要展示消息。 */
+  historyReady: boolean;
+  /** 后端（worker）是否还在初始化；只用于新建会话的空白占位。 */
+  sessionInitializing: boolean;
   currentSessionRunning: boolean;
   currentSessionStatus: AgentStatus;
   currentSessionCompacting: boolean;
@@ -1277,6 +1281,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
                 content={item.content}
                 deferHighlight={turnRunning && item.isStreaming === true}
                 projectPath={projectPath}
+                onFileOpen={onOpenFile}
               />
             </div>
           ))}
@@ -1382,6 +1387,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
                           content={msg.content}
                           deferHighlight={turnRunning}
                           projectPath={projectPath}
+                          onFileOpen={onOpenFile}
                         />
                       </div>
                     )}
@@ -1747,7 +1753,8 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
 
 const ChatMessagesView = memo(function ChatMessagesView({
   activeSessionId,
-  activeSessionInitialized,
+  historyReady,
+  sessionInitializing,
   currentSessionRunning,
   currentSessionStatus,
   currentSessionCompacting,
@@ -1985,15 +1992,24 @@ const ChatMessagesView = memo(function ChatMessagesView({
           onOpenChange={onUserMsgHistoryOpenChange}
           onScrollToMessage={onScrollToMessage}
         />
-        {activeSessionId && !activeSessionInitialized ? (
+        {activeSessionId && !historyReady ? (
           <div className="chat-loading-agent">
             <div className="chat-working-spinner" />
-            <span>正在初始化会话...</span>
+            <span>正在载入会话...</span>
           </div>
         ) : (
           <>
             {messages.length === 0 && (
-              <div className="chat-empty">发送消息开始对话</div>
+              // 新建会话：后端还在初始化时用转圈占位，避免用户对着“发送消息开始对话”
+              // 却发不出去（发送按钮此时是置灰的）。已有历史的消息不受影响。
+              sessionInitializing ? (
+                <div className="chat-loading-agent chat-session-waking">
+                  <div className="chat-working-spinner" />
+                  <span>正在启动会话后端...</span>
+                </div>
+              ) : (
+                <div className="chat-empty">发送消息开始对话</div>
+              )
             )}
             <ChatMessagesViewport
               messages={messages}
@@ -2299,6 +2315,12 @@ export function ChatPanel({
   const activeSessionInitialized = useProjectStore((state) =>
     activeSessionId ? state.initializedSessionIds.has(activeSessionId) : false
   );
+  const activeSessionInitializing = useProjectStore((state) =>
+    activeSessionId ? state.initializingSessionIds.has(activeSessionId) : false
+  );
+  const activeSessionMessagesLoaded = useChatStore((state) =>
+    activeSessionId ? state.sessionMessagesLoaded[activeSessionId] === true : false
+  );
   const {
     removeSessionReference: removePersistedSessionReference,
   } = useProjectStore(useShallow((state) => ({
@@ -2311,6 +2333,16 @@ export function ChatPanel({
     ? getSessionHeaderTitle(activeSession, sessionMessages)
     : "";
   const messages = useChatStore((state) => state.messages);
+  // 历史就绪和后端就绪是两条独立通路：会话被空闲回收后重新点开时，先展示
+  // SQLite 里的历史，把“唤醒后端”降级成输入框上的非阻塞提示。
+  const activeSessionHistoryReady = !activeSessionId
+    || activeSessionMessagesLoaded
+    || messages.length > 0;
+  useEffect(() => {
+    if (!activeSessionId) return;
+    if (useChatStore.getState().sessionMessagesLoaded[activeSessionId]) return;
+    void ensureSessionMessagesLoaded(activeSessionId);
+  }, [activeSessionId]);
   const [scrollHeaderTitle, setScrollHeaderTitle] = useState<string | null>(null);
   const [scrollHeaderMessageId, setScrollHeaderMessageId] = useState<string | null>(null);
   const currentAgentId = activeSession?.agentId || activeAgentId;
@@ -2975,10 +3007,19 @@ export function ChatPanel({
     return () => window.removeEventListener(OPEN_VIDEO_PREVIEW_EVENT, handleOpenVideo);
   }, []);
 
-  const handleOpenFile = useCallback((path: string, options: { preview?: boolean } = {}) => {
+  const handleOpenFile = useCallback(async (path: string, options: { preview?: boolean } = {}) => {
     const resolvedPath = resolveProjectFilePath(path, activeProject?.path || "");
     if (options.preview === false) {
       useAppStore.getState().revealFile(resolvedPath, { preview: false });
+      return;
+    }
+    // 聊天里的路径是模型写的文字，不保证真的存在（典型：只写了裸文件名，
+    // 实际文件不在项目根）。先确认存在再开预览，否则给带完整路径的提示，
+    // 而不是弹出一个空白预览窗。
+    if (!(await window.electronAPI.fileExists(resolvedPath))) {
+      showAppAlert(
+        `找不到文件：${resolvedPath}\n\n聊天里的路径按项目根解析。如果这里只是文件名，需要 Agent 给出完整路径（如 logs/app.log 或绝对路径）。`,
+      );
       return;
     }
     if (useEditorStore.getState().mode) {
@@ -3473,6 +3514,8 @@ export function ChatPanel({
   const handleSend = useCallback(async () => {
     if (forkingMessageIdRef.current) return;
     if (activeInteraction) return;
+    // 后端唤醒期间发送按钮置灰，这里同步拦掉 Enter 等快捷路径。
+    if (activeSessionInitializing) return;
     const targetSessionId = useProjectStore.getState().activeSessionId;
 
     if (isAwaitingUIResponse) {
@@ -3521,6 +3564,7 @@ export function ChatPanel({
     });
   }, [
     activeInteraction,
+    activeSessionInitializing,
     activeDraft.action,
     activeComposerDocument,
     activeSessionReferences.length,
@@ -3961,7 +4005,8 @@ export function ChatPanel({
       {/* Messages */}
       <ChatMessagesView
         activeSessionId={activeSessionId}
-        activeSessionInitialized={activeSessionInitialized}
+        historyReady={activeSessionHistoryReady}
+        sessionInitializing={activeSessionInitializing}
         currentSessionRunning={currentSessionRunning}
         currentSessionStatus={activeSessionAgentStatus || (currentSessionRunning ? "running" : "idle")}
         currentSessionCompacting={activeSessionCompacting}
@@ -4053,6 +4098,7 @@ export function ChatPanel({
           currentSessionRunning={currentSessionRunning}
           compactionInProgress={activeSessionCompacting}
           interactionDisabled={isForkingSession}
+          sessionInitializing={activeSessionInitializing}
           attachmentError={attachmentError}
           isAwaitingUIResponse={isAwaitingUIResponse}
           inputHasText={inputHasText}

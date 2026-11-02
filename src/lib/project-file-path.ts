@@ -44,16 +44,25 @@ export function getLocalMarkdownFilePath(href: string): string | null {
  * Keep this deliberately conservative so normal source snippets do not look
  * interactive merely because they are rendered with Markdown code styling.
  */
+// 以「文件名.扩展名」结尾，允许尾随 1~2 级行号/列号（`foo.ts:42:7`）。
+const FILE_PATH_ENDING = /(?:^|[\\/])[^\\/]+\.[a-z\d][a-z\d._-]*(?::\d+){0,2}$/i;
+const LINE_SUFFIX = /(?::\d+){1,2}$/;
+
 export function getLocalMarkdownCodePath(value: string): string | null {
   const path = value.trim();
   if (!path || path.length > 2048 || /[\r\n]/.test(path)) return null;
   if (path.startsWith("//") || (!WINDOWS_ABSOLUTE_PATH.test(path) && URI_SCHEME.test(path))) return null;
-
-  const hasPathSeparator = /[\\/]/.test(path);
-  const hasFileExtension = /(?:^|[\\/])[^\\/]+\.[a-z\d][a-z\d._-]*$/i.test(path);
-  if (!hasPathSeparator && !hasFileExtension) return null;
   if (/[<>|]/.test(path)) return null;
-  return path;
+
+  // 连续空白说明这段不只是路径。单行代码块会被渲染成行内代码，模型在里面写
+  // `release/app.exe   18:38 更新` 时，整段当路径去点会变成「找不到文件」。
+  if (/\s{2,}/.test(path)) return null;
+  // 以分隔符结尾 = 目录引用；否则必须「名字.扩展名[:行号]」结尾，
+  // 这样 `npm run build`、`路径后面跟了解释文字` 都不会被判成可点击路径。
+  if (!/[\\/]$/.test(path) && !FILE_PATH_ENDING.test(path)) return null;
+
+  // 行号不是文件系统的一部分，去掉了才能真正打开。
+  return path.replace(LINE_SUFFIX, "");
 }
 
 export function isAbsoluteProjectFilePath(filePath: string): boolean {

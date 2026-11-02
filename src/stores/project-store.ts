@@ -59,6 +59,8 @@ interface ProjectState {
   projectDataHydrated: boolean;
   agentStatuses: Record<string, AgentStatus>; // sessionId -> status
   initializedSessionIds: Set<string>; // session IDs with agent backend created
+  /** 正在唤醒后端（spawn/握手/恢复上下文）的会话；仅用于 UI 展示，不参与持久化。 */
+  initializingSessionIds: Set<string>;
   addProject: (name: string, path: string, agentIds?: string[]) => void;
   removeProject: (id: string) => void;
   reorderProjects: (sourceId: string, targetId: string, insertAfter?: boolean) => void;
@@ -74,6 +76,8 @@ interface ProjectState {
   setSessionFilePath: (projectId: string, sessionId: string, sessionFilePath: string) => void;
   setAgentStatus: (sessionId: string, status: AgentStatus) => void;
   markSessionInitialized: (sessionId: string) => void;
+  markSessionInitializing: (sessionId: string) => void;
+  clearSessionInitializing: (sessionId: string) => void;
   isSessionInitialized: (sessionId: string) => boolean;
 }
 
@@ -84,6 +88,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   projectDataHydrated: false,
   agentStatuses: {},
   initializedSessionIds: new Set<string>(),
+  initializingSessionIds: new Set<string>(),
 
   addProject: (name, path, agentIds = []) =>
     set((s) => {
@@ -185,6 +190,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       delete nextAgentStatuses[sessionId];
       const nextInitializedSessionIds = new Set(s.initializedSessionIds);
       nextInitializedSessionIds.delete(sessionId);
+      const nextInitializingSessionIds = new Set(s.initializingSessionIds);
+      nextInitializingSessionIds.delete(sessionId);
       return {
         projects: s.projects.map((p) =>
           p.id === projectId
@@ -199,6 +206,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId,
         agentStatuses: nextAgentStatuses,
         initializedSessionIds: nextInitializedSessionIds,
+        initializingSessionIds: nextInitializingSessionIds,
       };
     }),
 
@@ -320,6 +328,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const next = new Set(s.initializedSessionIds);
       next.add(sessionId);
       return { initializedSessionIds: next };
+    }),
+
+  markSessionInitializing: (sessionId) =>
+    set((s) => {
+      if (s.initializingSessionIds.has(sessionId)) return {};
+      const next = new Set(s.initializingSessionIds);
+      next.add(sessionId);
+      return { initializingSessionIds: next };
+    }),
+
+  clearSessionInitializing: (sessionId) =>
+    set((s) => {
+      if (!s.initializingSessionIds.has(sessionId)) return {};
+      const next = new Set(s.initializingSessionIds);
+      next.delete(sessionId);
+      return { initializingSessionIds: next };
     }),
 
   isSessionInitialized: (sessionId) => get().initializedSessionIds.has(sessionId),

@@ -131,10 +131,16 @@ export function useSessionModels({
     void fetchModels(sessionId, fetchRunId);
   }, [fetchModels]);
 
-  // 模型目录是按会话/Agent 作用域的。切换后先同步清空，避免异步发现
-  // 完成前把上一个会话的目录误显示在当前聊天栏。
+  // 模型目录按 Agent 作用域（models.json）。同一 Agent 内切会话时保留已有目录，
+  // 让模型选择器不必等后端重新发现就能显示；只有跨 Agent 才同步清空，
+  // 避免把上一个 Agent 的目录误显示在当前聊天栏。
+  const modelsAgentIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    clearModels();
+    const previousAgentId = modelsAgentIdRef.current;
+    modelsAgentIdRef.current = activeSessionAgentId;
+    if (!activeSessionAgentId || previousAgentId !== activeSessionAgentId) {
+      clearModels();
+    }
   }, [activeSessionId, activeSessionAgentId, clearModels]);
 
   useEffect(() => {
@@ -147,6 +153,21 @@ export function useSessionModels({
     }
 
     if (!activeSessionInitialized) {
+      // 模型目录不依赖 worker（Pi/Claude/Codex 都是 configured 模式），
+      // 所以和初始化并行拉一次：请求到就先把模型名渲染出来，不必等握手完成。
+      void (async () => {
+        const models = await SessionCommandCoordinator.getConfiguredModels(activeSessionId, activeSessionAgentId);
+        if (
+          modelFetchRunIdRef.current !== fetchRunId ||
+          useProjectStore.getState().activeSessionId !== activeSessionId ||
+          models.length === 0
+        ) return;
+        // 初始化完成后发现的真实目录更新时，不要用这份配置目录把它盖回去。
+        if (useChatStore.getState().availableModels.length > 0) return;
+        setAvailableModels(models);
+        const selectedModel = selectSessionModel(activeSessionId, models);
+        if (selectedModel) setCurrentModel(selectedModel);
+      })();
       const scheduleRetry = (attempt: number) => {
         if (attempt >= AUTO_INIT_RETRY_DELAYS_MS.length) return;
         retryTimer = setTimeout(() => {

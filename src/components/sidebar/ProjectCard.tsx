@@ -7,7 +7,7 @@ import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
-import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+import { getSessionPreviewLabel } from "@/lib/chat-message-preview";
 import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
@@ -490,7 +490,7 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
             // 未访问会话正文尚未加载时使用轻量摘要；当前会话仍优先使用内存中的
             // 消息，保证用户刚发出的首条请求立即反映到页签。
             const tabPreview = firstUserMsg
-              ? getChatMessagePreviewText(firstUserMsg)
+              ? getSessionPreviewLabel(firstUserMsg)
               : session.preview || "";
             const tabLabel = tabPreview || session.title;
             return (

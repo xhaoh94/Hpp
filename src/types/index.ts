@@ -397,7 +397,7 @@ export interface ElectronAPI {
   agentConfigImportRead: () => Promise<{ success: boolean; error?: string; canceled?: boolean; data?: AgentConfigExportData }>;
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
-  agentGetModels: (sessionId?: string) => Promise<AgentModel[]>;
+  agentGetModels: (sessionId?: string, agentId?: string) => Promise<AgentModel[]>;
   agentListActions: (sessionId?: string, options?: AgentActionListOptions) => Promise<AgentActionCatalogEntry[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;
   agentSetThinkingLevel: (level: string, sessionId?: string) => Promise<{ success: boolean }>;

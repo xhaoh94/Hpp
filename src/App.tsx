@@ -56,7 +56,8 @@ const CHAT_RESIZE_KEYBOARD_LARGE_STEP = 48;
 export default function App() {
   useDataPersistence();
   useEditorPersistence();
-  // 长时间空闲的会话保留页签但回收其后端进程，避免内存随打开页签数增长。
+  // 保留最近使用的会话后端（LRU 热池），超出容量或长期空闲才回收，避免内存
+  // 随打开页签数增长，同时让日常切换不必重新 spawn CLI。
   useIdleSessionRuntimeRelease();
   const [showFileSearch, setShowFileSearch] = useState(false);
   const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);

@@ -571,9 +571,9 @@ describe("agent event terminal reconciliation", () => {
     expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("idle");
   });
 
-  it("notifies with the latest message instead of the session title", () => {
-    // 通知正文曾用 session.title（首条用户消息），在系统弹窗里看起来像
-    // 把最开始的问题又发了一遍；应当展示本次任务最后一条消息的摘要。
+  it("notifies with the last user message instead of the assistant reply", () => {
+    // 通知要回显「用户本次让它做的事」：agent 回复往往很长且是 Markdown，
+    // 截成一行后看不出重点；session.title 又是会话首条用户消息，也不合适。
     vi.stubGlobal("document", { visibilityState: "hidden", hasFocus: () => false });
     const harness = createHarness();
     useProjectStore.setState((state) => ({
@@ -595,18 +595,26 @@ describe("agent event terminal reconciliation", () => {
     }, SESSION_ID);
     startRunningProcess(harness);
     chat.addMessage({
+      id: "last-user",
+      role: "user",
+      content: "## 顺便把通知正文换成我最后发的那句",
+      timestamp: 2,
+    }, SESSION_ID);
+    chat.addMessage({
       id: "last-assistant",
       role: "assistant",
       content: "最后结论：MCP 已经配好，可以直接用 concat 工具了",
-      timestamp: 2,
+      timestamp: 3,
     }, SESSION_ID);
 
     dispatchAgentEvent({ type: "stream_end", sessionId: SESSION_ID }, harness.controller);
 
     expect(showNotification).toHaveBeenCalledTimes(1);
     const body = String((showNotification.mock.calls[0] as [{ body?: string }])[0].body || "");
-    expect(body).toContain("最后结论：MCP 已经配好");
+    expect(body).toContain("顺便把通知正文换成我最后发的那句");
+    expect(body).not.toContain("最后结论：MCP 已经配好");
     expect(body).not.toContain("最初的问题：帮我配 MCP");
+    expect(body).not.toContain("##");
   });
 
   it("terminalizes an empty stream_end runtime and allows the next revision", () => {

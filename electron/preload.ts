@@ -237,7 +237,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) =>
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
-  agentGetModels: (sessionId?: string) => ipcRenderer.invoke("agent:getModels", sessionId),
+  agentGetModels: (sessionId?: string, agentId?: string) =>
+    ipcRenderer.invoke("agent:getModels", sessionId, agentId),
   agentListActions: (sessionId?: string, options?: AgentActionListOptions) =>
     ipcRenderer.invoke("agent:listActions", sessionId, options),
   agentSetModel: (provider: string, modelId: string, sessionId?: string) =>

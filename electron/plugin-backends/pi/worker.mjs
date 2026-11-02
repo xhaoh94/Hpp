@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
 import { getPiMessageText, resolvePiForkEntryId } from "./pi-fork-utils.mjs";
 import {
   buildShellEnvironmentContract,
@@ -95,11 +94,14 @@ const normalizeBuiltinExtensionConfig = (value) => {
   return normalized;
 };
 const HIGH_RISK_COMMAND_PATTERN = /(?:\brm\s+(?:-[^\s]*r|--recursive)|\bsudo\b|\b(?:chmod|chown)\b|\bgit\s+(?:push|clean|reset\s+--hard)|\b(?:curl|wget|ssh|scp|rsync)\b|\b(?:npm|pnpm|yarn|pip|cargo)\s+(?:install|add|publish)|invoke-webrequest|start-process|\bshutdown\b|\breboot\b|\btaskkill\b)/i;
-const SHELL_PROBE_TOKEN = "hpp-shell-ready";
+
 const FILE_DISCOVERY_GUIDANCE = [
   "当目标文件路径未知时，先使用 ls、find 或 grep 发现文件，再调用 read。",
   "不要猜测多个文件名并逐个试错。",
   "如果 bash 不可用，继续使用 ls、find 和 grep，不要反复重试基于 Shell 的文件发现。",
+  // 聊天里的行内代码路径会按项目根解析后点击预览；只写裸文件名会解析到
+  // 项目根下不存在的位置，点上去只会提示找不到文件。
+  "回答里引用文件时给出相对项目根的完整路径（如 src/lib/foo.ts），不要只写文件名。",
 ].join(" ");
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const AGENT_COMPACTION_THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -1265,48 +1267,69 @@ const getAvailableToolNames = () => new Set(
     .filter(Boolean),
 );
 
-// 同一次 init 里对同一个 shell 会探测多次（解析配置一次、最终确认一次，
-// 回退候选再各一次）。Windows 上每次 spawnSync 都是几十毫秒的进程启动，
-// 按 shell 路径+参数缓存结果。
-const shellProbeCache = new Map();
+// Hpp 不再在启动 / 新建会话时 spawn 一个 shell 做 `echo` 预检。那一步只为了
+// 回答“配置的 shell 还能不能用”，但代价是一次真实的进程启动：冷启动、杀软
+// 钩子或企业 profile 下可以拖到数秒，而它挡住了 worker 的初始化。这里改成
+// 零进程的静态判定：绝对路径看文件是否存在，裸名（bash、pwsh）走 PATH 查找。
+// shell 真的跑不起来时，由 bash 工具第一次执行把错误回报给模型即可。
+const splitPathList = (value) => String(value || "")
+  .split(process.platform === "win32" ? ";" : ":")
+  .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+  .filter(Boolean);
 
-const probeShell = (settingsManager) => {
-  if (typeof sdk?.getShellConfig !== "function") return null;
-  try {
-    const config = sdk.getShellConfig(settingsManager?.getShellPath?.());
-    if (!config?.shell || !Array.isArray(config.args)) {
-      return "Pi 返回了无效的 Shell 配置";
+const findShellOnPath = (name) => {
+  const extensions = process.platform === "win32"
+    ? ["", ...String(process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
+    : [""];
+  for (const dir of splitPathList(process.env.PATH)) {
+    for (const extension of extensions) {
+      const candidate = join(dir, `${name}${extension}`);
+      if (existsSync(candidate)) return candidate;
     }
-    const usesStdin = config.commandTransport === "stdin";
-    const cacheKey = `${config.shell}\u0000${config.args.join("\u0000")}\u0000${usesStdin ? "stdin" : "argv"}`;
-    const cached = shellProbeCache.get(cacheKey);
-    if (cached !== undefined) return cached;
-    // `echo` is available in POSIX shells, PowerShell, and cmd. Using `printf`
-    // here incorrectly marked a healthy PowerShell as unavailable on Windows.
-    const command = `echo ${SHELL_PROBE_TOKEN}`;
-    const result = spawnSync(
-      config.shell,
-      usesStdin ? config.args : [...config.args, command],
-      {
-        input: usesStdin ? `${command}\n` : undefined,
-        encoding: "utf8",
-        timeout: 5000,
-        windowsHide: true,
-      },
-    );
-    const probeResult = result.status === 0 && String(result.stdout || "").includes(SHELL_PROBE_TOKEN)
-      ? ""
-      : [
-        result.error?.message,
-        String(result.stderr || "").trim(),
-        String(result.stdout || "").trim(),
-        typeof result.status === "number" ? `退出码 ${result.status}` : "",
-      ].filter(Boolean).join("\n") || "Shell 启动检查失败";
-    shellProbeCache.set(cacheKey, probeResult);
-    return probeResult;
-  } catch (error) {
-    return error?.message || String(error);
   }
+  return "";
+};
+
+const shellAvailabilityCache = new Map();
+
+const isShellPathUsable = (shellPath) => {
+  const value = String(shellPath || "").trim();
+  if (!value) return false;
+  if (isAbsolute(value)) return existsSync(value);
+  const cached = shellAvailabilityCache.get(value);
+  if (cached !== undefined) return cached;
+  const usable = Boolean(findShellOnPath(value));
+  shellAvailabilityCache.set(value, usable);
+  return usable;
+};
+
+// 返回 Hpp 能判定的 shell 路径；返回 null 表示 Pi 没给出任何可解析的配置
+// （如未安装 / 未指定），此时不对可用性做任何断言，保留 bash 工具。
+// 候选回退也用同一套解析，保证“让 Pi 解析这个路径”和“判断这个路径”不会
+// 各自走一套逻辑。
+const resolveShellPathFor = (configuredPath) => {
+  const value = String(configuredPath || "").trim();
+  if (typeof sdk?.getShellConfig !== "function") return value || null;
+  try {
+    const shellPath = String(sdk.getShellConfig(value || undefined)?.shell || value).trim();
+    return shellPath || null;
+  } catch {
+    return value || null;
+  }
+};
+
+const resolveConfiguredShellPath = (settingsManager) => resolveShellPathFor(settingsManager?.getShellPath?.());
+
+const isShellAvailable = (settingsManager) => {
+  const shellPath = resolveConfiguredShellPath(settingsManager);
+  return shellPath === null ? true : isShellPathUsable(shellPath);
+};
+
+// 返回空字符串表示 shell 可用，否则返回给用户看的原因。
+const describeShellUnavailable = (settingsManager) => {
+  const shellPath = resolveConfiguredShellPath(settingsManager);
+  if (shellPath === null || isShellPathUsable(shellPath)) return "";
+  return `配置的 Shell ${shellPath} 不存在，无法执行命令`;
 };
 
 const getWindowsShellCandidates = () => {
@@ -1339,15 +1362,15 @@ const overrideShellPath = (settingsManager, shellPath) => new Proxy(settingsMana
 });
 
 // Keep the user's configured shell untouched, but fall back to the first
-// healthy installed shell. This explicitly includes PowerShell because Pi's
-// Windows auto-detection can otherwise stop at the unusable WSL bash launcher.
+// installed shell when the configured one is missing on disk. This still
+// covers the common Windows case (Git uninstalled / Pi pointing at a stale
+// path) without spawning anything to verify it.
 const resolveShellSettings = (settingsManager) => {
   shellNotice = "";
-  const configuredPath = settingsManager?.getShellPath?.();
-  const configuredError = probeShell(settingsManager);
-  if (!configuredError) return settingsManager;
+  if (isShellAvailable(settingsManager)) return settingsManager;
   if (typeof sdk?.getShellConfig !== "function") return settingsManager;
 
+  const configuredPath = String(settingsManager?.getShellPath?.() || "").trim();
   const candidates = [];
   try {
     const fallback = sdk.getShellConfig();
@@ -1365,8 +1388,7 @@ const resolveShellSettings = (settingsManager) => {
     if (!normalized || seen.has(normalized)) continue;
     seen.add(normalized);
     if (configuredPath && normalized === String(configuredPath).replaceAll("/", "\\").toLowerCase()) continue;
-    const fallbackError = probeShell({ getShellPath: () => candidate });
-    if (fallbackError) continue;
+    if (!isShellPathUsable(resolveShellPathFor(candidate) ?? candidate)) continue;
     shellNotice = configuredPath
       ? `已将不可用的 Shell ${configuredPath} 自动切换为 ${candidate}`
       : `已自动使用可用的 Shell ${candidate}`;
@@ -1381,7 +1403,7 @@ const configureFullAccessTools = (settingsManager) => {
   // 白名单口径见 collectAllowlistToolNames —— 两处必须共用同一个函数，
   // 否则全量重算和增量刷新会漂移（曾导致 MCP 自动激活的 tool_search 被抹掉）。
   const currentToolNames = collectAllowlistToolNames();
-  shellWarning = probeShell(settingsManager) || "";
+  shellWarning = describeShellUnavailable(settingsManager);
   if (shellNotice) shellWarning = "";
   shellWarningEmitted = false;
   fullAccessToolNames = [...new Set([
@@ -1574,19 +1596,39 @@ const applyBuiltinExtensionConfig = async (config) => {
   configureFullAccessTools(activeSettingsManager);
 };
 
+// 会话启动的分阶段打点。日志走 stderr，由 backend.ts 转发到主进程并落盘到
+// `$HPP_DATA_DIR/logs/hpp-timing.log`：正式包（内网机器）里没有 dev 控制台，
+// 只能靠日志文件事后分析。格式固定为 `[pi-init] <阶段> +<本阶段 ms> total=<累计 ms>`。
+const createInitTimer = () => {
+  const startedAt = Date.now();
+  let lastAt = startedAt;
+  return (label) => {
+    const now = Date.now();
+    const delta = now - lastAt;
+    lastAt = now;
+    console.error(`[pi-init] ${label} +${delta}ms total=${now - startedAt}ms`);
+  };
+};
+
 const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig, subagentConfig, builtinExtensions }) => {
+  const mark = createInitTimer();
+  console.error(`[pi-init] target project=${cwd} session=${sessionFilePath || "(new)"}`);
+  mark("init:start");
   await disposeSession();
+  mark("disposeSession");
   activeHostSystemPrompt = String(hostSystemPrompt || "").trim();
   activeCompactionConfig = normalizeAgentCompactionConfig(compactionConfig);
   activeSubagentConfig = normalizeHppSubagentConfig(subagentConfig);
   activeBuiltinExtensionConfig = normalizeBuiltinExtensionConfig(builtinExtensions);
   projectPath = cwd;
   sdk = await loadPiSDK();
+  mark("loadPiSDK");
   const eventBus = sdk.createEventBus();
   activeEventBus = eventBus;
   const agentDir = sdk.getAgentDir();
   stripUtf8Bom(join(agentDir, "models.json"));
   stripUtf8Bom(join(agentDir, "auth.json"));
+  mark("agentDir+stripUtf8Bom");
   // Pi 0.81+ replaced the public AuthStorage factory with ModelRuntime.
   // Keep compatibility with older SDKs while using the current API when it is
   // available.
@@ -1598,6 +1640,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
       authPath: join(agentDir, "auth.json"),
       modelsPath: join(agentDir, "models.json"),
     });
+    mark("ModelRuntime.create");
     createdModelRegistry = new sdk.ModelRegistry(modelRuntime);
     try {
       await createdModelRegistry.refresh?.();
@@ -1605,19 +1648,22 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
       // Offline or network error – fall back to whatever models.json already
       // contains from a previous successful refresh.
     }
+    mark("modelRegistry.refresh");
     // Resolve context windows from pi's built-in catalogue before the session
     // starts: Hpp-synced channels only declare id/name/reasoning/input, which
     // would otherwise leave every custom model at pi's 128k default.
     await applyCatalogueContextWindows(modelRuntime);
+    mark("applyCatalogueContextWindows");
   } else {
     authStorage = requireSDKFactory("AuthStorage").create(join(agentDir, "auth.json"));
     createdModelRegistry = requireSDKFactory("ModelRegistry").create(authStorage, join(agentDir, "models.json"));
   }
   const settingsManager = requireSDKFactory("SettingsManager").create(cwd, agentDir);
   const effectiveSettingsManager = resolveShellSettings(settingsManager);
+  mark("resolveShellSettings");
   activeSettingsManager = effectiveSettingsManager;
   shellEnvironment = getShellEnvironment(effectiveSettingsManager);
-  shellAvailable = !probeShell(effectiveSettingsManager);
+  shellAvailable = isShellAvailable(effectiveSettingsManager);
   const shellEnvironmentContract = buildShellEnvironmentContract({
     ...shellEnvironment,
     cwd,
@@ -1670,11 +1716,15 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
       activeHostSystemPrompt,
     ].filter(Boolean),
   });
+  mark("newResourceLoader");
   await resourceLoader.reload();
+  mark("resourceLoader.reload");
   assertPermissionExtensionLoaded(resourceLoader);
+  mark("assertPermissionExtensionLoaded");
   const sessionManager = sessionFilePath
     ? sdk.SessionManager.open(sessionFilePath, undefined, cwd)
     : requireSDKFactory("SessionManager").create(cwd);
+  mark("SessionManager");
   const result = await sdk.createAgentSession({
     cwd,
     agentDir,
@@ -1684,25 +1734,32 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     sessionManager,
   });
   session = result.session;
+  mark("createAgentSession");
   // Re-evaluate a restored setting so the session enforces the current
   // model's supported levels; sessions opened from disk may carry a value
   // the SDK accepted before the model catalogue was known.
   if (typeof session?.thinkingLevel === "string") {
     session?.setThinkingLevel?.(session.thinkingLevel);
   }
+  mark("setThinkingLevel");
   modelRegistry = createdModelRegistry || session.modelRegistry || null;
   uiBridge = new DesktopUIBridge(eventBus);
+  mark("uiBridge");
   await session.bindExtensions({
     uiContext: uiBridge.uiContext,
     mode: "tui",
     commandContextActions: buildCommandContextActions(session),
   });
+  mark("bindExtensions");
   configureFullAccessTools(effectiveSettingsManager);
+  mark("configureFullAccessTools");
   activePermissionMode = "full-access";
   activePlanMode = false;
   unsubscribe = session.subscribe(handleSessionEvent);
   send({ type: "history_snapshot", messages: buildHistorySnapshot(session.sessionManager) });
+  mark("history_snapshot");
   send({ type: "ready", id, sessionFilePath: session.sessionFile });
+  mark("ready");
 };
 
 const actionText = (value) => typeof value === "string" ? value.trim() : "";

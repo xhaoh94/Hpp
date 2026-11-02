@@ -53,7 +53,7 @@ export const buildShellEnvironmentContract = ({ platform, cwd, shellPath, shellF
       "- 工具架构中名为 bash 的工具已注册并可在本回合使用。需要执行命令时请直接调用它；只要工具架构中存在 bash，就不要声称没有 Shell 或 exec 工具。",
     );
   } else {
-    facts.push("- 由于配置的 Shell 未通过 Hpp 启动预检，当前无法执行命令；请改用专用的文件发现和文件操作工具。");
+    facts.push("- 配置的 Shell 路径不存在，当前无法执行命令；请改用专用的文件发现和文件操作工具。");
   }
 
   if (platform === "win32" && (shellFamily === "bash" || shellFamily === "posix")) {

@@ -4,17 +4,22 @@ import { useProjectStore, type ProjectSession } from "@/stores/project-store";
 import { setAgentCatalog } from "@/lib/agents";
 import {
   IDLE_SESSION_RUNTIME_RELEASE_MS,
+  WARM_SESSION_EVICT_GRACE_MS,
+  WARM_SESSION_POOL_MAX,
   scanIdleSessionRuntimes,
 } from "@/hooks/useIdleSessionRuntimeRelease";
 import { releaseIdleSessionRuntime } from "@/lib/session-command-coordinator";
 
-const session = (id: string): ProjectSession => ({
+const session = (
+  id: string,
+  lastActiveAt = "2026-07-17T00:00:00.000Z",
+): ProjectSession => ({
   id,
   agentId: "codex",
   agentSessionId: id,
   title: id,
   createdAt: "2026-07-17T00:00:00.000Z",
-  lastActiveAt: "2026-07-17T00:00:00.000Z",
+  lastActiveAt,
 });
 
 const electronAPI = {
@@ -28,12 +33,50 @@ const electronAPI = {
 };
 
 const NOW = Date.parse("2026-08-01T12:00:00.000Z");
-const STALE = new Date(NOW - IDLE_SESSION_RUNTIME_RELEASE_MS - 60_000).toISOString();
-const FRESH = new Date(NOW - 1_000).toISOString();
+const ago = (ms: number) => new Date(NOW - ms).toISOString();
+const STALE = ago(IDLE_SESSION_RUNTIME_RELEASE_MS + 60_000);
+const FRESH = ago(1_000);
+const MINUTE = 60_000;
+
+const installState = (
+  sessions: ProjectSession[],
+  activeSessionId: string,
+  initializedSessionIds: string[] = sessions.map((item) => item.id),
+) => {
+  useProjectStore.setState({
+    projects: [{
+      id: "project",
+      name: "Project",
+      path: "C:\\project",
+      createdAt: sessions[0]?.createdAt || new Date(NOW).toISOString(),
+      agents: ["codex"],
+      sessions,
+    }],
+    activeProjectId: "project",
+    activeSessionId,
+    agentStatuses: {},
+    initializedSessionIds: new Set(initializedSessionIds),
+  });
+  useChatStore.setState({
+    messages: [],
+    sessionMessages: Object.fromEntries(sessions.map((item) => [item.id, []])),
+    sessionMessagesLoaded: {},
+    activeSessionId,
+    isStreaming: false,
+    currentModel: null,
+    availableModels: [],
+    thinkingLevel: "medium",
+    messageQueues: {},
+    compactingSessions: {},
+  });
+};
 
 describe("releaseIdleSessionRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    electronAPI.agentGetSessionState.mockResolvedValue({ success: true, idle: true });
+    electronAPI.agentGetPendingUIRequests.mockResolvedValue({ revision: 0, requests: [] });
+    electronAPI.agentRemoveSession.mockResolvedValue({ success: true });
     vi.stubGlobal("window", { electronAPI, dispatchEvent: vi.fn() });
     setAgentCatalog([{
       id: "codex",
@@ -54,33 +97,9 @@ describe("releaseIdleSessionRuntime", () => {
         providerActivation: "none",
       },
     }]);
-    const idle = { ...session("session-idle"), lastActiveAt: STALE };
+    const idle = session("session-idle", STALE);
     const active = session("session-active");
-    useProjectStore.setState({
-      projects: [{
-        id: "project",
-        name: "Project",
-        path: "C:\\project",
-        createdAt: idle.createdAt,
-        agents: ["codex"],
-        sessions: [idle, active],
-      }],
-      activeProjectId: "project",
-      activeSessionId: active.id,
-      agentStatuses: {},
-      initializedSessionIds: new Set([idle.id, active.id]),
-    });
-    useChatStore.setState({
-      messages: [],
-      sessionMessages: { [idle.id]: [], [active.id]: [] },
-      activeSessionId: active.id,
-      isStreaming: false,
-      currentModel: null,
-      availableModels: [],
-      thinkingLevel: "medium",
-      messageQueues: {},
-      compactingSessions: {},
-    });
+    installState([idle, active], active.id);
   });
 
   afterEach(() => {
@@ -140,76 +159,150 @@ describe("releaseIdleSessionRuntime", () => {
   });
 });
 
-describe("scanIdleSessionRuntimes", () => {
+describe("scanIdleSessionRuntimes (LRU warm pool)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    electronAPI.agentGetSessionState.mockResolvedValue({ success: true, idle: true });
+    electronAPI.agentGetPendingUIRequests.mockResolvedValue({ revision: 0, requests: [] });
+    electronAPI.agentRemoveSession.mockResolvedValue({ success: true });
     vi.stubGlobal("window", { electronAPI, dispatchEvent: vi.fn() });
-    const stale = { ...session("session-stale"), lastActiveAt: STALE };
-    const fresh = { ...session("session-fresh"), lastActiveAt: FRESH };
-    const queued = { ...session("session-queued"), lastActiveAt: STALE };
-    const closed = { ...session("session-closed"), lastActiveAt: STALE, closed: true };
-    const active = session("session-active");
-    useProjectStore.setState({
-      projects: [{
-        id: "project",
-        name: "Project",
-        path: "C:\\project",
-        createdAt: active.createdAt,
-        agents: ["codex"],
-        sessions: [stale, fresh, queued, closed, active],
-      }],
-      activeProjectId: "project",
-      activeSessionId: active.id,
-      agentStatuses: {},
-      initializedSessionIds: new Set([stale.id, fresh.id, queued.id, closed.id, active.id]),
-    });
-    useChatStore.setState({
-      messages: [],
-      sessionMessages: {
-        [stale.id]: [],
-        [fresh.id]: [],
-        [queued.id]: [{ id: "m1", role: "user", content: "hi", timestamp: NOW - 1_000 }],
-        [closed.id]: [],
-        [active.id]: [],
+    setAgentCatalog([{
+      id: "codex",
+      name: "Codex",
+      version: "1.0.0",
+      minHppVersion: "0.1.0",
+      runtime: "cli",
+      order: 1,
+      source: "plugin",
+      removable: false,
+      capabilities: {
+        planMode: "native",
+        permissions: true,
+        guidance: true,
+        fork: false,
+        actions: true,
+        configuration: "none",
+        providerActivation: "none",
       },
-      activeSessionId: active.id,
-      isStreaming: false,
-      currentModel: null,
-      availableModels: [],
-      thinkingLevel: "medium",
-      messageQueues: {
-        [queued.id]: [{
-          id: "q1",
-          sessionId: queued.id,
-          content: "queued",
-          timestamp: NOW,
-        } as never],
-      },
-      compactingSessions: {},
-    });
+    }]);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    setAgentCatalog([]);
   });
 
-  it("releases only sessions that are open, initialized and idle past the threshold", async () => {
+  it("releases only sessions that are open, initialized and past the fallback TTL", async () => {
+    const active = session("session-active");
+    installState([
+      session("session-stale", STALE),
+      session("session-fresh", FRESH),
+      session("session-queued", STALE),
+      { ...session("session-closed", STALE), closed: true },
+      active,
+    ], active.id);
+    useChatStore.setState({
+      messageQueues: {
+        "session-queued": [{
+          id: "q1",
+          sessionId: "session-queued",
+          content: "queued",
+          timestamp: NOW,
+        } as never],
+      },
+    });
+
     await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual(["session-stale"]);
     expect(electronAPI.agentRemoveSession).toHaveBeenCalledTimes(1);
     expect(electronAPI.agentRemoveSession).toHaveBeenCalledWith("session-stale");
   });
 
+  it("keeps sessions warm while the pool has room", async () => {
+    const active = session("session-active");
+    installState([
+      session("session-a", ago(60 * MINUTE)),
+      session("session-b", ago(30 * MINUTE)),
+      active,
+    ], active.id);
+
+    await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([]);
+    expect(electronAPI.agentRemoveSession).not.toHaveBeenCalled();
+  });
+
+  it("evicts the least recently used sessions when the warm pool overflows", async () => {
+    const sessions = Array.from({ length: WARM_SESSION_POOL_MAX + 2 }, (_, index) => (
+      session(`session-${index}`, ago((index + 1) * 10 * MINUTE))
+    ));
+    installState(sessions, "session-0");
+
+    await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([
+      `session-${WARM_SESSION_POOL_MAX + 1}`,
+      `session-${WARM_SESSION_POOL_MAX}`,
+    ]);
+    expect(electronAPI.agentRemoveSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps sessions that were just used even when the pool overflows", async () => {
+    const sessions = Array.from({ length: WARM_SESSION_POOL_MAX + 2 }, (_, index) => (
+      session(`session-${index}`, ago(30_000))
+    ));
+    installState(sessions, "session-0");
+
+    await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([]);
+    expect(electronAPI.agentRemoveSession).not.toHaveBeenCalled();
+  });
+
+  it("releases a session past the fallback TTL even when the pool has room", async () => {
+    const active = session("session-active");
+    installState([
+      session("session-abandoned", STALE),
+      active,
+    ], active.id);
+
+    await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual(["session-abandoned"]);
+  });
+
+  it("never releases the active session, even when it is the stalest", async () => {
+    const active = session("session-active", STALE);
+    installState([
+      active,
+      session("session-b", ago(10 * MINUTE)),
+    ], active.id);
+
+    await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([]);
+    expect(electronAPI.agentRemoveSession).not.toHaveBeenCalled();
+  });
+
   it("skips a session whose backend reports an unfinished turn", async () => {
-    electronAPI.agentGetSessionState.mockResolvedValue({ success: true, idle: false });
+    const active = session("session-active");
+    installState([session("session-stale", STALE), active], active.id);
+    electronAPI.agentGetSessionState.mockResolvedValueOnce({ success: true, idle: false });
+
     await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([]);
     expect(electronAPI.agentRemoveSession).not.toHaveBeenCalled();
   });
 
   it("skips a session that is still streaming in the background", async () => {
+    const active = session("session-active");
+    installState([session("session-stale", STALE), active], active.id);
     useProjectStore.setState({ agentStatuses: { "session-stale": "running" } });
+
     await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([]);
     expect(electronAPI.agentGetSessionState).not.toHaveBeenCalled();
     expect(electronAPI.agentRemoveSession).not.toHaveBeenCalled();
+  });
+
+  it("releases the oldest warm sessions in LRU order", async () => {
+    const sessions = Array.from({ length: WARM_SESSION_POOL_MAX + 3 }, (_, index) => (
+      session(`session-${index}`, ago((index + 1) * 5 * MINUTE))
+    ));
+    installState(sessions, "session-0");
+
+    await expect(scanIdleSessionRuntimes(NOW)).resolves.toEqual([
+      `session-${WARM_SESSION_POOL_MAX + 2}`,
+      `session-${WARM_SESSION_POOL_MAX + 1}`,
+      `session-${WARM_SESSION_POOL_MAX}`,
+    ]);
   });
 });

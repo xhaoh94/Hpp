@@ -95,6 +95,19 @@ const DIFF_MIN_WIDTH = 320;
 const REVIEW_ROW_HEIGHT = 22;
 /** 完整文件对比读取慢于这个阈值才显示加载态，避免一闪而过的占位。 */
 const CONTENT_LOADING_DELAY_MS = 120;
+// 定位后盯住落点的窗口：虚拟列表首次测量、reviewState/撤销状态到达都会重排内容，
+// 可能把刚设好的 scrollTop 顶掉（症状：“跳对了又滚回第一行”）。
+const DIFF_SCROLL_GUARD_MS = 900;
+// scrollTop 在这个值以内就算“回到顶部”。
+const TOP_SNAP_PX = 2;
+/** 诊断开关：在 devtools / e2e 脚本里设 window.__HPP_REVIEW_SCROLL_DEBUG__ = true。 */
+const logScroll = (label: string, detail?: unknown) => {
+  const enabled = typeof window !== "undefined"
+    && (window as Window & { __HPP_REVIEW_SCROLL_DEBUG__?: boolean }).__HPP_REVIEW_SCROLL_DEBUG__ === true;
+  if (!enabled) return;
+  if (detail === undefined) console.log(`[review-scroll] ${label}`);
+  else console.log(`[review-scroll] ${label} ${JSON.stringify(detail)}`);
+};
 
 type DialogReviewFile = ReviewFileDiff & {
   canonical: boolean;
@@ -134,7 +147,13 @@ const isDiffPair = (pair: FullDiffPair) =>
 
 /** 虚拟列表向父组件暴露的定位能力：按行下标精确滚动，不依赖 DOM 查询。 */
 export type ReviewRowsHandle = {
-  scrollToIndex: (index: number, behavior?: "auto" | "smooth") => void;
+  scrollToIndex: (
+    index: number,
+    behavior?: "auto" | "smooth",
+    align?: "start" | "center" | "end" | "auto",
+  ) => void;
+  /** 把 [start, end) 这段行整体居中到视口，而不是只居中首行。 */
+  scrollToRange: (start: number, end: number) => void;
 };
 
 type ReviewVirtualRowsProps = {
@@ -300,10 +319,39 @@ const ReviewVirtualRows = forwardRef<ReviewRowsHandle, ReviewVirtualRowsProps>(
     });
 
     // 父组件直接按下标定位（不查 DOM）。虚拟列表在目标行尚未测量时按行高估算，
-    // 换行长行会有少量偏差，由定位后的居中校正负责收敛。
+    // 换行长行会有少量偏差；默认对齐到顶部（start），滚动距离短、偏差小。
     useImperativeHandle(ref, () => ({
-      scrollToIndex: (index: number, behavior: "auto" | "smooth" = "auto") => {
-        virtualizer.scrollToIndex(index, { align: "center", behavior });
+      scrollToIndex: (
+        index: number,
+        behavior: "auto" | "smooth" = "auto",
+        align: "start" | "center" | "end" | "auto" = "center",
+      ) => {
+        virtualizer.scrollToIndex(index, { align, behavior });
+      },
+      // 变更块可能有很多行：只把首行放中间会让整块内容沉到视口下半部，
+      // 所以按「首行上沿 ~ 尾后行上沿」的中线来对。
+      scrollToRange: (start: number, end: number) => {
+        const scrollEl = virtualizer.scrollElement;
+        if (!scrollEl) return;
+        const startInfo = virtualizer.getOffsetForIndex(start, "start");
+        if (!startInfo) return;
+        const blockTop = startInfo[0];
+        // end 是变更块后的第一行，它的上沿就是块的结束边界；块在文件末尾或用
+        // 未测量的行时退回估算。
+        const endInfo = end > start && end < virtualizer.options.count
+          ? virtualizer.getOffsetForIndex(end, "start")
+          : undefined;
+        const fallbackSize = virtualizer.options.estimateSize(end - 1);
+        const blockBottom = endInfo ? endInfo[0] : blockTop + Math.max(1, end - start) * fallbackSize;
+        // 变更块整块居中；但块比视口还高时居中会把首行推出可视线，
+        // 此时改为对齐顶部，保证能先看到改动起点。
+        const blockHeight = blockBottom - blockTop;
+        const target = blockHeight <= scrollEl.clientHeight
+          ? Math.max(0, (blockTop + blockBottom) / 2 - scrollEl.clientHeight / 2)
+          : blockTop;
+        // 直接跳：文件深处的改动点一翻要滑好几千像素，任何持续时间的动画
+        // 都是在拖时间（用户明确要求不要动画）。
+        scrollEl.scrollTo({ top: target, behavior: "auto" });
       },
     }), [virtualizer]);
 
@@ -383,6 +431,7 @@ export function CodeReviewDialog({
   const loadedRef = useRef<Set<string>>(new Set());
   const scrolledRef = useRef<string | null>(null);
   const diffPairIndicesRef = useRef<number[]>([]);
+  const diffPairEndsRef = useRef<number[]>([]);
   const diffScrollRef = useRef<HTMLDivElement | null>(null);
   const rowsRef = useRef<ReviewRowsHandle | null>(null);
   const onHunkUndoRef = useRef<((hunkIndex: number, changeIndex: number) => void) | null>(null);
@@ -624,6 +673,9 @@ export function CodeReviewDialog({
 
   // 规范化补丁始终表示「基线 → 当前磁盘内容」，因此每次撤销后都能重新构建真实剩余 diff。
   // 无法安全规范化的原始补丁仅使用 patch-only 回退视图，不参与写盘。
+  // 依赖只列真正影响行集合的字段：undoState（本次审阅的撤销状态）到达会让
+  // active 对象重建，但行集合并不变——如果依赖整个 active，pairs 会换一个新数组，
+  // 虚拟列表重建后 scrollTop 归零，就是「跳对了又滚回第一行」。
   const pairs = useMemo((): FullDiffPair[] | null => {
     if (!active) return null;
     if (active.reverted) return [];
@@ -632,7 +684,14 @@ export function CodeReviewDialog({
     if (content === undefined) return linesToPairs(active.lines);
     if (content !== null && active.patch.trim()) return buildFullFileDiff(content, active.patch);
     return linesToPairs(active.lines);
-  }, [active, fileContent]);
+  }, [
+    active?.displayFile,
+    active?.canonical,
+    active?.reverted,
+    active?.patch,
+    active?.lines,
+    fileContent,
+  ]);
 
   const language = useMemo(
     () => (active ? getFilePreviewLanguage(active.file) || undefined : undefined),
@@ -643,16 +702,19 @@ export function CodeReviewDialog({
   // 读取很快时静默等待，避免闪一下加载态。
   const needsFullContent = !!active && active.canonical && !active.reverted && active.patch.trim().length > 0;
   const activeContentReady = !!active && fileContent[active.displayFile] !== undefined;
+  // 规范化补丁（reviewState）还在路上：此时 active.canonical=false 只是暂时状态，
+  // 不能拿它当成“最终行集合”，否则定位会先落在 patch 视图的错位置上。
+  const waitingForCanonical = !!projectPath && reviewSources.length > 0 && !reviewState && !undoError;
   const waitingForContent = needsFullContent && !activeContentReady;
   const [showContentLoading, setShowContentLoading] = useState(false);
   useEffect(() => {
-    if (!waitingForContent) {
+    if (!waitingForContent && !waitingForCanonical) {
       setShowContentLoading(false);
       return;
     }
     const timer = setTimeout(() => setShowContentLoading(true), CONTENT_LOADING_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [waitingForContent, active?.displayFile]);
+  }, [waitingForContent, waitingForCanonical, active?.displayFile]);
 
   // 虚拟列表按需渲染，只把前 MAX_RENDER_LINES 行交给它；高亮下沉到行组件，
   // 这里不再整份预计算。
@@ -663,21 +725,27 @@ export function CodeReviewDialog({
 
   const truncated = !!pairs && pairs.length > MAX_RENDER_LINES;
 
-  // 修改点定位：连续的增删行合并为同一个修改点，只记录每个连续块的首个下标。
-  // 直接算在未高亮的 pair 上，首次定位不必等高亮完成。
-  const diffPairIndices = useMemo(() => {
-    const indices: number[] = [];
+  // 修改点定位：连续的增删行合并为同一个修改点，记录每个连续块的「首行」和「尾后行」。
+  // 首行用于 cursor 导航，两者一起用于「整块居中」（只居中首行时，
+  // 一个 30 行的变更块会把内容全推到视口下半部）。
+  const { diffPairIndices, diffPairEnds } = useMemo(() => {
+    const starts: number[] = [];
+    const ends: number[] = [];
     let prevIsDiff = false;
     renderPairs.forEach((pair, index) => {
       const isDiff = isDiffPair(pair);
-      if (isDiff && !prevIsDiff) indices.push(index);
+      if (isDiff && !prevIsDiff) starts.push(index);
+      if (!isDiff && prevIsDiff) ends.push(index);
       prevIsDiff = isDiff;
     });
-    return indices;
+    // 最后一个块一直到行集合末尾。
+    while (ends.length < starts.length) ends.push(renderPairs.length);
+    return { diffPairIndices: starts, diffPairEnds: ends };
   }, [renderPairs]);
 
   const totalDiffs = diffPairIndices.length;
   diffPairIndicesRef.current = diffPairIndices;
+  diffPairEndsRef.current = diffPairEnds;
 
   const fileReverted = !!active?.reverted;
   const undoBusy = preparingUndo || undoingKey !== null;
@@ -764,65 +832,161 @@ export function CodeReviewDialog({
   /**
    * 定位到第 cursor 个修改点。
    *
-   * 直接交给虚拟列表按行下标滚到居中位置，不再先查 DOM / 找 fallback 行：
+   * 直接交给虚拟列表按行下标滚动，不再先查 DOM / 找 fallback 行：
    * 目标行在文件深处时一定没被渲染，查 DOM 必然失败，只能退回“按估算行高猜一个位置”，
    * 这一猜就是首次打开时那段看起来像延迟的无效滚动。
    */
-  const scrollToDiff = (cursor: number, smooth = false) => {
+  const scrollToDiff = (cursor: number) => {
     const container = diffScrollRef.current;
     const rows = rowsRef.current;
-    if (!container || !rows) return;
+    if (!container || !rows) {
+      logScroll("scrollToDiff:skip", { hasContainer: !!container, hasRows: !!rows });
+      return;
+    }
     const pairIndex = diffPairIndicesRef.current[cursor];
-    if (pairIndex === undefined) return;
+    if (pairIndex === undefined) {
+      logScroll("scrollToDiff:no-pair", { cursor, pairs: diffPairIndicesRef.current.length });
+      return;
+    }
+    const pairEnd = diffPairEndsRef.current[cursor] ?? pairIndex + 1;
 
-    rows.scrollToIndex(pairIndex, smooth ? "smooth" : "auto");
-    if (smooth) return;
-    // 虚拟列表对尚未测量的行只能按固定行高估算，换行行会让位置略微偏移：
-    // 下一帧目标行渲染出来后再居中一次，且只在明显偏离时校正，
-    // 避免“到位后又跳一下”。
-    requestAnimationFrame(() => {
-      const scrollContainer = diffScrollRef.current;
-      const target = scrollContainer?.querySelector(`[data-review-row-index="${pairIndex}"]`);
-      if (!scrollContainer || !target) return;
-      const containerRect = scrollContainer.getBoundingClientRect();
-      const targetRect = target.getBoundingClientRect();
-      if (targetRect.top >= containerRect.top + 24 && targetRect.bottom <= containerRect.bottom - 24) return;
-      const relativeTop = targetRect.top - containerRect.top + scrollContainer.scrollTop;
-      scrollContainer.scrollTo({
-        top: Math.max(0, relativeTop - scrollContainer.clientHeight / 2 + targetRect.height / 2),
-      });
+    // 整块居中：把「变更首行上沿 ~ 尾后行上沿」的中线对到视口中线。
+    // 只居中首行的话，一个 30 行的变更块会整体沉到视口下半部。
+    rows.scrollToRange(pairIndex, pairEnd);
+    logScroll("scrollToDiff:done", {
+      cursor,
+      pairIndex,
+      pairEnd,
+      blockRows: pairEnd - pairIndex,
+      scrollTop: Math.round(container.scrollTop),
+      scrollHeight: Math.round(container.scrollHeight),
+      clientHeight: Math.round(container.clientHeight),
     });
+    // 不再自己算 relativeTop 再 scrollTo：虚拟列表测量中时目标元素可能还停在
+    // 上一帧的位置，"目标在视口上方 + scrollTop 不足" 会把 top 算成负数，
+    // clamp 到 0 就是“滚回第一行”。改成盯住落点，被顶掉了才用同一接口重定位。
+    guardDiffScroll(cursor);
+  };
+
+  /**
+   * 定位后的短窗口守护。
+   *
+   * 录屏确认的时序：打开停在改动处约 250ms，然后 scrollTop 被归零回到第 1 行。
+   * 根源是打开后陆续到达的异步状态（文件内容、undoState、审阅状态）引起重渲染，
+   * 虚拟列表重新测量后把滚动位置丢了。这里只在“真的回到顶部”时补一次，
+   * 并按最新的行下标重定位（行集合可能已经洗过牌）；用户一旦自己滚动/按键就停手。
+   */
+  const guardDiffScroll = (cursor: number) => {
+    const container = diffScrollRef.current;
+    if (!container) return;
+    const startedAt = performance.now();
+    let canceled = false;
+    let attempts = 0;
+    const cancel = () => { canceled = true; };
+    container.addEventListener("wheel", cancel, { passive: true });
+    container.addEventListener("touchstart", cancel, { passive: true });
+    container.addEventListener("pointerdown", cancel);
+    const stop = () => {
+      container.removeEventListener("wheel", cancel);
+      container.removeEventListener("touchstart", cancel);
+      container.removeEventListener("pointerdown", cancel);
+    };
+    const tick = () => {
+      if (canceled || performance.now() - startedAt > DIFF_SCROLL_GUARD_MS) {
+        stop();
+        return;
+      }
+      const rows = rowsRef.current;
+      const scrollContainer = diffScrollRef.current;
+      if (!rows || !scrollContainer || !scrollContainer.isConnected) {
+        stop();
+        return;
+      }
+      // 只处理“被打回顶部”；部分偏移不动，避免和测量误差打架。
+      // 最多补 6 次（改动本来就在第 1 行时这里不会反复重试）。
+      if (scrollContainer.scrollTop <= TOP_SNAP_PX && attempts < 6) {
+        const pairIndex = diffPairIndicesRef.current[cursor];
+        if (pairIndex === undefined) {
+          stop();
+          return;
+        }
+        attempts += 1;
+        logScroll("guard:re-pin", {
+          cursor,
+          pairIndex,
+          attempt: attempts,
+          t: Math.round(performance.now() - startedAt),
+        });
+        rows.scrollToRange(pairIndex, diffPairEndsRef.current[cursor] ?? pairIndex + 1);
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   };
 
   // 行集合是否已经稳定到可以定位：补丁视图（无法规范化/没有完整内容可用）
   // 或完整文件对比（规范化补丁 + 磁盘内容都就绪）。
-  // 规范化状态（canonical）和文件内容都会异步到达，每变一次行下标就整体洗一次牌，
-  // 提前定位只会先停在一个临时位置，等下一次变化再纠正 —— 这就是“延迟一会儿才跳”。
   const diffLayoutReady = !active
-    || !active.canonical
-    || activeContentReady
-    || active.patch.trim().length === 0;
+    || active.patch.trim().length === 0
+    // canonical=true：等磁盘内容读回（行集合才完整）；
+    // canonical=false：只有“不再等 reviewState”时才把 patch 视图当成最终形态。
+    || (active.canonical ? activeContentReady : !waitingForCanonical);
   // 视图模式也算行集合的一部分：unified/split 的行结构与行高不同，切换后要立即
   // 重新定位，而不是从旧偏移平滑滚过去。
+  // canonical 必须包含在 key 里：patch 视图的行下标和完整文件完全不同，规范化
+  // 结果（reviewState 到达）是一次真正的行集合重建，必须重新定位；否则会停在
+  // 一个按 patch 算出来的错位置，而且因为“只定位一次”永远不会再纠。
   const diffLayoutKey = active
     ? `${active.displayFile}::${active.canonical ? "full" : "patch"}::${viewMode}`
     : "";
 
-  // 默认定位到当前文件的第一个变化点。
-  // 用 useLayoutEffect（commit 后、paint 前执行）：行集合稳定后的第一帧就已经
-  // 在修改点上，没有可见的滚动过程。行集合变化（切换文件、规范化完成、文件内容
-  // 读回、切换视图）会以 auto 重新定位；同一行集合内翻页仍沿用平滑滚动。
+  // 默认定位到当前文件的第一个变化点；同一个「文件 + 行集合形态 + 视图」只走一次。
+  // useLayoutEffect：commit 后、paint 前执行，第一眼就在变更处。
   useLayoutEffect(() => {
-    if (!open || !active || pairs === null) return;
-    if (!diffLayoutReady) return;
-    if (diffPairIndices.length === 0) return;
-    if (!rowsRef.current) return;
-    const isFirst = scrolledRef.current !== diffLayoutKey;
-    if (isFirst) scrolledRef.current = diffLayoutKey;
+    if (!open || !active || pairs === null) {
+      logScroll("effect:skip", { open, hasActive: !!active, pairs: pairs === null ? "null" : pairs.length });
+      return;
+    }
+    if (!diffLayoutReady) {
+      logScroll("effect:not-ready", {
+        canonical: active.canonical,
+        contentReady: activeContentReady,
+        waitingForCanonical,
+        hasReviewState: !!reviewState,
+        undoError,
+        preparingUndo,
+      });
+      return;
+    }
+    if (diffPairIndices.length === 0) {
+      logScroll("effect:no-diff");
+      return;
+    }
+    if (!rowsRef.current) {
+      logScroll("effect:no-rows-ref");
+      return;
+    }
+    // 已经为这个文件（+视图）定过位：后续行集合变化不再自动滚动，
+    // 翻页只由 goPrevDiff / goNextDiff 触发。
+    if (scrolledRef.current === diffLayoutKey) {
+      logScroll("effect:already-scrolled", diffLayoutKey);
+      return;
+    }
+    scrolledRef.current = diffLayoutKey;
     // 用户可能已翻页，定位到当前游标而非总是第一个。
     const cursor = Math.min(diffCursor, diffPairIndices.length - 1);
     if (cursor !== diffCursor) setDiffCursor(cursor);
-    scrollToDiff(cursor, !isFirst);
+    logScroll("effect:scroll", {
+      key: diffLayoutKey,
+      cursor,
+      pairs: pairs.length,
+      diffs: diffPairIndices.length,
+      waitingForCanonical,
+      hasReviewState: !!reviewState,
+      undoError,
+      contentReady: activeContentReady,
+    });
+    scrollToDiff(cursor);
   }, [
     open,
     active,
@@ -837,13 +1001,13 @@ export function CodeReviewDialog({
   const goPrevDiff = () => {
     const next = Math.max(0, diffCursor - 1);
     setDiffCursor(next);
-    scrollToDiff(next, true);
+    scrollToDiff(next);
   };
 
   const goNextDiff = () => {
     const next = Math.min(totalDiffs - 1, diffCursor + 1);
     setDiffCursor(next);
-    scrollToDiff(next, true);
+    scrollToDiff(next);
   };
 
   if (!open) return null;
@@ -1106,10 +1270,17 @@ export function CodeReviewDialog({
                   <div className="chat-review-diff" ref={diffScrollRef}>
                     {fileReverted ? (
                       <div className="chat-review-empty">已撤销此文件的所有修改</div>
-                    ) : pairs === null || showContentLoading ? (
+                    ) : pairs === null || waitingForCanonical || waitingForContent ? (
+                      // 行集合还没确定（规范化补丁或文件内容在路上）时不渲染行区：
+                      // 先画 patch 视图会“停在顶部 → 过一会跳到改动处”。超过 120ms
+                      // 再显示加载态，快速路径下就是空白一下然后直接到位。
                       <div className="chat-review-loading">
-                        <Loader2 className="chat-review-spin" size={16} />
-                        <span>{uiText.review.loading}</span>
+                        {(pairs === null || showContentLoading) && (
+                          <>
+                            <Loader2 className="chat-review-spin" size={16} />
+                            <span>{uiText.review.loading}</span>
+                          </>
+                        )}
                       </div>
                     ) : viewMode === "split" ? (
                       <div className="chat-review-split">

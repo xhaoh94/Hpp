@@ -142,6 +142,8 @@ function RunButton({ text, language }: { text: string; language: string }) {
 interface MarkdownRendererProps {
   content: string;
   onLinkClick?: (href: string, event: ReactMouseEvent<HTMLAnchorElement>) => boolean | void;
+  /** 点击行内代码里的本地路径（或本地路径链接）时打开文件；不传则只保留右键菜单。 */
+  onFileOpen?: (path: string) => void;
   /** 相对路径链接按哪个项目根解析；不传时只有绝对路径链接可定位。 */
   projectPath?: string;
   /** 流式输出期间跳过代码高亮，等内容稳定后再执行 rehype-highlight。 */
@@ -195,7 +197,14 @@ function useRehypeHighlight(enabled: boolean) {
 // 链接点击处理器通过 context 下发，这样组件表可以完全稳定，分块渲染时
 // 各块之间也不需要重复传递回调。
 const MarkdownLinkClickContext = createContext<MarkdownRendererProps["onLinkClick"]>(undefined);
+const MarkdownFileOpenContext = createContext<MarkdownRendererProps["onFileOpen"]>(undefined);
 const MarkdownProjectPathContext = createContext<string | undefined>(undefined);
+
+/**
+ * 拖选文本松手也会触发 click，此时不应该打开文件预览，否则没法用鼠标
+ * 选中行内代码里的路径片段。
+ */
+const hasTextSelection = () => Boolean(window.getSelection()?.toString());
 
 // 同一时刻只开一个链接菜单：新菜单打开时关掉上一个。
 let closeActiveLinkMenu: (() => void) | null = null;
@@ -272,6 +281,7 @@ function LinkContextMenu({ state, onClose }: { state: LinkMenuState; onClose: ()
 const MARKDOWN_COMPONENTS: Components = {
   code({ node, className, children, ...props }) {
     const projectPath = useContext(MarkdownProjectPathContext);
+    const onFileOpen = useContext(MarkdownFileOpenContext);
     const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
     const match = /language-(\w+)/.exec(className || "");
     const language = match ? match[1] : "";
@@ -290,6 +300,11 @@ const MARKDOWN_COMPONENTS: Components = {
           <code
             className={`md-inline-code${localPath ? " md-path-reference" : ""}`}
             {...props}
+            onClick={resolvedPath && onFileOpen ? (event) => {
+              if (hasTextSelection()) return;
+              event.preventDefault();
+              onFileOpen(resolvedPath);
+            } : undefined}
             onContextMenu={resolvedPath ? (event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -363,6 +378,7 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   a({ href, children, ...props }) {
     const onLinkClick = useContext(MarkdownLinkClickContext);
+    const onFileOpen = useContext(MarkdownFileOpenContext);
     const projectPath = useContext(MarkdownProjectPathContext);
     // 只有 http(s) 交给系统浏览器（主进程的 setWindowOpenHandler 会接管），
     // 其余 href 一律拦掉默认跳转，否则 Electron 会新开一个没有 preload 的空白窗口。
@@ -391,7 +407,11 @@ const MARKDOWN_COMPONENTS: Components = {
           className="md-link"
           onClick={(event) => {
             if (href && onLinkClick?.(href, event)) return;
-            if (!external) event.preventDefault();
+            if (external) return;
+            event.preventDefault();
+            // 本地路径链接（`[app.log](./logs/app.log)` 或裸路径）左键打开预览，
+            // 与行内代码路径保持一致；没有 onFileOpen 时仍然只保留右键菜单。
+            if (localPath && onFileOpen && !hasTextSelection()) onFileOpen(localPath);
           }}
           onContextMenu={openMenu}
         >
@@ -465,6 +485,7 @@ const MarkdownChunk = memo(function MarkdownChunk({
 function MarkdownRendererImpl({
   content,
   onLinkClick,
+  onFileOpen,
   projectPath,
   deferHighlight = false,
 }: MarkdownRendererProps) {
@@ -476,16 +497,18 @@ function MarkdownRendererImpl({
   return (
     <div className="md-content">
       <MarkdownLinkClickContext.Provider value={onLinkClick}>
-        <MarkdownProjectPathContext.Provider value={projectPath}>
-          {chunks.map((chunk, index) => (
-            <MarkdownChunk
-              key={index}
-              content={chunk}
-              enableHighlight={enableHighlight}
-              highlightPlugin={highlightPlugin}
-            />
-          ))}
-        </MarkdownProjectPathContext.Provider>
+        <MarkdownFileOpenContext.Provider value={onFileOpen}>
+          <MarkdownProjectPathContext.Provider value={projectPath}>
+            {chunks.map((chunk, index) => (
+              <MarkdownChunk
+                key={index}
+                content={chunk}
+                enableHighlight={enableHighlight}
+                highlightPlugin={highlightPlugin}
+              />
+            ))}
+          </MarkdownProjectPathContext.Provider>
+        </MarkdownFileOpenContext.Provider>
       </MarkdownLinkClickContext.Provider>
     </div>
   );

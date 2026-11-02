@@ -1378,6 +1378,13 @@
   border-top-color: transparent;
 }
 
+/* 新建会话等待后端初始化：.chat-messages 不是 flex 容器，`flex: 1` 撑不开，
+   所以用 height: 100% 让转圈与“发送消息开始对话”占位落在同一位置。 */
+.chat-session-waking {
+  flex: none;
+  height: 100%;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -3281,7 +3288,8 @@
 }
 
 .chat-diff-file-row:hover:not(:disabled),
-.chat-diff-file-item.active .chat-diff-file-row {
+.chat-diff-file-item.active .chat-diff-file-row,
+.chat-diff-file-row[aria-expanded="true"] {
   background-color: var(--surface-muted);
 }
 
@@ -3378,7 +3386,7 @@
 .chat-diff-line {
   display: block;
   min-width: max-content;
-  padding: 0 12px;
+  padding: 0 14px;
   white-space: pre;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
 }
@@ -3474,6 +3482,111 @@
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.55;
+}
+
+/* 悬浮在 diff 文件行上的只读预览浮层；点击行仍走原有的打开文件/审核通路。 */
+.chat-diff-hover-card {
+  position: fixed;
+  z-index: 950;
+  display: flex;
+  flex-direction: column;
+  /* 尺寸跟视口伸缩：窄窗口铺满可用宽度，宽屏最多 1120px；
+     高度给视口的 64%，避免长 diff 也只剩一条窄带。 */
+  width: clamp(420px, 72vw, 1120px);
+  max-width: calc(100vw - 24px);
+  max-height: min(64vh, calc(100vh - 24px));
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background-color: var(--diff-popover-bg);
+  color: var(--text-secondary);
+  box-shadow: 0 18px 44px var(--shadow-color);
+  animation: chat-diff-hover-card-in 120ms ease-out;
+}
+
+@keyframes chat-diff-hover-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.chat-diff-hover-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 4px 14px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--diff-header-bg);
+}
+
+.chat-diff-hover-card-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.chat-diff-hover-card-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+/* 卡片里唯一的「离开 diff 去看完整文件」入口。原来它是点击文件行，
+   改成点击行 = 展开本卡片后，这个能力得在卡片里保留。 */
+.chat-diff-hover-card-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-diff-hover-card-open:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.chat-diff-hover-card-content {
+  margin: 0;
+  padding: 6px 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background-color: var(--diff-popover-bg);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.chat-diff-hover-card-more {
+  flex: 0 0 auto;
+  padding: 6px 14px 8px;
+  border-top: 1px dashed var(--border-color);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .chat-diff-add-line {
@@ -6535,6 +6648,9 @@ body.chat-questionnaire-resizing .chat-bubble {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* 关掉浏览器滚动锜定：虚拟列表重排行时会自己调整 scrollTop，
+     两者叠加会把已经定位好的位置打回顶部（“跳对了又滚回第一行”）。 */
+  overflow-anchor: none;
   background-color: var(--diff-bg);
 }
 

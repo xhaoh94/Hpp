@@ -57,6 +57,15 @@ describe("MarkdownRenderer runnable code blocks", () => {
     expect(styles).toContain(".md-content .md-code-run-btn");
   });
 
+  it("opens a preview when clicking an inline code path or a local link", () => {
+    expect(diffBlockSource).toContain("MarkdownFileOpenContext");
+    // 行内代码路径：左键直接开预览；有选区时不抢拖选复制
+    expect(diffBlockSource).toContain("onClick={resolvedPath && onFileOpen ?");
+    expect(diffBlockSource).toContain("if (hasTextSelection()) return;");
+    // 本地路径链接：左键同样走预览，而不是 preventDefault 后什么也不做
+    expect(diffBlockSource).toContain("if (localPath && onFileOpen && !hasTextSelection()) onFileOpen(localPath);");
+  });
+
   it("wires right-click file menus on links and inline code paths", () => {
     expect(diffBlockSource).toContain("onContextMenu={openMenu}");
     expect(diffBlockSource).toContain("<LinkContextMenu");

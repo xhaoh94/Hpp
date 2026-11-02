@@ -2,6 +2,7 @@ import { getAgentName } from "@/lib/agents";
 import { formatModelRequestFailure, uiText } from "@/i18n/text";
 import { cancelPendingGuidance } from "@/lib/session-command-coordinator";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
+import { markdownToPlainText } from "@/lib/notification-text";
 import {
   ASSISTANT_NARRATION_PROCESS_KIND,
 } from "@shared/process-view";
@@ -769,19 +770,24 @@ export function createAgentEventController({
     const agentName = getSessionAgentName(sessionId);
     const title = timedOut ? `${agentName} 任务已停止` : `${agentName} 任务已完成`;
 
-    // 通知正文用「当前最后一条有内容的消息」，而不是 session.title：
-    // 标题来自会话首条用户消息，通知里读起来像把最开始的问题又发了一遍，
-    // 完全看不出这次任务完成了什么。
+    // 通知正文用「本次最后一条用户消息」，而不是 session.title，也不是 agent
+    // 的回复：title 来自会话首条用户消息，读起来像把最开始的问题又发了一遍；
+    // 而 agent 回复往往很长、带列表和代码块，摘要成一行后看不出重点。任务完成后
+    // 用户想确认的是「我刚让它做的那件事」，所以取最后一条用户消息。
+    // 回退顺序：最后一条用户消息 → 会话 title → 项目名。
     const chat = useChatStore.getState();
     const messages = chat.activeSessionId === sessionId
       ? chat.messages
       : chat.sessionMessages[sessionId] || [];
-    const lastMessagePreview = [...messages]
+    const lastUserPreview = [...messages]
       .reverse()
-      .filter((message) => message.role === "user" || message.role === "assistant")
+      .filter((message) => message.role === "user")
       .map((message) => getChatMessagePreviewText(message))
       .find((preview) => !!preview.trim());
-    const bodyPreview = truncateNotificationText(lastMessagePreview || session?.title || "");
+    // 系统通知不支持 Markdown，直接传原文会露出 `## 标题`、反引号这些标记。
+    const bodyPreview = truncateNotificationText(
+      markdownToPlainText(lastUserPreview || session?.title || ""),
+    );
     const context = [
       project?.name,
       bodyPreview,

@@ -20,7 +20,7 @@ import {
   type SessionContextUsage,
 } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
-import { getChatMessagePreviewText, sanitizeSessionPreview } from "@/lib/chat-message-preview";
+import { getChatMessagePreviewText, getSessionPreviewLabel, sanitizeSessionPreview } from "@/lib/chat-message-preview";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 import { parseComposerDocument } from "@shared/composer-document";
 import { resolveSessionTitle } from "@/lib/session-title";
@@ -235,6 +235,7 @@ export const applyPersistedProjectSnapshot = (data: PersistedData) => {
     // instead of inheriting stale running/initialized flags.
     agentStatuses: {},
     initializedSessionIds: new Set<string>(),
+    initializingSessionIds: new Set<string>(),
   });
 };
 
@@ -311,6 +312,7 @@ export const applyPersistedMessagesSnapshot = (
 ) => {
   useChatStore.setState({
     sessionMessages,
+    sessionMessagesLoaded: activeSessionId ? { [activeSessionId]: true } : {},
     messages: activeSessionId ? sessionMessages[activeSessionId] || [] : [],
     activeSessionId,
     isStreaming: false,
@@ -554,7 +556,7 @@ const loadSessionMessageSummaries = (sessionIds: string[]) => {
     for (const [sessionId, value] of Object.entries(summaries || {})) {
       const message = parsePersistedChatMessage(value);
       if (message && isUserSpeechMessage(message)) {
-        updatePersistedSessionPreview(sessionId, getChatMessagePreviewText(message));
+        updatePersistedSessionPreview(sessionId, getSessionPreviewLabel(message));
       }
     }
   }).catch(() => undefined);
@@ -565,7 +567,12 @@ export async function ensureSessionMessagesLoaded(sessionId: string): Promise<bo
   if (!sessionId) return false;
   await requestInitialSessionMessagePage(sessionId);
   const page = sessionMessagePages.get(sessionId);
-  if (!page) return false;
+  if (!page) {
+    // 没有分页读取通道（例如测试/裁剪过的 preload）时也不能让界面永远停在
+    // “正在载入会话”；把当前内存内容当作已就绪。
+    useChatStore.getState().markSessionMessagesLoaded(sessionId, true);
+    return false;
+  }
 
   const state = useChatStore.getState();
   const currentMessages = state.sessionMessages[sessionId]
@@ -573,6 +580,9 @@ export async function ensureSessionMessagesLoaded(sessionId: string): Promise<bo
   const mergedMessages = mergeSessionMessageLists(page.loadedMessages, currentMessages);
   page.loadedMessages = mergedMessages;
   useChatStore.getState().loadSessionMessages(sessionId, mergedMessages);
+  // 即使读取失败也算“已经尝试过”：界面应展示当前内容（可能为空）并允许
+  // 后续重试，而不是永远停在“正在载入会话”的遮罩上。
+  useChatStore.getState().markSessionMessagesLoaded(sessionId, true);
   return page.loaded && !page.loadFailed;
 }
 
@@ -1183,7 +1193,7 @@ export function useDataPersistence() {
         if (messages === previous) continue;
         const firstUserMessage = messages.find(isUserSpeechMessage);
         if (firstUserMessage) {
-          updatePersistedSessionPreview(sessionId, getChatMessagePreviewText(firstUserMessage));
+          updatePersistedSessionPreview(sessionId, getSessionPreviewLabel(firstUserMessage));
         }
         queueSessionMessageChanges(sessionId, previous, messages);
         if (messages.some(hasOpenAssistantProcessState)) streamingSessionIds.add(sessionId);

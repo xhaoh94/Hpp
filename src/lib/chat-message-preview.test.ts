@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { getChatMessagePreviewText, sanitizeSessionPreview } from "./chat-message-preview";
+import {
+  getChatMessagePreviewText,
+  getSessionPreviewLabel,
+  sanitizeSessionPreview,
+} from "./chat-message-preview";
 
 describe("getChatMessagePreviewText", () => {
   it("prefers user text over a leading ordered file reference", () => {
@@ -108,6 +112,40 @@ describe("裸 content 里的内部标签清洗", () => {
     })).toBe("[image: shot.png]");
   });
 
+  it("只有图片、没有文字时显示 [图片] 而不是空", () => {
+    expect(getChatMessagePreviewText({
+      content: "",
+      images: [{ id: "img-1", src: "data:image/png;base64,AAAA", name: "shot.png" }],
+    })).toBe("[图片]");
+  });
+
+  it("多张图片带上数量", () => {
+    expect(getChatMessagePreviewText({
+      content: "",
+      images: [
+        { id: "img-1", src: "data:image/png;base64,AAAA", name: "a.png" },
+        { id: "img-2", src: "data:image/png;base64,BBBB", name: "b.png" },
+      ],
+    })).toBe("[图片 × 2]");
+  });
+
+  it("composerDocument 只有图片节点时也显示 [图片]", () => {
+    expect(getChatMessagePreviewText({
+      content: "",
+      composerDocument: {
+        version: 1,
+        nodes: [{ id: "img-1", type: "image", name: "shot.png", src: "data:image/png;base64,AAAA", mimeType: "image/png" }],
+      },
+    })).toBe("[图片]");
+  });
+
+  it("图片 + 文字时仍然以文字为标题", () => {
+    expect(getChatMessagePreviewText({
+      content: "看看这个报错",
+      images: [{ id: "img-1", src: "data:image/png;base64,AAAA", name: "shot.png" }],
+    })).toBe("看看这个报错");
+  });
+
   it("fork 的来源会话标签", () => {
     expect(getChatMessagePreviewText({
       content: `继续\n<source session_id="abc" title="上个会话" agent="pi" />`,
@@ -160,5 +198,61 @@ describe("持久化 preview 的兜底清洗", () => {
 
   it("已经干净的 preview 保持不变", () => {
     expect(sanitizeSessionPreview("普通的一段话")).toBe("普通的一段话");
+  });
+});
+
+/**
+ * 标题类位置（标题栏 / 页签 / 历史会话列表）用短标签列出具体附件名，
+ * 聊天正文与发言记录仍用 getChatMessagePreviewText 的既有写法。
+ */
+describe("getSessionPreviewLabel", () => {
+  it("只有图片时列出图片名，而不是笼统的 [图片]", () => {
+    expect(getSessionPreviewLabel({
+      content: "",
+      images: [{ id: "img-1", src: "data:image/png;base64,AAAA", name: "shot.png" }],
+    })).toBe("[shot.png]");
+  });
+
+  it("多张图片并列，超过 4 个用省略号", () => {
+    expect(getSessionPreviewLabel({
+      content: "",
+      images: [
+        { id: "1", src: "data:,", name: "a.png" },
+        { id: "2", src: "data:,", name: "b.png" },
+      ],
+    })).toBe("[a.png][b.png]");
+
+    expect(getSessionPreviewLabel({
+      content: "",
+      images: Array.from({ length: 6 }, (_, i) => ({ id: `i${i}`, src: "data:,", name: `p${i}.png` })),
+    })).toBe("[p0.png][p1.png][p2.png][p3.png]…");
+  });
+
+  it("文件与文件夹用各自的短标签", () => {
+    expect(getSessionPreviewLabel({
+      content: "",
+      composerDocument: {
+        version: 1,
+        nodes: [
+          { id: "f-1", type: "path", name: "a.ts", path: "C:/p/a.ts", kind: "file" },
+          { id: "d-1", type: "path", name: "src", path: "C:/p/src", kind: "folder" },
+          { id: "s-1", type: "snippet", fileName: "b.ts", filePath: "C:/p/b.ts", startLine: 3, endLine: 9 },
+        ],
+      },
+    })).toBe("[a.ts][src][b.ts:3-9]");
+  });
+
+  it("有文字时仍然以文字为准", () => {
+    expect(getSessionPreviewLabel({
+      content: "修一下这个报错",
+      images: [{ id: "img-1", src: "data:,", name: "shot.png" }],
+    })).toBe("修一下这个报错");
+  });
+
+  it("聊天内预览保持原有写法，不受标题格式影响", () => {
+    expect(getChatMessagePreviewText({
+      content: "",
+      images: [{ id: "img-1", src: "data:,", name: "shot.png" }],
+    })).toBe("[图片]");
   });
 });

@@ -80,6 +80,20 @@ describe("project file path resolution", () => {
     expect(getLocalMarkdownCodePath("plainIdentifier")).toBeNull();
   });
 
+  it("rejects a path that is followed by prose or a status note", () => {
+    // 单行代码块会被渲染成行内代码：`release/app.exe   18:38 更新` 整段当路径
+    // 去点，只会弹「找不到文件」。
+    expect(getLocalMarkdownCodePath("release/v0.1.4/hpp-Setup-0.1.4.exe   18:38 更新")).toBeNull();
+    expect(getLocalMarkdownCodePath("src/App.tsx 已修改")).toBeNull();
+    expect(getLocalMarkdownCodePath("release/v0.1.4/hpp-Setup-0.1.4.exe"))
+      .toBe("release/v0.1.4/hpp-Setup-0.1.4.exe");
+  });
+
+  it("drops a trailing line number so the file can actually be opened", () => {
+    expect(getLocalMarkdownCodePath("src/App.tsx:42")).toBe("src/App.tsx");
+    expect(getLocalMarkdownCodePath("src/App.tsx:42:7")).toBe("src/App.tsx");
+  });
+
   it("only counts http(s) as external links", () => {
     expect(isExternalMarkdownHref("https://example.com/docs")).toBe(true);
     expect(isExternalMarkdownHref("  HTTP://example.com")).toBe(true);

@@ -4,6 +4,7 @@ import { join } from "path";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText, withoutToolDiffPayload } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import { appendTimingLogLines, logTiming } from "../../utils/timing-log";
 import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
 import {
   formatSubagentModel,
@@ -405,6 +406,7 @@ export class PiSDKAgent {
   }
 
   async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
+    const initStartedAt = Date.now();
     const requestedSessionFilePath = existingSessionFilePath || null;
     const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
     const requestedCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
@@ -457,6 +459,7 @@ export class PiSDKAgent {
       windowsHide: true,
     });
     this.process = child;
+    const spawnElapsed = Date.now() - initStartedAt;
 
     const decoder = new StringDecoder("utf8");
     let buffer = "";
@@ -490,6 +493,9 @@ export class PiSDKAgent {
       const text = chunk.toString();
       stderrText = `${stderrText}${text}`.slice(-4000);
       console.log("[pi-sdk-worker]", text.trim());
+      // worker 的 [pi-init] 阶段计时走 stderr；正式包里没有 dev 控制台，
+      // 所以同时落盘到 logs/hpp-timing.log 供事后分析。
+      appendTimingLogLines("[pi-sdk-worker]", text);
     });
 
     child.stdin?.on("error", (error) => {
@@ -537,6 +543,10 @@ export class PiSDKAgent {
           if (data.type === "ready") {
             this._sessionFilePath = optionalString(data.sessionFilePath) || existingSessionFilePath || null;
             this.isReady = true;
+            // spawn→ready 的总耗时（含 node 启动、worker 模块加载和 init 全流程）。
+            logTiming(
+              `[Hpp timing] pi:worker-ready project=${projectPath} spawnMs=${spawnElapsed} totalMs=${Date.now() - initStartedAt}`,
+            );
             this.emitEvent({ type: "agent_ready", agentId: "pi", mock: false });
             resolve();
           } else {

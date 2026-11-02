@@ -10,11 +10,19 @@ describe("useSessionModels thinking synchronization", () => {
     expect(source).not.toContain("getSessionThinkingOrDefault");
   });
 
-  it("clears the previous session catalog before asynchronous discovery", () => {
-    expect(source).toContain("useEffect(() => {\n    clearModels();\n  }, [activeSessionId, activeSessionAgentId, clearModels]);");
+  it("clears the previous session catalog only when the Agent changes", () => {
+    // 模型目录是 Agent 级的：同 Agent 内切会话保留（新建会话立即可见模型名），
+    // 跨 Agent 同步清空。
+    expect(source).toContain("previousAgentId !== activeSessionAgentId");
     expect(source).toContain("setAvailableModels([])");
     expect(source).toContain("useChatStore.setState({ currentModel: null })");
     expect(source).toContain("if (useChatStore.getState().availableModels.length === 0) clearModels();");
+  });
+
+  it("fetches the configured catalog in parallel with initialization", () => {
+    // 模型目录不依赖 worker，初始化期间并行拉一次配置目录，请求到就渲染。
+    expect(source).toContain("SessionCommandCoordinator.getConfiguredModels");
+    expect(source).toContain("getConfiguredModels(activeSessionId, activeSessionAgentId)");
   });
 
   it("does not inherit a model across different Agents", () => {

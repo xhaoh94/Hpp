@@ -261,11 +261,19 @@ export interface QueuedMessage {
 interface ChatState {
   messages: ChatMessage[];
   sessionMessages: Record<string, ChatMessage[]>; // sessionId -> messages
+  /** 会话最近一页历史是否已经尝试从 SQLite 恢复；用于切换时区分“空会话”和“还没读完”。 */
+  sessionMessagesLoaded: Record<string, boolean>;
   activeSessionId: string | null;
   isStreaming: boolean;
   currentModel: ModelInfo | null;
   thinkingLevel: string;
   availableModels: ModelInfo[];
+  /**
+   * `availableModels` 当前属于哪个 Agent。模型目录来自 `models.json`，是
+   * Agent 级而不是会话级的，所以同一 Agent 内切会话时可以继续沿用已知目录
+   * （新建会话时模型选择器立刻可用），跨 Agent 则必须清空。
+   */
+  modelsAgentId: string | null;
   favoriteModels: ModelInfo[];
   activeAgentId: string;
   sessionDrafts: Record<string, ChatDraft>;
@@ -352,6 +360,7 @@ interface ChatState {
   deleteSessionsMessages: (sessionIds: string[]) => void;
   switchSession: (sessionId: string | null) => void;
   loadSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
+  markSessionMessagesLoaded: (sessionId: string, loaded?: boolean) => void;
 }
 
 const createMessageId = () => {
@@ -767,11 +776,13 @@ const updateSessionDraft = (
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   sessionMessages: {},
+  sessionMessagesLoaded: {},
   activeSessionId: null,
   isStreaming: false,
   currentModel: null,
   thinkingLevel: "medium",
   availableModels: [],
+  modelsAgentId: null,
   favoriteModels: [],
   activeAgentId: "",
   sessionDrafts: {},
@@ -1262,7 +1273,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     s.thinkingLevel === level ? {} : { thinkingLevel: level }
   )),
   setAvailableModels: (models) => set((s) => {
+    const nextModelsAgentId = s.activeAgentId || s.modelsAgentId;
     if (
+      s.modelsAgentId === nextModelsAgentId &&
       s.availableModels.length === models.length &&
       s.availableModels.every((model, index) =>
         model.id === models[index]?.id &&
@@ -1276,7 +1289,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     ) {
       return {};
     }
-    return { availableModels: models };
+    return { availableModels: models, modelsAgentId: nextModelsAgentId };
   }),
 
   toggleFavorite: (model) =>
@@ -1564,6 +1577,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const nextSessionMessages = { ...s.sessionMessages };
       delete nextSessionMessages[sessionId];
+      const nextSessionMessagesLoaded = { ...s.sessionMessagesLoaded };
+      delete nextSessionMessagesLoaded[sessionId];
       const nextMessageQueues = { ...s.messageQueues };
       delete nextMessageQueues[sessionId];
       const nextSessionDrafts = { ...s.sessionDrafts };
@@ -1579,6 +1594,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       return {
         sessionMessages: nextSessionMessages,
+        sessionMessagesLoaded: nextSessionMessagesLoaded,
         messageQueues: nextMessageQueues,
         queueEditLocks: nextQueueEditLocks,
         sessionDrafts: nextSessionDrafts,
@@ -1594,6 +1610,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (sessionIds.length === 0) return {};
       const sessionIdSet = new Set(sessionIds);
       const nextSessionMessages = { ...s.sessionMessages };
+      const nextSessionMessagesLoaded = { ...s.sessionMessagesLoaded };
       const nextMessageQueues = { ...s.messageQueues };
       const nextSessionDrafts = { ...s.sessionDrafts };
       const nextCompactingSessions = { ...s.compactingSessions };
@@ -1601,6 +1618,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const nextContextUsageBySession = { ...s.contextUsageBySession };
       for (const sessionId of sessionIdSet) {
         delete nextSessionMessages[sessionId];
+        delete nextSessionMessagesLoaded[sessionId];
         delete nextMessageQueues[sessionId];
         delete nextSessionDrafts[sessionId];
         delete nextCompactingSessions[sessionId];
@@ -1613,6 +1631,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       return {
         sessionMessages: nextSessionMessages,
+        sessionMessagesLoaded: nextSessionMessagesLoaded,
         messageQueues: nextMessageQueues,
         queueEditLocks: nextQueueEditLocks,
         sessionDrafts: nextSessionDrafts,
@@ -1630,17 +1649,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const nextSessionMessages = state.activeSessionId
       ? { ...state.sessionMessages, [state.activeSessionId]: state.messages }
       : state.sessionMessages;
+    // 同一 Agent 内切会话：模型目录是 Agent 级的（models.json），会话切换不会
+    // 改变它。保留已知目录让模型选择器立即可用（新建会话不用等 worker 启动
+    // 完成才显示模型名），真实目录回来后由 useSessionModels 覆盖。
+    // 跨 Agent 必须清空，否则会把上一个 Agent 的模型显示成当前会话的。
+    const keepModelState = Boolean(state.modelsAgentId) && state.modelsAgentId === state.activeAgentId;
     if (sessionId) {
       const sessionMsgs = nextSessionMessages[sessionId] || [];
       set({
         messages: sessionMsgs,
         sessionMessages: nextSessionMessages,
         activeSessionId: sessionId,
-        // 模型目录和当前模型属于会话运行时状态，不能跨会话沿用。
-        // 新会话的模型配置由 useSessionModels 在切换后重新发现。
-        currentModel: null,
-        availableModels: [],
-        thinkingLevel: "medium",
+        currentModel: keepModelState ? state.currentModel : null,
+        availableModels: keepModelState ? state.availableModels : [],
+        thinkingLevel: keepModelState ? state.thinkingLevel : "medium",
       });
     } else {
       set({
@@ -1660,4 +1682,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: s.activeSessionId === sessionId ? messages : s.messages,
     }));
   },
+
+  markSessionMessagesLoaded: (sessionId, loaded = true) =>
+    set((s) => {
+      if (s.sessionMessagesLoaded[sessionId] === loaded) return {};
+      return { sessionMessagesLoaded: { ...s.sessionMessagesLoaded, [sessionId]: loaded } };
+    }),
 }));

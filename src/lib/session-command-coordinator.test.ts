@@ -1362,6 +1362,24 @@ describe("SessionCommandCoordinator", () => {
     );
   });
 
+  it("exposes a waking state only while a cold backend is being created", async () => {
+    useProjectStore.setState({ initializedSessionIds: new Set(["session-one"]) });
+    electronAPI.agentGetSessionState.mockResolvedValueOnce({ success: false, idle: true });
+
+    const pending = SessionCommandCoordinator.initializeSession("session-two", { activate: true });
+    expect(useProjectStore.getState().initializingSessionIds.has("session-two")).toBe(true);
+
+    await pending;
+    expect(useProjectStore.getState().initializingSessionIds.has("session-two")).toBe(false);
+    expect(useProjectStore.getState().initializedSessionIds.has("session-two")).toBe(true);
+  });
+
+  it("does not flag a switch to an already initialized session as waking", async () => {
+    const pending = SessionCommandCoordinator.initializeSession("session-one", { activate: true });
+    expect(useProjectStore.getState().initializingSessionIds.has("session-one")).toBe(false);
+    await pending;
+  });
+
   it("activates an initialized session before asynchronous model discovery", async () => {
     const model = {
       id: "session-two-model",

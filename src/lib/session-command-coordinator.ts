@@ -289,9 +289,11 @@ async function runInitialization(
 
   let models: ModelInfo[] = [];
   let warning: string | undefined;
+  // 冷路径（spawn/握手/恢复上下文）才需要“唤醒中”状态；已初始化会话的
+  // 切换是纯 UI 操作，不应在界面上闪现这个提示。
+  const needsRuntimeInitialization = !useProjectStore.getState().initializedSessionIds.has(sessionId);
+  if (needsRuntimeInitialization) useProjectStore.getState().markSessionInitializing(sessionId);
   try {
-    const needsRuntimeInitialization = !useProjectStore.getState().initializedSessionIds.has(sessionId);
-
     // Switching to an already initialized backend is a UI operation. Model
     // discovery is repeated by useSessionModels after the new session is
     // painted, so do not make the tab click wait for an IPC/backend roundtrip.
@@ -401,6 +403,8 @@ async function runInitialization(
     // 即使 backend 已经创建成功，下一次状态探测也会复用它，不会重复创建。
     clearMissingRuntimeInitialization(sessionId);
     addStartupError(sessionId, warning);
+  } finally {
+    if (needsRuntimeInitialization) useProjectStore.getState().clearSessionInitializing(sessionId);
   }
 
   const current = getSessionCommandTarget(sessionId);
@@ -1200,6 +1204,22 @@ export async function getAvailableModels(sessionId: string) {
   }
 }
 
+/**
+ * 不等初始化完成、只读 Hpp 配置的模型目录。
+ * Pi / Claude / Codex 的 modelListMode 是 "configured"，目录完全来自 models.json /
+ * settings.json，与 worker 启动无关。新会话可以先拿到这份目录立即渲染，
+ * 避免为显示模型名白等一次 worker 握手（实测 ~1s）。
+ */
+export async function getConfiguredModels(sessionId: string, agentId?: string): Promise<ModelInfo[]> {
+  try {
+    const models = await window.electronAPI.agentGetModels(sessionId, agentId) as ModelInfo[];
+    if (models.length > 0) return models;
+    return getRetainedActiveModels(sessionId);
+  } catch {
+    return getRetainedActiveModels(sessionId);
+  }
+}
+
 export async function getActions(sessionId: string, reload = false): Promise<AgentActionCatalogEntry[]> {
   const { session } = getSessionCommandTarget(sessionId);
   if (!supportsAgentActions(session.agentId)) return [];
@@ -1592,6 +1612,7 @@ export const SessionCommandCoordinator = {
   setPermissionMode,
   reloadSession,
   getAvailableModels,
+  getConfiguredModels,
   getActions,
   getSessionCommandConfig,
   getSessionCommandStatus,

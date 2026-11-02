@@ -236,28 +236,60 @@ describe("code review dialog", () => {
 
   it("scrolls to the first change point by default when a file is shown", () => {
     expect(dialogSource).toContain("scrolledRef");
-    expect(dialogSource).toContain("scrollToDiff(cursor,");
+    expect(dialogSource).toContain("scrollToDiff(cursor);");
     // useLayoutEffect：commit 后、paint 前同步定位，无帧延迟、无闪烁。
     expect(dialogSource).toContain("useLayoutEffect");
     // 等行集合稳定（规范化补丁 + 完整文件内容）后一次定位到位：
     // 补丁视图的行下标和完整文件不一致，先定位再纠正就是用户感知到的“延迟一会儿才跳”。
-    expect(dialogSource).toContain("if (!diffLayoutReady) return;");
-    expect(dialogSource).toContain("scrollToDiff(cursor, !isFirst)");
-    // 行集合每变一次就 auto 重新定位一次（切换文件、规范化完成、内容读回）。
-    expect(dialogSource).toContain("const isFirst = scrolledRef.current !== diffLayoutKey;");
+    expect(dialogSource).toContain("if (!diffLayoutReady) {");
+    // 每个「文件 + 行集合形态 + 视图」只定位一次。
+    expect(dialogSource).toContain("if (scrolledRef.current === diffLayoutKey) {");
+    // 定位键必须含 canonical：patch → full 是真正的行集合重建，必须重新定位。
+    expect(dialogSource).toContain('active.canonical ? "full" : "patch"');
     // 重新打开同一文件也会再次定位：依赖含 open，且打开时重置 scrolledRef。
-    expect(dialogSource).toContain("if (!open || !active || pairs === null) return;");
+    expect(dialogSource).toContain("if (!open || !active || pairs === null) {");
     expect(dialogSource).toContain("diffLayoutKey,");
-    // 视图切换也算行集合变化：切到 split/unified 后立即重新定位。
+    // 视图切换也算一次新定位：切到 split/unified 后重新对齐到变更点。
     expect(dialogSource).toContain("::${viewMode}`");
+    // 变更块**整体**居中（不是首行居中）；块高超过视口时改为对齐顶部。
+    expect(dialogSource).toContain('rows.scrollToRange(pairIndex, pairEnd);');
+    expect(dialogSource).toContain("diffPairEnds");
+    expect(dialogSource).toContain("blockHeight <= scrollEl.clientHeight");
+  });
+
+  it("keeps the change point pinned when async state re-renders the list", () => {
+    // 录屏确认的时序：打开停在改动处约 250ms，然后 scrollTop 被归零回到第 1 行。
+    // 两处修法：① pairs 不再依赖整个 active 对象（undoState 到达重建 active 会换
+    // 新数组 → 虚拟列表重建 → scrollTop 归零）；② 定位后短窗口盯住“被打回顶部”。
+    expect(dialogSource).not.toContain("}, [active, fileContent]);");
+    expect(dialogSource).toContain("active?.displayFile,");
+    expect(dialogSource).toContain("guardDiffScroll");
+    expect(dialogSource).toContain("scrollTop <= TOP_SNAP_PX");
+    // 用户一滚动/按键就立刻停手，不跟用户抢滚动。
+    expect(dialogSource).toContain('container.addEventListener("wheel", cancel');
+  });
+
+  it("jumps directly between change points without a scroll animation", () => {
+    // 文件深处的改动点一翻要滑好几千像素，动画只是在拖时间。
+    expect(dialogSource).not.toContain("smoothScrollTop");
+    expect(dialogSource).not.toContain("DIFF_NAV_SCROLL_MS");
+    expect(dialogSource).toContain('scrollEl.scrollTo({ top: target, behavior: "auto" });');
+    expect(dialogSource).toContain("scrollToDiff(next);");
   });
 
   it("starts the diff at the change point instead of parking at the file top", () => {
-    // 完整对比未就绪时先不展示 diff（也就不会先停在文件顶部），
-    // 读取很快时静默等待，避免加载态闪烁。
+    // 行集合未就绪时**不渲染行区**（也就不会先停在文件顶部再跳），
+    // 读取快到 120ms 内就静默等待，避免加载态闪烁。
     expect(dialogSource).toContain("CONTENT_LOADING_DELAY_MS");
     expect(dialogSource).toContain("waitingForContent");
+    // 规范化补丁（reviewState）还在路上时也算未就绪：否则会先按 patch 视图
+    // 停在错位置，等规范化完成后才“跳”到真正的变更处。
+    expect(dialogSource).toContain("waitingForCanonical");
     expect(dialogSource).toContain("showContentLoading");
+    // 关键：两个 waiting 必须参与渲染分支，否则 patch 视图会先画出来。
+    expect(dialogSource).toContain("pairs === null || waitingForCanonical || waitingForContent ? (");
+    // 就绪判定：canonical 时等内容，patch 形态时不再等 reviewState。
+    expect(dialogSource).toContain("active.canonical ? activeContentReady : !waitingForCanonical");
     // 高亮按可见行惰性计算，不能回到“整份 diff 一次性高亮”。
     expect(dialogSource).not.toContain("highlightedPairs");
     expect(dialogSource).toContain("const ReviewRow = memo(");

@@ -88,7 +88,9 @@ export function FileContextMenu({ x, y, path, projectPath, onClose }: FileContex
     }
     const result = await window.electronAPI.statPath(path);
     if (!result.success || !result.attachment) {
-      showAppAlert(result.error || `无法添加资源：${getFileName(path)}`);
+      // 带完整路径：聊天里的路径是模型写的，按项目根解析后可能指向不存在的位置，
+      // 只说“找不到文件”用户无法判断它到底找的是哪里。
+      showAppAlert(`${result.error || "无法添加该文件"}\n\n解析后的路径：${path}`);
       onClose();
       return;
     }

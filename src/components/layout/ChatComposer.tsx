@@ -62,6 +62,7 @@ type ChatComposerProps = {
   currentSessionRunning: boolean;
   compactionInProgress?: boolean;
   interactionDisabled?: boolean;
+  sessionInitializing?: boolean;
   isAwaitingUIResponse: boolean;
   inputHasText: boolean;
   pendingFiles: PendingFile[];
@@ -107,6 +108,7 @@ export const ChatComposer = memo(function ChatComposer({
   currentSessionRunning,
   compactionInProgress = false,
   interactionDisabled = false,
+  sessionInitializing = false,
   isAwaitingUIResponse,
   inputHasText,
   pendingFiles,
@@ -156,7 +158,9 @@ export const ChatComposer = memo(function ChatComposer({
   const inputDisabled = activeQuestionnaire || interactionDisabled;
   const showAbortButton = !interactionDisabled && currentSessionRunning && !isAwaitingUIResponse && !hasPendingContent;
   const queueSend = !interactionDisabled && !isAwaitingUIResponse && hasPendingContent && (currentSessionRunning || compactionInProgress);
-  const sendDisabled = interactionDisabled
+  const sendDisabled = sessionInitializing
+    ? true
+    : interactionDisabled
     ? true
     : activeQuestionnaire
       ? true
@@ -166,7 +170,9 @@ export const ChatComposer = memo(function ChatComposer({
   const placeholder = compactionInProgress
     ? "上下文压缩中，发送后将进入队列"
     : getChatComposerPlaceholder(interactionDisabled, activeQuestionnaire, sendKey);
-  const sendTitle = compactionInProgress
+  const sendTitle = sessionInitializing
+    ? "会话后端启动中，就绪后可发送"
+    : compactionInProgress
     ? "发送后加入队列"
     : getChatComposerSendTitle(
       interactionDisabled,

@@ -103,7 +103,7 @@ describe("ProjectCard lifecycle regression constraints", () => {
   });
 
   it("derives session tab titles from ordered composer messages", () => {
-    expect(projectCardSource).toContain("getChatMessagePreviewText(firstUserMsg)");
+    expect(projectCardSource).toContain("getSessionPreviewLabel(firstUserMsg)");
     expect(projectCardSource).not.toContain("content={firstUserMsg.content}");
   });
 
@@ -115,7 +115,7 @@ describe("ProjectCard lifecycle regression constraints", () => {
       projectCardSource.indexOf("{(session.forkedFrom || session.forkContext) && ("),
     );
 
-    expect(tabBlock).toContain("getChatMessagePreviewText(firstUserMsg)");
+    expect(tabBlock).toContain("getSessionPreviewLabel(firstUserMsg)");
     expect(tabBlock).toContain("session.preview || \"\"");
     expect(tabBlock).toContain("const tabLabel = tabPreview || session.title;");
     expect(tabBlock).toContain("title={tabLabel}");

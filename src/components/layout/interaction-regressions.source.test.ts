@@ -238,7 +238,8 @@ describe("chat interaction regression constraints", () => {
     // 其余 href 一律拦掉默认跳转。
     expect(markdownRendererSource).not.toContain('target="_blank"\n                rel="noopener noreferrer"');
     expect(markdownRendererSource).toContain('{...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}');
-    expect(markdownRendererSource).toContain("if (!external) event.preventDefault();");
+    expect(markdownRendererSource).toContain("if (external) return;");
+    expect(markdownRendererSource).toContain("event.preventDefault();");
     // 默认 URL 清洗会把 Windows 盘符路径清成空 href，空 href 解析成当前页面 → 又开一个自己。
     expect(markdownRendererSource).toContain("urlTransform={keepLocalHref}");
     expect(markdownRendererSource).toContain("const SCRIPT_HREF = /^\\s*(?:javascript|data|vbscript):/i;");

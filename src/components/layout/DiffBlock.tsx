@@ -7,6 +7,7 @@ import { uiText } from "@/i18n/text";
 import { invalidateReviewUndoCache, loadReviewUndoState } from "@/lib/review-undo-cache";
 import { resolveProjectFilePath } from "@/lib/project-file-path";
 import { LazyCodeReviewDialog, preloadCodeReviewDialog } from "./LazyCodeReviewDialog";
+import { DiffHoverCard, type DiffHoverFile } from "./DiffHoverCard";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { FileContextMenu, type FileContextMenuState } from "@/components/shared/FileContextMenu";
 import { useEditorStore } from "@/stores/editor-store";
@@ -22,6 +23,11 @@ const FilePreview = LazyFilePreview;
 const CodeReviewDialog = LazyCodeReviewDialog;
 const DEFAULT_VISIBLE_FILES = 3;
 
+type DiffPreviewState = {
+  file: DiffHoverFile;
+  anchor: DOMRect;
+};
+
 export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBlockProps) {
   const [expanded, setExpanded] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -29,6 +35,7 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState | null>(null);
   const [undoState, setUndoState] = useState<ReviewUndoState | null>(null);
+  const [diffPreview, setDiffPreview] = useState<DiffPreviewState | null>(null);
   const summary = useMemo(() => buildDiffSummary(diffs, projectPath), [diffs, projectPath]);
 
   // 空闲时预取审核弹窗，点“审核”时不必再等 chunk 下载/解析才开始定位。
@@ -75,6 +82,60 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
   const visibleFiles = expanded ? displayFiles : displayFiles.slice(0, DEFAULT_VISIBLE_FILES);
   const allReverted = undoState?.allReverted === true;
 
+  // 预览卡片改成点击打开：不再用悬停延迟，也没了「从行移进浮层」的关闭计时。
+  const closeDiffPreview = () => setDiffPreview(null);
+
+  const toggleDiffPreview = (file: DiffHoverFile, element: HTMLElement) => {
+    setDiffPreview((current) => (
+      current?.file.file === file.file
+        ? null
+        : { file, anchor: element.getBoundingClientRect() }
+    ));
+  };
+
+  /** 打开完整文件：编辑器模式进 tab，否则弹文件预览。 */
+  const openDiffFile = (file: DiffHoverFile) => {
+    const base = projectPath ? projectPath.replace(/[\\/]+$/, "") : "";
+    const fullPath = base ? `${base}/${file.file}` : file.file;
+    if (useEditorStore.getState().mode) {
+      useEditorStore.getState().openFile(fullPath);
+    } else {
+      setPreviewFile(fullPath);
+    }
+  };
+
+  // 卡片按打开时的行坐标定位：滚动、缩放、Esc、点击外部都要收起，
+  // 否则它会浮在一个已经移走的行旁边。卡片内部滚动与点文件行不算。
+  useEffect(() => {
+    if (!diffPreview) return;
+    const dismiss = () => setDiffPreview(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
+    };
+    const handleScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("[data-diff-hover-card]")) return;
+      dismiss();
+    };
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      // 文件行自己负责切换（捕获阶段先于 click，不能抢先关掉）。
+      if (target.closest("[data-diff-hover-card]") || target.closest(".chat-diff-file-row")) return;
+      dismiss();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("mousedown", handlePointerDown, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("mousedown", handlePointerDown, true);
+    };
+  }, [diffPreview]);
+
   useEffect(() => {
     setUndoState(null);
     if (!projectPath || reviewSources.length === 0) return;
@@ -113,7 +174,9 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
           type="button"
           className="chat-diff-review-btn"
           onClick={() => {
-            setReviewInitialFile(null);
+            // 从某个文件的预览面板里点「审核」，就定位到那个文件；
+            // 否则保持原先的「第一个有补丁的文件」。
+            setReviewInitialFile(diffPreview?.file.file ?? null);
             setReviewOpen(true);
           }}
           title={uiText.review.audit}
@@ -132,26 +195,26 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
               <button
                 type="button"
                 className="chat-diff-file-row"
-                onClick={() => {
-                  const base = projectPath ? projectPath.replace(/[\\/]+$/, "") : "";
-                  const fullPath = base ? `${base}/${file.file}` : file.file;
-                  // 编辑器模式：直接打开到编辑器 tab；非编辑器模式：弹文件预览。
-                  if (useEditorStore.getState().mode) {
-                    useEditorStore.getState().openFile(fullPath);
-                  } else {
-                    setPreviewFile(fullPath);
+                // 点击文件行 = 就地展开该文件的 diff 预览。之前这里是直接打开文件预览/
+                // 编辑器，反而把「看改动」这个主要意图藏在了悬停里。
+                onClick={(event) => {
+                  if (!hasPatch) {
+                    openDiffFile(file);
+                    return;
                   }
+                  toggleDiffPreview(file, event.currentTarget);
                 }}
                 onContextMenu={(event) => {
                   event.preventDefault();
+                  closeDiffPreview();
                   setFileContextMenu({
                     x: event.clientX,
                     y: event.clientY,
                     path: resolveProjectFilePath(file.file, projectPath || ""),
                   });
                 }}
-                title={file.file}
-                aria-haspopup="dialog"
+                title={hasPatch ? undefined : file.file}
+                aria-expanded={hasPatch ? diffPreview?.file.file === file.file : undefined}
               >
                 <span className="chat-diff-file-path">
                   {file.file}
@@ -164,7 +227,7 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
                   <ChevronDown
                     size={14}
                     strokeWidth={2}
-                    className="chat-diff-file-chevron"
+                    className={`chat-diff-file-chevron${diffPreview?.file.file === file.file ? " expanded" : ""}`}
                     aria-hidden="true"
                   />
                 )}
@@ -189,6 +252,17 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
             aria-hidden="true"
           />
         </button>
+      )}
+
+      {diffPreview && (
+        <DiffHoverCard
+          file={diffPreview.file}
+          anchorRect={diffPreview.anchor}
+          onOpenFile={() => {
+            closeDiffPreview();
+            openDiffFile(diffPreview.file);
+          }}
+        />
       )}
 
       <FilePreview filePath={previewFile} onClose={() => setPreviewFile(null)} />

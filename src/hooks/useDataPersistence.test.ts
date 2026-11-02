@@ -300,6 +300,7 @@ describe("按需恢复会话消息", () => {
     await expect(ensureSessionMessagesLoaded("session-on-demand")).resolves.toBe(true);
     await expect(ensureSessionMessagesLoaded("session-on-demand")).resolves.toBe(true);
     expect(loadPage).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().sessionMessagesLoaded["session-on-demand"]).toBe(true);
     expect(useChatStore.getState().sessionMessages["session-on-demand"]?.map((message) => message.id))
       .toEqual(["message-4", "message-5"]);
 
@@ -398,6 +399,8 @@ describe("persisted composer snapshots", () => {
     });
     expect(state.isStreaming).toBe(false);
     expect(state.compactingSessions).toEqual({});
+    // 启动恢复的活动会话已经读完首屏页，切换逻辑可以直接渲染。
+    expect(state.sessionMessagesLoaded).toEqual({ "session-hydrated": true });
   });
 
   it("atomically clears surviving renderer messages when no valid disk snapshot is available", () => {
