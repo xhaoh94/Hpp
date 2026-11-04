@@ -6,6 +6,7 @@ import type { QuestionnaireQuestion } from "./questionnaire";
 import type { AgentActionCatalogEntry, AgentActionInvocation } from "./agent-actions";
 import type { AgentPermissionMode } from "./agent-permissions";
 import type { ComposerDocument, ComposerNode } from "./composer-document";
+import type { OutputDetailLevel } from "./output-detail";
 
 import {
   MAX_REMOTE_IMAGES,
@@ -270,6 +271,11 @@ export interface RemoteSessionConfig {
   thinkingLevel: string;
   planModeEnabled: boolean;
   permissionMode: AgentPermissionMode;
+  /**
+   * 输出内容详细等级：桌面端「通用设置」里配置，随会话配置下发，
+   * 保证移动端与桌面端渲染一致。缺省（旧版宿主）按「详细」处理。
+   */
+  outputDetailLevel?: OutputDetailLevel;
   availableModels?: RemoteModel[];
 }
 

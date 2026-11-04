@@ -31,6 +31,12 @@ export type ProcessEntryView = {
   accumulatedDurationMs?: number;
   phase?: "started" | "completed";
   stopReason?: ProcessSubagentStopReason;
+  /** 「标准」档操作摘要的明细：展开时按类别列出（命令数 / 改过的文件 / 看过的文件）。 */
+  operationSummary?: {
+    commandCount: number;
+    changedFiles: string[];
+    viewedFiles: string[];
+  };
   subagents?: Array<{
     id?: string;
     label?: string;
@@ -267,6 +273,45 @@ export const isFileOperationProcessEntry = (entry: ProcessEntryView) =>
 export const ASSISTANT_NARRATION_PROCESS_KIND = "assistant_narration" as const;
 export const USER_GUIDANCE_PROCESS_KIND = "user_guidance" as const;
 
+/**
+ * 把所有连续的思考合并成一条，让整轮思考和正文一样连成一段，而不是被每条
+ * 思考各占一行拆散。三个详细等级（简洁/标准/详细）都走同一套规则。
+ *
+ * 合并只在“相邻”时发生：调用方按时间顺序传入条目，中间一旦插入了正文
+ * （commentary / assistant_narration / 引导），或查看文件、命令等任何其他
+ * 条目，就会自然断开，形成新的一组思考——这些条目始终是思考之间的分界点。
+ *
+ * 合并后的条目沿用第一条的 id（保持列表 key 稳定），正文按顺序用空行
+ * 拼接，时间戳取区间起点。
+ */
+export function mergeThinkingEntries<T extends ProcessEntryView>(entries: T[]): T[] {
+  const merged: T[] = [];
+  for (const entry of entries) {
+    const previous = merged[merged.length - 1];
+    if (previous && entry.type === "thinking" && previous.type === "thinking") {
+      // 按「段落」去重，而不是拿两条完整的 detail 两两比较：
+      // previous 可能是已经拼接过的 "A\n\nB"，再来一条 "B" 时两两比较会重复拼。
+      const parts = String(previous.detail || "")
+        .split(/\n{2,}/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+      for (const part of String(entry.detail || "").split(/\n{2,}/).map((item) => item.trim())) {
+        if (part && !parts.includes(part)) parts.push(part);
+      }
+      merged[merged.length - 1] = {
+        ...previous,
+        detail: parts.join("\n\n"),
+        // 末条没带 state 时保留前一条的，避免把运行态抹成 undefined。
+        state: entry.state ?? previous.state,
+        completedAt: entry.completedAt ?? previous.completedAt,
+      };
+      continue;
+    }
+    merged.push(entry);
+  }
+  return merged;
+}
+
 export const isAssistantNarrationProcessEntry = (entry: ProcessEntryView) =>
   entry.kind === ASSISTANT_NARRATION_PROCESS_KIND;
 
@@ -275,6 +320,140 @@ export const isUserGuidanceProcessEntry = (entry: ProcessEntryView) =>
   entry.toolKind === "guidance_message" ||
   entry.toolKind === "guidance" ||
   /^收到引导(?:[:：]|$)/.test(entry.title);
+
+/**
+ * 操作类条目：执行命令、读取/查看文件、修改文件。
+ *
+ * 这三类就是「简洁」档唯一要隐藏的内容；其他条目（思考、正文、引导、
+ * 问卷、错误、状态、子 Agent、空闲提示）都属于对话信息，必须保留。
+ */
+export const isOperationProcessEntry = (entry: ProcessEntryView) =>
+  entry.type === "diff"
+  || (entry.type === "tool"
+    && entry.toolKind !== "guidance_message"
+    && entry.toolKind !== "guidance"
+    && entry.toolKind !== "stream_idle_notice");
+
+/** 「简洁」等级下真正要渲染的条目：只是不展示操作类条目。 */
+export const getConciseProcessEntries = <T extends ProcessEntryView>(entries: T[]) =>
+  entries.filter((entry) => !isOperationProcessEntry(entry));
+
+/** 「标准」档把操作类条目合并成的那一条的标识。 */
+export const OPERATION_SUMMARY_TOOL_KIND = "operation_summary" as const;
+
+/** 摘要里最多列出多少个文件名，超出的部分只报数量。 */
+const OPERATION_SUMMARY_FILE_LIMIT = 8;
+
+type OperationFileRef = { name: string; action?: string };
+
+const isRecordLike = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** 从条目的 files 里取出「文件名 + 动作」（action 决定算查看还是修改）。 */
+const getOperationFileRefs = (entry: ProcessEntryView): OperationFileRef[] =>
+  (entry.files || []).flatMap((file) => {
+    if (typeof file === "string") {
+      return file.trim() ? [{ name: file.trim() as string }] : [];
+    }
+    if (!isRecordLike(file) || typeof file.file !== "string") return [];
+    const name = file.file.trim();
+    if (!name) return [];
+    return [{ name, action: typeof file.action === "string" ? file.action : undefined }];
+  });
+
+const isWriteFileAction = (action?: string) =>
+  action === "edited" || action === "modified" || action === "written";
+
+type OperationSummary = {
+  commandCount: number;
+  changedFiles: string[];
+  viewedFiles: string[];
+};
+
+const summarizeOperations = (operations: ProcessEntryView[]): OperationSummary => {
+  let commandCount = 0;
+  const changedFiles: string[] = [];
+  const viewedFiles: string[] = [];
+  for (const entry of operations) {
+    const files = getOperationFileRefs(entry);
+    if (entry.type === "diff") {
+      // diff 条目本身就是“改了这些文件”。
+      changedFiles.push(...files.map((file) => file.name));
+      if (files.length === 0) commandCount += 0;
+      continue;
+    }
+    if (entry.command?.trim() || files.length === 0) commandCount += 1;
+    for (const file of files) {
+      if (isWriteFileAction(file.action)) changedFiles.push(file.name);
+      else viewedFiles.push(file.name);
+    }
+  }
+  return { commandCount, changedFiles, viewedFiles };
+};
+
+const uniqueNames = (names: string[]) => Array.from(new Set(names.filter(Boolean)));
+
+/** 一行里列文件名：超过上限只报数量，避免摘要被路径撑爆。 */
+const formatFileNames = (names: string[]) => {
+  const visible = names.slice(0, OPERATION_SUMMARY_FILE_LIMIT);
+  const rest = names.length - visible.length;
+  return rest > 0 ? `${visible.join("、")} 等 ${names.length} 个文件` : visible.join("、");
+};
+
+const buildOperationSummaryEntry = <T extends ProcessEntryView>(
+  first: T,
+  operations: T[],
+  title: string,
+  summary: OperationSummary,
+): T => ({
+  ...first,
+  // 合成条目的 id 随首个操作稳定，列表 key 不会每次重渲染就变。
+  id: `${first.id}-operation-summary`,
+  type: "status" as const,
+  toolKind: OPERATION_SUMMARY_TOOL_KIND,
+  title,
+  // 明细留给渲染层：展开时按「已运行 / 已修改 / 已查看」分三行，文件名可点击。
+  operationSummary: {
+    commandCount: summary.commandCount,
+    changedFiles: uniqueNames(summary.changedFiles),
+    viewedFiles: uniqueNames(summary.viewedFiles),
+  },
+  detail: undefined,
+  command: undefined,
+  files: undefined,
+  state: operations.some((entry) => entry.state === "running") ? "running" as const : "completed" as const,
+}) as T;
+
+/**
+ * 「标准」等级（收起态）：把「运行了哪些命令 / 查看了哪些文件 / 修改了哪些文件」
+ * 汇总成一条，放在第一个操作出现的位置；思考、正文等其他条目保持原顺序不变。
+ * 没有操作类条目时原样返回。
+ */
+export function collapseOperationProcessEntries<T extends ProcessEntryView>(entries: T[]): T[] {
+  const operations = entries.filter(isOperationProcessEntry);
+  if (operations.length === 0) return entries;
+
+  const { commandCount, changedFiles, viewedFiles } = summarizeOperations(operations);
+  const parts = [
+    commandCount > 0 ? `运行 ${commandCount} 条命令` : "",
+    uniqueNames(viewedFiles).length > 0 ? `查看 ${uniqueNames(viewedFiles).length} 个文件` : "",
+    uniqueNames(changedFiles).length > 0 ? `修改 ${uniqueNames(changedFiles).length} 个文件` : "",
+  ].filter(Boolean);
+  if (parts.length === 0) return entries;
+
+  const firstIndex = entries.findIndex(isOperationProcessEntry);
+  return [
+    ...entries.slice(0, firstIndex),
+    buildOperationSummaryEntry(entries[firstIndex], operations, parts.join(" · "), {
+      commandCount,
+      changedFiles,
+      viewedFiles,
+    }),
+    ...entries.slice(firstIndex).filter((entry) => !isOperationProcessEntry(entry)),
+  ];
+}
+
+
 
 /**
  * 引导气泡的兜底文本。旧版本没有分开保存展示/发送正文，历史记录里可能留着

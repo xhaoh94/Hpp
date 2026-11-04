@@ -200,3 +200,91 @@ describe("remote session close", () => {
     expect(remainingSessionIds()).toEqual(["empty-session", "busy-session"]);
   });
 });
+
+describe("remote session config output detail level", () => {
+  const createSession = (id: string): ProjectSession => ({
+    id,
+    agentId: "codex",
+    agentSessionId: id,
+    title: "会话",
+    createdAt: "2026-07-22T00:00:00.000Z",
+    lastActiveAt: "2026-07-22T00:00:00.000Z",
+  });
+
+  const setProjects = () => {
+    useProjectStore.setState({
+      projects: [{
+        id: "project-1",
+        name: "demo",
+        createdAt: 1,
+        sessions: [createSession("session-1")],
+      }],
+      activeProjectId: "project-1",
+      activeSessionId: "session-1",
+      projectDataHydrated: true,
+    } as never);
+  };
+
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setProjects();
+    useChatStore.setState({ messages: [], sessionMessages: {}, activeSessionId: null });
+    vi.spyOn(SessionCommandCoordinator, "getSessionCommandConfig")
+      .mockResolvedValue({ model: undefined, thinkingLevel: "medium", availableModels: [] });
+    vi.spyOn(SessionCommandCoordinator, "getSessionCommandStatus").mockReturnValue("idle");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("publishes the stored output detail level so mobile renders the same way", async () => {
+    const remotePublish = vi.fn();
+    vi.stubGlobal("window", {
+      dispatchEvent: vi.fn(),
+      electronAPI: {
+        loadData: vi.fn(async () => ({ general: { outputDetailLevel: "concise" } })),
+        remotePublish,
+      },
+    });
+
+    await executeRemoteSessionCommand({
+      commandId: "command-models",
+      name: "session.models.get",
+      payload: { sessionId: "session-1" },
+    });
+
+    await vi.waitFor(() => {
+      const configEvent = remotePublish.mock.calls
+        .map(([event]) => event)
+        .find((event) => event?.type === "session.config");
+      expect(configEvent?.config?.outputDetailLevel).toBe("concise");
+    });
+  });
+
+  it("falls back to detailed when the setting is missing or invalid", async () => {
+    const remotePublish = vi.fn();
+    vi.stubGlobal("window", {
+      dispatchEvent: vi.fn(),
+      electronAPI: {
+        loadData: vi.fn(async () => ({ general: { outputDetailLevel: "nonsense" } })),
+        remotePublish,
+      },
+    });
+
+    await executeRemoteSessionCommand({
+      commandId: "command-models",
+      name: "session.models.get",
+      payload: { sessionId: "session-1" },
+    });
+
+    await vi.waitFor(() => {
+      const configEvent = remotePublish.mock.calls
+        .map(([event]) => event)
+        .find((event) => event?.type === "session.config");
+      expect(configEvent?.config?.outputDetailLevel).toBe("detailed");
+    });
+  });
+});

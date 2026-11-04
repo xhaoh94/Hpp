@@ -21,10 +21,21 @@ import type {
 } from "@/types";
 import { normalizeAgentPermissionMode, type AgentPermissionMode } from "@shared/agent-permissions";
 import {
+  DEFAULT_OUTPUT_DETAIL_LEVEL,
+  normalizeOutputDetailLevel,
+  type OutputDetailLevel,
+} from "@shared/output-detail";
+import {
   getActiveAssistantTurnId,
   normalizeProcessForView,
   type ProcessTerminalViewState,
 } from "@shared/process-view";
+import {
+  AGENT_SETTINGS_UPDATED_EVENT,
+  GENERAL_SETTINGS_UPDATED_EVENT,
+  type AgentSettingsUpdatedDetail,
+  type GeneralSettingsUpdatedDetail,
+} from "@/lib/app-events";
 
 type UseRemoteBridgeOptions = {
   pendingInteractions: PendingUIResponses;
@@ -253,6 +264,7 @@ function buildSessionConfig(
   sessionId: string,
   planModeEnabled: boolean,
   permissionMode: AgentPermissionMode,
+  outputDetailLevel: OutputDetailLevel = DEFAULT_OUTPUT_DETAIL_LEVEL,
 ): RemoteSessionConfig {
   const chatState = useChatStore.getState();
   const isActiveSession = chatState.activeSessionId === sessionId;
@@ -263,6 +275,7 @@ function buildSessionConfig(
     thinkingLevel: isActiveSession ? chatState.thinkingLevel : (getSessionThinking(sessionId) || "medium"),
     planModeEnabled,
     permissionMode,
+    outputDetailLevel,
     availableModels: isActiveSession ? chatState.availableModels : undefined,
   };
 }
@@ -277,6 +290,7 @@ function buildCatalog(
   projects: Project[],
   planModeEnabled: boolean,
   permissionMode: AgentPermissionMode,
+  outputDetailLevel: OutputDetailLevel = DEFAULT_OUTPUT_DETAIL_LEVEL,
 ): RemoteProject[] {
   const statuses = useProjectStore.getState().agentStatuses;
   const messages = useChatStore.getState().sessionMessages;
@@ -296,7 +310,7 @@ function buildCatalog(
         sourceSessionId: session.forkedFrom.sourceSessionId,
         sourceTitle: session.forkedFrom.sourceTitle,
       } : undefined,
-      config: buildSessionConfig(session.id, planModeEnabled, permissionMode),
+      config: buildSessionConfig(session.id, planModeEnabled, permissionMode, outputDetailLevel),
     })),
   }));
 }
@@ -532,6 +546,8 @@ export function useRemoteBridge({
   const publishedInteractionsRef = useRef<PendingUIResponses>({});
   const planModeRef = useRef(false);
   const permissionModeRef = useRef<AgentPermissionMode>("auto");
+  // 输出详细等级不需要触发本 hook 重渲染，只用 ref 供各发布路径读取。
+  const outputDetailLevelRef = useRef<OutputDetailLevel>(DEFAULT_OUTPUT_DETAIL_LEVEL);
   const remoteAgentsRef = useRef<RemoteAgent[]>([]);
   const messageTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingMessageUpdatesRef = useRef(new Map<string, RemoteMessagePublishIntent>());
@@ -569,12 +585,12 @@ export function useRemoteBridge({
           projectState.agentStatuses[session.id] || "idle",
         );
         queues[session.id] = sanitizeQueue(chatState.messageQueues[session.id] || []);
-        configs[session.id] = buildSessionConfig(session.id, planModeRef.current, permissionModeRef.current);
+        configs[session.id] = buildSessionConfig(session.id, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current);
       }
     }
     publish({
       type: "snapshot",
-      catalog: buildCatalog(projectState.projects, planModeRef.current, permissionModeRef.current),
+      catalog: buildCatalog(projectState.projects, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current),
       agents: remoteAgentsRef.current,
       messages,
       queues,
@@ -625,7 +641,7 @@ export function useRemoteBridge({
       const projectState = useProjectStore.getState();
       publish({
         type: "catalog",
-        catalog: buildCatalog(projectState.projects, planModeRef.current, permissionModeRef.current),
+        catalog: buildCatalog(projectState.projects, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current),
         agents: remoteAgentsRef.current,
       });
     };
@@ -652,28 +668,30 @@ export function useRemoteBridge({
 
   useEffect(() => {
     let cancelled = false;
+    // 事件可能先于 loadData 到达：一旦事件写过 ref，就不能再用旧磁盘值覆盖，
+    // 否则用户刚改的设置会被回退（移动端下一次 snapshot 也拿到旧值）。
+    let overriddenByEvent = false;
     void window.electronAPI.loadData("settings").then((data) => {
       const settings = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
       const general = settings.general && typeof settings.general === "object" && !Array.isArray(settings.general)
         ? settings.general as Record<string, unknown>
         : {};
-      if (cancelled) return;
+      if (cancelled || overriddenByEvent) return;
       const enabled = general.planModeEnabled === true;
       const nextPermissionMode = normalizeAgentPermissionMode(general.permissionMode);
       setPlanModeEnabled(enabled);
       setPermissionMode(nextPermissionMode);
       planModeRef.current = enabled;
       permissionModeRef.current = nextPermissionMode;
+      outputDetailLevelRef.current = normalizeOutputDetailLevel(general.outputDetailLevel);
       setTimeout(publishSnapshot, 0);
     });
     const onSettings = (event: Event) => {
-      const detail = (event as CustomEvent<{
-        planModeEnabled?: boolean;
-        permissionMode?: AgentPermissionMode;
-      }>).detail;
+      const detail = (event as CustomEvent<AgentSettingsUpdatedDetail>).detail;
       const hasPlanUpdate = typeof detail?.planModeEnabled === "boolean";
       const hasPermissionUpdate = detail?.permissionMode !== undefined;
       if (!hasPlanUpdate && !hasPermissionUpdate) return;
+      overriddenByEvent = true;
       const nextPlanModeEnabled = hasPlanUpdate ? detail.planModeEnabled! : planModeRef.current;
       const nextPermissionMode = hasPermissionUpdate
         ? normalizeAgentPermissionMode(detail.permissionMode)
@@ -693,15 +711,46 @@ export function useRemoteBridge({
           publish({
             type: "session.config",
             sessionId: session.id,
-            config: buildSessionConfig(session.id, nextPlanModeEnabled, nextPermissionMode),
+            config: buildSessionConfig(
+              session.id,
+              nextPlanModeEnabled,
+              nextPermissionMode,
+              outputDetailLevelRef.current,
+            ),
           });
         }
       }
     };
-    window.addEventListener("agent-settings-updated", onSettings);
+    // 输出详细等级只在桌面端「通用设置」里改，改完需要立刻推给移动端，
+    // 否则移动端要等下一次会话配置更新才生效。
+    const onGeneralSettings = (event: Event) => {
+      const detail = (event as CustomEvent<GeneralSettingsUpdatedDetail>).detail;
+      if (detail?.outputDetailLevel === undefined) return;
+      overriddenByEvent = true;
+      const nextLevel = normalizeOutputDetailLevel(detail.outputDetailLevel);
+      if (nextLevel === outputDetailLevelRef.current) return;
+      outputDetailLevelRef.current = nextLevel;
+      for (const project of useProjectStore.getState().projects) {
+        for (const session of project.sessions) {
+          publish({
+            type: "session.config",
+            sessionId: session.id,
+            config: buildSessionConfig(
+              session.id,
+              planModeRef.current,
+              permissionModeRef.current,
+              nextLevel,
+            ),
+          });
+        }
+      }
+    };
+    window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, onSettings);
+    window.addEventListener(GENERAL_SETTINGS_UPDATED_EVENT, onGeneralSettings);
     return () => {
       cancelled = true;
-      window.removeEventListener("agent-settings-updated", onSettings);
+      window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, onSettings);
+      window.removeEventListener(GENERAL_SETTINGS_UPDATED_EVENT, onGeneralSettings);
     };
   }, [publish, publishSnapshot]);
 
@@ -713,7 +762,7 @@ export function useRemoteBridge({
       publish({
         type: "session.config",
         sessionId,
-        config: buildSessionConfig(sessionId, planModeRef.current, permissionModeRef.current),
+        config: buildSessionConfig(sessionId, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current),
       });
     };
     window.addEventListener(SESSION_CONFIG_UPDATED_EVENT, onSessionConfigUpdated);
@@ -735,7 +784,7 @@ export function useRemoteBridge({
           );
       previousProjects = state.projects;
       previousStatuses = state.agentStatuses;
-      publish({ type: "catalog", catalog: buildCatalog(state.projects, planModeRef.current, permissionModeRef.current), agents: remoteAgentsRef.current });
+      publish({ type: "catalog", catalog: buildCatalog(state.projects, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current), agents: remoteAgentsRef.current });
       for (const update of settlementUpdates) {
         const timer = messageTimersRef.current.get(update.sessionId);
         if (timer) clearTimeout(timer);
@@ -797,7 +846,7 @@ export function useRemoteBridge({
           scheduleMessagePublish(sessionId, intent);
         }
         if (catalogTitleChanged) {
-          publish({ type: "catalog", catalog: buildCatalog(projects, planModeRef.current, permissionModeRef.current), agents: remoteAgentsRef.current });
+          publish({ type: "catalog", catalog: buildCatalog(projects, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current), agents: remoteAgentsRef.current });
         }
         previousMessages = state.sessionMessages;
       }
@@ -822,7 +871,7 @@ export function useRemoteBridge({
           publish({
             type: "session.config",
             sessionId: state.activeSessionId,
-            config: buildSessionConfig(state.activeSessionId, planModeRef.current, permissionModeRef.current),
+            config: buildSessionConfig(state.activeSessionId, planModeRef.current, permissionModeRef.current, outputDetailLevelRef.current),
           });
         }
       }

@@ -256,3 +256,33 @@ describe("getSessionPreviewLabel", () => {
     })).toBe("[图片]");
   });
 });
+
+describe("getSessionPreviewLabel maxLabels", () => {
+  it("会话标题只取第一个附件名", () => {
+    expect(getSessionPreviewLabel({
+      content: "",
+      images: [
+        { id: "1", src: "data:,", name: "a.png" },
+        { id: "2", src: "data:,", name: "b.png" },
+      ],
+    }, { maxLabels: 1 })).toBe("[a.png]");
+
+    expect(getSessionPreviewLabel({
+      content: "",
+      composerDocument: {
+        version: 1,
+        nodes: [
+          { id: "i", type: "image", name: "shot.png", src: "data:,", mimeType: "image/png" },
+          { id: "f", type: "path", name: "a.ts", path: "C:/p/a.ts", kind: "file" },
+        ],
+      },
+    }, { maxLabels: 1 })).toBe("[shot.png]");
+  });
+
+  it("有文字时不受 maxLabels 影响", () => {
+    expect(getSessionPreviewLabel({
+      content: "看看这个报错",
+      images: [{ id: "1", src: "data:,", name: "a.png" }],
+    }, { maxLabels: 1 })).toBe("看看这个报错");
+  });
+});

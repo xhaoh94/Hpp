@@ -30,21 +30,29 @@ import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } 
 import { relativeRemotePath, resolveProjectFilePath } from "@/lib/project-file-path";
 import { FileContextMenu, type FileContextMenuState } from "@/components/shared/FileContextMenu";
 import {
-  formatProcessDuration,
-  getProcessGroupState,
+  collapseOperationProcessEntries,
+  formatProcessDuration,  getProcessGroupState,
   getStreamIdleNoticeDuration,
   getSubagentProgressLabel,
   groupProcessEntries,
   getVisibleProcessEntries,
+  getConciseProcessEntries,
   getUserGuidanceText,
   isAssistantNarrationProcessEntry,
   isProcessInterrupted,
   isProcessViewRunning,
   isUserGuidanceProcessEntry,
+  mergeThinkingEntries,
   normalizeProcessForView,
+  OPERATION_SUMMARY_TOOL_KIND,
   splitCommandDetail,
   type ProcessTerminalViewState,
 } from "@shared/process-view";
+import {
+  DEFAULT_OUTPUT_DETAIL_LEVEL,
+  shouldListChangedFiles,
+  type OutputDetailLevel,
+} from "@shared/output-detail";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
 
@@ -480,6 +488,7 @@ function ProcessEntryRow({
   now,
   running = true,
   expandThinkingWhileRunning = false,
+  outputDetailLevel = DEFAULT_OUTPUT_DETAIL_LEVEL,
   onToggleEntry,
   onOpenFile,
   onOpenImage,
@@ -487,12 +496,15 @@ function ProcessEntryRow({
   onThinkingRowRef,
   receivedMessageDocument,
   projectPath,
+  operationSummaryExpanded = false,
+  onToggleOperationSummary,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
   now: number;
   running?: boolean;
   expandThinkingWhileRunning?: boolean;
+  outputDetailLevel?: OutputDetailLevel;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
@@ -500,6 +512,8 @@ function ProcessEntryRow({
   onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
   projectPath?: string;
+  operationSummaryExpanded?: boolean;
+  onToggleOperationSummary?: () => void;
 }) {
   const isReceivedMessage = entry.toolKind === "message_received" || entry.title.startsWith("收到消息:");
   const showReceivedMessage = isReceivedMessage && !!receivedMessageDocument;
@@ -523,6 +537,84 @@ function ProcessEntryRow({
 
   // Thinking 正文不再截断显示：展开时完整渲染（设置“处理中是否展开”
   // 只控制处理过程中的默认展开状态，见 thinkingExpanded）。
+
+  // 「标准」档把命令 / 查看文件 / 修改文件合并成的一条摘要：
+  // 标题行常驻，点击展开后在下面按「已运行 / 已修改 / 已查看」列明细，
+  // 文件名与详细档一样是可点击的蓝色链接。
+  if (entry.toolKind === OPERATION_SUMMARY_TOOL_KIND) {
+    const summary = entry.operationSummary;
+    const showDetails = operationSummaryExpanded && !!summary;
+    const renderFileLink = (file: string) => {
+      const displayPath = relativeRemotePath(file, projectPath || "");
+      return (
+        <button
+          key={file}
+          type="button"
+          className="chat-process-file-name openable"
+          title={displayPath}
+          onClick={() => onOpenFile(file, { preview: true })}
+        >
+          {displayPath}
+        </button>
+      );
+    };
+    return (
+      <div className="chat-process-operation-summary-block">
+        <button
+          type="button"
+          className={`chat-process-operation-summary${entry.state === "running" ? " running" : ""}`}
+          onClick={onToggleOperationSummary}
+          aria-expanded={showDetails}
+          disabled={!onToggleOperationSummary}
+          title={showDetails ? "收起操作详情" : "展开操作详情"}
+        >
+          {/* 中性图标：三条横线 = 一批操作的汇总，与条目标题同一行对齐。 */}
+          <span className="chat-process-entry-icon" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" />
+            </svg>
+          </span>
+          <span>{entry.title}</span>
+          {onToggleOperationSummary && (
+            <svg
+              className={`chat-process-operation-summary-chevron${showDetails ? " expanded" : ""}`}
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              aria-hidden="true"
+            >
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          )}
+        </button>
+        {showDetails && summary && (
+          <div className="chat-process-operation-details">
+            {summary.commandCount > 0 && (
+              <div className="chat-process-operation-detail-line">
+                已运行 {summary.commandCount} 条命令
+              </div>
+            )}
+            {/* 每个文件占一行：路径长时不会几个文件挤在同一行。 */}
+            {summary.changedFiles.map((file) => (
+              <div className="chat-process-operation-detail-line" key={`changed-${file}`}>
+                <span>已修改</span>
+                {renderFileLink(file)}
+              </div>
+            ))}
+            {summary.viewedFiles.map((file) => (
+              <div className="chat-process-operation-detail-line" key={`viewed-${file}`}>
+                <span>已查看</span>
+                {renderFileLink(file)}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (entry.type === "subagent") {
     return (
@@ -685,7 +777,9 @@ function ProcessEntryRow({
             )}
           </button>
         )}
-        {files.length > 0 && <ProcessEntryFiles files={files} onOpenFile={onOpenFile} projectPath={projectPath} />}
+        {files.length > 0 && shouldListChangedFiles(outputDetailLevel) && (
+          <ProcessEntryFiles files={files} onOpenFile={onOpenFile} projectPath={projectPath} />
+        )}
         {commandVisible && (
           <CommandDetail entry={entry} onPreserveScroll={onPreserveScroll} />
         )}
@@ -708,6 +802,7 @@ function ProcessEntries({
   now,
   running = true,
   expandThinkingWhileRunning = false,
+  outputDetailLevel = DEFAULT_OUTPUT_DETAIL_LEVEL,
   onToggleEntry,
   onOpenFile,
   onOpenImage,
@@ -715,12 +810,15 @@ function ProcessEntries({
   onThinkingRowRef,
   receivedMessageDocument,
   projectPath,
+  operationSummaryExpanded = false,
+  onToggleOperationSummary,
 }: {
   entries: AgentProcessEntry[];
   messageId: string;
   now: number;
   running?: boolean;
   expandThinkingWhileRunning?: boolean;
+  outputDetailLevel?: OutputDetailLevel;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
   onOpenImage: (src: string) => void;
@@ -728,6 +826,9 @@ function ProcessEntries({
   onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
   projectPath?: string;
+  /** 「标准」档的合并摘要当前是否展开（展开时列出原始操作条目）。 */
+  operationSummaryExpanded?: boolean;
+  onToggleOperationSummary?: () => void;
 }) {
   return <>{groupProcessEntries(entries).map((group) => group.kind === "commands" ? (
     <CommandGroup
@@ -744,6 +845,7 @@ function ProcessEntries({
         now={now}
         running={running}
         expandThinkingWhileRunning={expandThinkingWhileRunning}
+        outputDetailLevel={outputDetailLevel}
         onToggleEntry={onToggleEntry}
         onOpenFile={onOpenFile}
         onOpenImage={onOpenImage}
@@ -751,6 +853,8 @@ function ProcessEntries({
         onThinkingRowRef={onThinkingRowRef}
         receivedMessageDocument={receivedMessageDocument}
         projectPath={projectPath}
+        operationSummaryExpanded={operationSummaryExpanded}
+        onToggleOperationSummary={onToggleOperationSummary}
       />
     ))
   ) : (
@@ -761,6 +865,7 @@ function ProcessEntries({
       now={now}
       running={running}
       expandThinkingWhileRunning={expandThinkingWhileRunning}
+      outputDetailLevel={outputDetailLevel}
       onToggleEntry={onToggleEntry}
       onOpenFile={onOpenFile}
       onOpenImage={onOpenImage}
@@ -768,6 +873,8 @@ function ProcessEntries({
       onThinkingRowRef={onThinkingRowRef}
       receivedMessageDocument={receivedMessageDocument}
       projectPath={projectPath}
+      operationSummaryExpanded={operationSummaryExpanded}
+      onToggleOperationSummary={onToggleOperationSummary}
     />
   ))}</>;
 }
@@ -1033,6 +1140,7 @@ export function ProcessBlock({
   terminalState = "completed",
   fallbackEndedAt,
   expandThinkingWhileRunning = false,
+  outputDetailLevel = DEFAULT_OUTPUT_DETAIL_LEVEL,
   onToggle,
   onToggleEntry,
   onOpenFile,
@@ -1050,6 +1158,8 @@ export function ProcessBlock({
   terminalState?: ProcessTerminalViewState;
   fallbackEndedAt?: number;
   expandThinkingWhileRunning?: boolean;
+  /** 输出内容详细等级：详细=全部，标准=变更文件只显示数量，简洁=只保留思考与正文。 */
+  outputDetailLevel?: OutputDetailLevel;
   onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
@@ -1081,18 +1191,43 @@ export function ProcessBlock({
     () => getVisibleProcessEntries(viewProcess.entries),
     [viewProcess.entries]
   );
-  const mergeProcessEntriesRef = useRef(createProcessEntryMerger());
-  const mergedEntries = useMemo(
-    () => expanded ? mergeProcessEntriesRef.current(visibleEntries) : [],
-    [expanded, visibleEntries]
+  // 「标准」档合并摘要的展开状态：默认收起，点开就列出原始的命令/文件条目。
+  const [operationSummaryExpanded, setOperationSummaryExpanded] = useState(false);
+  const toggleOperationSummary = useCallback(() => {
+    setOperationSummaryExpanded((value) => !value);
+  }, []);
+  // 切换等级或换消息后回到默认（收起）。
+  useEffect(() => {
+    setOperationSummaryExpanded(false);
+  }, [outputDetailLevel]);
+
+  // 「简洁」只是不展示操作类条目（命令 / 查看文件 / 修改文件），其余照常；
+  // 「标准」把这三类合并成一条摘要。
+  const renderedEntries = useMemo(
+    () => {
+      if (outputDetailLevel === "concise") return getConciseProcessEntries(visibleEntries);
+      // 「标准」始终只有一条摘要；展开与否由渲染层决定（明细在摘要条目里）。
+      if (outputDetailLevel === "standard") return collapseOperationProcessEntries(visibleEntries);
+      return visibleEntries;
+    },
+    [outputDetailLevel, visibleEntries]
   );
+  // 有条目但全被等级过滤掉时，不能当成“还没事件”去显示「等待 agent 事件…」。
+  const hasEntriesHiddenByLevel = viewProcess.entries.length > 0 && renderedEntries.length === 0;
+  const mergeProcessEntriesRef = useRef(createProcessEntryMerger());
+  const mergedEntries = useMemo(() => {
+    if (!expanded) return [];
+    const entries = mergeProcessEntriesRef.current(renderedEntries);
+    // 所有等级都把连续思考合并成一条；中间夹着其他条目（正文、查看文件等）时自然断开。
+    return mergeThinkingEntries(entries);
+  }, [expanded, renderedEntries]);
   const visibleCommentary = useMemo(
     () => commentary.filter((item) => item.content.trim().length > 0),
     [commentary]
   );
   const timelineItems = useMemo(() => {
     const items: ProcessTimelineItem[] = [
-      ...visibleEntries.map((entry, index) => ({
+      ...renderedEntries.map((entry, index) => ({
       kind: "entry" as const,
       id: entry.id,
       timestamp: entry.timestamp,
@@ -1103,7 +1238,7 @@ export function ProcessBlock({
       kind: "commentary" as const,
       id: item.id,
       timestamp: item.timestamp,
-      order: visibleEntries.length + index,
+      order: renderedEntries.length + index,
       commentary: item,
       })),
     ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order);
@@ -1125,8 +1260,24 @@ export function ProcessBlock({
         merged.push(item);
       }
     }
-    return merged;
-  }, [visibleCommentary, visibleEntries]);
+    // 所有等级都把连续思考合并成一条；正文与其他条目（如查看文件）在时间线里
+    // 自然成为分界点，不会跨过它们合并。
+    return merged.reduce<ProcessTimelineItem[]>((result, item) => {
+      const previous = result[result.length - 1];
+      if (
+        item.kind === "entry" &&
+        item.entry.type === "thinking" &&
+        previous?.kind === "entry" &&
+        previous.entry.type === "thinking"
+      ) {
+        const [entry] = mergeThinkingEntries([previous.entry, item.entry]);
+        result[result.length - 1] = { ...previous, entry };
+        return result;
+      }
+      result.push(item);
+      return result;
+    }, []);
+  }, [renderedEntries, visibleCommentary]);
   const hasCommentaryTimeline = visibleCommentary.length > 0;
 
   // --- 吸顶定位条：复用聊天滚动容器的 scroll 事件，避免 IntersectionObserver
@@ -1355,9 +1506,9 @@ export function ProcessBlock({
             <path d="M9 18l6-6-6-6" />
           </svg>
         </button>
-        {expanded && !hasCommentaryTimeline && (visibleEntries.length > 0 || processRunning) && (
+        {expanded && !hasCommentaryTimeline && (renderedEntries.length > 0 || (processRunning && !hasEntriesHiddenByLevel)) && (
           <div className="chat-process-content">
-            {visibleEntries.length === 0 ? (
+            {renderedEntries.length === 0 ? (
               <div className="chat-process-empty">{uiText.process.emptyEvents}</div>
             ) : (
               <ProcessEntries
@@ -1366,6 +1517,7 @@ export function ProcessBlock({
                 now={nowTick}
                 running={running}
                 expandThinkingWhileRunning={expandThinkingWhileRunning}
+                outputDetailLevel={outputDetailLevel}
                 onToggleEntry={onToggleEntry}
                 onOpenFile={onOpenFile}
                 onOpenImage={onOpenImage}
@@ -1373,6 +1525,8 @@ export function ProcessBlock({
                 onThinkingRowRef={registerThinkingRow}
                 receivedMessageDocument={receivedMessageDocument}
                 projectPath={projectPath}
+                operationSummaryExpanded={operationSummaryExpanded}
+                onToggleOperationSummary={toggleOperationSummary}
               />
             )}
           </div>
@@ -1398,12 +1552,16 @@ export function ProcessBlock({
               now={nowTick}
               running={running}
               expandThinkingWhileRunning={expandThinkingWhileRunning}
+              outputDetailLevel={outputDetailLevel}
               onToggleEntry={onToggleEntry}
               onOpenFile={onOpenFile}
               onOpenImage={onOpenImage}
               onPreserveScroll={onPreserveScroll}
               onThinkingRowRef={registerThinkingRow}
               receivedMessageDocument={receivedMessageDocument}
+              projectPath={projectPath}
+              operationSummaryExpanded={operationSummaryExpanded}
+              onToggleOperationSummary={toggleOperationSummary}
             />
           ) : null)}
         </div>

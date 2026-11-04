@@ -223,16 +223,26 @@ import {
   hasNativeMultiStepProcessPlan,
   getUserGuidanceText,
   getVisibleProcessEntries,
+  getConciseProcessEntries,
+  collapseOperationProcessEntries,
+  OPERATION_SUMMARY_TOOL_KIND,
   groupProcessEntries,
   isAssistantNarrationProcessEntry,
   isCommandProcessEntry,
   isFileOperationProcessEntry,
   isProcessViewRunning,
   isUserGuidanceProcessEntry,
+  mergeThinkingEntries,
   normalizeProcessForView,
   splitCommandDetail,
   type ProcessTerminalViewState,
 } from "@shared/process-view";
+import {
+  DEFAULT_OUTPUT_DETAIL_LEVEL,
+  normalizeOutputDetailLevel,
+  shouldListChangedFiles,
+  type OutputDetailLevel,
+} from "@shared/output-detail";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import { extractUserMessageAttachments } from "@shared/user-message-attachments";
@@ -918,10 +928,65 @@ const isAssistantBodyProcessEntry = (entry: RemoteProcessEntry) => (
 const ProcessEntryRow = memo(function ProcessEntryRow({
   entry,
   receivedMessageDocument,
+  operationSummaryExpanded = false,
+  onToggleOperationSummary,
 }: {
   entry: RemoteProcessEntry;
   receivedMessageDocument?: ComposerDocument;
+  operationSummaryExpanded?: boolean;
+  onToggleOperationSummary?: () => void;
 }) {
+  // 「标准」档把命令 / 查看文件 / 修改文件合并成的一条摘要：
+  // 标题行常驻，点一下在下面按「已运行 / 已修改 / 已查看」列明细。
+  if (entry.toolKind === OPERATION_SUMMARY_TOOL_KIND) {
+    const summary = entry.operationSummary;
+    const showDetails = operationSummaryExpanded && !!summary;
+    return (
+      <div className={`process-entry process-entry-static process-operation-summary${entry.state === "running" ? " running" : ""}`}>
+        <div
+          className="process-entry-summary"
+          role={onToggleOperationSummary ? "button" : undefined}
+          tabIndex={onToggleOperationSummary ? 0 : undefined}
+          aria-expanded={onToggleOperationSummary ? showDetails : undefined}
+          onClick={onToggleOperationSummary}
+          onKeyDown={onToggleOperationSummary ? (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            onToggleOperationSummary();
+          } : undefined}
+        >
+          <span className={`entry-state ${entry.state || "completed"}`} />
+          <span className="process-entry-title" title={entry.title}>{entry.title}</span>
+          {onToggleOperationSummary && (
+            <ChevronDown
+              className={`expand-indicator${showDetails ? " expanded" : ""}`}
+              size={13}
+            />
+          )}
+        </div>
+        {showDetails && summary && (
+          <div className="process-operation-details">
+            {summary.commandCount > 0 && (
+              <div className="process-operation-detail-line">已运行 {summary.commandCount} 条命令</div>
+            )}
+            {/* 每个文件占一行。 */}
+            {summary.changedFiles.map((file) => (
+              <div className="process-operation-detail-line" key={`changed-${file}`}>
+                <span>已修改</span>
+                <span className="process-operation-file">{file}</span>
+              </div>
+            ))}
+            {summary.viewedFiles.map((file) => (
+              <div className="process-operation-detail-line" key={`viewed-${file}`}>
+                <span>已查看</span>
+                <span className="process-operation-file">{file}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
   if (entry.type === "subagent" && entry.subagents?.length) {
     return <SubagentProcessEntry entry={entry} />;
   }
@@ -1055,7 +1120,7 @@ function MessageCommentary({
   );
 }
 
-function FileOperationGroup({ entries }: { entries: RemoteProcessEntry[] }) {
+function FileOperationGroup({ entries, showFiles = true }: { entries: RemoteProcessEntry[]; showFiles?: boolean }) {
   const files = new Map<string, Record<string, unknown>>();
   for (const entry of entries) {
     for (const file of entry.files || []) {
@@ -1084,7 +1149,8 @@ function FileOperationGroup({ entries }: { entries: RemoteProcessEntry[] }) {
         id: `files-${entries[0].id}`,
         title: warningTitle || `${action} ${mergedFiles.length} ${unit}`,
         state,
-        files: mergedFiles,
+        // 标准/简洁等级只保留数量，不把具体文件路径交给渲染层。
+        files: showFiles ? mergedFiles : [],
         detail: undefined,
       }}
     />
@@ -1326,7 +1392,13 @@ const getProcessStepStatusText = (status: string) => {
   }
 };
 
-function MobileTodoSummaryPill({ process }: { process: RemoteProcess }) {
+function MobileTodoSummaryPill({
+  process,
+  outputDetailLevel,
+}: {
+  process: RemoteProcess;
+  outputDetailLevel: OutputDetailLevel;
+}) {
   const steps = process.planSteps || [];
   if (!hasNativeMultiStepProcessPlan(process)) return null;
   const currentStep = getCurrentProcessStep(steps);
@@ -1368,11 +1440,13 @@ function MessageProcess({
   receivedUserMessage,
   running,
   terminalState,
+  outputDetailLevel,
 }: {
   message: RemoteChatMessage;
   receivedUserMessage?: RemoteChatMessage;
   running: boolean;
   terminalState: ProcessTerminalViewState;
+  outputDetailLevel: OutputDetailLevel;
 }) {
   const receivedMessageDocument = hydrateRemoteComposerDocument(
     receivedUserMessage?.composerDocument,
@@ -1397,8 +1471,29 @@ function MessageProcess({
     }
   }, [message.isStreaming, processStartedAt, running]);
   const visibleEntries = useMemo(() => getVisibleProcessEntries(process?.entries || []), [process?.entries]);
+  // 输出详细等级与桌面端保持一致：「简洁」只保留思考与正文（以及引导、问卷、
+  // 错误这些必须可见的条目）。
+  // 「标准」档合并摘要的展开状态：默认收起，点开就列出原始的命令/文件条目。
+  const [operationSummaryExpanded, setOperationSummaryExpanded] = useState(false);
+  const toggleOperationSummary = useCallback(() => {
+    setOperationSummaryExpanded((value) => !value);
+  }, []);
+  useEffect(() => {
+    setOperationSummaryExpanded(false);
+  }, [outputDetailLevel]);
+  const renderedEntries = useMemo(() => {
+    // 简洁：只隐藏操作类条目（命令 / 查看文件 / 修改文件），其余照常；
+    // 标准：这三类合并成一条摘要（展开时保留原始条目）。
+    if (outputDetailLevel === "concise") return getConciseProcessEntries(visibleEntries);
+    if (outputDetailLevel === "standard") return collapseOperationProcessEntries(visibleEntries);
+    return visibleEntries;
+  }, [outputDetailLevel, visibleEntries]);
+  // 无正文时间线时的主体列表：连续思考合并成一条（与桌面端 ProcessBlock 一致）。
+  // 有正文时不能提前合并：正文（commentary）是时间线里的分界点，
+  // 先合并会把正文前后的思考拼到一起。
+  const mergedEntries = useMemo(() => mergeThinkingEntries(renderedEntries), [renderedEntries]);
   const timelineItems = useMemo(() => [
-    ...visibleEntries.map((entry, index) => ({
+    ...renderedEntries.map((entry, index) => ({
       kind: "entry" as const,
       id: entry.id,
       timestamp: entry.timestamp,
@@ -1409,10 +1504,29 @@ function MessageProcess({
       kind: "commentary" as const,
       id: item.id,
       timestamp: item.timestamp,
-      order: visibleEntries.length + index,
+      order: renderedEntries.length + index,
       commentary: item,
     })),
-  ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, visibleEntries]);
+  ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, renderedEntries]);  // 「简洁」下连续的思考合并成一条；中间插入的正文自然成为分界，保持断开。
+  // 所有等级都把连续思考合并成一条；正文与其他条目（如查看文件）在时间线里
+  // 自然成为分界点。
+  const displayTimelineItems = useMemo(() => {
+    return timelineItems.reduce<typeof timelineItems>((result, item) => {
+      const previous = result[result.length - 1];
+      if (
+        item.kind === "entry" &&
+        item.entry.type === "thinking" &&
+        previous?.kind === "entry" &&
+        previous.entry.type === "thinking"
+      ) {
+        const [entry] = mergeThinkingEntries([previous.entry, item.entry]);
+        result[result.length - 1] = { ...previous, entry };
+        return result;
+      }
+      result.push(item);
+      return result;
+    }, []);
+  }, [timelineItems]);
   // 叙事时间线中，相邻的同类型条目（已读取/已编辑/已运行等）合并展示，
   // 中间穿插的正文/说明会打断合并，保持原有时间顺序与可读性。
   const groupedTimelineItems = useMemo(() => {
@@ -1434,7 +1548,7 @@ function MessageProcess({
       result.push({ kind: "files", id: `files-${files[0].id}`, entries: files });
       files = [];
     };
-    for (const item of timelineItems) {
+    for (const item of displayTimelineItems) {
       if (item.kind === "commentary") {
         flushCommands();
         flushFiles();
@@ -1458,13 +1572,13 @@ function MessageProcess({
     flushCommands();
     flushFiles();
     return result;
-  }, [timelineItems]);
+  }, [displayTimelineItems]);
   if (!process) return commentary.length > 0 ? <MessageCommentary items={commentary} running={running} /> : null;
   const elapsed = formatProcessDuration((process.endedAt ?? nowTick) - process.startedAt);
   const currentStep = getCurrentProcessStep(process.planSteps);
   const hasPlan = !!process.planSteps?.length;
-  const hasNarrativeTimeline = commentary.length > 0 || visibleEntries.some(isAssistantBodyProcessEntry);
-  if (!hasPlan && visibleEntries.length === 0 && !process.changeSummary && !hasNarrativeTimeline) return null;
+  const hasNarrativeTimeline = commentary.length > 0 || renderedEntries.some(isAssistantBodyProcessEntry);
+  if (!hasPlan && renderedEntries.length === 0 && !process?.changeSummary && !hasNarrativeTimeline) return null;
   return (
     <>
       <details className="process-block" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
@@ -1474,13 +1588,16 @@ function MessageProcess({
             <span>{currentStep?.title || `处理耗时 ${elapsed}`}</span>
           </span>
           <span className="process-summary-meta">
-            {process.changeSummary && process.changeSummary.filesChanged > 0 && (
-              <small className="process-summary-changes">
-                {process.changeSummary.filesChanged} 个文件已更改
-                {process.changeSummary.additions > 0 && <span className="process-summary-add"> +{process.changeSummary.additions}</span>}
-                {process.changeSummary.deletions > 0 && <span className="process-summary-del"> -{process.changeSummary.deletions}</span>}
-              </small>
-            )}
+            {/* 详细档才列具体变更数（含增删行）：标准档已有合并摘要，简洁档不露操作细节。 */}
+            {shouldListChangedFiles(outputDetailLevel)
+              && process.changeSummary
+              && process.changeSummary.filesChanged > 0 && (
+                <small className="process-summary-changes">
+                  {process.changeSummary.filesChanged} 个文件已更改
+                  {process.changeSummary.additions > 0 && <span className="process-summary-add"> +{process.changeSummary.additions}</span>}
+                  {process.changeSummary.deletions > 0 && <span className="process-summary-del"> -{process.changeSummary.deletions}</span>}
+                </small>
+              )}
             <ChevronDown className="expand-indicator" size={14} />
           </span>
         </summary>
@@ -1491,13 +1608,13 @@ function MessageProcess({
             ))}
           </div>
         )}
-        {!hasNarrativeTimeline && visibleEntries.length > 0 && (
+        {!hasNarrativeTimeline && mergedEntries.length > 0 && (
           <div className="process-entries">
-            {groupProcessEntries(visibleEntries, { groupFileOperations: true }).map((group) => group.kind === "commands"
+            {groupProcessEntries(mergedEntries, { groupFileOperations: true }).map((group) => group.kind === "commands"
               ? <CommandGroup key={`commands-${group.entries[0].id}`} entries={group.entries} />
               : group.kind === "files"
-                ? <FileOperationGroup key={`files-${group.entries[0].id}`} entries={group.entries} />
-                : <ProcessEntryRow key={group.entry.id} entry={group.entry} receivedMessageDocument={receivedMessageDocument} />)}
+                ? <FileOperationGroup key={`files-${group.entries[0].id}`} entries={group.entries} showFiles={shouldListChangedFiles(outputDetailLevel)} />
+                : <ProcessEntryRow key={group.entry.id} entry={group.entry} receivedMessageDocument={receivedMessageDocument} operationSummaryExpanded={operationSummaryExpanded} onToggleOperationSummary={toggleOperationSummary} />)}
           </div>
         )}
       </details>
@@ -1512,9 +1629,9 @@ function MessageProcess({
           ) : item.kind === "commands" ? (
             <CommandGroup key={item.id} entries={item.entries} />
           ) : item.kind === "files" ? (
-            <FileOperationGroup key={item.id} entries={item.entries} />
+            <FileOperationGroup key={item.id} entries={item.entries} showFiles={shouldListChangedFiles(outputDetailLevel)} />
           ) : (
-            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} />
+            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} operationSummaryExpanded={operationSummaryExpanded} onToggleOperationSummary={toggleOperationSummary} />
           ))}
         </div>
       )}
@@ -1580,6 +1697,7 @@ const MessageItem = memo(function MessageItem({
   receivedUserMessage,
   turnRunning,
   processTerminalState,
+  outputDetailLevel,
   actionsDisabled,
   forking,
   onEdit,
@@ -1591,6 +1709,7 @@ const MessageItem = memo(function MessageItem({
   receivedUserMessage?: RemoteChatMessage;
   turnRunning: boolean;
   processTerminalState: ProcessTerminalViewState;
+  outputDetailLevel: OutputDetailLevel;
   actionsDisabled: boolean;
   forking: boolean;
   onEdit: (content: string) => void;
@@ -1716,7 +1835,7 @@ const MessageItem = memo(function MessageItem({
           ))}
         </div>
       )}
-      <MessageProcess message={message} receivedUserMessage={receivedUserMessage} running={turnRunning} terminalState={processTerminalState} />
+      <MessageProcess message={message} receivedUserMessage={receivedUserMessage} running={turnRunning} terminalState={processTerminalState} outputDetailLevel={outputDetailLevel} />
       {message.role !== "user" && message.action && (
         <div className={`message-action-label${messagePresentation.text ? " with-content" : ""}`}>
           <WandSparkles size={13} />
@@ -1787,6 +1906,7 @@ const MessageListView = memo(function MessageListView({
   receivedUserMessages,
   activeTurnMessageId,
   processTerminalState,
+  outputDetailLevel,
   actionsDisabled,
   forkingMessageId,
   onEdit,
@@ -1798,6 +1918,7 @@ const MessageListView = memo(function MessageListView({
   receivedUserMessages: Record<string, RemoteChatMessage | undefined>;
   activeTurnMessageId: string | null | undefined;
   processTerminalState: ProcessTerminalViewState;
+  outputDetailLevel: OutputDetailLevel;
   actionsDisabled: boolean;
   forkingMessageId: string | null;
   onEdit: (content: string) => void;
@@ -1814,6 +1935,7 @@ const MessageListView = memo(function MessageListView({
           receivedUserMessage={receivedUserMessages[message.id]}
           turnRunning={message.id === activeTurnMessageId}
           processTerminalState={processTerminalState}
+          outputDetailLevel={outputDetailLevel}
           actionsDisabled={actionsDisabled}
           forking={forkingMessageId === message.id}
           onEdit={onEdit}
@@ -3151,6 +3273,9 @@ export default function App() {
         previous.thinkingLevel === config.thinkingLevel &&
         previous.planModeEnabled === config.planModeEnabled &&
         previous.permissionMode === config.permissionMode &&
+        // 桌面端改「输出内容详细等级」时只会推这一项变化；
+        // 漏掉它这里就会直接把新配置当重复包丢弃。
+        previous.outputDetailLevel === config.outputDetailLevel &&
         sameAvailableModels
       ) return current;
       const next = { ...current, [sessionId]: config };
@@ -3782,6 +3907,11 @@ export default function App() {
     [agents, createAgentId],
   );
   const selectedConfig = selectedSessionId ? configs[selectedSessionId] : undefined;
+  // 输出详细等级由桌面端随会话配置下发；旧版宿主没有该字段时按「详细」处理。
+  const outputDetailLevel = useMemo(
+    () => normalizeOutputDetailLevel(selectedConfig?.outputDetailLevel ?? DEFAULT_OUTPUT_DETAIL_LEVEL),
+    [selectedConfig?.outputDetailLevel],
+  );
   const selectedMessages = useMemo(
     () => selectedSessionId ? messages[selectedSessionId] || [] : [],
     [messages, selectedSessionId],
@@ -5392,6 +5522,7 @@ export default function App() {
                   receivedUserMessages={receivedUserMessages}
                   activeTurnMessageId={activeTurnMessageId}
                   processTerminalState={processTerminalState}
+                  outputDetailLevel={outputDetailLevel}
                   actionsDisabled={commandBusy || forkingMessageId !== null}
                   forkingMessageId={forkingMessageId}
                   onEdit={editMessage}
@@ -5415,7 +5546,9 @@ export default function App() {
                     <ArrowDown size={18} />
                   </button>
                 )}
-                {activeProcessWithTodos && <MobileTodoSummaryPill process={activeProcessWithTodos} />}
+                {activeProcessWithTodos && (
+                  <MobileTodoSummaryPill process={activeProcessWithTodos} outputDetailLevel={outputDetailLevel} />
+                )}
               </div>
             )}
           </div>

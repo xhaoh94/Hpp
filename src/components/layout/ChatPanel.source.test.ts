@@ -29,4 +29,18 @@ describe("chat history never waits for the agent backend", () => {
     expect(composerSource).toContain("const sendDisabled = sessionInitializing");
     expect(styles).not.toContain(".chat-runtime-waking");
   });
+
+  it("keeps the diff panel visible in every output level", () => {
+    const source = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
+    const styles = readWorkspaceFile("src/components/layout/ChatPanel.css");
+
+    // 变更文件面板（文件列表 + 审核入口）属于“改了什么”的内容，与输出等级无关：
+    // 简洁/标准/详细都要完整显示，不能退化成一个数量文字。
+    expect(source).toContain("const showDiffBlock = hasDiffs;");
+    expect(source).not.toContain("showChangedFilesSummary");
+    expect(source).not.toContain("chat-diff-count-summary");
+    expect(styles).not.toContain(".chat-diff-count-summary");
+    // 气泡可见性回到直接用 hasDiffs（面板总是会渲染）。
+    expect(source).toContain("!processRunning && (hasContent || hasImages || hasDiffs");
+  });
 });

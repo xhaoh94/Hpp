@@ -36,6 +36,7 @@ import { useProjectStore, type AgentStatus, type Project, type ProjectSession, t
 import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
+import { AGENT_SETTINGS_UPDATED_EVENT, GENERAL_SETTINGS_UPDATED_EVENT } from "@/lib/app-events";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import { showAppAlert } from "@/lib/app-dialog";
@@ -45,7 +46,11 @@ import {
   getSessionReferenceTitle,
 } from "@/lib/session-references";
 import { PATH_ATTACHMENT_DRAG_MIME, type PathAttachmentDragData } from "@/lib/path-attachments";
-import { getLocalMarkdownCodePath, getLocalMarkdownFilePath, resolveProjectFilePath } from "@/lib/project-file-path";
+import {
+  getLocalMarkdownCodePath,
+  getLocalMarkdownFilePath,
+  resolveProjectFilePath,
+} from "@/lib/project-file-path";
 import { extractUserMessageAttachments } from "@shared/user-message-attachments";
 import {
   ensureSessionMessagesLoaded,
@@ -124,6 +129,13 @@ import {
   toContextUsagePrecision,
 } from "@shared/models";
 import { collectProcessDiffs } from "@shared/diff-summary";
+import {
+  DEFAULT_OUTPUT_DETAIL_LEVEL,
+  formatChangedFilesSummary,
+  normalizeOutputDetailLevel,
+  shouldListChangedFiles,
+  type OutputDetailLevel,
+} from "@shared/output-detail";
 import { areAssistantMessageActionsVisible, formatHistoryMessageTime, formatMessageActionTime } from "@shared/message-display";
 import {
   getActiveAssistantTurnId,
@@ -159,8 +171,6 @@ import {
 import "./ChatPanel.css";
 
 const FilePreview = LazyFilePreview;
-const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
-const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
 type MessageSessionReferencePayload = { sourceSessionId: string; sourceTitle: string };
 type MessagePayload = PreparedSessionMessage;
 
@@ -1032,6 +1042,7 @@ type ChatMessagesViewProps = {
   currentSessionStatus: AgentStatus;
   currentSessionCompacting: boolean;
   expandThinkingWhileRunning: boolean;
+  outputDetailLevel: OutputDetailLevel;
   projectPath?: string;
   scrollRef: RefObject<HTMLDivElement | null>;
   showScrollBottom: boolean;
@@ -1064,6 +1075,7 @@ type ChatMessageItemProps = {
   compactionRunning: boolean;
   processTerminalState: ProcessTerminalViewState;
   expandThinkingWhileRunning: boolean;
+  outputDetailLevel: OutputDetailLevel;
   projectPath?: string;
   onEditMessage: (message: ChatMessage) => void;
   onImageContextMenu: (event: React.MouseEvent, imageSrc: string) => void;
@@ -1091,6 +1103,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
   compactionRunning,
   processTerminalState,
   expandThinkingWhileRunning,
+  outputDetailLevel,
   projectPath,
   onEditMessage,
   onImageContextMenu,
@@ -1200,6 +1213,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const processDiffs = collectProcessDiffs(msg.process);
   const visibleDiffs = !processRunning ? [...(msg.diffs || []), ...processDiffs] : [];
   const hasDiffs = visibleDiffs.length > 0;
+  // 变更文件卡片（diff 面板）属于“改了什么”的内容，与输出等级无关：
+  // 不管是简洁/标准/详细都要完整显示，否则用户会以为没有改动。
+  const showDiffBlock = hasDiffs;
   const userMessagePresentation = msg.role === "user"
     ? extractUserMessageAttachments(msg.content)
     : { text: msg.content, attachments: [] };
@@ -1259,6 +1275,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
           terminalState={processTerminalState}
           fallbackEndedAt={fallbackProcessEndedAt}
           expandThinkingWhileRunning={expandThinkingWhileRunning}
+          outputDetailLevel={outputDetailLevel}
           onToggle={onToggleAssistantProcess}
           onToggleEntry={onToggleAssistantProcessEntry}
           onOpenFile={onOpenFile}
@@ -1434,7 +1451,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
             </div>
           )}
           {msg.role !== "user" && renderSessionReferences()}
-          {hasDiffs && (
+          {showDiffBlock && (
             <DiffBlock
               reviewId={msg.id}
               diffs={visibleDiffs}
@@ -1517,7 +1534,13 @@ const getTodoStatusText = (status: AgentProcessStep["status"]) => {
   }
 };
 
-function TodoSummaryPill({ process }: { process: AgentProcess }) {
+function TodoSummaryPill({
+  process,
+  outputDetailLevel,
+}: {
+  process: AgentProcess;
+  outputDetailLevel: OutputDetailLevel;
+}) {
   const steps = process.planSteps || [];
   if (!hasNativeTodoSteps(process)) return null;
   const currentStep = getCurrentTodoStep(steps);
@@ -1530,6 +1553,7 @@ function TodoSummaryPill({ process }: { process: AgentProcess }) {
       <span className="chat-todo-summary-text" title={currentStep?.title || "任务处理中"}>
         {currentStep?.title || "任务处理中"}
       </span>
+      {/* 底部胶圈是浮层状态提示，不属于「处理过程条目」：三个等级都显示变更统计。 */}
       {changeSummary && changeSummary.filesChanged > 0 && (
         <span className="chat-todo-summary-change">
           · {changeSummary.filesChanged} 个文件已更改
@@ -1576,6 +1600,7 @@ type ChatMessagesViewportProps = {
   activeCompactionMessageId: string | null;
   processTerminalState: ProcessTerminalViewState;
   expandThinkingWhileRunning: boolean;
+  outputDetailLevel: OutputDetailLevel;
   showWorking: boolean;
   expandedUserMessageIds: ReadonlySet<string>;
   onUserMessageExpandedChange: (messageId: string, expanded: boolean) => void;
@@ -1606,6 +1631,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
   activeCompactionMessageId,
   processTerminalState,
   expandThinkingWhileRunning,
+  outputDetailLevel,
   showWorking,
   expandedUserMessageIds,
   onUserMessageExpandedChange,
@@ -1721,6 +1747,7 @@ const VirtualMessagesViewport = memo(function ChatMessagesViewport({
                 compactionRunning={message.id === activeCompactionMessageId}
                 processTerminalState={processTerminalState}
                 expandThinkingWhileRunning={expandThinkingWhileRunning}
+                outputDetailLevel={outputDetailLevel}
                 userMessageExpanded={expandedUserMessageIds.has(message.id)}
                 onUserMessageExpandedChange={onUserMessageExpandedChange}
                 onDiffOpenChange={onDiffOpenChange}
@@ -1779,6 +1806,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
   forkingMessageId,
   onResendMessage,
   expandThinkingWhileRunning,
+  outputDetailLevel,
   onUserMsgHistoryOpenChange,
   onScrollToMessage,
   virtualizerRef,
@@ -2018,6 +2046,7 @@ const ChatMessagesView = memo(function ChatMessagesView({
               activeCompactionMessageId={activeCompactionMessageId}
               processTerminalState={processTerminalState}
               expandThinkingWhileRunning={expandThinkingWhileRunning}
+              outputDetailLevel={outputDetailLevel}
               showWorking={currentSessionRunning && messages.length > 0 && messages[messages.length - 1].role === "user"}
               expandedUserMessageIds={expandedUserMessageIds}
               onUserMessageExpandedChange={handleUserMessageExpandedChange}
@@ -2054,7 +2083,9 @@ const ChatMessagesView = memo(function ChatMessagesView({
           </svg>
         </button>
           )}
-          {activeProcessWithTodos && <TodoSummaryPill process={activeProcessWithTodos} />}
+          {activeProcessWithTodos && (
+            <TodoSummaryPill process={activeProcessWithTodos} outputDetailLevel={outputDetailLevel} />
+          )}
         </div>
       )}
     </div>
@@ -2451,6 +2482,7 @@ export function ChatPanel({
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
   const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(false);
+  const [outputDetailLevel, setOutputDetailLevel] = useState<OutputDetailLevel>(DEFAULT_OUTPUT_DETAIL_LEVEL);
   const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("auto");
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null);
   const [modelConfigAgentId, setModelConfigAgentId] = useState<string | null>(null);
@@ -2772,14 +2804,21 @@ export function ChatPanel({
       if (!cancelled) {
         setPlanModeEnabled(!!getBooleanField(general, "planModeEnabled"));
         setExpandThinkingWhileRunning(getBooleanField(general, "expandThinkingWhileRunning") === true);
+        setOutputDetailLevel(normalizeOutputDetailLevel(general.outputDetailLevel));
         setPermissionMode(normalizeAgentPermissionMode(general.permissionMode));
       }
     });
 
     const handleGeneralSettingsUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ expandThinkingWhileRunning?: boolean }>).detail;
+      const detail = (event as CustomEvent<{
+        expandThinkingWhileRunning?: boolean;
+        outputDetailLevel?: OutputDetailLevel;
+      }>).detail;
       if (typeof detail?.expandThinkingWhileRunning === "boolean") {
         setExpandThinkingWhileRunning(detail.expandThinkingWhileRunning);
+      }
+      if (detail?.outputDetailLevel !== undefined) {
+        setOutputDetailLevel(normalizeOutputDetailLevel(detail.outputDetailLevel));
       }
     };
     window.addEventListener(GENERAL_SETTINGS_UPDATED_EVENT, handleGeneralSettingsUpdated);
@@ -4011,6 +4050,7 @@ export function ChatPanel({
         currentSessionStatus={activeSessionAgentStatus || (currentSessionRunning ? "running" : "idle")}
         currentSessionCompacting={activeSessionCompacting}
         expandThinkingWhileRunning={expandThinkingWhileRunning}
+        outputDetailLevel={outputDetailLevel}
         projectPath={activeProject.path}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}

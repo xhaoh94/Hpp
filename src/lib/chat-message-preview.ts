@@ -33,6 +33,14 @@ type PreviewStyle = "inline" | "session";
 // 标题类位置最多列这么多个附件，再多就用省略号，避免页签被撑爆。
 const MAX_SESSION_LABELS = 4;
 
+type PreviewOptions = {
+  style: PreviewStyle;
+  /** 标题类位置最多列几个附件（会话标题只需要一个）。 */
+  maxLabels?: number;
+  /** 超过 maxLabels 时是否加省略号；标题位置直接截掉。 */
+  ellipsis?: boolean;
+};
+
 const getNodeFallbackLabel = (node: Exclude<ComposerNode, { type: "text" }>, style: PreviewStyle) => {
   if (style === "session") {
     if (node.type === "path") return `[${node.name}]`;
@@ -53,19 +61,25 @@ const getImagePreviewLabel = (count: number, style: PreviewStyle) => {
   return count === 1 ? "[图片]" : `[图片 × ${count}]`;
 };
 
-const getImageSessionLabels = (images: PreviewMessage["images"]) => {
-  const names = (images || []).map((image) => `[${image.name}]`).filter((label) => label !== "[]");
-  if (names.length <= MAX_SESSION_LABELS) return names.join("");
-  return `${names.slice(0, MAX_SESSION_LABELS).join("")}…`;
-};
-
-const joinSessionLabels = (labels: string[]) => {
+const joinSessionLabels = (
+  labels: string[],
+  maxLabels = MAX_SESSION_LABELS,
+  ellipsis = true,
+) => {
   const visible = labels.filter(Boolean);
-  if (visible.length <= MAX_SESSION_LABELS) return visible.join("");
-  return `${visible.slice(0, MAX_SESSION_LABELS).join("")}…`;
+  if (visible.length <= maxLabels) return visible.join("");
+  const head = visible.slice(0, maxLabels).join("");
+  return ellipsis ? `${head}…` : head;
 };
 
-function getDocumentPreview(document: ComposerDocument, style: PreviewStyle): string {
+const getImageSessionLabels = (
+  images: PreviewMessage["images"],
+  maxLabels = MAX_SESSION_LABELS,
+  ellipsis = true,
+) => joinSessionLabels((images || []).map((image) => `[${image.name}]`), maxLabels, ellipsis);
+
+function getDocumentPreview(document: ComposerDocument, options: PreviewOptions): string {
+  const { style, maxLabels, ellipsis = true } = options;
   // Compact titles should describe the user's request instead of being
   // consumed by a long attachment name that precedes the text.
   const text = compactWhitespace(document.nodes
@@ -84,7 +98,7 @@ function getDocumentPreview(document: ComposerDocument, style: PreviewStyle): st
   if (style === "session") {
     const labels = attachmentNodes.map((node) => getNodeFallbackLabel(node, style));
     // 图片节点没有可用的 name 时退回「[图片]」，至少不会空白。
-    return joinSessionLabels(labels.map((label) => (label === "[]" ? "[图片]" : label)));
+    return joinSessionLabels(labels.map((label) => (label === "[]" ? "[图片]" : label)), maxLabels, ellipsis);
   }
 
   // 聊天内：只有图片时统一写「[图片]」，不把文件名塞进正文预览。
@@ -95,11 +109,12 @@ function getDocumentPreview(document: ComposerDocument, style: PreviewStyle): st
   return compactWhitespace(attachmentNodes.map((node) => getNodeFallbackLabel(node, style)).join(" "));
 }
 
-function buildPreviewText(message: PreviewMessage, style: PreviewStyle): string {
+function buildPreviewText(message: PreviewMessage, options: PreviewOptions): string {
+  const { style, maxLabels, ellipsis = true } = options;
   const document = parseComposerDocument(message.composerDocument)
     || parseComposerDocument(message.composerDraft?.document);
   if (document) {
-    const preview = getDocumentPreview(document, style);
+    const preview = getDocumentPreview(document, options);
     if (preview) return preview;
   }
 
@@ -107,7 +122,7 @@ function buildPreviewText(message: PreviewMessage, style: PreviewStyle): string 
   // 图片附件），原样显示会让会话项变成一串 `G:\Work\...`。
   const content = compactWhitespace(stripInternalTags(message.content || "").replace(MESSAGE_WRAPPER_TAG, ""));
   const imageCount = message.images?.length ?? 0;
-  const imageLabels = style === "session" ? getImageSessionLabels(message.images) : "";
+  const imageLabels = style === "session" ? getImageSessionLabels(message.images, maxLabels, ellipsis) : "";
   if (!content) return imageLabels || getImagePreviewLabel(imageCount, style);
 
   const textWithoutAttachments = compactWhitespace(content.replace(LEGACY_ATTACHMENT_TOKEN, " "));
@@ -119,14 +134,24 @@ function buildPreviewText(message: PreviewMessage, style: PreviewStyle): string 
 
 /** 聊天正文 / 发言记录里的预览（保持既有观感）。 */
 export function getChatMessagePreviewText(message: PreviewMessage): string {
-  return buildPreviewText(message, "inline");
+  return buildPreviewText(message, { style: "inline" });
 }
 
 /**
  * 标题栏 / 页签 / 历史会话列表里的预览：只有附件时列出具体名字
- * （`[shot.png][src][a.ts]`），而不是笼统的「[图片]」或空白。
+ * （`[shot.png]`、`[src]`、`[a.ts:3-9]`），而不是笼统的「[图片]」或空白。
  * 有文字时仍然以文字为准。
+ *
+ * `maxLabels` 用于会话标题这种窄位置（只取第一个附件名）。
  */
-export function getSessionPreviewLabel(message: PreviewMessage): string {
-  return buildPreviewText(message, "session");
+export function getSessionPreviewLabel(
+  message: PreviewMessage,
+  options: { maxLabels?: number } = {},
+): string {
+  return buildPreviewText(message, {
+    style: "session",
+    maxLabels: options.maxLabels,
+    // 标题位只需一个名字，多出来的直接截掉，不用省略号占位。
+    ellipsis: options.maxLabels === undefined,
+  });
 }

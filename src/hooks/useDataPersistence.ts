@@ -556,7 +556,8 @@ const loadSessionMessageSummaries = (sessionIds: string[]) => {
     for (const [sessionId, value] of Object.entries(summaries || {})) {
       const message = parsePersistedChatMessage(value);
       if (message && isUserSpeechMessage(message)) {
-        updatePersistedSessionPreview(sessionId, getSessionPreviewLabel(message));
+        // 会话标题只取第一个附件名（`[shot.png]`），多个附件会撑爆标题位。
+        updatePersistedSessionPreview(sessionId, getSessionPreviewLabel(message, { maxLabels: 1 }));
       }
     }
   }).catch(() => undefined);
@@ -1193,7 +1194,8 @@ export function useDataPersistence() {
         if (messages === previous) continue;
         const firstUserMessage = messages.find(isUserSpeechMessage);
         if (firstUserMessage) {
-          updatePersistedSessionPreview(sessionId, getSessionPreviewLabel(firstUserMessage));
+          // 会话标题只取第一个附件名（`[shot.png]`）。
+          updatePersistedSessionPreview(sessionId, getSessionPreviewLabel(firstUserMessage, { maxLabels: 1 }));
         }
         queueSessionMessageChanges(sessionId, previous, messages);
         if (messages.some(hasOpenAssistantProcessState)) streamingSessionIds.add(sessionId);

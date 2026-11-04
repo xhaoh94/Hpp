@@ -24,6 +24,7 @@ import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
+import { AGENT_SETTINGS_UPDATED_EVENT, GENERAL_SETTINGS_UPDATED_EVENT } from "@/lib/app-events";
 import { applyAppTheme, normalizeAppTheme, type AppTheme } from "@/lib/theme";
 import {
   DEFAULT_SHORTCUTS,
@@ -43,6 +44,14 @@ import {
   normalizeFileFilters,
   type FileFilterConfig,
 } from "@shared/file-filters";
+import {
+  DEFAULT_OUTPUT_DETAIL_LEVEL,
+  normalizeOutputDetailLevel,
+  OUTPUT_DETAIL_LEVEL_DESCRIPTIONS,
+  OUTPUT_DETAIL_LEVEL_LABELS,
+  OUTPUT_DETAIL_LEVELS,
+  type OutputDetailLevel,
+} from "@shared/output-detail";
 import { getDefaultCloseToTray, resolveCloseToTraySetting } from "@shared/desktop-platform";
 
 type FilterConfig = FileFilterConfig;
@@ -54,6 +63,7 @@ interface GeneralSettings {
   closeToTray: boolean;
   theme: AppTheme;
   expandThinkingWhileRunning: boolean;
+  outputDetailLevel: OutputDetailLevel;
 }
 
 type GeneralSectionId = "appearance" | "behavior" | "editing" | "images" | "storage";
@@ -102,9 +112,6 @@ const formatDiskSize = (bytes: number) => {
   return `${value >= 100 || unitIndex === 0 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 };
 
-const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
-const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -124,6 +131,7 @@ function normalizeGeneral(value: unknown): GeneralSettings {
     ),
     theme: normalizeAppTheme(general.theme),
     expandThinkingWhileRunning: general.expandThinkingWhileRunning === true,
+    outputDetailLevel: normalizeOutputDetailLevel(general.outputDetailLevel),
   };
 }
 
@@ -169,6 +177,7 @@ export function SettingsView() {
   const [closeToTray, setCloseToTray] = useState(DEFAULT_CLOSE_TO_TRAY);
   const [theme, setTheme] = useState<AppTheme>("dark");
   const [expandThinkingWhileRunning, setExpandThinkingWhileRunning] = useState(false);
+  const [outputDetailLevel, setOutputDetailLevel] = useState<OutputDetailLevel>(DEFAULT_OUTPUT_DETAIL_LEVEL);
   const [diskUsage, setDiskUsage] = useState<DiskUsageStats | null>(null);
   const [diskUsageLoading, setDiskUsageLoading] = useState(false);
   const [diskCleanupLoading, setDiskCleanupLoading] = useState(false);
@@ -204,6 +213,7 @@ export function SettingsView() {
         setCloseToTray(general.closeToTray);
         setTheme(general.theme);
         setExpandThinkingWhileRunning(general.expandThinkingWhileRunning);
+        setOutputDetailLevel(general.outputDetailLevel);
         applyAppTheme(general.theme);
         if (originalGeneral.imageRetentionHours !== IMAGE_RETENTION_HOURS) {
           void window.electronAPI.saveData("settings", {
@@ -338,6 +348,7 @@ export function SettingsView() {
       closeToTray,
       theme,
       expandThinkingWhileRunning,
+      outputDetailLevel,
     };
     const nextSettings = {
       ...currentSettings,
@@ -350,7 +361,7 @@ export function SettingsView() {
     };
 
     return window.electronAPI.saveData("settings", nextSettings);
-  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray, theme, expandThinkingWhileRunning]);
+  }, [shortcuts, filters, tempImagePath, planModeEnabled, closeToTray, theme, expandThinkingWhileRunning, outputDetailLevel]);
 
   const saveShortcuts = (s: ShortcutConfig) => {
     setShortcuts(s);
@@ -375,6 +386,7 @@ export function SettingsView() {
       closeToTrayExplicit: true,
       theme,
       expandThinkingWhileRunning,
+      outputDetailLevel,
     });
     void window.electronAPI.setCloseToTray(enabled);
   };
@@ -390,6 +402,7 @@ export function SettingsView() {
       closeToTray,
       theme: nextTheme,
       expandThinkingWhileRunning,
+      outputDetailLevel,
     });
   };
 
@@ -402,9 +415,28 @@ export function SettingsView() {
       closeToTray,
       theme,
       expandThinkingWhileRunning: enabled,
+      outputDetailLevel,
     });
     window.dispatchEvent(new CustomEvent(GENERAL_SETTINGS_UPDATED_EVENT, {
       detail: { expandThinkingWhileRunning: enabled },
+    }));
+  };
+
+  const updateOutputDetailLevel = (nextLevel: OutputDetailLevel) => {
+    const normalized = normalizeOutputDetailLevel(nextLevel);
+    setOutputDetailLevel(normalized);
+    void saveSettings(shortcuts, filters, {
+      tempImagePath,
+      imageRetentionHours: IMAGE_RETENTION_HOURS,
+      planModeEnabled,
+      closeToTray,
+      theme,
+      expandThinkingWhileRunning,
+      outputDetailLevel: normalized,
+    });
+    // 聊天面板常驻挂载：只写盘不会触发重新渲染，必须广播事件即时生效。
+    window.dispatchEvent(new CustomEvent(GENERAL_SETTINGS_UPDATED_EVENT, {
+      detail: { outputDetailLevel: normalized },
     }));
   };
 
@@ -417,6 +449,7 @@ export function SettingsView() {
       closeToTray,
       theme,
       expandThinkingWhileRunning,
+      outputDetailLevel,
     });
   };
 
@@ -832,6 +865,31 @@ export function SettingsView() {
                         aria-label="处理中自动展开思考"
                       />
                     </label>
+                    <div className="settings-general-row">
+                      <span className="settings-general-row-main">
+                        <strong>输出内容</strong>
+                        <span>{OUTPUT_DETAIL_LEVEL_DESCRIPTIONS[outputDetailLevel]}</span>
+                      </span>
+                      <div
+                        className="settings-segmented"
+                        role="radiogroup"
+                        aria-label="输出内容详细等级"
+                      >
+                        {OUTPUT_DETAIL_LEVELS.map((level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            role="radio"
+                            aria-checked={outputDetailLevel === level}
+                            className={`settings-segmented-option ${outputDetailLevel === level ? "selected" : ""}`}
+                            onClick={() => updateOutputDetailLevel(level)}
+                            title={OUTPUT_DETAIL_LEVEL_DESCRIPTIONS[level]}
+                          >
+                            {OUTPUT_DETAIL_LEVEL_LABELS[level]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
               </section>

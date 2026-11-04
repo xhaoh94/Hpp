@@ -1406,6 +1406,43 @@
   outline-offset: 2px;
 }
 
+/* 「应用行为」里的三选一（输出内容详细等级）：紧凑分段按钮，与其他行同高。 */
+.settings-segmented {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+}
+
+.settings-segmented-option {
+  padding: 3px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.settings-segmented-option:hover {
+  color: var(--text-primary);
+}
+
+.settings-segmented-option.selected {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.settings-segmented-option:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-color) 42%, transparent);
+  outline-offset: 1px;
+}
+
 .settings-general-links {
   border-top: 1px solid var(--border-color);
   border-bottom: 1px solid var(--border-color);

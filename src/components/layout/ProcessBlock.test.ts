@@ -889,3 +889,346 @@ describe("ProcessBlock", () => {
     expect(emptyMarkup).not.toContain("chat-process-empty");
   });
 });
+
+describe("output detail level rendering", () => {
+  const createLevelProcess = (): AgentProcess => ({
+    startedAt: 1,
+    endedAt: 2,
+    expanded: true,
+    entries: [
+      {
+        id: "thinking-1",
+        type: "thinking",
+        title: "正在思考: 分析改动",
+        detail: "需要先确认设置面板的保存路径。",
+        expanded: true,
+        state: "completed",
+        timestamp: 10,
+      },
+      {
+        id: "tool-1",
+        type: "tool",
+        toolKind: "run_command",
+        title: "已运行 npm test",
+        detail: "$ npm test\nPASS",
+        command: "npm test",
+        state: "completed",
+        timestamp: 20,
+      },
+      {
+        id: "diff-1",
+        type: "diff",
+        title: "已修改 2 个文件",
+        files: [
+          { file: "src/App.tsx", patch: "--- a/src/App.tsx\n+++ b/src/App.tsx\n+changed" },
+          { file: "src/index.css", patch: "--- a/src/index.css\n+++ b/src/index.css\n+changed" },
+        ],
+        state: "completed",
+        timestamp: 30,
+      },
+    ],
+  });
+
+  const renderLevel = (outputDetailLevel: "concise" | "standard" | "detailed") =>
+    renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: `assistant-${outputDetailLevel}`,
+      process: createLevelProcess(),
+      commentary: [],
+      running: false,
+      outputDetailLevel,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+  it("keeps every process detail in the detailed level", () => {
+    const markup = renderLevel("detailed");
+    expect(markup).toContain("需要先确认设置面板的保存路径。");
+    // 命令以折叠分组呈现，这里断言分组标题存在（展开内容按需渲染）。
+    expect(markup).toContain("已运行 1 条命令");
+    expect(markup).toContain("src/App.tsx");
+    expect(markup).toContain("src/index.css");
+    expect(markup).not.toContain("chat-process-change-summary");
+  });
+
+  it("collapses commands, viewed files and changed files into one line in the standard level", () => {
+    const markup = renderLevel("standard");
+    // 思考照常显示；命令与变更不再逐条列出，而是合并成一行。
+    expect(markup).toContain("需要先确认设置面板的保存路径。");
+    expect(markup).toContain("chat-process-operation-summary");
+    expect(markup).toContain("运行 1 条命令");
+    expect(markup).toContain("修改 2 个文件");
+    // 不再是原来的命令组标题，也不暴露具体文件名。
+    expect(markup).not.toContain("已运行 1 条命令");
+    expect(markup).not.toContain("src/App.tsx");
+    expect(markup).not.toContain("src/index.css");
+    // 折叠行不再重复数量：变更文件在消息底部的 diff 面板里完整显示。
+    expect(markup).not.toContain("chat-process-change-summary");
+  });
+
+  it("only keeps thinking in the concise level", () => {
+    const markup = renderLevel("concise");
+    expect(markup).toContain("需要先确认设置面板的保存路径。");
+    // 命令、变更文件等操作细节全部隐藏，摘要也不出现。
+    expect(markup).not.toContain("已运行 1 条命令");
+    expect(markup).not.toContain("运行 1 条命令");
+    expect(markup).not.toContain("src/App.tsx");
+    expect(markup).not.toContain("src/index.css");
+    expect(markup).not.toContain("chat-process-operation-summary");
+    expect(markup).not.toContain("chat-process-change-summary");
+  });
+
+  it("does not show the empty-events hint when entries are only hidden by the level", () => {
+    // 简洁档只保留思考；正在跑命令、还没产出思考时，不能把“条目被过滤”
+    // 当成“还没有事件”去显示「等待 agent 事件...」。
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-concise-hidden",
+      process: {
+        startedAt: 1,
+        expanded: true,
+        entries: [
+          {
+            id: "tool-1",
+            type: "tool" as const,
+            toolKind: "run_command" as const,
+            title: "已运行 npm test",
+            detail: "$ npm test",
+            command: "npm test",
+            state: "running" as const,
+            timestamp: 10,
+          },
+        ],
+      },
+      commentary: [],
+      running: true,
+      outputDetailLevel: "concise" as const,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+    expect(markup).not.toContain("等待 agent 事件...");
+    expect(markup).not.toContain("chat-process-empty");
+  });
+});
+
+describe("consecutive thinking is merged in every output level", () => {
+  const thinking = (id: string, detail: string, timestamp: number) => ({
+    id,
+    type: "thinking" as const,
+    title: "正在思考",
+    detail,
+    expanded: true,
+    state: "completed" as const,
+    timestamp,
+  });
+
+  const renderLevel = (
+    outputDetailLevel: "concise" | "standard" | "detailed",
+    entries: AgentProcess["entries"],
+    commentary: Array<{ id: string; content: string; timestamp: number; isStreaming?: boolean }> = [],
+  ) =>
+    renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: `assistant-${outputDetailLevel}-merge`,
+      process: { startedAt: 1, endedAt: 2, expanded: true, entries },
+      commentary,
+      running: false,
+      outputDetailLevel,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+  const thinkingRowCount = (markup: string) => markup.split("chat-process-thinking-row").length - 1;
+
+  for (const level of ["concise", "standard", "detailed"] as const) {
+    it(`renders one thinking row for consecutive thinking (${level})`, () => {
+      const markup = renderLevel(level, [
+        thinking("t1", "第一段思考。", 10),
+        thinking("t2", "第二段思考。", 20),
+        thinking("t3", "第三段思考。", 30),
+      ]);
+
+      // 三段连续思考连成一条：只出现一个思考行，但内容都在。
+      expect(thinkingRowCount(markup)).toBe(1);
+      expect(markup).toContain("第一段思考。");
+      expect(markup).toContain("第二段思考。");
+      expect(markup).toContain("第三段思考。");
+    });
+  }
+
+  it("keeps separate thinking rows when body text sits between them", () => {
+    const markup = renderLevel("detailed", [
+      thinking("t1", "写代码前的思考。", 10),
+      thinking("t2", "紧挨着的第二段。", 20),
+      thinking("t3", "正文之后的思考。", 40),
+    ], [
+      { id: "c1", content: "这是正文输出。", timestamp: 30, isStreaming: false },
+    ]);
+
+    // 正文把它切成了两组：前两段合并、第三段独立。
+    expect(thinkingRowCount(markup)).toBe(2);
+    expect(markup).toContain("这是正文输出。");
+    expect(markup).toContain("写代码前的思考。");
+    expect(markup).toContain("紧挨着的第二段。");
+    expect(markup).toContain("正文之后的思考。");
+  });
+
+  it("does not merge thinking across a file-view entry in detailed mode", () => {
+    const markup = renderLevel("detailed", [
+      thinking("t1", "读文件前的思考。", 10),
+      {
+        id: "read-1",
+        type: "tool" as const,
+        toolKind: "read_file",
+        title: "已读取 1 个文件",
+        files: [{ file: "src/App.tsx", action: "read" }],
+        state: "completed" as const,
+        timestamp: 20,
+      },
+      thinking("t2", "读文件后的思考。", 30),
+    ]);
+
+    // 查看文件是分界点：两段思考必须分开，文件条目本身照常显示。
+    expect(thinkingRowCount(markup)).toBe(2);
+    expect(markup).toContain("读文件前的思考。");
+    expect(markup).toContain("读文件后的思考。");
+    expect(markup).toContain("src/App.tsx");
+
+    // 真正的约束：两段思考不能出现在同一个思考行里（跨条目合并会违反这里）。
+    const thinkingRows = markup.split('class="chat-process-thinking-row');
+    expect(thinkingRows).toHaveLength(3);
+    expect(thinkingRows[1]).toContain("读文件前的思考。");
+    expect(thinkingRows[1]).not.toContain("读文件后的思考。");
+    expect(thinkingRows[2]).toContain("读文件后的思考。");
+    expect(thinkingRows[2]).not.toContain("读文件前的思考。");
+  });
+});
+
+describe("concise level keeps user-authored and interactive entries (regression)", () => {
+  const renderConcise = (entries: AgentProcess["entries"]) =>
+    renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-concise-essential",
+      process: { startedAt: 1, endedAt: 2, expanded: true, entries },
+      commentary: [],
+      running: false,
+      outputDetailLevel: "concise",
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onOpenImage: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+  it("never hides a user guidance message in concise mode", () => {
+    const markup = renderConcise([
+      { id: "t1", type: "thinking", title: "正在思考", detail: "先看看代码。", state: "completed", expanded: true, timestamp: 10 },
+      {
+        id: "guidance-1",
+        type: "info",
+        kind: "user_guidance",
+        toolKind: "guidance_message",
+        title: "引导",
+        detail: "改成用缓存",
+        state: "completed",
+        timestamp: 20,
+      },
+      { id: "t2", type: "thinking", title: "正在思考", detail: "好，按引导改。", state: "completed", expanded: true, timestamp: 30 },
+    ]);
+
+    // 用户自己发的引导必须可见，否则对话内容就丢了。
+    expect(markup).toContain("chat-process-guidance-row");
+    expect(markup).toContain("改成用缓存");
+    // 并且它仍然是思考之间的分界点。
+    expect(markup.split("chat-process-thinking-row").length - 1).toBe(2);
+    expect(markup).toContain("先看看代码。");
+    expect(markup).toContain("好，按引导改。");
+  });
+
+  it("never hides a questionnaire entry in concise mode", () => {
+    const markup = renderConcise([
+      { id: "q1", type: "question", title: "需要你确认", detail: "选哪个方案？", state: "running", timestamp: 10 },
+    ]);
+
+    expect(markup).toContain("需要你确认");
+  });
+
+  it("never hides an error entry in concise mode", () => {
+    const markup = renderConcise([
+      { id: "e1", type: "error", title: "命令执行失败", detail: "exit 1", state: "error", timestamp: 10 },
+    ]);
+
+    expect(markup).toContain("命令执行失败");
+  });
+
+  it("still hides plain process detail in concise mode", () => {
+    const markup = renderConcise([
+      { id: "t1", type: "thinking", title: "正在思考", detail: "先看看代码。", state: "completed", expanded: true, timestamp: 10 },
+      { id: "cmd-1", type: "tool", toolKind: "run_command", title: "已运行 1 条命令", detail: "npm test", state: "completed", timestamp: 20 },
+    ]);
+
+    // 命令这类过程细节在「简洁」下依然不显示。
+    expect(markup).not.toContain("npm test");
+    expect(markup).toContain("先看看代码。");
+  });
+});
+
+describe("standard level operation summary details", () => {
+  const buildProcess = (): AgentProcess => ({
+    startedAt: 1,
+    endedAt: 2,
+    expanded: true,
+    entries: [
+      {
+        id: "cmd-1",
+        type: "tool" as const,
+        toolKind: "run_command" as const,
+        title: "已运行 1 条命令",
+        command: "npm test",
+        state: "completed" as const,
+        timestamp: 10,
+      },
+      {
+        id: "read-1",
+        type: "tool" as const,
+        toolKind: "read_file" as const,
+        title: "已读取 1 个文件",
+        files: [{ file: "src/viewed.ts", action: "read" as const }],
+        state: "completed" as const,
+        timestamp: 20,
+      },
+      {
+        id: "diff-1",
+        type: "diff" as const,
+        title: "变更",
+        files: [{ file: "src/changed.ts" }],
+        state: "completed" as const,
+        timestamp: 30,
+      },
+    ],
+  });
+
+  const render = (outputDetailLevel: "standard" | "detailed") =>
+    renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: `assistant-summary-${outputDetailLevel}`,
+      process: buildProcess(),
+      commentary: [],
+      running: false,
+      outputDetailLevel,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+  it("defaults to the collapsed summary line", () => {
+    const markup = render("standard");
+    expect(markup).toContain("运行 1 条命令");
+    expect(markup).toContain("修改 1 个文件");
+    expect(markup).toContain("查看 1 个文件");
+    expect(markup).not.toContain("已修改 src/changed.ts");
+  });
+});

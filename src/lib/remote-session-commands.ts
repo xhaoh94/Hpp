@@ -17,6 +17,7 @@ import type {
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-constants";
 import { isAgentActionInvocation } from "@shared/agent-actions";
 import { normalizeAgentPermissionMode } from "@shared/agent-permissions";
+import { normalizeOutputDetailLevel } from "@shared/output-detail";
 import { createComposerDocument, type ComposerDocument, type ComposerNode } from "@shared/composer-document";
 import type { SessionReference } from "@/stores/project-store";
 
@@ -75,12 +76,14 @@ const hydrateRemoteComposerDocument = (
 async function getSessionConfig(sessionId: string, includeModels = false): Promise<RemoteSessionConfig> {
   const state = await SessionCommandCoordinator.getSessionCommandConfig(sessionId, includeModels);
   const settings = await window.electronAPI.loadData("settings").catch(() => null) as
-    { general?: { planModeEnabled?: unknown; permissionMode?: unknown } } | null;
+    { general?: { planModeEnabled?: unknown; permissionMode?: unknown; outputDetailLevel?: unknown } } | null;
   return {
     model: state.model,
     thinkingLevel: state.thinkingLevel,
     planModeEnabled: settings?.general?.planModeEnabled === true,
     permissionMode: normalizeAgentPermissionMode(settings?.general?.permissionMode),
+    // 输出详细等级随会话配置下发，让移动端与桌面端保持同一套渲染口径。
+    outputDetailLevel: normalizeOutputDetailLevel(settings?.general?.outputDetailLevel),
     availableModels: state.availableModels,
   };
 }

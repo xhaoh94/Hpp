@@ -505,7 +505,10 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelSource).toContain("running={processRunning}");
     expect(processBlockSource).toContain("normalizeProcessForView(process");
     expect(processBlockSource).toContain("useProcessTicker(processRunning)");
-    expect(processBlockSource).toContain("visibleEntries.length > 0 || processRunning");
+    // 输出内容详细等级会先过滤掉「简洁」模式下隐藏的条目，因此这里用渲染用的
+    // renderedEntries 判断：没有可展示条目且未运行时，不渲染空的处理过程区域。
+    // hasEntriesHiddenByLevel：条目被等级过滤掉时不能当成“还没事件”去显示空状态。
+    expect(processBlockSource).toContain("renderedEntries.length > 0 || (processRunning && !hasEntriesHiddenByLevel)");
   });
 
   it("shows the current native todo title without the completed-total counter", () => {

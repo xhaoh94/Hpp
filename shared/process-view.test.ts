@@ -14,7 +14,11 @@ import {
   isCommandProcessEntry,
   isProcessInterrupted,
   isProcessViewRunning,
+  getConciseProcessEntries,
   isUserGuidanceProcessEntry,
+  collapseOperationProcessEntries,
+  mergeThinkingEntries,
+  OPERATION_SUMMARY_TOOL_KIND,
   normalizeProcessForView,
   splitCommandDetail,
   type ProcessEntryView,
@@ -283,8 +287,8 @@ describe("shared process view model", () => {
 
   it("keeps agent narration with content, filters empty markers, and reports interruption", () => {
     const entries = [
-      entry({ id: "body", type: "info", kind: ASSISTANT_NARRATION_PROCESS_KIND, title: "任意标题" }),
-      entry({ id: "narration", type: "info", kind: ASSISTANT_NARRATION_PROCESS_KIND, title: "任意标题", detail: "我先检查项目配置。" }),
+      entry({ id: "body", type: "info", kind: "assistant_narration", title: "任意标题" }),
+      entry({ id: "narration", type: "info", kind: "assistant_narration", title: "任意标题", detail: "我先检查项目配置。" }),
       entry({ id: "received", type: "status", toolKind: "message_received", title: "收到消息" }),
       entry({ id: "legacy-received", type: "status", title: "收到消息: 测试" }),
       entry({ id: "stop", type: "status", title: "用户已手动中断", state: "interrupted" }),
@@ -363,5 +367,183 @@ describe("shared process view model", () => {
       title: "引导",
       detail: '<file path="G:\\Work\\src\\main.ts" lines="2-3">\ncode\n</file>',
     }))).toBe("[file: main.ts:2-3]");
+  });
+});
+
+describe("mergeThinkingEntries", () => {
+  const thinking = (id: string, detail: string, timestamp: number): ProcessEntryView => ({
+    id,
+    type: "thinking",
+    title: "正在思考",
+    detail,
+    timestamp,
+    state: "completed",
+  });
+  const tool = (id: string, timestamp: number): ProcessEntryView => ({
+    id,
+    type: "tool",
+    title: "已运行命令",
+    timestamp,
+    state: "completed",
+  });
+
+  it("joins consecutive thinking entries into one", () => {
+    const merged = mergeThinkingEntries([
+      thinking("t1", "第一段。", 10),
+      thinking("t2", "第二段。", 20),
+      thinking("t3", "第三段。", 30),
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe("t1");
+    expect(merged[0].detail).toBe("第一段。\n\n第二段。\n\n第三段。");
+    expect(merged[0].timestamp).toBe(10);
+  });
+
+  it("keeps groups separated by any non-thinking entry", () => {
+    const merged = mergeThinkingEntries([
+      thinking("t1", "前一段。", 10),
+      thinking("t2", "紧邻的一段。", 20),
+      tool("x", 30),
+      thinking("t3", "后一段。", 40),
+    ]);
+
+    expect(merged).toHaveLength(3);
+    expect(merged[0].detail).toBe("前一段。\n\n紧邻的一段。");
+    expect(merged[1].id).toBe("x");
+    expect(merged[2].detail).toBe("后一段。");
+  });
+
+  it("leaves non-thinking-only lists untouched and dedupes identical text", () => {
+    expect(mergeThinkingEntries([tool("x", 1), tool("y", 2)])).toHaveLength(2);
+
+    const merged = mergeThinkingEntries([
+      thinking("t1", "重复内容。", 10),
+      thinking("t2", "重复内容。", 20),
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].detail).toBe("重复内容。");
+  });
+
+  it("dedupes by paragraph so a repeated later chunk is not appended twice", () => {
+    // 流式快照会重复下发同一段思考：A、B、B 不能拼成 "A\n\nB\n\nB"。
+    const merged = mergeThinkingEntries([
+      thinking("t1", "A 段。", 10),
+      thinking("t2", "B 段。", 20),
+      thinking("t3", "B 段。", 30),
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].detail).toBe("A 段。\n\nB 段。");
+
+    // 多行合并后再来一条重复段落，仍然不重复拼接。
+    const chained = mergeThinkingEntries([
+      { ...thinking("t1", "A 段。\n\nB 段。", 10) },
+      thinking("t2", "B 段。", 20),
+    ]);
+    expect(chained[0].detail).toBe("A 段。\n\nB 段。");
+  });
+
+  it("keeps the previous state when the later entry has none", () => {
+    const previous = { ...thinking("t1", "第一段。", 10), state: "running" as const };
+    const next = { ...thinking("t2", "第二段。", 20), state: undefined };
+    const [merged] = mergeThinkingEntries([previous, next]);
+    expect(merged.state).toBe("running");
+  });
+});
+
+describe("getConciseProcessEntries", () => {
+  const base = { title: "条目", timestamp: 1 } as const;
+  const view = (over: Partial<ProcessEntryView> & { id: string; type: ProcessEntryView["type"] }) =>
+    ({ ...base, ...over }) as ProcessEntryView;
+
+  it("keeps thinking, guidance, questionnaire and error entries", () => {
+    const entries = [
+      view({ id: "t", type: "thinking", detail: "思考", title: "正在思考" }),
+      view({ id: "g", type: "info", kind: "user_guidance", toolKind: "guidance_message", detail: "引导" }),
+      view({ id: "q", type: "question", title: "需要确认" }),
+      view({ id: "e", type: "error", title: "执行失败" }),
+      view({ id: "n", type: "info", kind: "assistant_narration", title: "说明", detail: "正文" }),
+    ];
+
+    expect(getConciseProcessEntries(entries).map((entry) => entry.id)).toEqual(["t", "g", "q", "e", "n"]);
+  });
+
+  it("drops only operation entries and keeps everything else", () => {
+    const entries = [
+      view({ id: "c", type: "tool", toolKind: "run_command", title: "已运行 1 条命令", detail: "npm test" }),
+      view({ id: "f", type: "tool", toolKind: "read_file", title: "已读取 1 个文件" }),
+      view({ id: "d", type: "diff", title: "变更" }),
+      // 状态、子 Agent、空闲提示都不是“运行了什么”，必须保留。
+      view({ id: "s", type: "status", title: "状态" }),
+      view({ id: "a", type: "subagent", title: "子 Agent" }),
+      view({ id: "i", type: "tool", toolKind: "stream_idle_notice", title: "无输出" }),
+      view({ id: "t", type: "thinking", title: "正在思考", detail: "保留我" }),
+    ];
+
+    expect(getConciseProcessEntries(entries).map((entry) => entry.id)).toEqual(["s", "a", "i", "t"]);
+  });
+});
+
+describe("collapseOperationProcessEntries", () => {
+  const base = { title: "条目", timestamp: 1 } as const;
+  const view = (over: Partial<ProcessEntryView> & { id: string; type: ProcessEntryView["type"] }) =>
+    ({ ...base, ...over }) as ProcessEntryView;
+
+  it("merges commands, viewed files and changed files into one line", () => {
+    const collapsed = collapseOperationProcessEntries([
+      view({ id: "t", type: "thinking", title: "思考", detail: "想一下" }),
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "已运行 1 条命令", command: "npm test" }),
+      view({ id: "r1", type: "tool", toolKind: "read_file", title: "已读取 2 个文件", files: ["a.ts", "b.ts"] }),
+      view({ id: "d1", type: "diff", title: "变更", files: ["x.ts"] }),
+      view({ id: "q", type: "question", title: "需要确认" }),
+    ]);
+
+    expect(collapsed.map((entry) => entry.type)).toEqual(["thinking", "status", "question"]);
+    const summary = collapsed[1];
+    expect(summary.toolKind).toBe(OPERATION_SUMMARY_TOOL_KIND);
+    expect(summary.title).toBe("运行 1 条命令 · 查看 2 个文件 · 修改 1 个文件");
+    // 合成条目的 id 跟着首个操作走，列表 key 稳定。
+    expect(summary.id).toBe("c1-operation-summary");
+  });
+
+  it("leaves entry lists without operations untouched", () => {
+    const entries = [
+      view({ id: "t", type: "thinking", title: "思考", detail: "想一下" }),
+      view({ id: "q", type: "question", title: "需要确认" }),
+    ];
+    expect(collapseOperationProcessEntries(entries)).toBe(entries);
+  });
+
+  it("marks the summary as running while any operation is running", () => {
+    const collapsed = collapseOperationProcessEntries([
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test", state: "running" }),
+      view({ id: "d1", type: "diff", title: "变更", files: ["x.ts"], state: "completed" }),
+    ]);
+    expect(collapsed[0].state).toBe("running");
+  });
+});
+
+describe("collapseOperationProcessEntries 的明细", () => {
+  const base = { title: "条目", timestamp: 1 } as const;
+  const view = (over: Partial<ProcessEntryView> & { id: string; type: ProcessEntryView["type"] }) =>
+    ({ ...base, ...over }) as ProcessEntryView;
+
+  it("keeps grouped details so the renderer can expand them", () => {
+    const [summary] = collapseOperationProcessEntries([
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test" }),
+      view({ id: "c2", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm run build" }),
+      view({ id: "w1", type: "tool", toolKind: "edit_file", title: "编辑", files: [{ file: "src/a.cs", action: "edited" }] }),
+      view({ id: "d1", type: "diff", title: "变更", files: [{ file: "src/b.cs" }] }),
+      view({ id: "r1", type: "tool", toolKind: "read_file", title: "读取", files: [{ file: "src/c.cs", action: "read" }] }),
+    ]);
+
+    // 标题仍是合并后的一行。
+    expect(summary.title).toBe("运行 2 条命令 · 查看 1 个文件 · 修改 2 个文件");
+    // 明细按类别分好，展开时直接渲染（文件名可点击）。
+    expect(summary.operationSummary).toEqual({
+      commandCount: 2,
+      changedFiles: ["src/a.cs", "src/b.cs"],
+      viewedFiles: ["src/c.cs"],
+    });
   });
 });

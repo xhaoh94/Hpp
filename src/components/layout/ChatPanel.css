@@ -2201,6 +2201,20 @@
   white-space: nowrap;
 }
 
+/* 「标准」等级下只在折叠行显示“已修改 N 个文件”，不暴露具体文件名。 */
+.chat-process-change-summary {
+  flex: 0 1 auto;
+  opacity: 0.62;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.chat-process-change-summary::before {
+  content: "·";
+  margin-right: 6px;
+  opacity: 0.6;
+}
+
 .chat-process-progress {
   position: relative;
   display: inline-flex;
@@ -2413,6 +2427,91 @@
   opacity: 0.7;
   font-size: 14px;
   padding: 2px 0;
+}
+
+/* 「标准」档的操作摘要块：标题行 + 展开后的明细行。 */
+.chat-process-operation-summary-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 展开后的明细：按「已运行 / 已修改 / 已查看」分行，文件名与详细档同为蓝色链接。 */
+.chat-process-operation-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 24px;
+}
+
+/* 每个文件一行：前缀固定宽度不换行，路径过长时整体换行而不是把行撑开。 */
+.chat-process-operation-detail-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.chat-process-operation-detail-line > span {
+  flex: 0 0 auto;
+}
+
+.chat-process-operation-detail-line .chat-process-file-name {
+  flex: 1 1 auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* 「标准」档把命令 / 查看文件 / 修改文件合并成的一行摘要。
+   样式对齐未合并时的条目：主文字色（白）、14px、行高 21px，不降级成弱化提示。 */
+.chat-process-operation-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 21px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  /* 可点击展开；disabled 时退化成普通文本。 */
+  cursor: pointer;
+}
+
+.chat-process-operation-summary:disabled {
+  cursor: default;
+}
+
+.chat-process-operation-summary:not(:disabled):hover {
+  color: var(--text-primary);
+  opacity: 0.9;
+}
+
+/* 「标准」档合并摘要右侧的展开箭头，展开时朝下。 */
+.chat-process-operation-summary-chevron {
+  flex: 0 0 auto;
+  height: 21px;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.chat-process-operation-summary-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.chat-process-operation-summary.running {
+  color: var(--text-primary);
+}
+
+/* 图标与文字首行对齐（行高 21px、图标容器 18px → 拉高到同行高）。 */
+.chat-process-operation-summary .chat-process-entry-icon {
+  height: 21px;
 }
 
 .chat-process-entry {

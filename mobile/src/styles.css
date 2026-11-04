@@ -1361,6 +1361,14 @@ button:disabled { opacity: 0.48; }
 .process-entry:last-child { border-bottom: 0; }
 .process-entry-summary { display: grid; grid-template-columns: 7px minmax(0, 1fr) 14px; align-items: center; gap: 7px; min-height: 32px; padding: 0 9px; color: var(--muted); font-size: 11px; list-style: none; }
 .process-entry-static .process-entry-summary { grid-template-columns: 7px minmax(0, 1fr); }
+/* 「标准」档合并后的操作摘要：与普通条目标题同色（主文字色），不弱化成 muted。 */
+.process-operation-summary .process-entry-summary { color: var(--text); grid-template-columns: 7px minmax(0, 1fr) 14px; cursor: pointer; }
+.process-operation-details { display: flex; flex-direction: column; gap: 2px; padding: 0 9px 6px 23px; }
+.process-operation-detail-line { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.process-operation-detail-line > span:first-child { flex: 0 0 auto; }
+.process-operation-file { color: #60a5fa; overflow-wrap: anywhere; }
+.process-operation-summary .process-entry-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.process-operation-summary .expand-indicator.expanded { transform: rotate(180deg); }
 .process-entry-received { min-height: 28px; }
 .process-entry-received-content { display: inline-flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--text); font-size: 11px; line-height: 17px; }
 .process-entry-received-label { flex: 0 0 auto; color: var(--muted); }
