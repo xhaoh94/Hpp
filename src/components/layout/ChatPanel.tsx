@@ -3047,7 +3047,13 @@ export function ChatPanel({
   }, []);
 
   const handleOpenFile = useCallback(async (path: string, options: { preview?: boolean } = {}) => {
-    const resolvedPath = resolveProjectFilePath(path, activeProject?.path || "");
+    const projectPath = activeProject?.path || "";
+    let resolvedPath = resolveProjectFilePath(path, projectPath);
+    // 直接解析不到时，按相对路径后缀在项目树里兜底找（模型常以代码根为基准写路径）。
+    if (!(await window.electronAPI.fileExists(resolvedPath))) {
+      const found = await window.electronAPI.findProjectFile(path, projectPath);
+      if (found) resolvedPath = found;
+    }
     if (options.preview === false) {
       useAppStore.getState().revealFile(resolvedPath, { preview: false });
       return;

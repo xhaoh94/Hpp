@@ -84,6 +84,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
     ipcRenderer.invoke("fs:fileExists", filePath),
+  findProjectFile: (relativePath: string, projectPath: string) =>
+    ipcRenderer.invoke("fs:findProjectFile", relativePath, projectPath),
+
   loadReviewUndo: (request: PrepareReviewUndoRequest) =>
     ipcRenderer.invoke("fs:loadReviewUndo", request),
   prepareReviewUndo: (request: PrepareReviewUndoRequest) =>

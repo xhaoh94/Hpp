@@ -262,6 +262,58 @@ export function registerFileHandlers() {
     }
   });
 
+  // 模型在聊天里写的相对路径常以代码根（而非仓库根）为基准，直接解析会缺失
+  // 中间目录（如 Unity 的 `Unity/Assets/`）。直接命中失败时按路径后缀在项目树里
+  // 找第一个匹配文件，避免「找不到文件」误报。
+  ipcMain.handle("fs:findProjectFile", async (_event, relativePath: string, projectPath: string) => {
+    const root = (typeof projectPath === "string" ? projectPath.trim() : "").replace(/[\\/]+$/, "");
+    const raw = typeof relativePath === "string" ? relativePath.trim() : "";
+    if (!root || !raw) return null;
+    const target = raw
+      .replace(/(?::\d+){1,2}$/, "")
+      .replace(/[\\/]+$/, "")
+      .replace(/^[.][\\/]/, "")
+      .replace(/\\/g, "/")
+      .toLowerCase();
+    if (!target || target.includes("..") || target.startsWith("/")) return null;
+
+    const skipDirs = new Set(["node_modules", ".git", "library", "obj", "bin", ".vs", "dist", "out", "target", "build"]);
+    const maxDepth = 12;
+    const visited = new Set<string>();
+    let found: string | null = null;
+
+    async function walk(dir: string, depth: number): Promise<boolean> {
+      if (found || depth > maxDepth) return !!found;
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return false;
+      }
+      for (const entry of entries) {
+        if (found) break;
+        const fullPath = join(dir, entry.name);
+        const key = fullPath.toLowerCase();
+        if (visited.has(key)) continue;
+        visited.add(key);
+        if (entry.isDirectory()) {
+          if (skipDirs.has(entry.name.toLowerCase())) continue;
+          if (await walk(fullPath, depth + 1)) return true;
+        } else {
+          const normalized = fullPath.replace(/\\/g, "/").toLowerCase();
+          if (normalized.endsWith(`/${target}`) || normalized === target) {
+            found = fullPath;
+            return true;
+          }
+        }
+      }
+      return !!found;
+    }
+
+    await walk(root, 0);
+    return found;
+  });
+
   ipcMain.handle(
     "fs:loadReviewUndo",
     (_event, request: PrepareReviewUndoRequest) => reviewUndoService.load(request),

@@ -297,6 +297,7 @@ export interface ElectronAPI {
   getLocalMediaBaseUrl: () => Promise<string>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
+  findProjectFile: (relativePath: string, projectPath: string) => Promise<string | null>;
   loadReviewUndo: (request: PrepareReviewUndoRequest) => Promise<ReviewUndoLoadResult>;
   prepareReviewUndo: (request: PrepareReviewUndoRequest) => Promise<ReviewUndoResult>;
   applyReviewUndo: (
