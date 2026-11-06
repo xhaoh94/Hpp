@@ -32,6 +32,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
+          # public/icon.png and icon.ico are Git LFS objects. Without pulling
+          # them the AppImage ships 130-byte pointer files, and the main process
+          # crashes on startup with "Failed to load image from path".
+          lfs: true
 
       - name: Sync version from tag
         run: |

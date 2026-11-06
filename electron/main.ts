@@ -132,7 +132,13 @@ function createTray() {
 
   try {
     const trayIcon = nativeImage.createFromPath(getIconPath());
-    tray = new Tray(trayIcon.isEmpty() ? getIconPath() : trayIcon.resize({ width: 16, height: 16 }));
+    if (trayIcon.isEmpty()) {
+      // A missing/invalid icon (for example an unfetched Git LFS pointer in a
+      // CI build) must not take down startup; run without tray integration.
+      console.warn("Tray icon is unavailable; continuing without tray integration.");
+      return;
+    }
+    tray = new Tray(trayIcon.resize({ width: 16, height: 16 }));
     tray.setToolTip("Hpp");
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: "显示 Hpp", click: focusMainWindow },
@@ -237,7 +243,12 @@ function showSystemNotification(title: string, body: string) {
   if (!shouldShowSystemNotification()) {
     return { success: true };
   }
-  const notification = new Notification({ title, body, icon: getIconPath() });
+  const icon = nativeImage.createFromPath(getIconPath());
+  const notification = new Notification({
+    title,
+    body,
+    ...(icon.isEmpty() ? {} : { icon }),
+  });
   notification.on("click", focusMainWindow);
   notification.show();
   return { success: true };
@@ -368,9 +379,12 @@ function createWindow() {
   // Remove default menu bar
   Menu.setApplicationMenu(null);
 
-  // Load app icon for taskbar
+  // Load app icon for taskbar. Never pass an empty/missing path to Electron:
+  // BrowserWindow throws "Failed to load image from path" and the app never
+  // opens (e.g. when a release was built without fetching Git LFS assets).
   const iconPath = getIconPath();
   const iconImage = nativeImage.createFromPath(iconPath);
+  const windowIcon = iconImage.isEmpty() ? undefined : iconImage;
 
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -379,7 +393,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#f7f7f8",
     title: "Hpp",
-    icon: iconImage.isEmpty() ? iconPath : iconImage,
+    icon: windowIcon,
     frame: false,
     show: false,
     webPreferences: {
@@ -401,7 +415,7 @@ function createWindow() {
       console.error("[Hpp] setAppDetails failed:", error);
     }
   }
-  if (process.platform !== "darwin") mainWindow.setIcon(iconImage.isEmpty() ? iconPath : iconImage);
+  if (process.platform !== "darwin" && windowIcon) mainWindow.setIcon(windowIcon);
 
   // Maximize by default on all platforms.
   mainWindow.maximize();
