@@ -59,8 +59,10 @@ const getDirectoryStore = () => {
 
 // SDK 内置 catalog 缓存：直接读取 SDK 包内的 JSON 文件，不需要联网。
 // 格式：Map<provider:modelId, modelEntry> 和 Map<modelId, modelEntry>
-let builtinCatalogCache = null;
-let builtinCatalogLoaded = false;
+// 缓存的是 Promise 而不是结果：readProviderConfig 会并发地为多个渠道解析模型，
+// 如果先把“已加载”标记立起来再去 await，后来者会直接拿到还在加载中的 null，
+// 于是同一份配置里有的模型判为内置、有的被判为自定义（表现为判定时好时坏）。
+let builtinCatalogPromise = null;
 const readCatalogDir = async (catalogPath) => {
   const files = await readdir(catalogPath);
   const jsonFiles = files.filter((f) => f.endsWith(".json") && f !== ".manifest.json");
@@ -100,15 +102,12 @@ const readCatalogDir = async (catalogPath) => {
   return { byProviderAndId, byId, path: catalogPath };
 };
 
-const getBuiltinCatalog = async () => {
-  if (builtinCatalogLoaded) return builtinCatalogCache;
-  builtinCatalogLoaded = true;
+const loadBuiltinCatalog = async () => {
   const candidates = getBuiltinCatalogDirCandidates();
   let lastError = null;
   for (const catalogPath of candidates) {
     try {
-      builtinCatalogCache = await readCatalogDir(catalogPath);
-      return builtinCatalogCache;
+      return await readCatalogDir(catalogPath);
     } catch (error) {
       lastError = error;
     }
@@ -120,6 +119,11 @@ const getBuiltinCatalog = async () => {
     lastError instanceof Error ? lastError.message : lastError,
   );
   return null;
+};
+
+const getBuiltinCatalog = () => {
+  if (!builtinCatalogPromise) builtinCatalogPromise = loadBuiltinCatalog();
+  return builtinCatalogPromise;
 };
 
 // 判断 catalog entry 是否比现有的更好：

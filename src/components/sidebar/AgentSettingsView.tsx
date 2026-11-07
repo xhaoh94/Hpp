@@ -921,17 +921,31 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                           <div className="agent-settings-error">{plugin.compatibilityError}</div>
                         )}
                       </div>
-                      <button
-                        type="button"
-                        className={blockedByHppVersion || (installed && !updateAvailable)
-                          ? "btn-action agent-settings-refresh-btn"
-                          : "filter-add-btn agent-settings-update-btn"}
-                        onClick={() => void handleInstallOfficialPlugin(plugin)}
-                        disabled={officialLoading || installing || blockedByHppVersion || (installed && !updateAvailable)}
-                        title={blockedByHppVersion ? plugin.compatibilityError : undefined}
-                      >
-                        {buttonText}
-                      </button>
+                      <div className="agent-official-actions">
+                        <button
+                          type="button"
+                          className={blockedByHppVersion || (installed && !updateAvailable)
+                            ? "btn-action agent-settings-refresh-btn"
+                            : "filter-add-btn agent-settings-update-btn"}
+                          onClick={() => void handleInstallOfficialPlugin(plugin)}
+                          disabled={officialLoading || installing || blockedByHppVersion || (installed && !updateAvailable)}
+                          title={blockedByHppVersion ? plugin.compatibilityError : undefined}
+                        >
+                          {buttonText}
+                        </button>
+                        {/* 官方插件弹窗里也要能直接卸载：走与已安装列表同一个确认弹窗和卸载流程。 */}
+                        {installedAgent?.removable && (
+                          <button
+                            type="button"
+                            className="btn-action agent-settings-refresh-btn"
+                            onClick={() => openRemovePluginConfirm(plugin.id)}
+                            disabled={!!removingAgentId || isAnyAgentUpdating}
+                            title="卸载插件"
+                          >
+                            {removingAgentId === plugin.id ? "卸载中..." : "卸载"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}

@@ -106,4 +106,29 @@ describe("pi builtin catalog resolution", () => {
     // 目录完全缺失属于可容忍状态：返回 null（判为自定义模型），不抛异常。
     await expect(pi.lookupModel("catalog-model")).resolves.toBeNull();
   });
+
+  it("缓存加载中的 Promise：并发解析多渠道时首个调用也能拿到目录", async () => {
+    await seedCatalog(layoutPaths.hoisted);
+    // 多个渠道同时引用同一个内置模型：readProviderConfig 用 Promise.all 并发解析，
+    // 旧的“先置已加载标记再 await”写法会让除首个以外的调用拿到还在加载中的 null。
+    await mkdir(tempRoot, { recursive: true });
+    const providers: Record<string, unknown> = {};
+    for (const name of ["p1", "p2", "p3", "p4", "p5"]) {
+      providers[name] = {
+        name,
+        baseUrl: `https://${name}.example.com/v1`,
+        api: "openai-completions",
+        apiKey: "sk-test",
+        models: [{ id: "catalog-model", name: "catalog-model" }],
+      };
+    }
+    await writeFile(join(tempRoot, "models.json"), JSON.stringify({ providers }), "utf8");
+
+    const pi = await loadFreshConfig();
+    // 关键：readProviderConfig 必须是本进程里第一次触达 catalog 的调用（缓存冷）。
+    const config = await pi.readProviderConfig();
+    const flags = config.providers.flatMap((provider) => provider.models.map((model) => model.isBuiltin));
+    expect(flags).toHaveLength(5);
+    expect(flags).toEqual([true, true, true, true, true]);
+  });
 });

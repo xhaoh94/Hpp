@@ -1,4 +1,5 @@
 const AdmZip = require("adm-zip");
+const { createHash } = require("crypto");
 const {
   existsSync,
   mkdirSync,
@@ -6,12 +7,17 @@ const {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } = require("fs");
 const { isAbsolute, join, relative, resolve, sep } = require("path");
 
 const MANIFEST_FILE = "hpp-agent-plugin.json";
 const rootDir = resolve(__dirname, "..");
 const sourceRoot = join(rootDir, "electron", "agent-plugins");
+// 插件内容指纹基线（随仓库提交）。用于拦住“改了插件代码但没提 manifest version”
+// 的情况：客户端的更新判断只比较 version，版本相同就永远不会重新拉取 zip，
+// 于是修好的插件发到 GitHub 也到不了已安装的用户手上。
+const HASH_BASELINE_FILE = join(sourceRoot, "content-hashes.json");
 const releaseDownloadBaseUrl = "https://github.com/xhaoh94/Hpp/releases/latest/download";
 const currentHppVersion = require(join(rootDir, "package.json")).version;
 const outputRoot = join(rootDir, "release", `v${currentHppVersion}`, "agent-plugins");
@@ -219,12 +225,14 @@ function normalizeCapabilities(value) {
   };
 }
 
-function descriptorFromManifest(manifest) {
+function descriptorFromManifest(manifest, contentHash) {
   const zipFile = `${manifest.id}.zip`;
   return {
     id: manifest.id,
     name: manifest.name,
     version: manifest.version,
+    // 内容指纹随目录一起发布，供客户端做“版本相同但内容不同”的兜底判断。
+    ...(contentHash ? { contentHash } : {}),
     minHppVersion: manifest.minHppVersion,
     description: typeof manifest.description === "string" ? manifest.description : "",
     runtime: manifest.runtime === "cli" || manifest.runtime === "sdk" ? manifest.runtime : "plugin",
@@ -252,6 +260,59 @@ function descriptorFromManifest(manifest) {
     zipFile,
     downloadUrl: `${releaseDownloadBaseUrl}/${zipFile}`,
   };
+}
+
+/**
+ * 计算插件的确定性内容指纹。
+ * 覆盖的文件集合必须与写进 zip 的一致（同样跳过 *.test.*），
+ * 否则会出现“指纹变了但 zip 没变”的误报。
+ */
+function computeContentHash(pluginDir) {
+  const hash = createHash("sha256");
+  const walk = (currentDir) => {
+    const entries = readdirSync(currentDir, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const entryPath = join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (/\.test\.[cm]?[jt]s$/i.test(entry.name)) continue;
+      hash.update(zipPathFor(entryPath, pluginDir));
+      hash.update("\0");
+      hash.update(readFileSync(entryPath));
+      hash.update("\0");
+    }
+  };
+  walk(pluginDir);
+  return hash.digest("hex");
+}
+
+function readHashBaseline() {
+  if (!existsSync(HASH_BASELINE_FILE)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(HASH_BASELINE_FILE, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    throw new Error(`${HASH_BASELINE_FILE}: 不是有效 JSON（${error instanceof Error ? error.message : error}）`);
+  }
+}
+
+/**
+ * 找出“内容变了但版本没提”的插件。
+ * 纯函数，方便直接单测：传入基线、本次指纹与清单。
+ */
+function detectVersionDrift(baseline, entries) {
+  const drifted = [];
+  for (const entry of entries) {
+    const previous = baseline[entry.id];
+    if (previous && previous.hash !== entry.hash && previous.version === entry.version) {
+      drifted.push({ id: entry.id, version: entry.version });
+    }
+  }
+  return drifted;
 }
 
 function zipPathFor(filePath, pluginDir) {
@@ -290,21 +351,49 @@ function main() {
     .map((entry) => join(sourceRoot, entry.name))
     .sort((left, right) => left.localeCompare(right));
 
+  // 第一遍：读取 manifest 并校验内容指纹，发现“内容变了但版本没提”就整体中止，
+  // 避免产出一份客户端永远收不到的 zip。
+  const baseline = readHashBaseline();
+  const nextBaseline = {};
+  const plans = [];
+  for (const pluginDir of pluginDirs) {
+    const manifest = readManifest(pluginDir);
+    const contentHash = computeContentHash(pluginDir);
+    nextBaseline[manifest.id] = { version: manifest.version, hash: contentHash };
+    plans.push({ pluginDir, manifest, contentHash });
+  }
+  const drifted = detectVersionDrift(baseline, plans.map((plan) => ({
+    id: plan.manifest.id,
+    version: plan.manifest.version,
+    hash: plan.contentHash,
+  })));
+  if (drifted.length > 0) {
+    throw new Error(
+      "插件内容有改动但 manifest version 未提升，已中止打包：\n"
+      + `${drifted.map((entry) => `  ${entry.id}: 内容已变更，但 version 仍是 ${entry.version}`).join("\n")}\n`
+      + `请提升 electron/agent-plugins/<id>/${MANIFEST_FILE} 里的 version 后重试`
+      + "（客户端只比较版本号，版本不变就收不到更新）。",
+    );
+  }
+
   const catalog = {
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     plugins: [],
   };
 
-  for (const pluginDir of pluginDirs) {
-    const manifest = readManifest(pluginDir);
+  for (const { pluginDir, manifest, contentHash } of plans) {
     const zip = new AdmZip();
     addDirectory(zip, pluginDir, pluginDir);
     const zipPath = join(outputRoot, `${manifest.id}.zip`);
     zip.writeZip(zipPath);
-    catalog.plugins.push(descriptorFromManifest(manifest));
+    catalog.plugins.push(descriptorFromManifest(manifest, contentHash));
     console.log(`packaged ${manifest.id} -> ${zipPath}`);
   }
+
+  // 一次性写回基线，保持与本次产物一致。
+  writeFileSync(HASH_BASELINE_FILE, `${JSON.stringify(nextBaseline, null, 2)}\n`);
+  console.log(`wrote plugin content hashes -> ${HASH_BASELINE_FILE}`);
 
   const catalogPath = join(outputRoot, "agent-plugins.json");
   catalog.plugins.sort((left, right) => {
@@ -314,4 +403,9 @@ function main() {
   console.log(`wrote official plugin catalog -> ${catalogPath}`);
 }
 
-main();
+// 被单测 require 时不要自动执行打包。
+if (require.main === module) {
+  main();
+}
+
+module.exports = { computeContentHash, detectVersionDrift, readHashBaseline, HASH_BASELINE_FILE };
