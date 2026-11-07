@@ -643,6 +643,13 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                           最新 v{agentStatus.latestVersion}
                         </span>
                       )}
+                      {/* 插件自身的版本（与运行时版本不同）：方便判断插件是否已更新 */}
+                      <span
+                        className="agent-settings-meta"
+                        title={`插件版本 v${agent.version}`}
+                      >
+                        插件 v{agent.version}
+                      </span>
                       <span
                         className={`agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`}
                         title={getAgentPlanModeTooltip(agent.id)}
@@ -921,31 +928,17 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                           <div className="agent-settings-error">{plugin.compatibilityError}</div>
                         )}
                       </div>
-                      <div className="agent-official-actions">
-                        <button
-                          type="button"
-                          className={blockedByHppVersion || (installed && !updateAvailable)
-                            ? "btn-action agent-settings-refresh-btn"
-                            : "filter-add-btn agent-settings-update-btn"}
-                          onClick={() => void handleInstallOfficialPlugin(plugin)}
-                          disabled={officialLoading || installing || blockedByHppVersion || (installed && !updateAvailable)}
-                          title={blockedByHppVersion ? plugin.compatibilityError : undefined}
-                        >
-                          {buttonText}
-                        </button>
-                        {/* 官方插件弹窗里也要能直接卸载：走与已安装列表同一个确认弹窗和卸载流程。 */}
-                        {installedAgent?.removable && (
-                          <button
-                            type="button"
-                            className="btn-action agent-settings-refresh-btn"
-                            onClick={() => openRemovePluginConfirm(plugin.id)}
-                            disabled={!!removingAgentId || isAnyAgentUpdating}
-                            title="卸载插件"
-                          >
-                            {removingAgentId === plugin.id ? "卸载中..." : "卸载"}
-                          </button>
-                        )}
-                      </div>
+                      <button
+                        type="button"
+                        className={blockedByHppVersion || (installed && !updateAvailable)
+                          ? "btn-action agent-settings-refresh-btn"
+                          : "filter-add-btn agent-settings-update-btn"}
+                        onClick={() => void handleInstallOfficialPlugin(plugin)}
+                        disabled={officialLoading || installing || blockedByHppVersion || (installed && !updateAvailable)}
+                        title={blockedByHppVersion ? plugin.compatibilityError : undefined}
+                      >
+                        {buttonText}
+                      </button>
                     </div>
                   );
                 })}
