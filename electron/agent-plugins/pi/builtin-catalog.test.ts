@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -130,5 +130,74 @@ describe("pi builtin catalog resolution", () => {
     const flags = config.providers.flatMap((provider) => provider.models.map((model) => model.isBuiltin));
     expect(flags).toHaveLength(5);
     expect(flags).toEqual([true, true, true, true, true]);
+  });
+
+  it("把内置模型的能力回写到 models.json，避免 UI 与运行时不一致", async () => {
+    const catalogDir = join(tempRoot, ...layoutPaths.hoisted);
+    await mkdir(catalogDir, { recursive: true });
+    await writeFile(join(catalogDir, "catalog.json"), JSON.stringify({
+      "openai-completions": {
+        "chat:catalog-model": {
+          id: "catalog-model",
+          name: "Catalog Model",
+          provider: "deepseek",
+          reasoning: true,
+          input: ["text", "image"],
+        },
+      },
+    }));
+    const modelsPath = join(tempRoot, "models.json");
+    await writeFile(modelsPath, JSON.stringify({
+      providers: {
+        chan: {
+          name: "chan",
+          baseUrl: "https://chan.example.com/v1",
+          api: "openai-completions",
+          apiKey: "sk-test",
+          models: [{ id: "catalog-model", name: "catalog-model", reasoning: false, input: ["text"] }],
+        },
+      },
+    }));
+
+    const pi = await loadFreshConfig();
+    const config = await pi.readProviderConfig();
+
+    // UI/聊天看到的是目录能力
+    expect(config.providers[0].models[0]).toMatchObject({
+      isBuiltin: true,
+      reasoning: true,
+      imageInput: true,
+    });
+
+    // 磁盘上的 models.json 已被纠正：pi CLI 读这份，否则会把图片丢掉
+    const after = JSON.parse(await readFile(modelsPath, "utf8"));
+    expect(after.providers.chan.models[0]).toMatchObject({
+      id: "catalog-model",
+      reasoning: true,
+      input: ["text", "image"],
+    });
+  });
+
+  it("非内置模型的自定义能力不会被回写改动", async () => {
+    await seedCatalog(layoutPaths.hoisted);
+    const modelsPath = join(tempRoot, "models.json");
+    const custom = { id: "custom-model", name: "custom", reasoning: true, input: ["text"] };
+    await writeFile(modelsPath, JSON.stringify({
+      providers: {
+        chan: {
+          name: "chan",
+          baseUrl: "https://chan.example.com/v1",
+          api: "openai-completions",
+          apiKey: "sk-test",
+          models: [custom],
+        },
+      },
+    }));
+
+    const pi = await loadFreshConfig();
+    await pi.readProviderConfig();
+
+    const after = JSON.parse(await readFile(modelsPath, "utf8"));
+    expect(after.providers.chan.models[0]).toEqual(custom);
   });
 });

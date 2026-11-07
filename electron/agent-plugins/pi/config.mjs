@@ -292,6 +292,51 @@ const writeJsonObject = async (filePath, value) => {
   }
 };
 
+/**
+ * 内置模型的能力以 SDK 目录为权威，但真正发请求的是 pi CLI，它读的是
+ * models.json 里的 reasoning / input。若磁盘上还留着旧的自定义能力
+ * （典型：input 只有 ["text"]），UI 会显示模型支持图片，实际请求却被
+ * transform-messages 里 `model.input.includes("image")` 拦下，图片变成
+ * "(image omitted: model does not support images)"。
+ *
+ * 这里只在内置模型且这两个字段与目录不一致时回写，其余字段一律不动，
+ * 保证 UI 与运行时看到同一份能力。
+ */
+const syncBuiltinCapabilities = async (configPath, providers) => {
+  if (!Array.isArray(providers) || providers.length === 0) return;
+  let config;
+  try {
+    config = await readJsonObject(configPath);
+  } catch {
+    // 配置读不出来时不做任何事，避免把损坏的文件覆盖掉。
+    return;
+  }
+  const providersRecord = isRecord(config.providers) ? config.providers : {};
+  let changed = false;
+  for (const provider of providers) {
+    const rawProvider = isRecord(providersRecord[provider.providerId]) ? providersRecord[provider.providerId] : null;
+    if (!rawProvider || !Array.isArray(rawProvider.models)) continue;
+    for (const model of provider.models || []) {
+      if (model.isBuiltin !== true) continue;
+      const rawModel = rawProvider.models.find((entry) => isRecord(entry) && entry.id === model.id);
+      if (!rawModel) continue;
+      const nextInput = model.imageInput ? ["text", "image"] : ["text"];
+      const needsReasoning = rawModel.reasoning !== model.reasoning;
+      const needsInput = JSON.stringify(rawModel.input) !== JSON.stringify(nextInput);
+      if (!needsReasoning && !needsInput) continue;
+      if (needsReasoning) rawModel.reasoning = model.reasoning;
+      if (needsInput) rawModel.input = nextInput;
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  try {
+    await writeJsonObject(configPath, config);
+  } catch {
+    // 回写失败不影响读取；下次机会再同步。
+  }
+};
+
 const snapshotFile = async (filePath) => {
   try {
     return { filePath, existed: true, content: await readFile(filePath, "utf8") };
@@ -479,6 +524,9 @@ export const readProviderConfig = async () => {
       }];
     }),
   )).flat();
+  // 内置模型的能力以目录为权威，顺手把差异回写到 models.json，
+  // 否则 UI 显示能看图、运行时却按旧配置把图片丢掉。
+  await syncBuiltinCapabilities(getConfigPath(), providers);
   return {
     activeProviderId: asString(config.activeProviderId) || asString(config.activeProvider) || undefined,
     providers,
