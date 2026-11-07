@@ -35,6 +35,8 @@ import {
   buildSelfUpgradeArgs,
   getCliPackageForVersion,
   isNpmPermissionError,
+  looksLikeUpgradeFailure,
+  summarizeUpgradeFailure,
 } from "./agent-plugin-registry";
 
 const backendModule = `
@@ -2169,5 +2171,18 @@ describe("self-upgrade manifest wiring", () => {
 
     expect(result.success).toBe(true);
     expect(result.agent?.selfUpgrade).toBeUndefined();
+  });
+});
+
+describe("self-upgrade 输出校验", () => {
+  it("opencode 退出码为 0 但打印 Upgrade failed 时判为失败", () => {
+    const output = "\u001b[?25h│\n■  Upgrade failed for curl (exit code 92).\n│\n└  Done\n";
+    expect(looksLikeUpgradeFailure(output)).toBe(true);
+    expect(summarizeUpgradeFailure(output)).toContain("Upgrade failed for curl (exit code 92)");
+  });
+
+  it("正常成功输出不判为失败", () => {
+    expect(looksLikeUpgradeFailure("●  Upgrade\n│\n●  Done\n")).toBe(false);
+    expect(summarizeUpgradeFailure("●  Upgrade complete\n")).toBe("");
   });
 });

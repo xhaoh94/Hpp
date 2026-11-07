@@ -688,6 +688,26 @@ function isDirectoryWritable(dir: string): boolean {
  * 用工具自带的升级命令更新（如 `opencode upgrade --major`）。
  * 走这条路径时不碰 npm：系统级 npm 前缀、用独立安装器装的旧版本都不会干扰。
  */
+/**
+ * 识别自带升级命令“退出码为 0 但实际失败”的输出。
+ * 比如 `opencode upgrade` 下载失败时仍以 0 退出，只在输出里写
+ * "Upgrade failed for curl (exit code 92)"；不检查就会误报更新成功。
+ */
+export function looksLikeUpgradeFailure(output: string): boolean {
+  const text = String(output || "").replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+  return /upgrade failed|failed for (curl|npm|pnpm|bun|brew|choco|scoop)\b|installation failed/i.test(text);
+}
+
+/** 从升级输出里抽出可读的失败原因（去掉 spinner、限行数）。 */
+export function summarizeUpgradeFailure(output: string, limit = 4): string {
+  const text = String(output || "").replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+  const lines = text
+    .split(/[\r\n│●└┌]+/)
+    .map((line) => line.trim())
+    .filter((line) => line && /fail|error|denied|timed? ?out|exit code/i.test(line));
+  return lines.slice(0, limit).join("\n");
+}
+
 async function runCliSelfUpgrade(
   descriptor: AgentDescriptor,
   currentVersion: string | undefined,
@@ -702,7 +722,18 @@ async function runCliSelfUpgrade(
     };
   }
   try {
-    await runCommand(descriptor.command, args, { timeout: CLI_INSTALL_TIMEOUT_MS });
+    const result = await runCommand(descriptor.command, args, { timeout: CLI_INSTALL_TIMEOUT_MS });
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    // 退出码 0 不代表真的成功（opencode 下载失败也是 0），必须看输出。
+    if (looksLikeUpgradeFailure(output)) {
+      const detail = summarizeUpgradeFailure(output);
+      return {
+        success: false,
+        error: `${descriptor.name} 升级命令报告失败${detail ? `：\n${detail}` : "。"}`
+          + `\n可在终端手动执行：${descriptor.command} ${args.join(" ")}`,
+        status: await getCliAgentStatus(descriptor),
+      };
+    }
     return { success: true, status: await getCliAgentStatus(descriptor) };
   } catch (err) {
     return {
