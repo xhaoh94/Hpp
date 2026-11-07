@@ -4,19 +4,19 @@
     "hash": "f2b24d9ad66b28ad38d3de0b854d409a8f98e33f6d86a9e9d65935a3a24c4dff"
   },
   "codex": {
-    "version": "1.1.2",
-    "hash": "575ab0880be29d8f2430b2d185050efa166eec5a7ba7b68c036516073f81157f"
+    "version": "1.1.3",
+    "hash": "3a3a616154384d4365db1fe6a9db4f7f9a3840e248a3fb7efc0ce4200015b635"
   },
   "droid": {
-    "version": "1.3.5",
-    "hash": "25c9962e2685bc1bc80e019f6f275ae3307c578a7d420af32ce0c1cde703ed69"
+    "version": "1.3.6",
+    "hash": "da5017ce250ad3f221218d6e98eabdfcfa0a45ac4b10262a7125ed1da4515133"
   },
   "opencode": {
-    "version": "1.4.1",
-    "hash": "fc36485dea6beb01ebaed1c91044c5f0a2d11852f82fa9e22ab8b2d397db0897"
+    "version": "1.4.2",
+    "hash": "abe71ae8514ed37dd69b136ff93a44bda602e157de5d39c6b38731539052f67c"
   },
   "pi": {
-    "version": "1.3.5",
-    "hash": "73d09b276e211b11e87d0f96cad42deb24d72e1ae73cf44e90f6ecd147368de9"
+    "version": "1.3.6",
+    "hash": "79a9237a2b44eda31c12a394e6bbab4c5582f6dc752a7a9d41c0546567484e8d"
   }
 }
