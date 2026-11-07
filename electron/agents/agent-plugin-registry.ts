@@ -2,6 +2,7 @@ import { app, BrowserWindow } from "electron";
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
+import { accessSync, constants as fsConstants } from "fs";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
 import AdmZip from "adm-zip";
@@ -17,6 +18,7 @@ import { getLatestNpmPackageVersion, getNpmPackageVersionInfo } from "../utils/n
 import type {
   AgentBuiltinExtensionSupport,
   AgentCapabilities,
+  AgentCliSelfUpgrade,
   AgentDescriptor,
   AgentPackageStatus,
   AgentPackageVersions,
@@ -475,6 +477,60 @@ function normalizeCliPackages(value: unknown, fallbackPackageName?: string) {
   return [{ line: "v1" as const, name: fallbackPackageName }];
 }
 
+/**
+ * 插件可声明的「工具自带升级入口」（如 `opencode upgrade`）。
+ * 系统级 npm（prefix 为 /usr，root 所有）或命令行本身不是 npm 装的时，
+ * `npm install -g` 必然 EACCES；有自带升级入口就直接改道，
+ * 否则用户只会看到一句无法行动的权限错误。
+ */
+function normalizeCliSelfUpgrade(value: unknown): AgentCliSelfUpgrade | undefined {
+  if (!isRecord(value)) return undefined;
+  const args = Array.isArray(value.args)
+    ? value.args.map((entry) => asString(entry)).filter(Boolean)
+    : [];
+  if (args.length === 0) return undefined;
+  const methodArgs = Array.isArray(value.methodArgs)
+    ? value.methodArgs.map((entry) => asString(entry)).filter(Boolean)
+    : [];
+  const majorFlag = asString(value.majorFlag);
+  return {
+    args,
+    ...(methodArgs.length > 0 ? { methodArgs } : {}),
+    ...(majorFlag ? { majorFlag } : {}),
+    ...(value.supportsTarget === true ? { supportsTarget: true } : {}),
+  };
+}
+
+/** npm 全局安装被目录权限拒绕的错误特征（EACCES / EPERM）。 */
+export function isNpmPermissionError(message: string): boolean {
+  return /EACCES|EPERM|errno:?\s*-1[34]\b|permission denied/i.test(String(message || ""));
+}
+
+/**
+ * 拼出工具自带升级命令的参数。
+ * - 跳大版本（1.x → 2.x）且有 majorFlag 时用开关，比如 opencode 靠 `--major`
+ *   才会把 1.x 移除；
+ * - 否则在支持 target 时把具体版本交给工具自己处理。
+ */
+export function buildSelfUpgradeArgs(
+  descriptor: Pick<AgentDescriptor, "selfUpgrade">,
+  currentVersion?: string,
+  requestedVersion?: string,
+): string[] | undefined {
+  const selfUpgrade = descriptor.selfUpgrade;
+  if (!selfUpgrade) return undefined;
+  const args = [...selfUpgrade.args, ...(selfUpgrade.methodArgs || [])];
+  const currentMajor = parseMajorVersion(currentVersion);
+  const targetMajor = parseMajorVersion(requestedVersion);
+  if (currentMajor !== null && targetMajor !== null && targetMajor > currentMajor && selfUpgrade.majorFlag) {
+    args.push(selfUpgrade.majorFlag);
+    return args;
+  }
+  const version = String(requestedVersion || "").trim();
+  if (version && version !== "latest" && selfUpgrade.supportsTarget) args.push(version);
+  return args;
+}
+
 function parseMajorVersion(version?: string): number | null {
   const match = String(version || "").trim().match(/v?(\d+)/);
   if (!match) return null;
@@ -537,6 +593,7 @@ function descriptorFromManifest(
   const command = asString(manifest.command) || undefined;
   const packageName = asString(manifest.packageName) || undefined;
   const packages = normalizeCliPackages(manifest.packages, packageName);
+  const selfUpgrade = normalizeCliSelfUpgrade(manifest.selfUpgrade);
   const capabilities = normalizeCapabilities(manifest.capabilities);
   const order = typeof manifest.order === "number" && Number.isFinite(manifest.order) ? manifest.order : 1000;
 
@@ -551,6 +608,7 @@ function descriptorFromManifest(
     command,
     packageName,
     packages,
+    selfUpgrade,
     order,
     capabilities,
     source,
@@ -600,6 +658,60 @@ function runNpmCommand(args: string[], options: { cwd?: string; timeout?: number
   const invocation = getNpmInvocation(args, env);
   if (!invocation) return Promise.reject(new Error("未找到可用的 npm CLI，请重新安装 Node.js"));
   return runCommand(invocation.command, invocation.args, options);
+}
+
+/** 读取 npm 全局前缀；读不到时返回 undefined（调用方按“可写”处理，保持旧行为）。 */
+async function getNpmGlobalPrefix(): Promise<string | undefined> {
+  try {
+    const result = await runNpmCommand(["config", "get", "prefix"], { timeout: 15000 });
+    return result.stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** npm 全局包目录：POSIX 是 <prefix>/lib/node_modules，Windows 是 <prefix>/node_modules。 */
+function npmGlobalModulesDir(prefix: string): string {
+  return process.platform === "win32" ? join(prefix, "node_modules") : join(prefix, "lib", "node_modules");
+}
+
+function isDirectoryWritable(dir: string): boolean {
+  try {
+    accessSync(existsSync(dir) ? dir : dirname(dir), fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 用工具自带的升级命令更新（如 `opencode upgrade --major`）。
+ * 走这条路径时不碰 npm：系统级 npm 前缀、用独立安装器装的旧版本都不会干扰。
+ */
+async function runCliSelfUpgrade(
+  descriptor: AgentDescriptor,
+  currentVersion: string | undefined,
+  requestedVersion: string,
+): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }> {
+  const args = buildSelfUpgradeArgs(descriptor, currentVersion, requestedVersion);
+  if (!args || !descriptor.command) {
+    return {
+      success: false,
+      error: `${descriptor.name} 未声明可以使用的自带升级命令`,
+      status: await getCliAgentStatus(descriptor),
+    };
+  }
+  try {
+    await runCommand(descriptor.command, args, { timeout: CLI_INSTALL_TIMEOUT_MS });
+    return { success: true, status: await getCliAgentStatus(descriptor) };
+  } catch (err) {
+    return {
+      success: false,
+      error: `${descriptor.name} 自带升级命令执行失败：${formatError(err)}\n`
+        + `可在终端手动执行：${descriptor.command} ${args.join(" ")}`,
+      status: await getCliAgentStatus(descriptor),
+    };
+  }
 }
 
 async function terminateOrphanedWindowsCliProcesses(command: string): Promise<number> {
@@ -731,14 +843,19 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
   const installed = await commandExists(command);
   const nodeStatus = await getNodeRuntimeStatus();
   const npmAvailable = await commandExists("npm");
+  // 声明了自带升级入口的 CLI 不依赖 npm/node，只要能跑命令就能自我升级。
+  const canSelfUpgrade = !!descriptor.selfUpgrade && !!descriptor.command;
+  const canInstall = npmAvailable && nodeStatus.nodeOk;
   if (!installed) {
     return {
       installed: false,
       updateAvailable: false,
-      canUpdate: npmAvailable && nodeStatus.nodeOk,
+      canUpdate: canSelfUpgrade || canInstall,
       nodeVersion: nodeStatus.nodeVersion,
       nodeOk: nodeStatus.nodeOk,
-      error: nodeStatus.error || (npmAvailable ? undefined : "未检测到 npm，请重新安装包含 npm 的 Node.js"),
+      error: canSelfUpgrade
+        ? undefined
+        : nodeStatus.error || (npmAvailable ? undefined : "未检测到 npm，请重新安装包含 npm 的 Node.js"),
       source: descriptor.source,
       installedPath: descriptor.installedPath,
       removable: descriptor.removable,
@@ -777,7 +894,7 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
     currentVersion,
     latestVersion,
     updateAvailable,
-    canUpdate: !!(descriptor.packageName || descriptor.packages?.length) && npmAvailable && nodeStatus.nodeOk,
+    canUpdate: canSelfUpgrade || (!!(descriptor.packageName || descriptor.packages?.length) && canInstall),
     nodeVersion: nodeStatus.nodeVersion,
     nodeOk: nodeStatus.nodeOk,
     source: descriptor.source,
@@ -788,21 +905,49 @@ async function getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPack
 }
 
 async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }> {
-  if (!descriptor.packageName && !descriptor.packages?.length) {
+  const canSelfUpgrade = !!descriptor.selfUpgrade && !!descriptor.command;
+  if (!canSelfUpgrade && !descriptor.packageName && !descriptor.packages?.length) {
     return { success: false, error: `${descriptor.name} 不支持自动更新`, status: await getCliAgentStatus(descriptor) };
   }
+  const requestedVersion = normalizeVersionSpec(versionSpec) || "latest";
   const nodeStatus = await getNodeRuntimeStatus();
+  const npmAvailable = await commandExists("npm");
+
+  // 自带升级优先：不写 npm 全局目录，也不受「命令行是独立安装器装的、
+  // npm 装一份到 /usr 也压根不在 PATH 上」影响。失败才退回 npm。
+  let selfUpgradeError: string | undefined;
+  if (canSelfUpgrade) {
+    const currentStatus = await getCliAgentStatus(descriptor);
+    const selfResult = await runCliSelfUpgrade(descriptor, currentStatus.currentVersion, requestedVersion);
+    if (selfResult.success) return selfResult;
+    selfUpgradeError = selfResult.error;
+  }
+
+  // 系统级 npm（Arch/Debian 默认 prefix=/usr，root 所有）下 `npm install -g`
+  // 必然 EACCES。没有自带升级入口时直接给可执行的提示，不要把 EACCES 丢给用户。
+  const npmPrefix = npmAvailable ? await getNpmGlobalPrefix() : undefined;
+  const npmWritable = npmPrefix ? isDirectoryWritable(npmGlobalModulesDir(npmPrefix)) : true;
   if (!nodeStatus.nodeOk) {
     return {
       success: false,
-      error: nodeStatus.error || "未检测到可用的 Node.js",
+      error: selfUpgradeError || nodeStatus.error || "未检测到可用的 Node.js",
       status: await getCliAgentStatus(descriptor),
     };
   }
-  if (!(await commandExists("npm"))) {
+  if (!npmAvailable) {
     return {
       success: false,
-      error: "未找到 npm，无法自动更新 CLI agent",
+      error: selfUpgradeError || "未找到 npm，无法自动更新 CLI agent",
+      status: await getCliAgentStatus(descriptor),
+    };
+  }
+  if (!npmWritable && npmPrefix) {
+    const fallbackPackage = getCliPackageForVersion(descriptor, requestedVersion)?.name || descriptor.packageName;
+    return {
+      success: false,
+      error: selfUpgradeError || `${descriptor.name} 无法通过 npm 更新：npm 全局目录 ${npmGlobalModulesDir(npmPrefix)} 当前用户不可写（属于 root）。`
+        + `\n可把 npm 前缀改到用户目录后重试：npm config set prefix ~/.npm-global`
+        + (fallbackPackage ? `\n或直接用系统包管理器安装 ${fallbackPackage}。` : ""),
       status: await getCliAgentStatus(descriptor),
     };
   }
@@ -819,7 +964,6 @@ async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string)
     }
 
     await terminateOrphanedWindowsCliProcesses(descriptor.command || descriptor.id);
-    const requestedVersion = normalizeVersionSpec(versionSpec) || "latest";
     // 显式选版本时按该版本的主号选包（2.x → @opencode/cli，1.x → opencode-ai）；
     // 未指定版本时跟随当前已安装的主版本。
     const targetPackage = getCliPackageForVersion(
@@ -840,7 +984,6 @@ async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string)
     return { success: true, status: await getCliAgentStatus(descriptor) };
   } catch (err) {
     const rawMessage = formatError(err);
-    const requestedVersion = normalizeVersionSpec(versionSpec) || "latest";
     const statusForError = await getCliAgentStatus(descriptor);
     const failedPackageName = getCliPackageForVersion(
       descriptor,
@@ -871,6 +1014,12 @@ async function updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string)
           + `请先卸载当前的 OpenCode 包（npm uninstall -g ${descriptor.packageName || "opencode-ai"} 或 @opencode/cli），再重试安装。`,
         status: statusForError,
       };
+    }
+    if (/EACCES|EPERM/i.test(rawMessage) && descriptor.selfUpgrade && descriptor.command) {
+      // 预检失败或者 npm 自己报权限错误：退回工具自带升级命令。
+      const fallback = await runCliSelfUpgrade(descriptor, statusForError.currentVersion, requestedVersion);
+      if (fallback.success) return fallback;
+      return { ...fallback, error: `${fallback.error || ""}\n（npm 原始报错：${rawMessage}）`.trim() };
     }
     if (/ETARGET|No matching version found for /i.test(rawMessage)) {
       const packageList = (descriptor.packages?.length

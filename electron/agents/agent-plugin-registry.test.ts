@@ -30,7 +30,12 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { AgentPluginRegistry, getCliPackageForVersion } from "./agent-plugin-registry";
+import {
+  AgentPluginRegistry,
+  buildSelfUpgradeArgs,
+  getCliPackageForVersion,
+  isNpmPermissionError,
+} from "./agent-plugin-registry";
 
 const backendModule = `
 export function createAgentBackend(context) {
@@ -2080,5 +2085,89 @@ export const configProvider = {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("非法路径");
+  });
+});
+
+describe("CLI self-upgrade fallback", () => {
+  const opencodeSelfUpgrade = {
+    args: ["upgrade"],
+    majorFlag: "--major",
+    supportsTarget: true,
+  };
+
+  it("跨大版本时用 majorFlag，不把版本号当参数", () => {
+    expect(buildSelfUpgradeArgs({ selfUpgrade: opencodeSelfUpgrade }, "1.19.5", "2.2.6"))
+      .toEqual(["upgrade", "--major"]);
+  });
+
+  it("同版本线且指定版本时把版本交给工具自己处理", () => {
+    expect(buildSelfUpgradeArgs({ selfUpgrade: opencodeSelfUpgrade }, "2.1.0", "2.2.6"))
+      .toEqual(["upgrade", "2.2.6"]);
+  });
+
+  it("latest 且不跨版本线时只跑基础升级命令", () => {
+    expect(buildSelfUpgradeArgs({ selfUpgrade: opencodeSelfUpgrade }, "1.19.5", "latest"))
+      .toEqual(["upgrade"]);
+  });
+
+  it("未声明自带升级入口时返回 undefined", () => {
+    expect(buildSelfUpgradeArgs({}, "1.19.5", "2.2.6")).toBeUndefined();
+  });
+
+  it("methodArgs 会拼在 args 之后", () => {
+    const selfUpgrade = { ...opencodeSelfUpgrade, methodArgs: ["-m", "curl"] };
+    expect(buildSelfUpgradeArgs({ selfUpgrade }, "1.19.5", "latest"))
+      .toEqual(["upgrade", "-m", "curl"]);
+  });
+
+  it("识别 npm 的目录权限错误", () => {
+    expect(isNpmPermissionError("npm error code: 'EACCES'\nnpm error errno: -13")).toBe(true);
+    expect(isNpmPermissionError("EPERM: operation not permitted")).toBe(true);
+    expect(isNpmPermissionError("E404 Not Found")).toBe(false);
+    expect(isNpmPermissionError("")).toBe(false);
+  });
+});
+
+describe("self-upgrade manifest wiring", () => {
+  let tempRoot = "";
+  let registry: AgentPluginRegistry;
+
+  beforeEach(async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "hpp-agent-selfupgrade-"));
+    electronState.userDataDir = join(tempRoot, "user-data");
+    electronState.appVersion = "1.0.0";
+    registry = new AgentPluginRegistry();
+  });
+
+  afterEach(async () => {
+    await registry.shutdown();
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("把 manifest 里的 selfUpgrade 带到 descriptor 上", async () => {
+    const source = await createPluginSource(tempRoot, "self-upgrade-agent", "1.0.0", undefined, undefined, {
+      command: "opencode",
+      packageName: "opencode-ai",
+      packages: [{ line: "v2", name: "@opencode/cli" }, { line: "v1", name: "opencode-ai" }],
+      selfUpgrade: { args: ["upgrade"], majorFlag: "--major", supportsTarget: true },
+    });
+
+    const result = await registry.installFromPath(source);
+
+    expect(result.success).toBe(true);
+    expect(result.agent?.selfUpgrade).toEqual({ args: ["upgrade"], majorFlag: "--major", supportsTarget: true });
+  });
+
+  it("没有 args 的 selfUpgrade 声明会被忽略，退回 npm 路径", async () => {
+    const source = await createPluginSource(tempRoot, "broken-self-upgrade", "1.0.0", undefined, undefined, {
+      command: "opencode",
+      packageName: "opencode-ai",
+      selfUpgrade: { args: [], majorFlag: "--major" },
+    });
+
+    const result = await registry.installFromPath(source);
+
+    expect(result.success).toBe(true);
+    expect(result.agent?.selfUpgrade).toBeUndefined();
   });
 });

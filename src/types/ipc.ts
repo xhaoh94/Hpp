@@ -349,6 +349,22 @@ export interface AgentCliPackage {
   label?: string;
 }
 
+/**
+ * 工具自带的升级入口（如 `opencode upgrade`）。
+ * npm 全局前缀不可写（系统级 npm）或命令行不是 npm 装的时，`npm install -g`
+ * 必然失败；此时退回工具自己的升级命令，而不是把 EACCES 丢给用户。
+ */
+export interface AgentCliSelfUpgrade {
+  /** 升级子命令，如 ["upgrade"]，会拼在命令行后面。 */
+  args: string[];
+  /** 拼在 args 之后的固定参数，如 ["-m", "curl"] 强制不走 npm。 */
+  methodArgs?: string[];
+  /** 跨大版本时使用的开关，如 opencode 的 --major。 */
+  majorFlag?: string;
+  /** 是否接受显式版本号作为参数。 */
+  supportsTarget?: boolean;
+}
+
 export interface AgentPluginManifest {
   schemaVersion: 3;
   id: string;
@@ -361,6 +377,7 @@ export interface AgentPluginManifest {
   command?: string;
   packageName?: string;
   packages?: AgentCliPackage[];
+  selfUpgrade?: AgentCliSelfUpgrade;
   order?: number;
   installHint?: string;
   updateCommand?: string;
@@ -379,6 +396,7 @@ export interface AgentDescriptor {
   command?: string;
   packageName?: string;
   packages?: AgentCliPackage[];
+  selfUpgrade?: AgentCliSelfUpgrade;
   order: number;
   capabilities: AgentCapabilities;
   source: AgentSource;
@@ -411,6 +429,7 @@ export interface OfficialAgentPluginDescriptor {
   command?: string;
   packageName?: string;
   packages?: AgentCliPackage[];
+  selfUpgrade?: AgentCliSelfUpgrade;
   order: number;
   installHint?: string;
   updateCommand?: string;

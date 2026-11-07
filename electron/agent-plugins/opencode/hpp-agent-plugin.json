@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "minHppVersion": "0.1.0",
   "description": "OpenCode CLI programming agent (1.x / 2.x)",
   "entry": "agent.mjs",
@@ -13,6 +13,11 @@
     { "line": "v2", "name": "@opencode/cli", "label": "OpenCode 2.x（推荐）" },
     { "line": "v1", "name": "opencode-ai", "label": "OpenCode 1.x" }
   ],
+  "selfUpgrade": {
+    "args": ["upgrade"],
+    "majorFlag": "--major",
+    "supportsTarget": true
+  },
   "order": 30,
   "installHint": "npm install -g @opencode/cli   # OpenCode 2.x（推荐）\nnpm install -g opencode-ai     # OpenCode 1.x",
   "updateCommand": "npm install -g @opencode/cli@latest",
