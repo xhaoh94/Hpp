@@ -52,6 +52,10 @@ export interface AgentSubagent {
   prompt?: string;
   stopReason?: ProcessSubagentStopReason;
   usage?: ProcessSubagentUsage;
+  startedAt?: number;
+  completedAt?: number;
+  lastActivityAt?: number;
+  liveOutput?: string;
 }
 
 export interface AgentProcessEntry extends ProcessEntryView {
@@ -152,6 +156,8 @@ export interface PendingFile {
   filePath: string;
   startLine: number;
   endLine: number;
+  /** 编辑器未保存缓冲区的内容，有值时发送不再读盘。 */
+  text?: string;
 }
 
 export interface PendingPathAttachment {
@@ -1346,6 +1352,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         filePath: node.filePath,
         startLine: node.startLine,
         endLine: node.endLine,
+        ...(node.text !== undefined ? { text: node.text } : {}),
       }] : []);
       const pendingPathAttachments = nextDocument.nodes.flatMap((node) => node.type === "path" ? [{
         id: node.id,

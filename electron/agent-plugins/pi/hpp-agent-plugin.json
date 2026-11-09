@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "pi",
   "name": "Pi",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "minHppVersion": "0.1.0",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",
@@ -19,10 +19,8 @@
     "fork": true,
     "actions": true,
     "compaction": {
-      "customModel": true,
       "thinkingLevel": true,
-      "toggle": true,
-      "channelModel": true
+      "toggle": true
     },
     "subagent": {
       "supported": true,

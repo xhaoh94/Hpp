@@ -12,6 +12,7 @@ import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
 import { remoteAccessServer } from "./remote/remote-server";
+import { editorBridgeServer } from "./editor-bridge/server";
 import type { AppUpdateState, AppUpdateStatus } from "../src/types/ipc";
 import {
   APP_UPDATE_CHECK_INTERVAL_MS,
@@ -190,6 +191,7 @@ const shutdownCoordinator = new AppShutdownCoordinator(async () => {
   await Promise.allSettled([
     shutdownAgentRuntime(),
     remoteAccessServer.shutdown(),
+    editorBridgeServer.stop(),
   ]);
   closeStoreDatabases();
 });
@@ -490,6 +492,8 @@ if (singleInstanceLock) {
 
     await loadCloseToTraySetting();
     await remoteAccessServer.initialize(() => mainWindow);
+    // 编辑器桥接失败（端口、权限）不能拖垮启动，失败原因留给设置页展示。
+    await editorBridgeServer.initialize(() => mainWindow);
 
     if (app.isPackaged) {
       initAutoUpdater();

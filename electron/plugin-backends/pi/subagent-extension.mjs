@@ -9,6 +9,8 @@ import { resolveSubagentCwd } from "./subagent-policy.mjs";
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const MAX_TASK_OUTPUT_BYTES = 8 * 1024;
+/** 监视窗里展示的实时输出片段：只要尾巴，不参与最终结果。 */
+const MAX_LIVE_OUTPUT_BYTES = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES = 32 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_MESSAGE_COUNT = 80;
@@ -503,6 +505,11 @@ const toPublicResult = (result) => ({
   /** 因可重试的上游错误自动重跑的次数；0 表示没重试过。 */
   retries: Number(result.retries) || 0,
   step: result.step,
+  // 监视窗用：本任务自己的时间线 + 最近一段实时输出。
+  ...(Number.isFinite(result.startedAt) ? { startedAt: result.startedAt } : {}),
+  ...(Number.isFinite(result.completedAt) ? { completedAt: result.completedAt } : {}),
+  ...(Number.isFinite(result.lastActivityAt) ? { lastActivityAt: result.lastActivityAt } : {}),
+  ...(result.liveOutput ? { liveOutput: truncateText(result.liveOutput, MAX_LIVE_OUTPUT_BYTES) } : {}),
 });
 
 const getPartialResultFromUpdate = (partial) => {
@@ -566,11 +573,18 @@ const runSingleAgent = async ({
     liveOutput: "",
     stderr: "",
     usage: createUsage(),
+    // 监视窗需要按任务算耗时、判断是否停滞：这里记本任务自己的时间线。
+    startedAt: Date.now(),
+    lastActivityAt: Date.now(),
     // Prefer the child process' actual model once its first assistant message
     // arrives; the dispatching model is only a fallback for providers that omit
     // model metadata in JSON mode.
     model: agent.model,
     step,
+  };
+  const finishResult = () => {
+    result.completedAt = Date.now();
+    return result;
   };
   let progressUpdateTimer = null;
   const emitUpdateNow = () => {
@@ -599,6 +613,7 @@ const runSingleAgent = async ({
     const activity = nonEmptyString(value);
     if (!activity || activity === result.currentActivity) return;
     result.currentActivity = activity;
+    result.lastActivityAt = Date.now();
     if (immediate) emitUpdateNow();
     else emitProgressUpdate();
   };
@@ -609,7 +624,7 @@ const runSingleAgent = async ({
     result.stopReason = "aborted";
     result.errorMessage = "子 Agent 已中断";
     emitUpdate();
-    return result;
+    return finishResult();
   }
 
   const interactive = typeof requestUI === "function" && existsSync(bridgeExtensionPath);
@@ -621,7 +636,7 @@ const runSingleAgent = async ({
     result.stopReason = "error";
     result.errorMessage = error instanceof Error ? error.message : String(error);
     emitUpdate();
-    return result;
+    return finishResult();
   }
   const childCwd = cwdResult.cwd;
   const projectRoot = cwdResult.projectRoot;
@@ -630,7 +645,7 @@ const runSingleAgent = async ({
     result.stopReason = "error";
     result.errorMessage = `SubAgent 任务过长，非交互模式最多支持 ${MAX_JSON_TASK_BYTES} 字节。`;
     emitUpdate();
-    return result;
+    return finishResult();
   }
   const extensionIntegrations = getSubagentExtensionIntegration(agent.name, agentDir);
   const approvedExtensionPaths = extensionIntegrations.flatMap((integration) => integration.extensionPaths);
@@ -823,8 +838,13 @@ const runSingleAgent = async ({
           result.usage.cost += Number(usage.cost?.total) || 0;
           result.usage.contextTokens = Number(usage.totalTokens) || result.usage.contextTokens;
           result.model = nonEmptyString(message.model) || result.model || dispatchDefaults.model;
-          result.stopReason = nonEmptyString(message.stopReason) || result.stopReason;
-          result.errorMessage = nonEmptyString(message.errorMessage) || result.errorMessage;
+          const nextStopReason = nonEmptyString(message.stopReason);
+          const nextErrorMessage = nonEmptyString(message.errorMessage);
+          if (nextStopReason) result.stopReason = nextStopReason;
+          // pi 内部会自己重试：失败尝试的 errorMessage 不能靠 `||` 留着，否则重试
+          // 成功后任务还挂着「overloaded」这类旧文案，界面上看起来就是失败。
+          if (nextErrorMessage) result.errorMessage = nextErrorMessage;
+          else if (nextStopReason === "stop") result.errorMessage = "";
         }
         emitUpdate();
       }
@@ -938,11 +958,15 @@ const runSingleAgent = async ({
       result.protocolWarning = `已跳过 ${oversizedLineCount} 条超大协议记录`;
       result.stderr = truncateText(`${result.stderr}${result.stderr ? "\n" : ""}${result.protocolWarning}`, MAX_STDERR_BYTES);
     }
-    result.currentActivity = result.stopReason
+    // "stop" 是正常结束，不是失败；只有这三种才算失败原因。
+    const stopReasonFailed = result.stopReason === "timeout"
+      || result.stopReason === "error"
+      || result.stopReason === "aborted";
+    result.currentActivity = stopReasonFailed
       ? result.errorMessage || (result.stopReason === "timeout" ? "已超时" : "已停止")
       : result.output ? "已完成" : "已完成（未返回正文）";
     emitUpdate();
-    return result;
+    return finishResult();
   } catch (error) {
     if (signal?.aborted || aborted) {
       result.exitCode = 1;
@@ -955,7 +979,7 @@ const runSingleAgent = async ({
     }
     result.currentActivity = result.errorMessage;
     emitUpdate();
-    return result;
+    return finishResult();
   } finally {
     dismissUI?.(ownerId, "child-exit");
     if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
@@ -1233,6 +1257,8 @@ export const createHppSubagentExtension = ({
           }
           const retried = await run(item, step, update, runKey);
           retried.retries = next;
+          // 重试是同一个任务的重来：耗时按首次启动算，否则监视窗会显示成刚跑不久。
+          retried.startedAt = result.startedAt || retried.startedAt;
           result = retried;
           attempt = next;
         }

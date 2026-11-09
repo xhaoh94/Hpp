@@ -279,17 +279,23 @@ export async function setAgentBackendModelsVisible(
   }
 }
 
+/** MCP 工具的两种接入方式，缺一个就会有一类工具调不到。 */
+const MCP_TOOL_EXPOSURE_IDS = ["tool_search", "codemode"] as const;
+
 /**
- * 开启 MCP 时必须有一个能"够到" MCP 工具的扩展：MCP 的默认 exposure 是
- * `codemode`，没有 codemode/tool_search 时工具对模型不可见，Pi 每次会话都会
- * 发「MCP tools are only reachable…」警告。这里在配置层做联动，保证 UI 显示
- * 与实际运行一致（用户显式选了 tool_search 时不强加 codemode）。
+ * 用户只需要决定「开不开 MCP」；工具以什么方式暴露给模型由 Hpp 决定。
+ *
+ * 两个都要挂，因为它们覆盖的是不同的 exposure 档：
+ * - `tool_search` 管 `deferred`（按需检索，Plan 只读模式下也能用）
+ * - `codemode` 管 `codemode`（只能从脚本里调，也是 pi 的默认档）
+ * 缺任何一个，对应档位的 server 工具对模型都不可见，Pi 每次会话都会告警。
+ *
+ * 旧配置里残留的 codemode / tool_search 一律按这里重写，不沿用。
  */
-function withMcpReachableTool(enabled: string[], known: Set<string>): string[] {
-  if (!enabled.includes("mcp")) return enabled;
-  if (enabled.includes("codemode") || enabled.includes("tool_search")) return enabled;
-  if (!known.has("codemode")) return enabled;
-  return [...enabled, "codemode"];
+function resolveBuiltinExtensions(enabled: string[], known: Set<string>): string[] {
+  const userEnabled = enabled.filter((id) => id !== "codemode" && id !== "tool_search");
+  if (!userEnabled.includes("mcp")) return userEnabled;
+  return [...userEnabled, ...MCP_TOOL_EXPOSURE_IDS.filter((id) => known.has(id))];
 }
 
 async function getBuiltinExtensionDeclaration(
@@ -316,9 +322,12 @@ export async function getAgentBuiltinExtensions(agentId: string): Promise<string
     // 存过的值只保留插件仍声明的 id：插件升级删掉某个扩展后不该留下幽灵开关。
     const known = new Set(declaration.options.map((option) => option.id));
     const resolved = [...new Set((saved ?? declaration.defaultEnabled).filter((id) => known.has(id)))];
-    const enabled = withMcpReachableTool(resolved, known);
-    if (enabled.length !== resolved.length) {
-      // 老配置（只开了 MCP）自动补齐，保证下次读取和 UI 显示一致。
+    const enabled = resolveBuiltinExtensions(resolved, known);
+    // 顺序也要比：老配置里 codemode/tool_search 的顺序和现在不一样，只比长度会漏掉回写。
+    const changed = enabled.length !== resolved.length
+      || enabled.some((id, index) => id !== resolved[index]);
+    if (changed) {
+      // 老配置（只开了 MCP、或残留 codemode/tool_search）自动归一化，保证下次读取和 UI 显示一致。
       await updateSettings((settings) => {
         const all = isRecord(settings[BUILTIN_EXTENSIONS_KEY]) ? settings[BUILTIN_EXTENSIONS_KEY] : {};
         settings[BUILTIN_EXTENSIONS_KEY] = { ...all, [agentId]: enabled };
@@ -352,7 +361,7 @@ export async function setAgentBuiltinExtensions(
       throw new Error("当前 Agent 不允许修改内置扩展开关。");
     }
     const known = new Set(declaration.options.map((option) => option.id));
-    const next = withMcpReachableTool(
+    const next = resolveBuiltinExtensions(
       [...new Set((enabledIds || []).map(String).filter((id) => known.has(id)))],
       known,
     );

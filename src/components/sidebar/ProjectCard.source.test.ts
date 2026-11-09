@@ -78,12 +78,16 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(historyDeletion).toContain("if (targets.length === 0) return;");
   });
 
-  it("captures the remembered session project once and leaves later card state user-controlled", () => {
+  it("remembers each card's expanded state across restarts", () => {
+    // 启动默认只对“从未手动切换过”的项目生效：默认展开当前会话所在的项目。
     expect(projectViewSource).toContain("projectDataHydrated && startupCollapseStateRef.current === null");
     expect(projectViewSource).toContain("project.id !== rememberedProjectId");
-    expect(projectViewSource).toContain("initialSessionsCollapsed={startupCollapseStateRef.current?.get(project.id) ?? false}");
-    expect(projectCardSource).toContain("useState(initialSessionsCollapsed)");
-    expect(projectCardSource).not.toContain("setSessionsCollapsed(project.id");
+    expect(projectViewSource).toContain("project.sessionsCollapsed");
+    // 手动切换后写回项目本身（随 projects.json 持久化），下次启动沿用。
+    expect(projectCardSource).toContain("project.sessionsCollapsed ?? initialSessionsCollapsed");
+    expect(projectCardSource).toContain("setProjectSessionsCollapsed(project.id, next)");
+    // 不再每次渲染都把卡片状态重置成启动默认。
+    expect(projectCardSource).not.toContain("useState(initialSessionsCollapsed)");
   });
 
   it("opens the add-project form as a centered modal without pushing the project list", () => {
@@ -158,5 +162,29 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(sidebarContentRule).toContain("overflow-x: hidden");
     expect(terminalRule).toContain("overflow-x: hidden");
     expect(terminalRule).toContain("overflow-y: visible");
+  });
+
+  it("opens the same add-project modal styling for editing name and path", () => {
+    const editModal = readFileSync(new URL("./ProjectEditModal.tsx", import.meta.url), "utf8");
+
+    expect(projectCardSource).toContain("setShowEdit(true)");
+    expect(projectCardSource).toContain("<ProjectEditModal");
+    expect(projectCardSource).toContain("updateProject(project.id, { name, path })");
+    expect(editModal).toContain('className="project-form project-modal"');
+    expect(editModal).toContain('className="input-field path-input"');
+    expect(editModal).toContain("window.electronAPI.openDirectory()");
+  });
+
+  // 默认工作区是内置卡片：路径只能存在设置里，否则两处各存一份、重启后互相覆盖。
+  it("keeps the built-in default workspace path in settings and hides its delete button", () => {
+    const saveHandler = projectCardSource.slice(
+      projectCardSource.indexOf("const handleSaveProjectEdit"),
+      projectCardSource.indexOf("const handleDeleteProject"),
+    );
+    expect(saveHandler).toContain("saveDefaultWorkspacePath(path)");
+    expect(saveHandler).toContain("syncDefaultWorkspace(path)");
+    expect(projectCardSource).toContain("{!isDefaultWorkspace && (");
+    expect(projectViewSource).toContain("defaultWorkspaceProject");
+    expect(projectViewSource).toContain("draggableProjects = projects.filter");
   });
 });

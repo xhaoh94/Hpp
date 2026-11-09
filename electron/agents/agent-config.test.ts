@@ -515,7 +515,7 @@ describe("agent provider config", () => {
     expect(settings.agentModelPreferences["test-agent"].backendModelsVisible).toBe(true);
   });
 
-  it("persists builtin extension switches and falls back to declared defaults", async () => {
+  it("persists only the MCP switch and fills in tool exposure automatically", async () => {
     testState.capabilities = {
       configuration: providerConfiguration("hpp"),
       providerActivation: "none",
@@ -524,24 +524,35 @@ describe("agent provider config", () => {
         defaultEnabled: ["tool_search"],
         options: [
           { id: "codemode", label: "Codemode", hotReload: true },
+          { id: "mcp", label: "MCP", hotReload: true },
           { id: "tool_search", label: "Tool search", hotReload: true },
         ],
       },
     };
 
-    // 没存过时用插件声明的默认值。
-    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["tool_search"]);
-    await expect(setAgentBuiltinExtensions("test-agent", ["codemode"])).resolves.toMatchObject({
+    // 用户只能开关 MCP：没开 MCP 时两个接入方式都不该留下。
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual([]);
+
+    // 开 MCP 自动带上两种接入方式：缺一个就有一档 exposure 的工具调不到。
+    await expect(setAgentBuiltinExtensions("test-agent", ["mcp"])).resolves.toMatchObject({
       success: true,
-      enabledIds: ["codemode"],
+      enabledIds: ["mcp", "tool_search", "codemode"],
     });
-    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["codemode"]);
+    await expect(getAgentBuiltinExtensions("test-agent"))
+      .resolves.toEqual(["mcp", "tool_search", "codemode"]);
 
     const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
-    expect(settings.agentBuiltinExtensions["test-agent"]).toEqual(["codemode"]);
+    expect(settings.agentBuiltinExtensions["test-agent"])
+      .toEqual(["mcp", "tool_search", "codemode"]);
+
+    // 关掉 MCP 时接入方式一起消失，不留半个配置。
+    await expect(setAgentBuiltinExtensions("test-agent", [])).resolves.toMatchObject({
+      success: true,
+      enabledIds: [],
+    });
   });
 
-  it("enables codemode automatically when MCP is turned on", async () => {
+  it("rewrites legacy codemode / tool_search selections saved by older versions", async () => {
     testState.capabilities = {
       configuration: providerConfiguration("hpp"),
       providerActivation: "none",
@@ -556,26 +567,25 @@ describe("agent provider config", () => {
       },
     };
 
-    // MCP 默认 exposure=codemode：只开 MCP 时工具对模型不可见，Pi 每次会话都会
-    // 警告「MCP tools are only reachable…」，所以保存时联动打开 codemode。
-    await expect(setAgentBuiltinExtensions("test-agent", ["mcp"])).resolves.toMatchObject({
-      success: true,
-      enabledIds: ["mcp", "codemode"],
-    });
-
-    // 已经显式选了 tool_search 时不强加 codemode。
-    await expect(setAgentBuiltinExtensions("test-agent", ["mcp", "tool_search"])).resolves.toMatchObject({
-      enabledIds: ["mcp", "tool_search"],
-    });
-
-    // 旧配置（只写了 mcp）读取时自动补全并回写。
     const settingsPath = join(tempRoot, "hpp-data", "settings.json");
-    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
-    settings.agentBuiltinExtensions["test-agent"] = ["mcp"];
-    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
-    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["mcp", "codemode"]);
+    const writeSaved = async (ids: string[]) => {
+      const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+      settings.agentBuiltinExtensions["test-agent"] = ids;
+      await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+    };
+
+    // 老版本勾过 codemode / tool_search：读取时按新规则重排并回写。
+    await setAgentBuiltinExtensions("test-agent", ["mcp"]);
+    await writeSaved(["mcp", "codemode", "tool_search"]);
+    await expect(getAgentBuiltinExtensions("test-agent"))
+      .resolves.toEqual(["mcp", "tool_search", "codemode"]);
     const persisted = JSON.parse(await readFile(settingsPath, "utf8"));
-    expect(persisted.agentBuiltinExtensions["test-agent"]).toEqual(["mcp", "codemode"]);
+    expect(persisted.agentBuiltinExtensions["test-agent"])
+      .toEqual(["mcp", "tool_search", "codemode"]);
+
+    // 只有 codemode、没开 MCP 的旧配置直接丢掉。
+    await writeSaved(["codemode"]);
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual([]);
   });
 
   it("drops unknown and duplicated builtin extension ids", async () => {
@@ -585,20 +595,23 @@ describe("agent provider config", () => {
       builtinExtensions: {
         userConfigurable: true,
         defaultEnabled: [],
-        options: [{ id: "codemode", label: "Codemode", hotReload: true }],
+        options: [
+          { id: "codemode", label: "Codemode", hotReload: true },
+          { id: "mcp", label: "MCP", hotReload: true },
+        ],
       },
     };
 
-    await expect(setAgentBuiltinExtensions("test-agent", ["codemode", "codemode", "ghost_ext"]))
-      .resolves.toMatchObject({ success: true, enabledIds: ["codemode"] });
+    await expect(setAgentBuiltinExtensions("test-agent", ["mcp", "mcp", "ghost_ext"]))
+      .resolves.toMatchObject({ success: true, enabledIds: ["mcp", "codemode"] });
 
     // 存过的幽灵 id（插件升级后删掉了该扩展）读回时被过滤掉。
     const dataDir = join(tempRoot, "hpp-data");
     await mkdir(dataDir, { recursive: true });
     await writeFile(join(dataDir, "settings.json"), JSON.stringify({
-      agentBuiltinExtensions: { "test-agent": ["ghost_ext", "codemode"] },
+      agentBuiltinExtensions: { "test-agent": ["ghost_ext", "mcp"] },
     }), "utf8");
-    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["codemode"]);
+    await expect(getAgentBuiltinExtensions("test-agent")).resolves.toEqual(["mcp", "codemode"]);
   });
 
   it("reports builtin extensions as unsupported when the agent does not declare them", async () => {

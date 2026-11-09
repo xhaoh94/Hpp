@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
-import { Bot, BrainCircuit, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Server, Terminal, Trash2, X, Zap } from "lucide-react";
+import { Bot, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Server, Trash2, X, Zap } from "lucide-react";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
@@ -10,10 +10,8 @@ import { useChatStore } from "@/stores/chat-store";
 import { getThinkingLevelLabel, normalizeSupportedThinkingLevels, THINKING_LEVELS } from "@shared/models";
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "@shared/agent-provider-copy";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
-import { AgentCompactionModal } from "./AgentCompactionModal";
 import { AgentSubagentModal } from "./AgentSubagentModal";
 import { AgentMcpModal } from "./AgentMcpModal";
-import { AgentCodemodeModal } from "./AgentCodemodeModal";
 import { AgentConfigIO } from "./AgentConfigIO";
 import "./Settings.css";
 
@@ -381,8 +379,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const endpointOptions = providerConfiguration?.endpoints || [];
   const authModeOptions = providerConfiguration?.authModes || [];
   const backendModelVisibility = providerConfiguration?.backendModelVisibility;
-  const compactionCapabilities = activeAgent?.capabilities.compaction;
-  const supportsCompactionConfiguration = !!compactionCapabilities && compactionCapabilities !== "none";
   const subagentCapabilities = activeAgent?.capabilities.subagent;
   const supportsSubagentConfiguration = !!subagentCapabilities
     && subagentCapabilities !== "none"
@@ -422,7 +418,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [builtinExtensionsEnabled, setBuiltinExtensionsEnabled] = useState<string[]>([]);
   const [savingBuiltinExtensions, setSavingBuiltinExtensions] = useState(false);
   const [mcpModalOpen, setMcpModalOpen] = useState(false);
-  const [codemodeModalOpen, setCodemodeModalOpen] = useState(false);
   const [reorderingProviderId, setReorderingProviderId] = useState<string>("");
   const [dragProviderId, setDragProviderId] = useState<string>("");
   const [dragOverProviderId, setDragOverProviderId] = useState<string>("");
@@ -436,7 +431,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const [modelSearch, setModelSearch] = useState("");
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [compactionModalOpen, setCompactionModalOpen] = useState(false);
   const [subagentModalOpen, setSubagentModalOpen] = useState(false);
   const [copySourceProvider, setCopySourceProvider] = useState<AgentProviderConfig | null>(null);
   const [copyingTargetAgentId, setCopyingTargetAgentId] = useState("");
@@ -534,7 +528,6 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   }, [agentId]);
 
   useEffect(() => {
-    setCompactionModalOpen(false);
     setSubagentModalOpen(false);
   }, [agentId]);
 
@@ -543,7 +536,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     [config.providers, selectedProviderId]
   );
 
-  // 已配置渠道里的全部模型，SubAgent / 上下文压缩的模型选择共用。
+  // 已配置渠道里的全部模型，SubAgent 的模型选择用。
   const providerModelOptions = useMemo(() => {
     const seen = new Set<string>();
     return config.providers.flatMap((provider) => provider.models.flatMap((model) => {
@@ -1530,63 +1523,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   SubAgent
                 </button>
               )}
-              {supportsCompactionConfiguration && (
+              {/* 工具接入方式（codemode / tool_search）由 Hpp 按 MCP 开关自动决定，不暴露给用户。 */}
+              {builtinExtensionOptions.some((option) => option.id === "mcp") && (
                 <button
                   type="button"
-                  className="btn-action"
-                  onClick={() => setCompactionModalOpen(true)}
-                  disabled={loading}
+                  className="btn-action agent-config-mcp-button"
+                  onClick={() => setMcpModalOpen(true)}
+                  disabled={loading || savingBuiltinExtensions}
+                  title="读取 ~/.pi/agent/mcp.json 里的服务器并接入其工具"
                 >
-                  <BrainCircuit size={13} />
-                  上下文压缩
+                  <Server size={13} />
+                  MCP
+                  {builtinExtensionsEnabled.includes("mcp") && <span className="agent-config-mcp-dot" />}
                 </button>
               )}
-              {builtinExtensionOptions.map((option) => (
-                option.id === "mcp" ? (
-                  // MCP 有服务器配置要管，勾选框装不下 —— 走按钮 + 弹窗。
-                  // 勾选状态直接显示在按钮上，避免用户点进去才知道开没开。
-                  <button
-                    key={option.id}
-                    type="button"
-                    className="btn-action agent-config-mcp-button"
-                    onClick={() => setMcpModalOpen(true)}
-                    disabled={loading || savingBuiltinExtensions}
-                    title={option.description}
-                  >
-                    <Server size={13} />
-                    MCP
-                    {builtinExtensionsEnabled.includes(option.id) && <span className="agent-config-mcp-dot" />}
-                  </button>
-                ) : option.id === "codemode" ? (
-                  // codemode 有 mode / inlineBudget 两个可配项，也走弹窗。
-                  <button
-                    key={option.id}
-                    type="button"
-                    className="btn-action agent-config-mcp-button"
-                    onClick={() => setCodemodeModalOpen(true)}
-                    disabled={loading || savingBuiltinExtensions}
-                    title={option.description}
-                  >
-                    <Terminal size={13} />
-                    Codemode
-                    {builtinExtensionsEnabled.includes(option.id) && <span className="agent-config-mcp-dot" />}
-                  </button>
-                ) : (
-                  <label
-                    key={option.id}
-                    className="agent-config-model-visibility"
-                    title={option.description}
-                  >
-                    <span>{option.label}</span>
-                    <input
-                      type="checkbox"
-                      checked={builtinExtensionsEnabled.includes(option.id)}
-                      disabled={loading || savingBuiltinExtensions}
-                      onChange={(event) => void handleBuiltinExtensionToggle(option.id, event.target.checked).catch(() => {})}
-                    />
-                  </label>
-                )
-              ))}
               <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
                 <RefreshCw size={13} />
                 {reloading ? "重载中..." : "重新载入当前配置"}
@@ -2183,25 +2133,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
           agentName={activeAgent?.name || getAgentName(agentId)}
           enabled={builtinExtensionsEnabled.includes("mcp")}
           onEnabledChange={async (next) => { await handleBuiltinExtensionToggle("mcp", next); }}
-          codemodeEnabled={builtinExtensionsEnabled.includes("codemode")}
           projects={mcpEditableProjects}
           onClose={() => setMcpModalOpen(false)}
-        />
-      )}
-      {codemodeModalOpen && (
-        <AgentCodemodeModal
-          enabled={builtinExtensionsEnabled.includes("codemode")}
-          onEnabledChange={async (next) => { await handleBuiltinExtensionToggle("codemode", next); }}
-          onClose={() => setCodemodeModalOpen(false)}
-        />
-      )}
-      {compactionModalOpen && compactionCapabilities && compactionCapabilities !== "none" && (
-        <AgentCompactionModal
-          agentId={agentId}
-          agentName={activeAgent?.name || getAgentName(agentId)}
-          capabilities={compactionCapabilities}
-          modelOptions={providerModelOptions}
-          onClose={() => setCompactionModalOpen(false)}
         />
       )}
       {deleteConfirmProvider && (

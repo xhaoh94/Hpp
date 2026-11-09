@@ -14,8 +14,10 @@ import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
 import { hasNoSessionMessages } from "@/lib/session-lifecycle";
 import { discardSessionsCompletely } from "@/lib/session-discard";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
+import { isDefaultWorkspaceProject, saveDefaultWorkspacePath } from "@/lib/default-workspace";
+import { ProjectEditModal } from "./ProjectEditModal";
 import { showAppAlert } from "@/lib/app-dialog";
-import { GitBranch, Terminal } from "lucide-react";
+import { GitBranch, Pencil, Terminal } from "lucide-react";
 
 const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 
@@ -51,11 +53,17 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
   const {
     removeProject,
     removeSession,
+    updateProject,
+    setProjectSessionsCollapsed,
+    syncDefaultWorkspace,
     activeProjectId,
     activeSessionId,
   } = useProjectStore(useShallow((state) => ({
     removeProject: state.removeProject,
     removeSession: state.removeSession,
+    updateProject: state.updateProject,
+    setProjectSessionsCollapsed: state.setProjectSessionsCollapsed,
+    syncDefaultWorkspace: state.syncDefaultWorkspace,
     activeProjectId: state.activeProjectId,
     activeSessionId: state.activeSessionId,
   })));
@@ -78,7 +86,22 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
     return next;
   }));
   const [showHistory, setShowHistory] = useState(false);
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(initialSessionsCollapsed);
+  const [showEdit, setShowEdit] = useState(false);
+  // 展开/收起状态跟着项目走：手动切换过就用记住的值，从未切换过才用启动默认。
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(
+    () => project.sessionsCollapsed ?? initialSessionsCollapsed,
+  );
+  // 卡片可能在项目数据持久化字段到达之前就挂载了（启动时先有一份早期快照，
+  // 随后 hydration 才把 sessionsCollapsed 填进来）。那时 useState 的初始值已经
+  // 定死，表现为“记住的状态重启后失效”，所以这里等字段真正到达后补应用一次；
+  // 应用过之后用户的手动切换优先，不再被覆盖。
+  const appliedPersistedCollapseRef = useRef(project.sessionsCollapsed !== undefined);
+  useEffect(() => {
+    if (appliedPersistedCollapseRef.current) return;
+    if (project.sessionsCollapsed === undefined) return;
+    appliedPersistedCollapseRef.current = true;
+    setSessionsCollapsed(project.sessionsCollapsed);
+  }, [project.name, project.sessionsCollapsed]);
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
@@ -238,6 +261,19 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
     })();
   };
 
+  const isDefaultWorkspace = isDefaultWorkspaceProject(project);
+
+  // 默认工作区的路径只存设置里：卡片编辑与设置页写同一个字段，否则两处各存一份、重开就打架。
+  const handleSaveProjectEdit = ({ name, path }: { name: string; path: string }) => {
+    if (isDefaultWorkspace) {
+      void saveDefaultWorkspacePath(path)
+        .then(() => syncDefaultWorkspace(path))
+        .catch((error: unknown) => showAppAlert(`保存失败：${getErrorMessage(error)}`));
+      return;
+    }
+    updateProject(project.id, { name, path });
+  };
+
   const handleDeleteProject = () => {
     const sessionIds = project.sessions.map((session) => session.id);
     void Promise.allSettled(sessionIds.map((sessionId) => SessionCommandCoordinator.closeSession(sessionId)))
@@ -352,34 +388,55 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
           className={`project-info ${sessionsCollapsed ? "sessions-collapsed" : ""}`}
           onClick={(event) => {
             if ((event.target as HTMLElement).closest("button")) return;
-            setSessionsCollapsed((collapsed) => !collapsed);
+            const next = !sessionsCollapsed;
+            appliedPersistedCollapseRef.current = true;
+            setSessionsCollapsed(next);
+            setProjectSessionsCollapsed(project.id, next);
           }}
           title={sessionsCollapsed ? "展开会话" : "收起会话"}
         >
-          <button
-            className="project-close-btn"
-            onClick={handleDeleteProject}
-            title="删除项目"
-          >
-            ×
-          </button>
-          {project.sessions.some(s => s.closed) && (
+          <div className="project-card-actions">
             <button
-              className="project-history-btn"
-              onClick={() => setShowHistory(true)}
-              title="历史会话"
+              className="project-edit-btn"
+              onClick={(event) => {
+                event.stopPropagation();
+                setShowEdit(true);
+              }}
+              title="编辑项目名称与路径"
+              aria-label={`编辑项目：${project.name}`}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                <path
-                  d="M21 12C21 16.4183 16.9706 20 12 20C10.5109 20 9.11662 19.6978 7.88198 19.1546L3 21L4.39455 16.8328C3.51219 15.4868 3 13.8077 3 12C3 7.58172 7.02944 4 12 4C16.9706 4 21 7.58172 21 12Z"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinejoin="round"
-                />
-              </svg>
+              <Pencil size={12} strokeWidth={1.8} />
             </button>
-          )}
-          <div className="project-name">{project.name}</div>
+            {project.sessions.some(s => s.closed) && (
+              <button
+                className="project-history-btn"
+                onClick={() => setShowHistory(true)}
+                title="历史会话"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M21 12C21 16.4183 16.9706 20 12 20C10.5109 20 9.11662 19.6978 7.88198 19.1546L3 21L4.39455 16.8328C3.51219 15.4868 3 13.8077 3 12C3 7.58172 7.02944 4 12 4C16.9706 4 21 7.58172 21 12Z"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+            {!isDefaultWorkspace && (
+              <button
+                className="project-close-btn"
+                onClick={handleDeleteProject}
+                title="删除项目"
+              >
+                ×
+              </button>
+            )}
+          </div>
+          <div className="project-name">
+            <span className="project-name-text">{project.name}</span>
+            {isDefaultWorkspace && <span className="project-default-badge">默认</span>}
+          </div>
           <div className="project-path" title={project.path}>{project.path}</div>
           {!sessionsCollapsed && <div className="project-terminals" ref={agentShortcutsRef}>
             {loading ? (
@@ -537,6 +594,14 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
             );
           })}
         </div>
+      )}
+
+      {showEdit && (
+        <ProjectEditModal
+          project={project}
+          onClose={() => setShowEdit(false)}
+          onSubmit={handleSaveProjectEdit}
+        />
       )}
 
       <SessionHistoryModal

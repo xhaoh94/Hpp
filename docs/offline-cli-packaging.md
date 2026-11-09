@@ -7,13 +7,15 @@
 
 本文只覆盖 CLI/SDK 软件安装。模型 API 地址、API Key、账号登录和内网模型网关不包含在包内，运行模型请求时仍需配置可达的服务。
 
-## 2. 当前打包版本（2026-10-08）
+## 2. 当前打包版本
 
 | 组件 | 包名 | 版本 |
 | --- | --- | --- |
-| Codex CLI | `@openai/codex` | `0.156.1` |
-| Pi SDK/CLI | `@earendil-works/pi-coding-agent` | `1.1.0` |
-| Node.js | 便携运行时 | `24.12.0` |
+| Codex CLI | `@openai/codex` | `0.156.1`（脚本固定） |
+| Pi SDK/CLI | `@earendil-works/pi-coding-agent` | 构建时自动取 npm `latest` |
+| Node.js | 便携运行时 | `24.12.0`（脚本固定） |
+
+Pi 版本在每次构建时从 `https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest` 解析成**精确版本号**后再写入 `app/package.json`、`VERSIONS.txt` 和 ZIP 文件名，产物仍可复现。需要固定旧版本时用 `PI_VERSION=1.5.0 npm run offline:build`。Codex / Node 保持固定：升级它们需要另验 Hpp 侧兼容性，不跟随上游自动升级。
 
 Pi 包既提供 SDK 导出，也提供 `pi` 命令。当前版本的 npm `bin` 入口是 `dist/bundle/cli.js`；Hpp 集成使用同一个包的 SDK 导出，不依赖全局 `pi` 命令。
 
@@ -74,8 +76,8 @@ codex-pi-offline-win-x64-latest-2026-09-23/
 
 以下命令在联网的 Windows x64 打包机执行。示例目录为 `release/codex-pi-offline-win-x64-latest-2026-09-23`。
 
-> 自动化：`npm run offline:build`（`offline-installers/build-offline.cjs`）一键完成 5.2–5.4、第 6 节打包与 SHA-256。
-> 版本可用环境变量覆盖：`CODEX_VERSION` / `PI_VERSION` / `NODE_VERSION`（默认上面第 2 节的版本）。
+> 自动化：`npm run offline:build`（`offline-installers/build-offline.cjs`）一键完成 5.1 版本解析、5.2–5.4、第 6 节打包与 SHA-256。
+> Pi 默认自动取 npm `latest`；`PI_VERSION` 可钉精确版本或显式写 `latest`。`CODEX_VERSION` / `NODE_VERSION` 覆盖脚本里的固定值。查询 npm 失败时脚本直接报错，不会静默打出旧版本。
 > 脚本在「node 无法创建子进程」的沙箱里会自动加 `--ignore-scripts`（本包 codex/pi 无 install 脚本，原生二进制走可选依赖，不影响产物）；正常环境仍按本文保留脚本执行。
 > 下面的手工步骤保留作为参考与排障依据。
 
@@ -299,8 +301,8 @@ pi-sdk-runtime\node_modules\@earendil-works\pi-coding-agent\package.json
 
 ## 10. 更新新版本的建议流程
 
-1. 重新执行第 5.1 节的 npm 版本查询。
-2. 更新 `app/package.json` 的两个精确版本。
+1. Pi 版本由 `npm run offline:build` 自动取 `latest`；需要核对时执行第 5.1 节的 npm 版本查询。
+2. 若要固定 Pi 版本，用 `PI_VERSION=<精确版本>`；Codex / Node 的版本改 `build-offline.cjs` 顶部常量。
 3. 删除旧的 `app/node_modules` 和锁文件后重新执行生产依赖安装，避免残留旧包。
 4. 如果新 Pi 版本的 `bin` 路径变化，按 `npm view ... bin --json` 的结果更新 `pi.cmd` 和安装脚本检查项。
 5. 检查 Pi 的**依赖布局**是否变化（`npm view ... dist.shrinkwrap` 是否还在）。Pi 1.0.1 起不再发布

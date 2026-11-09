@@ -8,7 +8,7 @@ import type { OutputDetailLevel } from "@shared/output-detail";
  * 改名时漏一处就会让设置改动静默不生效，所以统一收在这里。
  *
  * `agent-settings-updated`：计划模式 / 权限模式（远程端需要实时同步）。
- * `general-settings-updated`：通用设置里的输出内容详细等级。
+ * `general-settings-updated`：通用设置里的输出内容详细等级、默认工作区路径。
  */
 export const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 export const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
@@ -20,4 +20,6 @@ export type AgentSettingsUpdatedDetail = {
 
 export type GeneralSettingsUpdatedDetail = {
   outputDetailLevel?: OutputDetailLevel;
+  /** 默认工作区路径变更；内置工作区卡片据此同步。 */
+  defaultWorkspacePath?: string;
 };

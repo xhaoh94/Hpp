@@ -108,35 +108,16 @@ const AGENT_COMPACTION_THINKING_LEVELS = new Set(["inherit", "off", "minimal", "
 const DEFAULT_AGENT_COMPACTION_CONFIG = {
   enabled: true,
   thinkingLevel: "low",
-  modelMode: "current",
-  customModel: {
-    baseUrl: "",
-    apiKey: "",
-    modelId: "",
-    api: "openai-completions",
-    reasoning: false,
-  },
 };
+// 压缩模型不可配置：一律走 Agent 当前模型，旧配置里的 modelMode / model 直接忽略。
 const normalizeAgentCompactionConfig = (value) => {
   const config = isRecord(value) ? value : {};
-  const customModel = isRecord(config.customModel) ? config.customModel : {};
-  const modelMode = config.modelMode === "custom" ? "custom" : "current";
-  const model = typeof config.model === "string" ? config.model.trim() : "";
   return {
     // 存量配置没有 enabled 字段，缺省视为启用。
     enabled: config.enabled !== false,
     thinkingLevel: AGENT_COMPACTION_THINKING_LEVELS.has(config.thinkingLevel)
       ? config.thinkingLevel
       : DEFAULT_AGENT_COMPACTION_CONFIG.thinkingLevel,
-    modelMode,
-    ...(modelMode === "custom" && model ? { model } : {}),
-    customModel: {
-      baseUrl: String(customModel.baseUrl || "").trim(),
-      apiKey: String(customModel.apiKey || "").trim(),
-      modelId: String(customModel.modelId || "").trim(),
-      api: customModel.api === "openai-responses" ? "openai-responses" : "openai-completions",
-      reasoning: customModel.reasoning === true,
-    },
   };
 };
 // 摘要输出上限 = min(0.8 × settings.reserveTokens, 模型 maxTokens)，而 pi 默认
@@ -988,88 +969,15 @@ const getCompactionThinkingLevel = (config, model, inheritedLevel) => {
     .find((level) => isCompactionThinkingLevelSupported(model, level)) || "off";
 };
 
-const createCustomCompactionTarget = async (config) => {
-  if (config.modelMode !== "custom") return null;
-  return (await resolveChannelCompactionTarget(config)) || createManualCompactionTarget(config);
-};
-
-// 从已配置渠道解析压缩模型：配置值形如 "providerId/modelId"（同 SubAgent）。
-// 渠道或模型被删除时抛错，由调用方回退到当前模型。
-const resolveChannelCompactionTarget = async (config) => {
-  const ref = typeof config.model === "string" ? config.model.trim() : "";
-  const separator = ref.indexOf("/");
-  if (separator <= 0 || separator === ref.length - 1) return null;
-  const provider = ref.slice(0, separator);
-  const modelId = ref.slice(separator + 1);
-  let model = modelRegistry?.find?.(provider, modelId);
-  if (!model) {
-    // 渠道弹窗在会话运行期间改写的 models.json 不会自动进入注册表
-    //（SDK 只在 registerProvider 等 API 调用时刷新，不 watch 文件），
-    // 与 setModel 同理：宣判不可用之前先重读一次磁盘配置（仅本地，不走网络）。
-    try {
-      await modelRegistry?.refresh?.({ allowNetwork: false });
-    } catch {
-      // 刷新失败不覆盖下方原始的「模型不可用」诊断。
-    }
-    model = modelRegistry?.find?.(provider, modelId);
-  }
-  if (!model) {
-    throw new Error(`已配置的压缩模型不可用：${ref}（渠道或模型可能已被删除）`);
-  }
-  if (!modelRegistry?.getApiKeyAndHeaders) {
-    throw new Error("当前 Agent 运行时不支持解析压缩模型凭据");
-  }
-  const auth = await modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth?.ok) throw new Error(auth?.error || `压缩模型认证失败：${ref}`);
-  return { model, auth };
-};
-
-// 旧配置：手工填写的 OpenAI 兼容模型（Base URL / 模型 ID / 协议 / Key）。
-const createManualCompactionTarget = (config) => {
-  const custom = config.customModel;
-  if (!custom.baseUrl || !custom.modelId) return null;
-  return {
-    model: {
-      id: custom.modelId,
-      name: custom.modelId,
-      provider: "hpp-compaction",
-      api: custom.api,
-      baseUrl: custom.baseUrl.replace(/\/+$/, ""),
-      reasoning: custom.reasoning,
-      ...(custom.reasoning ? {
-        // 用户已显式声明该自定义模型支持思考，因此允许手动选择全部通用档位。
-        thinkingLevelMap: {
-          minimal: "minimal",
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-          max: "max",
-        },
-      } : {}),
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 262144,
-      maxTokens: 16384,
-      ...(custom.api === "openai-completions" && custom.reasoning
-        ? { compat: { supportsReasoningEffort: true } }
-        : {}),
-    },
-    auth: {
-      apiKey: custom.apiKey || "hpp-local",
-    },
-  };
-};
-
 const resolveCurrentCompactionTarget = async (context) => {
   const model = context?.model || session?.model;
   if (!model) throw new Error("当前 Agent 没有可用于压缩的模型");
   const registry = context?.modelRegistry || modelRegistry;
   if (!registry?.getApiKeyAndHeaders) {
-    throw new Error("当前 Agent 运行时不支持解析压缩模型凭据");
+    throw new Error("当前 Agent 运行时不支持解析模型凭据");
   }
   const auth = await registry.getApiKeyAndHeaders(model);
-  if (!auth?.ok) throw new Error(auth?.error || "压缩模型认证失败");
+  if (!auth?.ok) throw new Error(auth?.error || "当前模型认证失败");
   return { model, auth };
 };
 
@@ -1129,7 +1037,7 @@ const markCompactionSucceeded = () => {
   compactionSuspended = false;
 };
 
-// 只有“自定义模型与当前模型都没跑通”才算一次彻底失败；达到阈值后停止自动压缩，
+// 当前模型无法完成摘要才算一次彻底失败；达到阈值后停止自动压缩，
 // 让用户先处理配置或新建会话，而不是每轮交互都重复发起注定失败的摘要请求。
 const markCompactionFailed = () => {
   compactionFailureStreak += 1;
@@ -1140,7 +1048,7 @@ const markCompactionFailed = () => {
     id: `hpp-compaction-suspended-${randomUUID()}`,
     status: "warning",
     title: "上下文压缩已暂停",
-    detail: `连续 ${compactionFailureStreak} 次压缩失败，本次会话已停止自动压缩以避免重复失败。请新建会话，或在「渠道配置 → 上下文压缩」更换压缩模型/渠道后重新保存；也可以手动触发一次压缩重试。`,
+    detail: `连续 ${compactionFailureStreak} 次压缩失败，本次会话已停止自动压缩以避免重复失败。请新建会话，或检查「渠道配置」里该模型渠道的凭据与额度后重新保存；也可以手动触发一次压缩重试。`,
   });
 };
 
@@ -1157,39 +1065,6 @@ const hppCompactionExtension = (pi) => {
     if (compactionSuspended && event.reason !== "manual") {
       return { cancel: true };
     }
-    // 渠道模型可能已被删除或凭据失效：解析失败时按「自定义模型不可用」处理，
-    // 回退当前模型，绝不能让 hook 抛错而卡住整个压缩流程。
-    let customTarget = null;
-    try {
-      customTarget = await createCustomCompactionTarget(config);
-    } catch (error) {
-      if (!event.signal?.aborted) {
-        send({
-          type: "status",
-          id: `hpp-compaction-custom-model-fallback-${randomUUID()}`,
-          status: "warning",
-          title: "自定义压缩模型不可用，已回退当前模型",
-          detail: `${error?.message || String(error)}（可在「渠道配置 → 上下文压缩」重新选择压缩模型，或改为“跟随当前 Agent 模型”）`,
-        });
-      }
-    }
-    if (customTarget) {
-      try {
-        const compaction = await runCompactionWithRetry(event, context, customTarget, config);
-        markCompactionSucceeded();
-        return { compaction };
-      } catch (error) {
-        if (event.signal?.aborted) return undefined;
-        send({
-          type: "status",
-          id: `hpp-compaction-custom-model-fallback-${randomUUID()}`,
-          status: "warning",
-          title: "自定义压缩模型不可用，已回退当前模型",
-          detail: `${error?.message || String(error)}（请检查该压缩模型渠道的凭据与额度）`,
-        });
-      }
-    }
-
     try {
       const currentTarget = await resolveCurrentCompactionTarget(context);
       const compaction = await runCompactionWithRetry(event, context, currentTarget, config);
@@ -1201,11 +1076,11 @@ const hppCompactionExtension = (pi) => {
           type: "status",
           id: `hpp-compaction-default-fallback-${randomUUID()}`,
           status: "warning",
-          title: "独立压缩策略不可用，已使用 Agent 默认压缩",
+          title: "压缩失败，已回退 Agent 原生压缩",
           detail: `${error?.message || String(error)}（请检查当前模型渠道的凭据与额度）`,
         });
       }
-      // 这里才是“这次压缩彻底失败”：自定义模型与当前模型都没跑通。
+      // 当前模型也没跑通，这次压缩彻底失败。
       markCompactionFailed();
       // 返回 undefined 让 Agent 的原生压缩流程接管，避免配置错误阻断会话恢复。
       return undefined;

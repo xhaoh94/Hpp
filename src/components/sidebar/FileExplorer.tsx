@@ -15,7 +15,6 @@ import { useAppStore, type FileRevealRequest } from "@/stores/app-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "@/stores/chat-store";
-import { useEditorStore } from "@/stores/editor-store";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { useFileFilters } from "@/hooks/useFileFilters";
 import { isFileTreePathWithin, isSameFileTreePath } from "@/lib/file-tree-paths";
@@ -343,11 +342,7 @@ export function FileExplorer() {
   const activeTreeCommand = treeCommand?.scopeKey === treeScopeKey ? treeCommand : null;
 
   const handleFileClick = useCallback((path: string) => {
-    if (useEditorStore.getState().mode) {
-      useEditorStore.getState().openFile(path);
-    } else {
-      setPreviewFile(path);
-    }
+    setPreviewFile(path);
   }, []);
 
   const handleSelect = useCallback((entry: FileEntry, event: MouseEvent<HTMLDivElement>, siblings: FileEntry[]) => {
@@ -549,11 +544,7 @@ export function FileExplorer() {
   useEffect(() => {
     if (!revealRequest) return;
     if (revealRequest.preview) {
-      if (useEditorStore.getState().mode) {
-        useEditorStore.getState().openFile(revealRequest.path);
-      } else {
-        setPreviewFile(revealRequest.path);
-      }
+      setPreviewFile(revealRequest.path);
     } else {
       setPreviewFile(null);
     }

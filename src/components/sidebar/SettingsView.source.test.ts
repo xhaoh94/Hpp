@@ -74,6 +74,15 @@ describe("desktop general settings layout", () => {
     expect(styles).toContain(".settings-segmented-option.selected");
   });
 
+  it("keeps the default workspace path out of general settings", () => {
+    const source = readWorkspaceFile("src/components/sidebar/SettingsView.tsx");
+
+    // 工作区目录只在项目卡片上改。设置页再放一份输入框就会造出第二个真源，
+    // 保存其它通用设置时用旧值覆盖回去（历史上踩过）。
+    expect(source).not.toContain("defaultWorkspacePath");
+    expect(source).not.toContain("general-settings-workspace");
+  });
+
   it("applies the output detail level to process rendering", () => {
     const panel = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
     expect(panel).toContain('normalizeOutputDetailLevel(general.outputDetailLevel)');
@@ -96,42 +105,13 @@ describe("desktop general settings layout", () => {
     expect(panel).toContain("{changeSummary && changeSummary.filesChanged > 0 && (");
   });
 
-  it("moves Agent compaction into plugin-capability-driven channel configuration", () => {    const configModal = readWorkspaceFile("src/components/sidebar/AgentConfigModal.tsx");
-    const compactionModal = readWorkspaceFile("src/components/sidebar/AgentCompactionModal.tsx");
-    const buttonIndex = configModal.indexOf("上下文压缩");
-    const reloadIndex = configModal.indexOf("重新载入当前配置");
+  it("no longer exposes a context-compaction entry in channel configuration", () => {
+    const configModal = readWorkspaceFile("src/components/sidebar/AgentConfigModal.tsx");
 
-    expect(buttonIndex).toBeGreaterThan(-1);
-    expect(buttonIndex).toBeLessThan(reloadIndex);
-    expect(configModal).toContain('activeAgent?.capabilities.compaction');
-    expect(configModal).toContain('compactionCapabilities !== "none"');
-    expect(configModal).not.toContain('agentId === "pi"');
-    expect(compactionModal).toContain("压缩思考等级");
-    expect(compactionModal).toContain("当前 Agent 模型");
-    expect(compactionModal).toContain("自定义模型");
-    expect(compactionModal).toContain("Base URL");
-    expect(compactionModal).toContain("模型 ID");
-    expect(compactionModal).toContain("agentCompactionByAgent");
-    expect(compactionModal).toContain("agentSetAgentCompactionConfig");
-    expect(compactionModal).toContain('typeof applyConfig !== "function"');
-    expect(compactionModal).toContain("完全退出并重启 Hpp 后将应用到该 Agent");
-    // 改完设置直接关闭（关闭按钮/遮罩/Esc）时自动应用，避免“选了跟随聊天
-    // 但没点保存”被静默丢弃后看起来像配置不生效。
-    expect(compactionModal).toContain("requestCloseRef");
-    expect(compactionModal).toContain("if (dirtyRef.current && !(await saveRef.current())) return;");
-    // 渠道里已删除的压缩模型引用：保存时拦住并显式提示，否则运行期只会静默回退。
-    expect(compactionModal).toContain("storedChannelModelMissing");
-    expect(compactionModal).toContain("已不在渠道配置中");
-
-    const preload = readWorkspaceFile("electron/preload.ts");
-    expect(preload).toContain("agentSetAgentCompactionConfig");
-    expect(preload).toContain('ipcRenderer.invoke("agent:setAgentCompactionConfig", agentId, config)');
-
-    const styles = readWorkspaceFile("src/components/sidebar/Settings.css");
-    expect(styles).toContain(".settings-compaction-custom-model");
-    expect(styles).toContain(".settings-compaction-warning");
-    expect(styles).toContain(".agent-compaction-modal-overlay");
-    expect(styles).toContain("grid-template-columns: repeat(2, minmax(0, 1fr))");
+    // 压缩一律走 Agent 自己的默认策略（启用、低思考等级），不再给用户配置入口。
+    expect(configModal).not.toContain("上下文压缩");
+    expect(configModal).not.toContain("AgentCompactionModal");
+    expect(configModal).not.toContain("compactionModalOpen");
   });
 
   it("hot-updates SubAgent settings before falling back to session reload", () => {

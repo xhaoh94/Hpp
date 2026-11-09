@@ -50,6 +50,8 @@ export type ComposerSnippetNode = {
   filePath: string;
   startLine: number;
   endLine: number;
+  /** 编辑器里未保存的缓冲区内容；有值时发送用这段文本，不再读盘。 */
+  text?: string;
 };
 
 export type ComposerSessionNode = {
@@ -160,8 +162,9 @@ function parseNode(value: unknown, index: number): ComposerNode | null {
     const filePath = stringValue(value.filePath);
     const startLine = Number.isInteger(value.startLine) ? value.startLine as number : 0;
     const endLine = Number.isInteger(value.endLine) ? value.endLine as number : 0;
+    const text = stringValue(value.text);
     return fileName && filePath && startLine > 0 && endLine >= startLine
-      ? { id, type: "snippet", fileName, filePath, startLine, endLine }
+      ? { id, type: "snippet", fileName, filePath, startLine, endLine, ...(text !== undefined ? { text } : {}) }
       : fallbackNode(value, index);
   }
   if (value.type === "session" && isRecord(value.reference)) {

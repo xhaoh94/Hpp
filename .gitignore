@@ -12,3 +12,6 @@ electron.vite.config.*.mjs
 .trae
 .workbuddy
 .trae
+
+# 由 npm run editors:build 生成的 VSCode 扩展包，只在打包时用
+/resources/editors/*.vsix

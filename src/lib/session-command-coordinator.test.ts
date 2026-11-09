@@ -274,6 +274,42 @@ describe("SessionCommandCoordinator", () => {
     expect(electronAPI.agentSendMessage).not.toHaveBeenCalled();
   });
 
+  it("inserts a guide-front send at the head of an existing queue", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.setState({
+      messageQueues: {
+        "session-one": [{
+          id: "existing-queued",
+          sessionId: "session-one",
+          displayContent: "earlier",
+          sendContent: "earlier",
+          createdAt: 10,
+          status: "queued",
+        }],
+      },
+    });
+    electronAPI.agentGetSessionState
+      .mockResolvedValueOnce({ success: true, idle: false })
+      .mockResolvedValueOnce({ success: true, idle: false });
+
+    await expect(SessionCommandCoordinator.sendMessage({
+      sessionId: "session-one",
+      clientMessageId: "guide-front-message",
+      message,
+      queueIfRunning: true,
+      queuePosition: "front",
+    })).resolves.toMatchObject({ queued: true });
+    await expect(SessionCommandCoordinator.sendMessage({
+      sessionId: "session-one",
+      clientMessageId: "normal-message",
+      message,
+      queueIfRunning: true,
+    })).resolves.toMatchObject({ queued: true });
+
+    expect(useChatStore.getState().messageQueues["session-one"].map((item) => item.id))
+      .toEqual(["guide-front-message", "existing-queued", "normal-message"]);
+  });
+
   it("queues a send while context compaction is active", async () => {
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     useChatStore.setState({ compactingSessions: { "session-one": true } });

@@ -117,9 +117,6 @@ export async function readMcpConfigSnapshot(
     filePath,
     exists,
     servers: readMcpServerEntries(parsed, scope, globalNames),
-    ...(isRecordValue(parsed) && typeof parsed.autoEnableCodemode === "boolean"
-      ? { autoEnableCodemode: parsed.autoEnableCodemode }
-      : {}),
     // 项目级条目里「无基可覆盖」的情况已经标到条目上的 overrideMissing 了，
     // 让校验器别在 errors 里重复报同一件事。
     errors: validateMcpServers(parsed, scope, globalNames, { reportOverrideMissing: false }),
@@ -130,7 +127,6 @@ export async function readMcpConfigSnapshot(
 export interface McpConfigWrite {
   scope: McpConfigScope;
   servers: Record<string, McpServerConfig>;
-  autoEnableCodemode?: boolean;
   projectPath?: string;
 }
 
@@ -145,9 +141,8 @@ export async function writeMcpConfig(
   const filePath = getMcpConfigFilePath(input.scope, context, input.projectPath);
   return queueNamedWrite(`mcp:${filePath}`, async () => {
   const globalNames = input.scope === "project" ? await readGlobalServerNames(context) : [];
-  // 读-改-写：只覆盖 mcpServers（以及显式传入的 autoEnableCodemode），其余顶层键原样保留。
-  // `autoEnableCodemode` 在 pi 里是「项目级覆盖全局」（`extensions/mcp/config.js` 的
-  // readConfigFile 两个文件都读、项目后读后赢），整体重建会把它从项目文件里静默删掉。
+  // 读-改-写：只覆盖 mcpServers，其余顶层键（pi 自己的 autoEnableCodemode 等）原样保留。
+  // 这些键 Hpp 不再解释，但整体重建会把它们静默删掉，pi 的行为就跟着变了。
   let existing: { parsed: unknown; exists: boolean };
   try {
     existing = await readJsonFile(filePath);
@@ -158,9 +153,6 @@ export async function writeMcpConfig(
   }
   const base = isRecordValue(existing.parsed) ? existing.parsed : {};
   const next: Record<string, unknown> = { ...base, mcpServers: input.servers };
-  if (typeof input.autoEnableCodemode === "boolean") {
-    next.autoEnableCodemode = input.autoEnableCodemode;
-  }
   const errors = validateMcpServers(next, input.scope, globalNames);
   if (errors.length > 0) {
     throw new Error(`配置校验未通过：${errors[0]}`);

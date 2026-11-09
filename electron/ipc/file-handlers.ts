@@ -408,6 +408,19 @@ export function registerFileHandlers() {
     return homedir();
   });
 
+  // 默认工作区目录要能自动补建，否则路径指向不存在的目录时 agent 起进程直接 ENOENT。
+  ipcMain.handle("fs:ensureDirectory", async (_event, dirPath: string) => {
+    if (typeof dirPath !== "string" || !dirPath.trim()) {
+      return { success: false, error: "INVALID_PATH" };
+    }
+    try {
+      await mkdir(dirPath, { recursive: true });
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   ipcMain.handle("fs:isCommandAvailable", (_event, command: string) => {
     if (typeof command !== "string" || !/^[\w@./:-]+$/.test(command)) return false;
     try {

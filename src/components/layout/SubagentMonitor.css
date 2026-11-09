@@ -1,0 +1,247 @@
+/* 子任务监视窗：胶囊入口 + 浮层。颜色全部走主题变量，跟随浅色/深色。 */
+
+/* 相对 .chat-panel 定位：面板本身是 overflow:hidden，浮层不会漏到设置页。 */
+.subagent-monitor-pill {
+  position: absolute;
+  right: 20px;
+  bottom: 148px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.subagent-monitor-pill:hover,
+.subagent-monitor-pill.open {
+  color: var(--text-primary);
+  border-color: var(--accent-color);
+}
+
+.subagent-monitor-pill-time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.subagent-monitor-panel {
+  position: absolute;
+  right: 20px;
+  bottom: 186px;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 40px));
+  max-height: min(420px, 60vh);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.subagent-monitor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.subagent-monitor-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.subagent-monitor-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.subagent-monitor-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.subagent-monitor-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.subagent-monitor-list {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  list-style: none;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.subagent-monitor-list > li {
+  flex: 0 0 auto;
+}
+
+.subagent-monitor-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.subagent-monitor-item.active {
+  border-color: var(--accent-color);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+}
+
+.subagent-monitor-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-monitor-item-time {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.subagent-monitor-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.subagent-monitor-dot.running {
+  background: var(--accent-color);
+  animation: subagent-monitor-pulse 1.4s ease-in-out infinite;
+}
+
+.subagent-monitor-dot.pending {
+  background: color-mix(in srgb, var(--text-secondary) 60%, transparent);
+}
+
+.subagent-monitor-dot.stalled {
+  background: #fbbf24;
+  animation: none;
+}
+
+@keyframes subagent-monitor-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.subagent-monitor-detail {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.subagent-monitor-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.subagent-monitor-detail-head strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.subagent-monitor-model {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+.subagent-monitor-usage {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-monitor-activity {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.subagent-monitor-idle {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.subagent-monitor-idle.stalled {
+  color: #fbbf24;
+}
+
+.subagent-monitor-output {
+  max-height: 150px;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  .subagent-monitor-pill {
+    right: 12px;
+    bottom: 120px;
+  }
+
+  .subagent-monitor-panel {
+    right: 12px;
+    bottom: 158px;
+    width: calc(100vw - 24px);
+  }
+}

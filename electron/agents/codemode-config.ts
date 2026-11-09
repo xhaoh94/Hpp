@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import type { AgentCodemodeConfig } from "../../src/types/ipc";
 import { resolvePiAgentDir } from "./mcp-config";
+import { parseJsoncFileContent } from "../utils/jsonc";
 import { queueNamedWrite } from "../utils/write-queue";
 
 /**
@@ -49,7 +50,7 @@ export async function readCodemodeConfig(agentDir?: string): Promise<{
   if (!existsSync(filePath)) {
     return { config: normalizeCodemodeConfig(undefined), filePath, exists: false, stored: false };
   }
-  const parsed: unknown = JSON.parse((await readFile(filePath, "utf8")).replace(/^\uFEFF/, ""));
+  const parsed = parseJsoncFileContent(await readFile(filePath, "utf8"), filePath);
   const settings = isRecord(parsed) ? parsed : {};
   return {
     config: normalizeCodemodeConfig(settings.codemode),
@@ -69,7 +70,7 @@ export async function writeCodemodeConfig(
     // （里面有 models / auth 等，绝不能整体覆盖）。
     let settings: Record<string, unknown> = {};
     if (existsSync(filePath)) {
-      const parsed: unknown = JSON.parse((await readFile(filePath, "utf8")).replace(/^\uFEFF/, ""));
+      const parsed = parseJsoncFileContent(await readFile(filePath, "utf8"), filePath);
       if (isRecord(parsed)) settings = parsed;
     }
     const next = normalizeCodemodeConfig(config);

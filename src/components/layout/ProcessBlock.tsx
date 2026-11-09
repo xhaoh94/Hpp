@@ -33,6 +33,7 @@ import {
   collapseOperationProcessEntries,
   formatProcessDuration,  getProcessGroupState,
   getStreamIdleNoticeDuration,
+  getSubagentActivityLabel,
   getSubagentProgressLabel,
   groupProcessEntries,
   getVisibleProcessEntries,
@@ -427,6 +428,8 @@ function SubagentEntryRow({
 }) {
   const subagents = entry.subagents || [];
   const progress = getSubagentProgressLabel(subagents);
+  // 折叠态也要能看到"谁在干什么"，否则并行子任务对用户就是黑箱。
+  const activity = getSubagentActivityLabel(subagents);
   const elapsed = typeof entry.startedAt === "number"
     ? `已运行 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
     : "";
@@ -456,10 +459,20 @@ function SubagentEntryRow({
                 <SubagentGlyph />
               </span>
               <span className="chat-subagent-label">{subagent.label}</span>
+              {subagent.status === "running" && subagent.startedAt
+                ? (
+                  <span className="chat-subagent-chip-time">
+                    {formatProcessDuration((subagent.completedAt ?? now) - subagent.startedAt)}
+                  </span>
+                )
+                : null}
             </span>
           ))}
         </span>
         <span className="chat-subagent-event-title">{entry.title}</span>
+        {activity && (
+          <span className="chat-subagent-event-activity" title={activity}>{activity}</span>
+        )}
         {progress && <span className="chat-subagent-event-meta">{progress}</span>}
         {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
         {canExpand && (

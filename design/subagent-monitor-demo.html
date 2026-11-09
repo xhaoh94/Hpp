@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hpp · Subagent 监视窗 Demo</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #252526;
+    --bg-tertiary: #2d2d30;
+    --text-primary: #d4d4d4;
+    --text-secondary: #808080;
+    --border-color: #3c3c3c;
+    --accent-color: #007acc;
+    --bg-hover: #2a2d2e;
+    --danger-color: #f44747;
+    --warning-color: #fbbf24;
+    --success-color: #10b981;
+    --code-bg: #161b22;
+    --code-text: #c9d1d9;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg-primary: #f7f7f8;
+    --bg-secondary: #f0f1f3;
+    --bg-tertiary: #e7e9ed;
+    --text-primary: #24272d;
+    --text-secondary: #66707b;
+    --border-color: #d2d6dc;
+    --accent-color: #0969da;
+    --bg-hover: #e3e6ea;
+    --danger-color: #d1242f;
+    --warning-color: #b45309;
+    --success-color: #0f8a5f;
+    --code-bg: #eceef1;
+    --code-text: #24272d;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+    color: var(--text-primary);
+    font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+
+  /* 假窗口外壳 */
+  .app {
+    position: relative;
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    width: min(1180px, 96vw);
+    height: min(760px, 92vh);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px;
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .sidebar-title { color: var(--text-primary); font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+  .sidebar-item { padding: 5px 8px; border-radius: 5px; }
+  .sidebar-item.active { background: var(--bg-hover); color: var(--text-primary); }
+
+  /* 聊天面板（定位基准） */
+  .chat-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-primary);
+  }
+
+  .chat-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .chat-header strong { color: var(--text-primary); font-size: 13px; font-weight: 600; }
+
+  .chat-scroll {
+    flex: 1;
+    min-height: 0;
+    padding: 18px 24px 24px;
+    overflow-y: auto;
+  }
+
+  .bubble-user {
+    width: fit-content;
+    max-width: 74%;
+    margin: 0 0 18px auto;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .assistant-text {
+    margin-bottom: 10px;
+    color: var(--text-primary);
+    font-size: 13.5px;
+    line-height: 1.7;
+  }
+
+  /* 折叠态子任务行 */
+  .subagent-entry {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    margin-bottom: 18px;
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+  .subagent-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+    padding: 2px 0;
+  }
+  .chips { display: contents; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    max-width: 240px;
+    height: 30px;
+    padding: 0 11px 0 7px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-tertiary) 72%, transparent);
+    color: var(--text-primary);
+    font-size: 15px;
+    white-space: nowrap;
+  }
+  .chip-chip-avatar {
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent-color) 24%, transparent);
+    color: var(--accent-color);
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .chip.running .chip-chip-avatar { animation: pulse 1.35s ease-in-out infinite; }
+  .chip.completed .chip-chip-avatar { color: var(--success-color); background: color-mix(in srgb, var(--success-color) 18%, transparent); }
+  .chip.pending .chip-chip-avatar { color: var(--text-secondary); background: var(--bg-tertiary); }
+  .chip.error .chip-chip-avatar { color: var(--danger-color); background: color-mix(in srgb, var(--danger-color) 18%, transparent); }
+  .chip-time {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    opacity: .85;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .row-title { color: var(--text-secondary); font-size: 15px; white-space: nowrap; }
+  .row-activity {
+    min-width: 120px;
+    flex: 1 1 180px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row-meta {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  /* 输入区（让浮层位置看起来真实） */
+  .composer {
+    flex-shrink: 0;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border-color);
+  }
+  .composer-box {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    height: 96px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  /* ============ 监视窗（与真实组件同名同结构） ============ */
+  .subagent-monitor-pill {
+    position: absolute;
+    right: 20px;
+    bottom: 148px;
+    z-index: 40;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
+    backdrop-filter: blur(8px);
+    transition: color .15s, border-color .15s;
+  }
+  .subagent-monitor-pill:hover,
+  .subagent-monitor-pill.open { color: var(--text-primary); border-color: var(--accent-color); }
+  .subagent-monitor-pill-time { font-variant-numeric: tabular-nums; opacity: .8; }
+
+  .subagent-monitor-panel {
+    position: absolute;
+    right: 20px;
+    bottom: 186px;
+    z-index: 41;
+    display: flex;
+    flex-direction: column;
+    width: min(440px, calc(100vw - 40px));
+    max-height: min(420px, 60vh);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .28);
+    overflow: hidden;
+  }
+  .subagent-monitor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-color);
+  }
+  .subagent-monitor-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .subagent-monitor-close {
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .subagent-monitor-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .subagent-monitor-body { display: flex; min-height: 0; flex-direction: column; }
+  .subagent-monitor-list {
+    display: flex;
+    gap: 6px;
+    margin: 0;
+    padding: 8px 10px;
+    overflow-x: auto;
+    list-style: none;
+    border-bottom: 1px solid var(--border-color);
+  }
+  .subagent-monitor-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 9px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .subagent-monitor-item.active {
+    border-color: var(--accent-color);
+    background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+    color: var(--text-primary);
+  }
+  .subagent-monitor-item-time { font-variant-numeric: tabular-nums; opacity: .8; }
+  .subagent-monitor-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+  }
+  .subagent-monitor-dot.running { background: var(--accent-color); animation: pulse 1.4s ease-in-out infinite; }
+  .subagent-monitor-dot.pending { background: color-mix(in srgb, var(--text-secondary) 60%, transparent); }
+  .subagent-monitor-dot.stalled { background: var(--warning-color); animation: none; }
+
+  .subagent-monitor-detail {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    overflow-y: auto;
+  }
+  .subagent-monitor-detail-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .subagent-monitor-detail-head strong { color: var(--text-primary); font-size: 13px; }
+  .subagent-monitor-model { margin-left: auto; opacity: .85; }
+  .subagent-monitor-usage { color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .subagent-monitor-activity { color: var(--text-primary); font-size: 12px; line-height: 1.5; word-break: break-word; }
+  .subagent-monitor-idle { color: var(--text-secondary); font-size: 11px; }
+  .subagent-monitor-idle.stalled { color: var(--warning-color); }
+  .subagent-monitor-output {
+    max-height: 150px;
+    margin: 0;
+    padding: 8px;
+    overflow-y: auto;
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* demo 控制条 */
+  .demo-controls {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 50;
+    display: flex;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-secondary) 96%, transparent);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .demo-controls button {
+    padding: 3px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+  }
+  .demo-controls button.active { border-color: var(--accent-color); color: var(--text-primary); }
+  .demo-hint {
+    position: absolute;
+    top: 10px;
+    right: 16px;
+    z-index: 50;
+    color: var(--text-secondary);
+    font-size: 11px;
+    opacity: .75;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-title">Hpp</div>
+    <div class="sidebar-item active">Hpp（当前会话）</div>
+    <div class="sidebar-item">EchoMusic</div>
+    <div class="sidebar-item">UxGame</div>
+  </div>
+
+  <div class="chat-panel">
+    <div class="chat-header">
+      <strong>Hpp</strong>
+      <span>· deepseek-chat</span>
+      <span style="margin-left:auto">上下文 34%</span>
+    </div>
+
+    <div class="chat-scroll">
+      <div class="bubble-user">帮我并行审一下这次压缩链路的改动，重点看切模型后的行为。</div>
+
+      <div class="assistant-text">好，我拆成三路并行看：检索、实现审查、回归风险。</div>
+
+      <!-- 折叠态子任务行：活动 + 进度 + 耗时都在这一行 -->
+      <div class="subagent-entry" id="subagent-entry">
+        <div class="subagent-row">
+          <span class="chips" id="chips"></span>
+          <span class="row-title">Subagent</span>
+          <span class="row-activity" id="row-activity"></span>
+          <span class="row-meta" id="row-progress"></span>
+          <span class="row-meta" id="row-elapsed"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="composer-box">给 Hpp 发送消息…　（Ctrl+Enter 发送）</div>
+    </div>
+
+    <!-- 监视窗 -->
+    <button type="button" class="subagent-monitor-pill" id="pill">
+      <span>◈</span>
+      <span id="pill-label">3 个 Subagent 运行中</span>
+      <span class="subagent-monitor-pill-time" id="pill-time">7:32</span>
+    </button>
+
+    <div class="subagent-monitor-panel" id="panel">
+      <div class="subagent-monitor-header">
+        <span class="subagent-monitor-title"><span>◈</span> Subagent 监视</span>
+        <button type="button" class="subagent-monitor-close" id="close">✕</button>
+      </div>
+      <div class="subagent-monitor-body">
+        <ul class="subagent-monitor-list" id="list"></ul>
+        <div class="subagent-monitor-detail">
+          <div class="subagent-monitor-detail-head">
+            <strong id="detail-label">Reviewer</strong>
+            <span id="detail-status">运行中</span>
+            <span class="subagent-monitor-model" id="detail-model">deepseek-chat</span>
+          </div>
+          <div class="subagent-monitor-usage" id="detail-usage">12 轮 · 84.3k tokens</div>
+          <div class="subagent-monitor-activity" id="detail-activity">
+            正在运行 read 工具：src/lib/session-command-coordinator.ts
+          </div>
+          <div class="subagent-monitor-idle" id="detail-idle">最后活动 6 秒前</div>
+          <pre class="subagent-monitor-output" id="detail-output">改动集中在三处：
+1. agent-manager 里切模型的 RPC 超时改成了专用常量；
+2. pi worker 的 setModel 改成同步等压缩结束；
+3. 压缩配置删掉了手填 Base URL 的自定义渠道。
+
+风险点：opencode 那条路径仍会在压缩配置为「独立思考等级」时重启 runtime，
+会话不空闲会直接抛错，和注释里「运行中切换安全」的说法不一致。</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="demo-controls">
+      <span style="align-self:center;padding:0 4px">演示状态</span>
+      <button type="button" data-state="running" class="active">正常并行</button>
+      <button type="button" data-state="stalled">一个卡住</button>
+      <button type="button" data-state="done">全部完成</button>
+      <button type="button" id="theme">切换主题</button>
+    </div>
+    <div class="demo-hint">点击右下角胶囊可展开/收起面板</div>
+  </div>
+</div>
+
+<script>
+  const STATES = {
+    running: {
+      pillText: "3 个 Subagent 运行中",
+      pillTime: "7:32",
+      panelOpen: true,
+      subagents: [
+        { id: "reviewer", label: "Reviewer", status: "running", elapsed: "7:32", activity: "Reviewer：正在运行 read 工具：src/lib/session-command-coordinator.ts", stalled: false },
+        { id: "scout", label: "Scout", status: "running", elapsed: "3:18", activity: "Scout：正在运行 grep 工具：useSessionModels", stalled: false },
+        { id: "planner", label: "Planner", status: "pending", elapsed: "—", activity: "", stalled: false },
+      ],
+      detail: {
+        label: "Reviewer", status: "运行中", model: "deepseek-chat",
+        usage: "12 轮 · 84.3k tokens",
+        activity: "正在运行 read 工具：src/lib/session-command-coordinator.ts",
+        idle: "最后活动 6 秒前", idleStalled: false,
+      },
+    },
+    stalled: {
+      pillText: "3 个 Subagent 运行中",
+      pillTime: "11:08",
+      panelOpen: true,
+      subagents: [
+        { id: "reviewer", label: "Reviewer", status: "running", elapsed: "11:08", activity: "Reviewer：正在运行 read 工具：src/lib/session-command-coordinator.ts", stalled: true },
+        { id: "scout", label: "Scout", status: "running", elapsed: "6:54", activity: "Scout：正在输出：……", stalled: false },
+        { id: "planner", label: "Planner", status: "pending", elapsed: "—", activity: "", stalled: false },
+      ],
+      detail: {
+        label: "Reviewer", status: "运行中", model: "deepseek-chat",
+        usage: "18 轮 · 121.7k tokens",
+        activity: "正在运行 read 工具：src/lib/session-command-coordinator.ts",
+        idle: "最后活动 4 分钟前（可能已卡住）", idleStalled: true,
+      },
+    },
+    done: {
+      pillText: "", pillTime: "", panelOpen: false,
+      subagents: [
+        { id: "reviewer", label: "Reviewer", status: "completed", elapsed: "8:20", activity: "", stalled: false },
+        { id: "scout", label: "Scout", status: "completed", elapsed: "3:41", activity: "", stalled: false },
+        { id: "planner", label: "Planner", status: "error", elapsed: "1:12", activity: "", stalled: false },
+      ],
+      detail: null,
+    },
+  };
+
+  const $ = (id) => document.getElementById(id);
+  let current = "running";
+
+  function renderChips(subagents) {
+    $("chips").innerHTML = subagents.map((agent) => {
+      const cls = agent.status === "error" ? "error" : agent.status;
+      const glyph = agent.status === "completed" ? "✓" : agent.status === "error" ? "!" : agent.label[0];
+      const time = agent.status === "running" ? `<span class="chip-time">${agent.elapsed}</span>` : "";
+      return `<span class="chip ${cls}"><span class="chip-chip-avatar">${glyph}</span><span>${agent.label}</span>${time}</span>`;
+    }).join("");
+  }
+
+  function render() {
+    const state = STATES[current];
+    renderChips(state.subagents);
+
+    const running = state.subagents.filter((agent) => agent.status === "running");
+    const finished = state.subagents.filter((agent) => agent.status !== "running" && agent.status !== "pending").length;
+    const active = running[0] || state.subagents[0];
+
+    $("row-activity").textContent = active ? (active.activity || (active.status === "pending" ? `${active.label}：等待启动…` : "")) : "";
+    $("row-progress").textContent = state.subagents.length > 1 ? `进度 ${finished}/${state.subagents.length}` : "";
+    const maxElapsed = state.subagents.map((agent) => agent.elapsed).filter((value) => value !== "—")[0] || "";
+    $("row-elapsed").textContent = current === "done" ? "已运行 8:20" : `已运行 ${state.pillTime || maxElapsed}`;
+
+    // 胶囊
+    const hasRunning = running.length > 0 || state.subagents.some((agent) => agent.status === "pending");
+    $("pill").style.display = hasRunning ? "" : "none";
+    $("pill-label").textContent = state.pillText;
+    $("pill-time").textContent = state.pillTime;
+
+    // 面板
+    const open = state.panelOpen && !!$("panel").dataset.open;
+    $("panel").style.display = open && state.detail ? "" : "none";
+    $("pill").classList.toggle("open", open && !!state.detail);
+
+    $("list").innerHTML = state.subagents.map((agent) => {
+      const selected = state.detail && agent.label === state.detail.label;
+      const dot = agent.stalled ? "stalled" : agent.status;
+      return `<li><button type="button" class="subagent-monitor-item ${selected ? "active" : ""}">
+        <span class="subagent-monitor-dot ${dot}"></span>
+        <span>${agent.label}</span>
+        <span class="subagent-monitor-item-time">${agent.elapsed}</span>
+      </button></li>`;
+    }).join("");
+
+    if (state.detail) {
+      $("detail-label").textContent = state.detail.label;
+      $("detail-status").textContent = state.detail.status;
+      $("detail-model").textContent = state.detail.model;
+      $("detail-usage").textContent = state.detail.usage;
+      $("detail-activity").textContent = state.detail.activity;
+      $("detail-idle").textContent = state.detail.idle;
+      $("detail-idle").className = `subagent-monitor-idle ${state.detail.idleStalled ? "stalled" : ""}`;
+    }
+  }
+
+  $("panel").dataset.open = "1";
+  $("pill").addEventListener("click", () => {
+    const next = $("panel").dataset.open === "1" ? "0" : "1";
+    $("panel").dataset.open = next;
+    render();
+  });
+  $("close").addEventListener("click", () => {
+    $("panel").dataset.open = "0";
+    render();
+  });
+
+  document.querySelectorAll(".demo-controls button[data-state]").forEach((button) => {
+    button.addEventListener("click", () => {
+      current = button.dataset.state;
+      document.querySelectorAll(".demo-controls button[data-state]").forEach((item) => item.classList.toggle("active", item === button));
+      $("panel").dataset.open = STATES[current].panelOpen ? "1" : "0";
+      render();
+    });
+  });
+
+  $("theme").addEventListener("click", () => {
+    const root = document.documentElement;
+    root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+  });
+
+  render();
+</script>
+</body>
+</html>

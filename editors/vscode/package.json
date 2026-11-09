@@ -1,0 +1,91 @@
+{
+  "name": "hpp-bridge",
+  "displayName": "Hpp Bridge",
+  "description": "把选中的代码或当前文件发送到 Hpp 的聊天输入框",
+  "version": "0.1.3",
+  "publisher": "xhaoh94",
+  "license": "ISC",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hpp.sendSelection",
+        "title": "Hpp: 发送选中代码"
+      },
+      {
+        "command": "hpp.sendLine",
+        "title": "Hpp: 发送当前行"
+      },
+      {
+        "command": "hpp.sendFile",
+        "title": "Hpp: 发送当前文件"
+      },
+      {
+        "command": "hpp.sendFolder",
+        "title": "Hpp: 发送文件夹"
+      },
+      {
+        "command": "hpp.showStatus",
+        "title": "Hpp: 查看连接状态"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hpp.sendSelection",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "hpp.sendLine",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h",
+        "when": "editorTextFocus && !editorHasSelection"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "hpp.sendSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@9"
+        },
+        {
+          "command": "hpp.sendLine",
+          "when": "!editorHasSelection",
+          "group": "navigation@9"
+        },
+        {
+          "command": "hpp.sendFile",
+          "group": "navigation@10"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "hpp.sendFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@9"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Hpp",
+      "properties": {
+        "hpp.discoveryPath": {
+          "type": "string",
+          "default": "",
+          "description": "自定义 editor-bridge.json 路径；留空则按平台默认位置查找（%APPDATA%\\hpp\\hpp-data 等）。"
+        }
+      }
+    }
+  }
+}

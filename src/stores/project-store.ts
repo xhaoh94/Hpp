@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { isDefaultWorkspaceProject, withDefaultWorkspace } from "@/lib/default-workspace";
 
 export interface ProjectSession {
   id: string;
@@ -48,6 +49,8 @@ export interface Project {
   createdAt: string;
   agents: string[];
   sessions: ProjectSession[];
+  /** 侧栏里该项目卡片是否收起会话列表；缺省表示“从未手动切换过”。 */
+  sessionsCollapsed?: boolean;
 }
 
 export type AgentStatus = "idle" | "running" | "completed" | "error";
@@ -62,6 +65,11 @@ interface ProjectState {
   /** 正在唤醒后端（spawn/握手/恢复上下文）的会话；仅用于 UI 展示，不参与持久化。 */
   initializingSessionIds: Set<string>;
   addProject: (name: string, path: string, agentIds?: string[]) => void;
+  updateProject: (id: string, patch: { name?: string; path?: string }) => void;
+  /** 记住侧栏项目卡片的展开/收起状态（随 projects.json 持久化）。 */
+  setProjectSessionsCollapsed: (id: string, collapsed: boolean) => void;
+  /** 同步内置默认工作区（固定首位），路径来自设置。 */
+  syncDefaultWorkspace: (path: string) => void;
   removeProject: (id: string) => void;
   reorderProjects: (sourceId: string, targetId: string, insertAfter?: boolean) => void;
   setActiveProject: (id: string | null) => void;
@@ -109,8 +117,46 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       };
     }),
 
+  updateProject: (id, patch) =>
+    set((s) => {
+      const name = patch.name?.trim();
+      const path = patch.path?.trim();
+      if (!name && !path) return s;
+      return {
+        projects: s.projects.map((project) => {
+          if (project.id !== id) return project;
+          // 内置工作区的名字是固定文案，只有路径跟着设置走。
+          const nextName = isDefaultWorkspaceProject(project) || !name ? project.name : name;
+          return {
+            ...project,
+            name: nextName,
+            path: path || project.path,
+          };
+        }),
+      };
+    }),
+
+  setProjectSessionsCollapsed: (id, collapsed) =>
+    set((s) => {
+      const target = s.projects.find((project) => project.id === id);
+      if (!target || target.sessionsCollapsed === collapsed) return s;
+      return {
+        projects: s.projects.map((project) => (
+          project.id === id ? { ...project, sessionsCollapsed: collapsed } : project
+        )),
+      };
+    }),
+
+  syncDefaultWorkspace: (path) =>
+    set((s) => {
+      const projects = withDefaultWorkspace(s.projects, path);
+      return projects === s.projects ? {} : { projects };
+    }),
+
   removeProject: (id) =>
     set((s) => {
+      // 内置工作区不可删除：它的会话是用户的兜底入口。
+      if (isDefaultWorkspaceProject({ id })) return s;
       const project = s.projects.find((p) => p.id === id);
       const removedSessionIds = new Set(project?.sessions.map((session) => session.id) || []);
       const nextAgentStatuses = { ...s.agentStatuses };
@@ -133,6 +179,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   reorderProjects: (sourceId, targetId, insertAfter = false) =>
     set((s) => {
       if (sourceId === targetId) return s;
+      // 内置工作区永远置顶：既不能拖走，也不能被插到前面。
+      if (isDefaultWorkspaceProject({ id: sourceId }) || isDefaultWorkspaceProject({ id: targetId })) return s;
       const sourceIndex = s.projects.findIndex((project) => project.id === sourceId);
       const targetIndex = s.projects.findIndex((project) => project.id === targetId);
       if (sourceIndex < 0 || targetIndex < 0) return s;

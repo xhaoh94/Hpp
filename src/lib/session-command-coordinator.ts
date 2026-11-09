@@ -897,6 +897,8 @@ export async function sendMessage(input: {
   clientMessageId: string;
   message: PreparedSessionMessage;
   queueIfRunning?: boolean;
+  /** 运行中入队时插到待发送区首位，而不是追加到队尾。 */
+  queuePosition?: "front" | "back";
   throwOnFailure?: boolean;
   hooks?: SendMessageHooks;
 }): Promise<SendMessageResult> {
@@ -937,7 +939,8 @@ export async function sendMessage(input: {
         createdAt: existing?.createdAt ?? Date.now(),
         status: "queued" as const,
       };
-      if (existing) chat.upsertQueuedMessage(queued);
+      // upsertQueuedMessage 对不存在的项插到队首；普通发送仍追加到队尾。
+      if (existing || input.queuePosition === "front") chat.upsertQueuedMessage(queued);
       else chat.enqueueMessage(queued);
       if (message.forkContextUsed) clearForkContext(input.sessionId);
       return { queued: true, clientMessageId: input.clientMessageId };

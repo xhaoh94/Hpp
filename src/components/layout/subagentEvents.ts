@@ -109,6 +109,28 @@ const parseSubagent = (
     prompt: getFirstString(value, ["prompt", "task", "request"]),
     ...(stopReason ? { stopReason } : {}),
     ...(usage ? { usage } : {}),
+    ...pickTimestamps(value),
+  };
+};
+
+const getTimestamp = (value: unknown): number | undefined => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+/** 子任务自己的时间线字段（老后端没有，按缺省处理）。 */
+const pickTimestamps = (value: Record<string, unknown>) => {
+  const startedAt = getTimestamp(value.startedAt);
+  const completedAt = getTimestamp(value.completedAt);
+  const lastActivityAt = getTimestamp(value.lastActivityAt);
+  const liveOutput = typeof value.liveOutput === "string" && value.liveOutput.trim()
+    ? value.liveOutput
+    : undefined;
+  return {
+    ...(startedAt ? { startedAt } : {}),
+    ...(completedAt ? { completedAt } : {}),
+    ...(lastActivityAt ? { lastActivityAt } : {}),
+    ...(liveOutput ? { liveOutput } : {}),
   };
 };
 

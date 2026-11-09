@@ -108,11 +108,10 @@ describe("writeMcpConfig 保留 mcp.json 的其他内容", () => {
   });
 
   /**
-   * 回归：pi 的 `autoEnableCodemode` 是「项目级覆盖全局」（`extensions/mcp/config.js` 的
-   * readConfigFile 两个文件都读、项目后读后赢）。保存项目级配置时只提交 mcpServers，
-   * 整体重建顶层会把项目文件里那份值静默删掉 —— 等于背着用户改了行为。
+   * 回归：Hpp 只负责 mcpServers，其余顶层键是 pi 自己的（`autoEnableCodemode` 等）。
+   * 整体重建顶层会把它们静默删掉 —— 等于背着用户改了 pi 的行为。
    */
-  it("项目级保存不丢失 autoEnableCodemode 与其他顶层键", async () => {
+  it("保存时不丢失 pi 自己的顶层键", async () => {
     const projectFile = join(projectPath, ".pi", "mcp.json");
     await writeFile(projectFile, JSON.stringify({
       autoEnableCodemode: false,
@@ -129,18 +128,6 @@ describe("writeMcpConfig 保留 mcp.json 的其他内容", () => {
     expect(written.autoEnableCodemode).toBe(false);
     expect(written.someFutureKey).toBe(42);
     expect(written.mcpServers).toEqual({ shared: { enabled: false } });
-  });
-
-  it("全局显式传入 autoEnableCodemode 时才改写它", async () => {
-    const globalFile = join(agentDir, "mcp.json");
-    await writeMcpConfig(
-      { scope: "global", servers: { shared: { command: "npx" } }, autoEnableCodemode: false },
-      { agentDir },
-    );
-    expect(JSON.parse(await readFile(globalFile, "utf8")).autoEnableCodemode).toBe(false);
-
-    await writeMcpConfig({ scope: "global", servers: { shared: { command: "npx" } } }, { agentDir });
-    expect(JSON.parse(await readFile(globalFile, "utf8")).autoEnableCodemode).toBe(false);
   });
 
   it("配置文件不存在时照样能创建，校验不过就不落盘", async () => {

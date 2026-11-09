@@ -181,12 +181,9 @@ export interface AgentProviderConfiguration {
 export type AgentConfigurationSupport = AgentProviderConfiguration | "none";
 
 export interface AgentCompactionCapabilities {
-  customModel: boolean;
   thinkingLevel: boolean;
   /** 插件支持「启用/关闭上下文压缩」开关（后端能真正取消压缩）。 */
   toggle?: boolean;
-  /** 压缩模型可直接从已配置渠道选择（`providerId/modelId`）。 */
-  channelModel?: boolean;
 }
 
 export type AgentCompactionSupport = AgentCompactionCapabilities | "none";
@@ -251,8 +248,6 @@ export interface McpConfigSnapshot {
   filePath: string;
   exists: boolean;
   servers: McpServerEntry[];
-  /** mcp.json 顶层的 autoEnableCodemode（缺省 true，不落盘）。 */
-  autoEnableCodemode?: boolean;
   /** 语法/字段错误，来自与 pi 相同的校验规则。 */
   errors: string[];
   /** 可编辑的项目路径；scope 为 global 时为空。 */

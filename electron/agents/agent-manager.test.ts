@@ -410,14 +410,6 @@ describe("AgentManager plugin removal", () => {
 
     const config = {
       thinkingLevel: "low",
-      modelMode: "current",
-      customModel: {
-        baseUrl: "",
-        apiKey: "",
-        modelId: "",
-        api: "openai-completions",
-        reasoning: false,
-      },
     };
     await expect(getHandler("agent:setCompactionConfig")({}, config)).resolves.toEqual({
       success: true,
@@ -485,22 +477,14 @@ describe("AgentManager plugin removal", () => {
       configuration: "none",
       providerActivation: "none",
       compaction: agentId === "full-support"
-        ? { customModel: true, thinkingLevel: true }
-        : { customModel: true, thinkingLevel: false },
+        ? { thinkingLevel: true }
+        : { thinkingLevel: false },
     }));
     await getHandler("agent:createSession")({}, "full-support", "C:\\project", "full-compaction-session");
     await getHandler("agent:createSession")({}, "model-only", "C:\\project", "model-only-compaction-session");
 
     const config = {
       thinkingLevel: "high",
-      modelMode: "current",
-      customModel: {
-        baseUrl: "",
-        apiKey: "",
-        modelId: "",
-        api: "openai-completions",
-        reasoning: false,
-      },
     };
     await expect(getHandler("agent:setAgentCompactionConfig")({}, "full-support", config)).resolves.toEqual({
       success: true,
@@ -509,24 +493,15 @@ describe("AgentManager plugin removal", () => {
     expect(fullSupportBackend.setCompactionConfig).toHaveBeenCalledWith({ ...config, enabled: true });
     expect(modelOnlyBackend.setCompactionConfig).not.toHaveBeenCalled();
 
-    await expect(getHandler("agent:setAgentCompactionConfig")({}, "model-only", {
-      ...config,
-      modelMode: "custom",
-      customModel: {
-        ...config.customModel,
-        baseUrl: "https://summary.example/v1",
-        modelId: "summary-model",
-        reasoning: true,
-      },
-    })).resolves.toEqual({
+    // 没声明思考等级能力的插件：思考等级强制跟随聊天。
+    await expect(getHandler("agent:setAgentCompactionConfig")({}, "model-only", config)).resolves.toEqual({
       success: true,
       appliedSessionIds: ["model-only-compaction-session"],
     });
-    expect(modelOnlyBackend.setCompactionConfig).toHaveBeenCalledWith(expect.objectContaining({
+    expect(modelOnlyBackend.setCompactionConfig).toHaveBeenCalledWith({
+      enabled: true,
       thinkingLevel: "inherit",
-      modelMode: "custom",
-      customModel: expect.objectContaining({ reasoning: false }),
-    }));
+    });
   });
 
   it("rejects scoped compaction when the plugin does not declare the capability", async () => {

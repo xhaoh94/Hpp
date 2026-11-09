@@ -1,6 +1,7 @@
 "use strict";
 // 构建 Windows x64 离线包：Codex CLI + Pi SDK/CLI + 便携 Node.js（自包含，目标机无需 npm/Node）。
-// 规格见 docs/offline-cli-packaging.md。版本可用环境变量覆盖：CODEX_VERSION / PI_VERSION / NODE_VERSION。
+// 规格见 docs/offline-cli-packaging.md。
+// Pi 默认取 npm latest（构建时解析成精确版本后固定），PI_VERSION 可钉版本；CODEX_VERSION / NODE_VERSION 为固定值。
 // 产物：release/codex-pi-offline-win-x64-<codex>-<pi>.zip 及同名 .sha256。
 // 注意：install.ps1 必须是纯 ASCII（PowerShell 5.1 按 ANSI 解码无 BOM UTF-8 会乱码报错）。
 
@@ -15,15 +16,17 @@ const ROOT = resolve(__dirname, "..");
 const RELEASE_DIR = join(ROOT, "release");
 
 const CODEX_VERSION = process.env.CODEX_VERSION || "0.156.1";
-const PI_VERSION = process.env.PI_VERSION || "1.1.0";
 const NODE_VERSION = process.env.NODE_VERSION || "24.12.0";
+const piOverride = process.env.PI_VERSION;
+// 空串表示待自动解析；解析后写入的仍是精确版本，保证 app/package.json 与产物文件名可复现。
+let PI_VERSION = piOverride && piOverride !== "latest" ? piOverride : "";
 
 const STAMP = new Date().toISOString().slice(0, 10);
 const STAGE_NAME = `codex-pi-offline-win-x64-latest-${STAMP}`;
 const STAGE_DIR = join(RELEASE_DIR, STAGE_NAME);
 const APP_DIR = join(STAGE_DIR, "app");
 const RUNTIME_DIR = join(STAGE_DIR, "runtime");
-const ZIP_PATH = join(RELEASE_DIR, `codex-pi-offline-win-x64-${CODEX_VERSION}-${PI_VERSION}.zip`);
+let ZIP_PATH;
 // GNU tar 不支持 `-a` 打 zip；必须用 Windows 自带的 bsdtar。
 const WINDOWS_TAR = "C:\\Windows\\System32\\tar.exe";
 
@@ -99,6 +102,24 @@ function verifyAppDeps() {
     fail(`缺少 Pi 内置模型目录，Hpp 将无法识别内置模型能力。尝试过：\n  ${catalogCandidates.join("\n  ")}`);
   }
   log("依赖校验通过");
+}
+
+// registry 的 /latest 是该 tag 的完整 manifest；与 electron/agent-plugins/pi/runtime.mjs 查的是同一数据源。
+async function resolveLatestPiVersion() {
+  const url = "https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest";
+  log(`查询 Pi SDK 最新版本 ${url}`);
+  let res;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  } catch (error) {
+    fail(`查询 Pi SDK 版本失败（${error?.message || error}）；可用 PI_VERSION=<精确版本> 离线构建`);
+  }
+  if (!res.ok) fail(`查询 Pi SDK 版本失败：HTTP ${res.status}；可用 PI_VERSION=<精确版本> 离线构建`);
+  const version = (await res.json())?.version;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+/.test(version)) {
+    fail(`npm 返回了非法版本号 ${JSON.stringify(version)}；可用 PI_VERSION=<精确版本> 指定`);
+  }
+  return version;
 }
 
 async function downloadNodeRuntime() {
@@ -265,6 +286,11 @@ async function writeSha256() {
 }
 
 async function main() {
+  if (!PI_VERSION) {
+    PI_VERSION = await resolveLatestPiVersion();
+    log(`Pi SDK 最新版本：${PI_VERSION}`);
+  }
+  ZIP_PATH = join(RELEASE_DIR, `codex-pi-offline-win-x64-${CODEX_VERSION}-${PI_VERSION}.zip`);
   log(`版本：Codex ${CODEX_VERSION} / Pi ${PI_VERSION} / Node ${NODE_VERSION}`);
   log(`staging: ${STAGE_DIR}`);
   rmSync(STAGE_DIR, { recursive: true, force: true });

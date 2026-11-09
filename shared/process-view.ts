@@ -47,6 +47,12 @@ export type ProcessEntryView = {
     prompt?: string;
     stopReason?: ProcessSubagentStopReason;
     usage?: ProcessSubagentUsage;
+    /** 子任务自己的时间线（不是整次工具调用的）；老后端可能没有。 */
+    startedAt?: number;
+    completedAt?: number;
+    lastActivityAt?: number;
+    /** 运行中的实时输出片段（尾巴），仅用于监视窗。 */
+    liveOutput?: string;
   }>;
 };
 

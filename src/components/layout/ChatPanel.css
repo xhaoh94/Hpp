@@ -10,13 +10,6 @@
   background-color: var(--bg-primary);
 }
 
-/* 编辑器模式下隐藏聊天区左侧的辅助定位按钮，释放完整内容宽度。 */
-.layout-content.editor-mode > .chat-panel .chat-header-history-anchor,
-.layout-content.editor-mode > .chat-panel .chat-sticky-previous-message,
-.layout-content.editor-mode > .chat-panel .chat-process-sticky {
-  display: none !important;
-}
-
 .chat-panel-forking {
   cursor: wait;
 }
@@ -1584,6 +1577,8 @@
   margin: 2px 6px 2px 0;
 }
 
+/* AI 回复的复制 / fork / 时间 / 模型常驻显示：这些是读消息时就要看的信息，
+   不靠悬停。用户消息的操作区仍保持悬停才出现（见 .chat-msg-actions）。 */
 .chat-assistant-actions {
   display: flex;
   align-self: flex-start;
@@ -1592,15 +1587,6 @@
   min-height: 24px;
   margin-top: 2px;
   padding-left: 2px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s;
-}
-
-.chat-msg.assistant:hover .chat-assistant-actions,
-.chat-assistant-actions:focus-within {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 .chat-assistant-action-btn {
@@ -2970,6 +2956,15 @@
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 运行中任务在自己那颗 chip 上显示耗时，4 个并行时不用展开也能看出谁卡住。 */
+.chat-subagent-chip-time {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
 }
 
 .chat-subagent-entry.error .chat-subagent-event-title {

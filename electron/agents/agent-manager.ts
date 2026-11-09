@@ -107,6 +107,10 @@ const AGENT_SESSION_STATE_REFRESH_TIMEOUT_MS = 3_000;
 // leaves the renderer waiting on the creation IPC forever, which surfaces as
 // an endless "initializing" spinner with no error message.
 const AGENT_BACKEND_CALL_TIMEOUT_MS = 15_000;
+// 切模型是唯一会同步等待后端收尾的调用：压缩进行中时 pi 会一直等到压缩结束
+// 才真正改 session.model。用 15s 会先判「切换模型超时」，而后端随后仍把模型
+// 切掉，前端不落盘、不对齐思考等级 —— UI 与运行时模型直接分叉。
+const AGENT_MODEL_SWITCH_TIMEOUT_MS = 120_000;
 // A host UI request that stays untouched for this long while the backend
 // itself reports idle is stale residue from a finished turn. Reuse the
 // session instead of reporting busy forever.
@@ -160,13 +164,8 @@ function normalizeCompactionForSupport(
   const normalized = normalizeAgentCompactionConfig(value);
   if (!support || support === "none") return normalized;
   return {
-    ...normalized,
+    enabled: normalized.enabled,
     thinkingLevel: support.thinkingLevel ? normalized.thinkingLevel : "inherit",
-    modelMode: support.customModel ? normalized.modelMode : "current",
-    customModel: {
-      ...normalized.customModel,
-      reasoning: support.thinkingLevel && normalized.customModel.reasoning,
-    },
   };
 }
 
@@ -1722,12 +1721,12 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.handle("agentMcp:writeConfig", async (
     _event,
     scope: McpConfigScope,
-    payload: { servers: Record<string, McpServerConfig>; autoEnableCodemode?: boolean },
+    payload: { servers: Record<string, McpServerConfig> },
     projectPath?: string,
   ) => {
     try {
       const written = await writeMcpConfig(
-        { scope, servers: payload?.servers || {}, autoEnableCodemode: payload?.autoEnableCodemode, projectPath },
+        { scope, servers: payload?.servers || {}, projectPath },
         mcpAgentContext(),
       );
       // pi 的 MCP 扩展在 bindExtensions 时连接 server，没有「重连」API。
@@ -2093,7 +2092,7 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
       if (!agent) return { success: false, error: "No active agent" };
       await withTimeout(
         agent.setModel(provider, modelId),
-        AGENT_BACKEND_CALL_TIMEOUT_MS,
+        AGENT_MODEL_SWITCH_TIMEOUT_MS,
         "切换模型超时，插件未响应，请重试。",
       );
       return { success: true };

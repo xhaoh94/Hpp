@@ -10,7 +10,6 @@ import { LazyCodeReviewDialog, preloadCodeReviewDialog } from "./LazyCodeReviewD
 import { DiffHoverCard, type DiffHoverFile } from "./DiffHoverCard";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { FileContextMenu, type FileContextMenuState } from "@/components/shared/FileContextMenu";
-import { useEditorStore } from "@/stores/editor-store";
 
 type DiffBlockProps = {
   reviewId: string;
@@ -93,15 +92,11 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
     ));
   };
 
-  /** 打开完整文件：编辑器模式进 tab，否则弹文件预览。 */
+  /** 打开完整文件：统一弹文件预览。 */
   const openDiffFile = (file: DiffHoverFile) => {
     const base = projectPath ? projectPath.replace(/[\\/]+$/, "") : "";
     const fullPath = base ? `${base}/${file.file}` : file.file;
-    if (useEditorStore.getState().mode) {
-      useEditorStore.getState().openFile(fullPath);
-    } else {
-      setPreviewFile(fullPath);
-    }
+    setPreviewFile(fullPath);
   };
 
   // 卡片按打开时的行坐标定位：滚动、缩放、Esc、点击外部都要收起，

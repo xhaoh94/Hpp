@@ -142,12 +142,11 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
 
 function normalizeCompactionCapabilities(value: unknown): AgentCapabilities["compaction"] {
   if (!isRecord(value)) return "none";
-  const customModel = value.customModel === true;
+  // 旧清单里的 customModel / channelModel 已废弃，读到就忽略。
   const thinkingLevel = value.thinkingLevel === true;
   const toggle = value.toggle === true;
-  const channelModel = value.channelModel === true;
-  return customModel || thinkingLevel || toggle || channelModel
-    ? { customModel, thinkingLevel, toggle, channelModel }
+  return thinkingLevel || toggle
+    ? { thinkingLevel, toggle }
     : "none";
 }
 

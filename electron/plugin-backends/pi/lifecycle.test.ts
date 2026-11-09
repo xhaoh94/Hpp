@@ -172,14 +172,6 @@ describe("Pi lifecycle", () => {
     const initialConfig = {
       enabled: true,
       thinkingLevel: "low" as const,
-      modelMode: "current" as const,
-      customModel: {
-        baseUrl: "",
-        apiKey: "",
-        modelId: "",
-        api: "openai-completions" as const,
-        reasoning: false,
-      },
     };
 
     await agent.init("C:\\project", undefined, { compaction: initialConfig });

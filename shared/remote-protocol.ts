@@ -53,6 +53,7 @@ const remoteComposerNodeSchema = z.discriminatedUnion("type", [
   z.object({
     id: z.string().min(1).max(128), type: z.literal("snippet"), fileName: z.string().max(512),
     filePath: z.string().max(4096), startLine: z.number().int().positive(), endLine: z.number().int().positive(),
+    text: z.string().max(200_000).optional(),
   }).refine((node) => node.endLine >= node.startLine, "Invalid line range"),
   z.object({
     id: z.string().min(1).max(128), type: z.literal("session"),

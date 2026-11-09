@@ -18,8 +18,6 @@ type AgentMcpModalProps = {
   /** MCP 总开关的当前值与切换回调（复用 AgentConfigModal 的 builtinExtension 通道）。 */
   enabled: boolean;
   onEnabledChange: (enabled: boolean) => Promise<void>;
-  /** Codemode 总开关的当前值，用于提示「server 用 codemode 档但 codemode 没开」。 */
-  codemodeEnabled?: boolean;
   /** 可选项目列表，用于项目级配置。没有项目时只显示全局。 */
   projects: Array<{ id: string; name: string; path: string }>;
   onClose: () => void;
@@ -107,7 +105,6 @@ export function AgentMcpModal({
   agentName,
   enabled,
   onEnabledChange,
-  codemodeEnabled = false,
   onClose,
   projects,
 }: AgentMcpModalProps) {
@@ -126,9 +123,6 @@ export function AgentMcpModal({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advancedText, setAdvancedText] = useState("");
   const [advancedError, setAdvancedError] = useState("");
-  // mcp.json 的顶层字段，不属于任何 server。缺省 true（pi 的默认），未落盘时
-  // 用true —— 与 pi 的 loadMcpConfig 一致（不存在时才return 不含该字段）。
-  const [autoEnableCodemode, setAutoEnableCodemode] = useState(true);
 
   const project = useMemo(
     () => projects.find((item) => item.id === projectId) || projects[0],
@@ -172,10 +166,6 @@ export function AgentMcpModal({
       setSnapshot(next);
       setDrafts(next.servers.map(toDraft));
       setGlobalSnapshot(nextGlobalSnapshot);
-      // 顶层字段是全局的；项目级文件没有该字段时保留当前全局值。
-      if (typeof nextGlobalSnapshot.autoEnableCodemode === "boolean") {
-        setAutoEnableCodemode(nextGlobalSnapshot.autoEnableCodemode);
-      }
       dirtyRef.current = false;
     } catch (error) {
       if (!isCurrentRequest()) return;
@@ -324,13 +314,7 @@ export function AgentMcpModal({
       }
       const result = await window.electronAPI.agentMcpWriteConfig(
         scope,
-        {
-          servers,
-          // autoEnableCodemode 是**全局**顶层字段（pi 的语义是项目级覆盖全局，
-          // config.js:112）。项目级保存时必须传 undefined —— 否则会在项目文件里
-          // 钉一份当前全局值的副本，之后改全局设置时被这份陈旧副本反向盖掉。
-          ...(scope === "global" ? { autoEnableCodemode } : {}),
-        },
+        { servers },
         projectPath,
       );
       if (!result.success) {
@@ -479,43 +463,12 @@ export function AgentMcpModal({
             )}
           </section>
 
-          {scope === "global" && (
+          {scope === "global" && hasCodemodeExposure && (
             <section className="agent-mcp-section">
-              <label className="agent-mcp-enabled-row agent-mcp-auto-codemode">
-                <input
-                  type="checkbox"
-                  checked={autoEnableCodemode}
-                  disabled={loading || saving}
-                  onChange={(event) => {
-                    setAutoEnableCodemode(event.target.checked);
-                    dirtyRef.current = true;
-                  }}
-                />
-                <span>
-                  自动启用 Codemode
-                  <small>
-                    有 server 的 exposure 设为<code>仅脚本可调</code>时，Pi 会自动把 Codemode
-                    加入工具列表。关掉它需要手动在配置里开Codemode。
-                  </small>
-                </span>
-              </label>
-              {hasCodemodeExposure && !codemodeEnabled && (
-                <p className="agent-mcp-hint agent-mcp-codemode-warning">
-                  当前有 server 的生效档位是「仅脚本可调」（未显式设置 exposure 的 server 默认就是这一档），
-                  但 Codemode 扩展没启用 —— 这些工具模型调不到。
-                </p>
-              )}
-              {hasCodemodeExposure && codemodeEnabled && !autoEnableCodemode && (
-                <p className="agent-mcp-hint agent-mcp-codemode-warning">
-                  自动启用 Codemode 已关闭：这些脚本类工具要自己把 Codemode 加进工具列表才调得到。
-                </p>
-              )}
-              {hasCodemodeExposure && codemodeEnabled && autoEnableCodemode && (
-                <p className="agent-mcp-hint">
-                  当前有 server 使用「仅脚本可调」，这些工具只能从 Codemode 脚本里调用，
-                  不会出现在模型的工具列表中。
-                </p>
-              )}
+              <p className="agent-mcp-hint">
+                当前有 server 使用「仅脚本可调」，这些工具只能从 Codemode 脚本里调用，
+                不会出现在模型的工具列表中。
+              </p>
             </section>
           )}
 

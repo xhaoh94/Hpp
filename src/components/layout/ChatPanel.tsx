@@ -35,7 +35,6 @@ import {
 import { useProjectStore, type AgentStatus, type Project, type ProjectSession, type SessionReference } from "@/stores/project-store";
 import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { useAppStore } from "@/stores/app-store";
-import { useEditorStore } from "@/stores/editor-store";
 import { AGENT_SETTINGS_UPDATED_EVENT, GENERAL_SETTINGS_UPDATED_EVENT } from "@/lib/app-events";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
@@ -89,6 +88,7 @@ import { ConfirmationPanel } from "./ConfirmationPanel";
 import { DiffBlock } from "./DiffBlock";
 import { PermissionChoicePanel } from "./PermissionChoicePanel";
 import { ProcessBlock } from "./ProcessBlock";
+import { SubagentMonitor } from "./SubagentMonitor";
 import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { resolvePreviousUserTargetIndex } from "./previousUserTarget";
@@ -237,6 +237,7 @@ type SendPayloadNow = (
     permissionMode?: AgentPermissionMode;
     queueIfRunning?: boolean;
     clientMessageId?: string;
+    queuePosition?: "front" | "back";
   }
 ) => Promise<SendMessageResult>;
 
@@ -442,6 +443,7 @@ const queuedDraftWithDocument = (draft: QueuedMessageEditableDraft, document: Co
   images,
   pendingFiles: document.nodes.flatMap((node) => node.type === "snippet" ? [{
     id: node.id, fileName: node.fileName, filePath: node.filePath, startLine: node.startLine, endLine: node.endLine,
+    ...(node.text !== undefined ? { text: node.text } : {}),
   }] : []),
   pendingPathAttachments: document.nodes.flatMap((node) => node.type === "path" ? [{ id: node.id, name: node.name, path: node.path, kind: node.kind }] : []),
   sessionReferences: document.nodes.flatMap((node): SessionReference[] => {
@@ -3067,10 +3069,6 @@ export function ChatPanel({
       );
       return;
     }
-    if (useEditorStore.getState().mode) {
-      useEditorStore.getState().openFile(resolvedPath);
-      return;
-    }
     setPreviewFile(resolvedPath);
   }, [activeProject?.path]);
 
@@ -3484,6 +3482,7 @@ export function ChatPanel({
       permissionMode?: AgentPermissionMode;
       queueIfRunning?: boolean;
       clientMessageId?: string;
+      queuePosition?: "front" | "back";
     }
   ) => {
     const cleanupRuntime = (sessionId: string) => {
@@ -3512,6 +3511,7 @@ export function ChatPanel({
       sessionId: targetSessionId,
       clientMessageId,
       queueIfRunning: options?.queueIfRunning === true,
+      queuePosition: options?.queuePosition,
       message: {
         ...payload,
         planModeEnabled: !!options?.planModeEnabled,
@@ -3556,7 +3556,8 @@ export function ChatPanel({
     sessionRuntimeRef,
   ]);
 
-  const handleSend = useCallback(async () => {
+  const handleSend = useCallback(async (options?: { guideFront?: boolean }) => {
+    const guideFront = options?.guideFront === true;
     if (forkingMessageIdRef.current) return;
     if (activeInteraction) return;
     // 后端唤醒期间发送按钮置灰，这里同步拦掉 Enter 等快捷路径。
@@ -3602,14 +3603,30 @@ export function ChatPanel({
     if (useProjectStore.getState().activeSessionId === targetSessionId) setComposerInput("");
     clearSessionDraft(targetSessionId);
     clearLegacySessionReferences(targetSessionId, payload.sessionReferences || []);
-    await sendPayloadNow(targetSessionId, payload, {
+    const guideFrontMessageId = guideFront ? crypto.randomUUID() : undefined;
+    const result = await sendPayloadNow(targetSessionId, payload, {
       planModeEnabled,
       permissionMode,
       queueIfRunning: true,
+      queuePosition: guideFront ? ("front" as const) : undefined,
+      clientMessageId: guideFrontMessageId,
     });
+    // 运行中被入队时自动点一次引导；空闲时消息已直接发出，无需引导。
+    if (
+      guideFrontMessageId && result.queued &&
+      activeSessionSupportsGuidance && !activeSessionCompactionBlocksGuidance
+    ) {
+      try {
+        await SessionCommandCoordinator.guideQueuedMessage(targetSessionId, guideFrontMessageId);
+      } catch (error) {
+        showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+      }
+    }
   }, [
     activeInteraction,
     activeSessionInitializing,
+    activeSessionCompactionBlocksGuidance,
+    activeSessionSupportsGuidance,
     activeDraft.action,
     activeComposerDocument,
     activeSessionReferences.length,
@@ -3738,6 +3755,13 @@ export function ChatPanel({
         ? composerHistoryRef.current.previous(sessionId, currentDraft, messages, resolveLegacyReference)
         : composerHistoryRef.current.next(sessionId, currentDraft);
       if (nextDraft) restoreComposerDraft(sessionId, nextDraft);
+      return;
+    }
+
+    // Ctrl+Alt+Enter：运行中把消息插到待发送区首位并立即引导；空闲时等价于普通发送。
+    if (e.key === "Enter" && e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey) {
+      e.preventDefault();
+      handleSend({ guideFront: true });
       return;
     }
 
@@ -4138,6 +4162,8 @@ export function ChatPanel({
             onCancel={handleCancelQuestionnaire}
           />
         )}
+
+        <SubagentMonitor sessionId={activeSessionId} />
 
         <ChatComposer
           activeQuestionnaire={!!activeInteraction}

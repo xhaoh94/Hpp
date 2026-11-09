@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileArchive, FolderOpen, GripVertical, PackagePlus, RefreshCw, Settings, X } from "lucide-react";
 import {
-  getAgentPlanModeTooltip,
   normalizeAgentOrder,
   orderAgents,
-  supportsNativePlanMode,
 } from "@/lib/agents";
 import { compareVersions } from "@/lib/version";
 import { showAppConfirm } from "@/lib/app-dialog";
@@ -545,7 +543,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
 
         <div className="filter-group">
           {orderedAgents.map((agent) => {
-            const hasNativePlanMode = supportsNativePlanMode(agent.id);
             const agentStatus = agentStatuses[agent.id];
             const isInstalled = agentStatus?.installed === true;
             const isChecking = agentChecking[agent.id] === true || !agentStatus;
@@ -649,12 +646,6 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                         title={`插件版本 v${agent.version}`}
                       >
                         插件 v{agent.version}
-                      </span>
-                      <span
-                        className={`agent-settings-badge ${hasNativePlanMode ? "" : "agent-settings-badge-warning"}`}
-                        title={getAgentPlanModeTooltip(agent.id)}
-                      >
-                        Plan
                       </span>
                     </span>
                     {(agentStatus?.error || agentUpdateErrors[agent.id]) && (

@@ -71,14 +71,14 @@ describe("official plugin config providers", () => {
       ["pi", "opencode", "droid", "codex", "claude"].map(readManifest),
     );
 
+    // 压缩模型不可配置（走 pi 自己的模型），清单里不再声明 channelModel。
     expect(pi.capabilities.compaction).toEqual({
-      customModel: true,
       thinkingLevel: true,
       toggle: true,
-      channelModel: true,
     });
-    expect(opencode.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: true });
-    expect(droid.capabilities.compaction).toEqual({ customModel: true, thinkingLevel: false });
+    expect(opencode.capabilities.compaction).toEqual({ thinkingLevel: true });
+    // Droid 只剩「同模型压缩」，没有任何可配置项，能力声明整块移除。
+    expect(droid.capabilities.compaction).toBeUndefined();
     expect(codex.capabilities.compaction).toBeUndefined();
     expect(claude.capabilities.compaction).toBeUndefined();
   });

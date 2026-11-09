@@ -46,7 +46,6 @@ import type {
 import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
 import { normalizeSupportedThinkingLevels } from "../../../shared/models";
 import {
-  isCustomAgentCompactionModelConfigured,
   normalizeAgentCompactionConfig,
   type AgentCompactionConfig,
 } from "../../../shared/agent-compaction";
@@ -281,41 +280,26 @@ function getAskAnswerText(value: unknown) {
   return "";
 }
 
+/** 旧版本写进 Droid 配置的压缩模型条目，升级后按这个 id 清掉。 */
 const HPP_DROID_COMPACTION_MODEL_ID = "custom:hpp:compaction";
 
-function getDroidCompactionModel(config: AgentCompactionConfig): string {
-  return isCustomAgentCompactionModelConfigured(config) ? HPP_DROID_COMPACTION_MODEL_ID : "same";
-}
-
-export function buildDroidRuntimeSettings(baseValue: unknown, value: unknown): UnknownRecord {
+/**
+ * Droid 只有「同模型压缩」和「自定义模型」两种取值。Hpp 已移除手填渠道，
+ * 压缩永远跟随当前会话模型，`"same"` 是唯一合法值。
+ */
+export function buildDroidRuntimeSettings(baseValue: unknown, _value: unknown): UnknownRecord {
   const base = asRecord(baseValue);
-  const config = normalizeAgentCompactionConfig(value);
+  // 清掉旧版本注入的压缩模型条目，避免升级后还残留一个过期渠道。
   const customModels = Array.isArray(base.customModels)
     ? base.customModels.map(asRecord).filter((model) => (
         model.id !== HPP_DROID_COMPACTION_MODEL_ID && model.hppCompactionManaged !== true
       ))
     : [];
-  const customConfigured = isCustomAgentCompactionModelConfigured(config);
-
-  if (customConfigured) {
-    const custom = config.customModel;
-    customModels.push({
-      id: HPP_DROID_COMPACTION_MODEL_ID,
-      hppCompactionManaged: true,
-      model: custom.modelId,
-      displayName: `Hpp 压缩 · ${custom.modelId}`,
-      baseUrl: custom.baseUrl,
-      // Droid 要求 customModels.apiKey 非空；本地无鉴权服务使用无敏感信息的占位值。
-      apiKey: custom.apiKey || "hpp-local",
-      provider: custom.api === "openai-responses" ? "openai" : "generic-chat-completion-api",
-      noImageSupport: true,
-    });
-  }
 
   return {
     ...base,
     customModels,
-    compactionModel: getDroidCompactionModel(config),
+    compactionModel: "same",
   };
 }
 
@@ -517,7 +501,7 @@ export class DroidAgent {
       this.activeCompactionSignature = nextCompactionSignature;
       await this.applySessionResult(result, !!existingSessionId);
       await this.sendRpcAsync("droid.update_session_settings", {
-        compactionModel: getDroidCompactionModel(this.compactionConfig),
+        compactionModel: "same",
       });
       this.emitEvent({ type: "agent_ready", agentId: "droid", mock: false });
     } catch (error) {

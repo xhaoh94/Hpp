@@ -107,11 +107,10 @@ describe("official agent plugins", () => {
       }],
     }, "0.1.5");
 
+    // 旧清单里的 customModel / channelModel 已被移除，读到必须忽略而不是报错。
     expect(plugins[0].capabilities.compaction).toEqual({
-      customModel: true,
       thinkingLevel: true,
       toggle: false,
-      channelModel: false,
     });
   });
 

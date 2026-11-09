@@ -990,3 +990,50 @@ describe("SubAgent 协议输出上限", () => {
     }
   }, 30_000);
 });
+
+/**
+ * 回归：pi 内部重试成功后，失败尝试的 errorMessage 不能继续挂着。
+ * 之前 `result.errorMessage = message.errorMessage || result.errorMessage`
+ * 只在成功消息缺字段时保留旧值，用户看到的是「Our servers are currently
+ * overloaded」，任务输出其实是完整的。
+ */
+describe("SubAgent 重试成功后的文案", () => {
+  it("清掉上一次失败尝试的 errorMessage，并把任务标成已完成", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-retry-test-"));
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "const failed = { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '' }], stopReason: 'error', errorMessage: 'Our servers are currently overloaded. Please try again later.', model: 'test/child' } };",
+        "const ok = { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '审查完成：未发现缺陷' }], stopReason: 'stop', model: 'test/child' } };",
+        "process.stdout.write(JSON.stringify(failed) + '\\n');",
+        "process.stdout.write(JSON.stringify(ok) + '\\n');",
+        "process.stdout.write(JSON.stringify({ type: 'agent_end' }) + '\\n');",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-retry",
+        { agent: "reviewer", task: "只读审查" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      const task = result.details.results[0];
+      expect(task).toMatchObject({
+        exitCode: 0,
+        stopReason: "stop",
+        errorMessage: "",
+        message: "已完成",
+        output: "审查完成：未发现缺陷",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

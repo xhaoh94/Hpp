@@ -205,15 +205,13 @@ describe("AgentPluginRegistry", () => {
     const source = await createPluginSource(tempRoot, "compaction-agent", "1.0.0", {
       planMode: "native",
       configuration: providerConfiguration,
-      compaction: { customModel: true, thinkingLevel: false },
+      compaction: { thinkingLevel: false, toggle: true },
     });
     const result = await registry.installFromPath(source);
 
     expect(result.agent?.capabilities.compaction).toEqual({
-      customModel: true,
       thinkingLevel: false,
-      toggle: false,
-      channelModel: false,
+      toggle: true,
     });
   });
 
@@ -225,11 +223,10 @@ describe("AgentPluginRegistry", () => {
     });
     const result = await registry.installFromPath(source);
 
+    // 旧清单里的 customModel / channelModel 已被移除，读到必须忽略而不是报错。
     expect(result.agent?.capabilities.compaction).toEqual({
-      customModel: true,
       thinkingLevel: true,
       toggle: true,
-      channelModel: false,
     });
   });
 

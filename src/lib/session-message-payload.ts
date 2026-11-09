@@ -140,7 +140,12 @@ export async function buildSessionMessagePayload(
       filePath: node.filePath,
       startLine: node.startLine,
       endLine: node.endLine,
+      ...(node.text !== undefined ? { text: node.text } : {}),
     });
+    if (typeof node.text === "string") {
+      sendParts.push(`<file path="${escapeXmlAttribute(node.filePath)}" lines="${node.startLine}-${node.endLine}">\n${node.text}\n</file>`);
+      continue;
+    }
     try {
       const result = await input.readFile(node.filePath);
       if (result.success && typeof result.content === "string") {

@@ -21,6 +21,12 @@ import {
 } from "@/stores/chat-store";
 import { PersistenceFlushScheduler } from "./persistenceScheduler";
 import { getChatMessagePreviewText, getSessionPreviewLabel, sanitizeSessionPreview } from "@/lib/chat-message-preview";
+import {
+  readDefaultWorkspacePathSetting,
+  resolveDefaultWorkspacePath,
+  withDefaultWorkspace,
+} from "@/lib/default-workspace";
+import { GENERAL_SETTINGS_UPDATED_EVENT, type GeneralSettingsUpdatedDetail } from "@/lib/app-events";
 import { parseComposerDraftSnapshot } from "@/lib/composer-history";
 import { parseComposerDocument } from "@shared/composer-document";
 import { resolveSessionTitle } from "@/lib/session-title";
@@ -179,6 +185,9 @@ const parseProject = (value: unknown): Project | null => {
     sessions: Array.isArray(value.sessions)
       ? value.sessions.map(parseProjectSession).filter((session): session is ProjectSession => !!session)
       : [],
+    // 侧栏卡片的展开/收起偏好。读取是白名单式的，漏掉这一项会让“记住的状态”
+    // 在重启后被丢弃（随后写盘还会把它从磁盘上抹掉）。
+    sessionsCollapsed: typeof value.sessionsCollapsed === "boolean" ? value.sessionsCollapsed : undefined,
   };
 };
 
@@ -442,6 +451,8 @@ const notifySessionConfigUpdated = (sessionId: string) => {
 let _cacheDirty = false;
 let _pendingProjectsData: PersistedData | null = null;
 let _pendingMessagesData: PersistedMessages | null = null;
+// 默认工作区路径在配置为空时要拼 <home>/hpp，home 只在水合时拿得到，缓存下来给设置事件复用。
+let _defaultWorkspaceHomeDir = "";
 let _messagesSnapshotNeedsFullRebuild = true;
 const SESSION_MESSAGE_PAGE_SIZE = 500;
 type SessionMessagePageState = {
@@ -972,6 +983,14 @@ export function selectSessionModel(sessionId: string, models: ModelInfo[]): Mode
   return models[0];
 }
 
+/** 默认工作区目录可能还不存在（首次启动 / 用户手填新路径），agent 起进程前必须有它。 */
+const ensureDefaultWorkspaceDirectory = (path: string) => {
+  if (!path) return;
+  const ensure = window.electronAPI?.ensureDirectory;
+  if (typeof ensure !== "function") return;
+  void ensure(path).catch(() => undefined);
+};
+
 export function useDataPersistence() {
   // Load everything on mount in a single coordinated flow
   useEffect(() => {
@@ -991,8 +1010,20 @@ export function useDataPersistence() {
     Promise.all([
       window.electronAPI.loadData("projects").catch(() => null),
       window.electronAPI.loadData("currentModel").catch(() => null),
-    ]).then(async ([projectData, modelData]) => {
+      window.electronAPI.loadData("settings").catch(() => null),
+      // 旧 preload / 测试替身可能没有 getHomeDir，缺失时退化成「不注入默认路径」。
+      typeof window.electronAPI.getHomeDir === "function"
+        ? window.electronAPI.getHomeDir().catch(() => "")
+        : Promise.resolve(""),
+    ]).then(async ([projectData, modelData, settingsData, homeDir]) => {
       if (cancelled || !persistenceHydration.isCurrent(hydrationGeneration)) return;
+
+      _defaultWorkspaceHomeDir = typeof homeDir === "string" ? homeDir : "";
+      const defaultWorkspacePath = resolveDefaultWorkspacePath(
+        _defaultWorkspaceHomeDir,
+        readDefaultWorkspacePathSetting(settingsData),
+      );
+      ensureDefaultWorkspaceDirectory(defaultWorkspacePath);
 
       // 1. Load projects and restore active session
       let activeSessionId: string | null = null;
@@ -1002,23 +1033,25 @@ export function useDataPersistence() {
       let validSessionIds: Set<string> | null = null;
       let hydratedMessagesLoaded = false;
 
-      const d = parsePersistedData(projectData);
-      if (d) {
-        validSessionIds = new Set(d.projects.flatMap((project) => project.sessions.map((session) => session.id)));
-        // 没有恢复出活动会话时默认选中第一个未关闭会话（含侧栏展开），
-        // 这样启动后不会停在“没有任何会话被选中”的空状态。
-        activeSessionId = resolveHydratedActiveSessionId(d);
-        applyPersistedProjectSnapshot({ ...d, activeSessionId });
-        if (activeSessionId) {
-          activeProject = d.projects.find((p) => p.sessions.some((s) => s.id === activeSessionId));
-          activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
-          if (activeSession) {
-            activeAgentId = activeSession.agentId;
-            useChatStore.setState({ activeAgentId });
-          }
+      const parsed = parsePersistedData(projectData);
+      // 内置默认工作区始终进快照（固定首位）：它是用户没有项目时唯一能开会话的入口。
+      const d: PersistedData = {
+        projects: withDefaultWorkspace(parsed?.projects || [], defaultWorkspacePath),
+        activeProjectId: parsed?.activeProjectId || null,
+        activeSessionId: parsed?.activeSessionId || null,
+      };
+      validSessionIds = new Set(d.projects.flatMap((project) => project.sessions.map((session) => session.id)));
+      // 没有恢复出活动会话时默认选中第一个未关闭会话（含侧栏展开），
+      // 这样启动后不会停在“没有任何会话被选中”的空状态。
+      activeSessionId = resolveHydratedActiveSessionId(d);
+      applyPersistedProjectSnapshot({ ...d, activeSessionId });
+      if (activeSessionId) {
+        activeProject = d.projects.find((p) => p.sessions.some((s) => s.id === activeSessionId));
+        activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+        if (activeSession) {
+          activeAgentId = activeSession.agentId;
+          useChatStore.setState({ activeAgentId });
         }
-      } else {
-        useProjectStore.setState({ projectDataHydrated: true });
       }
 
       // 2. 只恢复当前活动会话的最近一页。其它会话保留在 SQLite 中，
@@ -1109,20 +1142,20 @@ export function useDataPersistence() {
       // 同一原因：hydration 期内的项目规范化（如把仍是「新会话 - <时间>」的
       // 占位标题迁移成首条用户消息预览）也要落盘，否则下次启动又得靠
       // preview 重新推导，旧数据一旦缺 preview 就会退回占位标题。
-      if (d) {
-        const projectState = useProjectStore.getState();
-        scheduleProjectsSave({
-          projects: projectState.projects,
-          activeProjectId: projectState.activeProjectId,
-          activeSessionId: projectState.activeSessionId,
-        });
-      }
+      const projectState = useProjectStore.getState();
+      scheduleProjectsSave({
+        projects: projectState.projects,
+        activeProjectId: projectState.activeProjectId,
+        activeSessionId: projectState.activeSessionId,
+      });
 
-      if (validSessionIds) {
+      // 只在 projects.json 真的读出来时才做孤儿清理：否则 validSessionIds
+      // 只剩内置工作区（空集合）→ 主进程会把它当成「所有会话都是孤儿」删干净。
+      if (parsed && validSessionIds) {
         loadSessionMessageSummaries([...validSessionIds]);
         void window.electronAPI.purgeSessionData({
           validSessionIds: [...validSessionIds],
-          validProjectIds: d?.projects.map((project) => project.id) || [],
+          validProjectIds: d.projects.map((project) => project.id),
         })
           .catch((error) => console.error("[persistence] orphan cleanup failed:", error));
       }
@@ -1136,6 +1169,20 @@ export function useDataPersistence() {
   }, []);
 
   // Model and thinking settings are persisted by SessionCommandCoordinator.
+
+  // 默认工作区路径改动（设置页或项目卡片编辑）后同步置顶卡片并补建目录。
+  useEffect(() => {
+    const handleGeneralSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<GeneralSettingsUpdatedDetail>).detail;
+      if (typeof detail?.defaultWorkspacePath !== "string") return;
+      const path = resolveDefaultWorkspacePath(_defaultWorkspaceHomeDir, detail.defaultWorkspacePath);
+      if (!path) return;
+      ensureDefaultWorkspaceDirectory(path);
+      useProjectStore.getState().syncDefaultWorkspace(path);
+    };
+    window.addEventListener(GENERAL_SETTINGS_UPDATED_EVENT, handleGeneralSettingsUpdated);
+    return () => window.removeEventListener(GENERAL_SETTINGS_UPDATED_EVENT, handleGeneralSettingsUpdated);
+  }, []);
 
   // Save projects, activeProjectId, and activeSessionId when they change
   useEffect(() => {

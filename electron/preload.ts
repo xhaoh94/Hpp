@@ -28,6 +28,14 @@ import type {
   RemoteRendererCommandResult,
   RemoteRendererPublish,
 } from "../shared/remote-protocol";
+import {
+  EDITOR_BRIDGE_INSERT_CHANNEL,
+  EDITOR_BRIDGE_RESULT_CHANNEL,
+} from "../shared/editor-bridge-constants";
+import type {
+  EditorBridgeInsertPayload,
+  EditorBridgeInsertResult,
+} from "../shared/editor-bridge-protocol";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   // Window controls
@@ -101,6 +109,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),
   openAttachmentFolder: () => ipcRenderer.invoke("fs:openAttachmentFolder"),
   getHomeDir: () => ipcRenderer.invoke("fs:getHomeDir"),
+  ensureDirectory: (dirPath: string) => ipcRenderer.invoke("fs:ensureDirectory", dirPath),
   isCommandAvailable: (command: string) => ipcRenderer.invoke("fs:isCommandAvailable", command),
   piSDKGetStatus: () => ipcRenderer.invoke("pi-sdk:getStatus"),
   piSDKUpdate: () => ipcRenderer.invoke("pi-sdk:update"),
@@ -171,6 +180,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("remote:command", handler);
   },
 
+  // Editor bridge：外部编辑器发来的选区/文件，交给渲染层插进输入框
+  editorBridgeGetStatus: () => ipcRenderer.invoke("editor-bridge:getStatus"),
+  editorBridgeListTargets: () => ipcRenderer.invoke("editor-bridge:listTargets"),
+  editorBridgeInstallExtension: (targetId: string) =>
+    ipcRenderer.invoke("editor-bridge:installExtension", targetId),
+  editorBridgeInstallZed: () => ipcRenderer.invoke("editor-bridge:installZed"),
+  editorBridgeInsertResult: (result: EditorBridgeInsertResult) =>
+    ipcRenderer.send(EDITOR_BRIDGE_RESULT_CHANNEL, result),
+  onEditorBridgeInsert: (callback: (payload: EditorBridgeInsertPayload) => void) => {
+    const handler = (_event: unknown, payload: EditorBridgeInsertPayload) => callback(payload);
+    ipcRenderer.on(EDITOR_BRIDGE_INSERT_CHANNEL, handler);
+    return () => ipcRenderer.removeListener(EDITOR_BRIDGE_INSERT_CHANNEL, handler);
+  },
+
   // Clipboard
   writeImageToClipboard: (imageDataUrl: string) =>
     ipcRenderer.invoke("clipboard:writeImage", imageDataUrl),
@@ -215,7 +238,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentMcp:readConfig", scope, projectPath),
   agentMcpWriteConfig: (
     scope: McpConfigScope,
-    payload: { servers: Record<string, McpServerConfig>; autoEnableCodemode?: boolean },
+    payload: { servers: Record<string, McpServerConfig> },
     projectPath?: string,
   ) => ipcRenderer.invoke("agentMcp:writeConfig", scope, payload, projectPath),
   agentCodemodeGetConfig: () => ipcRenderer.invoke("agentCodemode:getConfig"),

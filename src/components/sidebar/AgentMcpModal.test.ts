@@ -78,14 +78,15 @@ describe("MCP 弹窗的状态管理约定", () => {
   });
 
   /**
-   * 回归：`autoEnableCodemode` 是 mcp.json 的**全局**顶层字段，pi 的语义是
-   * 「项目级覆盖全局」（config.js:112）。项目级保存时若把它一起提交，会在项目文件里
-   * 钉一份当前全局值的副本；之后用户改全局设置时，这份陈旧副本会反向盖掉新值。
+   * 回归：`autoEnableCodemode` 是 pi 自己的顶层字段，但 Hpp 现在开 MCP 就强制启用
+   * codemode 扩展，那套「自动加进工具列表」的兜底永远不触发。留个勾选只会让人以为
+   * 关掉它就能关掉 codemode，所以整条链路都不再读写它。
    */
-  it("autoEnableCodemode 只在全局作用域提交", () => {
+  it("不再读写 pi 的 autoEnableCodemode", () => {
     const source = readWorkspaceFile(MCP_MODAL);
-    expect(source).toContain('...(scope === "global" ? { autoEnableCodemode } : {})');
-    expect(source).not.toContain("{ servers, autoEnableCodemode }");
+    expect(source).not.toContain("autoEnableCodemode");
+    // 保存只提交 servers，其余顶层键由 read-modify-write 原样保留。
+    expect(source).toContain("{ servers },");
   });
 
   /**

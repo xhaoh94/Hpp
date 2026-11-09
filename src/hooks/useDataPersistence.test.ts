@@ -251,6 +251,22 @@ describe("会话标题在正文加载前也要可读", () => {
     }],
   })?.projects[0]?.sessions[0];
 
+  it("读回项目时保留侧栏卡片的展开/收起记忆", () => {
+    const parsed = parsePersistedData({
+      projects: [{
+        id: "project-one",
+        name: "project-one",
+        path: "C:/project-one",
+        createdAt: "2025-10-15T13:26:00.000Z",
+        agents: ["codex"],
+        sessions: [],
+        sessionsCollapsed: true,
+      }],
+    });
+    // 白名单式读取很容易漏掉新增的持久化字段：漏了就等于“重启后记忆失效”。
+    expect(parsed?.projects[0]?.sessionsCollapsed).toBe(true);
+  });
+
   it("把仍是占位标题的旧数据迁移成首条用户消息预览", () => {
     expect(parseFirstSession(makeSession({ preview: "修复侧栏会话标题" }))?.title)
       .toBe("修复侧栏会话标题");

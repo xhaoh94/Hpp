@@ -1316,7 +1316,7 @@ describe("Pi SDK worker protocol", () => {
       type: "init",
       projectPath: tempRoot,
       // “跟随聊天”（inherit）+ 支持 max 档的压缩模型。
-      compactionConfig: { thinkingLevel: "inherit", modelMode: "custom", model: "luna/gpt-5.6-luna" },
+      compactionConfig: { thinkingLevel: "inherit" },
     });
     await worker.waitFor((message) => message.type === "ready");
     // 聊天档位调到 max：继承给摘要请求会把输出预算耗在思考上，必须下调到 medium。
@@ -1408,7 +1408,8 @@ describe("Pi SDK worker protocol", () => {
     expect(await runFailingCompaction("switch-fail-4")).toBe("continued");
   });
 
-  it("uses a configured OpenAI-compatible model for Agent compaction", async () => {
+  // 旧版手填 Base URL/Key 的压缩配置：升级后没有渠道引用，直接跟随当前模型。
+  it("ignores a legacy hand-written OpenAI-compatible compaction model", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
     worker.send({
@@ -1428,89 +1429,14 @@ describe("Pi SDK worker protocol", () => {
       },
     });
     await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "compact-custom", type: "prompt", message: "compact", permissionMode: "full-access" });
-    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-custom");
-
-    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
-    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
-    expect(summary).toMatchObject({
-      id: "summary-fast",
-      provider: "hpp-compaction",
-      api: "openai-responses",
-      baseUrl: "https://summary.example.com/v1",
-      reasoning: true,
-      apiKey: "summary-key",
-      thinkingLevel: "low",
-    });
-  });
-
-  it("uses a configured channel model for Agent compaction", async () => {
-    const worker = startWorker(runtimeRoot, agentDir);
-    children.push(worker.child);
-    worker.send({
-      id: "init",
-      type: "init",
-      projectPath: tempRoot,
-      // 渠道弹窗里从已配置渠道选的压缩模型："providerId/modelId"。
-      compactionConfig: { modelMode: "custom", model: "test-provider/single-level-model" },
-    });
-    await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "compact-channel", type: "prompt", message: "compact", permissionMode: "full-access" });
-    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-channel");
-
-    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
-    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
-    expect(summary).toMatchObject({
-      id: "single-level-model",
-      provider: "test-provider",
-      apiKey: "test-api-key",
-    });
-  });
-
-  it("re-reads the model catalogue before reporting a freshly added compaction model", async () => {
-    const worker = startWorker(runtimeRoot, agentDir);
-    children.push(worker.child);
-    worker.send({
-      id: "init",
-      type: "init",
-      projectPath: tempRoot,
-      // 渠道弹窗在会话运行期间新加入的模型：init 快照里 find 不到，
-      // refresh（重读磁盘配置）之后才能找到，不应误报不可用。
-      compactionConfig: { modelMode: "custom", model: "tanwan/gpt-5.6-sol" },
-    });
-    await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "compact-added", type: "prompt", message: "compact", permissionMode: "full-access" });
-    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-added");
-
-    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
-    const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
-    expect(summary).toMatchObject({ id: "gpt-5.6-sol", provider: "tanwan" });
-    expect(worker.messages.some((item) => item.type === "status"
-      && String(item.title || "").includes("自定义压缩模型不可用"))).toBe(false);
-  });
-
-  it("falls back to the current model when the configured channel model is gone", async () => {
-    const worker = startWorker(runtimeRoot, agentDir);
-    children.push(worker.child);
-    worker.send({
-      id: "init",
-      type: "init",
-      projectPath: tempRoot,
-      // 渠道或模型已被删除：注册表 find 不到，应回退当前模型而不是中断压缩。
-      compactionConfig: { modelMode: "custom", model: "deleted-provider/summary-model" },
-    });
-    await worker.waitFor((message) => message.type === "ready");
-    worker.send({ id: "compact-missing", type: "prompt", message: "compact", permissionMode: "full-access" });
-    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-missing");
+    worker.send({ id: "compact-legacy", type: "prompt", message: "compact", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "compact-legacy");
 
     const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
     const summary = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}"));
     expect(summary).toMatchObject({ id: "pi-model", provider: "test-provider" });
     expect(worker.messages.some((item) => item.type === "status"
-      && String(item.detail || "").includes("已配置的压缩模型不可用"))).toBe(true);
-    // 用户看不懂“不可用”应该怎么做：detail 里要给可直接照做的指引。
-    expect(worker.messages.some((item) => item.type === "status"
-      && String(item.detail || "").includes("跟随当前 Agent 模型"))).toBe(true);
+      && String(item.detail || "").includes("已配置的压缩模型不可用"))).toBe(false);
   });
 
   it("cancels compaction when the channel config disables it", async () => {

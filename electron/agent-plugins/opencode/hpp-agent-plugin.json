@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "minHppVersion": "0.1.0",
   "description": "OpenCode CLI programming agent (1.x / 2.x)",
   "entry": "agent.mjs",
@@ -29,7 +29,6 @@
     "fork": true,
     "actions": true,
     "compaction": {
-      "customModel": true,
       "thinkingLevel": true
     },
     "configuration": {

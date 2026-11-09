@@ -5,6 +5,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useShallow } from "zustand/react/shallow";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
+import { isDefaultWorkspaceProject } from "@/lib/default-workspace";
 import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
 
@@ -34,6 +35,9 @@ export function ProjectView() {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
 
+  // 只给“从未手动切换过展开状态”的项目算一个启动默认：默认只展开当前会话
+  // 所在的项目。用户手动展开/收起后，项目上会记住 sessionsCollapsed，
+  // 下次启动直接沿用（见 ProjectCard）。
   if (projectDataHydrated && startupCollapseStateRef.current === null) {
     const rememberedProjectId = projects.find((project) =>
       project.sessions.some((session) => session.id === activeSessionId)
@@ -85,6 +89,9 @@ export function ProjectView() {
       }
     }
   };
+
+  const defaultWorkspaceProject = projects.find(isDefaultWorkspaceProject);
+  const draggableProjects = projects.filter((project) => !isDefaultWorkspaceProject(project));
 
   return (
     <div className="sidebar">
@@ -174,11 +181,18 @@ export function ProjectView() {
           <div className="placeholder-text">暂无项目</div>
         )}
         <div className="project-list">
-          {projects.map((project) => (
+          {/* 内置默认工作区固定置顶：不参与拖拽排序，也不会被当作投放目标。
+              启动时强制展开 —— 收起状态会把 Agent 快捷启动按钮一起藏掉。 */}
+          {defaultWorkspaceProject && (
+            <div className="project-card-pinned">
+              <ProjectCard project={defaultWorkspaceProject} initialSessionsCollapsed={false} />
+            </div>
+          )}
+          {draggableProjects.map((project) => (
             <div
               key={project.id}
               className={`project-card-drag-wrapper ${draggedProjectId === project.id ? "dragging" : ""} ${dropProjectId === project.id ? `drop-target ${dropPosition}` : ""}`}
-              draggable={projects.length > 1}
+              draggable={draggableProjects.length > 1}
               onDragStart={(event: DragEvent<HTMLDivElement>) => {
                 stopProjectAutoScroll();
                 setDraggedProjectId(project.id);
@@ -230,7 +244,11 @@ export function ProjectView() {
             >
               <ProjectCard
                 project={project}
-                initialSessionsCollapsed={startupCollapseStateRef.current?.get(project.id) ?? false}
+                initialSessionsCollapsed={
+                  project.sessionsCollapsed
+                  ?? startupCollapseStateRef.current?.get(project.id)
+                  ?? false
+                }
               />
             </div>
           ))}

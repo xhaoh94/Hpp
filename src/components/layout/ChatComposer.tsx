@@ -403,6 +403,12 @@ export const ChatComposer = memo(function ChatComposer({
       event.stopPropagation();
     }
 
+    // Ctrl+Alt+Enter 由 ChatPanel 处理，@ 文件提及弹窗不能吞掉这个组合键。
+    if (event.key === "Enter" && event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey) {
+      onKeyDown(event);
+      return;
+    }
+
     const activeText = editorRef.current?.getActiveText();
     const currentMention = activeText
       ? parseActiveFileMention(activeText.text, activeText.start, activeText.end)

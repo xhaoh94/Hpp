@@ -295,15 +295,49 @@
 }
 
 .project-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
-.project-close-btn {
+.project-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-default-badge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(0, 120, 212, 0.16);
+  color: var(--accent-color);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 15px;
+}
+
+.project-card-actions {
   position: absolute;
   top: -4px;
   right: -4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.project-item:hover .project-card-actions {
+  opacity: 1;
+}
+
+.project-close-btn,
+.project-history-btn,
+.project-edit-btn {
   width: 20px;
   height: 20px;
   background: var(--bg-tertiary);
@@ -316,31 +350,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
   transition: all 0.15s;
-}
-
-.project-history-btn {
-  position: absolute;
-  top: -4px;
-  right: 20px;
-  width: 20px;
-  height: 20px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: all 0.15s;
-}
-
-.project-item:hover .project-close-btn,
-.project-item:hover .project-history-btn {
-  opacity: 1;
 }
 
 .project-close-btn:hover {
@@ -353,6 +363,11 @@
   background-color: #0078d4;
   color: white;
   border-color: #0078d4;
+}
+
+.project-edit-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .project-path {
@@ -421,6 +436,7 @@
 .project-info.sessions-collapsed { opacity: 0.9; }
 
 .project-card-drag-wrapper { position: relative; cursor: grab; }
+.project-card-pinned { position: relative; cursor: default; margin-bottom: 2px; }
 .project-card-drag-wrapper:active { cursor: grabbing; }
 .project-card-drag-wrapper.dragging { opacity: 0.45; }
 .project-card-drag-wrapper.drop-target { outline: none; }

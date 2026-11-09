@@ -254,12 +254,12 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
 
 function normalizeCompactionCapabilities(value: unknown): AgentCapabilities["compaction"] {
   if (!isRecord(value)) return "none";
-  const customModel = value.customModel === true;
+  // 旧插件还在声明 customModel（手填 Base URL/Key）与 channelModel（指定压缩模型）；
+  // Hpp 已移除这两条路径，读到就忽略，只认思考等级 / 启停开关。
   const thinkingLevel = value.thinkingLevel === true;
   const toggle = value.toggle === true;
-  const channelModel = value.channelModel === true;
-  return customModel || thinkingLevel || toggle || channelModel
-    ? { customModel, thinkingLevel, toggle, channelModel }
+  return thinkingLevel || toggle
+    ? { thinkingLevel, toggle }
     : "none";
 }
 

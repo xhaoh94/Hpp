@@ -43,6 +43,14 @@ import type {
 } from "../../shared/remote-protocol";
 import type { FileFilterConfig } from "../../shared/file-filters";
 import type {
+  EditorBridgeInsertPayload,
+  EditorBridgeInsertResult,
+  EditorBridgeInstallResult,
+  EditorBridgeStatus,
+  EditorBridgeTargetInfo,
+  EditorBridgeZedResult,
+} from "../../shared/editor-bridge-protocol";
+import type {
   PrepareReviewUndoRequest,
   ReviewUndoLoadResult,
   ReviewUndoResult,
@@ -309,6 +317,7 @@ export interface ElectronAPI {
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
   openAttachmentFolder: () => Promise<{ canceled: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getHomeDir: () => Promise<string>;
+  ensureDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>;
   isCommandAvailable: (command: string) => Promise<boolean>;
   piSDKGetStatus: () => Promise<PiSDKStatus>;
   piSDKUpdate: () => Promise<{ success: boolean; error?: string; status?: PiSDKStatus }>;
@@ -350,6 +359,14 @@ export interface ElectronAPI {
   onRemoteClientsChanged: (callback: (status: { connected: number }) => void) => () => void;
   onRemoteClientDisconnected: (callback: (event: { deviceId: string }) => void) => () => void;
 
+  // Editor bridge
+  editorBridgeGetStatus: () => Promise<EditorBridgeStatus>;
+  editorBridgeListTargets: () => Promise<EditorBridgeTargetInfo[]>;
+  editorBridgeInstallExtension: (targetId: string) => Promise<EditorBridgeInstallResult>;
+  editorBridgeInstallZed: () => Promise<EditorBridgeZedResult>;
+  editorBridgeInsertResult: (result: EditorBridgeInsertResult) => void;
+  onEditorBridgeInsert: (callback: (payload: EditorBridgeInsertPayload) => void) => () => void;
+
   // Clipboard
   writeImageToClipboard: (imageDataUrl: string) => Promise<{ success: boolean; error?: string }>;
   /** 把本地视频文件放进系统剪贴板；mode=path 表示文件剪贴板不可用、退化为复制路径。 */
@@ -383,7 +400,7 @@ export interface ElectronAPI {
   agentMcpReadConfig: (scope: McpConfigScope, projectPath?: string) => Promise<McpConfigResult>;
   agentMcpWriteConfig: (
     scope: McpConfigScope,
-    payload: { servers: Record<string, McpServerConfig>; autoEnableCodemode?: boolean },
+    payload: { servers: Record<string, McpServerConfig> },
     projectPath?: string,
   ) => Promise<McpConfigResult>;
   agentCodemodeGetConfig: () => Promise<AgentCodemodeConfigResult>;

@@ -66,7 +66,6 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("onClaimRevealCenter(revealRequestId)");
     expect(source).toContain("[isHighlighted, onClaimRevealCenter, revealRequest?.requestId]");
     expect(source).not.toContain("[isHighlighted, loadingFolder, revealRequest?.requestId]");
-    expect(source).toContain("useEditorStore.getState().openFile(revealRequest.path)");
     expect(source).toContain("setPreviewFile(revealRequest.path)");
     expect(source).toContain("setPreviewFile(null)");
     expect(styles).not.toContain(".file-tree-content::after");

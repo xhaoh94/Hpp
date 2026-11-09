@@ -87,6 +87,39 @@ describe("subagent events", () => {
     }));
   });
 
+  // 监视窗依赖任务级时间线与实时输出；老后端不给这些字段时保持 undefined。
+  it("carries per-task timing and live output for the monitor", () => {
+    const parsed = parseSubagentsFromEvent({
+      type: "subagent_event",
+      state: "running",
+      subagents: [{
+        id: "thread-4",
+        label: "Reviewer",
+        status: "running",
+        startedAt: 1000.7,
+        lastActivityAt: 2500,
+        liveOutput: "正在读取文件",
+      }],
+    } as AgentEvent);
+
+    expect(parsed[0]).toMatchObject({
+      startedAt: 1000.7,
+      lastActivityAt: 2500,
+      liveOutput: "正在读取文件",
+    });
+    expect(parsed[0].completedAt).toBeUndefined();
+
+    // 脏数据（0 / NaN / 空串）不写入。
+    const empty = parseSubagentsFromEvent({
+      type: "subagent_event",
+      state: "running",
+      subagents: [{ id: "thread-5", startedAt: 0, completedAt: Number.NaN, liveOutput: "  " }],
+    } as AgentEvent);
+    expect(empty[0].startedAt).toBeUndefined();
+    expect(empty[0].completedAt).toBeUndefined();
+    expect(empty[0].liveOutput).toBeUndefined();
+  });
+
   it("uses an agent path as a readable fallback label", () => {
     expect(parseSubagentsFromEvent({
       type: "subagent_event",

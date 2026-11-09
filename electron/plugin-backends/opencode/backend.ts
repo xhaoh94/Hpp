@@ -30,7 +30,6 @@ import type { AgentPermissionMode } from "../../../shared/agent-permissions";
 import { isHighRiskAgentPermissionRequest } from "../../../shared/agent-permissions";
 import { normalizeSupportedThinkingLevels, normalizeThinkingLevelId } from "../../../shared/models";
 import {
-  isCustomAgentCompactionModelConfigured,
   normalizeAgentCompactionConfig,
   type AgentCompactionConfig,
 } from "../../../shared/agent-compaction";
@@ -516,22 +515,8 @@ function readOpenCodeConfigContent(): string | undefined {
 
 function getOpenCodeCompactionVariant(config: AgentCompactionConfig): string | undefined {
   if (config.thinkingLevel === "inherit") return undefined;
-  if (config.modelMode === "custom" && !config.customModel.reasoning) return undefined;
   if (config.thinkingLevel === "xhigh") return "max";
   return config.thinkingLevel;
-}
-
-function getAvailableCompactionProviderId(providers: UnknownRecord): string {
-  let providerId = HPP_OPENCODE_COMPACTION_PROVIDER;
-  let index = 2;
-  while (
-    providers[providerId] !== undefined
-    && asRecord(providers[providerId]).name !== HPP_OPENCODE_COMPACTION_PROVIDER_NAME
-  ) {
-    providerId = `${HPP_OPENCODE_COMPACTION_PROVIDER}-${index}`;
-    index += 1;
-  }
-  return providerId;
 }
 
 export function buildOpenCodeConfigContent(
@@ -543,76 +528,30 @@ export function buildOpenCodeConfigContent(
   const config = normalizeAgentCompactionConfig(value);
   const parsed = parseOpenCodeConfigContent(source);
   const useV2 = protocolId === "v2";
-  const providers = { ...asRecord(parsed.provider) };
-  const providersV2 = { ...asRecord(parsed.providers) };
   const agents = { ...asRecord(parsed.agent) };
   const compactionAgent = { ...asRecord(agents.compaction) };
   delete compactionAgent.model;
   delete compactionAgent.variant;
 
-  const customConfigured = isCustomAgentCompactionModelConfigured(config);
-  if (customConfigured) {
-    // 判断 id 是否被占用时把两种配置结构都算上。
-    const providerId = getAvailableCompactionProviderId({ ...providers, ...providersV2 });
-    const custom = config.customModel;
-    const modelEntry = {
-      name: custom.modelId,
-      reasoning: custom.reasoning,
-      attachment: false,
-      modalities: { input: ["text"], output: ["text"] },
-    };
-    if (useV2) {
-      // 2.x 的 provider 声明用 package/settings；推理模型走 openai 包。
-      providersV2[providerId] = {
-        package: custom.api === "openai-responses"
-          ? "@opencode/ai/providers/openai"
-          : "@opencode/ai/providers/openai-compatible",
-        name: HPP_OPENCODE_COMPACTION_PROVIDER_NAME,
-        settings: {
-          baseURL: custom.baseUrl,
-          ...(custom.apiKey ? { apiKey: custom.apiKey } : {}),
-        },
-        models: { [custom.modelId]: modelEntry },
-      };
-    } else {
-      providers[providerId] = {
-        npm: custom.api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible",
-        name: HPP_OPENCODE_COMPACTION_PROVIDER_NAME,
-        options: {
-          baseURL: custom.baseUrl,
-          ...(custom.apiKey ? { apiKey: custom.apiKey } : {}),
-        },
-        models: { [custom.modelId]: modelEntry },
-      };
-    }
-    compactionAgent.model = `${providerId}/${custom.modelId}`;
-  } else if (config.thinkingLevel !== "inherit" && currentModel?.provider && currentModel.id) {
-    // OpenCode 仅在 compaction agent 显式指定模型时应用 variant。
-    // 因此独立思考等级需要把“当前模型”固定为用户刚选择的模型。
+  // OpenCode 的压缩只能用会话模型（Hpp 已移除手填渠道）。仅在设置了独立压缩
+  // 思考等级时显式指定当前模型：OpenCode 只对显式 model 应用 variant。
+  if (config.thinkingLevel !== "inherit" && currentModel?.provider && currentModel.id) {
     compactionAgent.model = `${currentModel.provider}/${currentModel.id}`;
   }
 
-  const variant = getOpenCodeCompactionVariant(customConfigured ? config : { ...config, modelMode: "current" });
+  const variant = getOpenCodeCompactionVariant(config);
   if (variant && compactionAgent.model) compactionAgent.variant = variant;
   agents.compaction = compactionAgent;
 
   const nextConfig: UnknownRecord = {
     ...parsed,
-    provider: providers,
     agent: agents,
     ...(!useV2 && !("permission" in parsed) ? { permission: "allow" } : {}),
   };
   if (useV2) {
-    // 2.x 用 providers.* 声明渠道；用户原有的 provider.* 段在迁移期仍被接受，
-    // 所以这里只补 Hpp 需要注入的条目，不整体改写用户配置。
-    if (Object.keys(providersV2).length > 0) nextConfig.providers = providersV2;
     // 2.x 的权限是 ordered rules（permissions 数组）；schema 细节还在演进，
     // 这里不主动写权限，让 OpenCode 走默认策略，Hpp 在事件层自动批准。
     delete nextConfig.permission;
-  }
-  if (!useV2 && customConfigured && Array.isArray(parsed.enabled_providers)) {
-    const customProviderId = String(compactionAgent.model).split("/")[0];
-    nextConfig.enabled_providers = [...new Set([...parsed.enabled_providers.map(String), customProviderId])];
   }
   return JSON.stringify(nextConfig);
 }
@@ -2618,7 +2557,6 @@ export class OpenCodeAgent {
     if (
       modelChanged
       && this.process
-      && this.compactionConfig.modelMode === "current"
       && this.compactionConfig.thinkingLevel !== "inherit"
     ) {
       await this.restartRuntimeForCompaction();
@@ -2681,7 +2619,7 @@ export class OpenCodeAgent {
   }
 
   private getCompactionSignature(config: AgentCompactionConfig): string {
-    const pinnedCurrentModel = config.modelMode === "current" && config.thinkingLevel !== "inherit"
+    const pinnedCurrentModel = config.thinkingLevel !== "inherit"
       ? { provider: this.currentProviderId, id: this.currentModelId }
       : null;
     return JSON.stringify({ config, pinnedCurrentModel });

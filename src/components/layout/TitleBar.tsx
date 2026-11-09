@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
-import { Columns2, Copy, Download, LoaderCircle, Minus, RotateCcw, Square, X } from 'lucide-react'
+import { Copy, Download, LoaderCircle, Minus, RotateCcw, Square, X } from 'lucide-react'
 import type { AppUpdateStatus } from '@/types'
-import { useEditorStore } from '@/stores/editor-store'
 import { uiText } from '@/i18n/text'
 import './TitleBar.css'
 
@@ -17,8 +16,6 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
   const updatePromptRef = useRef<HTMLSpanElement | null>(null)
   const [isNiri, setIsNiri] = useState(false)
   const [appVersion, setAppVersion] = useState('')
-  const editorMode = useEditorStore((s) => s.mode)
-  const toggleEditorMode = useEditorStore((s) => s.toggleMode)
 
   useEffect(() => {
     let cancelled = false
@@ -205,16 +202,6 @@ const TitleBar: React.FC<TitleBarProps> = ({ title = 'Hpp' }) => {
       </div>
 
       <div className="titlebar-controls">
-        <button
-          type="button"
-          className={`titlebar-mode-btn${editorMode ? ' active' : ''}`}
-          onClick={toggleEditorMode}
-          title={editorMode ? uiText.editor.togglePreviewMode : uiText.editor.toggleEditorMode}
-          aria-label={editorMode ? uiText.editor.togglePreviewMode : uiText.editor.toggleEditorMode}
-          aria-pressed={editorMode}
-        >
-          <Columns2 size={14} strokeWidth={1.8} />
-        </button>
         {!isNiri && (
           <>
             <button

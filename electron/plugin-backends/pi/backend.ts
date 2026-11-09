@@ -149,6 +149,8 @@ const PI_WORKER_INIT_TIMEOUT_MS = 120_000;
 // asking the worker for the model list.
 const PI_COMPACTION_MODEL_WAIT_MS = 30_000;
 const PI_SUBAGENT_DETAIL_CAP = 4000;
+/** 监视窗里显示的实时输出片段上限（只取尾巴，不影响最终结果）。 */
+const PI_SUBAGENT_LIVE_OUTPUT_CAP = 2400;
 
 type PiSubagentStart = {
   startedAt: number;
@@ -308,6 +310,14 @@ const buildPiSubagentEvent = (
       prompt: task || undefined,
       ...(normalizeNativeSubagentStopReason(result.stopReason) ? { stopReason: normalizeNativeSubagentStopReason(result.stopReason) } : {}),
       ...(usage ? { usage } : {}),
+      // 监视窗/耗时展示用；老版本 worker 没有这些字段时不写，渲染层按缺省处理。
+      ...(Number.isFinite(Number(result.startedAt)) ? { startedAt: Number(result.startedAt) } : {}),
+      ...(Number.isFinite(Number(result.completedAt)) ? { completedAt: Number(result.completedAt) } : {}),
+      ...(Number.isFinite(Number(result.lastActivityAt)) ? { lastActivityAt: Number(result.lastActivityAt) } : {}),
+      ...(typeof result.liveOutput === "string" && result.liveOutput.trim()
+        // 实时输出取尾巴：用户要看的是最近在写什么。
+        ? { liveOutput: result.liveOutput.slice(-PI_SUBAGENT_LIVE_OUTPUT_CAP) }
+        : {}),
     };
   });
   const subagents = parsedResults.length > 0
@@ -790,16 +800,18 @@ export class PiSDKAgent {
   }
 
   /**
-   * Resolve once the running compaction (if any) settles, or after the
-   * bounded timeout — whichever comes first. A compaction that never settles
-   * must not block model/config RPCs forever.
+   * Resolve once the running compaction (if any) settles. `timeoutMs` 只在
+   * 需要「超时就先放弃」的调用方（如列模型）传；切模型必须同步等到底。
    */
-  private waitForCompactionIdle(timeoutMs: number): Promise<boolean> {
+  private waitForCompactionIdle(timeoutMs?: number): Promise<boolean> {
     if (!this.compactionActive) return Promise.resolve(true);
     return new Promise((resolve) => {
       const startedAt = Date.now();
       const timer = setInterval(() => {
-        if (!this.compactionActive || Date.now() - startedAt >= timeoutMs) {
+        if (
+          !this.compactionActive
+          || (timeoutMs !== undefined && Date.now() - startedAt >= timeoutMs)
+        ) {
           clearInterval(timer);
           resolve(!this.compactionActive);
         }
@@ -811,9 +823,10 @@ export class PiSDKAgent {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     // 不允许在压缩中途修改 Pi 的 session.model。压缩请求已经捕获了旧模型，
     // 这时切换会让 Hpp hook 看到新模型，造成准备数据、认证和实际模型不一致。
-    if (!(await this.waitForCompactionIdle(PI_COMPACTION_MODEL_WAIT_MS))) {
-      throw new Error("SESSION_BUSY");
-    }
+    // 这里同步等到压缩结束，不自己判超时：压缩常态要跑十几秒到一分钟，后端
+    // 提前放弃会让前端收到「切换超时」、后端稍后却仍把模型切掉 —— UI 与运行
+    // 时模型就此分叉。兜底交给 RPC 总超时（AGENT_MODEL_SWITCH_TIMEOUT_MS）。
+    await this.waitForCompactionIdle();
     if (!this.process) throw new Error("Pi SDK worker is not running");
     let requestId = "";
     await new Promise<void>((resolve, reject) => {

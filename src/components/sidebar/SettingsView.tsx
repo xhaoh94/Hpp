@@ -17,10 +17,12 @@ import {
   Settings,
   SlidersHorizontal,
   Smartphone,
+  SquareCode,
 } from "lucide-react";
 import { AgentSettingsView } from "./AgentSettingsView";
 import { AgentConfigModal } from "./AgentConfigModal";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
+import { EditorIntegrationSettings } from "./EditorIntegrationSettings";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useProjectStore } from "@/stores/project-store";
@@ -170,6 +172,7 @@ export function SettingsView() {
   const [expandedGeneralSection, setExpandedGeneralSection] = useState<GeneralSectionId | null>("appearance");
   const [showAgentSettingsModal, setShowAgentSettingsModal] = useState(false);
   const [showRemoteAccessModal, setShowRemoteAccessModal] = useState(false);
+  const [showEditorIntegrationModal, setShowEditorIntegrationModal] = useState(false);
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
   const [tempImagePath, setTempImagePath] = useState("");
   const [planModeEnabled, setPlanModeEnabled] = useState(false);
@@ -566,6 +569,13 @@ export function SettingsView() {
               远程访问
             </button>
             <button
+              onClick={() => setShowEditorIntegrationModal(true)}
+              className="btn-quick-setting"
+            >
+              <SquareCode size={16} strokeWidth={1.8} />
+              编辑器集成
+            </button>
+            <button
               onClick={openGeneralSettings}
               className="btn-quick-setting"
             >
@@ -757,6 +767,10 @@ export function SettingsView() {
       )}
       {showRemoteAccessModal && createPortal(
         <RemoteAccessSettings onClose={() => setShowRemoteAccessModal(false)} />,
+        document.body,
+      )}
+      {showEditorIntegrationModal && createPortal(
+        <EditorIntegrationSettings onClose={() => setShowEditorIntegrationModal(false)} />,
         document.body,
       )}
       {configAgent && (
