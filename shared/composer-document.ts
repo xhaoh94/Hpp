@@ -1,5 +1,12 @@
 export const COMPOSER_DOCUMENT_VERSION = 1 as const;
 
+/**
+ * 单个粘贴文本块允许的最大字符数。与 session-command-coordinator 的
+ * MESSAGE_TOO_LARGE（200_000）以及远程协议里 text 的上限保持一致，
+ * 避免「界面上折叠了、发送时才被拒绝」。
+ */
+export const MAX_COMPOSER_PASTE_CHARS = 200_000 as const;
+
 export type ComposerSessionReference = {
   sourceSessionId: string;
   sourceTitle: string;
@@ -60,13 +67,25 @@ export type ComposerSessionNode = {
   reference: ComposerSessionReference;
 };
 
+/**
+ * 粘贴进来的大段文本：在输入框和消息气泡里都折叠成一个可悬停展开的标签，
+ * 但发送给 Agent 的仍然是完整原文。只存原文，行数/字数/字节数都由它派生，
+ * 避免同一份内容在快照和草稿里各写一遍。
+ */
+export type ComposerPasteNode = {
+  id: string;
+  type: "paste";
+  text: string;
+};
+
 export type ComposerNode =
   | ComposerTextNode
   | ComposerImageNode
   | ComposerPathNode
   | ComposerVideoNode
   | ComposerSnippetNode
-  | ComposerSessionNode;
+  | ComposerSessionNode
+  | ComposerPasteNode;
 
 export type ComposerDocument = {
   version: typeof COMPOSER_DOCUMENT_VERSION;
@@ -167,6 +186,14 @@ function parseNode(value: unknown, index: number): ComposerNode | null {
       ? { id, type: "snippet", fileName, filePath, startLine, endLine, ...(text !== undefined ? { text } : {}) }
       : fallbackNode(value, index);
   }
+  if (value.type === "paste") {
+    const text = stringValue(value.text);
+    // 空串或超出发送上限的粘贴块一律降级成文本标签，宁可丢折叠也不能让
+    // 后续发送在 MESSAGE_TOO_LARGE 上失败。
+    return text && text.length <= MAX_COMPOSER_PASTE_CHARS
+      ? { id, type: "paste", text }
+      : fallbackNode(value, index);
+  }
   if (value.type === "session" && isRecord(value.reference)) {
     const sourceSessionId = stringValue(value.reference.sourceSessionId);
     const sourceTitle = stringValue(value.reference.sourceTitle);
@@ -192,6 +219,36 @@ export const getComposerPlainText = (document: ComposerDocument) => document.nod
   .filter((node): node is ComposerTextNode => node.type === "text")
   .map((node) => node.text)
   .join("");
+
+/**
+ * 消息的完整文字：手打文本 + 粘贴块原文 + 其它附件的标签。
+ * 用于发送体量校验、编辑回填、复制消息这类「不能丢内容」的场景；
+ * 而「气泡是否太长」「会话标题预览」仍然用 {@link getComposerPlainText}，
+ * 否则一次粘贴就会把标题和折叠判断全部撑爆。
+ */
+export const getComposerFullText = (document: ComposerDocument) => document.nodes
+  .map((node) => (node.type === "text" || node.type === "paste" ? node.text : getComposerNodeLabel(node)))
+  .join("");
+
+/** 粘贴块的显示统计：行数、字符数、UTF-8 字节数。 */
+export type ComposerPasteStats = {
+  chars: number;
+  lines: number;
+  bytes: number;
+};
+
+export const getComposerPasteStats = (text: string): ComposerPasteStats => {
+  let lines = 1;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "\n") lines += 1;
+  }
+  // TextEncoder 在 Electron 渲染进程、移动端 WebView 和 Node 测试环境里都有；
+  // 兜底按字符数估算，避免极端环境下统计直接抛错。
+  const bytes = typeof TextEncoder !== "undefined"
+    ? new TextEncoder().encode(text).length
+    : text.length;
+  return { chars: text.length, lines, bytes };
+};
 
 export const composerDocumentHasContent = (document: ComposerDocument) =>
   document.nodes.some((node) => node.type === "text" ? !!node.text.trim() : true);
@@ -235,5 +292,6 @@ export const getComposerNodeLabel = (node: Exclude<ComposerNode, ComposerTextNod
   if (node.type === "video") return `[video: ${node.name}]`;
   if (node.type === "path") return `[${node.kind}: ${node.name}]`;
   if (node.type === "snippet") return `[${node.fileName}:${node.startLine}-${node.endLine}]`;
+  if (node.type === "paste") return `[粘贴文本: ${getComposerPasteStats(node.text).lines} 行]`;
   return `[引用会话: ${node.reference.sourceTitle}]`;
 };

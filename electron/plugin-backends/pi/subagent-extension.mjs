@@ -477,8 +477,21 @@ const getSubagentTools = (agent, integrations) => {
   ));
 };
 
+/**
+ * 子 Agent 走预打包 CLI，而不是 dist/cli.js（模块树）。
+ *
+ * 模块树要靠 node_modules 解析 `@earendil-works/pi-ai`：旧版 SDK 曾用 shrinkwrap
+ * 把它嵌在 pi-coding-agent/node_modules 下，升级后这份旧副本可能残留，新版代码
+ * import 新文件就会 ERR_MODULE_NOT_FOUND —— 表现为「主会话正常、只有 subagent 挂」。
+ * bundle/cli.js 只 import 同目录 chunks，完全绕开这个问题，启动也更快。
+ */
 const getPiInvocation = (packageRoot, args, nodePath) => {
-  const cliPath = join(packageRoot || "", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+  const packageDir = join(packageRoot || "", "node_modules", "@earendil-works", "pi-coding-agent");
+  const bundleCli = join(packageDir, "dist", "bundle", "cli.js");
+  const bundleRuntime = join(packageDir, "dist", "bundle", "cli-runtime.js");
+  const cliPath = existsSync(bundleCli) && existsSync(bundleRuntime)
+    ? bundleCli
+    : join(packageDir, "dist", "cli.js");
   if (!existsSync(cliPath)) {
     throw new Error(`Pi CLI 不存在：${cliPath}`);
   }

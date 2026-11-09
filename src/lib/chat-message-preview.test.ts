@@ -286,3 +286,35 @@ describe("getSessionPreviewLabel maxLabels", () => {
     }, { maxLabels: 1 })).toBe("看看这个报错");
   });
 });
+
+describe("粘贴块在会话标题/列表里的预览", () => {
+  const pasted = Array.from({ length: 80 }, (_, index) => `line ${index + 1}`).join("\n");
+
+  it("describes the paste by size instead of dumping its text", () => {
+    const message = {
+      content: "",
+      composerDocument: {
+        version: 1 as const,
+        nodes: [{ id: "p1", type: "paste" as const, text: pasted }],
+      },
+    };
+
+    expect(getChatMessagePreviewText(message)).toBe("[粘贴文本: 80 行]");
+    expect(getSessionPreviewLabel(message)).toBe("[粘贴文本: 80 行]");
+  });
+
+  it("still prefers hand-written text when the message has both", () => {
+    const message = {
+      content: "",
+      composerDocument: {
+        version: 1 as const,
+        nodes: [
+          { id: "t1", type: "text" as const, text: "看看这段" },
+          { id: "p1", type: "paste" as const, text: pasted },
+        ],
+      },
+    };
+
+    expect(getChatMessagePreviewText(message)).toBe("看看这段");
+  });
+});

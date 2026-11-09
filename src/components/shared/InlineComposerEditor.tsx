@@ -13,6 +13,7 @@ import {
   $isRangeSelection,
   $isTextNode,
   COMMAND_PRIORITY_LOW,
+  COMMAND_PRIORITY_NORMAL,
   COMPOSITION_END_COMMAND,
   DecoratorNode,
   KEY_BACKSPACE_COMMAND,
@@ -45,8 +46,11 @@ import {
   type ComposerNode,
   type ComposerTextNode,
 } from "@shared/composer-document";
+import { isPastedTextTooLarge, shouldFoldPastedText } from "@/lib/paste-fold";
+import { uiText } from "@/i18n/text";
 import { openVideoPreview } from "@/lib/media-preview";
 import { VideoThumbnail } from "./VideoThumbnail";
+import { ComposerPasteChip } from "./ComposerPasteChip";
 import {
   COMPOSER_CLIPBOARD_MIME,
   readCopiedComposer,
@@ -138,6 +142,29 @@ function ComposerEntityView({ entity, nodeKey }: { entity: EntityNodeValue; node
       editor.registerCommand(KEY_BACKSPACE_COMMAND, removeSelected, COMMAND_PRIORITY_LOW),
     );
   }, [disabled, editor, remove, selected]);
+
+  // 粘贴块：正文不进 DOM，只留一个可以悬停/点击展开的标签。
+  // 包装层的 mousedown 与其它芯片一致，保证点中它时进入节点选中态，
+  // 之后 Backspace/Delete 能整块删除。
+  if (entity.type === "paste") {
+    return (
+      <span
+        className={`inline-composer-paste${selected ? " selected" : ""}`}
+        data-composer-node-id={entity.id}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          if (!event.shiftKey) clearSelection();
+          setSelected(!selected);
+        }}
+      >
+        <ComposerPasteChip
+          text={entity.text}
+          variant="composer"
+          onRemove={disabled ? undefined : remove}
+        />
+      </span>
+    );
+  }
 
   const label = entity.type === "image"
     ? "Image"
@@ -439,6 +466,47 @@ function ComposerClipboardPastePlugin() {
   return null;
 }
 
+/**
+ * 大段纯文本粘贴：不把原文铺进输入框，而是换成一个可悬停展开的标签。
+ *
+ * 优先级设为 NORMAL，低于上面的「复制发言气泡」拦截（CRITICAL）：
+ * 从聊天里复制的消息自带文档格式，应当原样还原，不能降级成粘贴块。
+ * 带文件的剪贴板一律放行给 upper 层附件通路（图片/视频/路径）。
+ */
+function ComposerLargeTextPastePlugin({ onBlocked }: { onBlocked?: (message: string) => void }) {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => editor.registerCommand(
+    PASTE_COMMAND,
+    (event: PasteCommandType) => {
+      if (!(event instanceof globalThis.ClipboardEvent)) return false;
+      const data = event.clipboardData;
+      if (!data) return false;
+      if (Array.from(data.items || []).some((item) => item.kind === "file")) return false;
+      const text = data.getData("text/plain");
+      if (!text) return false;
+      if (isPastedTextTooLarge(text)) {
+        // 超上限时不能静默截断：宁可拒绝，也不能让用户以为发出去的是全文。
+        event.preventDefault();
+        event.stopPropagation();
+        onBlocked?.(uiText.chatComposer.pasteTooLarge);
+        return true;
+      }
+      if (!shouldFoldPastedText(text)) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      editor.update(() => {
+        $insertComposerLexicalNodes(
+          [$createComposerEntityNode({ id: createNodeId(), type: "paste", text })],
+          null,
+        );
+      }, { discrete: true });
+      return true;
+    },
+    COMMAND_PRIORITY_NORMAL,
+  ), [editor, onBlocked]);
+  return null;
+}
+
 function CaptureEditorPlugin({
   editorRef,
   selectionRef,
@@ -505,6 +573,8 @@ export type InlineComposerEditorProps = {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  /** 粘贴内容超出发送上限时回调，由上层弹提示（不会插入任何内容）。 */
+  onPasteBlocked?: (message: string) => void;
   onOpenImage?: (src: string) => void;
   onOpenVideo?: (path: string) => void;
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
@@ -680,6 +750,7 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
           <HistoryPlugin />
           <SyncDocumentPlugin value={value} onChange={onChange} />
           <ComposerClipboardPastePlugin />
+          <ComposerLargeTextPastePlugin onBlocked={events.onPasteBlocked} />
           <CaptureEditorPlugin editorRef={editorRef} selectionRef={selectionRef} />
         </div>
       </LexicalComposer>

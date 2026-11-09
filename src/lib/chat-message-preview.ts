@@ -1,5 +1,5 @@
 import type { ComposerDocument, ComposerNode } from "@shared/composer-document";
-import { parseComposerDocument } from "@shared/composer-document";
+import { getComposerNodeLabel, parseComposerDocument } from "@shared/composer-document";
 import { MESSAGE_WRAPPER_TAG, stripInternalTags } from "@shared/message-internal-tags";
 import type { ChatMessage } from "@/stores/chat-store";
 
@@ -42,6 +42,8 @@ type PreviewOptions = {
 };
 
 const getNodeFallbackLabel = (node: Exclude<ComposerNode, { type: "text" }>, style: PreviewStyle) => {
+  // 粘贴块在预览里一律只写体量，不把原文抖到标题栏/会话列表里。
+  if (node.type === "paste") return getComposerNodeLabel(node);
   if (style === "session") {
     if (node.type === "path") return `[${node.name}]`;
     if (node.type === "snippet") return `[${node.fileName}:${node.startLine}-${node.endLine}]`;

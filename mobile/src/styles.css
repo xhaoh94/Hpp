@@ -1176,6 +1176,11 @@ button:disabled { opacity: 0.48; }
 .message-content > :last-child { margin-bottom: 0; }
 .message-content p { margin: 0 0 10px; }
 .message.user .message-content p { white-space: pre-wrap; }
+/* 用户发言里的纯文本段：替代原来的 <p>，保留换行与行高。 */
+.message.user .message-content .message-content-text { display: inline; white-space: pre-wrap; }
+/* 代码块是块级内容，不能让 inline 的 .message-content 把它挤成一条窄带。 */
+.message-user-flow > .message-content:has(.chat-user-code-flow) { display: block; }
+.message-content > .chat-user-code-flow { display: block; max-width: 100%; }
 .message-content h1 { font-size: 18px; }
 .message-content h2 { font-size: 16px; }
 .message-content h3 { font-size: 14px; }
@@ -1273,6 +1278,9 @@ button:disabled { opacity: 0.48; }
 .message-text-attachment-list { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
 .message-text-attachment-list.user { justify-content: flex-end; }
 .message-text-attachment-chip { display: inline-flex; max-width: min(100%, 320px); min-width: 0; height: 25px; align-items: center; gap: 5px; padding: 0 7px; border: 1px solid var(--accent-border); border-radius: 5px; background: var(--accent-soft); color: var(--text); font-size: 10px; }
+/* 气泡里的粘贴标签只对齐尺寸，底色保持中性（不抢附件引用的 accent 色）。 */
+.message-user-flow .composer-paste-chip.message { height: 25px; margin: 2px 5px 2px 0; padding: 0 7px; border-radius: 5px; font-size: 10px; }
+.message-user-flow .composer-paste-chip.message .composer-paste-chip-icon { width: 12px; height: 12px; }
 .message-text-attachment-chip > svg { flex: 0 0 auto; color: var(--muted); }
 .message-text-attachment-chip.folder > svg { color: #dcab5f; }
 .message-text-attachment-chip.image > svg { color: #6bc7a4; }
@@ -1377,6 +1385,8 @@ button:disabled { opacity: 0.48; }
 .process-entry-received-content .composer-message-image { width: 17px; height: 17px; margin: 0 1px; padding: 2px; border-radius: 5px; transform: none; }
 .process-entry-received-content .composer-message-image img { width: 11px; height: 11px; }
 .process-entry-received-content .composer-message-text { font-size: inherit; line-height: inherit; }
+.process-entry-received-content .composer-paste-chip.message { height: 17px; margin: 0 1px; padding: 0 4px; border-radius: 5px; font-size: inherit; line-height: inherit; vertical-align: -1px; }
+.process-entry-received-content .composer-paste-chip-icon { width: 11px; height: 11px; }
 .process-entry-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .process-idle-duration { color: var(--muted); font: inherit; white-space: nowrap; }
 .process-entry-detail { box-sizing: border-box; width: calc(100% - 10px); min-width: 0; max-width: calc(100% - 10px); margin: 3px 5px 6px; padding: 8px; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--code); color: var(--muted); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }

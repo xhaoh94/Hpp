@@ -14,7 +14,7 @@ import {
   createComposerDocument,
   getComposerImageNodes,
   getComposerNodeLabel,
-  getComposerPlainText,
+  getComposerFullText,
   withoutComposerImages,
   type ComposerDocument,
   type ComposerNode,
@@ -106,6 +106,15 @@ export async function buildSessionMessagePayload(
       continue;
     }
 
+    if (node.type === "paste") {
+      // 界面上折叠成标签，但发给 Agent 的必须是完整原文。
+      // 注意这个分支必须在下面 snippet 的兜底分支之前，
+      // 否则粘贴块会被当成文件片段拼成畸形 payload。
+      displayParts.push(getComposerNodeLabel(node));
+      sendParts.push(node.text);
+      continue;
+    }
+
     displayParts.push(getComposerNodeLabel(node));
     // New composers keep images outside the ordered document. This branch
     // only protects against a malformed or concurrently migrated document.
@@ -192,7 +201,9 @@ export async function buildSessionMessagePayload(
   const sessionReferences = references.length > 0
     ? references.map(({ sourceSessionId, sourceTitle }) => ({ sourceSessionId, sourceTitle }))
     : undefined;
-  const editableText = input.document ? getComposerPlainText(document) : input.text;
+  // 编辑回填 / 体量校验要用完整文字（含粘贴块），否则一次粘贴就能绕过
+  // MESSAGE_TOO_LARGE 的上限检查，且编辑消息会把粘贴内容丢掉。
+  const editableText = input.document ? getComposerFullText(document) : input.text;
 
   return {
     editableContent: editableText.trim(),

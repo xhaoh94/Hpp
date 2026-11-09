@@ -1,3 +1,6 @@
+import type { ComposerPasteStats } from "@shared/composer-document";
+import { formatPastedTextSize } from "@/lib/paste-fold";
+
 export type AttachmentKind = "file" | "folder" | string;
 export type ProcessFileAction = "read" | "listed" | "written" | "edited" | "modified" | undefined;
 export type ProcessStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -35,6 +38,16 @@ export const uiText = {
     file: "文件",
     folder: "文件夹",
     session: "会话",
+    pasteTooLarge: "粘贴内容过大（超过 20 万字符），未插入输入框",
+    pasteRemove: "移除粘贴内容",
+    pasteExpandHint: "点击查看全文，可复制或另存为文件",
+    pasteChipPrefix: "粘贴文本",
+    pastePreviewTitle: "粘贴的文本",
+    pasteCopy: "复制全文",
+    pasteCopied: "已复制",
+    pasteSave: "另存为 txt",
+    pasteSaved: "已保存",
+    pasteSaveFailed: "保存失败",
   },
   process: {
     narration: "正文输出",
@@ -271,3 +284,20 @@ export const getToolActionSummary = (
 
 export const getPlanStepFallbackTitle = (index: number) =>
   `处理第 ${index + 1} 项任务：Agent 暂未提供具体执行说明`;
+
+/**
+ * 粘贴块标签：`粘贴文本 · 128 行 · 8.4 KB`。
+ * 多行优先说行数，单行大文本则说字符数。
+ */
+export const getComposerPasteChipLabel = (stats: ComposerPasteStats) => {
+  const head = stats.lines > 1 ? `${stats.lines} 行` : `${stats.chars} 字符`;
+  return `${uiText.chatComposer.pasteChipPrefix} · ${head} · ${formatPastedTextSize(stats.bytes)}`;
+};
+
+/** 悬停/点击浮层的标题：内容量 + 字符数，让用户确认是不是要的那段。 */
+export const getComposerPastePreviewTitle = (stats: ComposerPasteStats) =>
+  `${stats.lines} 行 · ${stats.chars} 字符 · ${formatPastedTextSize(stats.bytes)}`;
+
+/** 浮层底部的截断提示：只渲染了前 N 行。 */
+export const getComposerPasteTruncatedNotice = (totalLines: number, shownLines: number) =>
+  `仅显示前 ${shownLines} 行，共 ${totalLines} 行；完整内容仍会发送给 Agent`;

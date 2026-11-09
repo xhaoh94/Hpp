@@ -389,6 +389,38 @@ export function registerFileHandlers() {
     return { canceled: false, path: result.filePaths[0] };
   });
 
+  // 把一段文本存成用户选定的文件（聊天里的「另存为 txt」）。
+  // 文本只来自渲染进程的剪贴板内容，不走任意路径写入，因此不需要额外授权。
+  ipcMain.handle(
+    "fs:saveTextFile",
+    async (event, content: unknown, suggestedName: unknown) => {
+      if (typeof content !== "string") {
+        return { canceled: true, success: false, error: "INVALID_CONTENT" };
+      }
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const defaultName = typeof suggestedName === "string" && suggestedName.trim()
+        ? suggestedName.trim()
+        : "pasted-text.txt";
+      try {
+        const result = await dialog.showSaveDialog(win!, {
+          defaultPath: defaultName,
+          filters: [{ name: "Text", extensions: ["txt"] }],
+        });
+        if (result.canceled || !result.filePath) return { canceled: true, success: true };
+        const written = await writeTextFile(result.filePath, content);
+        return written.success
+          ? { canceled: false, success: true, path: result.filePath }
+          : { canceled: false, success: false, error: written.error };
+      } catch (error) {
+        return {
+          canceled: false,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+
   ipcMain.handle("fs:openAttachmentFolder", async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     const result = await dialog.showOpenDialog(win!, {

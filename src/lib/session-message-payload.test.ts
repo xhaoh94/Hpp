@@ -201,3 +201,49 @@ describe("声明格式与实际字节不一致", () => {
     expect(payload.messageImages).toHaveLength(1);
   });
 });
+
+/**
+ * 粘贴块在界面上只显示标签，但发送给 Agent 的必须是完整原文：
+ * 这里锁死「展示用标签 / 发送用全文 / 编辑回填用全文」三条语义。
+ */
+describe("粘贴的长文本", () => {
+  it("sends the full pasted text while the display content stays a label", async () => {
+    const text = Array.from({ length: 120 }, (_, index) => `log line ${index + 1}`).join("\n");
+    const document = createComposerDocument([
+      { id: "t1", type: "text", text: "分析这段日志" },
+      { id: "p1", type: "paste", text },
+    ]);
+    const payload = await buildSessionMessagePayload({
+      text: "分析这段日志",
+      images: [],
+      pendingFiles: [],
+      pendingPathAttachments: [],
+      sessionReferences: [],
+      document,
+      readFile: async () => ({ success: true, content: "" }),
+    });
+
+    expect(payload.sendContent).toContain(text);
+    expect(payload.displayContent).toBe("分析这段日志[粘贴文本: 120 行]");
+    expect(payload.editableContent).toBe(`分析这段日志${text}`);
+    // 粘贴块不能被误判成文件片段（否则会拼出畸形的 <file> 载荷）。
+    expect(payload.editableDraft.pendingFiles).toEqual([]);
+    expect(payload.composerDocument?.nodes.some((node) => node.type === "paste")).toBe(true);
+  });
+
+  it("accepts a paste-only message", async () => {
+    const payload = await buildSessionMessagePayload({
+      text: "",
+      images: [],
+      pendingFiles: [],
+      pendingPathAttachments: [],
+      sessionReferences: [],
+      document: createComposerDocument([{ id: "p1", type: "paste", text: "a\nb" }]),
+      readFile: async () => ({ success: true, content: "" }),
+    });
+
+    expect(payload.sendContent).toBe("a\nb");
+    expect(payload.displayContent).toBe("[粘贴文本: 2 行]");
+    expect(payload.editableContent).toBe("a\nb");
+  });
+});

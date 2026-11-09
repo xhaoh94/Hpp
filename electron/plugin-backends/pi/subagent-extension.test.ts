@@ -1037,3 +1037,47 @@ describe("SubAgent 重试成功后的文案", () => {
     }
   }, 30_000);
 });
+
+/**
+ * 回归：子 Agent 必须走自包含的 bundle CLI。
+ *
+ * 模块树入口要经 node_modules 解析 @earendil-works/pi-ai；升级残留的嵌套旧副本
+ * 会让它 ERR_MODULE_NOT_FOUND —— 主会话没事、只有 subagent 全挂。
+ */
+describe("SubAgent CLI 入口", () => {
+  it("优先使用 bundle CLI，而不是模块树 cli.js", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-bundle-test-"));
+    try {
+      const packageDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(join(packageDir, "bundle"), { recursive: true });
+      // 模块树入口：一旦被选中就直接失败，方便区分实际用的是哪个。
+      await writeFile(join(packageDir, "cli.js"),
+        "process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'from-tree'}],stopReason:'stop'}})+'\\n');\n"
+        + "process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n');\n",
+        "utf8");
+      await writeFile(join(packageDir, "bundle", "cli-runtime.js"), "", "utf8");
+      await writeFile(join(packageDir, "bundle", "cli.js"),
+        "process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'from-bundle'}],stopReason:'stop'}})+'\\n');\n"
+        + "process.stdout.write(JSON.stringify({type:'agent_end'})+'\\n');\n",
+        "utf8");
+
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      const result = await tools[0].execute(
+        "call-bundle",
+        { agent: "scout", task: "看看走了哪个入口" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+
+      expect(result.details.results[0]).toMatchObject({ exitCode: 0, output: "from-bundle" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

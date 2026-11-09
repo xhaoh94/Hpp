@@ -1,5 +1,6 @@
 import { ipcMain } from "electron";
 import { execFile } from "child_process";
+import { existsSync } from "fs";
 import { access, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join, resolve } from "path";
 import { commandExists, getCommandEnv, getExecFileInvocation, getNodeExecutable, getNpmInvocation } from "../utils/command-utils";
@@ -158,10 +159,39 @@ async function getNodeStatus(): Promise<Pick<PiSDKStatus, "nodeVersion" | "nodeO
   }
 }
 
+/**
+ * 检测升级残留的混合依赖树。
+ *
+ * 旧版 SDK 带 shrinkwrap，把 pi-ai 嵌在 pi-coding-agent/node_modules 下；新版改成
+ * 提升到顶层。若两处同时存在且版本不同，模块树入口会先命中**嵌套的旧包**，
+ * 新版代码 import 新文件就报 ERR_MODULE_NOT_FOUND —— 表现为主会话正常、
+ * 子 Agent 全部启动失败。这种情况只能靠整棵重装修复。
+ */
+async function detectDependencyTreeProblem(packageRoot: string): Promise<string | undefined> {
+  const scopedDir = join(packageRoot, "node_modules", "@earendil-works");
+  const nestedAi = join(scopedDir, "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "package.json");
+  const hoistedAi = join(scopedDir, "pi-ai", "package.json");
+  if (!existsSync(nestedAi) || !existsSync(hoistedAi)) return undefined;
+
+  const readVersion = async (path: string) => {
+    try {
+      const value = JSON.parse(await readFile(path, "utf8"));
+      return typeof value.version === "string" ? value.version : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const [nestedVersion, hoistedVersion] = await Promise.all([readVersion(nestedAi), readVersion(hoistedAi)]);
+  if (!nestedVersion || !hoistedVersion || nestedVersion === hoistedVersion) return undefined;
+
+  return `Pi SDK 依赖树损坏：pi-ai 同时存在嵌套旧副本（${nestedVersion}）与顶层副本（${hoistedVersion}），子 Agent 会启动失败。请重新安装 Pi SDK。`;
+}
+
 export async function getPiSDKStatus(): Promise<PiSDKStatus> {
   const packageRoot = await getActivePackageRoot();
   const currentVersion = packageRoot ? await getInstalledVersion(packageRoot) : undefined;
   const nodeStatus = await getNodeStatus();
+  const dependencyError = packageRoot ? await detectDependencyTreeProblem(packageRoot) : undefined;
   let latestVersion: string | undefined;
   let error: string | undefined;
 
@@ -190,7 +220,7 @@ export async function getPiSDKStatus(): Promise<PiSDKStatus> {
     canUpdate: commandExists("npm") && nodeStatus.nodeOk === true,
     packageRoot,
     ...nodeStatus,
-    error: error || environmentError,
+    error: dependencyError || error || environmentError,
   };
 }
 
@@ -210,6 +240,11 @@ export async function updatePiSDK(): Promise<{ success: boolean; error?: string;
       name: "hpp-pi-sdk-runtime",
       private: true,
     }, null, 2)}\n`, "utf8");
+    // 旧版 SDK 的 shrinkwrap 布局会把 pi-ai 嵌在 pi-coding-agent/node_modules 下；
+    // 覆盖安装只会把这份旧副本留下，新版代码 import 新文件时直接
+    // ERR_MODULE_NOT_FOUND。依赖树必须整棵重装。
+    await rm(join(packageRoot, "node_modules"), { recursive: true, force: true });
+    await rm(join(packageRoot, "package-lock.json"), { force: true });
     await runNpmCommand(
       ["install", `${PI_SDK_PACKAGE}@latest`, "--save-exact", "--omit=dev"],
       { cwd: packageRoot, timeout: 180000 }

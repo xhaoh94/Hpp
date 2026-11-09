@@ -306,8 +306,9 @@ describe("chat interaction regression constraints", () => {
   it("folds long user messages rendered as plain text or as a composer document", () => {
     expect(chatPanelSource).toContain("const COLLAPSED_USER_MESSAGE_LINES = 10");
     expect(chatPanelSource).toContain("truncateComposerDocumentLines(orderedComposerDocument, COLLAPSED_USER_MESSAGE_LINES)");
-    expect(chatPanelSource).toContain("<ComposerMessageFlow document={displayedComposerDocument}");
-    expect(chatPanelSource).not.toContain("<ComposerMessageFlow document={orderedComposerDocument}");
+    expect(chatPanelSource).toContain("<ComposerMessageFlow");
+    expect(chatPanelSource).toContain("document={displayedComposerDocument}");
+    expect(chatPanelSource).not.toContain("document={orderedComposerDocument}");
     expect(chatPanelSource).toContain('userMessageExpanded ? "收起" : "显示更多"');
   });
 

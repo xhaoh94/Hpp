@@ -107,6 +107,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   searchFiles: (dirPath: string, query: string, filters?: FileFilterConfig) =>
     ipcRenderer.invoke("fs:searchFiles", dirPath, query, filters),
   openDirectory: () => ipcRenderer.invoke("fs:openDirectory"),
+  saveTextFile: (content: string, suggestedName?: string) =>
+    ipcRenderer.invoke("fs:saveTextFile", content, suggestedName),
   openAttachmentFolder: () => ipcRenderer.invoke("fs:openAttachmentFolder"),
   getHomeDir: () => ipcRenderer.invoke("fs:getHomeDir"),
   ensureDirectory: (dirPath: string) => ipcRenderer.invoke("fs:ensureDirectory", dirPath),

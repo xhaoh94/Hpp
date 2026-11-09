@@ -18,7 +18,7 @@ import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-constants";
 import { isAgentActionInvocation } from "@shared/agent-actions";
 import { normalizeAgentPermissionMode } from "@shared/agent-permissions";
 import { normalizeOutputDetailLevel } from "@shared/output-detail";
-import { createComposerDocument, type ComposerDocument, type ComposerNode } from "@shared/composer-document";
+import { createComposerDocument, getComposerFullText, MAX_COMPOSER_PASTE_CHARS, type ComposerDocument, type ComposerNode } from "@shared/composer-document";
 import type { SessionReference } from "@/stores/project-store";
 
 export type RemoteCommandContext = {
@@ -53,6 +53,13 @@ const hydrateRemoteComposerDocument = (
     const id = getString(node.id);
     if (!id) return [];
     if (node.type === "text") return [{ id, type: "text", text: getString(node.text) }];
+    if (node.type === "paste") {
+      const text = getString(node.text);
+      // 超上限或空的粘贴块降级为文本标签，避免后续发送被 MESSAGE_TOO_LARGE 拒绝。
+      return text && text.length <= MAX_COMPOSER_PASTE_CHARS
+        ? [{ id, type: "paste", text }]
+        : [{ id, type: "text", text: `[粘贴文本: ${text.split(/\r?\n/).length} 行]` }];
+    }
     if (node.type === "image") {
       const image = imageMap.get(id);
       return image ? [{ ...image, type: "image" }] : [{ id, type: "text", text: `[image: ${getString(node.name) || "图片"}]` }];
@@ -202,27 +209,38 @@ async function sendRemoteMessage(payload: Record<string, unknown>) {
     return { id: raw.id, name: raw.name, mimeType: raw.mimeType, src: `data:${raw.mimeType};base64,${raw.data}` };
   });
   const displayContent = content || (rawImages.length > 0 ? "请查看附件图片。" : "");
-  if (!displayContent && referenceContext.contextBlocks.length === 0 && !action) throw new Error("INVALID_REQUEST");
+  const hydratedDocument = hydrateRemoteComposerDocument(
+    payload.composerDocument,
+    editableImages,
+    referenceContext.references,
+  );
+  // 粘贴块只显示标签，移动端的 content 可能为空（它只含手打文本），
+  // 判定有没有内容、大小校验和编辑回填都必须看完整文档文本。
+  const documentText = hydratedDocument ? getComposerFullText(hydratedDocument).trim() : "";
+  if (!displayContent && !documentText && referenceContext.contextBlocks.length === 0 && !action) {
+    throw new Error("INVALID_REQUEST");
+  }
   const prepared = await buildSessionMessagePayload({
     text: displayContent,
     images: editableImages,
     pendingFiles: [],
     pendingPathAttachments: [],
     sessionReferences: referenceContext.references,
-    document: hydrateRemoteComposerDocument(payload.composerDocument, editableImages, referenceContext.references),
+    document: hydratedDocument,
     forkContext: referenceContext.session.forkContext?.context,
     action,
     readFile: (path) => window.electronAPI.readFile(path),
   });
+  const editableContent = prepared.editableContent || content;
   const result = await SessionCommandCoordinator.sendMessage({
     sessionId,
     clientMessageId,
     throwOnFailure: true,
     message: {
       ...prepared,
-      editableContent: content,
+      editableContent,
       displayContent: prepared.displayContent || referenceContext.displayText,
-      editableDraft: prepared.editableDraft ? { ...prepared.editableDraft, text: content } : undefined,
+      editableDraft: prepared.editableDraft ? { ...prepared.editableDraft, text: editableContent } : undefined,
       planModeEnabled: payload.planModeEnabled === true,
       permissionMode: normalizeAgentPermissionMode(payload.permissionMode),
     },

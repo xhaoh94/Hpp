@@ -1,0 +1,211 @@
+/* 粘贴文本标签：输入框与消息气泡共用（见 ComposerPasteChip.tsx）。
+   颜色全部走桌面端变量并带移动端变量兜底，保证两端同一份样式可用。 */
+
+.composer-paste-chip {
+  display: inline-flex;
+  height: 26px;
+  max-width: min(300px, 72vw);
+  align-items: center;
+  gap: 2px;
+  box-sizing: border-box;
+  margin: 0 6px;
+  padding: 0 4px 0 6px;
+  border: 1px solid var(--border-color, var(--border, rgba(128, 128, 128, 0.35)));
+  border-radius: 6px;
+  background: var(--composer-entity-bg, var(--bg-tertiary, var(--surface-raised, rgba(128, 128, 128, 0.16))));
+  color: var(--text-primary, var(--text, inherit));
+  font-size: 13px;
+  line-height: 18px;
+  vertical-align: middle;
+}
+
+.composer-paste-chip.message {
+  /* 气泡里的粘贴标签在尺寸上对齐「文件引用芯片」（.chat-attached-path-chip）：
+     12px 字号 + 2px/6px 内边距 + 4px 圆角，不会把单行气泡抬高一截。
+     底色/边框保持中性的 --composer-entity-bg，与输入框里的芯片一致，
+     不抢附件引用的 accent 色。 */
+  height: auto;
+  gap: 5px;
+  margin: 2px 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.25;
+  vertical-align: middle;
+}
+
+.composer-paste-chip.message .composer-paste-chip-body {
+  gap: 5px;
+}
+
+.composer-paste-chip-body {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-paste-chip-body:focus-visible {
+  outline: 1px solid var(--accent-color, var(--accent, #4b8bf5));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.composer-paste-chip-icon {
+  flex: 0 0 auto;
+  color: var(--text-secondary, var(--muted, currentColor));
+}
+
+.composer-paste-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-paste-chip-remove {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary, var(--muted, currentColor));
+  cursor: pointer;
+  place-items: center;
+}
+
+.composer-paste-chip-remove:hover {
+  background: var(--bg-hover, rgba(128, 128, 128, 0.25));
+  color: var(--text-primary, var(--text, inherit));
+}
+
+.composer-paste-card {
+  position: fixed;
+  z-index: 950;
+  display: flex;
+  width: clamp(360px, 62vw, 720px);
+  max-width: calc(100vw - 24px);
+  max-height: min(52vh, calc(100vh - 24px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-color, var(--border, rgba(128, 128, 128, 0.35)));
+  border-radius: 10px;
+  background-color: var(--diff-popover-bg, var(--surface-raised, #1f1f1f));
+  color: var(--text-secondary, var(--muted, inherit));
+  box-shadow: 0 18px 44px var(--shadow-color, rgba(0, 0, 0, 0.45));
+  animation: composer-paste-card-in 120ms ease-out;
+}
+
+@keyframes composer-paste-card-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.composer-paste-card-header {
+  display: flex;
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px 4px 14px;
+  border-bottom: 1px solid var(--border-color, var(--border, rgba(128, 128, 128, 0.35)));
+  background-color: var(--diff-header-bg, transparent);
+}
+
+.composer-paste-card-title {
+  flex: 0 0 auto;
+  color: var(--text-primary, var(--text, inherit));
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.composer-paste-card-stats {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-secondary, var(--muted, inherit));
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-paste-card-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.composer-paste-card-actions > button {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary, var(--muted, inherit));
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.composer-paste-card-actions > button:hover {
+  background: var(--bg-hover, rgba(128, 128, 128, 0.22));
+  color: var(--text-primary, var(--text, inherit));
+}
+
+.composer-paste-card-actions > button.saved {
+  color: var(--accent-color, var(--accent, #4b8bf5));
+}
+
+.composer-paste-card-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  color: var(--text-primary, var(--text, inherit));
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+
+.composer-paste-card-more {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border-color, var(--border, rgba(128, 128, 128, 0.35)));
+  color: var(--text-secondary, var(--muted, inherit));
+  font-size: 12px;
+}
+
+/* 输入框内包着标签的选中层：点中芯片后用 Backspace/Delete 可整块删除。 */
+.inline-composer-paste {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.inline-composer-paste.selected .composer-paste-chip {
+  border-color: var(--accent-color, var(--accent, #4b8bf5));
+  box-shadow: 0 0 0 1px var(--accent-color, var(--accent, #4b8bf5));
+}
+
+/* 触屏没有 hover：浮层贴到底部，宽度铺满，避免在窄屏上被裁。 */
+@media (hover: none) and (pointer: coarse) {
+  .composer-paste-card {
+    width: calc(100vw - 16px);
+    max-width: none;
+  }
+}

@@ -156,8 +156,8 @@ function cliFailureMessage(error: unknown, command: string): string {
  * Windows 的 `where code` 会**先**返回无扩展名的 `bin/code`（bash 垫片），
  * 那个东西 spawn 不了（ENOENT）。找到这种路径时换成同目录的 .cmd。
  */
-export function preferExecutableShim(path: string): string {
-  if (!isWindows() || /\.(exe|cmd|bat)$/i.test(path)) return path;
+export function preferExecutableShim(path: string, platform = process.platform): string {
+  if (platform !== "win32" || /\.(exe|cmd|bat)$/i.test(path)) return path;
   for (const suffix of [".cmd", ".bat", ".exe"]) {
     if (existsSync(path + suffix)) return path + suffix;
   }

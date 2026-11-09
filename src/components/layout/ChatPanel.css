@@ -2820,6 +2820,23 @@
   line-height: inherit;
 }
 
+/* 处理面板里的「已收到消息」行沿用紧凑字号，粘贴标签不能撑高整行。
+   选择器比 .composer-paste-chip.message 更具体，避免两边样式加载顺序影响结果。 */
+.chat-process-received-message .composer-paste-chip.message {
+  height: 18px;
+  margin: 0 2px;
+  padding: 0 4px;
+  border-radius: 5px;
+  font-size: inherit;
+  line-height: inherit;
+  vertical-align: -1px;
+}
+
+.chat-process-received-message .composer-paste-chip-icon {
+  width: 11px;
+  height: 11px;
+}
+
 .chat-process-entry-title {
   color: var(--text-primary);
   font-family: inherit;

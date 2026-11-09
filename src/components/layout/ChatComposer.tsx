@@ -35,6 +35,7 @@ import {
   type InlineComposerEditorHandle,
 } from "@/components/shared/InlineComposerEditor";
 import type { ComposerDocument } from "@shared/composer-document";
+import { composerDocumentHasContent } from "@shared/composer-document";
 
 const FILE_MENTION_LIST_ID = "chat-composer-file-mentions";
 const FILE_MENTION_RESULT_LIMIT = 12;
@@ -96,6 +97,8 @@ type ChatComposerProps = {
   onSyncInputValue: (value: string) => void;
   onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onPaste: (event: ClipboardEvent<HTMLDivElement>) => void;
+  /** 粘贴内容超出发送上限时的提示（由 ChatPanel 弹现有附件提示条）。 */
+  onPasteBlocked?: (message: string) => void;
   onDrop: (event: DragEvent<HTMLDivElement>) => void;
   onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   onSend: () => void;
@@ -142,6 +145,7 @@ export const ChatComposer = memo(function ChatComposer({
   onSyncInputValue,
   onKeyDown,
   onPaste,
+  onPasteBlocked,
   onDrop,
   onDragOver,
   onSend,
@@ -210,9 +214,13 @@ export const ChatComposer = memo(function ChatComposer({
   const resolvePrimaryAction = () => {
     if (interactionDisabled || activeQuestionnaire) return "none" as const;
     const text = composerDocument.nodes.filter((node) => node.type === "text").map((node) => node.text).join("");
-    if (isAwaitingUIResponse) return text.trim() ? "send" as const : "none" as const;
+    if (isAwaitingUIResponse) {
+      return text.trim() || composerDocumentHasContent(composerDocument) ? "send" as const : "none" as const;
+    }
     return getComposerAction({
       text,
+      // 粘贴块只显示标签，靠这个标记让「只有粘了一段文本」也能点亮发送。
+      documentHasContent: composerDocumentHasContent(composerDocument),
       imageCount: pendingImages.length,
       fileCount: pendingFiles.length,
       pathAttachmentCount: pendingPathAttachments.length,
@@ -769,6 +777,7 @@ export const ChatComposer = memo(function ChatComposer({
             if (!nextTarget || !inputContainerRef.current?.contains(nextTarget)) setFileMention(null);
           }}
           onPaste={onPaste}
+          onPasteBlocked={onPasteBlocked}
           onOpenImage={onOpenImage}
           placeholder={placeholder}
           className="chat-textarea"

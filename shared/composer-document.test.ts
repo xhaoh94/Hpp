@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   createComposerDocument,
+  getComposerFullText,
   getComposerNodeLabel,
+  getComposerPasteStats,
   getComposerPlainText,
+  MAX_COMPOSER_PASTE_CHARS,
   parseComposerDocument,
   truncateComposerDocumentLines,
 } from "./composer-document";
@@ -48,8 +51,7 @@ describe("video attachments in composer documents", () => {
   });
 });
 
-describe("truncateComposerDocumentLines", () => {
-  it("keeps only the leading lines of a single text node", () => {
+describe("truncateComposerDocumentLines", () => {  it("keeps only the leading lines of a single text node", () => {
     const document = createComposerDocument([textNode("t1", "l1\nl2\nl3\nl4")]);
 
     expect(getComposerPlainText(truncateComposerDocumentLines(document, 2))).toBe("l1\nl2");
@@ -96,5 +98,70 @@ describe("truncateComposerDocumentLines", () => {
     expect(truncateComposerDocumentLines(document, 0).nodes).toEqual([]);
     expect(getComposerPlainText(truncateComposerDocumentLines(document, 1))).toBe("l1");
     expect(getComposerPlainText(document)).toBe("l1\nl2");
+  });
+});
+
+describe("pasted text nodes", () => {
+  const pasteNode = (id: string, text: string) => ({ id, type: "paste" as const, text });
+
+  it("round-trips a pasted block without merging it into neighbouring text", () => {
+    const parsed = parseComposerDocument({
+      version: 1,
+      nodes: [
+        { id: "t1", type: "text", text: "看下这段日志" },
+        { id: "p1", type: "paste", text: "line1\nline2" },
+        { id: "t2", type: "text", text: "什么原因" },
+      ],
+    });
+
+    expect(parsed?.nodes.map((node) => node.type)).toEqual(["text", "paste", "text"]);
+    // 粘贴块自己的原文不能被拼进相邻的纯文本节点。
+    expect(getComposerPlainText(parsed!)).toBe("看下这段日志什么原因");
+    expect(getComposerFullText(parsed!)).toBe("看下这段日志line1\nline2什么原因");
+  });
+
+  it("keeps the full original text out of plain text but in the full text", () => {
+    const document = createComposerDocument([pasteNode("p1", "a\nb\nc")]);
+
+    expect(getComposerPlainText(document)).toBe("");
+    expect(getComposerFullText(document)).toBe("a\nb\nc");
+    expect(getComposerPasteStats("a\nb\nc")).toEqual({ chars: 5, lines: 3, bytes: 5 });
+  });
+
+  it("keeps a paste on the last visible line instead of counting its own lines", () => {
+    const document = createComposerDocument([
+      textNode("t1", "l1\nl2"),
+      pasteNode("p1", "pasted\nblock\nlines"),
+    ]);
+
+    const truncated = truncateComposerDocumentLines(document, 2);
+
+    // 标签本身不换行：粘贴块里有多少行都不影响截断结果。
+    expect(truncated.nodes.map((node) => node.id)).toEqual(["t1", "p1"]);
+    expect(getComposerPlainText(truncated)).toBe("l1\nl2");
+  });
+
+  it("drops pastes that fall after the collapsed lines, like other chips", () => {
+    const document = createComposerDocument([
+      textNode("t1", "l1\nl2\nl3"),
+      pasteNode("p1", "pasted"),
+    ]);
+
+    expect(truncateComposerDocumentLines(document, 2).nodes.map((node) => node.id)).toEqual(["t1"]);
+  });
+
+  it("degrades unusable pastes to text labels instead of dropping them silently", () => {
+    const empty = parseComposerDocument({ version: 1, nodes: [{ id: "p0", type: "paste", text: "" }] });
+    const oversized = parseComposerDocument({
+      version: 1,
+      nodes: [{ id: "p1", type: "paste", text: "x".repeat(MAX_COMPOSER_PASTE_CHARS + 1) }],
+    });
+
+    expect(empty?.nodes[0]).toMatchObject({ type: "text" });
+    expect(oversized?.nodes[0]).toMatchObject({ type: "text" });
+  });
+
+  it("labels pasted blocks by line count", () => {
+    expect(getComposerNodeLabel(pasteNode("p1", "a\nb\nc") as never)).toBe("[粘贴文本: 3 行]");
   });
 });

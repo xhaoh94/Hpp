@@ -673,7 +673,13 @@ function ProcessEntryRow({
             </span>
             <div className="chat-bubble user chat-process-guidance-bubble">
               {hasDocumentContent && guidanceDocument ? (
-                <ComposerMessageFlow document={guidanceDocument} onOpenImage={onOpenImage} />
+                <ComposerMessageFlow
+                  document={guidanceDocument}
+                  onOpenImage={onOpenImage}
+                  projectPath={projectPath}
+                  onOpenFile={onOpenFile}
+                  compactCode
+                />
               ) : fallbackText ? (
                 <span className="chat-process-guidance-text">{fallbackText}</span>
               ) : null}
@@ -767,7 +773,13 @@ function ProcessEntryRow({
         {showReceivedMessage ? (
           <div className="chat-process-entry-header chat-process-received-message">
             <span className="chat-process-received-label">收到消息：</span>
-            <ComposerMessageFlow document={receivedMessageDocument} onOpenImage={onOpenImage} />
+            <ComposerMessageFlow
+              document={receivedMessageDocument}
+              onOpenImage={onOpenImage}
+              projectPath={projectPath}
+              onOpenFile={onOpenFile}
+              compactCode
+            />
           </div>
         ) : (
           <button

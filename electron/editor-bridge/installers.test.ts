@@ -20,12 +20,13 @@ describe("CLI 路径归一", () => {
       const shim = join(dir, "code");
       writeFileSync(shim, "#!/bin/sh\n", "utf8");
       // 只有垫片、没有 .cmd 时保持原样（后面交给 cmd 执行会给出可读报错）。
-      expect(preferExecutableShim(shim)).toBe(shim);
+      expect(preferExecutableShim(shim, "win32")).toBe(shim);
 
       writeFileSync(`${shim}.cmd`, "@echo off\n", "utf8");
-      const resolved = preferExecutableShim(shim);
+      const resolved = preferExecutableShim(shim, "win32");
       expect(resolved.endsWith("code.cmd")).toBe(true);
       expect(existsSync(resolved)).toBe(true);
+      expect(preferExecutableShim(shim, "linux")).toBe(shim);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

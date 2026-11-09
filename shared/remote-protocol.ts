@@ -42,6 +42,8 @@ export const remoteImageSchema = z.object({
 
 const remoteComposerNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1).max(128), type: z.literal("text"), text: z.string().max(200_000) }),
+  // 粘贴块：界面折叠成标签，正文仍需完整下发（上限与消息体一致）。
+  z.object({ id: z.string().min(1).max(128), type: z.literal("paste"), text: z.string().min(1).max(200_000) }),
   z.object({
     id: z.string().min(1).max(128), type: z.literal("image"), name: z.string().max(256),
     mimeType: z.string().max(128), src: z.string().optional(),

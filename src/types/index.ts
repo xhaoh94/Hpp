@@ -315,6 +315,11 @@ export interface ElectronAPI {
   ) => Promise<ReviewUndoResult>;
   searchFiles: (dirPath: string, query: string, filters?: FileFilterConfig) => Promise<FileEntry[]>;
   openDirectory: () => Promise<{ canceled: boolean; path: string }>;
+  /** 弹保存对话框把一段文本存到磁盘；移动端没有这个能力。 */
+  saveTextFile?: (
+    content: string,
+    suggestedName?: string,
+  ) => Promise<{ canceled: boolean; success: boolean; path?: string; error?: string }>;
   openAttachmentFolder: () => Promise<{ canceled: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   getHomeDir: () => Promise<string>;
   ensureDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>;

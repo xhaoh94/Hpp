@@ -1,0 +1,73 @@
+/* 用户发言正文里「文本段 + 代码段」混排的容器。 */
+.chat-user-code-flow {
+  display: block;
+  max-width: 100%;
+}
+
+/* 气泡正文默认是 pre-wrap 的行内流；一旦含代码块就改成块级流，
+   否则代码块会被当成一个超长「行」而拉宽气泡。 */
+.composer-message-flow.has-code {
+  display: block;
+  white-space: normal;
+}
+
+.chat-user-code-block {
+  display: block;
+  max-width: 100%;
+  margin: 6px 0;
+}
+
+/* MarkdownRenderer 自带的外层容器在气泡里会多出一段间距。 */
+.chat-user-code-block .md-content {
+  margin: 0;
+}
+
+.chat-user-code-block .md-code-block {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  /* 用户气泡底色和 --user-bubble-bg 相同，代码块必须比气泡更“沉”才看得出边界。 */
+  background: var(--code-bg, var(--code, var(--user-bubble-bg, var(--user-bubble))));
+  border-color: var(--border-color, var(--user-bubble-border));
+}
+
+/* 长代码在块内纵向滚动，而不是把整条消息撑成一面墙。 */
+.chat-user-code-block .md-code-scroll-wrapper {
+  max-height: 360px;
+  overflow: auto;
+}
+
+/* 处理面板 / 移动端窄屏：更小的高度上限。 */
+.chat-user-code-block.compact .md-code-scroll-wrapper {
+  max-height: 240px;
+}
+
+.chat-user-code-block.compact .md-code-block {
+  border-radius: 6px;
+}
+
+.chat-user-code-block.compact .md-code-header {
+  padding: 4px 8px 0 8px;
+}
+
+.chat-user-code-block.compact .md-code-scroll-wrapper {
+  padding: 2px 10px 6px 10px !important;
+}
+
+.chat-user-code-block.compact .md-code-block pre code {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 输入框/气泡里的代码块不该继承气泡的 pre-wrap，否则缩进会被吃掉。 */
+.chat-user-code-block pre {
+  white-space: pre;
+}
+
+/* 触屏：高度再收一点，避免代码块占满整屏。 */
+@media (max-width: 720px) {
+  .chat-user-code-block .md-code-scroll-wrapper {
+    max-height: 300px;
+  }
+}

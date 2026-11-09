@@ -77,6 +77,8 @@ import {
   toLocalMediaUrl,
 } from "@/lib/media-preview";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
+import { UserMessageText } from "@/components/shared/UserMessageText";
+import { planUserMessageCode } from "@/lib/user-message-code";
 import { VideoThumbnail } from "@/components/shared/VideoThumbnail";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
@@ -159,6 +161,7 @@ import { writeComposerClipboard } from "@/lib/composer-clipboard";
 import {
   composerDocumentHasContent,
   createComposerDocument,
+  getComposerFullText,
   getComposerImageNodes,
   getComposerVideoNodes,
   getComposerPlainText,
@@ -1232,7 +1235,15 @@ const ChatMessageItem = memo(function ChatMessageItem({
     ? getComposerPlainText(orderedComposerDocument)
     : userMessagePresentation.text;
   const userMessageLines = msg.role === "user" ? userMessageText.split(/\r?\n/) : [];
-  const userMessageIsLong = userMessageLines.length > COLLAPSED_USER_MESSAGE_LINES;
+  // 短代码消息直接渲染成代码块（带内部滚动），不要再被「显示更多」截成十行。
+  // 自动识别只在「整条消息就是一段文本」时开启，夹着附件的消息只认 ``` 围栏。
+  const userMessageCodePlan = msg.role === "user"
+    ? planUserMessageCode(userMessageText, {
+      autoDetect: !orderedComposerDocument || orderedComposerDocument.nodes.length === 1,
+    })
+    : null;
+  const userMessageIsCode = userMessageCodePlan?.kind === "segments";
+  const userMessageIsLong = !userMessageIsCode && userMessageLines.length > COLLAPSED_USER_MESSAGE_LINES;
   const displayedUserContent = userMessageIsLong && !userMessageExpanded
     ? userMessageLines.slice(0, COLLAPSED_USER_MESSAGE_LINES).join("\n")
     : userMessagePresentation.text;
@@ -1354,7 +1365,12 @@ const ChatMessageItem = memo(function ChatMessageItem({
                     {msg.role === "user" && (hasOrderedContent || hasTextAttachments || hasSessionReferences || hasContent) && (
                       <div className="chat-user-message-flow">
                         {displayedComposerDocument ? (
-                          <ComposerMessageFlow document={displayedComposerDocument} onOpenImage={onOpenImage} />
+                          <ComposerMessageFlow
+                            document={displayedComposerDocument}
+                            onOpenImage={onOpenImage}
+                            projectPath={projectPath}
+                            onOpenFile={onOpenFile}
+                          />
                         ) : (
                           <>
                         {/* 图片已有缩略图时不再重复显示同名芯片，只保留没有缩略图的
@@ -1378,9 +1394,13 @@ const ChatMessageItem = memo(function ChatMessageItem({
                           </span>
                         ))}
                         {hasContent && (
-                          <span className={`chat-user-content ${userMessageIsLong && !userMessageExpanded ? "collapsed" : ""}`}>
-                            {displayedUserContent}
-                          </span>
+                          <UserMessageText
+                            text={displayedUserContent}
+                            plan={userMessageCodePlan ?? undefined}
+                            textClassName={`chat-user-content ${userMessageIsLong && !userMessageExpanded ? "collapsed" : ""}`}
+                            projectPath={projectPath}
+                            onFileOpen={onOpenFile}
+                          />
                         )}
                           </>
                         )}
@@ -1438,7 +1458,9 @@ const ChatMessageItem = memo(function ChatMessageItem({
                     className="chat-copy-btn"
                     onClick={() => void copyUserMessage(
                       sourceComposerDocument,
-                      msg.content,
+                      // 复制出去的是完整原文：粘贴块在界面上只是标签，
+                      // 粘到外部应用时不能只剩一个「[粘贴文本: N 行]」。
+                      sourceComposerDocument ? getComposerFullText(sourceComposerDocument) : msg.content,
                     )}
                     title="复制"
                     disabled={!hasRawContent}
@@ -2715,9 +2737,9 @@ export function ChatPanel({
     setScrollHeaderMessageId(messages[lastSpeechAboveOrInView].id);
   }, [messages, scrollRef]);
 
-  const syncInputState = useCallback((value: string) => {
+  const syncInputState = useCallback((value: string, hasContentOverride?: boolean) => {
     inputValueRef.current = value;
-    const hasText = value.trim().length > 0;
+    const hasText = hasContentOverride ?? value.trim().length > 0;
     if (inputHasTextRef.current !== hasText) {
       inputHasTextRef.current = hasText;
       setInputHasText(hasText);
@@ -2733,7 +2755,9 @@ export function ChatPanel({
   const syncComposerDocument = useCallback((document: ComposerDocument) => {
     const sessionId = useProjectStore.getState().activeSessionId;
     const text = getComposerPlainText(document);
-    syncInputState(text);
+    // 粘贴块不算“手打文本”，但它是实打实的内容：只粘一段日志时
+    // 发送按钮必须亮起来，所以内容判断改用整份文档。
+    syncInputState(text, composerDocumentHasContent(document));
     if (sessionId) setDraftDocument(sessionId, document);
   }, [setDraftDocument, syncInputState]);
 
@@ -4218,6 +4242,7 @@ export function ChatPanel({
           onSyncInputValue={syncInputValue}
           onKeyDown={handleKeyDown}
           onPaste={handleComposerPaste}
+          onPasteBlocked={showAttachmentError}
           onDrop={handleDrop}
           onDragOver={handleDragOver}
           onSend={handleSend}

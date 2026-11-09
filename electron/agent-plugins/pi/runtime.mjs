@@ -176,6 +176,11 @@ export const update = async (context, options = {}) => {
     const versionSpec = typeof options.versionSpec === "string" && options.versionSpec.trim()
       ? options.versionSpec.trim()
       : "latest";
+    // 旧版 SDK 带 shrinkwrap，把 pi-ai 嵌在 pi-coding-agent/node_modules 下。
+    // 直接覆盖安装会留下这份旧副本，新版代码 import 新文件时就是
+    // ERR_MODULE_NOT_FOUND；依赖树必须整棵重装。
+    await rm(join(runtimeRoot, "node_modules"), { recursive: true, force: true });
+    await rm(join(runtimeRoot, "package-lock.json"), { force: true });
     await run("npm", ["install", `${PACKAGE_NAME}@${versionSpec}`, "--save-exact", "--omit=dev"], {
       cwd: runtimeRoot,
       timeout: 180000,

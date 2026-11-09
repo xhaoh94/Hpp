@@ -189,6 +189,7 @@ import type {
 import {
   composerDocumentHasContent,
   createComposerDocument,
+  getComposerFullText,
   getComposerImageNodes,
   getComposerPlainText,
   withoutComposerImages,
@@ -197,6 +198,7 @@ import {
 } from "@shared/composer-document";
 import { InlineComposerEditor, type InlineComposerEditorHandle } from "../../src/components/shared/InlineComposerEditor";
 import { ComposerMessageFlow } from "../../src/components/shared/ComposerMessageFlow";
+import { UserMessageText } from "../../src/components/shared/UserMessageText";
 import { BrailleSpinner } from "../../src/components/shared/BrailleSpinner";
 
 function SessionRunningIndicator() {
@@ -1815,8 +1817,12 @@ const MessageItem = memo(function MessageItem({
               ))}
               {messagePresentation.text && (
                 <div className="message-content">
-                  {/* 用户发言按纯文本展示，避免 Markdown 语法（# 标题、` 代码）造成字号忽大忽小 */}
-                  <p>{messagePresentation.text}</p>
+                  {/* 用户发言仍按纯文本展示（不走 Markdown），只有代码围栏 /
+                      整段明确是代码时才换成代码块。 */}
+                  <UserMessageText
+                    text={messagePresentation.text}
+                    textClassName="message-content-text"
+                  />
                 </div>
               )}
                 </>
@@ -1861,7 +1867,16 @@ const MessageItem = memo(function MessageItem({
               <Pencil size={15} />
             </button>
           )}
-          <button type="button" onClick={() => onCopy(message.content)} disabled={!message.content} title="复制" aria-label="复制">
+          <button
+            type="button"
+            onClick={() => onCopy(
+              // 复制全文：粘贴块在气泡里只是标签，不能只复制出标签文字。
+              sourceComposerDocument ? getComposerFullText(sourceComposerDocument) : message.content,
+            )}
+            disabled={!message.content && !sourceComposerDocument}
+            title="复制"
+            aria-label="复制"
+          >
             <Copy size={15} />
           </button>
           {assistantActionsReady && (
@@ -3978,6 +3993,8 @@ export default function App() {
   const composerAction = getComposerAction({
     text: composer,
     composingText: composerComposition,
+    // 粘贴块只显示标签，原文不在 text 里，必须由文档来判定有没有内容。
+    documentHasContent: composerDocumentHasContent(composerDocument),
     imageCount: pendingImages.length,
     referenceCount: selectedReferenceSessions.length,
     actionCount: pendingAction ? 1 : 0,
@@ -5645,6 +5662,7 @@ export default function App() {
                 onChange={handleComposerChange}
                 onCompositionStart={handleComposerCompositionStartInline}
                 onCompositionEnd={handleComposerCompositionEndInline}
+                onPasteBlocked={showFloatingToast}
                 placeholder={isConnected ? "发送指令" : "桌面未连接"}
                 disabled={!isConnected}
               />
@@ -5655,6 +5673,7 @@ export default function App() {
                   const action = getComposerAction({
                     text: composer,
                     composingText: composerComposition,
+                    documentHasContent: composerDocumentHasContent(composerDocument),
                     imageCount: pendingImages.length,
                     referenceCount: selectedReferenceSessions.length,
                     actionCount: pendingAction ? 1 : 0,
