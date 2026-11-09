@@ -3,7 +3,7 @@
 
 .composer-paste-chip {
   display: inline-flex;
-  height: 26px;
+  height: 24px;
   max-width: min(300px, 72vw);
   align-items: center;
   gap: 2px;
@@ -11,12 +11,12 @@
   margin: 0 6px;
   padding: 0 4px 0 6px;
   border: 1px solid var(--border-color, var(--border, rgba(128, 128, 128, 0.35)));
-  border-radius: 6px;
+  border-radius:  6px;
   background: var(--composer-entity-bg, var(--bg-tertiary, var(--surface-raised, rgba(128, 128, 128, 0.16))));
   color: var(--text-primary, var(--text, inherit));
   font-size: 13px;
   line-height: 18px;
-  vertical-align: middle;
+  vertical-align: top;
 }
 
 .composer-paste-chip.message {
@@ -26,12 +26,12 @@
      不抢附件引用的 accent 色。 */
   height: auto;
   gap: 5px;
-  margin: 2px 4px;
+  margin: 2px 0;
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
-  line-height: 1.25;
-  vertical-align: middle;
+  line-height: 1.65;
+  vertical-align: top;
 }
 
 .composer-paste-chip.message .composer-paste-chip-body {

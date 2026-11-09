@@ -59,6 +59,9 @@ jobs:
         run: npm test
 
       - name: Build application
+        env:
+          # 指纹基线在 Windows 生成（CRLF），Linux checkout 是 LF，这里跳过误判。
+          HPP_SKIP_PLUGIN_DRIFT_CHECK: "1"
         run: npm run build
 
       - name: Build AppImage

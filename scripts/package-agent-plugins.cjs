@@ -367,7 +367,12 @@ function main() {
     version: plan.manifest.version,
     hash: plan.contentHash,
   })));
-  if (drifted.length > 0) {
+  // 指纹按原始字节算：Windows 工作区是 CRLF、Git 仓库是 LF，CI checkout 后
+  // 与本地生成的基线必然对不上。发布侧已在打包时校验过 drift，CI 只需产出 zip。
+  const skipDriftCheck = process.env.HPP_SKIP_PLUGIN_DRIFT_CHECK === "1";
+  if (drifted.length > 0 && skipDriftCheck) {
+    console.log(`[plugins] CI 构建跳过 drift 校验：${drifted.map((entry) => entry.id).join(", ")}`);
+  } else if (drifted.length > 0) {
     throw new Error(
       "插件内容有改动但 manifest version 未提升，已中止打包：\n"
       + `${drifted.map((entry) => `  ${entry.id}: 内容已变更，但 version 仍是 ${entry.version}`).join("\n")}\n`

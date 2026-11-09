@@ -90,7 +90,11 @@ export default defineConfig({
     root: resolve(__dirname, "src"),
     publicDir: resolve(__dirname, "public"),
     server: {
-      hmr: false,
+      // 开启 HMR：调样式时 CSS 是「替换样式表」级别更新，不会重载页面、
+      // 也不会丢聊天/会话状态，改完保存即生效。
+      // 之前这里是 hmr: false（开发时任何改动都得重启 dev）。
+      // 如果以后遇到 HMR 下的怪问题（白屏/闪烁/重复注册），把它改回 false 即可。
+      hmr: true,
       watch: {
         ignored: [resolve(__dirname, "out/**")],
       },
