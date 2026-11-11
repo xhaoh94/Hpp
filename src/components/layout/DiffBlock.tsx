@@ -253,6 +253,7 @@ export function DiffBlock({ reviewId, diffs, projectPath, onOpenChange }: DiffBl
         <DiffHoverCard
           file={diffPreview.file}
           anchorRect={diffPreview.anchor}
+          onClose={closeDiffPreview}
           onOpenFile={() => {
             closeDiffPreview();
             openDiffFile(diffPreview.file);

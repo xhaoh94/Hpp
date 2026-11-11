@@ -3,11 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#171918" />
+    <meta name="theme-color" content="#1e1e1e" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <link rel="icon" href="./icon.png" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <title>Hpp</title>
+    <script>
+      // 首屏就定好外观，避免 WebView 先画一帧深色再跳浅色。
+      (function () {
+        try {
+          var pref = localStorage.getItem("hpp-mobile-theme");
+          var dark = pref === "dark" || (pref !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          var theme = dark ? "dark" : "light";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", dark ? "#1e1e1e" : "#f7f7f8");
+        } catch (error) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

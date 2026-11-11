@@ -143,12 +143,13 @@ public class HppUpdaterPlugin extends Plugin {
         preferences().edit().remove(KEY_COMPLETED_SHA).apply();
 
         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(source));
-        request.setTitle("Hpp");
+        request.setTitle("Hpp 更新");
         request.setDescription("正在下载安装包");
         request.setMimeType("application/vnd.android.package-archive");
         request.setAllowedOverMetered(true);
         request.setAllowedOverRoaming(true);
-        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
+        // 应用切到后台后仍由 DownloadManager 继续下载，并在完成时留在通知栏。
+        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
         request.setDestinationInExternalFilesDir(
             getContext(),
             Environment.DIRECTORY_DOWNLOADS,

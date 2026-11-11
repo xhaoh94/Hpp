@@ -89,8 +89,29 @@ export type CodeReviewDialogProps = {
 const MAX_RENDER_LINES = 5000;
 const MAX_HIGHLIGHT_CHARS = 2000;
 const FILES_MIN_WIDTH = 180;
-const FILES_MAX_WIDTH = 420;
+const FILES_MAX_WIDTH = 560;
 const DIFF_MIN_WIDTH = 320;
+/** 文件行里除文字外的固定宽度：列表内边距、行内边距、两处 gap、状态图标、滚动条与余量。 */
+const FILES_WIDTH_CHROME = 84;
+
+const getFileBaseName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/** 按最长文件名量出文件栏需要的宽度；量不到 canvas 时退回按字符数估算。 */
+const measureReviewFilesWidth = (labels: string[], files: DialogReviewFile[]) => {
+  const fallback = FILES_WIDTH_CHROME
+    + labels.reduce((max, label) => Math.max(max, label.length), 0) * 8 + 56;
+  if (typeof document === "undefined") return fallback;
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return fallback;
+  ctx.font = '13px "Cascadia Code", "Fira Code", Consolas, monospace';
+  const labelWidth = labels.reduce((max, label) => Math.max(max, ctx.measureText(label).width), 0);
+  ctx.font = "600 12px system-ui, sans-serif";
+  const statsWidth = files.reduce(
+    (max, file) => Math.max(max, ctx.measureText(`+${file.additions} -${file.deletions}`).width),
+    0,
+  );
+  return Math.ceil(FILES_WIDTH_CHROME + labelWidth + statsWidth);
+};
 /** 与 `.chat-review-unified` / `.chat-review-split` 的固定行高保持一致。 */
 const REVIEW_ROW_HEIGHT = 22;
 /** 完整文件对比读取慢于这个阈值才显示加载态，避免一闪而过的占位。 */
@@ -425,6 +446,7 @@ export function CodeReviewDialog({
   const [filesCollapsed, setFilesCollapsed] = useState(false);
   const [filesWidth, setFilesWidth] = useState(220);
   const [filesResizing, setFilesResizing] = useState(false);
+  const filesWidthManualRef = useRef(false);
   const [showDeletedInRight, setShowDeletedInRight] = useState(false);
   const [diffCursor, setDiffCursor] = useState(0);
   const [fileContent, setFileContent] = useState<Record<string, string | null>>({});
@@ -496,6 +518,7 @@ export function CodeReviewDialog({
       const body = reviewBodyRef.current;
       if (!body) return;
       const bodyRect = body.getBoundingClientRect();
+      filesWidthManualRef.current = true;
       setFilesWidth(clampFilesWidth(event.clientX - bodyRect.left));
     };
     const handlePointerUp = () => setFilesResizing(false);
@@ -522,6 +545,7 @@ export function CodeReviewDialog({
     event.preventDefault();
     event.stopPropagation();
     setFilesCollapsed(false);
+    filesWidthManualRef.current = true;
     setFilesWidth((width) => clampFilesWidth(width + (event.key === "ArrowRight" ? 16 : -16)));
   };
 
@@ -624,6 +648,21 @@ export function CodeReviewDialog({
       };
     });
   }, [sourceFiles, reviewState, projectPath]);
+
+  // 同名文件只显示文件名会混淆，这些项退回项目相对路径；完整路径始终在 title 里。
+  const fileLabels = useMemo(() => {
+    const bases = files.map((file) => getFileBaseName(file.displayFile));
+    const counts = new Map<string, number>();
+    bases.forEach((base) => counts.set(base, (counts.get(base) || 0) + 1));
+    return bases.map((base, index) => (counts.get(base) || 0) > 1 ? files[index].displayFile : base);
+  }, [files]);
+  const fileWidthKey = useMemo(() => fileLabels.join("|"), [fileLabels]);
+
+  // 文件栏按最长文件名撑开；手动拖过之后不再自动改写用户的宽度。
+  useLayoutEffect(() => {
+    if (!open || filesWidthManualRef.current || fileLabels.length === 0) return;
+    setFilesWidth(clampFilesWidth(measureReviewFilesWidth(fileLabels, files)));
+  }, [open, fileWidthKey]);
 
   const active = useMemo(() => {
     if (files.length === 0) return null;
@@ -1174,7 +1213,7 @@ export function CodeReviewDialog({
                 </button>
               </div>
               <div className="chat-review-files-list">
-                {files.map((file) => {
+                {files.map((file, index) => {
                   const isActive = file.displayFile === active?.displayFile;
                   return (
                     <button
@@ -1187,7 +1226,7 @@ export function CodeReviewDialog({
                       <span className="chat-review-file-status" aria-hidden="true">
                         <FileStatusIcon status={file.status} />
                       </span>
-                      <span className="chat-review-file-path">{file.displayFile}</span>
+                      <span className="chat-review-file-path">{fileLabels[index] ?? getFileBaseName(file.displayFile)}</span>
                       <span className="chat-review-file-stats">
                         <span className="chat-diff-add">+{file.additions}</span>
                         <span className="chat-diff-del">-{file.deletions}</span>

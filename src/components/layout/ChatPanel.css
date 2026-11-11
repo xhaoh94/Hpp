@@ -3595,16 +3595,15 @@
   line-height: 1.55;
 }
 
-/* 悬浮在 diff 文件行上的只读预览浮层；点击行仍走原有的打开文件/审核通路。 */
+/* 点击文件行弹出的 diff 浮窗：portal 到 body，横向按视口铺开（能盖住侧边栏），
+   四周留边距并保留窗口样式；高度沿用原浮层的 64vh。 */
 .chat-diff-hover-card {
   position: fixed;
-  z-index: 950;
+  left: 12px;
+  right: 12px;
+  z-index: 1950;
   display: flex;
   flex-direction: column;
-  /* 尺寸跟视口伸缩：窄窗口铺满可用宽度，宽屏最多 1120px；
-     高度给视口的 64%，避免长 diff 也只剩一条窄带。 */
-  width: clamp(420px, 72vw, 1120px);
-  max-width: calc(100vw - 24px);
   max-height: min(64vh, calc(100vh - 24px));
   overflow: hidden;
   border: 1px solid var(--border-color);
@@ -3676,6 +3675,25 @@
 
 .chat-diff-hover-card-open:hover {
   border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.chat-diff-hover-card-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-diff-hover-card-close:hover {
+  background-color: var(--surface-muted);
   color: var(--text-primary);
 }
 

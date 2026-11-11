@@ -110,7 +110,7 @@ describe("diff file inline preview", () => {
   it("opens the floating diff panel on click instead of hover", () => {
     expect(diffBlockSource).toContain("toggleDiffPreview");
     expect(diffBlockSource).toContain("<DiffHoverCard");
-    expect(diffBlockSource).toContain("anchorRect={diffPreview.anchor}");
+    expect(diffBlockSource).toContain("onClose={closeDiffPreview}");
     // 悬停弹出的整套延迟逻辑已删除。
     expect(diffBlockSource).not.toContain("scheduleHoverPreview");
     expect(diffBlockSource).not.toContain("HOVER_PREVIEW_OPEN_DELAY_MS");
@@ -136,15 +136,27 @@ describe("diff file inline preview", () => {
     expect(diffBlockSource).toContain('target.closest(".chat-diff-file-row")');
   });
 
-  it("renders the card through a portal, clamped to the viewport", () => {
+  it("renders the card through a portal, viewport-wide with the original window frame", () => {
     expect(diffHoverCardSource).toContain("createPortal");
-    expect(diffHoverCardSource).toContain("fitsRight");
     expect(diffHoverCardSource).toContain("data-diff-hover-card");
     expect(diffHoverCardSource).toContain("buildDiffPreviewLines");
-    expect(chatPanelStyles).toContain(".chat-diff-hover-card {");
-    // 宽度/高度跟视口伸缩：窄窗口铺满可用宽度，宽屏最多 1120px。
-    expect(chatPanelStyles).toContain("width: clamp(420px, 72vw, 1120px);");
-    expect(chatPanelStyles).toContain("max-width: calc(100vw - 24px);");
-    expect(chatPanelStyles).toContain("max-height: min(64vh, calc(100vh - 24px));");
+    // 宽度铺到视口后，面板里要有自己的关闭入口。
+    expect(diffHoverCardSource).toContain("chat-diff-hover-card-close");
+    const cardRule = chatPanelStyles.slice(
+      chatPanelStyles.indexOf(".chat-diff-hover-card {"),
+      chatPanelStyles.indexOf("@keyframes chat-diff-hover-card-in"),
+    );
+    // 横向按视口铺开、盖过侧边栏，但四周留边距，不是贴边全屏。
+    expect(cardRule).toContain("left: 12px");
+    expect(cardRule).toContain("right: 12px");
+    expect(cardRule).toContain("z-index: 1950");
+    // 保留最初浮窗的圆角、描边与投影。
+    expect(cardRule).toContain("border: 1px solid var(--border-color)");
+    expect(cardRule).toContain("border-radius: 10px");
+    expect(cardRule).toContain("box-shadow: 0 18px 44px var(--shadow-color)");
+    // 高度沿用原浮层，不跟着宽度一起全屏。
+    expect(cardRule).toContain("max-height: min(64vh, calc(100vh - 24px))");
+    expect(cardRule).not.toContain("clamp(");
+    expect(cardRule).not.toContain("inset: 0");
   });
 });

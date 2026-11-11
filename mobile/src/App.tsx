@@ -40,6 +40,8 @@ import {
   LoaderCircle,
   Menu,
   MessageCircle,
+  Monitor,
+  Moon,
   MessageSquare,
   MoreVertical,
   Pencil,
@@ -53,6 +55,7 @@ import {
   ShieldCheck,
   Square,
   Smartphone,
+  Sun,
   Trash2,
   WandSparkles,
   Wifi,
@@ -281,6 +284,13 @@ import { copyText, createClientId } from "./web-platform";
 import { useDragAutoScroll } from "../../src/hooks/useDragAutoScroll";
 import { getComposerAction } from "./composer";
 import { HppUpdater, type AndroidUpdaterDownloadStatus } from "./android-updater";
+import {
+  applyTheme,
+  loadThemePreference,
+  resolveTheme,
+  saveThemePreference,
+  type ThemePreference,
+} from "./theme";
 import {
   ANDROID_UPDATE_METADATA_MIRROR_URL,
   ANDROID_UPDATE_METADATA_URL,
@@ -2105,6 +2115,82 @@ function Questionnaire({
   );
 }
 
+const THEME_OPTIONS: { id: ThemePreference; label: string; hint: string; icon: typeof Sun }[] = [
+  { id: "system", label: "跟随系统", hint: "随系统外观自动切换", icon: Monitor },
+  { id: "light", label: "浅色", hint: "始终使用浅色外观", icon: Sun },
+  { id: "dark", label: "深色", hint: "始终使用深色外观", icon: Moon },
+];
+
+function ThemePicker({
+  open,
+  preference,
+  onSelect,
+  onClose,
+}: {
+  open: boolean;
+  preference: ThemePreference;
+  onSelect: (value: ThemePreference) => void;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="sheet-backdrop theme-picker-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="theme-picker-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="theme-picker-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="theme-picker-header">
+          <h2 id="theme-picker-title">外观</h2>
+          <button type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭"><X size={18} /></button>
+        </header>
+        <div className="theme-picker-options">
+          {THEME_OPTIONS.map((option) => {
+            const Icon = option.icon;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                className={`theme-picker-option ${preference === option.id ? "active" : ""}`}
+                onClick={() => onSelect(option.id)}
+              >
+                <Icon size={18} />
+                <span><strong>{option.label}</strong><small>{option.hint}</small></span>
+                {preference === option.id && <Check size={16} />}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AndroidUpdatePill({
+  stage,
+  progress,
+  onOpen,
+}: {
+  stage: AndroidUpdateStage;
+  progress: number;
+  onOpen: () => void;
+}) {
+  if (stage !== "downloading" && stage !== "downloaded" && stage !== "error") return null;
+  const ready = stage === "downloaded";
+  const label = stage === "downloading"
+    ? "正在后台下载更新"
+    : ready ? "更新已下载，点击安装" : "更新下载失败，点击查看";
+  return (
+    <button type="button" className={`android-update-pill ${ready ? "ready" : ""}`} onClick={onOpen} role="status">
+      {stage === "downloading" ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
+      <span>{label}</span>
+      {stage === "downloading" && progress >= 0 && <strong className="pill-progress">{progress}%</strong>}
+    </button>
+  );
+}
+
 function AndroidUpdateDialog({
   open,
   currentVersion,
@@ -2125,7 +2211,8 @@ function AndroidUpdateDialog({
   onPrimary: () => void;
 }) {
   if (!open) return null;
-  const busy = stage === "checking" || stage === "downloading";
+  // 下载交给系统 DownloadManager，弹窗可以收起来让它在后台继续。
+  const busy = stage === "checking";
   const title = stage === "up-to-date"
     ? "已是最新版本"
     : stage === "error" && !metadata
@@ -2136,7 +2223,7 @@ function AndroidUpdateDialog({
   const primaryLabel = stage === "checking"
     ? "正在检查"
     : stage === "downloading"
-      ? progress >= 0 ? `下载中 ${progress}%` : "正在下载"
+      ? "后台下载"
       : stage === "downloaded"
         ? "安装更新"
         : stage === "permission"
@@ -2755,6 +2842,9 @@ export default function App() {
   const [updateProgress, setUpdateProgress] = useState(-1);
   const [updateError, setUpdateError] = useState("");
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [updateBackground, setUpdateBackground] = useState(false);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => loadThemePreference());
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
   const clientRef = useRef<RemoteClient | null>(null);
   const editingQueueItemRef = useRef<RemoteQueuedMessage | null>(null);
   const activeHostRef = useRef<PairedHost | null>(null);
@@ -2801,6 +2891,7 @@ export default function App() {
   const dismissedUpdateVersionRef = useRef<number | null>(null);
   const updateStageRef = useRef<AndroidUpdateStage>("idle");
   const updateInstallInFlightRef = useRef(false);
+  const updateBackgroundRef = useRef(false);
   const incomingWebPairingRef = useRef(
     !IS_NATIVE_APP ? new URLSearchParams(window.location.search).get("pair") : null,
   );
@@ -3032,6 +3123,10 @@ export default function App() {
 
   const checkAndroidUpdate = useCallback(async (manual: boolean) => {
     if (!IS_NATIVE_APP) return;
+    if (manual) {
+      updateBackgroundRef.current = false;
+      setUpdateBackground(false);
+    }
     if (updateCheckInFlightRef.current) {
       if (manual) setUpdateDialogOpen(true);
       return;
@@ -3116,6 +3211,8 @@ export default function App() {
   }, [continueDownloadedInstall]);
 
   const downloadAndroidUpdate = useCallback(async () => {
+    updateBackgroundRef.current = false;
+    setUpdateBackground(false);
     const metadata = updateMetadataRef.current;
     if (!metadata) {
       await checkAndroidUpdate(true);
@@ -3141,31 +3238,55 @@ export default function App() {
   const syncAndroidUpdateDownload = useCallback(async (installWhenDownloaded: boolean) => {
     const metadata = updateMetadataRef.current;
     if (!metadata) return;
+    const background = updateBackgroundRef.current;
     try {
       const status = await HppUpdater.getUpdateStatus({ sha256: metadata.sha256 });
-      if (status.status === "downloaded" && installWhenDownloaded) {
+      // 后台模式只更新进度，不把弹窗弹回来、也不自动拉起系统安装器。
+      if (status.status === "downloaded" && installWhenDownloaded && !background) {
         await continueDownloadedInstall();
         return;
       }
-      if (!applyAndroidDownloadStatus(status) && updateStageRef.current === "downloading") {
+      if (!applyAndroidDownloadStatus(status, !background) && updateStageRef.current === "downloading") {
         setUpdateError("安装包下载已中断，请重新下载");
         setUpdateStage("error");
-        setUpdateDialogOpen(true);
+        if (!background) setUpdateDialogOpen(true);
       }
     } catch (statusFailure) {
       setUpdateError(getAndroidUpdateErrorMessage(statusFailure));
       setUpdateStage("error");
-      setUpdateDialogOpen(true);
+      if (!background) setUpdateDialogOpen(true);
     }
   }, [applyAndroidDownloadStatus, continueDownloadedInstall]);
 
-  const closeUpdateDialog = useCallback(() => {
+  const backgroundAndroidUpdate = useCallback(() => {
+    updateBackgroundRef.current = true;
+    setUpdateBackground(true);
     const metadata = updateMetadataRef.current;
     if (metadata) dismissedUpdateVersionRef.current = metadata.versionCode;
     setUpdateDialogOpen(false);
   }, []);
 
+  const reopenUpdateDialog = useCallback(() => {
+    updateBackgroundRef.current = false;
+    setUpdateBackground(false);
+    setUpdateDialogOpen(true);
+  }, []);
+
+  const closeUpdateDialog = useCallback(() => {
+    if (updateStageRef.current === "downloading") {
+      backgroundAndroidUpdate();
+      return;
+    }
+    const metadata = updateMetadataRef.current;
+    if (metadata) dismissedUpdateVersionRef.current = metadata.versionCode;
+    setUpdateDialogOpen(false);
+  }, [backgroundAndroidUpdate]);
+
   const handleUpdatePrimary = useCallback(() => {
+    if (updateStage === "downloading") {
+      backgroundAndroidUpdate();
+      return;
+    }
     if (updateStage === "permission") {
       void requestInstallPermission();
       return;
@@ -3179,7 +3300,22 @@ export default function App() {
       return;
     }
     void downloadAndroidUpdate();
-  }, [checkAndroidUpdate, continueDownloadedInstall, downloadAndroidUpdate, requestInstallPermission, updateStage]);
+  }, [backgroundAndroidUpdate, checkAndroidUpdate, continueDownloadedInstall, downloadAndroidUpdate, requestInstallPermission, updateStage]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => applyTheme(resolveTheme(themePreference, media.matches));
+    apply();
+    if (themePreference !== "system") return;
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [themePreference]);
+
+  const selectTheme = useCallback((next: ThemePreference) => {
+    saveThemePreference(next);
+    setThemePreference(next);
+    setThemePickerOpen(false);
+  }, []);
 
   useEffect(() => {
     if (demoMode || !IS_NATIVE_APP) return;
@@ -4950,17 +5086,28 @@ export default function App() {
     }
   };
 
-  const updateDialog = (
-    <AndroidUpdateDialog
-      open={updateDialogOpen}
-      currentVersion={appVersion}
-      metadata={updateMetadata}
-      stage={updateStage}
-      progress={updateProgress}
-      error={updateError}
-      onClose={closeUpdateDialog}
-      onPrimary={handleUpdatePrimary}
-    />
+  const overlayUi = (
+    <>
+      <AndroidUpdateDialog
+        open={updateDialogOpen}
+        currentVersion={appVersion}
+        metadata={updateMetadata}
+        stage={updateStage}
+        progress={updateProgress}
+        error={updateError}
+        onClose={closeUpdateDialog}
+        onPrimary={handleUpdatePrimary}
+      />
+      {updateBackground && (
+        <AndroidUpdatePill stage={updateStage} progress={updateProgress} onOpen={reopenUpdateDialog} />
+      )}
+      <ThemePicker
+        open={themePickerOpen}
+        preference={themePreference}
+        onSelect={selectTheme}
+        onClose={() => setThemePickerOpen(false)}
+      />
+    </>
   );
 
   if (!hostsLoaded) {
@@ -4988,7 +5135,10 @@ export default function App() {
         <header className="connections-header">
           <div className="brand-mark"><Smartphone size={22} /></div>
           <div><h1>Hpp</h1><p>选择一台已配对的桌面</p></div>
-          <button type="button" className="icon-button" onClick={() => setPairingMode("manual")} title="添加桌面"><Plus size={20} /></button>
+          <div className="connections-header-actions">
+            <button type="button" className="icon-button" onClick={() => setThemePickerOpen(true)} title="外观" aria-label="外观"><Sun size={18} /></button>
+            <button type="button" className="icon-button" onClick={() => setPairingMode("manual")} title="添加桌面"><Plus size={20} /></button>
+          </div>
         </header>
         {floatingToast && (
           <div key={floatingToast.id} className="mobile-floating-toast" role="status" aria-live="polite">
@@ -5112,7 +5262,7 @@ export default function App() {
             </section>
           </div>
         )}
-        {updateDialog}
+        {overlayUi}
       </main>
     );
   }
@@ -5154,7 +5304,7 @@ export default function App() {
         </div>
       </header>
 
-      {updateDialog}
+      {overlayUi}
 
       {editingQueueItem && selected && (
         <QueueEditDialog
@@ -5215,6 +5365,7 @@ export default function App() {
             <strong>{activeHost.alias || activeHost.hostName}</strong>
             <span className={connectionState}>{connectionLabel(connectionState)} · {activeHost.baseUrl}</span>
           </div>
+          <button className="icon-button" onClick={() => setThemePickerOpen(true)} title="外观" aria-label="外观"><Sun size={18} /></button>
           <button className="icon-button" onClick={leaveActiveHost} title="返回主机列表"><ArrowLeft size={18} /></button>
           <button className="icon-button" onClick={() => setDrawerOpen(false)} title="关闭项目列表" aria-label="关闭侧边栏"><X size={19} /></button>
         </div>
