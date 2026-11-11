@@ -796,3 +796,18 @@
 :root[data-theme="light"] .project-terminal-child.active .terminal-child-close:hover {
   background-color: var(--surface-inset);
 }
+
+/* 浅色下 3px 灰点几乎融进近白行背景，用强调色和柔光把运行态点阵提出来。 */
+:root[data-theme="light"] .braille-dot-spinner {
+  grid-template-columns: repeat(2, 4px);
+  grid-template-rows: repeat(3, 4px);
+  width: 10px;
+  height: 16px;
+  filter: drop-shadow(0 0 2px rgba(9, 105, 218, 0.45));
+}
+:root[data-theme="light"] .braille-dot-spinner > .braille-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--accent-color);
+}
