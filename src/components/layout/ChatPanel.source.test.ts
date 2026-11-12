@@ -36,7 +36,7 @@ describe("chat history never waits for the agent backend", () => {
 
     // 变更文件面板（文件列表 + 审核入口）属于“改了什么”的内容，与输出等级无关：
     // 简洁/标准/详细都要完整显示，不能退化成一个数量文字。
-    expect(source).toContain("const showDiffBlock = hasDiffs;");
+    expect(source).toContain("const showDiffBlock = substantiveDiffs.length > 0;");
     expect(source).not.toContain("showChangedFilesSummary");
     expect(source).not.toContain("chat-diff-count-summary");
     expect(styles).not.toContain(".chat-diff-count-summary");

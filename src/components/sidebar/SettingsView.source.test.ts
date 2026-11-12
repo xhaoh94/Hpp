@@ -88,7 +88,7 @@ describe("desktop general settings layout", () => {
     expect(panel).toContain('normalizeOutputDetailLevel(general.outputDetailLevel)');
     expect(panel).toContain("outputDetailLevel={outputDetailLevel}");
     // diff 面板属于“改了什么”的内容：任何等级都与详细档一样完整显示。
-    expect(panel).toContain("const showDiffBlock = hasDiffs;");
+    expect(panel).toContain("const showDiffBlock = substantiveDiffs.length > 0;");
 
     const block = readWorkspaceFile("src/components/layout/ProcessBlock.tsx");
     // 简洁：思考与正文各自合并；标准：按段合并——思考合成一块、命令/查看/修改合成一块。

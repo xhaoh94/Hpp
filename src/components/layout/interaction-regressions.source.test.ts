@@ -14,6 +14,7 @@ import chatScrollSource from "./useChatScroll.ts?raw";
 import chatVirtualizerSource from "./useChatVirtualizer.ts?raw";
 import agentEventControllerSource from "./agentEventController.ts?raw";
 import processBlockSource from "./ProcessBlock.tsx?raw";
+import inlineComposerEditorSource from "../shared/InlineComposerEditor.tsx?raw";
 import chatStoreSource from "../../stores/chat-store.ts?raw";
 
 const chatPanelStyles = readFileSync(
@@ -43,6 +44,13 @@ describe("video attachments", () => {
 });
 
 describe("chat interaction regression constraints", () => {
+  it("keeps spellcheck off the prompt editor", () => {
+    // contenteditable 默认参与拼写检查：中文里夹的 subagent / Hpp 这类词会被
+    // Chromium 画红波浪线。窗口级 spellcheck 不能关（会影响整个 app）。
+    expect(inlineComposerEditorSource).toContain("spellCheck={false}");
+    expect(inlineComposerEditorSource).toContain('autoCorrect="off"');
+  });
+
   it("does not leave persisted-message debug payloads in the production render path", () => {
     expect(chatPanelSource).not.toContain("title={JSON.stringify({");
     expect(chatPanelSource).not.toContain("doc: sourceComposerDocument?.nodes.map");

@@ -740,6 +740,10 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
             contentEditable={<ContentEditable
               className="inline-composer-content"
               aria-placeholder={placeholder || ""}
+              // 可编辑元素默认开启拼写检查：英文技术词（subagent、Hpp）会被
+              // Chromium 画上红波浪线。提示词输入框里这不是笔误，一律关掉。
+              spellCheck={false}
+              autoCorrect="off"
               placeholder={<span />}
               {...events}
               onKeyDownCapture={onKeyDown}

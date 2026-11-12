@@ -88,6 +88,21 @@ export function registerFileHandlers() {
     }
   });
 
+  // 用系统默认程序打开单个文件（HTML/SVG 会在默认浏览器里渲染效果）。
+  ipcMain.handle("fs:openPath", async (_event, targetPath: string) => {
+    if (typeof targetPath !== "string" || !targetPath.trim()) {
+      return { success: false, error: "Path is required" };
+    }
+    try {
+      const info = await stat(targetPath).catch(() => null);
+      if (!info?.isFile()) return { success: false, error: "文件不存在" };
+      const error = await shell.openPath(targetPath);
+      return error ? { success: false, error } : { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   // 「打开到本地文件夹目录」：目录用资源管理器打开自身，文件则打开所在文件夹并选中；
   // 路径不存在时退化为打开父目录，让用户至少落到正确的位置。
   ipcMain.handle("fs:revealPath", async (_event, targetPath: string) => {

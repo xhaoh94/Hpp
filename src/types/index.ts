@@ -311,6 +311,8 @@ export interface ElectronAPI {
   statPath: (filePath: string) => Promise<{ success: boolean; attachment?: PathAttachmentInfo; error?: string }>;
   /** 本地视频流的 HTTP 服务前缀；拼接 encodeURIComponent(path) 后给 <video>。 */
   getLocalMediaBaseUrl: () => Promise<string>;
+  /** 用系统默认程序打开文件（HTML/SVG 走默认浏览器渲染）。 */
+  openPathInShell: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
   findProjectFile: (relativePath: string, projectPath: string) => Promise<string | null>;

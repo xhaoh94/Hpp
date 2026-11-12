@@ -2620,34 +2620,37 @@
    文字笔画上（background-clip: text），不出现矩形覆盖层或边框；
    展开态与单行思考不做扫光，避免干扰阅读。 */
 .chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
-  --chat-thinking-shimmer-highlight: var(--text-primary);
+  /* 黑白扫光：窄光带（46%–54%）+ 近黑/纯白高光，匀速扫过。
+     旧实现是 40%–60% 的宽光带 + 缓动，浅色主题下“灰变黑”几乎看不出光。 */
+  --chat-thinking-shimmer-base: var(--text-secondary);
+  --chat-thinking-shimmer-ink: #ffffff; /* 深色主题：亮带 */
   color: transparent;
   -webkit-background-clip: text;
   background-clip: text;
   background-image: linear-gradient(
-    105deg,
-    var(--text-secondary) 0%,
-    var(--text-secondary) 38%,
-    var(--chat-thinking-shimmer-highlight) 50%,
-    var(--text-secondary) 62%,
-    var(--text-secondary) 100%
+    100deg,
+    var(--chat-thinking-shimmer-base) 0%,
+    var(--chat-thinking-shimmer-base) 46%,
+    var(--chat-thinking-shimmer-ink) 50%,
+    var(--chat-thinking-shimmer-base) 54%,
+    var(--chat-thinking-shimmer-base) 100%
   );
-  background-size: 300% 100%;
-  background-position: 100% 0;
-  animation: chat-thinking-text-shimmer 4s ease-in-out infinite;
+  /* 240% 让窄带整条穿过文字；再窄就会只剩“闪一下”。 */
+  background-size: 240% 100%;
+  background-position: 130% 0;
+  animation: chat-thinking-text-shimmer 2.2s linear infinite;
 }
 
-/* 浅色下 --text-primary 比基底更暗，扫光会像阴影；改成向背景提亮的主题蓝。 */
 :root[data-theme="light"] .chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
-  --chat-thinking-shimmer-highlight: color-mix(in srgb, var(--accent-color) 78%, var(--bg-primary));
+  --chat-thinking-shimmer-ink: #0b0d10; /* 浅色主题：近黑带 */
 }
 
 @keyframes chat-thinking-text-shimmer {
   0% {
-    background-position: 100% 0;
+    background-position: 130% 0;
   }
-  75%, 100% {
-    background-position: 0% 0;
+  100% {
+    background-position: -30% 0;
   }
 }
 
@@ -2998,15 +3001,6 @@
   color: var(--text-secondary);
   font-size: 14px;
   white-space: nowrap;
-}
-
-/* 运行中任务在自己那颗 chip 上显示耗时，4 个并行时不用展开也能看出谁卡住。 */
-.chat-subagent-chip-time {
-  flex: 0 0 auto;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.85;
 }
 
 .chat-subagent-chevron {

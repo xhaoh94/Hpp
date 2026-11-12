@@ -131,6 +131,7 @@ import {
   toContextUsagePrecision,
 } from "@shared/models";
 import { collectProcessDiffs } from "@shared/diff-summary";
+import { MessageArtifacts } from "./MessageArtifacts";
 import {
   DEFAULT_OUTPUT_DETAIL_LEVEL,
   formatChangedFilesSummary,
@@ -1218,9 +1219,17 @@ const ChatMessageItem = memo(function ChatMessageItem({
   const processDiffs = collectProcessDiffs(msg.process);
   const visibleDiffs = !processRunning ? [...(msg.diffs || []), ...processDiffs] : [];
   const hasDiffs = visibleDiffs.length > 0;
+  // 只有带补丁 / 增删计数的改动才进 diff 面板：新建文件（write）在 process 里
+  // 也是一条 written 记录，但它没有 patch，放进 diff 面板只会是个空卡片，
+  // 同时还会把「产物」里的同名文件挤掉。
+  const substantiveDiffs = visibleDiffs.filter((diff) => (
+    String(diff.patch || "").trim().length > 0
+    || (diff.additions || 0) > 0
+    || (diff.deletions || 0) > 0
+  ));
   // 变更文件卡片（diff 面板）属于“改了什么”的内容，与输出等级无关：
   // 不管是简洁/标准/详细都要完整显示，否则用户会以为没有改动。
-  const showDiffBlock = hasDiffs;
+  const showDiffBlock = substantiveDiffs.length > 0;
   const userMessagePresentation = msg.role === "user"
     ? extractUserMessageAttachments(msg.content)
     : { text: msg.content, attachments: [] };
@@ -1481,6 +1490,15 @@ const ChatMessageItem = memo(function ChatMessageItem({
               diffs={visibleDiffs}
               projectPath={projectPath}
               onOpenChange={(open) => onDiffOpenChange?.(msg.id, open)}
+            />
+          )}
+          {msg.role !== "user" && (
+            // Agent 这次写出的文件单独列一行（所有输出等级都显示），
+            // 图片直接给缩略图；diff 面板列过的文件由组件内部跳过。
+            <MessageArtifacts
+              message={msg}
+              onOpenFile={onOpenFile}
+              excludePaths={showDiffBlock ? substantiveDiffs.map((diff) => diff.file) : undefined}
             />
           )}
           {showAssistantActions && (

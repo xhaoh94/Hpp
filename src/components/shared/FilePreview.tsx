@@ -137,14 +137,42 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
     return /\.mdx?$/i.test(activeFilePath);
   }, [activeFilePath]);
 
+  // 网页文档：默认直接渲染效果（iframe），而不是丢给代码视图。
+  const isWebDocument = useMemo(() => {
+    if (!activeFilePath) return false;
+    return /\.(?:html?|xhtml|svg)$/i.test(activeFilePath);
+  }, [activeFilePath]);
+
+  // 渲染层页面在 dev 下是 http://localhost，iframe 直接加载 file:// 会被当成
+  // 混合内容拦掉（表现就是一片空白）。改走主进程已有的本地媒体服务：
+  // 它监听 127.0.0.1 并带随机 token，dev / 生产都能正常加载，相对资源也能解析。
+  const [mediaBaseUrl, setMediaBaseUrl] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void window.electronAPI.getLocalMediaBaseUrl().then((base) => {
+      if (!cancelled) setMediaBaseUrl(String(base || ""));
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const webPreviewUrl = useMemo(() => {
+    if (!activeFilePath || !isWebDocument || !mediaBaseUrl) return "";
+    const normalized = activeFilePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    // 每段单独编码：保留 `/` 分隔，盘符与中文/空格都能被服务端 decode 回来。
+    return `${mediaBaseUrl}${normalized.split("/").map(encodeURIComponent).join("/")}`;
+  }, [activeFilePath, isWebDocument, mediaBaseUrl]);
+
   const isImage = useMemo(() => {
     if (!activeFilePath) return false;
     return IMAGE_FILE_PATTERN.test(activeFilePath);
   }, [activeFilePath]);
 
   useEffect(() => {
-    setPreviewMode(isMarkdown ? true : null);
-  }, [isMarkdown]);
+    // markdown 与网页文档都默认展示“效果”，源码是可选视图。
+    setPreviewMode(isMarkdown || isWebDocument ? true : null);
+  }, [isMarkdown, isWebDocument]);
 
   useEffect(() => {
     setSearchOpen(false);
@@ -516,9 +544,25 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
             </svg>
             <span>{fileName}</span>
           </div>
+          {isWebDocument && (
+            <button
+              type="button"
+              className="fp-header-btn"
+              title="用默认浏览器打开"
+              aria-label="用默认浏览器打开"
+              onClick={() => {
+                if (!activeFilePath) return;
+                void window.electronAPI.openPathInShell(activeFilePath).then((result) => {
+                  if (!result.success) setError(result.error || "无法用浏览器打开");
+                });
+              }}
+            >
+              浏览器打开
+            </button>
+          )}
           <button className="fp-close" onClick={handleClose}>×</button>
         </div>
-        {isMarkdown && (
+        {(isMarkdown || isWebDocument) && (
           <div className="fp-toolbar">
             <button
               className={`fp-toolbar-btn ${previewMode === true ? 'active' : ''}`}
@@ -528,7 +572,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
                 setGoToLineOpen(false);
               }}
             >
-              预览
+              {isWebDocument ? "效果" : "预览"}
             </button>
             <button
               className={`fp-toolbar-btn ${previewMode === false ? 'active' : ''}`}
@@ -670,6 +714,16 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
                 <div className="fp-status">无法显示图片</div>
               )}
             </div>
+          ) : isWebDocument && previewMode === true ? (
+            <iframe
+              key={webPreviewUrl}
+              className="fp-web-frame"
+              src={webPreviewUrl}
+              title={fileName}
+              // 页面 origin 是 127.0.0.1:port，与 Hpp 本身仍跨源；放开 same-origin
+              // 是为了让模块脚本 / localStorage 这类页面能正常工作。
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+            />
           ) : showMarkdownPreview ? (
             <div className="fp-markdown-preview">
               <ErrorBoundary key={activeFilePath} fallback={<div className="fp-status">Markdown 渲染失败，请切换到源码模式</div>}>

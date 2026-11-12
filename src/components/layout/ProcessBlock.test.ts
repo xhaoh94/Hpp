@@ -163,30 +163,32 @@ describe("ProcessBlock", () => {
     expect(styles).not.toContain("transform: scale(1.2)");
   });
 
-  it("sweeps a shimmer across the collapsed thinking preview while running", () => {
+  it("sweeps a narrow shimmer across the collapsed thinking preview while running", () => {
     const styles = readFileSync(resolve("src/components/layout/ChatPanel.css"), "utf8");
-    // 折叠且思考运行时：预览两行文字上方有一道扫光反复扫过。
+    // 折叠且思考运行时：预览两行文字有一道窄光带反复扫过（方案 A）。
     expect(styles).toContain(
       ".chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview"
     );
     expect(styles).toContain("chat-thinking-text-shimmer");
     expect(styles).toContain("@keyframes chat-thinking-text-shimmer");
-    expect(styles).toContain("4s ease-in-out infinite");
+    // 窄光带 + 匀速：旧的 4s 缓动宽光带在浅色主题下几乎看不出扫光。
+    expect(styles).toContain("2.2s linear infinite");
     // 只高亮文字笔画本身：背景裁剪到文字，不出现矩形覆盖层或边框。
     expect(styles).toContain("background-clip: text");
-    expect(styles).toContain("background-size: 300% 100%");
-    // T1：宽高亮带（38%-62%）柔和扫过。
-    expect(styles).toContain("var(--text-secondary) 38%");
-    expect(styles).toContain("var(--text-secondary) 62%");
-    // 浅色下 --text-primary 是近黑，扫光会像阴影；高亮色必须按主题区分。
-    expect(styles).toContain("--chat-thinking-shimmer-highlight: var(--text-primary)");
-    expect(styles).toContain(":root[data-theme=\"light\"] .chat-process-thinking-row.collapsed");
-    expect(styles).toContain("--chat-thinking-shimmer-highlight: color-mix(");
+    expect(styles).toContain("background-size: 240% 100%");
+    expect(styles).toContain("background-position: 130% 0");
+    expect(styles).toContain("background-position: -30% 0");
+    // 光带只占 46%–54%，保持锐利。
+    expect(styles).toContain("var(--chat-thinking-shimmer-base) 46%");
+    expect(styles).toContain("var(--chat-thinking-shimmer-base) 54%");
+    // 黑白扫光：深色亮带、浅色近黑带，两端都不引入彩色。
+    expect(styles).toContain("--chat-thinking-shimmer-ink: #ffffff");
+    expect(styles).toContain("--chat-thinking-shimmer-ink: #0b0d10");
+    expect(styles).toContain(':root[data-theme="light"] .chat-process-thinking-row.collapsed');
     expect(styles).not.toContain(".chat-process-thinking-preview::after");
-    // 扫光只作用于折叠态，不影响展开/单行思考。
   });
 
-  it("renders live subagent chips with progress and elapsed time, without a title row", () => {
+  it("hides a running subagent group that the floating pill already covers", () => {
     const html = renderToStaticMarkup(createElement(ProcessBlock, {
       messageId: "assistant-subagent",
       process: {
@@ -212,17 +214,50 @@ describe("ProcessBlock", () => {
       onPreserveScroll: (action: () => void) => action(),
     }));
 
-    expect(html).toContain("进度 1/2");
+    // 运行中只在底部悬浮胶囊里展示，聊天区不出现重复的行。
+    expect(html).not.toContain("chat-subagent-chip");
+    expect(html).not.toContain("chat-subagent-event");
+    expect(html).not.toContain("正在工作");
+  });
+
+  it("renders finished subagent chips with progress and elapsed time, without a title row", () => {
+    const html = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-subagent",
+      process: {
+        startedAt: 1_000,
+        expanded: true,
+        entries: [{
+          id: "subagent-event",
+          type: "subagent" as const,
+          title: "正在工作",
+          state: "completed" as const,
+          timestamp: 1_000,
+          startedAt: 1_000,
+          completedAt: 133_000,
+          subagents: [
+            { id: "scout", label: "Scout", status: "completed" as const, message: "读完文件" },
+            { id: "reviewer", label: "Reviewer", status: "completed" as const, message: "已完成" },
+          ],
+        }],
+      },
+      running: false,
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+    expect(html).toContain("进度 2/2");
     expect(html).toContain("已运行");
     // 标题与活动预览已去掉，只留胶囊 + 右侧进度。
     expect(html).not.toContain("chat-subagent-event-activity");
-    expect(html).not.toContain("Scout：正在读取文件");
+    expect(html).not.toContain("Scout：读完文件");
     expect(html).not.toContain("chat-subagent-event-title");
     expect(html).not.toContain("正在工作");
-    // 已结束的子任务不占用活动位。
-    expect(html).not.toContain("Reviewer：已完成");
-    // 胶囊是按钮（点开监视窗），展开/折叠只挂在右侧那块点击区上。
-    expect(html).toContain('class="chat-subagent-chip running"');
+    // 胶囊里只留名字，耗时只在右侧「已运行」里出现。
+    expect(html).not.toContain("chat-subagent-chip-time");
+    // 胶囊是按钮，展开/折叠只挂在右侧那块点击区上。
+    expect(html).toContain('class="chat-subagent-chip completed"');
     expect(html).toContain("chat-subagent-event-toggle");
     expect(html).toContain('class="chat-subagent-event-toggle expandable"');
     expect(html).toContain('aria-expanded="false"');

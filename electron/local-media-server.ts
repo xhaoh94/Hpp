@@ -36,8 +36,35 @@ export interface LocalMediaServer {
   close: () => Promise<void>;
 }
 
-const fileMimeType = (filePath: string) =>
-  VIDEO_MIME_TYPES[extname(filePath).toLowerCase()] || "application/octet-stream";
+// 网页预览会走这个服务加载本地文件：MIME 不对时浏览器会当成下载而不是渲染
+// （`.html` 返回 application/octet-stream 就表现为一片空白）。
+const DOCUMENT_MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".xhtml": "application/xhtml+xml; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".ico": "image/x-icon",
+  ".bmp": "image/bmp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+const fileMimeType = (filePath: string) => {
+  const extension = extname(filePath).toLowerCase();
+  return VIDEO_MIME_TYPES[extension] || DOCUMENT_MIME_TYPES[extension] || "application/octet-stream";
+};
 
 const parseRange = (header: string | undefined, size: number) => {
   if (!header) return null;

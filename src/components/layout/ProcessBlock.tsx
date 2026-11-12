@@ -45,6 +45,7 @@ import {
   normalizeProcessForView,
   OPERATION_SUMMARY_TOOL_KIND,
   splitCommandDetail,
+  type ProcessEntryView,
   type ProcessTerminalViewState,
 } from "@shared/process-view";
 import {
@@ -344,6 +345,15 @@ const getSubagentTooltip = (subagent: AgentSubagent) => [
   subagent.message,
 ].filter(Boolean).join(" · ");
 
+/**
+ * 运行中的子任务由底部悬浮胶囊统一展示，聊天区等它全部结束再出现，避免两处重复。
+ * 判据与胶囊同源（getEffectiveProcessSubagents），两边不会一显一隐。
+ */
+const isActiveSubagentEntry = (entry: ProcessEntryView) =>
+  entry.type === "subagent" &&
+  getEffectiveProcessSubagents(entry.subagents, entry.state)
+    .some((subagent) => subagent.status === "running" || subagent.status === "pending");
+
 function SubagentEntryRow({
   messageId,
   entry,
@@ -393,13 +403,6 @@ function SubagentEntryRow({
                   <SubagentGlyph />
                 </span>
                 <span className="chat-subagent-label">{subagent.label}</span>
-                {subagent.status === "running" && subagent.startedAt
-                  ? (
-                    <span className="chat-subagent-chip-time">
-                      {formatProcessDuration((subagent.completedAt ?? now) - subagent.startedAt)}
-                    </span>
-                  )
-                  : null}
               </button>
             );
           })}
@@ -1154,7 +1157,7 @@ export function ProcessBlock({
   );
   const visibleEntries = useMemo(
     () => {
-      const base = getVisibleProcessEntries(viewProcess.entries);
+      const base = getVisibleProcessEntries(viewProcess.entries).filter((entry) => !isActiveSubagentEntry(entry));
       return conciseCommentaryEntry ? [...base, conciseCommentaryEntry] : base;
     },
     [viewProcess.entries, conciseCommentaryEntry]

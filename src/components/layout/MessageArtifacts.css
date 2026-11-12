@@ -1,0 +1,154 @@
+/* 消息底部的产物入口：默认一行「产物 N」+ 图片缩略图，展开后是文件清单。
+   收起 / 展开共用一张卡片，避免按钮和列表看起来是两个独立块。 */
+.chat-artifacts {
+  display: flex;
+  flex-direction: column;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+  overflow: hidden;
+}
+
+.chat-artifacts-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 0;
+  background: none;
+  /* 标题用主文字色：之前 12px + secondary 在浅色背景上对比度不足。 */
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-artifacts-toggle:hover {
+  color: var(--text-primary);
+  background: var(--surface-muted);
+}
+
+.chat-artifacts-toggle.expanded {
+  color: var(--text-primary);
+}
+
+.chat-artifacts-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.chat-artifacts-thumbs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+
+.chat-artifact-thumb,
+.chat-artifact-thumb-fallback {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: cover;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.chat-artifact-thumb-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--text-secondary);
+}
+
+.chat-artifacts-thumb-more {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.chat-artifacts-chevron {
+  flex: 0 0 auto;
+  margin-left: auto;
+  transition: transform 0.15s ease;
+}
+
+.chat-artifacts-thumbs + .chat-artifacts-chevron {
+  margin-left: 2px;
+}
+
+.chat-artifacts-toggle.expanded .chat-artifacts-chevron {
+  transform: rotate(180deg);
+}
+
+/* 展开后与标题行同宽、靠左侧对齐，中间用一条细分隔线切开。 */
+.chat-artifacts-list {
+  display: flex;
+  flex-direction: column;
+  padding: 2px;
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-artifact-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  /* 行文字提到 13px + 主文字色，浅色主题下才看得清。 */
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-artifact-row:hover {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.chat-artifact-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-secondary);
+}
+
+.chat-artifact-row:hover .chat-artifact-icon {
+  color: var(--text-primary);
+}
+
+.chat-artifact-name {
+  flex: 0 0 auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 之前用的浅蓝 #60a5fa 在浅色背景上对比度太低，改用主题强调色。 */
+  color: var(--accent-color);
+  font-weight: 500;
+}
+
+.chat-artifact-row:hover .chat-artifact-name {
+  text-decoration: underline;
+}
+
+/* 路径缩到文件名后面做辅助信息：保留“文件放哪了”，但不和名字抢视觉重心。 */
+.chat-artifact-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 路径是辅助信息：靠字号区分层级，不再叠透明度（叠了就看不清）。 */
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
