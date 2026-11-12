@@ -20,15 +20,13 @@ import {
 } from "./agentEventUtils";
 
 describe("agentEventUtils", () => {
-  it("resets the stream idle baseline after a turn settles", () => {
+  it("resets the notice slot after a turn settles", () => {
     const runtime = createSessionRuntime();
-    runtime.streamIdleSince = 45_000;
-    runtime.streamIdleNoticeEntryId = "idle-notice";
+    runtime.noticeEntryId = "already-running-notice";
 
     resetSessionRuntimeAfterTurn(runtime);
 
-    expect(runtime.streamIdleSince).toBeNull();
-    expect(runtime.streamIdleNoticeEntryId).toBeNull();
+    expect(runtime.noticeEntryId).toBeNull();
   });
 
   it("orders host lifecycle revisions and rejects older settled turns", () => {
@@ -329,6 +327,43 @@ describe("agentEventUtils", () => {
     expect(getToolSummary({
       type: "tool",
       toolKind: "run_command",
+      isError: true,
+      exitCode: 1,
+    } as AgentEvent, false)).toBe("命令返回非零退出码 1");
+  });
+
+  // 命令标题用模型写的一句话意图，而不是「已运行 bash」。
+  it("uses the model-written command description as the row title", () => {
+    expect(getToolSummary({
+      type: "tool",
+      toolKind: "run_command",
+      toolName: "bash",
+      description: "查看空闲时长的渲染位置",
+    } as AgentEvent, true)).toBe("查看空闲时长的渲染位置");
+
+    // 空白描述退回通用文案。
+    expect(getToolSummary({
+      type: "tool",
+      toolKind: "run_command",
+      toolName: "bash",
+      description: "   ",
+    } as AgentEvent, false)).toBe("已运行 bash");
+
+    // 过长截断，完整命令仍在明细里。
+    const long = "搜".repeat(80);
+    expect(getToolSummary({
+      type: "tool",
+      toolKind: "run_command",
+      toolName: "bash",
+      description: long,
+    } as AgentEvent, false)).toBe(`${"搜".repeat(48)}…`);
+
+    // 失败时仍然显示退出码，不被描述盖掉。
+    expect(getToolSummary({
+      type: "tool",
+      toolKind: "run_command",
+      toolName: "bash",
+      description: "运行测试",
       isError: true,
       exitCode: 1,
     } as AgentEvent, false)).toBe("命令返回非零退出码 1");

@@ -7,7 +7,7 @@ import {
   getProcessGroupState,
   getSubagentActivityLabel,
   getSubagentProgressLabel,
-  getStreamIdleNoticeDuration,
+  getEffectiveProcessSubagents,
   getVisibleProcessEntries,
   hasNativeMultiStepProcessPlan,
   groupProcessEntries,
@@ -15,8 +15,10 @@ import {
   isProcessInterrupted,
   isProcessViewRunning,
   getConciseProcessEntries,
+  buildConciseCommentaryEntry,
   isUserGuidanceProcessEntry,
   collapseOperationProcessEntries,
+  collapseStandardProcessEntries,
   mergeThinkingEntries,
   OPERATION_SUMMARY_TOOL_KIND,
   normalizeProcessForView,
@@ -297,30 +299,6 @@ describe("shared process view model", () => {
     expect(isProcessInterrupted(entries)).toBe(true);
   });
 
-  it("merges repeated stream idle notices and sums their durations", () => {
-    const durations = [54_000, 137_000, 107_000, 121_000];
-    const entries = durations.map((duration, index) => {
-      const startedAt = index * 200_000;
-      return entry({
-        id: `idle-${index}`,
-        type: "status",
-        title: "Pi 仍在运行，暂时没有新输出",
-        toolKind: "stream_idle_notice",
-        state: "completed",
-        timestamp: startedAt,
-        startedAt,
-        completedAt: startedAt + duration,
-      });
-    });
-
-    const [merged] = getVisibleProcessEntries(entries);
-
-    expect(getVisibleProcessEntries(entries)).toHaveLength(1);
-    expect(merged.id).toBe("idle-3");
-    expect(merged.accumulatedDurationMs).toBe(54_000 + 137_000 + 107_000);
-    expect(getStreamIdleNoticeDuration(merged, 999_999)).toBe(419_000);
-  });
-
   it("reports subagent completion and latest live activity", () => {
     const subagents = [
       { id: "scout", label: "Scout", status: "running" as const, message: "正在读取文件" },
@@ -456,31 +434,65 @@ describe("getConciseProcessEntries", () => {
   const view = (over: Partial<ProcessEntryView> & { id: string; type: ProcessEntryView["type"] }) =>
     ({ ...base, ...over }) as ProcessEntryView;
 
-  it("keeps thinking, guidance, questionnaire and error entries", () => {
+  it("merges thinking and body into two blocks, keeping interactive entries as boundaries", () => {
     const entries = [
-      view({ id: "t", type: "thinking", detail: "思考", title: "正在思考" }),
-      view({ id: "g", type: "info", kind: "user_guidance", toolKind: "guidance_message", detail: "引导" }),
-      view({ id: "q", type: "question", title: "需要确认" }),
-      view({ id: "e", type: "error", title: "执行失败" }),
-      view({ id: "n", type: "info", kind: "assistant_narration", title: "说明", detail: "正文" }),
+      view({ id: "t1", type: "thinking", detail: "先看设置", title: "正在思考", timestamp: 1 }),
+      view({ id: "c", type: "tool", toolKind: "run_command", title: "已运行 1 条命令", detail: "npm test", timestamp: 2 }),
+      view({ id: "t2", type: "thinking", detail: "再看缓存", title: "正在思考", timestamp: 3 }),
+      view({ id: "n1", type: "info", kind: "assistant_narration", title: "说明", detail: "第一段正文", timestamp: 4 }),
+      view({ id: "n2", type: "info", kind: "assistant_narration", title: "说明", detail: "第二段正文", timestamp: 5 }),
     ];
 
-    expect(getConciseProcessEntries(entries).map((entry) => entry.id)).toEqual(["t", "g", "q", "e", "n"]);
+    const concise = getConciseProcessEntries(entries);
+    expect(concise.map((entry) => entry.id)).toEqual(["t1", "n1"]);
+    expect(concise[0].detail).toBe("先看设置\n\n再看缓存");
+    expect(concise[1].detail).toBe("第一段正文\n\n第二段正文");
   });
 
-  it("drops only operation entries and keeps everything else", () => {
+  it("keeps guidance, questionnaire and error in place instead of merging across them", () => {
+    const entries = [
+      view({ id: "t1", type: "thinking", detail: "改之前", title: "正在思考", timestamp: 1 }),
+      view({ id: "g", type: "info", kind: "user_guidance", toolKind: "guidance_message", detail: "改成用缓存", timestamp: 2 }),
+      view({ id: "t2", type: "thinking", detail: "改之后", title: "正在思考", timestamp: 3 }),
+      view({ id: "q", type: "question", title: "需要确认", timestamp: 4 }),
+      view({ id: "e", type: "error", title: "执行失败", timestamp: 5 }),
+      view({ id: "n", type: "info", kind: "assistant_narration", title: "说明", detail: "正文", timestamp: 6 }),
+    ];
+
+    expect(getConciseProcessEntries(entries).map((entry) => entry.id)).toEqual(["t1", "g", "t2", "q", "e", "n"]);
+  });
+
+  it("shows diff but hides operation, status and subagent entries", () => {
     const entries = [
       view({ id: "c", type: "tool", toolKind: "run_command", title: "已运行 1 条命令", detail: "npm test" }),
       view({ id: "f", type: "tool", toolKind: "read_file", title: "已读取 1 个文件" }),
-      view({ id: "d", type: "diff", title: "变更" }),
-      // 状态、子 Agent、空闲提示都不是“运行了什么”，必须保留。
       view({ id: "s", type: "status", title: "状态" }),
-      view({ id: "a", type: "subagent", title: "子 Agent" }),
-      view({ id: "i", type: "tool", toolKind: "stream_idle_notice", title: "无输出" }),
+      view({ id: "d", type: "diff", title: "变更" }),
+      view({
+        id: "a", type: "subagent", title: "子 Agent", detail: "子任务正文",
+        subagents: [{ id: "s1", label: "Scout", message: "子任务消息", status: "completed" }],
+      }),
+      view({ id: "e", type: "error", title: "出错了" }),
       view({ id: "t", type: "thinking", title: "正在思考", detail: "保留我" }),
     ];
 
-    expect(getConciseProcessEntries(entries).map((entry) => entry.id)).toEqual(["s", "a", "i", "t"]);
+    // subagent 胶囊只在底部悬浮区（与档位无关）显示，处理过程时间线内不出现。
+    const concise = getConciseProcessEntries(entries);
+    expect(concise.map((entry) => entry.id)).toEqual(["d", "e", "t"]);
+    expect(concise.some((entry) => entry.type === "subagent")).toBe(false);
+  });
+
+  it("folds standalone commentary into one narration entry", () => {
+    const folded = buildConciseCommentaryEntry<ProcessEntryView>([
+      { id: "c1", content: "第一段", timestamp: 10 },
+      { id: "c2", content: "第一段\n\n第二段", timestamp: 20, isStreaming: true },
+    ]);
+
+    expect(folded?.kind).toBe(ASSISTANT_NARRATION_PROCESS_KIND);
+    expect(folded?.detail).toBe("第一段\n\n第二段");
+    expect(folded?.timestamp).toBe(10);
+    expect(folded?.state).toBe("running");
+    expect(buildConciseCommentaryEntry([])).toBeNull();
   });
 });
 
@@ -514,12 +526,128 @@ describe("collapseOperationProcessEntries", () => {
     expect(collapseOperationProcessEntries(entries)).toBe(entries);
   });
 
+  // 只有连续的操作才合并：思考/正文/提示打断时重新起一段，否则会分不清
+  // "这段回话到底跑了什么"。
+  it("splits merged operations at intervening thinking or narration entries", () => {
+    const collapsed = collapseOperationProcessEntries([
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test" }),
+      view({ id: "c2", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm run lint" }),
+      view({ id: "t1", type: "thinking", title: "思考", detail: "先看看测试结果" }),
+      view({ id: "c3", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm run build" }),
+      view({ id: "n1", type: "info", kind: ASSISTANT_NARRATION_PROCESS_KIND, title: "正文" }),
+      view({ id: "c4", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm run deploy" }),
+    ]);
+
+    expect(collapsed.map((item) => item.id)).toEqual([
+      "c1-operation-summary",
+      "t1",
+      "c3-operation-summary",
+      "n1",
+      "c4-operation-summary",
+    ]);
+    expect(collapsed[0].title).toBe("运行 2 条命令");
+    expect(collapsed[2].title).toBe("运行 1 条命令");
+    expect(collapsed[4].title).toBe("运行 1 条命令");
+  });
+
+  it("starts a new run after an error entry", () => {
+    const collapsed = collapseOperationProcessEntries([
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test" }),
+      view({ id: "err", type: "error", title: "命令失败" }),
+      view({ id: "c2", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm run build" }),
+    ]);
+
+    expect(collapsed.map((item) => item.id)).toEqual([
+      "c1-operation-summary",
+      "err",
+      "c2-operation-summary",
+    ]);
+  });
+
   it("marks the summary as running while any operation is running", () => {
     const collapsed = collapseOperationProcessEntries([
       view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test", state: "running" }),
       view({ id: "d1", type: "diff", title: "变更", files: ["x.ts"], state: "completed" }),
     ]);
     expect(collapsed[0].state).toBe("running");
+  });
+});
+
+describe("collapseStandardProcessEntries", () => {
+  const base = { title: "条目", timestamp: 1 } as const;
+  const view = (over: Partial<ProcessEntryView> & { id: string; type: ProcessEntryView["type"] }) =>
+    ({ ...base, ...over }) as ProcessEntryView;
+
+  // 标准模式：正文之间的思考先合成一块，命令/查看/修改再合成一块。
+  it("merges thinking and operations into one block per segment", () => {
+    const collapsed = collapseStandardProcessEntries([
+      view({ id: "t1", type: "thinking", title: "思考", detail: "先看看现状" }),
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test" }),
+      view({ id: "t2", type: "thinking", title: "思考", detail: "再补一次校验" }),
+      view({ id: "r1", type: "tool", toolKind: "read_file", title: "读取", files: [{ file: "a.ts" }] }),
+      view({ id: "n1", type: "info", kind: ASSISTANT_NARRATION_PROCESS_KIND, title: "正文" }),
+      view({ id: "t3", type: "thinking", title: "思考", detail: "收尾" }),
+      view({ id: "c2", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm run build" }),
+    ]);
+
+    expect(collapsed.map((item) => item.id)).toEqual([
+      "t1",
+      "c1-operation-summary",
+      "n1",
+      "t3",
+      "c2-operation-summary",
+    ]);
+    // 两段思考的正文合到第一条里。
+    expect(collapsed[0].detail).toBe("先看看现状\n\n再补一次校验");
+    expect(collapsed[1].title).toBe("运行 1 条命令 · 查看 1 个文件");
+  });
+
+  // 摘要展开时要逐条列出命令：description 是标题，command 放进 title。
+  it("keeps each command and its description inside the summary", () => {
+    const [summary] = collapseStandardProcessEntries([
+      view({
+        id: "c1",
+        type: "tool",
+        toolKind: "run_command",
+        title: "查看空闲时长的渲染位置",
+        description: "查看空闲时长的渲染位置",
+        command: "grep -rn idleDuration src",
+      }),
+      view({
+        id: "c2",
+        type: "tool",
+        toolKind: "run_command",
+        title: "移除两端的空闲时长渲染",
+        description: "移除两端的空闲时长渲染",
+        command: "sed -n 918,935p mobile/src/App.tsx",
+      }),
+    ]);
+
+    expect(summary.title).toBe("运行 2 条命令");
+    expect(summary.operationSummary?.commandItems).toEqual([
+      { id: "c1", description: "查看空闲时长的渲染位置", command: "grep -rn idleDuration src" },
+      { id: "c2", description: "移除两端的空闲时长渲染", command: "sed -n 918,935p mobile/src/App.tsx" },
+    ]);
+  });
+
+  it("keeps the first-seen category order inside a segment", () => {
+    const collapsed = collapseStandardProcessEntries([
+      view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test" }),
+      view({ id: "t1", type: "thinking", title: "思考", detail: "看结果" }),
+    ]);
+
+    // 先跑命令再思考：保持这个先后，不强行把思考提上来。
+    expect(collapsed.map((item) => item.id)).toEqual(["c1-operation-summary", "t1"]);
+  });
+
+  it("lets questions and errors break the segment", () => {
+    const collapsed = collapseStandardProcessEntries([
+      view({ id: "t1", type: "thinking", title: "思考", detail: "A" }),
+      view({ id: "q", type: "question", title: "需要确认" }),
+      view({ id: "t2", type: "thinking", title: "思考", detail: "B" }),
+    ]);
+
+    expect(collapsed.map((item) => item.id)).toEqual(["t1", "q", "t2"]);
   });
 });
 
@@ -544,6 +672,31 @@ describe("collapseOperationProcessEntries 的明细", () => {
       commandCount: 2,
       changedFiles: ["src/a.cs", "src/b.cs"],
       viewedFiles: ["src/c.cs"],
+      // 展开摘要时每条命令单独一行，标题用 description，缺省退回命令本身。
+      commandItems: [
+        { id: "c1", command: "npm test" },
+        { id: "c2", command: "npm run build" },
+      ],
     });
+  });
+});
+
+describe("getEffectiveProcessSubagents", () => {
+  const child = (id: string, status?: "pending" | "running" | "completed") => ({ id, label: id, status });
+
+  // 占位项的 id 是裸工具调用 id，真实子任务是 `toolCallId:N`；前者收不到后续事件。
+  it("drops a placeholder whose id prefixes a real child", () => {
+    const subagents = [child("call-1", "running"), child("call-1:1", "completed")];
+    expect(getEffectiveProcessSubagents(subagents, "running").map((item) => item.id)).toEqual(["call-1:1"]);
+  });
+
+  it("drops leftover active subagents once the entry is terminal", () => {
+    const subagents = [child("a", "running"), child("b", "completed")];
+    expect(getEffectiveProcessSubagents(subagents, "completed").map((item) => item.id)).toEqual(["b"]);
+    expect(getEffectiveProcessSubagents(subagents, "error").map((item) => item.id)).toEqual(["b"]);
+    // 运行中的条目照常全部保留。
+    expect(getEffectiveProcessSubagents(subagents, "running")).toHaveLength(2);
+    // 老数据没有状态字段时不敢当幽灵删。
+    expect(getEffectiveProcessSubagents([{ id: "x", label: "X" }], "completed")).toHaveLength(1);
   });
 });

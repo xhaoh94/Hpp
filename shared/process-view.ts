@@ -21,21 +21,23 @@ export type ProcessEntryView = {
   detail?: string;
   prompt?: string;
   command?: string;
+  /** 模型写的一句话意图（命令条目标题），没有时退回 command。 */
+  description?: string;
   exitCode?: number;
   state?: "running" | "completed" | "warning" | "error" | "interrupted";
   files?: unknown[];
   timestamp?: number;
   startedAt?: number;
   completedAt?: number;
-  /** stream_idle_notice 已完成的前序无输出区间总时长（毫秒）。 */
-  accumulatedDurationMs?: number;
   phase?: "started" | "completed";
   stopReason?: ProcessSubagentStopReason;
-  /** 「标准」档操作摘要的明细：展开时按类别列出（命令数 / 改过的文件 / 看过的文件）。 */
+  /** 「标准」档操作摘要的明细：展开时按类别列出（命令 / 改过的文件 / 看过的文件）。 */
   operationSummary?: {
     commandCount: number;
     changedFiles: string[];
     viewedFiles: string[];
+    /** 每条命令单独一行显示（标题用模型写的 description）。 */
+    commandItems?: ProcessOperationCommandItem[];
   };
   subagents?: Array<{
     id?: string;
@@ -81,6 +83,30 @@ export const getSubagentActivityLabel = (subagents: ProcessSubagentView[]) => {
 
   const running = subagents.find((subagent) => subagent.status === "running");
   return running ? `${running.label || "Subagent"}：正在工作…` : "";
+};
+
+export const isTerminalProcessEntryState = (state?: ProcessEntryView["state"]) => (
+  state === "completed" || state === "error" || state === "interrupted"
+);
+
+/**
+ * 早期占位项的 id 就是裸工具调用 id，而真实子任务是 `toolCallId:N`，两者会一起挂在这个条目上。
+ * 占位项收不到后续事件，进度会永远停在 1/2。特征是：有兄弟 id 等于它加 `:` 前缀。
+ * 条目本身已结束时，还停在 running/pending 的同样算残留。
+ */
+export const getEffectiveProcessSubagents = <T extends ProcessSubagentView>(
+  subagents: T[] | undefined,
+  entryState?: ProcessEntryView["state"],
+): T[] => {
+  const list = subagents || [];
+  const terminalEntry = isTerminalProcessEntryState(entryState);
+  const isPlaceholder = (id?: string) => !!id && list.length > 1 && list.some((other) => (
+    !!other.id && other.id !== id && other.id.startsWith(`${id}:`)
+  ));
+  return list.filter((subagent) => {
+    if (isPlaceholder(subagent.id)) return false;
+    return !terminalEntry || !subagent.status || isTerminalProcessSubagentStatus(subagent.status);
+  });
 };
 
 export type ProcessPlanStepView = {
@@ -328,21 +354,117 @@ export const isUserGuidanceProcessEntry = (entry: ProcessEntryView) =>
   /^收到引导(?:[:：]|$)/.test(entry.title);
 
 /**
- * 操作类条目：执行命令、读取/查看文件、修改文件。
- *
- * 这三类就是「简洁」档唯一要隐藏的内容；其他条目（思考、正文、引导、
- * 问卷、错误、状态、子 Agent、空闲提示）都属于对话信息，必须保留。
+ * 操作类条目：执行命令、读取/查看文件、修改文件、diff。
+ * 标准档把它们合并成摘要；简洁档按两段主体重组，不在这里复用。
  */
 export const isOperationProcessEntry = (entry: ProcessEntryView) =>
   entry.type === "diff"
   || (entry.type === "tool"
     && entry.toolKind !== "guidance_message"
-    && entry.toolKind !== "guidance"
-    && entry.toolKind !== "stream_idle_notice");
+    && entry.toolKind !== "guidance");
 
-/** 「简洁」等级下真正要渲染的条目：只是不展示操作类条目。 */
-export const getConciseProcessEntries = <T extends ProcessEntryView>(entries: T[]) =>
-  entries.filter((entry) => !isOperationProcessEntry(entry));
+/** 历史上只带标题、没有 kind 的正文节点。 */
+export const PROCESS_NARRATION_TITLE = "正文输出";
+
+/** 简洁档的正文节点：narration 条目或历史上只带标题的正文节点。 */
+const isConciseBodyEntry = (entry: ProcessEntryView) =>
+  isAssistantNarrationProcessEntry(entry) || entry.title === PROCESS_NARRATION_TITLE;
+
+/** 简洁档的例外：交互、结果与变更条目必须原样可见，不能被两段合并吞掉。 */
+const isConciseExceptionEntry = (entry: ProcessEntryView) =>
+  entry.type === "question"
+  || entry.type === "error"
+  || entry.type === "diff"
+  || isUserGuidanceProcessEntry(entry)
+  // 中断的命令仍是操作细节，继续隐藏；只保留中断的状态/思考/正文。
+  || (entry.state === "interrupted" && entry.type !== "tool");
+
+/** 正文按段落拼接去重；历史 commentary 与 narration 可能有重叠段落。 */
+export function mergeProcessBodyText(texts: string[]): string {
+  const parts: string[] = [];
+  for (const text of texts) {
+    for (const part of String(text || "").split(/\n{2,}/).map((item) => item.trim())) {
+      if (part && !parts.includes(part)) parts.push(part);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+function mergeBodyEntries<T extends ProcessEntryView>(entries: T[]): T {
+  const first = entries[0];
+  const last = entries[entries.length - 1];
+  return {
+    ...first,
+    detail: mergeProcessBodyText(entries.map((entry) => String(entry.detail || ""))),
+    state: last.state ?? first.state,
+    completedAt: last.completedAt ?? first.completedAt,
+  };
+}
+
+/**
+ * 把独立的 commentary 正文折成一个 narration 条目，让简洁档两段合并只走
+ * ProcessEntries 这一条渲染路径；否则正文会散在时间线里，永远合不起来。
+ */
+export function buildConciseCommentaryEntry<T extends ProcessEntryView>(
+  commentary: Array<{ id: string; content: string; timestamp: number; isStreaming?: boolean }>,
+): T | null {
+  const parts = commentary.filter((item) => item.content.trim().length > 0);
+  if (parts.length === 0) return null;
+  const last = parts[parts.length - 1];
+  return {
+    id: `concise-commentary-${parts[0].id}`,
+    type: "info",
+    kind: ASSISTANT_NARRATION_PROCESS_KIND,
+    title: PROCESS_NARRATION_TITLE,
+    detail: mergeProcessBodyText(parts.map((item) => item.content)),
+    timestamp: parts[0].timestamp,
+    state: last.isStreaming ? "running" : "completed",
+  } as T;
+}
+
+/**
+ * 「简洁」档按例外分段：每段内所有思考合成一条、所有正文合成一条，
+ * 例外（引导/问卷/错误/子 Agent/diff）作为分界点原样保留。
+ * 引导是用户介入点，跨过它合并会让引导前后的思考看起来颠倒了顺序。
+ */
+export const getConciseProcessEntries = <T extends ProcessEntryView>(entries: T[]): T[] => {
+  const result: T[] = [];
+  let thinking: T[] = [];
+  let body: T[] = [];
+  let thinkingIndex = 0;
+  let bodyIndex = 0;
+
+  const flush = () => {
+    const blocks: Array<{ index: number; entry: T }> = [];
+    if (thinking.length > 0) {
+      const [merged] = mergeThinkingEntries(thinking);
+      blocks.push({ index: thinkingIndex, entry: merged });
+    }
+    if (body.length > 0) {
+      blocks.push({ index: bodyIndex, entry: mergeBodyEntries(body) });
+    }
+    result.push(...blocks.sort((left, right) => left.index - right.index).map((item) => item.entry));
+    thinking = [];
+    body = [];
+  };
+
+  entries.forEach((entry, index) => {
+    if (isConciseExceptionEntry(entry)) {
+      flush();
+      result.push(entry);
+      return;
+    }
+    if (entry.type === "thinking") {
+      if (thinking.length === 0) thinkingIndex = index;
+      thinking.push(entry);
+    } else if (isConciseBodyEntry(entry)) {
+      if (body.length === 0) bodyIndex = index;
+      body.push(entry);
+    }
+  });
+  flush();
+  return result;
+};
 
 /** 「标准」档把操作类条目合并成的那一条的标识。 */
 export const OPERATION_SUMMARY_TOOL_KIND = "operation_summary" as const;
@@ -369,6 +491,12 @@ const getOperationFileRefs = (entry: ProcessEntryView): OperationFileRef[] =>
 
 const isWriteFileAction = (action?: string) =>
   action === "edited" || action === "modified" || action === "written";
+
+export type ProcessOperationCommandItem = {
+  id: string;
+  description?: string;
+  command?: string;
+};
 
 type OperationSummary = {
   commandCount: number;
@@ -423,6 +551,13 @@ const buildOperationSummaryEntry = <T extends ProcessEntryView>(
     commandCount: summary.commandCount,
     changedFiles: uniqueNames(summary.changedFiles),
     viewedFiles: uniqueNames(summary.viewedFiles),
+    commandItems: operations
+      .filter(isCommandProcessEntry)
+      .map((entry) => ({
+        id: entry.id,
+        ...(entry.description ? { description: entry.description } : {}),
+        ...(entry.command ? { command: entry.command } : {}),
+      })),
   },
   detail: undefined,
   command: undefined,
@@ -431,35 +566,102 @@ const buildOperationSummaryEntry = <T extends ProcessEntryView>(
 }) as T;
 
 /**
- * 「标准」等级（收起态）：把「运行了哪些命令 / 查看了哪些文件 / 修改了哪些文件」
- * 汇总成一条，放在第一个操作出现的位置；思考、正文等其他条目保持原顺序不变。
- * 没有操作类条目时原样返回。
+ * 「标准」等级（收起态）：把**连续的**操作类条目（命令 / 读文件 / 改文件）
+ * 汇总成一条，放在该段第一个操作的位置。
+ *
+ * 思考、正文、提问、提示会打断合并：它们之间的操作属于不同阶段，混成一条
+ * 会让人分不清"这段回话到底跑了什么"。没有操作类条目时原样返回。
  */
 export function collapseOperationProcessEntries<T extends ProcessEntryView>(entries: T[]): T[] {
-  const operations = entries.filter(isOperationProcessEntry);
-  if (operations.length === 0) return entries;
+  if (!entries.some(isOperationProcessEntry)) return entries;
 
-  const { commandCount, changedFiles, viewedFiles } = summarizeOperations(operations);
-  const parts = [
-    commandCount > 0 ? `运行 ${commandCount} 条命令` : "",
-    uniqueNames(viewedFiles).length > 0 ? `查看 ${uniqueNames(viewedFiles).length} 个文件` : "",
-    uniqueNames(changedFiles).length > 0 ? `修改 ${uniqueNames(changedFiles).length} 个文件` : "",
-  ].filter(Boolean);
-  if (parts.length === 0) return entries;
+  const result: T[] = [];
+  let run: T[] = [];
+  const flushRun = () => {
+    if (run.length === 0) return;
+    const { commandCount, changedFiles, viewedFiles } = summarizeOperations(run);
+    const parts = [
+      commandCount > 0 ? `运行 ${commandCount} 条命令` : "",
+      uniqueNames(viewedFiles).length > 0 ? `查看 ${uniqueNames(viewedFiles).length} 个文件` : "",
+      uniqueNames(changedFiles).length > 0 ? `修改 ${uniqueNames(changedFiles).length} 个文件` : "",
+    ].filter(Boolean);
+    if (parts.length === 0) {
+      result.push(...run);
+    } else {
+      result.push(buildOperationSummaryEntry(run[0], run, parts.join(" · "), {
+        commandCount,
+        changedFiles,
+        viewedFiles,
+      }));
+    }
+    run = [];
+  };
 
-  const firstIndex = entries.findIndex(isOperationProcessEntry);
-  return [
-    ...entries.slice(0, firstIndex),
-    buildOperationSummaryEntry(entries[firstIndex], operations, parts.join(" · "), {
-      commandCount,
-      changedFiles,
-      viewedFiles,
-    }),
-    ...entries.slice(firstIndex).filter((entry) => !isOperationProcessEntry(entry)),
-  ];
+  for (const entry of entries) {
+    if (isOperationProcessEntry(entry)) {
+      run.push(entry);
+      continue;
+    }
+    flushRun();
+    result.push(entry);
+  }
+  flushRun();
+  return result;
 }
 
 
+
+/**
+ * 「标准」等级的最终形态：同一段里所有思考合成一块、所有操作合成一块，
+ * 正文/提问/错误等「其他条目」照旧打断分段。
+ *
+ * 例：T op T op 正文 T op → [思考(T+T)] [操作(op+op)] 正文 [思考(T)] [操作(op)]。
+ * 两块的先后按该段里先出现的类别决定，不强行把思考提到最前面。
+ */
+export function collapseStandardProcessEntries<T extends ProcessEntryView>(entries: T[]): T[] {
+  const result: T[] = [];
+  let thinking: T[] = [];
+  let operations: T[] = [];
+  let firstCategory: "thinking" | "operation" | null = null;
+
+  const flushSegment = () => {
+    const pushThinking = () => {
+      if (thinking.length === 0) return;
+      result.push(...mergeThinkingEntries(thinking));
+      thinking = [];
+    };
+    const pushOperations = () => {
+      if (operations.length === 0) return;
+      result.push(...collapseOperationProcessEntries(operations));
+      operations = [];
+    };
+    if (firstCategory === "operation") {
+      pushOperations();
+      pushThinking();
+    } else {
+      pushThinking();
+      pushOperations();
+    }
+    firstCategory = null;
+  };
+
+  for (const entry of entries) {
+    if (entry.type === "thinking") {
+      firstCategory ??= "thinking";
+      thinking.push(entry);
+      continue;
+    }
+    if (isOperationProcessEntry(entry)) {
+      firstCategory ??= "operation";
+      operations.push(entry);
+      continue;
+    }
+    flushSegment();
+    result.push(entry);
+  }
+  flushSegment();
+  return result;
+}
 
 /**
  * 引导气泡的兜底文本。旧版本没有分开保存展示/发送正文，历史记录里可能留着
@@ -482,58 +684,11 @@ export const getUserGuidanceText = (entry: ProcessEntryView) => {
   return entry.title === "引导" ? "" : sanitizeGuidanceText(entry.title);
 };
 
-export const getStreamIdleNoticeDuration = (
-  entry: Pick<ProcessEntryView, "toolKind" | "accumulatedDurationMs" | "startedAt" | "completedAt">,
-  now = Date.now(),
-) => {
-  if (entry.toolKind !== "stream_idle_notice") return 0;
-  const accumulated = isFiniteTimestamp(entry.accumulatedDurationMs)
-    ? Math.max(0, entry.accumulatedDurationMs)
-    : 0;
-  const end = isFiniteTimestamp(entry.completedAt) ? entry.completedAt : now;
-  const interval = isFiniteTimestamp(entry.startedAt)
-    ? Math.max(0, end - entry.startedAt)
-    : 0;
-  return accumulated + interval;
-};
-
 export function getVisibleProcessEntries<T extends ProcessEntryView>(entries: T[]) {
-  // 多次暂停/恢复会产生多条空闲提示，但它们属于同一个处理过程。
-  // 合并时保留最新条目的位置和运行状态，把前面的时长折算进同一条，
-  // 这样既能修复旧数据，也能让当前运行中的提示继续实时计时。
-  const latestIdleNoticeIndex = entries.reduce((latest, entry, index) => (
-    entry.toolKind === "stream_idle_notice" ? index : latest
-  ), -1);
-  const idleNoticeCount = entries.reduce(
-    (count, entry) => count + (entry.toolKind === "stream_idle_notice" ? 1 : 0),
-    0,
-  );
-  const mergedIdleNotice = idleNoticeCount > 1 && latestIdleNoticeIndex >= 0
-    ? (() => {
-      const idleEntries = entries.filter((entry) => entry.toolKind === "stream_idle_notice");
-      // 只把前面各区间自身的时长累计到最后一条。这里不读取前面条目
-      // 的 accumulatedDurationMs，避免旧版本/中间版本已经写过累计值时
-      // 被重复相加；该字段只作为合并后条目的视图字段。
-      const accumulatedDurationMs = idleEntries
-        .slice(0, -1)
-        .reduce((total, entry) => total + getStreamIdleNoticeDuration(
-          { ...entry, accumulatedDurationMs: undefined },
-          isFiniteTimestamp(entry.completedAt)
-            ? entry.completedAt
-            : isFiniteTimestamp(entry.startedAt) ? entry.startedAt : 0,
-        ), 0);
-      return {
-        ...entries[latestIdleNoticeIndex],
-        accumulatedDurationMs,
-      } as T;
-    })()
-    : null;
-
-  return entries.flatMap((entry, index) => {
-    if (entry.toolKind === "stream_idle_notice") {
-      if (index !== latestIdleNoticeIndex) return [];
-      return [mergedIdleNotice || entry];
-    }
+  return entries.flatMap((entry) => {
+    // 「Pi 仍在运行，暂时没有新输出」这类空闲提示已下线；历史会话里残留的
+    // 条目同样不展示（数据保留，只是渲染层过滤）。
+    if (entry.toolKind === "stream_idle_notice") return [];
     // `message_received` used to duplicate the user's bubble inside the
     // process timeline. Keep persisted records intact, but never display the
     // redundant row on either desktop or mobile clients.
@@ -560,7 +715,7 @@ export function splitCommandDetail(entry: Pick<ProcessEntryView, "detail" | "com
 
 export function groupProcessEntries<T extends ProcessEntryView>(
   entries: T[],
-  options: { groupFileOperations?: boolean } = {}
+  options: { groupFileOperations?: boolean; groupCommands?: boolean } = {}
 ): ProcessEntryGroup<T>[] {
   const groups: ProcessEntryGroup<T>[] = [];
   let commands: T[] = [];
@@ -576,7 +731,7 @@ export function groupProcessEntries<T extends ProcessEntryView>(
     files = [];
   };
   for (const entry of entries) {
-    if (isCommandProcessEntry(entry)) {
+    if (isCommandProcessEntry(entry) && options.groupCommands !== false) {
       flushFiles();
       commands.push(entry);
     } else if (options.groupFileOperations && isFileOperationProcessEntry(entry)) {

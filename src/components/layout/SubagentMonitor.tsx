@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, X } from "lucide-react";
 import { formatProcessDuration } from "@shared/process-view";
 import { useChatStore, type ChatMessage } from "@/stores/chat-store";
+import { SUBAGENT_MONITOR_OPEN_EVENT } from "@/lib/app-events";
 import {
   collectRunningSubagents,
   formatIdleAgo,
@@ -184,6 +185,17 @@ export function SubagentMonitor({ sessionId }: { sessionId: string | null }) {
   useEffect(() => {
     if (running.length === 0 && open) setOpen(false);
   }, [open, running.length]);
+
+  // 聊天里的胶囊是入口：点哪颗就展开监视窗并对齐到那颗。
+  useEffect(() => {
+    const handleOpen = (event: Event) => {
+      const subagentId = (event as CustomEvent<{ subagentId?: string }>).detail?.subagentId;
+      if (subagentId) setSelectedId(subagentId);
+      setOpen(true);
+    };
+    window.addEventListener(SUBAGENT_MONITOR_OPEN_EVENT, handleOpen);
+    return () => window.removeEventListener(SUBAGENT_MONITOR_OPEN_EVENT, handleOpen);
+  }, []);
 
   useEffect(() => {
     if (!open) return;

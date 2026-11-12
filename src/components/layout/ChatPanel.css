@@ -928,6 +928,7 @@
   position: relative;
   transform: none;
   z-index: 1;
+  flex: 0 0 auto;
   width: 36px;
   height: 36px;
   display: flex;
@@ -2450,6 +2451,28 @@
   overflow-wrap: anywhere;
 }
 
+/* 摘要展开后的每条命令：终端图标 + 意图，命令本身只放在 title 里。 */
+.chat-process-operation-command {
+  align-items: center;
+}
+
+.chat-process-operation-command-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.chat-process-operation-command-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 「标准」档把命令 / 查看文件 / 修改文件合并成的一行摘要。
    样式对齐未合并时的条目：主文字色（白）、14px、行高 21px，不降级成弱化提示。 */
 .chat-process-operation-summary {
@@ -2515,7 +2538,7 @@
 
 .chat-process-entry.warning,
 .chat-process-entry.warning .chat-process-entry-title,
-.chat-command-detail.warning .chat-command-header {
+.chat-command-detail.warning .chat-command-inline {
   color: var(--warning-color);
 }
 
@@ -2597,6 +2620,7 @@
    文字笔画上（background-clip: text），不出现矩形覆盖层或边框；
    展开态与单行思考不做扫光，避免干扰阅读。 */
 .chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
+  --chat-thinking-shimmer-highlight: var(--text-primary);
   color: transparent;
   -webkit-background-clip: text;
   background-clip: text;
@@ -2604,13 +2628,18 @@
     105deg,
     var(--text-secondary) 0%,
     var(--text-secondary) 38%,
-    var(--text-primary) 50%,
+    var(--chat-thinking-shimmer-highlight) 50%,
     var(--text-secondary) 62%,
     var(--text-secondary) 100%
   );
   background-size: 300% 100%;
   background-position: 100% 0;
   animation: chat-thinking-text-shimmer 4s ease-in-out infinite;
+}
+
+/* 浅色下 --text-primary 比基底更暗，扫光会像阴影；改成向背景提亮的主题蓝。 */
+:root[data-theme="light"] .chat-process-thinking-row.collapsed .chat-process-thinking-toggle.running + .chat-process-thinking-preview {
+  --chat-thinking-shimmer-highlight: color-mix(in srgb, var(--accent-color) 78%, var(--bg-primary));
 }
 
 @keyframes chat-thinking-text-shimmer {
@@ -2848,12 +2877,6 @@
   word-break: break-word;
 }
 
-.chat-process-idle-duration {
-  color: var(--text-secondary);
-  font: inherit;
-  white-space: nowrap;
-}
-
 .chat-subagent-entry {
   display: flex;
   flex-direction: column;
@@ -2871,20 +2894,32 @@
   width: 100%;
   min-width: 0;
   padding: 2px 0;
+  color: inherit;
+  font: inherit;
+  line-height: 1.45;
+}
+
+/* 胶囊只负责打开监视窗；进度、耗时和箭头紧挨着胶囊，这一段管展开/折叠。 */
+.chat-subagent-event-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
   font: inherit;
   line-height: 1.45;
-  text-align: left;
 }
 
-.chat-subagent-event:disabled {
+.chat-subagent-event-toggle:disabled {
   cursor: default;
   opacity: 1;
 }
 
-.chat-subagent-event.expandable {
+.chat-subagent-event-toggle.expandable {
   cursor: pointer;
 }
 
@@ -2904,7 +2939,13 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--bg-tertiary) 72%, transparent);
   color: var(--text-primary);
+  font: inherit;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+}
+
+.chat-subagent-chip:disabled {
+  cursor: default;
 }
 
 .chat-subagent-avatar {
@@ -2952,26 +2993,10 @@
   font-weight: 500;
 }
 
-.chat-subagent-event-title {
-  color: var(--text-secondary);
-  font-size: 15px;
-  white-space: nowrap;
-}
-
 .chat-subagent-event-meta {
   flex: 0 0 auto;
   color: var(--text-secondary);
   font-size: 14px;
-  white-space: nowrap;
-}
-
-.chat-subagent-event-activity {
-  min-width: 120px;
-  flex: 1 1 180px;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 14px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -2984,22 +3009,13 @@
   opacity: 0.85;
 }
 
-.chat-subagent-entry.error .chat-subagent-event-title {
-  color: #f87171;
-}
-
-.chat-subagent-entry.interrupted .chat-subagent-event-title {
-  color: #fbbf24;
-}
-
 .chat-subagent-chevron {
   flex: 0 0 auto;
   opacity: 0.7;
   transition: transform 0.15s ease;
 }
 
-.chat-subagent-event.expandable:hover .chat-subagent-event-title,
-.chat-subagent-event.expandable:hover .chat-subagent-chevron {
+.chat-subagent-event-toggle.expandable:hover .chat-subagent-chevron {
   color: var(--text-primary);
   opacity: 1;
 }
@@ -3147,55 +3163,15 @@
   min-width: 0;
 }
 
-.chat-command-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-width: 0;
-  padding: 2px 0;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: inherit;
-  font-size: 15px;
-  line-height: 1.55;
-  text-align: left;
-}
-
-.chat-command-header:not(:disabled) {
-  cursor: pointer;
-}
-
-.chat-command-header:not(:disabled):hover {
-  color: var(--text-primary);
-}
-
-.chat-command-header:disabled {
-  cursor: default;
-}
-
-.chat-command-prompt {
-  display: none;
-}
-
-.chat-command-text {
-  min-width: 0;
-  flex: 1;
+/* 展开后的原始命令：标题行已由条目行显示意图，这里只补一行 $ command。 */
+.chat-command-inline {
+  margin: 2px 0 0;
   overflow: hidden;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
-}
-
-.chat-command-state {
-  display: none;
-}
-
-.chat-command-chevron {
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  transition: transform 0.15s;
 }
 
 .chat-command-output {
@@ -5110,7 +5086,8 @@ body.chat-questionnaire-resizing .chat-bubble {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  margin: 1px 2px;
+  /* 与粘贴标签 / 文件引用芯片统一：左右各 6px，连续两个芯片才拉开距离。 */
+  margin: 1px 6px;
   padding: 2px 6px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -5181,7 +5158,8 @@ body.chat-questionnaire-resizing .chat-bubble {
   box-sizing: border-box;
   align-items: center;
   gap: 5px;
-  margin: 1px 2px;
+  /* 与图片/粘贴/文件芯片统一间距。 */
+  margin: 1px 6px;
   padding: 2px 8px;
   border: 1px solid var(--border-color);
   border-radius: 6px;

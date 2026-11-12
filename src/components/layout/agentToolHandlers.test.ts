@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@/types";
+import { useChatStore } from "@/stores/chat-store";
 import { createSessionRuntime } from "./agentEventUtils";
 import { handleToolEndEvent, handleToolStartEvent, resolveActiveToolKey } from "./agentToolHandlers";
 import type { AgentEventHandlerContext, ProcessEntryDraft } from "./agentEventTypes";
@@ -100,6 +101,67 @@ describe("handleToolEndEvent", () => {
       "unknown",
       runtime,
     )).toBe("provider-end-id");
+  });
+
+  // 命令标题用模型写的一句话意图；工具结束时 pi 不带 args，必须沿用开始时记下的。
+  it("keeps the model-written command description as the title after the tool ends", () => {
+    const runtime = createSessionRuntime();
+    const { context, entries } = createContext();
+
+    handleToolStartEvent({
+      type: "tool_start",
+      toolKind: "run_command",
+      toolName: "bash",
+      toolCallId: "call-desc",
+      command: "grep -rn idleDuration src",
+      description: "查看空闲时长的渲染位置",
+    } as AgentEvent, "session-1", runtime, context);
+
+    expect(entries[0].title).toBe("查看空闲时长的渲染位置");
+    expect(runtime.activeToolDescription["call-desc"]).toBe("查看空闲时长的渲染位置");
+
+    const update = vi.spyOn(useChatStore.getState(), "updateLastAssistantProcessEntry");
+    handleToolEndEvent({
+      type: "tool_end",
+      toolKind: "run_command",
+      toolName: "bash",
+      toolCallId: "call-desc",
+      command: "grep -rn idleDuration src",
+    } as AgentEvent, "session-1", runtime, context);
+
+    const patch = update.mock.calls.at(-1)?.[1] as { title?: string } | undefined;
+    expect(patch?.title).toBe("查看空闲时长的渲染位置");
+    update.mockRestore();
+  });
+
+  // pi 的 tool_execution_end 不带 args：结束时不能下发 command: undefined，
+  // 否则会把工具开始时存下的原始命令覆盖掉，摘要明细只剩「命令」。
+  it("keeps the start command when the end event has no args", () => {
+    const runtime = createSessionRuntime();
+    const { context, entries } = createContext();
+
+    handleToolStartEvent({
+      type: "tool_start",
+      toolKind: "run_command",
+      toolName: "bash",
+      toolCallId: "call-no-end-args",
+      command: "wc -l src/components/layout/ProcessBlock.tsx",
+    } as AgentEvent, "session-1", runtime, context);
+
+    expect(entries[0].command).toBe("wc -l src/components/layout/ProcessBlock.tsx");
+
+    const update = vi.spyOn(useChatStore.getState(), "updateLastAssistantProcessEntry");
+    handleToolEndEvent({
+      type: "tool_end",
+      toolKind: "run_command",
+      toolName: "bash",
+      toolCallId: "call-no-end-args",
+      outputText: "1568",
+    } as AgentEvent, "session-1", runtime, context);
+
+    const patch = update.mock.calls.at(-1)?.[1] as Record<string, unknown> | undefined;
+    expect(patch).not.toHaveProperty("command");
+    update.mockRestore();
   });
 
   it("registers questions for id-drift correlation", () => {

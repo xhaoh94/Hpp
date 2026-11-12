@@ -7,7 +7,6 @@ import type { AgentProcess } from "@/stores/chat-store";
 import { createComposerDocument } from "@shared/composer-document";
 import { ASSISTANT_NARRATION_PROCESS_KIND } from "@shared/process-view";
 import {
-  formatIdleDuration,
   getStickyButtonStackHeight,
   getStickyAdjustedScrollTop,
   getStickyVisualCorrectionScrollTop,
@@ -179,47 +178,15 @@ describe("ProcessBlock", () => {
     // T1：宽高亮带（38%-62%）柔和扫过。
     expect(styles).toContain("var(--text-secondary) 38%");
     expect(styles).toContain("var(--text-secondary) 62%");
+    // 浅色下 --text-primary 是近黑，扫光会像阴影；高亮色必须按主题区分。
+    expect(styles).toContain("--chat-thinking-shimmer-highlight: var(--text-primary)");
+    expect(styles).toContain(":root[data-theme=\"light\"] .chat-process-thinking-row.collapsed");
+    expect(styles).toContain("--chat-thinking-shimmer-highlight: color-mix(");
     expect(styles).not.toContain(".chat-process-thinking-preview::after");
     // 扫光只作用于折叠态，不影响展开/单行思考。
   });
 
-  it("formats idle durations as a stable mm:ss value", () => {
-    expect(formatIdleDuration(0)).toBe("00:00");
-    expect(formatIdleDuration(45_900)).toBe("00:45");
-    expect(formatIdleDuration(3_661_000)).toBe("61:01");
-  });
-
-  it("shows and freezes the idle duration only for stream idle notices", () => {
-    const renderNotice = (toolKind: string) => renderToStaticMarkup(createElement(ProcessBlock, {
-      messageId: `assistant-${toolKind}`,
-      process: {
-        startedAt: 1_000,
-        endedAt: 50_000,
-        expanded: true,
-        entries: [{
-          id: toolKind,
-          type: "status" as const,
-          title: "Pi 仍在运行，暂时没有新输出",
-          toolKind,
-          state: "completed" as const,
-          timestamp: 1_000,
-          startedAt: 2_000,
-          completedAt: 47_900,
-        }],
-      },
-      running: false,
-      onToggle: vi.fn(),
-      onToggleEntry: vi.fn(),
-      onOpenFile: vi.fn(),
-      onPreserveScroll: (action: () => void) => action(),
-    }));
-
-    expect(renderNotice("stream_idle_notice")).toContain("· 00:45");
-    expect(renderNotice("stream_idle_notice")).not.toContain("已停滞");
-    expect(renderNotice("already_running_notice")).not.toContain("· 00:45");
-  });
-
-  it("renders live subagent progress, elapsed time and the active subagent's activity", () => {
+  it("renders live subagent chips with progress and elapsed time, without a title row", () => {
     const html = renderToStaticMarkup(createElement(ProcessBlock, {
       messageId: "assistant-subagent",
       process: {
@@ -247,46 +214,18 @@ describe("ProcessBlock", () => {
 
     expect(html).toContain("进度 1/2");
     expect(html).toContain("已运行");
-    // 折叠态要能看出谁在干什么，否则并行子任务对用户是黑箱。
-    expect(html).toContain("chat-subagent-event-activity");
-    expect(html).toContain("Scout：正在读取文件");
+    // 标题与活动预览已去掉，只留胶囊 + 右侧进度。
+    expect(html).not.toContain("chat-subagent-event-activity");
+    expect(html).not.toContain("Scout：正在读取文件");
+    expect(html).not.toContain("chat-subagent-event-title");
+    expect(html).not.toContain("正在工作");
     // 已结束的子任务不占用活动位。
     expect(html).not.toContain("Reviewer：已完成");
-  });
-
-  it("combines repeated idle notices into one row with the summed duration", () => {
-    const durations = [54_000, 137_000, 107_000, 121_000];
-    const process: AgentProcess = {
-      startedAt: 1_000,
-      endedAt: 900_000,
-      expanded: true,
-      entries: durations.map((duration, index) => {
-        const startedAt = 10_000 + index * 200_000;
-        return {
-          id: `idle-${index}`,
-          type: "status" as const,
-          title: "Pi 仍在运行，暂时没有新输出",
-          toolKind: "stream_idle_notice",
-          state: "completed" as const,
-          timestamp: startedAt,
-          startedAt,
-          completedAt: startedAt + duration,
-        };
-      }),
-    };
-    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
-      messageId: "assistant-idle-summary",
-      process,
-      commentary: [],
-      running: false,
-      onToggle: vi.fn(),
-      onToggleEntry: vi.fn(),
-      onOpenFile: vi.fn(),
-      onPreserveScroll: (action: () => void) => action(),
-    }));
-
-    expect(markup.match(/Pi 仍在运行，暂时没有新输出/g)).toHaveLength(1);
-    expect(markup).toContain("· 06:59");
+    // 胶囊是按钮（点开监视窗），展开/折叠只挂在右侧那块点击区上。
+    expect(html).toContain('class="chat-subagent-chip running"');
+    expect(html).toContain("chat-subagent-event-toggle");
+    expect(html).toContain('class="chat-subagent-event-toggle expandable"');
+    expect(html).toContain('aria-expanded="false"');
   });
 
   it("collapses commentary together with process entries", () => {
@@ -767,8 +706,10 @@ describe("ProcessBlock", () => {
       onPreserveScroll: (action) => action(),
     }));
 
-    expect(markup).toContain("chat-command-group warning");
+    // 命令独立成行：warning 状态直接挂在行上，标题是退出码提示。
+    expect(markup).toContain("chat-process-entry warning tool");
     expect(markup).toContain("命令返回非零退出码 1");
+    expect(markup).not.toContain("chat-command-group");
   });
 
   it("makes listed directories available for navigation", () => {
@@ -943,11 +884,47 @@ describe("output detail level rendering", () => {
       onPreserveScroll: (action: () => void) => action(),
     }));
 
+  // 展开的命令行只保留「意图标题 + 输出」，不能把标题再重复一遍。
+  it("does not repeat the command title when a command row is expanded", () => {
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-command-expanded",
+      process: {
+        startedAt: 1,
+        endedAt: 2,
+        expanded: true,
+        entries: [{
+          id: "cmd-expanded",
+          type: "tool",
+          toolKind: "run_command",
+          title: "统计 ProcessBlock.tsx 行数",
+          description: "统计 ProcessBlock.tsx 行数",
+          command: "wc -l src/components/layout/ProcessBlock.tsx",
+          detail: "$ wc -l src/components/layout/ProcessBlock.tsx\n1568 src/components/layout/ProcessBlock.tsx",
+          state: "completed",
+          expanded: true,
+          timestamp: 10,
+        }],
+      },
+      commentary: [],
+      outputDetailLevel: "detailed",
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+    expect(markup.match(/统计 ProcessBlock\.tsx 行数/g)).toHaveLength(1);
+    expect(markup).toContain("chat-command-inline");
+    expect(markup).toContain("1568 src/components/layout/ProcessBlock.tsx");
+    expect(markup).not.toContain("chat-command-header");
+  });
+
   it("keeps every process detail in the detailed level", () => {
     const markup = renderLevel("detailed");
     expect(markup).toContain("需要先确认设置面板的保存路径。");
-    // 命令以折叠分组呈现，这里断言分组标题存在（展开内容按需渲染）。
-    expect(markup).toContain("已运行 1 条命令");
+    // 命令独立成行（不再合并分组），标题就是条目自己的标题。
+    expect(markup).toContain("已运行 npm test");
+    expect(markup).not.toContain("chat-command-group");
     expect(markup).toContain("src/App.tsx");
     expect(markup).toContain("src/index.css");
     expect(markup).not.toContain("chat-process-change-summary");
@@ -981,7 +958,7 @@ describe("output detail level rendering", () => {
   });
 
   it("does not show the empty-events hint when entries are only hidden by the level", () => {
-    // 简洁档只保留思考；正在跑命令、还没产出思考时，不能把“条目被过滤”
+    // 简洁档全隐藏操作条目时，正文/思考都没产出，不能把“条目被过滤”
     // 当成“还没有事件”去显示「等待 agent 事件...」。
     const markup = renderToStaticMarkup(createElement(ProcessBlock, {
       messageId: "assistant-concise-hidden",
@@ -1147,6 +1124,49 @@ describe("concise level keeps user-authored and interactive entries (regression)
     expect(markup.split("chat-process-thinking-row").length - 1).toBe(2);
     expect(markup).toContain("先看看代码。");
     expect(markup).toContain("好，按引导改。");
+  });
+
+  it("merges thinking and commentary into two blocks in concise mode", () => {
+    const markup = renderToStaticMarkup(createElement(ProcessBlock, {
+      messageId: "assistant-concise-two-blocks",
+      process: {
+        startedAt: 1,
+        endedAt: 2,
+        expanded: true,
+        entries: [
+          { id: "t1", type: "thinking", title: "正在思考", detail: "先看设置", state: "completed", expanded: true, timestamp: 10 },
+          { id: "cmd", type: "tool", toolKind: "run_command", title: "已运行 npm test", detail: "npm test", state: "completed", timestamp: 20 },
+          { id: "t2", type: "thinking", title: "正在思考", detail: "再看缓存", state: "completed", expanded: true, timestamp: 30 },
+          { id: "diff", type: "diff", title: "src/App.tsx 变更", state: "completed", timestamp: 40 },
+          {
+            id: "sub", type: "subagent", title: "子 Agent", detail: "子任务正文", state: "completed", timestamp: 50,
+            subagents: [{ id: "s1", label: "Scout", status: "completed", message: "子任务正文" }],
+          },
+        ],
+      },
+      commentary: [
+        { id: "c1", content: "第一段正文", timestamp: 60 },
+        { id: "c2", content: "第二段正文", timestamp: 70 },
+      ],
+      running: false,
+      outputDetailLevel: "concise",
+      onToggle: vi.fn(),
+      onToggleEntry: vi.fn(),
+      onOpenFile: vi.fn(),
+      onPreserveScroll: (action: () => void) => action(),
+    }));
+
+    // 两段思考合成一条，两段 commentary 合成一条正文，且正文只渲染一次。
+    expect(markup.split("chat-process-thinking-row").length - 1).toBe(1);
+    expect(markup).toContain("先看设置");
+    expect(markup).toContain("再看缓存");
+    expect(markup.split("第一段正文").length - 1).toBe(1);
+    expect(markup).toContain("第二段正文");
+    // 命令细节不出现；diff 仍在，但子 Agent 时间线条目（含其胶囊）不再显示。
+    expect(markup).not.toContain("npm test");
+    expect(markup).toContain("src/App.tsx 变更");
+    expect(markup).not.toContain("chat-subagent-chip");
+    expect(markup).not.toContain("子任务正文");
   });
 
   it("never hides a questionnaire entry in concise mode", () => {

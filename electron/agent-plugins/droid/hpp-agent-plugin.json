@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "droid",
   "name": "Droid",
-  "version": "1.3.7",
+  "version": "1.3.8",
   "minHppVersion": "0.1.0",
   "description": "Droid CLI programming agent",
   "entry": "agent.mjs",
@@ -32,6 +32,7 @@
       "hint": "渠道由 Droid 插件管理 customModels 中的 Hpp 条目，并保留其它原生配置。",
       "modelDefaults": { "reasoning": false, "imageInput": false },
       "fixedModelCapabilities": false,
+      "modelEndpointOverrides": true,
       "modelListMode": "merge",
       "backendModelVisibility": {
         "userConfigurable": true,

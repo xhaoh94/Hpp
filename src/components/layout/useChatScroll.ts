@@ -11,6 +11,12 @@ import type { ChatVirtualizerRef } from "./useChatVirtualizer";
 const SCROLL_BOTTOM_THRESHOLD = 50;
 const AUTO_FOLLOW_BOTTOM_EPSILON = 2;
 const POINTER_SCROLL_INTENT_THRESHOLD = 2;
+/**
+ * 用户主动展开/折叠后的静默期。虚拟行重新测量、diff/文件内容异步加载都会在
+ * 点击后的一两帧甚至几百毫秒后才把内容撑高；这段时间内一旦按"到底了"重新
+ * 开启跟随，视口就会被拽回底部，把刚展开的内容顶出去。
+ */
+const LAYOUT_CHANGE_GUARD_MS = 800;
 const USER_SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
 
 export function useChatScroll({
@@ -32,6 +38,11 @@ export function useChatScroll({
   const userScrollInProgressRef = useRef(false);
   const userScrollOperationRef = useRef(0);
   const scrollOperationRef = useRef(0);
+  /** 主动布局变更期间锁住锚点：{ until, anchor }，见 LAYOUT_CHANGE_GUARD_MS。 */
+  const layoutGuardRef = useRef<{
+    until: number;
+    anchor: { element: HTMLElement; top: number } | null;
+  } | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   const getDistanceFromScrollBottom = useCallback((el: HTMLDivElement) => {
@@ -59,6 +70,8 @@ export function useChatScroll({
     userScrollInProgressRef.current = false;
     bottomLockSessionRef.current = activeSessionId;
     autoFollowBottomRef.current = true;
+    // 主动回到底部（发送消息、点"回到底部"）优先于展开静默期。
+    layoutGuardRef.current = null;
     return operation;
   }, [activeSessionId, beginScrollOperation]);
 
@@ -69,7 +82,6 @@ export function useChatScroll({
     autoFollowBottomRef.current = false;
     return operation;
   }, [beginScrollOperation]);
-
   const startUserScroll = useCallback(() => {
     const operation = beginScrollOperation();
     userScrollInProgressRef.current = true;
@@ -226,6 +238,21 @@ export function useChatScroll({
       frame = 0;
       const current = scrollRef.current;
       if (!current) return;
+      const guard = layoutGuardRef.current;
+      if (guard) {
+        // 主动展开/折叠：虚拟行重测量与异步内容会让高度晚一两拍才变，
+        // 这里只按锚点校正视口，不做贴底，否则刚展开的内容会被顶出视野。
+        const anchor = guard.anchor;
+        if (anchor?.element.isConnected) {
+          const nextTop = anchor.element.getBoundingClientRect().top;
+          if (Math.abs(nextTop - anchor.top) >= 0.5) {
+            current.scrollTop += nextTop - anchor.top;
+            anchor.top = nextTop;
+          }
+        }
+        updateScrollBottomState(current);
+        return;
+      }
       if (shouldKeepAtBottom()) keepAtBottom(current);
       else updateScrollBottomState(current);
     };
@@ -339,21 +366,39 @@ export function useChatScroll({
     const anchorTop = anchor?.getBoundingClientRect().top;
     const previousScrollTop = el.scrollTop;
     const operation = stopAutoFollow();
+    // 展开/折叠后高度可能晚一两拍才变（虚拟行重测量、diff 异步加载）：
+    // 锁住锚点一段时间，期间既不贴底，也要跟着内容增长校正视口。
+    const guard = {
+      until: performance.now() + LAYOUT_CHANGE_GUARD_MS,
+      anchor: anchor && typeof anchorTop === "number" ? { element: anchor, top: anchorTop } : null,
+    };
+    layoutGuardRef.current = guard;
 
     action();
 
     requestAnimationFrame(() => {
       const current = scrollRef.current;
       if (!current || scrollOperationRef.current !== operation) return;
-      if (anchor && typeof anchorTop === "number") {
-        const nextTop = anchor.getBoundingClientRect().top;
-        current.scrollTop += nextTop - anchorTop;
+      if (guard.anchor?.element.isConnected) {
+        const nextTop = guard.anchor.element.getBoundingClientRect().top;
+        current.scrollTop += nextTop - guard.anchor.top;
+        guard.anchor.top = nextTop;
       } else {
         current.scrollTop = previousScrollTop;
       }
-      autoFollowBottomRef.current = getDistanceFromScrollBottom(current) <= AUTO_FOLLOW_BOTTOM_EPSILON;
       updateScrollBottomState(current);
     });
+
+    // 静默期结束后再决定是否恢复跟随：内容只增不减时距离已经变大，
+    // 会停在"不跟随"，用户展开的东西留在原位。
+    window.setTimeout(() => {
+      if (layoutGuardRef.current !== guard) return;
+      layoutGuardRef.current = null;
+      const current = scrollRef.current;
+      if (!current) return;
+      autoFollowBottomRef.current = getDistanceFromScrollBottom(current) <= AUTO_FOLLOW_BOTTOM_EPSILON;
+      updateScrollBottomState(current);
+    }, LAYOUT_CHANGE_GUARD_MS);
   }, [getDistanceFromScrollBottom, stopAutoFollow, updateScrollBottomState]);
 
   const preserveScrollDuringAutoLayoutChange = useCallback((action: () => void) => {

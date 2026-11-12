@@ -349,16 +349,14 @@ const buildPiSubagentEvent = (
     prompt,
     stopReason,
     state,
-    subagents: subagents.length > 0 ? subagents : [{
-      id: toolCallId,
-      label: "Subagent",
-      status: state === "running" ? "running" : state,
-    }],
+    // 拿不到子任务身份时就不再补占位项：裸 toolCallId 的条目收不到后续 `:N` 的事件，
+    // 会永远停在 running，进度算成 1/2。
+    subagents,
     timestamp: startedAt,
     startedAt,
     completedAt: completed ? Date.now() : undefined,
     ...(background ? { background: true } : {}),
-    agentThreadId: subagents[0]?.id || toolCallId,
+    ...(subagents[0] ? { agentThreadId: subagents[0].id } : {}),
     receiverThreadIds: subagents.map((subagent) => subagent.id),
     source: "pi",
   };

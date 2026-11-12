@@ -28,7 +28,7 @@ export const editorBridgeSendSchema = z.object({
   text: z.string().max(EDITOR_BRIDGE_MAX_TEXT_BYTES).optional(),
   language: z.string().trim().max(64).optional(),
   sessionId: z.string().trim().min(1).max(256).optional(),
-  /** 默认 false：连续发送时不该把焦点从编辑器抢走。 */
+  /** 默认把 Hpp 提到前台并聚焦聊天输入框；显式 false 才保留编辑器焦点。 */
   focus: z.boolean().optional(),
 }).superRefine((value, ctx) => {
   if (value.kind !== "selection") return;

@@ -490,6 +490,30 @@ const isPlaceholderSubagentLabel = (label: string, id: string) => {
     normalized.toLowerCase() === `agent ${id.slice(0, 8)}`.toLowerCase();
 };
 
+/** 增量事件往往只带状态：不拿 undefined 覆盖已经收到的输出，也不让 pending 把进度打回去。 */
+const mergeSubagentUpdate = (previous: AgentSubagent, incoming: AgentSubagent): AgentSubagent => {
+  const patch = Object.fromEntries(
+    Object.entries(incoming).filter(([, value]) => value !== undefined),
+  ) as Partial<AgentSubagent>;
+  const status = incoming.status === "pending" && previous.status && previous.status !== "pending"
+    ? previous.status
+    : incoming.status ?? previous.status;
+  const active = status === "running" || status === "pending";
+  return {
+    ...previous,
+    ...patch,
+    status,
+    // 重新跑起来的任务不该带着上一轮的完成时间。
+    ...(active ? { completedAt: undefined } : {}),
+    label: isPlaceholderSubagentLabel(incoming.label, incoming.id) && !isPlaceholderSubagentLabel(previous.label, previous.id)
+      ? previous.label
+      : incoming.label,
+    path: incoming.path || previous.path,
+    model: incoming.model || previous.model,
+    prompt: incoming.prompt || previous.prompt,
+  };
+};
+
 const mergeProcessEntrySubagents = (
   existing: AgentSubagent[] | undefined,
   incoming: AgentSubagent[] | undefined,
@@ -498,20 +522,7 @@ const mergeProcessEntrySubagents = (
   const merged = new Map((existing || []).map((subagent) => [subagent.id, subagent] as const));
   for (const subagent of incoming) {
     const previous = merged.get(subagent.id);
-    if (!previous) {
-      merged.set(subagent.id, subagent);
-      continue;
-    }
-    merged.set(subagent.id, {
-      ...previous,
-      ...subagent,
-      label: isPlaceholderSubagentLabel(subagent.label, subagent.id) && !isPlaceholderSubagentLabel(previous.label, previous.id)
-        ? previous.label
-        : subagent.label,
-      path: subagent.path || previous.path,
-      model: subagent.model || previous.model,
-      prompt: subagent.prompt || previous.prompt,
-    });
+    merged.set(subagent.id, previous ? mergeSubagentUpdate(previous, subagent) : subagent);
   }
   return Array.from(merged.values());
 };

@@ -48,6 +48,8 @@ export interface NormalizedToolPayload {
   additions?: number;
   deletions?: number;
   command?: string;
+  /** 模型自己写的一句话意图（如「查看空闲时长的渲染位置」），用作命令条目标题。 */
+  description?: string;
   exitCode?: number;
   /** 后端上报的工具自身执行耗时（毫秒）。比宿主侧事件时间戳相减更准。 */
   durationMs?: number;
@@ -533,6 +535,11 @@ export const normalizeToolEvent = (
   const toolKind = getToolKind(toolName, command, patch);
   const detailObject = asRecord(dataRecord.detail);
   const argsObject = asRecord(args);
+  // 工具参数里的 description 是模型写给用户看的意图（pi 的 bash 由 Hpp 补了这个参数，
+  // Claude Code 一类后端原生就有），后面会被当成命令条目标题。
+  const description = typeof argsObject.description === "string"
+    ? argsObject.description.trim().replace(/\s+/g, " ")
+    : "";
   const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };
@@ -590,6 +597,7 @@ export const normalizeToolEvent = (
     additions: changes.additions,
     deletions: changes.deletions,
     command: command || undefined,
+    ...(description ? { description } : {}),
     exitCode,
     // 条件展开而非写 undefined：键存在本身会让下游的 hasOwnProperty 判断误判为「有耗时」。
     ...(durationMs !== undefined ? { durationMs } : {}),

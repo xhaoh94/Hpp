@@ -38,6 +38,25 @@ describe("process event normalization", () => {
     });
   });
 
+  // 命令条目标题要用模型写的 description；它随 args 一起到，供渲染层取用。
+  it("carries the model-written command description", () => {
+    expect(normalizeToolEvent("tool_start", {
+      toolName: "bash",
+      toolCallId: "call-desc",
+      args: { command: "grep -rn idleDuration src", description: "  查看空闲时长的渲染位置  " },
+    })).toMatchObject({
+      toolKind: "run_command",
+      command: "grep -rn idleDuration src",
+      description: "查看空闲时长的渲染位置",
+    });
+
+    // 没有 description 时不下发该字段，渲染层自然退回「已运行 bash」。
+    expect(normalizeToolEvent("tool_start", {
+      toolName: "bash",
+      args: { command: "ls" },
+    })).not.toHaveProperty("description");
+  });
+
   it("preserves Pi file-read errors from the tool result", () => {
     expect(normalizeToolEvent("tool_end", {
       toolName: "read",

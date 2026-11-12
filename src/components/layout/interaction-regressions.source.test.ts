@@ -79,6 +79,29 @@ describe("chat interaction regression constraints", () => {
     expect(settlingSource).not.toContain("setTimeout");
   });
 
+  // 展开合并的命令/查看文件会把内容撑高，虚拟行重测量还会晚一两拍才生效；
+  // 这段静默期内必须按锚点校正而不是贴底，否则阅读位置会被拽走。
+  // JSX 文本节点里的 `;` 会原样渲染出来（曾经在处理过程底部多出一个分号）。
+  it("does not leave stray punctuation in jsx children", () => {
+    expect(processBlockSource).not.toContain(")};</>");
+    expect(processBlockSource).toContain("))}</>;");
+  });
+
+  it("keeps the reading position after an intentional layout change", () => {
+    expect(chatScrollSource).toContain("const layoutGuardRef = useRef<{");
+    expect(chatScrollSource).toContain("if (layoutGuardRef.current !== guard) return;");
+    const layoutChangeSource = chatScrollSource.slice(
+      chatScrollSource.indexOf("const keepAtBottomAfterLayout"),
+      chatScrollSource.indexOf("const scheduleKeepAtBottom"),
+    );
+    expect(layoutChangeSource).toContain("const guard = layoutGuardRef.current");
+    expect(layoutChangeSource).toContain("current.scrollTop += nextTop - anchor.top");
+    // 合并摘要与文件链接必须走滚动保持，不能直接切换展开状态。
+    expect(processBlockSource).toContain("const action = () => onToggleOperationSummary?.(entry.id);");
+    expect(processBlockSource).toContain("onPreserveScroll(action, event.currentTarget)");
+    expect(processBlockSource).not.toContain("onClick={() => onOpenFile(file.file, { preview })}");
+  });
+
   it("gives user scrolling ownership over streaming layout changes", () => {
     const userScrollSource = chatScrollSource.slice(
       chatScrollSource.indexOf("const startUserScroll"),

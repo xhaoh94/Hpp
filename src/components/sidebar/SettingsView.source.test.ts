@@ -64,7 +64,7 @@ describe("desktop general settings layout", () => {
     const shared = readWorkspaceFile("shared/output-detail.ts");
     expect(shared).toContain('export type OutputDetailLevel = "concise" | "standard" | "detailed"');
     expect(shared).toContain('DEFAULT_OUTPUT_DETAIL_LEVEL: OutputDetailLevel = "detailed"');
-    expect(shared).toContain("concise: \"隐藏命令、查看文件、修改文件等操作细节\"");
+    expect(shared).toContain("concise: \"思考与正文各自合并成一段，保留引导、问卷、子任务与变更\"");
 
     // 「输出内容」不再是独立分区，而是「应用行为」里的一行分段按钮。
     expect(source).not.toContain('expandedGeneralSection === "output"');
@@ -91,10 +91,10 @@ describe("desktop general settings layout", () => {
     expect(panel).toContain("const showDiffBlock = hasDiffs;");
 
     const block = readWorkspaceFile("src/components/layout/ProcessBlock.tsx");
-    // 简洁：只隐藏操作类条目；标准：把命令/查看文件/修改文件合并成一条摘要。
+    // 简洁：思考与正文各自合并；标准：按段合并——思考合成一块、命令/查看/修改合成一块。
     expect(block).toContain("if (outputDetailLevel === \"concise\") return getConciseProcessEntries(visibleEntries);");
     // 标准档默认收起；点击后展开原始操作条目。
-    expect(block).toContain('if (outputDetailLevel === "standard") return collapseOperationProcessEntries(visibleEntries);');
+    expect(block).toContain('if (outputDetailLevel === "standard") return collapseStandardProcessEntries(visibleEntries);');
     expect(block).toContain("operationSummary");
     expect(block).toContain("onToggleOperationSummary={toggleOperationSummary}");
     expect(block).toContain('entry.type === "thinking"');
@@ -112,6 +112,14 @@ describe("desktop general settings layout", () => {
     expect(configModal).not.toContain("上下文压缩");
     expect(configModal).not.toContain("AgentCompactionModal");
     expect(configModal).not.toContain("compactionModalOpen");
+  });
+
+  // 选择器通用 .input-field 规则在文件末尾、同为 0,2,0；搜索框的 padding-left
+  // 必须多一层选择器才压得住，否则搜索图标会和占位文字重叠。
+  it("模型选择弹窗的搜索框给图标留出内边距", () => {
+    const styles = readWorkspaceFile("src/components/sidebar/Settings.css");
+    expect(styles).toContain(".agent-model-picker-modal .agent-model-picker-search .input-field {");
+    expect(styles).toContain("padding-left: 32px;");
   });
 
   it("hot-updates SubAgent settings before falling back to session reload", () => {

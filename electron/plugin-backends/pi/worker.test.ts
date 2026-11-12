@@ -219,6 +219,21 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
+    if (message === "shell-description") {
+      const tool = this.registeredTools.find((candidate) => candidate.name === "bash");
+      const prepare = tool?.prepareArguments;
+      const result = {
+        required: tool?.parameters?.required || [],
+        hasDescriptionProperty: Boolean(tool?.parameters?.properties?.description),
+        written: prepare?.({ command: "grep -rn idleDuration src", description: "  查看 空闲时长  " }),
+        missing: prepare?.({ command: "grep -rn idleDuration src" }),
+      };
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message.startsWith("/skill:review") || message.startsWith("/scout-and-plan") || message.startsWith("/implement") || message.startsWith("/implement-and-review") || message.startsWith("/compact")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
@@ -686,7 +701,14 @@ export const createBashToolDefinition = (_cwd, options = {}) => ({
   description: "fake bash tool",
   promptSnippet: "fake bash",
   promptGuidelines: [],
-  parameters: {},
+  parameters: {
+    type: "object",
+    required: ["command"],
+    properties: {
+      command: { type: "string" },
+      timeout: { type: "number" },
+    },
+  },
   commandPrefix: options.commandPrefix,
   rewrittenCommand: options.spawnHook?.({ command: "npm run build && npx tsc", cwd: _cwd, env: {} }).command,
 });
@@ -1144,6 +1166,28 @@ describe("Pi SDK worker protocol", () => {
     worker.send({ id: "ok-1", type: "prompt", message: "tool-with-duration", permissionMode: "full-access" });
     const ok = await worker.waitFor((message) => message.type === "prompt_done" && message.id === "ok-1");
     expect(ok.aborted).toBeUndefined();
+  });
+
+  it("requires a command description and fills it before SDK validation", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "desc-1", type: "prompt", message: "shell-description", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "desc-1");
+
+    const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
+    const result = JSON.parse(String((message?.message as { text?: unknown })?.text || "{}")) as {
+      required?: string[];
+      hasDescriptionProperty?: boolean;
+      written?: Record<string, unknown>;
+      missing?: Record<string, unknown>;
+    };
+    expect(result.required).toContain("description");
+    expect(result.hasDescriptionProperty).toBe(true);
+    expect(result.written?.description).toBe("查看 空闲时长");
+    expect(result.missing?.description).toBe("检索内容");
+    expect(result.missing?.command).toBe("grep -rn idleDuration src");
   });
 
   it("forwards Pi tool duration and nested-call parent id", async () => {

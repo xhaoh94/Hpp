@@ -57,9 +57,11 @@ export type SessionRuntime = {
   activeToolEntry: Record<string, string>;
   activeToolFile: Record<string, AgentProcessFile[]>;
   activeToolKind: Record<string, NormalizedToolKind>;
+  /** 工具开始时的意图描述：pi 的 tool_execution_end 不带 args，结束后要沿用。 */
+  activeToolDescription: Record<string, string>;
   streamWatchdog: ReturnType<typeof setTimeout> | null;
-  streamIdleNoticeEntryId: string | null;
-  streamIdleSince: number | null;
+  /** 「仍在执行上一条请求」这类提示条目的 id（复用同一条，不重复插入）。 */
+  noticeEntryId: string | null;
   autoAbortReason: string | null;
   manualAbortRequested: boolean;
   activeCompactionId: string | null;
@@ -146,9 +148,9 @@ export const createSessionRuntime = (): SessionRuntime => ({
   activeToolEntry: {},
   activeToolFile: {},
   activeToolKind: {},
+  activeToolDescription: {},
   streamWatchdog: null,
-  streamIdleNoticeEntryId: null,
-  streamIdleSince: null,
+  noticeEntryId: null,
   autoAbortReason: null,
   manualAbortRequested: false,
   activeCompactionId: null,
@@ -340,11 +342,11 @@ export const resetSessionRuntimeBuffers = (runtime: SessionRuntime) => {
   runtime.streamBuffer = "";
   runtime.thinkingBuffer = "";
   runtime.thinkingEntryId = null;
+  runtime.noticeEntryId = null;
   runtime.activeToolEntry = {};
   runtime.activeToolFile = {};
   runtime.activeToolKind = {};
-  runtime.streamIdleNoticeEntryId = null;
-  runtime.streamIdleSince = null;
+  runtime.activeToolDescription = {};
   runtime.processTextEntryId = null;
   runtime.processTextEntryIds = [];
   runtime.processTextHistory = [];
@@ -640,6 +642,20 @@ export const getToolDetail = (event: AgentEvent) => {
   return undefined;
 };
 
+/**
+ * 命令条目标题优先用模型写的一句话意图（`description`）。
+ * 没有就退回「已运行 bash」这类通用文案；过长截断，完整命令仍在展开明细里。
+ */
+const COMMAND_DESCRIPTION_TITLE_MAX = 48;
+const getCommandDescriptionTitle = (event: AgentEvent): string => {
+  const raw = (event as { description?: unknown }).description;
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return "";
+  return value.length <= COMMAND_DESCRIPTION_TITLE_MAX
+    ? value
+    : `${value.slice(0, COMMAND_DESCRIPTION_TITLE_MAX)}…`;
+};
+
 export const getToolSummary = (event: AgentEvent, running = false): string => {
   const toolKind = normalizeToolKind(event.toolKind);
   const toolName = getToolName(event);
@@ -649,6 +665,10 @@ export const getToolSummary = (event: AgentEvent, running = false): string => {
   }
   if (event.isError) {
     return getToolWarningSummary(toolKind, toolName);
+  }
+  if (toolKind === "run_command") {
+    const description = getCommandDescriptionTitle(event);
+    if (description) return description;
   }
 
   if (files.length > 0) return getProcessFileEntryTitle(files[0].action, files.length, running);

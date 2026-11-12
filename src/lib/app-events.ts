@@ -12,6 +12,8 @@ import type { OutputDetailLevel } from "@shared/output-detail";
  */
 export const AGENT_SETTINGS_UPDATED_EVENT = "agent-settings-updated";
 export const GENERAL_SETTINGS_UPDATED_EVENT = "general-settings-updated";
+/** 点聊天里的 Subagent 胶囊时打开监视窗并对齐到该子任务。 */
+export const SUBAGENT_MONITOR_OPEN_EVENT = "subagent-monitor-open";
 
 export type AgentSettingsUpdatedDetail = {
   planModeEnabled?: boolean;

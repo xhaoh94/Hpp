@@ -64,6 +64,24 @@ function readJsonBody(request: IncomingMessage): Promise<unknown> {
 }
 
 /**
+ * Windows 不允许后台进程直接抢前台；短暂置顶一次可绕过前台锁定。
+ * 置顶标记要等 focus 生效后再撤，否则窗口会一直压在编辑器上面。
+ */
+const bringWindowToFront = (window: BrowserWindow) => {
+  if (window.isMinimized()) window.restore();
+  if (!window.isVisible()) window.show();
+  if (process.platform !== "win32") {
+    window.focus();
+    return;
+  }
+  window.setAlwaysOnTop(true);
+  window.focus();
+  setTimeout(() => {
+    if (!window.isDestroyed()) window.setAlwaysOnTop(false);
+  }, 200);
+};
+
+/**
  * 只服务本机的编辑器客户端。刻意不发任何 CORS 头：浏览器里的网页因此既过不了
  * 预检、也读不到响应，而令牌放在自定义头里，`<form>` 那种简单请求也伪造不了。
  */
@@ -173,11 +191,9 @@ export class EditorBridgeServer {
     const window = this.getWindow();
     if (!window || window.isDestroyed()) throw new Error("Hpp 主窗口未就绪。");
     if (window.webContents.isLoading()) throw new Error("Hpp 界面还在加载，请稍后重试。");
-    if (request.focus) {
-      if (window.isMinimized()) window.restore();
-      if (!window.isVisible()) window.show();
-      window.focus();
-    }
+    // 编辑器发送后默认把 Hpp 提到前台，渲染层随后把焦点落到聊天输入框。
+    // 只有显式 focus:false（批量脚本 / 连续发送）才保留编辑器焦点。
+    if (request.focus !== false) bringWindowToFront(window);
     const requestId = randomUUID();
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {

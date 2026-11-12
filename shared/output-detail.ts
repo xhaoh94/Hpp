@@ -4,7 +4,7 @@
  * - `detailed`（详细，默认）：保持原有行为，完整渲染处理过程、思考与变更文件列表。
  * - `standard`（标准）：处理过程与思考照常渲染，但变更文件只显示「已修改 N 个文件」，
  *   不再逐个列出具体是哪些文件。
- * - `concise`（简洁）：只显示思考与正文输出；操作步骤、命令、变更文件等过程细节全部隐藏。
+ * - `concise`（简洁）：思考与正文各自合并成一段；引导、问卷、错误、子 Agent 胶囊与 diff 保留。
  */
 export type OutputDetailLevel = "concise" | "standard" | "detailed";
 
@@ -36,7 +36,7 @@ export const OUTPUT_DETAIL_LEVEL_LABELS: Record<OutputDetailLevel, string> = {
 };
 
 export const OUTPUT_DETAIL_LEVEL_DESCRIPTIONS: Record<OutputDetailLevel, string> = {
-  concise: "隐藏命令、查看文件、修改文件等操作细节",
+  concise: "思考与正文各自合并成一段，保留引导、问卷、子任务与变更",
   standard: "命令、查看文件、修改文件合并成一条摘要",
   detailed: "完整显示步骤、思考与具体变更文件",
 };

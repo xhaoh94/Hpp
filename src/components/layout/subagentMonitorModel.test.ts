@@ -69,6 +69,16 @@ describe("Subagent 监视窗数据", () => {
     expect(collectRunningSubagents([])).toEqual([]);
   });
 
+  // 旧数据里残留的占位项永远不会收到终态事件；条目都结束了就别再给它开页签。
+  it("条目已结束时忽略残留的 running 子任务", () => {
+    const finished = message("m1", [
+      subagent({ id: "call-1", label: "Subagent", status: "running" }),
+      subagent({ id: "call-1:1", status: "completed" }),
+    ]);
+    finished.process!.entries[0].state = "completed";
+    expect(collectRunningSubagents([finished])).toEqual([]);
+  });
+
   it("耗时按任务自己的 startedAt 算，完成后冻结在 completedAt", () => {
     expect(getSubagentElapsedMs(subagent({ startedAt: 1_000 }), 61_000)).toBe(60_000);
     expect(getSubagentElapsedMs(subagent({ startedAt: 1_000, completedAt: 31_000 }), 99_000)).toBe(30_000);

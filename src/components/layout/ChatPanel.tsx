@@ -2097,21 +2097,21 @@ const ChatMessagesView = memo(function ChatMessagesView({
         )}
       </div>
 
-      {(showScrollBottom || activeProcessWithTodos) && (
-        <div className="chat-floating-status">
-          {showScrollBottom && (
-        <button className="chat-scroll-bottom" onClick={onScrollToBottom} title="返回底部">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 5v14" />
-            <path d="M19 12l-7 7-7-7" />
-          </svg>
-        </button>
-          )}
-          {activeProcessWithTodos && (
-            <TodoSummaryPill process={activeProcessWithTodos} outputDetailLevel={outputDetailLevel} />
-          )}
-        </div>
-      )}
+      {/* 底部悬浮区（竖排）：Subagent → Todo → 回到底部；各自没有内容时自身不渲染。 */}
+      <div className="chat-floating-status">
+        <SubagentMonitor sessionId={activeSessionId} />
+        {activeProcessWithTodos && (
+          <TodoSummaryPill process={activeProcessWithTodos} outputDetailLevel={outputDetailLevel} />
+        )}
+        {showScrollBottom && (
+          <button className="chat-scroll-bottom" onClick={onScrollToBottom} title="返回底部">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5v14" />
+              <path d="M19 12l-7 7-7-7" />
+            </svg>
+          </button>
+        )}
+      </div>
     </div>
   );
 });
@@ -2298,7 +2298,7 @@ type ChatPanelProps = {
 };
 
 export function ChatPanel({
-  sendKey = "Enter",
+  sendKey = "normal",
   previousMessageKey = "Ctrl+Up",
   nextMessageKey = "Ctrl+Down",
 }: ChatPanelProps) {
@@ -2554,6 +2554,8 @@ export function ChatPanel({
       if (!targetSessionId || targetSessionId !== useProjectStore.getState().activeSessionId) return;
       composerEvent.preventDefault();
       editorRef.current?.insertNode(composerEvent.detail.node);
+      // 窗口刚从后台恢复时 rAF 会被冻结，先同步落一次焦点，下一帧再补一次。
+      editorRef.current?.focus();
       requestAnimationFrame(() => editorRef.current?.focus());
     };
     window.addEventListener(COMPOSER_INSERT_EVENT, handleComposerInsert);
@@ -3555,7 +3557,6 @@ export function ChatPanel({
           runtime.streamBuffer = "";
           runtime.thinkingBuffer = "";
           runtime.thinkingEntryId = null;
-          runtime.streamIdleNoticeEntryId = null;
           runtime.autoAbortReason = null;
           // The backend may accept the prompt but then emit nothing (stalled
           // worker, dropped first event). Arm the backend-state watchdog right
@@ -3782,21 +3783,21 @@ export function ChatPanel({
       return;
     }
 
-    // Ctrl+Alt+Enter：运行中把消息插到待发送区首位并立即引导；空闲时等价于普通发送。
-    if (e.key === "Enter" && e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey) {
+    // sendKey 决定 Enter / Ctrl+Enter 谁普通发送、谁引导发送；Shift+Enter 固定换行。
+    // 引导发送：运行中把消息插到待发送区首位并立即引导，空闲时等价普通发送。
+    if (e.key === "Enter" && !e.altKey && !e.shiftKey) {
       e.preventDefault();
-      handleSend({ guideFront: true });
+      const withModifier = e.ctrlKey || e.metaKey;
+      const guide = sendKey === "guide" ? !withModifier : withModifier;
+      if (guide) {
+        handleSend({ guideFront: true });
+      } else {
+        handleSend();
+      }
       return;
     }
 
-    const shouldSend =
-      (sendKey === "Ctrl+Enter" && e.key === "Enter" && e.ctrlKey) ||
-      (sendKey === "Enter" && e.key === "Enter" && !e.ctrlKey);
-
-    if (shouldSend) {
-      e.preventDefault();
-      handleSend();
-    } else if (e.key === "Enter") {
+    if (e.key === "Enter") {
       e.preventDefault();
       editorRef.current?.insertLineBreak();
     }
@@ -4186,8 +4187,6 @@ export function ChatPanel({
             onCancel={handleCancelQuestionnaire}
           />
         )}
-
-        <SubagentMonitor sessionId={activeSessionId} />
 
         <ChatComposer
           activeQuestionnaire={!!activeInteraction}

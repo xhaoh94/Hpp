@@ -355,7 +355,7 @@ export const getProviderApi = (endpoint) => Object.prototype.hasOwnProperty.call
   ? ENDPOINT_APIS[endpoint]
   : undefined;
 
-const normalizeModel = async (value, providerId) => {
+const normalizeModel = async (value, providerId, providerDefaults = {}) => {
   if (!isRecord(value)) return null;
   const id = asString(value.id) || asString(value.model) || asString(value.name);
   if (!id) return null;
@@ -380,6 +380,14 @@ const normalizeModel = async (value, providerId) => {
   // 上下文窗口：优先取 models.json 里的声明（Hpp 同步渠道时写入），
   // 否则用 Agent 目录条目；两者都没有时留空，由运行时自己决定默认值。
   const declaredContextWindow = Number(value.contextWindow) || Number(directoryEntry?.contextWindow) || 0;
+  // 模型级 api/baseUrl 与渠道一致时不算覆盖：不回报，避免每个模型都显示成
+  // “已覆盖”，让人误以为渠道端点失效。
+  const declaredApi = asString(value.api);
+  const declaredBaseUrl = asString(value.baseUrl) || asString(value.baseURL) || asString(value.url);
+  const endpoint = declaredApi && declaredApi !== asString(providerDefaults.api)
+    ? getProviderEndpoint(declaredApi)
+    : "";
+  const baseUrl = declaredBaseUrl && declaredBaseUrl !== asString(providerDefaults.baseUrl) ? declaredBaseUrl : "";
   return {
     id,
     name: asString(value.name) || id,
@@ -391,6 +399,8 @@ const normalizeModel = async (value, providerId) => {
     isBuiltin,
     hasThinkingLevels: !isBuiltin,
     ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
+    ...(endpoint ? { endpoint } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
   };
 };
 
@@ -470,6 +480,17 @@ export const toProviderConfig = (provider, existingProvider = {}) => {
       } else {
         delete entry.thinkingLevelMap;
       }
+      // 模型级覆盖：api/baseUrl 落在模型条目上（pi 优先取模型自身的值）。
+      // 与渠道相同的值不写，没有覆盖时必须 delete —— 否则旧版本写下的值会一直粘在模型上。
+      const modelEndpoint = asString(model.endpoint);
+      const modelApi = modelEndpoint && modelEndpoint !== asString(provider.endpoint)
+        ? getProviderApi(modelEndpoint)
+        : undefined;
+      if (modelApi) entry.api = modelApi;
+      else delete entry.api;
+      const modelBaseUrl = asString(model.baseUrl);
+      if (modelBaseUrl && modelBaseUrl !== asString(provider.baseUrl)) entry.baseUrl = modelBaseUrl;
+      else delete entry.baseUrl;
       return entry;
     }),
   };
@@ -511,13 +532,16 @@ export const readProviderConfig = async () => {
       if (!isManagedProvider(value)) return [];
       const endpoint = getProviderEndpoint(value.api);
       if (!endpoint) return [];
+      const providerBaseUrl = asString(value.baseUrl) || asString(value.baseURL) || asString(value.url);
       const models = Array.isArray(value.models)
-        ? (await Promise.all(value.models.map((model) => normalizeModel(model, providerId)))).filter(Boolean)
+        ? (await Promise.all(value.models.map((model) =>
+            normalizeModel(model, providerId, { api: value.api, baseUrl: providerBaseUrl }),
+          ))).filter(Boolean)
         : [];
       return [{
         providerId,
         displayName: asString(value.name) || providerId,
-        baseUrl: asString(value.baseUrl) || asString(value.baseURL) || asString(value.url),
+        baseUrl: providerBaseUrl,
         apiKey: asString(value.apiKey) || asString(value.api_key),
         endpoint,
         models,

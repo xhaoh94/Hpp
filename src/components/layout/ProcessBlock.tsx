@@ -17,8 +17,6 @@ import {
   type ComposerDocument,
 } from "@shared/composer-document";
 import {
-  formatCommandGroupTitle,
-  getCommandStateLabel,
   uiText,
 } from "@/i18n/text";
 import {
@@ -28,14 +26,14 @@ import {
 } from "./processEntryMerge";
 import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
 import { relativeRemotePath, resolveProjectFilePath } from "@/lib/project-file-path";
+import { SUBAGENT_MONITOR_OPEN_EVENT } from "@/lib/app-events";
 import { FileContextMenu, type FileContextMenuState } from "@/components/shared/FileContextMenu";
 import {
-  collapseOperationProcessEntries,
-  formatProcessDuration,  getProcessGroupState,
-  getStreamIdleNoticeDuration,
-  getSubagentActivityLabel,
+  buildConciseCommentaryEntry,
+  collapseStandardProcessEntries,
+  formatProcessDuration,
   getSubagentProgressLabel,
-  groupProcessEntries,
+  getEffectiveProcessSubagents,
   getVisibleProcessEntries,
   getConciseProcessEntries,
   getUserGuidanceText,
@@ -56,12 +54,6 @@ import {
 } from "@shared/output-detail";
 
 type PreserveScroll = (action: () => void, anchor?: HTMLElement | null) => void;
-
-export const formatIdleDuration = (ms: number) => {
-  const seconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
-  const minutes = Math.floor(seconds / 60);
-  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-};
 
 type ProcessTimelineItem =
   | {
@@ -152,10 +144,12 @@ function ProcessEntryIcon({ type, state }: { type: AgentProcessEntry["type"]; st
 function ProcessEntryFiles({
   files,
   onOpenFile,
+  onPreserveScroll,
   projectPath,
 }: {
   files: AgentProcessFile[];
   onOpenFile: (filePath: string, options?: { preview?: boolean }) => void;
+  onPreserveScroll?: PreserveScroll;
   projectPath?: string;
 }) {
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
@@ -169,7 +163,12 @@ function ProcessEntryFiles({
             <button
               className="chat-process-file-name openable"
               title={displayPath}
-              onClick={() => onOpenFile(file.file, { preview })}
+              onClick={(event) => {
+                // 预览面板会挤窄聊天区触发重排：按锚点保持视口，避免阅读位置被顶走。
+                const action = () => onOpenFile(file.file, { preview });
+                if (onPreserveScroll) onPreserveScroll(action, event.currentTarget);
+                else action();
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setContextMenu({
@@ -269,104 +268,31 @@ const formatErrorDetailAsMarkdown = (detail?: string) => {
   return lines.join("\n");
 };
 
+/**
+ * 命令条目展开后的内容：原始命令一行 + 输出块。
+ * 标题行（图标 + 意图 + 折叠箭头）统一由 ProcessEntryRow 渲染，这里不再重复。
+ */
 function CommandDetail({
   entry,
-  onPreserveScroll,
 }: {
   entry: AgentProcessEntry;
-  onPreserveScroll?: PreserveScroll;
 }) {
-  const [outputExpanded, setOutputExpanded] = useState(false);
-  const userToggledRef = useRef(false);
   const { command, output } = useMemo(
     () => splitCommandDetail(entry),
     [entry.detail, entry.command]
   );
   const outputLines = useMemo(() => output ? output.split("\n") : [], [output]);
-  const isRunning = entry.state === "running";
-  const canExpand = outputLines.length > 0;
-
-  useEffect(() => {
-    if (!isRunning && !userToggledRef.current) {
-      setOutputExpanded(false);
-    }
-  }, [isRunning]);
-
-  const toggleOutput = (anchor?: HTMLElement | null) => {
-    userToggledRef.current = true;
-    const action = () => setOutputExpanded((current) => !current);
-    if (onPreserveScroll) onPreserveScroll(action, anchor);
-    else action();
-  };
+  if (!command && outputLines.length === 0) return null;
 
   return (
-    <div className={`chat-command-detail ${entry.state || ""} ${outputExpanded ? "expanded" : "collapsed"}`}>
-      <button
-        className="chat-command-header"
-        onClick={canExpand ? (event) => toggleOutput(event.currentTarget) : undefined}
-        disabled={!canExpand}
-      >
-        <span className="chat-command-prompt">$_</span>
-        <span className="chat-command-text">{command || entry.title}</span>
-        <span className="chat-command-state">{getCommandStateLabel(entry.state)}</span>
-        {canExpand && (
-          <svg
-            className="chat-command-chevron"
-            width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
-            style={{ transform: outputExpanded ? "rotate(180deg)" : "rotate(0deg)" }}
-          >
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        )}
-      </button>
-      {outputLines.length > 0 && outputExpanded && (
+    <div className={`chat-command-detail ${entry.state || ""} expanded`}>
+      {command && <div className="chat-command-inline">$ {command}</div>}
+      {outputLines.length > 0 && (
         <div className="chat-command-output">
           <div className="chat-command-lang">BASH</div>
           <pre>{outputLines.join("\n")}</pre>
         </div>
       )}
-    </div>
-  );
-}
-
-function CommandGroup({
-  entries,
-  onPreserveScroll,
-}: {
-  entries: AgentProcessEntry[];
-  onPreserveScroll: PreserveScroll;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const state = getProcessGroupState(entries);
-  const warningTitle = entries.find((entry) => entry.state === "warning")?.title;
-
-  return (
-    <div className={`chat-process-entry tool chat-command-group ${state}`}>
-      <span className="chat-process-entry-icon">
-        <ProcessEntryIcon type="tool" state={state} />
-      </span>
-      <div className="chat-process-entry-main">
-        <button
-          className="chat-process-entry-header expandable"
-          onClick={(event) => onPreserveScroll(() => setExpanded((current) => !current), event.currentTarget)}
-        >
-          <span className="chat-process-entry-title">{warningTitle || formatCommandGroupTitle(entries.length)}</span>
-          <svg
-            className="chat-process-entry-chevron"
-            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-            style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}
-          >
-            <path d="M9 18l6-6-6-6" />
-          </svg>
-        </button>
-        {expanded && (
-          <div className="chat-command-group-list">
-            {entries.map((entry) => (
-              <CommandDetail key={entry.id} entry={entry} onPreserveScroll={onPreserveScroll} />
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -406,6 +332,11 @@ function SubagentGlyph() {
   );
 }
 
+/** 监视窗挂在 ChatPanel 上，用事件解耦，免得把回调从聊天区一路透传下来。 */
+const openSubagentMonitor = (subagentId: string) => {
+  window.dispatchEvent(new CustomEvent(SUBAGENT_MONITOR_OPEN_EVENT, { detail: { subagentId } }));
+};
+
 const getSubagentTooltip = (subagent: AgentSubagent) => [
   getSubagentStatusLabel(subagent.status),
   subagent.model,
@@ -426,10 +357,8 @@ function SubagentEntryRow({
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   projectPath?: string;
 }) {
-  const subagents = entry.subagents || [];
+  const subagents = getEffectiveProcessSubagents(entry.subagents, entry.state);
   const progress = getSubagentProgressLabel(subagents);
-  // 折叠态也要能看到"谁在干什么"，否则并行子任务对用户就是黑箱。
-  const activity = getSubagentActivityLabel(subagents);
   const elapsed = typeof entry.startedAt === "number"
     ? `已运行 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
     : "";
@@ -438,54 +367,64 @@ function SubagentEntryRow({
     .filter((message): message is string => !!message && message !== entry.detail?.trim());
   const detail = [entry.detail?.trim(), ...new Set(messages)].filter(Boolean).join("\n\n");
   const canExpand = detail.length > 0;
+  const toggle = (element?: HTMLElement | null) => onToggleEntry(messageId, entry.id, element);
 
   return (
     <div className={`chat-subagent-entry ${entry.state || ""}`}>
-      <button
-        type="button"
-        className={`chat-subagent-event ${canExpand ? "expandable" : ""}`}
-        onClick={canExpand ? (event) => onToggleEntry(messageId, entry.id, event.currentTarget) : undefined}
-        disabled={!canExpand}
-        aria-expanded={canExpand ? !!entry.expanded : undefined}
-      >
+      <div className="chat-subagent-event">
         <span className="chat-subagent-chips">
-          {subagents.map((subagent) => (
-            <span
-              className={`chat-subagent-chip ${subagent.status || ""}`}
-              key={subagent.id}
-              title={getSubagentTooltip(subagent) || subagent.label}
-            >
-              <span className={`chat-subagent-avatar tone-${getSubagentTone(subagent.id)}`}>
-                <SubagentGlyph />
-              </span>
-              <span className="chat-subagent-label">{subagent.label}</span>
-              {subagent.status === "running" && subagent.startedAt
-                ? (
-                  <span className="chat-subagent-chip-time">
-                    {formatProcessDuration((subagent.completedAt ?? now) - subagent.startedAt)}
-                  </span>
-                )
-                : null}
-            </span>
-          ))}
+          {subagents.map((subagent) => {
+            const monitorable = subagent.status === "running" || subagent.status === "pending";
+            return (
+              <button
+                type="button"
+                className={`chat-subagent-chip ${subagent.status || ""}`}
+                key={subagent.id}
+                title={getSubagentTooltip(subagent) || subagent.label}
+                // 运行中的子任务有实时输出，点开监视窗；已结束的没有可监视内容，退化成展开详情。
+                onClick={
+                  monitorable
+                    ? () => openSubagentMonitor(subagent.id)
+                    : canExpand ? () => toggle() : undefined
+                }
+                disabled={!monitorable && !canExpand}
+              >
+                <span className={`chat-subagent-avatar tone-${getSubagentTone(subagent.id)}`}>
+                  <SubagentGlyph />
+                </span>
+                <span className="chat-subagent-label">{subagent.label}</span>
+                {subagent.status === "running" && subagent.startedAt
+                  ? (
+                    <span className="chat-subagent-chip-time">
+                      {formatProcessDuration((subagent.completedAt ?? now) - subagent.startedAt)}
+                    </span>
+                  )
+                  : null}
+              </button>
+            );
+          })}
         </span>
-        <span className="chat-subagent-event-title">{entry.title}</span>
-        {activity && (
-          <span className="chat-subagent-event-activity" title={activity}>{activity}</span>
-        )}
-        {progress && <span className="chat-subagent-event-meta">{progress}</span>}
-        {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
-        {canExpand && (
-          <svg
-            className="chat-subagent-chevron"
-            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-            style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
-            aria-hidden="true"
-          >
-            <path d="M9 18l6-6-6-6" />
-          </svg>
-        )}
-      </button>
+        <button
+          type="button"
+          className={`chat-subagent-event-toggle ${canExpand ? "expandable" : ""}`}
+          onClick={canExpand ? (event) => toggle(event.currentTarget) : undefined}
+          disabled={!canExpand}
+          aria-expanded={canExpand ? !!entry.expanded : undefined}
+        >
+          {progress && <span className="chat-subagent-event-meta">{progress}</span>}
+          {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
+          {canExpand && (
+            <svg
+              className="chat-subagent-chevron"
+              width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+              style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
+              aria-hidden="true"
+            >
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          )}
+        </button>
+      </div>
       {canExpand && entry.expanded && (
         <div className="chat-subagent-detail">
           <MarkdownRenderer content={detail} projectPath={projectPath} />
@@ -526,7 +465,7 @@ function ProcessEntryRow({
   receivedMessageDocument?: ComposerDocument;
   projectPath?: string;
   operationSummaryExpanded?: boolean;
-  onToggleOperationSummary?: () => void;
+  onToggleOperationSummary?: (entryId: string) => void;
 }) {
   const isReceivedMessage = entry.toolKind === "message_received" || entry.title.startsWith("收到消息:");
   const showReceivedMessage = isReceivedMessage && !!receivedMessageDocument;
@@ -536,10 +475,6 @@ function ProcessEntryRow({
   const canExpand = hasDetail;
   const detailVisible = hasDetail && !isCommandEntry && (!canExpand || entry.expanded);
   const commandVisible = isCommandEntry && hasDetail && (!canExpand || entry.expanded);
-  const hasIdleTiming = Number.isFinite(entry.startedAt) || Number.isFinite(entry.accumulatedDurationMs);
-  const idleDuration = entry.toolKind === "stream_idle_notice" && hasIdleTiming
-    ? formatIdleDuration(getStreamIdleNoticeDuration(entry, now))
-    : null;
   const errorDetailMarkdown =
     detailVisible && (entry.type === "error" || entry.state === "error")
       ? formatErrorDetailAsMarkdown(entry.detail)
@@ -565,7 +500,12 @@ function ProcessEntryRow({
           type="button"
           className="chat-process-file-name openable"
           title={displayPath}
-          onClick={() => onOpenFile(file, { preview: true })}
+          onClick={(event) => {
+            // 预览面板会挤窄聊天区触发重排，同样按锚点保持视口位置。
+            const action = () => onOpenFile(file, { preview: true });
+            if (onPreserveScroll) onPreserveScroll(action, event.currentTarget);
+            else action();
+          }}
         >
           {displayPath}
         </button>
@@ -576,7 +516,12 @@ function ProcessEntryRow({
         <button
           type="button"
           className={`chat-process-operation-summary${entry.state === "running" ? " running" : ""}`}
-          onClick={onToggleOperationSummary}
+          onClick={(event) => {
+            // 展开会改变高度，必须走滚动保持：否则贴底时内容一长高就会被拽回底部。
+            const action = () => onToggleOperationSummary?.(entry.id);
+            if (onPreserveScroll) onPreserveScroll(action, event.currentTarget);
+            else action();
+          }}
           aria-expanded={showDetails}
           disabled={!onToggleOperationSummary}
           title={showDetails ? "收起操作详情" : "展开操作详情"}
@@ -605,11 +550,27 @@ function ProcessEntryRow({
         </button>
         {showDetails && summary && (
           <div className="chat-process-operation-details">
-            {summary.commandCount > 0 && (
-              <div className="chat-process-operation-detail-line">
-                已运行 {summary.commandCount} 条命令
-              </div>
-            )}
+            {/* 每条命令单独一行：图标 + 模型写的意图，完整命令放 title。
+                老数据没有 commandItems，退回原来的总数行。 */}
+            {summary.commandItems && summary.commandItems.length > 0
+              ? summary.commandItems.map((item) => (
+                <div className="chat-process-operation-detail-line chat-process-operation-command" key={item.id}>
+                  <span className="chat-process-operation-command-icon" aria-hidden="true">
+                    <ProcessEntryIcon type="tool" />
+                  </span>
+                  <span
+                    className="chat-process-operation-command-title"
+                    title={item.command || item.description || ""}
+                  >
+                    {item.description || item.command || "命令"}
+                  </span>
+                </div>
+              ))
+              : summary.commandCount > 0 && (
+                <div className="chat-process-operation-detail-line">
+                  已运行 {summary.commandCount} 条命令
+                </div>
+              )}
             {/* 每个文件占一行：路径长时不会几个文件挤在同一行。 */}
             {summary.changedFiles.map((file) => (
               <div className="chat-process-operation-detail-line" key={`changed-${file}`}>
@@ -789,7 +750,6 @@ function ProcessEntryRow({
           >
             <span className="chat-process-entry-title">
               {entry.title}
-              {idleDuration && <span className="chat-process-idle-duration"> · {idleDuration}</span>}
             </span>
             {canExpand && (
               <svg
@@ -803,10 +763,10 @@ function ProcessEntryRow({
           </button>
         )}
         {files.length > 0 && shouldListChangedFiles(outputDetailLevel) && (
-          <ProcessEntryFiles files={files} onOpenFile={onOpenFile} projectPath={projectPath} />
+          <ProcessEntryFiles files={files} onOpenFile={onOpenFile} onPreserveScroll={onPreserveScroll} projectPath={projectPath} />
         )}
         {commandVisible && (
-          <CommandDetail entry={entry} onPreserveScroll={onPreserveScroll} />
+          <CommandDetail entry={entry} />
         )}
         {detailVisible && errorDetailMarkdown && (
           <div className={`chat-process-entry-detail chat-process-error-markdown ${canExpand ? "panel" : ""}`}>
@@ -835,7 +795,7 @@ function ProcessEntries({
   onThinkingRowRef,
   receivedMessageDocument,
   projectPath,
-  operationSummaryExpanded = false,
+  expandedSummaryIds,
   onToggleOperationSummary,
 }: {
   entries: AgentProcessEntry[];
@@ -851,42 +811,16 @@ function ProcessEntries({
   onThinkingRowRef?: (entryId: string, el: HTMLElement | null) => void;
   receivedMessageDocument?: ComposerDocument;
   projectPath?: string;
-  /** 「标准」档的合并摘要当前是否展开（展开时列出原始操作条目）。 */
-  operationSummaryExpanded?: boolean;
-  onToggleOperationSummary?: () => void;
+  /** 「标准」档里已展开的合并摘要 id（一段回合可能有多段）。 */
+  expandedSummaryIds?: Set<string>;
+  onToggleOperationSummary?: (entryId: string) => void;
 }) {
-  return <>{groupProcessEntries(entries).map((group) => group.kind === "commands" ? (
-    <CommandGroup
-      key={`commands-${group.entries[0].id}`}
-      entries={group.entries}
-      onPreserveScroll={onPreserveScroll}
-    />
-  ) : group.kind === "files" ? (
-    group.entries.map((entry) => (
-      <ProcessEntryRow
-        key={entry.id}
-        messageId={messageId}
-        entry={entry}
-        now={now}
-        running={running}
-        expandThinkingWhileRunning={expandThinkingWhileRunning}
-        outputDetailLevel={outputDetailLevel}
-        onToggleEntry={onToggleEntry}
-        onOpenFile={onOpenFile}
-        onOpenImage={onOpenImage}
-        onPreserveScroll={onPreserveScroll}
-        onThinkingRowRef={onThinkingRowRef}
-        receivedMessageDocument={receivedMessageDocument}
-        projectPath={projectPath}
-        operationSummaryExpanded={operationSummaryExpanded}
-        onToggleOperationSummary={onToggleOperationSummary}
-      />
-    ))
-  ) : (
+  // 每条命令独立成行（标题用模型写的 description），不再合并成「已运行 N 条命令」。
+  return <>{entries.map((entry) => (
     <ProcessEntryRow
-      key={group.entry.id}
+      key={entry.id}
       messageId={messageId}
-      entry={group.entry}
+      entry={entry}
       now={now}
       running={running}
       expandThinkingWhileRunning={expandThinkingWhileRunning}
@@ -898,7 +832,7 @@ function ProcessEntries({
       onThinkingRowRef={onThinkingRowRef}
       receivedMessageDocument={receivedMessageDocument}
       projectPath={projectPath}
-      operationSummaryExpanded={operationSummaryExpanded}
+      operationSummaryExpanded={expandedSummaryIds?.has(entry.id) === true}
       onToggleOperationSummary={onToggleOperationSummary}
     />
   ))}</>;
@@ -1183,7 +1117,7 @@ export function ProcessBlock({
   terminalState?: ProcessTerminalViewState;
   fallbackEndedAt?: number;
   expandThinkingWhileRunning?: boolean;
-  /** 输出内容详细等级：详细=全部，标准=变更文件只显示数量，简洁=只保留思考与正文。 */
+  /** 输出内容详细等级：详细=全部，标准=操作合并成摘要，简洁=思考与正文各自合并。 */
   outputDetailLevel?: OutputDetailLevel;
   onToggle: (messageId: string, anchor?: HTMLElement | null) => void;
   onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null, expanded?: boolean) => void;
@@ -1212,27 +1146,42 @@ export function ProcessBlock({
     () => isProcessInterrupted(viewProcess.entries),
     [viewProcess.entries]
   );
+  // 简洁档把独立的 commentary 正文折成一个 narration 条目，和 process 里的
+  // 正文一起参与两段合并；时间线分支因此不再单独渲染 commentary，正文才不会散开。
+  const conciseCommentaryEntry = useMemo(
+    () => outputDetailLevel === "concise" ? buildConciseCommentaryEntry<AgentProcessEntry>(commentary) : null,
+    [commentary, outputDetailLevel]
+  );
   const visibleEntries = useMemo(
-    () => getVisibleProcessEntries(viewProcess.entries),
-    [viewProcess.entries]
+    () => {
+      const base = getVisibleProcessEntries(viewProcess.entries);
+      return conciseCommentaryEntry ? [...base, conciseCommentaryEntry] : base;
+    },
+    [viewProcess.entries, conciseCommentaryEntry]
   );
   // 「标准」档合并摘要的展开状态：默认收起，点开就列出原始的命令/文件条目。
-  const [operationSummaryExpanded, setOperationSummaryExpanded] = useState(false);
-  const toggleOperationSummary = useCallback(() => {
-    setOperationSummaryExpanded((value) => !value);
+  // 一段回合里可能有多段合并（被思考/正文打断），所以按条目 id 记。
+  const [expandedSummaryIds, setExpandedSummaryIds] = useState<Set<string>>(() => new Set());
+  const toggleOperationSummary = useCallback((entryId: string) => {
+    setExpandedSummaryIds((current) => {
+      const next = new Set(current);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
   }, []);
   // 切换等级或换消息后回到默认（收起）。
   useEffect(() => {
-    setOperationSummaryExpanded(false);
+    setExpandedSummaryIds(new Set());
   }, [outputDetailLevel]);
 
-  // 「简洁」只是不展示操作类条目（命令 / 查看文件 / 修改文件），其余照常；
-  // 「标准」把这三类合并成一条摘要。
+  // 「简洁」把思考与正文各自合并成一段，交互条目作为分界点保留；
+  // 「标准」把操作类条目合并成一条摘要。
   const renderedEntries = useMemo(
     () => {
       if (outputDetailLevel === "concise") return getConciseProcessEntries(visibleEntries);
-      // 「标准」始终只有一条摘要；展开与否由渲染层决定（明细在摘要条目里）。
-      if (outputDetailLevel === "standard") return collapseOperationProcessEntries(visibleEntries);
+      // 「标准」按段合并：一段里所有思考合成一块、所有命令/查看/修改合成另一块。
+      if (outputDetailLevel === "standard") return collapseStandardProcessEntries(visibleEntries);
       return visibleEntries;
     },
     [outputDetailLevel, visibleEntries]
@@ -1246,9 +1195,12 @@ export function ProcessBlock({
     // 所有等级都把连续思考合并成一条；中间夹着其他条目（正文、查看文件等）时自然断开。
     return mergeThinkingEntries(entries);
   }, [expanded, renderedEntries]);
+  // 简洁档正文已折进 renderedEntries，时间线里不能再出现一份。
   const visibleCommentary = useMemo(
-    () => commentary.filter((item) => item.content.trim().length > 0),
-    [commentary]
+    () => outputDetailLevel === "concise"
+      ? []
+      : commentary.filter((item) => item.content.trim().length > 0),
+    [commentary, outputDetailLevel]
   );
   const timelineItems = useMemo(() => {
     const items: ProcessTimelineItem[] = [
@@ -1550,7 +1502,7 @@ export function ProcessBlock({
                 onThinkingRowRef={registerThinkingRow}
                 receivedMessageDocument={receivedMessageDocument}
                 projectPath={projectPath}
-                operationSummaryExpanded={operationSummaryExpanded}
+                expandedSummaryIds={expandedSummaryIds}
                 onToggleOperationSummary={toggleOperationSummary}
               />
             )}
@@ -1585,7 +1537,7 @@ export function ProcessBlock({
               onThinkingRowRef={registerThinkingRow}
               receivedMessageDocument={receivedMessageDocument}
               projectPath={projectPath}
-              operationSummaryExpanded={operationSummaryExpanded}
+              operationSummaryExpanded={expandedSummaryIds.has(item.entry.id)}
               onToggleOperationSummary={toggleOperationSummary}
             />
           ) : null)}

@@ -138,7 +138,6 @@ describe("dispatchAgentEvent subagent lifecycle", () => {
       isOpenProjectSession: () => true,
       getRuntime: () => ({ manualAbortRequested: false }),
       cancelAgentEndGrace: vi.fn(),
-      completeIdleNotice: vi.fn(),
       refreshStreamWatchdog: vi.fn(),
       ensureAssistantContinuation: vi.fn(),
       finishAssistantProcessText: vi.fn(),

@@ -131,7 +131,7 @@ describe("ProjectCard lifecycle regression constraints", () => {
   it("uses one explicit title typography for command and file process summaries", () => {
     const titleRule = chatPanelStyles.slice(
       chatPanelStyles.indexOf(".chat-process-entry-title {"),
-      chatPanelStyles.indexOf(".chat-process-idle-duration {"),
+      chatPanelStyles.indexOf(".chat-subagent-entry {"),
     );
     expect(titleRule).toContain("font-size: 14px");
     expect(titleRule).toContain("font-weight: 400");

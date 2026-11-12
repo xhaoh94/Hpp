@@ -75,9 +75,9 @@ describe("mobile capability source constraints", () => {
 
   it("keeps runtime body text transparent and joins adjacent process nodes", () => {
     expect(appSource).toContain("isAssistantBodyProcessEntry");
-    // 输出详细等级会先过滤掉「简洁」模式下隐藏的条目，因此用渲染用的
-    // renderedEntries 判断是否走叙事时间线。
-    expect(appSource).toContain("const hasNarrativeTimeline = commentary.length > 0 || renderedEntries.some(isAssistantBodyProcessEntry)");
+    // 简洁档正文已折进 renderedEntries，叙事分支不能再由原始 commentary 单独撑起。
+    expect(appSource).toContain("outputDetailLevel !== \"concise\" && commentary.length > 0");
+    expect(appSource).toContain("renderedEntries.some(isAssistantBodyProcessEntry)");
     expect(appSource).toContain("{hasNarrativeTimeline && expanded && (");
     expect(appSource).toContain("message-content assistant-body-segment");
     expect(stylesSource).toContain(".assistant-body-segment {");
@@ -338,12 +338,13 @@ describe("mobile output detail level sync", () => {
     // 等级由桌面端随会话配置下发，移动端不自己保存。
     expect(appSource).toContain("normalizeOutputDetailLevel(selectedConfig?.outputDetailLevel");
     expect(appSource).toContain("DEFAULT_OUTPUT_DETAIL_LEVEL");
-    // 「简洁」只隐藏操作类条目（命令/查看文件/修改文件），思考、正文、引导、
-    // 问卷、错误、状态等一律保留，否则用户自己的内容会凭空消失。
+    // 「简洁」思考与正文各自合并；引导、问卷、错误、子任务、diff 必须保留，
+    // 否则用户自己的内容会凭空消失。
     expect(appSource).toContain('if (outputDetailLevel === "concise") return getConciseProcessEntries(visibleEntries);');
     expect(appSource).not.toContain('visibleEntries.filter((entry) => entry.type === "thinking")');
     // 「标准」把这三类合并成一条摘要，不暴露具体文件。
-    expect(appSource).toContain('if (outputDetailLevel === "standard") return collapseOperationProcessEntries(visibleEntries);');
+    // 标准模式先按段合并思考，再把操作合成摘要。
+    expect(appSource).toContain('if (outputDetailLevel === "standard") return collapseStandardProcessEntries(visibleEntries);');
     expect(appSource).toContain("operationSummary");
     expect(appSource).toContain("onToggleOperationSummary={toggleOperationSummary}");
     expect(appSource).toContain("OPERATION_SUMMARY_TOOL_KIND");

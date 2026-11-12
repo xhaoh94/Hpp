@@ -323,7 +323,6 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     appendOrRefreshAlreadyRunningNotice,
     appendProcessEntry,
     cancelAgentEndGrace,
-    completeIdleNotice,
     discardRuntime,
     ensureAssistantContinuation,
     finishAbortedTurn,
@@ -408,7 +407,6 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     event.type !== "stream_snapshot" &&
     event.type !== "stream_end"
   ) {
-    completeIdleNotice(currentSessionId);
     refreshStreamWatchdog(currentSessionId);
   }
   switch (event.type) {

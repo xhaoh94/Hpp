@@ -56,6 +56,7 @@ import {
   Square,
   Smartphone,
   Sun,
+  Terminal,
   Trash2,
   WandSparkles,
   Wifi,
@@ -220,16 +221,16 @@ import {
 import { getAgentActionDisplayDescription } from "@shared/agent-actions";
 import type { AgentPermissionMode } from "@shared/agent-permissions";
 import {
+  buildConciseCommentaryEntry,
   formatProcessDuration,
   getActiveAssistantTurnId,
   getProcessGroupState,
-  getStreamIdleNoticeDuration,
   getSubagentProgressLabel,
   hasNativeMultiStepProcessPlan,
   getUserGuidanceText,
   getVisibleProcessEntries,
   getConciseProcessEntries,
-  collapseOperationProcessEntries,
+  collapseStandardProcessEntries,
   OPERATION_SUMMARY_TOOL_KIND,
   groupProcessEntries,
   isAssistantNarrationProcessEntry,
@@ -917,22 +918,6 @@ function AgentActionSheet({
   );
 }
 
-function IdleDurationLabel({ entry }: { entry: RemoteProcessEntry }) {
-  // Only a running stream_idle_notice entry needs the ticking clock; a
-  // completed one renders a static duration. Keeping the ticker inside this
-  // tiny leaf means the per-second nowTick no longer invalidates every
-  // ProcessEntryRow (previously it re-rendered all process entries each
-  // second while an agent turn was running).
-  const ticking = entry.toolKind === "stream_idle_notice" && !!entry.startedAt && !entry.completedAt;
-  const nowTick = useProcessTicker(ticking);
-  const hasIdleTiming = Number.isFinite(entry.startedAt) || Number.isFinite(entry.accumulatedDurationMs);
-  const idleDuration = entry.toolKind === "stream_idle_notice" && hasIdleTiming
-    ? formatIdleDuration(getStreamIdleNoticeDuration(entry, nowTick))
-    : null;
-  if (!idleDuration) return null;
-  return <span className="process-idle-duration"> · {idleDuration}</span>;
-}
-
 const isAssistantBodyProcessEntry = (entry: RemoteProcessEntry) => (
   isAssistantNarrationProcessEntry(entry) || entry.title === "正文输出"
 );
@@ -946,7 +931,7 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
   entry: RemoteProcessEntry;
   receivedMessageDocument?: ComposerDocument;
   operationSummaryExpanded?: boolean;
-  onToggleOperationSummary?: () => void;
+  onToggleOperationSummary?: (entryId: string) => void;
 }) {
   // 「标准」档把命令 / 查看文件 / 修改文件合并成的一条摘要：
   // 标题行常驻，点一下在下面按「已运行 / 已修改 / 已查看」列明细。
@@ -960,11 +945,11 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
           role={onToggleOperationSummary ? "button" : undefined}
           tabIndex={onToggleOperationSummary ? 0 : undefined}
           aria-expanded={onToggleOperationSummary ? showDetails : undefined}
-          onClick={onToggleOperationSummary}
+          onClick={onToggleOperationSummary ? () => onToggleOperationSummary(entry.id) : undefined}
           onKeyDown={onToggleOperationSummary ? (event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
-            onToggleOperationSummary();
+            onToggleOperationSummary(entry.id);
           } : undefined}
         >
           <span className={`entry-state ${entry.state || "completed"}`} />
@@ -978,9 +963,18 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
         </div>
         {showDetails && summary && (
           <div className="process-operation-details">
-            {summary.commandCount > 0 && (
-              <div className="process-operation-detail-line">已运行 {summary.commandCount} 条命令</div>
-            )}
+            {summary.commandItems && summary.commandItems.length > 0
+              ? summary.commandItems.map((item) => (
+                <div className="process-operation-detail-line process-operation-command" key={item.id}>
+                  <Terminal size={12} />
+                  <span className="process-operation-command-title" title={item.command || item.description || ""}>
+                    {item.description || item.command || "命令"}
+                  </span>
+                </div>
+              ))
+              : summary.commandCount > 0 && (
+                <div className="process-operation-detail-line">已运行 {summary.commandCount} 条命令</div>
+              )}
             {/* 每个文件占一行。 */}
             {summary.changedFiles.map((file) => (
               <div className="process-operation-detail-line" key={`changed-${file}`}>
@@ -1061,7 +1055,6 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
       <span className={`entry-state ${entry.state || "completed"}`} />
       <span className="process-entry-title" title={entry.title}>
         {entry.title}
-        <IdleDurationLabel entry={entry} />
       </span>
       {hasDetails && <ChevronDown className="expand-indicator" size={13} />}
     </>
@@ -1084,32 +1077,6 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
     </details>
   );
 });
-
-function CommandGroup({ entries }: { entries: RemoteProcessEntry[] }) {
-  const groupState = getProcessGroupState(entries);
-  return (
-    <details className="process-entry command-group">
-      <summary className="process-entry-summary command-group-summary">
-        <span className={`entry-state ${groupState}`} />
-        <span className="process-entry-title">已运行 {entries.length} 条命令</span>
-        <ChevronDown className="expand-indicator" size={13} />
-      </summary>
-      <div className="command-group-list">
-        {entries.map((entry) => {
-          const { command, output } = splitCommandDetail(entry);
-          const title = command || entry.title;
-          if (!output) return <div className="command-group-item static" key={entry.id}>{title}</div>;
-          return (
-            <details className="command-group-item" key={entry.id}>
-              <summary><span>{title}</span><ChevronDown className="expand-indicator" size={12} /></summary>
-              <pre>{output}</pre>
-            </details>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
 
 function MessageCommentary({
   items,
@@ -1296,11 +1263,6 @@ function getSubagentStatusLabel(
   }
 }
 
-export const formatIdleDuration = (ms: number) => {
-  const seconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
-  const minutes = Math.floor(seconds / 60);
-  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-};
 
 function SubagentGlyph() {
   return (
@@ -1482,22 +1444,35 @@ function MessageProcess({
       setExpanded(running && message.isStreaming === true);
     }
   }, [message.isStreaming, processStartedAt, running]);
-  const visibleEntries = useMemo(() => getVisibleProcessEntries(process?.entries || []), [process?.entries]);
-  // 输出详细等级与桌面端保持一致：「简洁」只保留思考与正文（以及引导、问卷、
-  // 错误这些必须可见的条目）。
-  // 「标准」档合并摘要的展开状态：默认收起，点开就列出原始的命令/文件条目。
-  const [operationSummaryExpanded, setOperationSummaryExpanded] = useState(false);
-  const toggleOperationSummary = useCallback(() => {
-    setOperationSummaryExpanded((value) => !value);
+  // 简洁档把 commentary 正文折成一条 narration，与 process 正文一起参与两段合并。
+  const conciseCommentaryEntry = useMemo(
+    () => outputDetailLevel === "concise" ? buildConciseCommentaryEntry<RemoteProcessEntry>(commentary) : null,
+    [commentary, outputDetailLevel]
+  );
+  const visibleEntries = useMemo(() => {
+    const base = getVisibleProcessEntries(process?.entries || []);
+    return conciseCommentaryEntry ? [...base, conciseCommentaryEntry] : base;
+  }, [process?.entries, conciseCommentaryEntry]);
+  // 输出详细等级与桌面端保持一致。
+  // 「标准」档合并摘要的展开状态：一段回合可能有多段合并（被思考/正文打断），
+  // 所以按条目 id 记，点哪个展开哪个。
+  const [expandedSummaryIds, setExpandedSummaryIds] = useState<Set<string>>(() => new Set());
+  const toggleOperationSummary = useCallback((entryId: string) => {
+    setExpandedSummaryIds((current) => {
+      const next = new Set(current);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
   }, []);
   useEffect(() => {
-    setOperationSummaryExpanded(false);
+    setExpandedSummaryIds(new Set());
   }, [outputDetailLevel]);
   const renderedEntries = useMemo(() => {
-    // 简洁：只隐藏操作类条目（命令 / 查看文件 / 修改文件），其余照常；
-    // 标准：这三类合并成一条摘要（展开时保留原始条目）。
+    // 简洁：思考与正文各自合并成一段，交互条目作为分界点保留；
+    // 标准：操作类条目合并成一条摘要（展开时保留原始条目）。
     if (outputDetailLevel === "concise") return getConciseProcessEntries(visibleEntries);
-    if (outputDetailLevel === "standard") return collapseOperationProcessEntries(visibleEntries);
+    if (outputDetailLevel === "standard") return collapseStandardProcessEntries(visibleEntries);
     return visibleEntries;
   }, [outputDetailLevel, visibleEntries]);
   // 无正文时间线时的主体列表：连续思考合并成一条（与桌面端 ProcessBlock 一致）。
@@ -1512,14 +1487,15 @@ function MessageProcess({
       order: index,
       entry,
     })),
-    ...commentary.map((item, index) => ({
+    // 简洁档正文已折进 renderedEntries，时间线里不能再出现一份。
+    ...(outputDetailLevel === "concise" ? [] : commentary).map((item, index) => ({
       kind: "commentary" as const,
       id: item.id,
       timestamp: item.timestamp,
       order: renderedEntries.length + index,
       commentary: item,
     })),
-  ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, renderedEntries]);  // 「简洁」下连续的思考合并成一条；中间插入的正文自然成为分界，保持断开。
+  ].sort((left, right) => left.timestamp - right.timestamp || left.order - right.order), [commentary, renderedEntries, outputDetailLevel]);  // 「简洁」下连续的思考合并成一条；中间插入的正文自然成为分界，保持断开。
   // 所有等级都把连续思考合并成一条；正文与其他条目（如查看文件）在时间线里
   // 自然成为分界点。
   const displayTimelineItems = useMemo(() => {
@@ -1545,16 +1521,9 @@ function MessageProcess({
     const result: Array<
       | { kind: "entry"; id: string; entry: RemoteProcessEntry }
       | { kind: "commentary"; id: string; commentary: NonNullable<RemoteChatMessage["commentary"]>[number] }
-      | { kind: "commands"; id: string; entries: RemoteProcessEntry[] }
       | { kind: "files"; id: string; entries: RemoteProcessEntry[] }
     > = [];
-    let commands: RemoteProcessEntry[] = [];
     let files: RemoteProcessEntry[] = [];
-    const flushCommands = () => {
-      if (commands.length === 0) return;
-      result.push({ kind: "commands", id: `commands-${commands[0].id}`, entries: commands });
-      commands = [];
-    };
     const flushFiles = () => {
       if (files.length === 0) return;
       result.push({ kind: "files", id: `files-${files[0].id}`, entries: files });
@@ -1562,26 +1531,20 @@ function MessageProcess({
     };
     for (const item of displayTimelineItems) {
       if (item.kind === "commentary") {
-        flushCommands();
         flushFiles();
         result.push({ kind: "commentary", id: item.id, commentary: item.commentary });
         continue;
       }
       const entry = item.entry;
-      if (isCommandProcessEntry(entry)) {
-        flushFiles();
-        commands.push(entry);
-      } else if (isFileOperationProcessEntry(entry)) {
-        flushCommands();
+      // 命令不分组：每条独立成行（标题用模型写的 description）。
+      if (isFileOperationProcessEntry(entry)) {
         if (files.length > 0 && files[0].toolKind !== entry.toolKind) flushFiles();
         files.push(entry);
       } else {
-        flushCommands();
         flushFiles();
         result.push({ kind: "entry", id: item.id, entry });
       }
     }
-    flushCommands();
     flushFiles();
     return result;
   }, [displayTimelineItems]);
@@ -1589,7 +1552,9 @@ function MessageProcess({
   const elapsed = formatProcessDuration((process.endedAt ?? nowTick) - process.startedAt);
   const currentStep = getCurrentProcessStep(process.planSteps);
   const hasPlan = !!process.planSteps?.length;
-  const hasNarrativeTimeline = commentary.length > 0 || renderedEntries.some(isAssistantBodyProcessEntry);
+  // 简洁档折出的正文条目自己会触发叙事分支，不需要原始 commentary 再撑一次。
+  const hasNarrativeTimeline = (outputDetailLevel !== "concise" && commentary.length > 0)
+    || renderedEntries.some(isAssistantBodyProcessEntry);
   if (!hasPlan && renderedEntries.length === 0 && !process?.changeSummary && !hasNarrativeTimeline) return null;
   return (
     <>
@@ -1622,11 +1587,11 @@ function MessageProcess({
         )}
         {!hasNarrativeTimeline && mergedEntries.length > 0 && (
           <div className="process-entries">
-            {groupProcessEntries(mergedEntries, { groupFileOperations: true }).map((group) => group.kind === "commands"
-              ? <CommandGroup key={`commands-${group.entries[0].id}`} entries={group.entries} />
-              : group.kind === "files"
-                ? <FileOperationGroup key={`files-${group.entries[0].id}`} entries={group.entries} showFiles={shouldListChangedFiles(outputDetailLevel)} />
-                : <ProcessEntryRow key={group.entry.id} entry={group.entry} receivedMessageDocument={receivedMessageDocument} operationSummaryExpanded={operationSummaryExpanded} onToggleOperationSummary={toggleOperationSummary} />)}
+            {groupProcessEntries(mergedEntries, { groupFileOperations: true, groupCommands: false }).map((group) => group.kind === "files"
+              ? <FileOperationGroup key={`files-${group.entries[0].id}`} entries={group.entries} showFiles={shouldListChangedFiles(outputDetailLevel)} />
+              : group.kind === "entry"
+                ? <ProcessEntryRow key={group.entry.id} entry={group.entry} receivedMessageDocument={receivedMessageDocument} operationSummaryExpanded={expandedSummaryIds.has(group.entry.id)} onToggleOperationSummary={toggleOperationSummary} />
+                : null)}
           </div>
         )}
       </details>
@@ -1638,12 +1603,10 @@ function MessageProcess({
               text={item.commentary.content}
               key={`commentary-${item.id}`}
             />
-          ) : item.kind === "commands" ? (
-            <CommandGroup key={item.id} entries={item.entries} />
           ) : item.kind === "files" ? (
             <FileOperationGroup key={item.id} entries={item.entries} showFiles={shouldListChangedFiles(outputDetailLevel)} />
           ) : (
-            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} operationSummaryExpanded={operationSummaryExpanded} onToggleOperationSummary={toggleOperationSummary} />
+            <ProcessEntryRow key={`process-${item.id}`} entry={item.entry} receivedMessageDocument={receivedMessageDocument} operationSummaryExpanded={expandedSummaryIds.has(item.entry.id)} onToggleOperationSummary={toggleOperationSummary} />
           ))}
         </div>
       )}

@@ -889,6 +889,36 @@ const planModeToolBlockReason = (event) => {
   return "";
 };
 
+// 模型偶尔漏填 description；给一句基于命令的中文兜底，标题才不会退化成「命令」。
+const COMMAND_DESCRIPTION_VERBS = {
+  grep: "检索内容", rg: "检索内容", find: "查找文件", fd: "查找文件",
+  ls: "列出目录", dir: "列出目录", cat: "查看文件", head: "查看文件开头",
+  tail: "查看文件末尾", wc: "统计行数", git: "执行 Git 操作",
+  npm: "运行 npm 命令", pnpm: "运行 pnpm 命令", yarn: "运行 yarn 命令",
+  node: "运行 Node 脚本", curl: "发起网络请求", sed: "处理文本",
+};
+const fallbackCommandDescription = (command) => {
+  const text = typeof command === "string" ? command.trim() : "";
+  if (!text) return "执行命令";
+  const head = text.split(/\s+/)[0].replace(/^.*[\\/]/, "").toLowerCase();
+  return COMMAND_DESCRIPTION_VERBS[head] || `执行 ${head}`;
+};
+
+// tool_execution_start 在 SDK 的 prepareArguments 之前发出，拿到的是未补字段的入参；
+// 宿主侧要按同一规则补一次，否则命令条目标题只能是「命令」。
+const withCommandDescription = (toolName, args) => {
+  if (!isRecord(args)) return args;
+  const written = typeof args.description === "string" ? args.description.trim().replace(/\s+/g, " ") : "";
+  if (written) return { ...args, description: written };
+  const command = typeof args.command === "string" ? args.command : "";
+  return {
+    ...args,
+    description: command
+      ? fallbackCommandDescription(command)
+      : `执行 ${String(toolName || "工具").trim()}`,
+  };
+};
+
 const registerHppShellTool = (pi) => {
   if (!shellAvailable || typeof pi?.registerTool !== "function" || typeof sdk?.createBashToolDefinition !== "function") return;
   const isPowerShell = shellEnvironment.platform === "win32" && shellEnvironment.shellFamily === "powershell";
@@ -910,13 +940,44 @@ const registerHppShellTool = (pi) => {
     } : {}),
   });
   definition.label = shellLabel;
-  definition.description = `在当前工作目录执行 ${shellLabel} 命令。注册的工具名称仍为 bash，并返回标准输出和标准错误。`;
+  definition.description = `在当前工作目录执行 ${shellLabel} 命令。注册的工具名称仍为 bash，并返回标准输出和标准错误。调用时请填写 description，用一句中文说明这条命令要做什么。`;
   definition.promptSnippet = `使用可用的 bash 工具执行 ${shellLabel} 命令`;
   definition.promptGuidelines = [
     ...(definition.promptGuidelines || []),
     `bash 工具已注册并可用；它实际执行的是 ${shellLabel}，不一定是 GNU Bash。`,
+    // 宿主会把 description 当作命令条目标题展示，缺失时只能显示「已运行 bash」。
+    "每次调用 bash 都填写 description：一句中文短语说明这条命令要达成什么（动词开头，如「查看空闲时长的渲染位置」），会显示在处理过程里作为标题。",
     ...(isPowerShell ? ["在 Windows PowerShell 中运行 Node 包管理器命令时，请使用 npm.cmd、npx.cmd、pnpm.cmd 和 yarn.cmd。"] : []),
   ];
+  // description 必须必填：只当可选项时模型基本不写，命令条目只能显示「命令」。
+  // prepareArguments 在 SDK 校验入参之前执行，漏填时补齐，命令不会被校验拒掉。
+  const parameters = isRecord(definition.parameters) ? definition.parameters : null;
+  const properties = parameters && isRecord(parameters.properties) ? parameters.properties : null;
+  if (parameters && properties) {
+    definition.parameters = {
+      ...parameters,
+      properties: {
+        ...properties,
+        description: {
+          type: "string",
+          description: "必填。一句话说明这条命令要达成什么，动词开头、中文，例如「查看空闲时长的渲染位置」。会显示在处理过程里作为标题。",
+        },
+      },
+      required: [...(Array.isArray(parameters.required) ? parameters.required : []).filter(
+        (key) => key !== "description"
+      ), "description"],
+    };
+    definition.prepareArguments = (args) => {
+      const input = isRecord(args) ? args : {};
+      const written = typeof input.description === "string" ? input.description.trim().replace(/\s+/g, " ") : "";
+      return written
+        ? { ...input, description: written }
+        : {
+            ...input,
+            description: fallbackCommandDescription(input.command),
+          };
+    };
+  }
   pi.registerTool(definition);
 };
 
@@ -1950,7 +2011,7 @@ const handleSessionEvent = (event) => {
         type: "tool_execution_start",
         toolName: event.toolName,
         toolCallId: event.toolCallId,
-        args: event.args,
+        args: withCommandDescription(event.toolName, event.args),
       });
       break;
     case "tool_execution_update":
@@ -1959,7 +2020,7 @@ const handleSessionEvent = (event) => {
         type: "tool_execution_update",
         toolName: event.toolName,
         toolCallId: event.toolCallId,
-        args: event.args,
+        args: withCommandDescription(event.toolName, event.args),
         partialResult: event.partialResult,
       });
       break;

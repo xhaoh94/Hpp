@@ -116,16 +116,21 @@ export const readProviderConfig = async () => {
     const baseUrl = asString(model.baseUrl) || asString(model.baseURL);
     const apiKey = asString(model.apiKey);
     const providerType = asString(model.provider) || "generic-chat-completion-api";
+    const modelEndpoint = getProviderEndpoint(providerType);
     const declaredProviderId = asString(model.hppProviderId);
-    const providerId = declaredProviderId || providerIdFromUrl(baseUrl, providerType, usedIds);
+    // 渠道级取值独立落盘：模型条目上的 baseUrl/provider 可能是模型级覆盖，
+    // 拿它当渠道值会让"第一个模型恰好覆盖"变成整条渠道的基准。
+    const channelBaseUrl = asString(model.hppProviderBaseUrl) || baseUrl;
+    const declaredChannelEndpoint = asString(model.hppProviderEndpoint);
+    const providerId = declaredProviderId || providerIdFromUrl(channelBaseUrl, providerType, usedIds);
     if (declaredProviderId) usedIds.add(declaredProviderId);
     if (!groups.has(providerId)) {
       groups.set(providerId, {
         providerId,
         displayName: asString(model.hppProviderDisplayName) || providerId,
-        baseUrl,
+        baseUrl: channelBaseUrl,
         apiKey,
-        endpoint: getProviderEndpoint(providerType),
+        endpoint: declaredChannelEndpoint || modelEndpoint,
         models: [],
         nativeModelIds: new Set(),
       });
@@ -149,6 +154,8 @@ export const readProviderConfig = async () => {
       isBuiltin: false,
       hasThinkingLevels: reasoning && !hasExplicitLevels,
       ...(hasExplicitLevels ? { supportedThinkingLevels } : {}),
+      ...(baseUrl && baseUrl !== group.baseUrl ? { baseUrl } : {}),
+      ...(modelEndpoint !== group.endpoint ? { endpoint: modelEndpoint } : {}),
     });
     const nativeModelId = asString(model.id);
     if (nativeModelId) group.nativeModelIds.add(nativeModelId);
@@ -183,18 +190,23 @@ export const writeProviderConfig = async (state) => {
       const existing = existingManagedModels.get(getManagedModelKey(provider.providerId, model.id)) || {};
       const nativeModelId = asString(existing.id) || `custom:hpp:${sanitizeProviderId(provider.providerId, "provider")}:${sanitizeProviderId(model.id, "model")}`;
       const supportedThinkingLevels = normalizeThinkingLevels(model.supportedThinkingLevels);
+      const modelBaseUrl = asString(model.baseUrl) || provider.baseUrl;
+      const modelEndpoint = asString(model.endpoint) || provider.endpoint;
       managedModels.push({
         ...existing,
         hppManaged: true,
         hppProviderId: provider.providerId,
         hppProviderDisplayName: provider.displayName || provider.providerId,
+        // 渠道级取值单独记一份，模型条目上的 baseUrl/provider 才能安全地承载覆盖。
+        hppProviderBaseUrl: provider.baseUrl,
+        hppProviderEndpoint: provider.endpoint,
         hppReasoning: supportedThinkingLevels.length > 0,
         hppSupportedThinkingLevels: supportedThinkingLevels,
-        provider: getProviderType(provider.endpoint),
+        provider: getProviderType(modelEndpoint),
         model: model.id,
         id: nativeModelId,
         displayName: model.name || model.id,
-        baseUrl: provider.baseUrl,
+        baseUrl: modelBaseUrl,
         apiKey: provider.apiKey,
         noImageSupport: model.imageInput !== true,
       });

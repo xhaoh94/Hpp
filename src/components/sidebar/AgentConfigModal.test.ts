@@ -165,24 +165,43 @@ describe("AgentConfigModal provider selection", () => {
     // Electron 可能只派发 dragend 不派发 drop：dragend 里要补一次提交。
     expect(modalSource).toContain("onDragEnd={handleModelDragEnd}");
     expect(modalSource).toContain("if (!modelDropCommittedRef.current) {");
-    // 拖动反馈：拖起行半透明，目标行显示插入线。
-    expect(settingsStyles).toContain(".agent-config-model-row.drop-before");
-    expect(settingsStyles).toContain(".agent-config-model-row.dragging");
+    // 拖动反馈：拖起行半透明，目标行显示插入线。状态挂在整行（含可选的模型 URL 行）上。
+    expect(settingsStyles).toContain(".agent-config-model-item.drop-before");
+    expect(settingsStyles).toContain(".agent-config-model-item.dragging");
   });
 
-  it("labels the model id and display name columns on the toolbar row", () => {
-    // 列标题与“获取模型/添加模型”同一行，不再单独占一行，也没有“能力”说明。
+  it("exposes per-model endpoints only for agents that declare support", () => {
+    // 能力关闭时整列不渲染，面板也不加宽列变量。
+    expect(modalSource).toContain('supportsModelEndpoints ? "with-model-endpoints" : ""');
+    expect(modalSource).toContain('providerConfiguration?.modelEndpointOverrides === true');
+    expect(settingsStyles).toContain(".agent-config-models-panel.with-model-endpoints");
+    // 选择器默认「继承渠道」，覆盖后颜色提亮。
+    expect(modalSource).toContain('<option value="">继承渠道</option>');
+    expect(modalSource).toContain("agent-config-model-endpoint ${model.endpoint ? \"overridden\" : \"\"}");
+    // 只有覆盖了端点才展开模型 URL 行；留空即沿用渠道 URL。
+    expect(modalSource).toContain("supportsModelEndpoints && model.endpoint && (");
+    expect(modalSource).toContain("留空沿用渠道 URL");
+    expect(settingsStyles).toContain(".agent-config-model-endpoint-row");
+  });
+
+  it("keeps column labels and row actions on separate rows", () => {
     expect(modalSource).toContain('className="agent-config-model-head-label">模型 ID<');
     expect(modalSource).toContain('className="agent-config-model-head-label">显示名<');
-    expect(modalSource).not.toContain("agent-config-model-head-ability");
-    // 面板左上角不再有单独的“模型”标题（它现在与列标题、按钮同排）。
-    const panelHeaderStart = modalSource.indexOf("agent-config-models-header");
-    const panelHeaderBlock = modalSource.slice(
-      panelHeaderStart,
-      modalSource.indexOf("agent-config-model-actions", panelHeaderStart),
-    );
-    expect(panelHeaderBlock).not.toContain("agent-config-section-title");
-    expect(panelHeaderBlock).toContain("模型 ID");
+    // 能力列不给标题：内置行的显示名跨过该列，标在这儿会落到显示名输入框上方。
+    expect(modalSource).not.toContain('className="agent-config-model-head-label">能力<');
+    // 操作按钮在工具条里，列标题行只放列名。
+    const toolbarStart = modalSource.indexOf("agent-config-models-toolbar");
+    const headerStart = modalSource.indexOf("agent-config-models-header", toolbarStart);
+    expect(toolbarStart).toBeGreaterThan(-1);
+    expect(toolbarStart).toBeLessThan(headerStart);
+    const headerBlock = modalSource.slice(headerStart, modalSource.indexOf("modelFetchError", headerStart));
+    expect(headerBlock).not.toContain("agent-config-model-actions");
+    expect(headerBlock).toContain("模型 ID");
+    // 端点列标题显式定位到第 5 列：能力列没有标题，自动排布会占错列。
+    expect(settingsStyles).toContain(".agent-config-model-head-endpoint {");
+    expect(settingsStyles).toContain("grid-column: 5;");
+    expect(settingsStyles).toContain(".agent-config-models-toolbar");
+    expect(settingsStyles).toContain(".agent-config-models-count");
     expect(modalSource).toContain('placeholder="model-id"');
     expect(modalSource).toContain('placeholder="显示名（默认同 ID）"');
     expect(modalSource).toContain('className="input-field agent-config-model-display-name"');
@@ -190,13 +209,11 @@ describe("AgentConfigModal provider selection", () => {
     expect(settingsStyles).toContain(".agent-config-model-row.builtin > .agent-config-model-display-name");
     // 内置行不渲染能力区占位（占位会抢走删除列，把删除按钮挤到隐式第二行）。
     expect(modalSource).not.toContain('className="agent-config-model-checks" aria-hidden="true" />');
-    // 删除按钮显式钉在最后一列，不依赖自动排布。
+    // 删除按钮显式钉在最后一列，不依赖自动排布（列数随是否支持模型级端点变化，所以用负索引）。
     expect(settingsStyles).toContain(".agent-config-model-row > .btn-delete {");
-    expect(settingsStyles).toContain("grid-column: 5;");
+    expect(settingsStyles).toContain("grid-column: -2;");
     expect(settingsStyles).toContain("--agent-model-columns");
     expect(settingsStyles).toContain(".agent-config-model-head-label");
-    // 列标题与按钮同行：按钮跨能力+删除列并靠右。
-    expect(settingsStyles).toContain(".agent-config-models-header .agent-config-model-actions");
   });
 
   it("keeps the channel detail header out of the model column grid", () => {

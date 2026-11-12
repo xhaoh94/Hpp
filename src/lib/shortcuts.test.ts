@@ -3,15 +3,25 @@ import {
   DEFAULT_SHORTCUTS,
   formatShortcut,
   matchShortcut,
+  normalizeSendKey,
   normalizeShortcuts,
 } from "./shortcuts";
 
 describe("desktop shortcuts", () => {
   it("fills message navigation defaults into legacy settings", () => {
-    expect(normalizeShortcuts({ sendKey: "Ctrl+Enter", cycleModel: "Ctrl+M" })).toEqual({
+    expect(normalizeShortcuts({ sendKey: "normal", cycleModel: "Ctrl+M" })).toEqual({
       ...DEFAULT_SHORTCUTS,
-      sendKey: "Ctrl+Enter",
+      sendKey: "normal",
     });
+  });
+
+  it("migrates legacy sendKey values to the normal/guide modes", () => {
+    // 旧配置「Ctrl+Enter 发送」在新语义下 = Ctrl+Enter 普通发送、Enter 引导。
+    expect(normalizeSendKey("Ctrl+Enter")).toBe("guide");
+    expect(normalizeSendKey("Enter")).toBe("normal");
+    // 非法值落回默认。
+    expect(normalizeSendKey("whatever")).toBe("normal");
+    expect(normalizeSendKey(undefined)).toBe("normal");
   });
 
   it("uses Ctrl+arrow keys for message navigation by default", () => {

@@ -70,6 +70,8 @@ const buildNormalizedProviderPayload = (draft: AgentProviderConfig, originalProv
       const supportedThinkingLevels = isBuiltin
         ? []
         : normalizeSupportedThinkingLevels(model.supportedThinkingLevels);
+      // 端点覆盖只在选了非“继承渠道”时保留，URL 留空表示沿用渠道 URL。
+      const baseUrl = model.endpoint ? (model.baseUrl || "").trim() : "";
       return {
         ...model,
         id: model.id.trim(),
@@ -77,6 +79,8 @@ const buildNormalizedProviderPayload = (draft: AgentProviderConfig, originalProv
         reasoning: isBuiltin ? model.reasoning === true : getConfiguredThinkingLevels(model.supportedThinkingLevels).length > 0,
         imageInput: model.imageInput,
         supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
+        ...(model.endpoint ? { endpoint: model.endpoint } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
       };
     }),
   };
@@ -326,6 +330,17 @@ const createProvider = (index: number, configuration: AgentProviderConfiguration
 const getEndpointLabel = (configuration: AgentProviderConfiguration, endpoint: AgentProviderEndpoint) =>
   configuration.endpoints.find((option) => option.id === endpoint)?.label || endpoint;
 
+/** 端点 id → 展示名；配置缺失时原样返回，避免调用处到处写非空断言。 */
+const describeEndpoint = (configuration: AgentProviderConfiguration | undefined, endpoint: string) =>
+  configuration ? getEndpointLabel(configuration, endpoint) : endpoint;
+
+/** 模型行的端点列只有 132px：去掉清单里的路径后缀和 "Messages/Conversations" 尾巴才放得下。 */
+const shortEndpointLabel = (label: string) => {
+  const base = label.split("（")[0].split(" (")[0].trim();
+  const shortened = base.replace(/\s+(Messages|Conversations)$/i, "").trim();
+  return shortened || base;
+};
+
 function cloneProvider(provider: AgentProviderConfig): AgentProviderConfig {
   return {
     ...provider,
@@ -378,6 +393,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   const usesActivation = activeAgent?.capabilities.providerActivation === "single-active";
   const endpointOptions = providerConfiguration?.endpoints || [];
   const authModeOptions = providerConfiguration?.authModes || [];
+  // 同一个渠道混多地中转站（GPT 走 /v1、Claude 走 /claude/v1）时，插件声明
+  // modelEndpointOverrides 才在模型行露出端点列。
+  const supportsModelEndpoints = providerConfiguration?.modelEndpointOverrides === true;
   const backendModelVisibility = providerConfiguration?.backendModelVisibility;
   const subagentCapabilities = activeAgent?.capabilities.subagent;
   const supportsSubagentConfiguration = !!subagentCapabilities
@@ -504,6 +522,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
             ...customDefault,
             id: model.id,
             name: model.name,
+            // 能力回退不能把端点覆盖一起丢掉。
+            ...(model.endpoint ? { endpoint: model.endpoint } : {}),
+            ...(model.baseUrl ? { baseUrl: model.baseUrl } : {}),
           } : model),
         };
       });
@@ -927,22 +948,60 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       return;
     }
 
+    // 渠道端点 + 已配置的模型级端点各拉一次：中转站的 GPT / Claude 常常挂在
+    // 不同路径下，单端点只能拿到一半模型。按 (url, endpoint) 去重。
+    const targets: Array<{ baseUrl: string; endpoint: AgentProviderEndpoint }> = [
+      { baseUrl: draft.baseUrl.trim(), endpoint: draft.endpoint },
+    ];
+    if (supportsModelEndpoints) {
+      for (const model of draft.models) {
+        if (!model.endpoint) continue;
+        const target = { baseUrl: (model.baseUrl || draft.baseUrl).trim(), endpoint: model.endpoint };
+        if (!targets.some((item) => item.baseUrl === target.baseUrl && item.endpoint === target.endpoint)) {
+          targets.push(target);
+        }
+      }
+    }
+
     const requestId = ++modelFetchRequest.current;
     setFetchingModels(true);
     setModelFetchError("");
     try {
-      const result = await window.electronAPI.agentConfigFetchModels(
-        draft.baseUrl,
-        draft.apiKey,
-        draft.endpoint,
-        draft.authMode,
-      );
+      const results = await Promise.all(targets.map(async (target) => {
+        try {
+          const result = await window.electronAPI.agentConfigFetchModels(
+            target.baseUrl,
+            draft.apiKey,
+            target.endpoint,
+            draft.authMode,
+          );
+          return { target, result };
+        } catch (error) {
+          return { target, result: { success: false, models: [], error: error instanceof Error ? error.message : String(error) } };
+        }
+      }));
       if (modelFetchRequest.current !== requestId) return;
-      if (!result.success || result.models.length === 0) {
-        setModelFetchError(result.error || "没有获取到可用模型。");
+      const merged: AgentRemoteModel[] = [];
+      const failures: string[] = [];
+      for (const { target, result } of results) {
+        if (!result.success || result.models.length === 0) {
+          failures.push(`${describeEndpoint(providerConfiguration, target.endpoint)}${result.error ? `：${result.error}` : "：没有返回模型"}`);
+          continue;
+        }
+        // 与渠道端点一致的模型不打覆盖标记，加进来就是“继承渠道”。
+        const tag = targets.length > 1
+          && (target.endpoint !== draft.endpoint || target.baseUrl !== draft.baseUrl.trim());
+        for (const model of result.models) {
+          if (merged.some((item) => item.id === model.id)) continue;
+          merged.push(tag ? { ...model, endpoint: target.endpoint, baseUrl: target.baseUrl } : model);
+        }
+      }
+      if (merged.length === 0) {
+        setModelFetchError(failures.join("；") || "没有获取到可用模型。");
         return;
       }
-      setRemoteModels(result.models);
+      if (failures.length > 0) showFloatingToastMessage(`部分端点获取失败：${failures.join("；")}`);
+      setRemoteModels(merged);
       setSelectedRemoteModelIds(new Set());
       setModelSearch("");
       setModelPickerOpen(true);
@@ -952,7 +1011,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     } finally {
       if (modelFetchRequest.current === requestId) setFetchingModels(false);
     }
-  }, [draft]);
+  }, [draft, providerConfiguration, supportsModelEndpoints]);
 
   const toggleRemoteModel = useCallback((modelId: string) => {
     if (configuredModelIds.has(modelId)) return;
@@ -998,6 +1057,9 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         hasThinkingLevels: false,
         isBuiltin: false,
         supportedThinkingLevels: supportedThinkingLevels.length > 0 ? supportedThinkingLevels : undefined,
+        // 从模型级端点拉到的模型带上来源端点，不必再手工补一次。
+        ...(model.endpoint ? { endpoint: model.endpoint } : {}),
+        ...(model.baseUrl ? { baseUrl: model.baseUrl } : {}),
       });
       addedModelIds.push(model.id);
     }
@@ -1880,36 +1942,45 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 </label>
               </div>
 
-              <div className="agent-config-models-panel">
-                <div className="agent-config-models-header">
-                <span />
-                <span className="agent-config-model-head-label">模型 ID</span>
-                <span className="agent-config-model-head-label">显示名</span>
-                <div className="agent-config-model-actions">
-                  <button
-                    type="button"
-                    className="btn-action agent-config-mini-btn"
-                    onClick={() => void handleFetchModels()}
-                    disabled={fetchingModels || !draft.baseUrl.trim()}
-                  >
-                    {fetchingModels ? <Loader2 size={13} className="agent-config-spin" /> : <RefreshCw size={13} />}
-                    {fetchingModels ? "获取中..." : "获取模型"}
-                  </button>
-                  <button type="button" className="btn-action agent-config-mini-btn" onClick={addModel}>
-                    <Plus size={13} />
-                    添加模型
-                  </button>
+              <div className={`agent-config-models-panel ${supportsModelEndpoints ? "with-model-endpoints" : ""}`}>
+                {/* 操作按钮不在列表里：列标题行只放列名，避免按钮夹在「显示名」和「端点」中间。 */}
+                <div className="agent-config-models-toolbar">
+                  <span className="agent-config-section-title">模型</span>
+                  <span className="agent-config-models-count">{draft.models.length}</span>
+                  <div className="agent-config-model-actions">
+                    <button
+                      type="button"
+                      className="btn-action agent-config-mini-btn"
+                      onClick={() => void handleFetchModels()}
+                      disabled={fetchingModels || !draft.baseUrl.trim()}
+                    >
+                      {fetchingModels ? <Loader2 size={13} className="agent-config-spin" /> : <RefreshCw size={13} />}
+                      {fetchingModels ? "获取中..." : "获取模型"}
+                    </button>
+                    <button type="button" className="btn-action agent-config-mini-btn" onClick={addModel}>
+                      <Plus size={13} />
+                      添加模型
+                    </button>
+                  </div>
                 </div>
-              </div>
+                <div className="agent-config-models-header">
+                  <span />
+                  <span className="agent-config-model-head-label">模型 ID</span>
+                  <span className="agent-config-model-head-label">显示名</span>
+                  {supportsModelEndpoints && (
+                    <span className="agent-config-model-head-label agent-config-model-head-endpoint" title="单个模型可覆盖渠道端点">端点</span>
+                  )}
+                </div>
               {modelFetchError && <div className="status-message error agent-config-fetch-error">{modelFetchError}</div>}
               <div className="agent-config-model-list">
                 {draft.models.map((model, index) => (
                   <div
                     key={index}
-                    className={`agent-config-model-row ${model.isBuiltin ? "builtin" : "custom"} ${dragModelIndex === index ? "dragging" : ""} ${dragOverModelIndex === index && dragModelIndex !== index ? `drop-${dragOverModelPosition}` : ""}`}
+                    className={`agent-config-model-item ${dragModelIndex === index ? "dragging" : ""} ${dragOverModelIndex === index && dragModelIndex !== index ? `drop-${dragOverModelPosition}` : ""}`}
                     onDragOver={(event) => handleModelDragOver(event, index)}
                     onDrop={(event) => commitModelDrop(event, index)}
                   >
+                  <div className={`agent-config-model-row ${model.isBuiltin ? "builtin" : "custom"}`}>
                     <span
                       className="agent-config-model-drag"
                       draggable
@@ -1955,6 +2026,30 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         </label>
                       </div>
                     ) : null}
+                    {supportsModelEndpoints && (
+                      <select
+                        value={model.endpoint || ""}
+                        onChange={(event) => {
+                          const endpoint = event.target.value as AgentProviderEndpoint | "";
+                          updateModel(index, {
+                            endpoint: endpoint || undefined,
+                            // 回到“继承渠道”时把模型 URL 一起清掉，避免留下一条改不掉的隐藏覆盖。
+                            ...(endpoint ? {} : { baseUrl: undefined }),
+                          });
+                        }}
+                        className={`input-field agent-config-model-endpoint ${model.endpoint ? "overridden" : ""}`}
+                        title={model.endpoint
+                          ? `模型端点：${describeEndpoint(providerConfiguration, model.endpoint)}`
+                          : `继承渠道端点：${describeEndpoint(providerConfiguration, draft.endpoint)}`}
+                      >
+                        <option value="">继承渠道</option>
+                        {endpointOptions.map((option) => (
+                          <option key={option.id} value={option.id} title={option.label}>
+                            {shortEndpointLabel(option.label)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     <button
                       type="button"
                       className="btn-icon btn-delete"
@@ -1964,6 +2059,25 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     >
                       <Trash2 size={13} />
                     </button>
+                  </div>
+                  {supportsModelEndpoints && model.endpoint && (
+                    <div className="agent-config-model-endpoint-row">
+                      <span>模型 URL</span>
+                      <input
+                        value={model.baseUrl || ""}
+                        onChange={(event) => updateModel(index, { baseUrl: event.target.value })}
+                        className="input-field"
+                        placeholder={`留空沿用渠道 URL${draft.baseUrl.trim() ? `（${draft.baseUrl.trim()}）` : ""}`}
+                      />
+                      <button
+                        type="button"
+                        className="agent-config-endpoint-reset"
+                        onClick={() => updateModel(index, { endpoint: undefined, baseUrl: undefined })}
+                      >
+                        还原
+                      </button>
+                    </div>
+                  )}
                   </div>
                 ))}
               </div>
@@ -2032,6 +2146,11 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                       />
                       <span className="agent-model-picker-name">{model.name}</span>
                       <code>{model.id}</code>
+                      {model.endpoint && (
+                        <span className="agent-model-picker-badge endpoint" title={model.baseUrl || undefined}>
+                          {describeEndpoint(providerConfiguration, model.endpoint)}
+                        </span>
+                      )}
                       {configured && <span className="agent-model-picker-badge">已添加</span>}
                     </label>
                   );

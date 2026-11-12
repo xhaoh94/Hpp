@@ -2788,19 +2788,42 @@
   text-align: left;
 }
 
-.agent-config-models-header .agent-config-model-actions {
-  grid-column: 4 / 6;
+/* 面板工具条：标题 + 数量在左，操作按钮靠右。与列标题分开，
+   否则按钮会夹在「显示名」和「端点」中间，把列标题读成一排控件。 */
+.agent-config-models-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-subtle);
 }
 
-/* 表头按钮减重：去掉填充底色，保留一圈淡边框保证可点性，hover 才上强调色。 */
-.agent-config-models-header .agent-config-mini-btn {
+.agent-config-models-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.agent-config-models-toolbar .agent-config-model-actions {
+  margin-left: auto;
+}
+
+/* 工具条按钮减重：去掉填充底色，保留一圈淡边框保证可点性，hover 才上强调色。 */
+.agent-config-models-toolbar .agent-config-mini-btn {
   height: 24px;
   padding: 0 9px;
   border-color: color-mix(in srgb, var(--border-color) 70%, transparent);
   background: transparent;
 }
 
-.agent-config-models-header .agent-config-mini-btn:hover:not(:disabled) {
+.agent-config-models-toolbar .agent-config-mini-btn:hover:not(:disabled) {
   border-color: var(--accent-color);
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -2919,7 +2942,6 @@
   padding: 6px 14px;
   margin-bottom: 0;
   border-bottom: 1px solid var(--border-color);
-  background: var(--surface-subtle);
 }
 
 .agent-config-models-panel .agent-config-model-list {
@@ -3160,7 +3182,9 @@
   pointer-events: none;
 }
 
-.agent-model-picker-search .input-field {
+/* 选择器的通用 .input-field 规则（文件末尾）也用 0,2,0 的 padding，
+   同级时后定义者胜出 —— 这里必须多一层，否则搜索图标会压住占位文字。 */
+.agent-model-picker-modal .agent-model-picker-search .input-field {
   padding-left: 32px;
 }
 
@@ -3240,6 +3264,16 @@
   white-space: nowrap;
 }
 
+/* 端点徽标：同一批结果可能来自多个端点，标出来才知道加进去的模型带没带覆盖。 */
+.agent-model-picker-badge.endpoint {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+  color: var(--accent-color);
+  font-weight: 500;
+}
+
 .agent-model-picker-footer {
   justify-content: flex-end;
   padding: 12px 20px;
@@ -3253,9 +3287,43 @@
   --agent-model-columns: 22px minmax(0, 1fr) minmax(0, 1.45fr) minmax(0, 250px) 28px;
 }
 
+/* 支持模型级端点的 Agent 多一列端点选择；能力列收窄给它让位。 */
+.agent-config-models-panel.with-model-endpoints {
+  --agent-model-columns: 22px minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 218px) minmax(0, 132px) 28px;
+}
+
 .agent-config-model-list {
   display: flex;
   flex-direction: column;
+}
+
+/* 一行 + 可选的模型 URL 行共用一个外框：拖动落点、hover 底色、分隔线都挂在它上面。 */
+.agent-config-model-item {
+  position: relative;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  transition: background-color 0.12s ease;
+}
+
+.agent-config-model-item:last-child {
+  border-bottom: 0;
+}
+
+.agent-config-model-item:hover {
+  background: color-mix(in srgb, var(--bg-hover) 75%, transparent);
+}
+
+.agent-config-model-item.dragging {
+  opacity: 0.55;
+}
+
+.agent-config-model-item.drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent-color);
+}
+
+.agent-config-model-item.drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent-color);
 }
 
 .agent-config-model-row {
@@ -3265,18 +3333,8 @@
   align-items: center;
   gap: 9px;
   padding: 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
   border-radius: 6px;
   background: transparent;
-  transition: background-color 0.12s ease;
-}
-
-.agent-config-model-row:last-child {
-  border-bottom: 0;
-}
-
-.agent-config-model-row:hover {
-  background: color-mix(in srgb, var(--bg-hover) 75%, transparent);
 }
 
 /* 行内输入框：清掉 .input-field 的下外边距，整行才能按 28px 垂直居中。
@@ -3294,6 +3352,59 @@
   height: 28px;
 }
 
+/* 模型行端点列：默认「继承渠道」弱化，覆盖后提到强调色，一眼看出哪几个模型走了别的端点。 */
+.agent-config-model-row > .agent-config-model-endpoint {
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.agent-config-model-row > .agent-config-model-endpoint.overridden {
+  border-color: color-mix(in srgb, var(--accent-color) 55%, var(--border-color));
+  color: var(--text-primary);
+}
+
+/* 覆盖行：缩进对齐模型 ID 列，只放模型 URL 与还原。 */
+.agent-config-model-endpoint-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 6px calc(6px + 22px + 9px);
+}
+
+.agent-config-model-endpoint-row > span {
+  color: var(--text-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.agent-config-model-endpoint-row .input-field {
+  height: 26px;
+  padding: 0 9px;
+  margin-bottom: 0;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.agent-config-endpoint-reset {
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.agent-config-endpoint-reset:hover {
+  color: var(--accent-color);
+}
+
+/* 端点列标题显式定位：能力列没有标题，靠自动排布会把它挤到能力列上。 */
+.agent-config-model-head-endpoint {
+  grid-column: 5;
+}
+
 /* 内置模型没有能力控件：显示名跨过空的能力列，保留 ID 宽度并吃掉右侧空白。 */
 .agent-config-model-row.builtin > .agent-config-model-display-name {
   grid-column: 3 / 5;
@@ -3301,13 +3412,13 @@
 
 /* 删除按钮显式落在最后一列：内置行少了能力控件，靠自动排布会被挤到第二行左侧。 */
 .agent-config-model-row > .btn-delete {
-  grid-column: 5;
+  grid-column: -2;
   justify-self: end;
   opacity: 0.45;
   transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
 }
 
-.agent-config-model-row:hover > .btn-delete:not(:disabled),
+.agent-config-model-item:hover .agent-config-model-row > .btn-delete:not(:disabled),
 .agent-config-model-row > .btn-delete:focus-visible {
   opacity: 1;
 }
@@ -3328,7 +3439,8 @@
   transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
 }
 
-.agent-config-model-row:hover > .agent-config-model-drag {
+.agent-config-model-item:hover .agent-config-model-row > .agent-config-model-drag,
+.agent-config-model-drag:hover {
   opacity: 1;
 }
 
@@ -3339,18 +3451,6 @@
 
 .agent-config-model-drag:active {
   cursor: grabbing;
-}
-
-.agent-config-model-row.dragging {
-  opacity: 0.55;
-}
-
-.agent-config-model-row.drop-before {
-  box-shadow: inset 0 2px 0 0 var(--accent-color);
-}
-
-.agent-config-model-row.drop-after {
-  box-shadow: inset 0 -2px 0 0 var(--accent-color);
 }
 
 .agent-config-model-checks {
@@ -3783,12 +3883,9 @@
 }
 
 @media (max-width: 1080px) {
+  /* 窄屏没有列标题（也没有按钮）：整行去掉，省下 28px 给列表。 */
   .agent-config-models-header {
-    grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 28px;
-  }
-
-  .agent-config-models-header .agent-config-model-actions {
-    grid-column: 2 / 5;
+    display: none;
   }
 
   /* 窄屏：隐藏列标题，能力区换到第二行，列宽改为 ID / 名字 / 删除。 */
@@ -3811,10 +3908,25 @@
 
   .agent-config-model-row.custom .agent-config-model-checks {
     grid-column: 2 / 4;
+    grid-row: 2;
   }
 
   .agent-config-model-row.custom > .btn-delete {
     grid-row: 1 / 3;
+  }
+
+  /* 窄屏没有端点列：端点选择换到独立一行，自定义模型的能力区在它上面。 */
+  .agent-config-model-row > .agent-config-model-endpoint {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
+
+  .agent-config-model-row.custom > .agent-config-model-endpoint {
+    grid-row: 3;
+  }
+
+  .agent-config-models-panel.with-model-endpoints .agent-config-model-row.custom > .btn-delete {
+    grid-row: 1 / 4;
   }
 }
 
@@ -3832,6 +3944,11 @@
   }
 
   .agent-config-model-checks {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .agent-config-model-row > .agent-config-model-endpoint {
     grid-column: auto;
     grid-row: auto;
   }

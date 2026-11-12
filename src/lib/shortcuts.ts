@@ -9,7 +9,7 @@ export interface ShortcutConfig {
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutConfig = {
-  sendKey: "Enter",
+  sendKey: "normal",
   fileSearch: "Ctrl+P",
   switchToFiles: "Ctrl+Shift+F",
   prevModel: "Ctrl+[",
@@ -26,12 +26,21 @@ const asRecord = (value: unknown): Record<string, unknown> => (
     : {}
 );
 
+// sendKey 表示 Enter 承担哪种发送：normal = Enter 普通发送 / Ctrl+Enter 引导，guide = 对调。
+// 旧配置里它是「哪个键发送」（"Enter" / "Ctrl+Enter"），读取时迁移。
+export function normalizeSendKey(value: unknown): string {
+  if (value === "Ctrl+Enter" || value === "guide") return "guide";
+  return "normal";
+}
+
 export function normalizeShortcuts(value: unknown): ShortcutConfig {
   const shortcuts = asRecord(value);
   const result = { ...DEFAULT_SHORTCUTS };
   for (const key of Object.keys(DEFAULT_SHORTCUTS) as Array<keyof ShortcutConfig>) {
+    if (key === "sendKey") continue;
     if (typeof shortcuts[key] === "string" && shortcuts[key].trim()) result[key] = shortcuts[key].trim();
   }
+  result.sendKey = normalizeSendKey(shortcuts.sendKey);
   return result;
 }
 

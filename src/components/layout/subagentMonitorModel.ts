@@ -1,4 +1,5 @@
 import type { AgentSubagent, ChatMessage } from "@/stores/chat-store";
+import { getEffectiveProcessSubagents } from "@shared/process-view";
 
 export type MonitoredSubagent = AgentSubagent & {
   messageId: string;
@@ -18,7 +19,8 @@ export const collectRunningSubagents = (messages: ChatMessage[]): MonitoredSubag
     const entries = message.process?.entries;
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
-      for (const subagent of entry.subagents || []) {
+      // 收进残留的占位项，就是永远收不到终态、永远空输出的那个页签。
+      for (const subagent of getEffectiveProcessSubagents(entry.subagents, entry.state)) {
         byId.set(subagent.id, { ...subagent, messageId: message.id, entryId: entry.id });
       }
     }

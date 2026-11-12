@@ -133,4 +133,16 @@ describe("subagent events", () => {
       status: "running",
     })]);
   });
+
+  // 后端给了空列表就是「没有子任务」；再补占位项的话，它的裸 toolCallId 永远收不到
+  // 后续 `toolCallId:N` 的事件，进度会一直卡在 1/2。
+  it("does not invent a placeholder subagent for an explicit empty list", () => {
+    expect(parseSubagentsFromEvent({
+      type: "subagent_event",
+      id: "call-9",
+      toolCallId: "call-9",
+      subagents: [],
+      state: "running",
+    } as AgentEvent)).toEqual([]);
+  });
 });

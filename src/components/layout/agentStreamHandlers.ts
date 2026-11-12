@@ -18,7 +18,6 @@ export function handleMessageStartEvent(
   }
   if (runtime.streamStarted) {
     ctx.clearStreamWatchdog(currentSessionId);
-    ctx.completeIdleNotice(currentSessionId);
     ctx.finishThinkingEntry(currentSessionId);
     useChatStore.getState().finishLastAssistantProcess(Date.now(), "completed", currentSessionId);
   }
@@ -32,6 +31,7 @@ export function handleMessageStartEvent(
   runtime.activeToolEntry = {};
   runtime.activeToolFile = {};
   runtime.activeToolKind = {};
+  runtime.activeToolDescription = {};
   runtime.nativePlanSteps = false;
   runtime.inferredPlanStepsActive = false;
   runtime.inferredStepSignal = {
@@ -72,7 +72,6 @@ export function handleStreamStartEvent(
   ) {
     ctx.finishAbortedTurn(currentSessionId);
   }
-  ctx.completeIdleNotice(currentSessionId);
   flushSync(() => {
     if (!alreadyStarted) {
       runtime.streamBuffer = "";
@@ -90,6 +89,7 @@ export function handleStreamStartEvent(
     runtime.activeToolEntry = {};
     runtime.activeToolFile = {};
     runtime.activeToolKind = {};
+    runtime.activeToolDescription = {};
     runtime.nativePlanSteps = false;
     runtime.inferredPlanStepsActive = false;
     runtime.inferredStepSignal = {
@@ -178,7 +178,6 @@ export function handleStreamSnapshotEvent(
 ) {
   const content = String(event.content || "");
   if (!content) return;
-  ctx.completeIdleNotice(currentSessionId);
   ctx.ensureAssistantContinuation(currentSessionId);
   ctx.finishThinkingEntry(currentSessionId);
   ctx.replaceAssistantProcessText(currentSessionId, content);

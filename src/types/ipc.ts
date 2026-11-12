@@ -174,6 +174,8 @@ export interface AgentProviderConfiguration {
     supportedThinkingLevels?: string[];
   };
   fixedModelCapabilities: boolean;
+  /** 插件支持在单个模型上覆盖 Endpoint/URL（同一渠道混多地中转站）。 */
+  modelEndpointOverrides?: boolean;
   modelListMode: "configured" | "backend" | "merge";
   backendModelVisibility?: AgentBackendModelVisibility;
 }

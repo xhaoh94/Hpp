@@ -25,7 +25,6 @@ describe("handleStreamEndEvent", () => {
       getPendingUIResponse: () => null,
       setPendingUIResponse: vi.fn(),
       clearStreamWatchdog: vi.fn(),
-      completeIdleNotice: vi.fn(),
       finishThinkingEntry: vi.fn(),
       appendProcessEntry: vi.fn(),
       updateInferredPlanSteps: vi.fn(),

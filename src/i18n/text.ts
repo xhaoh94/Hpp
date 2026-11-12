@@ -23,8 +23,8 @@ export const uiText = {
     creatingFork: "正在创建分叉会话",
     creatingForkWithEllipsis: "正在创建分叉会话...",
     submitQuestionnaire: "请在上方提交问卷",
-    placeholderCtrlEnter: "Ctrl+Enter 发送, Enter 换行",
-    placeholderEnter: "Enter 发送, Ctrl+Enter 换行",
+    placeholderNormal: "Enter 发送，Ctrl+Enter 引导发送，Shift+Enter 换行",
+    placeholderGuide: "Enter 引导发送，Ctrl+Enter 发送，Shift+Enter 换行",
     sendAnswer: "发送回答",
     queueSend: "加入发送队列",
     send: "发送",
@@ -127,9 +127,9 @@ export const getChatComposerPlaceholder = (
 ) => {
   if (interactionDisabled) return uiText.chatComposer.creatingForkWithEllipsis;
   if (activeQuestionnaire) return uiText.chatComposer.submitQuestionnaire;
-  return sendKey === "Ctrl+Enter"
-    ? uiText.chatComposer.placeholderCtrlEnter
-    : uiText.chatComposer.placeholderEnter;
+  return sendKey === "guide"
+    ? uiText.chatComposer.placeholderGuide
+    : uiText.chatComposer.placeholderNormal;
 };
 
 export const getChatComposerSendTitle = (

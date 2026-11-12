@@ -83,6 +83,22 @@ describe("official plugin config providers", () => {
     expect(claude.capabilities.compaction).toBeUndefined();
   });
 
+  it("declares per-model endpoint overrides only where the backend can honour them", async () => {
+    const readConfiguration = async (agentId: string) => {
+      const manifest = JSON.parse(await readFile(
+        join(process.cwd(), "electron", "agent-plugins", agentId, "hpp-agent-plugin.json"),
+        "utf8",
+      ));
+      return manifest.capabilities.configuration;
+    };
+    const configurations = await Promise.all(["pi", "droid", "opencode", "codex", "claude"].map(readConfiguration));
+
+    expect(configurations[0].modelEndpointOverrides).toBe(true);
+    expect(configurations[1].modelEndpointOverrides).toBe(true);
+    // 这三个的端点写在进程级 env / 单份 config 里，做不到按模型切换。
+    expect(configurations.slice(2).every((configuration) => configuration.modelEndpointOverrides === undefined)).toBe(true);
+  });
+
   it("maps Pi endpoints through the plugin adapter", async () => {
     const { getProviderApi, getProviderEndpoint, toProviderConfig } = await import("./pi/config.mjs");
     expect(toProviderConfig(provider("responses"))).toMatchObject({ api: "openai-responses" });
@@ -129,6 +145,54 @@ describe("official plugin config providers", () => {
         }],
       }],
     });
+  });
+
+  it("writes per-model Pi endpoints and URLs, and reads them back", async () => {
+    const pi = await import("./pi/config.mjs");
+    const configuredProvider = {
+      ...provider("responses"),
+      models: [
+        { id: "gpt-model", name: "GPT", reasoning: true, imageInput: true },
+        // 与渠道端点相同的显式覆盖不应落成模型级 api。
+        { id: "gpt-same-endpoint", name: "GPT 2", reasoning: true, imageInput: true, endpoint: "responses" },
+        {
+          id: "claude-model",
+          name: "Claude",
+          reasoning: true,
+          imageInput: true,
+          endpoint: "anthropic-messages",
+          baseUrl: "https://relay.example/claude/v1",
+        },
+        { id: "claude-inherit-url", name: "Claude 2", reasoning: true, imageInput: true, endpoint: "anthropic-messages" },
+      ],
+    };
+
+    const written = pi.toProviderConfig(configuredProvider);
+    expect(written.models[0]).not.toHaveProperty("api");
+    expect(written.models[1]).not.toHaveProperty("api");
+    expect(written.models[2]).toMatchObject({
+      api: "anthropic-messages",
+      baseUrl: "https://relay.example/claude/v1",
+    });
+    expect(written.models[3]).toMatchObject({ api: "anthropic-messages" });
+    expect(written.models[3]).not.toHaveProperty("baseUrl");
+
+    await writeFile(process.env.PI_CONFIG_PATH!, JSON.stringify({
+      providers: { custom: written },
+    }), "utf8");
+    const state = await pi.readProviderConfig();
+    expect(state).toMatchObject({
+      providers: [{
+        models: [
+          { id: "gpt-model" },
+          { id: "gpt-same-endpoint" },
+          { id: "claude-model", endpoint: "anthropic-messages", baseUrl: "https://relay.example/claude/v1" },
+          { id: "claude-inherit-url", endpoint: "anthropic-messages" },
+        ],
+      }],
+    });
+    expect(state.providers[0].models[0]).not.toHaveProperty("endpoint");
+    expect(state.providers[0].models[3]).not.toHaveProperty("baseUrl");
   });
 
   it("keeps the declared Pi context window when reading channels back", async () => {
@@ -313,6 +377,53 @@ describe("official plugin config providers", () => {
     expect(getProviderEndpoint("generic-chat-completion-api")).toBe("chat-completions");
     expect(getProviderEndpoint("openai")).toBe("responses");
     expect(getProviderEndpoint("anthropic")).toBe("anthropic-messages");
+  });
+
+  it("keeps per-model Droid endpoints inside one channel", async () => {
+    const droid = await import("./droid/config.mjs");
+    await droid.writeProviderConfig({
+      providers: [{
+        ...provider("chat-completions"),
+        models: [
+          { id: "gpt-model", name: "GPT", reasoning: true, imageInput: true },
+          {
+            id: "claude-model",
+            name: "Claude",
+            reasoning: true,
+            imageInput: true,
+            endpoint: "anthropic-messages",
+            baseUrl: "https://relay.example/claude/v1",
+          },
+        ],
+      }],
+    });
+
+    const saved = JSON.parse(await readFile(process.env.DROID_CONFIG_PATH!, "utf8"));
+    // 渠道级取值单独落盘：模型条目上的 baseUrl/provider 可以安全地承载覆盖。
+    expect(saved.customModels[0]).toMatchObject({
+      model: "gpt-model",
+      provider: "generic-chat-completion-api",
+      baseUrl: "https://api.example/v1",
+      hppProviderBaseUrl: "https://api.example/v1",
+      hppProviderEndpoint: "chat-completions",
+    });
+    expect(saved.customModels[1]).toMatchObject({
+      model: "claude-model",
+      provider: "anthropic",
+      baseUrl: "https://relay.example/claude/v1",
+    });
+
+    await expect(droid.readProviderConfig()).resolves.toMatchObject({
+      providers: [{
+        providerId: "custom",
+        endpoint: "chat-completions",
+        baseUrl: "https://api.example/v1",
+        models: [
+          { id: "gpt-model" },
+          { id: "claude-model", endpoint: "anthropic-messages", baseUrl: "https://relay.example/claude/v1" },
+        ],
+      }],
+    });
   });
 
   it("maps and detects OpenCode endpoint packages", async () => {

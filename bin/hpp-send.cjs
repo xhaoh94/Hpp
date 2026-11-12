@@ -27,7 +27,8 @@ const USAGE = `用法: hpp-send --file <路径> [选项]
   --client <名字>      来源标识，默认 cli
   --language <名字>    语言标识
   --session <id>       插入到指定会话
-  --focus              插入后把 Hpp 窗口提到前台
+  --focus              插入后把 Hpp 窗口提到前台（默认已启用）
+  --no-focus           不抢焦点，保留编辑器焦点（批量发送时用）
   --discovery <路径>   指定 editor-bridge.json
 `;
 
@@ -54,6 +55,7 @@ function parseArgs(argv) {
       case "--session": options.session = next(); break;
       case "--discovery": options.discovery = next(); break;
       case "--focus": options.focus = true; break;
+      case "--no-focus": options.focus = false; break;
       case "-h":
       case "--help": options.help = true; break;
       default: throw new Error(`未知参数: ${token}`);

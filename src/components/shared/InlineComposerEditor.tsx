@@ -22,6 +22,7 @@ import {
   COMMAND_PRIORITY_CRITICAL,
   PASTE_COMMAND,
   SELECTION_CHANGE_COMMAND,
+  TextNode,
   type LexicalEditor,
   type LexicalNode,
   type NodeKey,
@@ -507,6 +508,22 @@ function ComposerLargeTextPastePlugin({ onBlocked }: { onBlocked?: (message: str
   return null;
 }
 
+/**
+ * 输入框只承载纯文本（草稿模型里没有格式），但底层是 Lexical 富文本：
+ * 粘贴带 <strong>/font-weight 的 HTML、或在 contenteditable 里按 Ctrl+B，都会把 TextNode 变成粗体，
+ * 而界面上没有任何入口能改回去。这里把所有文本节点的格式强制归零，任何来源都进不来。
+ */
+function ComposerPlainTextFormatPlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(
+    () => editor.registerNodeTransform(TextNode, (node) => {
+      if (node.getFormat() !== 0) node.setFormat(0);
+    }),
+    [editor],
+  );
+  return null;
+}
+
 function CaptureEditorPlugin({
   editorRef,
   selectionRef,
@@ -751,6 +768,7 @@ export const InlineComposerEditor = memo(forwardRef<InlineComposerEditorHandle, 
           <SyncDocumentPlugin value={value} onChange={onChange} />
           <ComposerClipboardPastePlugin />
           <ComposerLargeTextPastePlugin onBlocked={events.onPasteBlocked} />
+          <ComposerPlainTextFormatPlugin />
           <CaptureEditorPlugin editorRef={editorRef} selectionRef={selectionRef} />
         </div>
       </LexicalComposer>

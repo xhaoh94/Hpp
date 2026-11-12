@@ -29,6 +29,10 @@ export interface AgentCustomModelConfig {
   hasThinkingLevels?: boolean;
   /** 该模型是否在 Agent 内置目录中（能力由 Agent 管理，配置弹窗不显示能力控件）。 */
   isBuiltin?: boolean;
+  /** 模型级 Endpoint 覆盖；缺省继承渠道。 */
+  endpoint?: AgentProviderEndpoint;
+  /** 模型级 URL 覆盖；缺省沿用渠道 URL。 */
+  baseUrl?: string;
 }
 
 export type AgentProviderEndpoint = string;
@@ -145,6 +149,8 @@ function normalizeModel(value: unknown): AgentCustomModelConfig | null {
   if (!id) return null;
   const supportedThinkingLevels = normalizeSupportedThinkingLevels(value.supportedThinkingLevels);
   const isBuiltin = value.isBuiltin === true;
+  const endpoint = asString(value.endpoint);
+  const baseUrl = asString(value.baseUrl);
   return {
     id,
     name: asString(value.name) || id,
@@ -157,6 +163,8 @@ function normalizeModel(value: unknown): AgentCustomModelConfig | null {
     ...(supportedThinkingLevels.length > 0 ? { supportedThinkingLevels } : {}),
     ...(value.hasThinkingLevels === true || supportedThinkingLevels.length > 0 ? { hasThinkingLevels: true } : {}),
     ...(isBuiltin ? { isBuiltin: true } : {}),
+    ...(endpoint ? { endpoint } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
   };
 }
 
@@ -186,10 +194,17 @@ function normalizeProvider(value: unknown, configuration: AgentProviderConfigura
 
 function normalizeState(value: unknown, configuration: AgentProviderConfiguration): AgentConfigState {
   const record = isRecord(value) ? value : {};
+  const supportsModelEndpoints = configuration.modelEndpointOverrides === true;
   const providers = Array.isArray(record.providers)
     ? record.providers
         .map((provider) => normalizeProvider(provider, configuration))
         .filter((provider): provider is AgentProviderConfig => !!provider)
+        // 不支持模型级端点的 Agent 读回时直接丢掉这两个字段，
+        // 否则草稿里会带着界面上根本改不了的覆盖值，保存必然被校验拒绝。
+        .map((provider) => supportsModelEndpoints ? provider : {
+          ...provider,
+          models: provider.models.map(({ endpoint: _endpoint, baseUrl: _baseUrl, ...model }) => model),
+        })
     : [];
   const activeProviderId = asString(record.activeProviderId);
   return {
@@ -504,8 +519,17 @@ function validateProviderConfig(provider: AgentProviderConfig, configuration: Ag
   }
   if (!provider.apiKey) throw new Error("请填写 sk-key。");
   if (provider.models.length === 0) throw new Error("至少需要添加一个模型。");
+  if (!configuration.modelEndpointOverrides) {
+    const overridden = provider.models.find((model) => model.endpoint || model.baseUrl);
+    if (overridden) {
+      throw new Error(`当前 Agent 不支持按模型覆盖端点（模型 ${overridden.id || "未命名"}），请删除该模型的端点后再保存。`);
+    }
+  }
   for (const model of provider.models) {
     if (!model.id.trim()) throw new Error("模型 ID 不能为空。");
+    if (model.endpoint && !configuration.endpoints.some((endpoint) => endpoint.id === model.endpoint)) {
+      throw new Error(`模型 ${model.id} 的 Endpoint 不受支持：${model.endpoint}`);
+    }
   }
 }
 
@@ -632,13 +656,25 @@ export async function copyAgentProviderConfig(
       sourceProvider.providerId,
       targetState.providers.map((provider) => provider.providerId),
     );
-    const models = sourceProvider.models.map((model) => targetConfiguration.fixedModelCapabilities
-      ? {
-          ...model,
-          reasoning: targetConfiguration.modelDefaults.reasoning,
-          imageInput: targetConfiguration.modelDefaults.imageInput,
-        }
-      : { ...model });
+    // 模型级端点只在目标 Agent 支持且能映射到同类端点时带过去；
+    // 否则整条复制会因为校验失败而做废，比丢掉覆盖更糟。
+    const models = sourceProvider.models.map((model) => {
+      const { endpoint: modelEndpoint, baseUrl: modelBaseUrl, ...rest } = model;
+      const targetModelEndpoint = targetConfiguration.modelEndpointOverrides === true && modelEndpoint
+        ? resolveCompatibleProviderEndpoint(modelEndpoint, targetConfiguration.endpoints)
+        : undefined;
+      return {
+        ...rest,
+        ...(targetConfiguration.fixedModelCapabilities
+          ? {
+              reasoning: targetConfiguration.modelDefaults.reasoning,
+              imageInput: targetConfiguration.modelDefaults.imageInput,
+            }
+          : {}),
+        ...(targetModelEndpoint ? { endpoint: targetModelEndpoint } : {}),
+        ...(targetModelEndpoint && modelBaseUrl ? { baseUrl: modelBaseUrl } : {}),
+      };
+    });
     const result = await saveAgentProviderConfig(targetAgentId, {
       ...sourceProvider,
       providerId: copiedProviderId,

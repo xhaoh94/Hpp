@@ -206,6 +206,60 @@ describe("agent provider config", () => {
     });
   });
 
+  it("round-trips model-level endpoints for agents that declare support", async () => {
+    testState.capabilities = {
+      configuration: { ...providerConfiguration("hpp"), modelEndpointOverrides: true },
+      providerActivation: "single-active",
+    };
+
+    await expect(saveAgentProviderConfig("test-agent", {
+      ...provider("provider-a"),
+      models: [{
+        id: "claude-model",
+        name: "Claude",
+        reasoning: true,
+        imageInput: true,
+        endpoint: "chat-completions",
+        baseUrl: "https://relay.example/claude/v1",
+      }],
+    })).resolves.toMatchObject({ success: true });
+
+    await expect(listAgentConfig("test-agent")).resolves.toMatchObject({ success: true });
+    const saved = await listAgentConfig("test-agent");
+    const providerA = saved.config?.providers.find((item) => item.providerId === "provider-a");
+    expect(providerA?.models[0]).toMatchObject({
+      id: "claude-model",
+      endpoint: "chat-completions",
+      baseUrl: "https://relay.example/claude/v1",
+    });
+  });
+
+  it("rejects model-level endpoints for agents that did not declare support", async () => {
+    await expect(saveAgentProviderConfig("test-agent", {
+      ...provider("provider-a"),
+      models: [{ id: "claude-model", endpoint: "chat-completions" }],
+    })).resolves.toMatchObject({
+      success: false,
+      error: "当前 Agent 不支持按模型覆盖端点（模型 claude-model），请删除该模型的端点后再保存。",
+    });
+  });
+
+  it("drops stale model-level endpoints when an agent does not declare support", async () => {
+    const settingsPath = join(tempRoot, "hpp-data", "settings.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    settings.agentConfigs["test-agent"].providers[0].models = [{
+      id: "legacy-model",
+      endpoint: "chat-completions",
+      baseUrl: "https://relay.example/claude/v1",
+    }];
+    await writeFile(settingsPath, JSON.stringify(settings), "utf8");
+
+    const saved = await listAgentConfig("test-agent");
+    const model = saved.config?.providers[0].models[0];
+    expect(model).not.toHaveProperty("endpoint");
+    expect(model).not.toHaveProperty("baseUrl");
+  });
+
   it("derives custom-model reasoning from whether thinking levels are selected", async () => {
     const result = await saveAgentProviderConfig("test-agent", {
       ...provider("provider-a"),

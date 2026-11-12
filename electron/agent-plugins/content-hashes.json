@@ -8,15 +8,15 @@
     "hash": "3a3a616154384d4365db1fe6a9db4f7f9a3840e248a3fb7efc0ce4200015b635"
   },
   "droid": {
-    "version": "1.3.7",
-    "hash": "94b59ab49f70f946a78c728772db1ff21a4c88f498919017f206cf200d4616e0"
+    "version": "1.3.8",
+    "hash": "86773c8e03fa28652265fecd0c16a1db9ad418b224f70689784dad045966e156"
   },
   "opencode": {
     "version": "1.4.3",
     "hash": "9e7917cc16e8ca67f8099ebafde3a0a57476d1d22526c2322186d0c6d807680e"
   },
   "pi": {
-    "version": "1.3.8",
-    "hash": "6999f3af002c471abf6a7ebd0779618cf726b0a0475f950b432098e126758141"
+    "version": "1.3.9",
+    "hash": "24bad73e86df3781dc2b3b983e30b61f6ae0e2759427d667ddcef32268b73009"
   }
 }

@@ -89,9 +89,31 @@ describe("pasted-text chips", () => {
     expect(messageVariant).toMatch(/\bpadding:\s/);
     expect(messageVariant).toMatch(/\bfont-size:\s/);
     expect(messageVariant).toMatch(/\bborder-radius:\s/);
+    // 左右都要有间距：只用右间距时「正文 + 芯片」会贴在一起，两个连续芯片也会贴住。
+    const messageBlock = messageVariant.slice(0, messageVariant.indexOf("}"));
+    expect(messageBlock).toMatch(/margin:\s*2px 6px/);
     // 边框/底色保持中性（不蹭附件的 accent 色），只对齐尺寸与垂直对齐。
     expect(messageVariant).not.toContain("color-mix(");
     const mobileStyles = readWorkspaceFile("mobile/src/styles.css");
     expect(mobileStyles).toContain(".composer-paste-chip");
+  });
+});
+
+/**
+ * 输入框的草稿模型只有纯文本，界面也没有任何格式入口：
+ * 一旦 Lexical 把粘贴源里的 <strong> 或 Ctrl+B 带进来，部分文字就会莫名其妙变粗且无法清除。
+ */
+describe("composer plain-text invariant", () => {
+  it("normalizes every TextNode format back to zero", () => {
+    expect(inlineComposerSource).toContain("editor.registerNodeTransform(TextNode");
+    expect(inlineComposerSource).toContain("node.getFormat() !== 0");
+    expect(inlineComposerSource).toContain("node.setFormat(0)");
+    expect(inlineComposerSource).toContain("<ComposerPlainTextFormatPlugin />");
+  });
+
+  it("never writes formatting into the draft document", () => {
+    const composerDocumentSource = readWorkspaceFile("shared/composer-document.ts");
+    expect(composerDocumentSource).not.toMatch(/\bformat\b/);
+    expect(composerDocumentSource).not.toMatch(/\bbold\b/);
   });
 });

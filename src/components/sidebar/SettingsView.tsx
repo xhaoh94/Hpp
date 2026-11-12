@@ -595,7 +595,7 @@ export function SettingsView() {
             </div>
             <div className="settings-modal-content">
               <div className="shortcut-list">
-                {/* 发送方式：下拉选择 */}
+                {/* 发送方式：决定 Enter / Ctrl+Enter 谁普通发送、谁引导发送；Shift+Enter 固定换行 */}
                 <div className="shortcut-item">
                   <span className="shortcut-label">发送消息</span>
                   <div className="shortcut-control">
@@ -604,8 +604,8 @@ export function SettingsView() {
                       value={shortcuts.sendKey}
                       onChange={(e) => saveShortcuts({ ...shortcuts, sendKey: e.target.value })}
                     >
-                      <option value="Enter">Enter 发送</option>
-                      <option value="Ctrl+Enter">Ctrl + Enter 发送</option>
+                      <option value="normal">Enter 普通发送 / Ctrl+Enter 引导</option>
+                      <option value="guide">Enter 引导发送 / Ctrl+Enter 普通</option>
                     </select>
                   </div>
                 </div>
@@ -930,7 +930,7 @@ export function SettingsView() {
                         <span className="settings-general-link-icon"><Keyboard size={16} /></span>
                         <span className="settings-general-row-main">
                           <strong>快捷键</strong>
-                          <span>{shortcuts.sendKey} 发送，支持文件搜索与模型切换</span>
+                          <span>{shortcuts.sendKey === "guide" ? "Enter 引导发送" : "Enter 普通发送"}，支持文件搜索与模型切换</span>
                         </span>
                         <span className="settings-general-link-meta">{Object.keys(shortcuts).length} 项</span>
                         <ChevronRight size={16} />

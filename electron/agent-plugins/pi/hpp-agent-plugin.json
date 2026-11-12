@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "pi",
   "name": "Pi",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "minHppVersion": "0.1.0",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",
@@ -76,6 +76,7 @@
       "hint": "渠道由 Pi 插件无损读写 models.json，图片能力映射到模型 input。",
       "modelDefaults": { "reasoning": false, "imageInput": false },
       "fixedModelCapabilities": false,
+      "modelEndpointOverrides": true,
       "modelListMode": "configured"
     }
   }

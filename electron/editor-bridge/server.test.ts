@@ -36,9 +36,12 @@ function createWindow() {
   const sent: SentPayload[] = [];
   const window = {
     isDestroyed: () => false,
-    isMinimized: () => false,
-    isVisible: () => true,
+    isMinimized: vi.fn(() => false),
+    isVisible: vi.fn(() => true),
+    restore: vi.fn(),
+    show: vi.fn(),
     focus: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
     webContents: {
       isLoading: () => false,
       send: (channel: string, payload: SentPayload) => {
@@ -106,6 +109,16 @@ describe("editor bridge server", () => {
     mockState.listeners.clear();
   });
 
+  async function completeInsert(body = selection) {
+    const pending = post(server.getStatus().port, token, body);
+    await waitFor(() => fake.sent.length === 1);
+    mockState.listeners.get(EDITOR_BRIDGE_RESULT_CHANNEL)?.({}, {
+      requestId: fake.sent[0].requestId,
+      success: true,
+    });
+    await pending;
+  }
+
   it("writes a discovery record on start and reports it", () => {
     const status = server.getStatus();
     expect(status.running).toBe(true);
@@ -152,6 +165,21 @@ describe("editor bridge server", () => {
     const response = await pending;
     expect(response.status).toBe(500);
     expect(response.body.error).toContain("没有打开的会话");
+  });
+
+  it("默认把 Hpp 提到前台（含最小化到托盘的情形）", async () => {
+    fake.window.isMinimized.mockReturnValue(true);
+    fake.window.isVisible.mockReturnValue(false);
+    await completeInsert();
+    expect(fake.window.restore).toHaveBeenCalled();
+    expect(fake.window.show).toHaveBeenCalled();
+    expect(fake.window.focus).toHaveBeenCalled();
+  });
+
+  it("显式 focus:false 时保留编辑器焦点", async () => {
+    await completeInsert({ ...selection, focus: false });
+    expect(fake.window.focus).not.toHaveBeenCalled();
+    expect(fake.window.show).not.toHaveBeenCalled();
   });
 
   it("rejects a selection without a line range before touching the renderer", async () => {

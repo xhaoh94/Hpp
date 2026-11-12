@@ -375,77 +375,14 @@ export function createAgentEventController({
     }, sessionId);
   };
 
-  const completeIdleNotice = (sessionId: string) => {
-    const runtime = getRuntime(sessionId);
-    // Most turn activity is not an idle-notice transition. Avoid flushing the
-    // normal stream buffer on every tool/plan/process event; only an existing
-    // idle interval needs to be closed here.
-    if (!runtime.streamIdleNoticeEntryId && runtime.streamIdleSince === null) return;
-    flushRuntimeRender(sessionId);
-    const entryId = runtime.streamIdleNoticeEntryId;
-    if (entryId) {
-      // 每个无输出区间保留自己的开始/结束时间，渲染层会把同一处理过程
-      // 中的所有区间合并后显示总时长。
-      useChatStore.getState().updateLastAssistantProcessEntry(entryId, {
-        state: "completed",
-        completedAt: Date.now(),
-        expanded: false,
-      }, sessionId);
-    }
-    runtime.streamIdleNoticeEntryId = null;
-    runtime.streamIdleSince = null;
-  };
-
-  const appendOrRefreshIdleNotice = (sessionId: string) => {
-    flushRuntimeRender(sessionId);
-    const runtime = getRuntime(sessionId);
-    if (!runtime.processActive) return;
-    // 上下文压缩本身就是有明确状态的运行阶段，不应再显示“暂时没有新输出”。
-    if (useChatStore.getState().compactingSessions[sessionId] === true) {
-      completeIdleNotice(sessionId);
-      return;
-    }
-    const agentName = getSessionAgentName(sessionId);
-    runtime.streamIdleSince ??= Date.now();
-    const idleSince = runtime.streamIdleSince;
-
-    if (runtime.streamIdleNoticeEntryId) {
-      useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
-        title: `${agentName} 仍在运行，暂时没有新输出`,
-        detail: `${agentName} 任务还没有结束，正在等待后续事件或最终响应。`,
-        toolKind: "stream_idle_notice",
-        startedAt: idleSince,
-        completedAt: undefined,
-        state: "running",
-        expanded: false,
-      }, sessionId);
-    } else {
-      const entryId = createProcessEntryId();
-      runtime.streamIdleNoticeEntryId = entryId;
-      appendProcessEntry(sessionId, {
-        id: entryId,
-        type: "status",
-        title: `${agentName} 仍在运行，暂时没有新输出`,
-        detail: `${agentName} 任务还没有结束，正在等待后续事件或最终响应。`,
-        toolKind: "stream_idle_notice",
-        startedAt: idleSince,
-        state: "running",
-        expanded: false,
-      });
-    }
-
-    if (sessionId === useProjectStore.getState().activeSessionId) setStreamingState(true);
-    useProjectStore.getState().setAgentStatus(sessionId, "running");
-  };
-
   const appendOrRefreshAlreadyRunningNotice = (sessionId: string) => {
     flushRuntimeRender(sessionId);
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
     const agentName = getSessionAgentName(sessionId);
 
-    if (runtime.streamIdleNoticeEntryId) {
-      useChatStore.getState().updateLastAssistantProcessEntry(runtime.streamIdleNoticeEntryId, {
+    if (runtime.noticeEntryId) {
+      useChatStore.getState().updateLastAssistantProcessEntry(runtime.noticeEntryId, {
         title: `${agentName} 仍在执行上一条请求`,
         detail: `新的发送请求已忽略；当前 ${agentName} 任务还在运行，后续输出会继续追加到这里。`,
         toolKind: "already_running_notice",
@@ -454,7 +391,7 @@ export function createAgentEventController({
       }, sessionId);
     } else {
       const entryId = createProcessEntryId();
-      runtime.streamIdleNoticeEntryId = entryId;
+      runtime.noticeEntryId = entryId;
       appendProcessEntry(sessionId, {
         id: entryId,
         type: "status",
@@ -824,7 +761,6 @@ export function createAgentEventController({
     cancelAgentEndGrace(currentSessionId);
     if (options.stopCompaction) stopContextCompaction(currentSessionId);
     clearStreamWatchdog(currentSessionId);
-    completeIdleNotice(currentSessionId);
     finishAssistantProcessText(currentSessionId);
     finishThinkingEntry(currentSessionId);
     updateInferredPlanSteps(currentSessionId, options.planSignal);
@@ -1002,7 +938,6 @@ export function createAgentEventController({
     const runtime = getRuntime(currentSessionId);
     clearStreamWatchdog(currentSessionId);
     if (!isSessionTurnStillOpen(currentSessionId) || runtime.manualAbortRequested) return;
-    runtime.streamIdleSince ??= Date.now();
     const version = streamWatchdogVersions.get(currentSessionId) || 0;
     runtime.streamWatchdog = setTimeout(() => {
       runtime.streamWatchdog = null;
@@ -1033,7 +968,6 @@ export function createAgentEventController({
           if (stateIsFresh && state?.idle === false) clearAgentEndObservation(currentSessionId);
           if (!awaitingUI) {
             if (!hasVisibleSessionTurnState(currentSessionId)) ensureAssistantContinuation(currentSessionId);
-            appendOrRefreshIdleNotice(currentSessionId);
           }
           refreshStreamWatchdog(currentSessionId);
         });
@@ -1075,7 +1009,6 @@ export function createAgentEventController({
           }
           clearAgentEndObservation(currentSessionId);
           if (!hasVisibleSessionTurnState(currentSessionId)) ensureAssistantContinuation(currentSessionId);
-          appendOrRefreshIdleNotice(currentSessionId);
           refreshStreamWatchdog(currentSessionId);
         });
     }, delayMs);
@@ -1103,7 +1036,6 @@ export function createAgentEventController({
     runtime.processActive = true;
     runtime.streamStarted = true;
     runtime.autoAbortReason = null;
-    completeIdleNotice(currentSessionId);
     useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
     if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(true);
     useProjectStore.getState().setAgentStatus(currentSessionId, "running");
@@ -1148,8 +1080,7 @@ export function createAgentEventController({
       // 收尾型压缩没有后续对话，压缩期间不能再注入引导；运行中压缩结束后 Pi 会继续对话并消费引导。
       // postTurn 缺省表示后端未上报压缩阶段（保持“压缩期间不引导”的旧行为）。
       useChatStore.getState().setSessionCompactionPostTurn(currentSessionId, postTurn);
-      completeIdleNotice(currentSessionId);
-      finishAssistantProcessText(currentSessionId);
+        finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
       if (presentation === "process") {
         appendProcessEntry(currentSessionId, {
@@ -1221,7 +1152,6 @@ export function createAgentEventController({
     updateProcessPlanSteps,
     updateInferredPlanSteps,
     recordProcessFiles,
-    completeIdleNotice,
     appendOrRefreshAlreadyRunningNotice,
     finishThinkingEntry,
     appendAssistantProcessText,

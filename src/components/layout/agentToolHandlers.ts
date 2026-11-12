@@ -94,6 +94,8 @@ export function handleToolStartEvent(
   const toolDetail = getToolDetail(event);
   const toolKind = normalizeToolKind(event.toolKind);
   runtime.activeToolKind[key] = toolKind;
+  const eventDescription = typeof event.description === "string" ? event.description.trim() : "";
+  if (eventDescription) runtime.activeToolDescription[key] = eventDescription;
   const entryType: AgentProcessEntry["type"] = toolKind === "question" ? "question" : "tool";
   const toolSummary = getToolSummary(event, true);
   if (existingEntryId) {
@@ -103,6 +105,7 @@ export function handleToolStartEvent(
       files: toolFiles.length > 0 ? toolFiles : undefined,
       toolKind,
       command: typeof event.command === "string" ? event.command : undefined,
+      description: runtime.activeToolDescription[key] || undefined,
       state: "running",
       type: entryType,
     }, currentSessionId);
@@ -117,6 +120,7 @@ export function handleToolStartEvent(
       files: toolFiles.length > 0 ? toolFiles : undefined,
       toolKind,
       command: typeof event.command === "string" ? event.command : undefined,
+      description: runtime.activeToolDescription[key] || undefined,
       state: "running",
       expanded: false,
     });
@@ -178,6 +182,7 @@ export function handleToolEndEvent(
     delete runtime.activeToolEntry[key];
     delete runtime.activeToolFile[key];
     delete runtime.activeToolKind[key];
+    delete runtime.activeToolDescription[key];
     return;
   }
 
@@ -254,6 +259,11 @@ export function handleToolEndEvent(
   const toolSummary = getToolSummary({
     ...effectiveEvent,
     files: displayedToolFiles.length > 0 ? displayedToolFiles : undefined,
+    // pi 的 tool_execution_end 不带 args：沿用工具开始时的意图描述，
+    // 否则命令一结束标题就从「看空闲时长」退回「已运行 bash」。
+    ...(typeof effectiveEvent.description === "string" && effectiveEvent.description.trim()
+      ? {}
+      : { description: runtime.activeToolDescription[key] }),
   }, false);
   const entryType: AgentProcessEntry["type"] = "tool";
   const patch = {
@@ -261,7 +271,12 @@ export function handleToolEndEvent(
     detail: toolDetail || undefined,
     files: displayedToolFiles.length > 0 ? displayedToolFiles : undefined,
     toolKind: effectiveToolKind,
-    command: typeof effectiveEvent.command === "string" ? effectiveEvent.command : undefined,
+    // pi 的 tool_execution_end 不带 args：没有命令文本时不要下发 undefined，
+    // 否则 {...entry, ...patch} 会把工具开始时存下的原始命令覆盖掉。
+    ...(typeof effectiveEvent.command === "string" && effectiveEvent.command
+      ? { command: effectiveEvent.command }
+      : {}),
+    description: runtime.activeToolDescription[key] || undefined,
     exitCode: typeof effectiveEvent.exitCode === "number" ? effectiveEvent.exitCode : undefined,
     state: toolWarning || commandExitWarning ? "warning" : "completed",
     type: entryType,
@@ -273,6 +288,7 @@ export function handleToolEndEvent(
     delete runtime.activeToolEntry[key];
     delete runtime.activeToolFile[key];
     delete runtime.activeToolKind[key];
+    delete runtime.activeToolDescription[key];
   } else {
     ctx.appendProcessEntry(currentSessionId, {
       type: entryType,

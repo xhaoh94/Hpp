@@ -1434,6 +1434,10 @@ button:disabled { opacity: 0.48; }
 .process-operation-detail-line { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .process-operation-detail-line > span:first-child { flex: 0 0 auto; }
 .process-operation-file { color: #60a5fa; overflow-wrap: anywhere; }
+/* 摘要展开后每条命令：图标 + 意图，命令本身只在 title 里。 */
+.process-operation-command { align-items: center; }
+.process-operation-command > svg { flex: 0 0 auto; color: var(--muted); }
+.process-operation-command-title { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .process-operation-summary .process-entry-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .process-operation-summary .expand-indicator.expanded { transform: rotate(180deg); }
 .process-entry-received { min-height: 28px; }
@@ -1447,7 +1451,6 @@ button:disabled { opacity: 0.48; }
 .process-entry-received-content .composer-paste-chip.message { height: 17px; margin: 0 1px; padding: 0 4px; border-radius: 5px; font-size: inherit; line-height: inherit; vertical-align: -1px; }
 .process-entry-received-content .composer-paste-chip-icon { width: 11px; height: 11px; }
 .process-entry-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.process-idle-duration { color: var(--muted); font: inherit; white-space: nowrap; }
 .process-entry-detail { box-sizing: border-box; width: calc(100% - 10px); min-width: 0; max-width: calc(100% - 10px); margin: 3px 5px 6px; padding: 8px; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--code); color: var(--muted); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .process-entry-detail pre { box-sizing: border-box; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; overflow-x: hidden; }
 .subagent-entry-summary { grid-template-columns: minmax(0, 1fr) 14px; min-height: 38px; padding-top: 5px; padding-bottom: 5px; }

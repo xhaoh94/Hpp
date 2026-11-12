@@ -186,9 +186,11 @@ export const parseSubagentsFromEvent = (
     });
   }
 
-  if (subagents.length === 0) {
-    const id = getString(event.toolCallId) || getString(event.id) || "subagent";
-    subagents = [{ id, label: "Subagent", status: fallbackStatus }];
+  // 后端明确给了列表（哪怕是空数组）就以它为准，不再补占位项：占位项的 id 是裸 toolCallId，
+  // 后续 `toolCallId:N` 的事件永远匹配不到它，只会留下一个卡在 running 的幽灵。
+  if (subagents.length === 0 && source === null) {
+    const id = getString(event.toolCallId) || getString(event.id);
+    if (id) subagents = [{ id, label: "Subagent", status: fallbackStatus }];
   }
 
   const seen = new Set<string>();

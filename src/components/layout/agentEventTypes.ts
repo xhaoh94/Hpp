@@ -32,7 +32,6 @@ export type AgentEventHandlerContext = {
   updateProcessPlanSteps: (sessionId: string, steps: AgentProcessStep[], native?: boolean) => void;
   updateInferredPlanSteps: (sessionId: string, signal: InferredStepSignal) => void;
   recordProcessFiles: (sessionId: string, files: AgentProcessFile[], signal?: InferredStepSignal) => void;
-  completeIdleNotice: (sessionId: string) => void;
   appendOrRefreshAlreadyRunningNotice: (sessionId: string) => void;
   finishThinkingEntry: (sessionId: string) => void;
   appendAssistantProcessText: (sessionId: string, delta: string) => void;

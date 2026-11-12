@@ -1,14 +1,15 @@
 /* 子任务监视窗：胶囊入口 + 浮层。颜色全部走主题变量，跟随浅色/深色。 */
 
-/* 相对 .chat-panel 定位：面板本身是 overflow:hidden，浮层不会漏到设置页。 */
+/* 参与底部悬浮行（Subagent → Todo → 回到底部），按行内顺序排布。 */
 .subagent-monitor-pill {
-  position: absolute;
-  right: 20px;
-  bottom: 148px;
-  z-index: 40;
+  position: relative;
+  z-index: 2;
   display: inline-flex;
+  /* 底部悬浮区是竖排 flex，不能被同列内容挤到换行。 */
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
   height: 30px;
   padding: 0 12px;
   border: 1px solid var(--border-color);
@@ -20,6 +21,7 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
   backdrop-filter: blur(8px);
   transition: color 0.15s, border-color 0.15s;
+  pointer-events: auto;
 }
 
 .subagent-monitor-pill:hover,
@@ -33,10 +35,12 @@
   opacity: 0.8;
 }
 
+/* 錨定在底部悬浮行上方（最近的定位祖先是 .chat-floating-status），居中展开。 */
 .subagent-monitor-panel {
   position: absolute;
-  right: 20px;
-  bottom: 186px;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
   z-index: 41;
   display: flex;
   flex-direction: column;
@@ -47,6 +51,7 @@
   background: var(--bg-secondary);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
   overflow: hidden;
+  pointer-events: auto;
 }
 
 .subagent-monitor-header {
@@ -234,14 +239,7 @@
 }
 
 @media (max-width: 640px) {
-  .subagent-monitor-pill {
-    right: 12px;
-    bottom: 120px;
-  }
-
   .subagent-monitor-panel {
-    right: 12px;
-    bottom: 158px;
     width: calc(100vw - 24px);
   }
 }

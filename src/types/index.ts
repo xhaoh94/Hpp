@@ -178,6 +178,10 @@ export interface AgentCustomModelConfig {
   hasThinkingLevels?: boolean;
   /** 该模型是否在 Agent 内置目录中（能力由 Agent 管理，配置弹窗不显示能力控件）。 */
   isBuiltin?: boolean;
+  /** 模型级 Endpoint 覆盖；缺省继承渠道（仅声明 modelEndpointOverrides 的插件支持）。 */
+  endpoint?: AgentProviderEndpoint;
+  /** 模型级 URL 覆盖；缺省沿用渠道 URL。 */
+  baseUrl?: string;
 }
 
 export type AgentProviderEndpoint = string;
@@ -222,6 +226,10 @@ export interface AgentModelLookupResult {
 export interface AgentRemoteModel {
   id: string;
   name: string;
+  /** 来源端点；按端点分批获取时写入，新增模型时据此带上模型级覆盖。 */
+  endpoint?: AgentProviderEndpoint;
+  /** 来源 URL；同上。 */
+  baseUrl?: string;
 }
 
 export interface AgentConfigFetchModelsResult {

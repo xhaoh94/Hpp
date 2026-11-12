@@ -247,6 +247,7 @@ function normalizeProviderConfiguration(value: unknown): AgentProviderConfigurat
         : undefined,
     },
     fixedModelCapabilities: value.fixedModelCapabilities === true,
+    modelEndpointOverrides: value.modelEndpointOverrides === true,
     modelListMode,
     backendModelVisibility,
   };

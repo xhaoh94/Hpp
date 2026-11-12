@@ -5,7 +5,7 @@ import { createAgentEventController } from "./agentEventController";
 import { dispatchAgentEvent } from "./agentEventDispatcher";
 import type { AgentEvent } from "@/types";
 import type { PendingUIResponse, PendingUIResponseUpdate } from "./agentEventTypes";
-import { getStreamIdleNoticeDuration, getVisibleProcessEntries } from "@shared/process-view";
+import { getVisibleProcessEntries } from "@shared/process-view";
 import { resetSessionRuntimeAfterTurn, type SessionRuntime } from "./agentEventUtils";
 
 const SESSION_ID = "lifecycle-session";
@@ -1193,22 +1193,20 @@ describe("agent event terminal reconciliation", () => {
     expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("error");
   });
 
-  it("does not show a stream idle notice while context compaction is running", async () => {
+  // 「Pi 仍在运行，暂时没有新输出」提示已下线：即使 watchdog 判定后端仍在跑、
+  // 且一个字节的新输出都没有，也不允许往处理过程里插状态条目。
+  it("does not insert an idle notice when the watchdog sees no new output", async () => {
     vi.useFakeTimers();
     agentGetSessionState.mockResolvedValue({ success: true, idle: false });
     const harness = createHarness();
     startRunningProcess(harness);
 
-    harness.controller.appendContextCompactionDivider(SESSION_ID, "compact-no-idle-notice", "started");
-    expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBe(true);
-
     harness.controller.refreshStreamWatchdog(SESSION_ID);
     await vi.advanceTimersByTimeAsync(45_000);
 
-    const idleEntries = getMessages()
-      .flatMap((message) => message.process?.entries || [])
-      .filter((entry) => entry.toolKind === "stream_idle_notice");
-    expect(idleEntries).toHaveLength(0);
+    const entries = getMessages().flatMap((message) => message.process?.entries || []);
+    expect(entries.filter((entry) => entry.toolKind === "stream_idle_notice")).toHaveLength(0);
+    expect(entries.filter((entry) => /仍在运行/.test(entry.title))).toHaveLength(0);
     harness.controller.clearAllStreamWatchdogs();
   });
 
@@ -1302,35 +1300,28 @@ describe("agent event terminal reconciliation", () => {
     harness.controller.clearAllStreamWatchdogs();
   });
 
-  it("merges stream idle notices and accumulates each completed interval", async () => {
+  it("keeps the process clean across repeated silent watchdog rounds", async () => {
     vi.useFakeTimers();
     agentGetSessionState.mockResolvedValue({ success: true, idle: false });
     const harness = createHarness();
     startRunningProcess(harness);
     harness.controller.refreshStreamWatchdog(SESSION_ID);
 
-    await vi.advanceTimersByTimeAsync(45_000);
-    const getIdleEntries = () => getMessages()
+    const countIdleEntries = () => getMessages()
       .flatMap((message) => message.process?.entries || [])
-      .filter((entry) => entry.toolKind === "stream_idle_notice");
-    const getVisibleIdleEntries = () => getVisibleProcessEntries(getIdleEntries());
-    expect(getIdleEntries()).toHaveLength(1);
-    expect(getVisibleIdleEntries()).toHaveLength(1);
+      .filter((entry) => entry.toolKind === "stream_idle_notice").length;
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(countIdleEntries()).toBe(0);
 
     dispatchAgentEvent({
       type: "thinking_delta",
       delta: "恢复输出",
       sessionId: SESSION_ID,
     }, harness.controller);
-    expect(getIdleEntries()).toHaveLength(1);
-    expect(getVisibleIdleEntries()).toHaveLength(1);
-    expect(getStreamIdleNoticeDuration(getVisibleIdleEntries()[0], Date.now())).toBe(45_000);
 
     await vi.advanceTimersByTimeAsync(45_000);
-    expect(getIdleEntries()).toHaveLength(2);
-    const [mergedIdleNotice] = getVisibleIdleEntries();
-    expect(getVisibleIdleEntries()).toHaveLength(1);
-    expect(getStreamIdleNoticeDuration(mergedIdleNotice, Date.now())).toBe(90_000);
+    expect(countIdleEntries()).toBe(0);
     harness.controller.clearAllStreamWatchdogs();
   });
 
@@ -1857,9 +1848,9 @@ describe("stream watchdog backend reconciliation", () => {
     expect(agentGetSessionState).toHaveBeenCalledTimes(1);
     expect(getMessages().find((message) => message.process)?.process?.endedAt).toBeUndefined();
     expect(runtime.streamWatchdog).not.toBeNull();
-    expect(getMessages().flatMap((message) => message.process?.entries || []).some((entry) => (
-      entry.type === "status" && entry.state === "running"
-    ))).toBe(true);
+    // 继续等待，但不再往处理过程里插「仍在运行」提示。
+    expect(getMessages().flatMap((message) => message.process?.entries || [])
+      .filter((entry) => entry.toolKind === "stream_idle_notice")).toHaveLength(0);
     harness.controller.clearAllStreamWatchdogs();
   });
 });

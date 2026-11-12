@@ -252,6 +252,40 @@ describe("chat process entry defaults", () => {
     }));
   });
 
+  // 增量事件常常只带状态：不能把已经收到的输出抹成 undefined，也不能把 running 打回 pending。
+  it("keeps previously received subagent output on status-only updates", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantProcessEntry({
+      id: "live",
+      type: "subagent",
+      title: "正在工作",
+      timestamp: 1,
+      state: "running",
+      subagents: [{
+        id: "call-2:1",
+        label: "Reviewer",
+        status: "running",
+        message: "正在读取文件",
+        liveOutput: "尾巴",
+        startedAt: 100,
+        lastActivityAt: 120,
+      }],
+    });
+    store.updateLastAssistantProcessEntry("live", {
+      subagents: [{ id: "call-2:1", label: "Reviewer", status: "pending" }],
+    });
+
+    expect(useChatStore.getState().messages[0].process?.entries[0].subagents?.[0]).toEqual(
+      expect.objectContaining({
+        status: "running",
+        message: "正在读取文件",
+        liveOutput: "尾巴",
+        startedAt: 100,
+        lastActivityAt: 120,
+      }),
+    );
+  });
+
   it("finishes the process containing a questionnaire without ending a newer process", () => {
     useChatStore.setState({ activeSessionId: "session-1" });
     const store = useChatStore.getState();

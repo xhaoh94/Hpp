@@ -26,7 +26,9 @@
      不抢附件引用的 accent 色。 */
   height: auto;
   gap: 5px;
-  margin: 2px 0;
+  /* 左右都给间距：芯片是行内块，只用右间距的话「正文 + 芯片」会贴在一起。
+     与 .composer-message-entity 保持同一节奏。 */
+  margin: 2px 6px;
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
