@@ -2,7 +2,7 @@
   "name": "hpp-bridge",
   "displayName": "Hpp Bridge",
   "description": "把选中的代码或当前文件发送到 Hpp 的聊天输入框",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "publisher": "xhaoh94",
   "license": "ISC",
   "engines": {
@@ -70,6 +70,11 @@
         }
       ],
       "explorer/context": [
+        {
+          "command": "hpp.sendFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "navigation@9"
+        },
         {
           "command": "hpp.sendFolder",
           "when": "explorerResourceIsFolder",

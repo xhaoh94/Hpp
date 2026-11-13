@@ -10,6 +10,7 @@ const mainDir = process.env.HPP_PI_PACKAGE_MAIN_DIR
   : join(projectRoot, "out", "main");
 const requiredFiles = [
   "pi-sdk-worker.mjs",
+  "transient-provider-retry.mjs",
   "pi-fork-utils.mjs",
   "pi-agent-dir.mjs",
   "shell-environment.mjs",

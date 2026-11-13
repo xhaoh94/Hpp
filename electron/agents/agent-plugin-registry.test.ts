@@ -36,8 +36,10 @@ import {
   getCliPackageForVersion,
   isNpmPermissionError,
   looksLikeUpgradeFailure,
+  mergeHostCliDescriptor,
   summarizeUpgradeFailure,
 } from "./agent-plugin-registry";
+import type { AgentDescriptor } from "../../src/types/ipc";
 
 const backendModule = `
 export function createAgentBackend(context) {
@@ -2124,6 +2126,66 @@ describe("CLI self-upgrade fallback", () => {
     expect(isNpmPermissionError("EPERM: operation not permitted")).toBe(true);
     expect(isNpmPermissionError("E404 Not Found")).toBe(false);
     expect(isNpmPermissionError("")).toBe(false);
+  });
+});
+
+describe("host CLI descriptor merge", () => {
+  const known = {
+    id: "opencode",
+    name: "OpenCode",
+    version: "1.4.3",
+    minHppVersion: "0.1.0",
+    runtime: "cli",
+    command: "opencode",
+    packageName: "opencode-ai",
+    packages: [
+      { line: "v2", name: "@opencode/cli", label: "OpenCode 2.x" },
+      { line: "v1", name: "opencode-ai", label: "OpenCode 1.x" },
+    ],
+    selfUpgrade: { args: ["upgrade"], majorFlag: "--major", supportsTarget: true },
+    order: 30,
+    capabilities: { planMode: "native", permissions: true },
+    source: "plugin",
+    removable: true,
+    installedPath: "/tmp/opencode",
+  } as unknown as AgentDescriptor;
+
+  // 插件运行时的 getStatus/update 只拼最小 descriptor，manifest 的
+  // packages/selfUpgrade 不会跟过来；host 端不补齐就会退回 npm 全局安装。
+  const incoming = {
+    id: "opencode",
+    name: "OpenCode",
+    source: "plugin",
+    removable: true,
+    command: "opencode",
+    packageName: "opencode-ai",
+    installedPath: "/tmp/opencode",
+  } as unknown as AgentDescriptor;
+
+  it("补齐插件省略的 packages 与 selfUpgrade", () => {
+    const merged = mergeHostCliDescriptor(known, incoming);
+
+    expect(merged.selfUpgrade).toEqual(known.selfUpgrade);
+    expect(merged.packages).toEqual(known.packages);
+    expect(merged.version).toBe("1.4.3");
+    expect(merged.capabilities).toBe(known.capabilities);
+  });
+
+  it("插件显式提供的 CLI 元数据优先", () => {
+    const override = {
+      ...incoming,
+      packages: [{ line: "v3", name: "@opencode/cli-next" }],
+      selfUpgrade: { args: ["upgrade", "--experimental"] },
+    } as unknown as AgentDescriptor;
+
+    const merged = mergeHostCliDescriptor(known, override);
+
+    expect(merged.packages).toEqual(override.packages);
+    expect(merged.selfUpgrade).toEqual(override.selfUpgrade);
+  });
+
+  it("registry 里找不到插件时保持原 descriptor", () => {
+    expect(mergeHostCliDescriptor(undefined, incoming)).toBe(incoming);
   });
 });
 

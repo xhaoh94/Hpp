@@ -16,6 +16,7 @@ const copyAgentWorkerPlugin = () => ({
       ["electron/plugin-backends/codex/fork-utils.mjs", "fork-utils.mjs"],
       ["electron/plugin-backends/codex/command-invocation.mjs", "command-invocation.mjs"],
       ["electron/plugin-backends/pi/worker.mjs", "pi-sdk-worker.mjs"],
+      ["electron/plugin-backends/pi/transient-provider-retry.mjs", "transient-provider-retry.mjs"],
       ["electron/plugin-backends/pi/pi-fork-utils.mjs", "pi-fork-utils.mjs"],
       ["electron/plugin-backends/pi/pi-agent-dir.mjs", "pi-agent-dir.mjs"],
       ["electron/plugin-backends/pi/shell-environment.mjs", "shell-environment.mjs"],

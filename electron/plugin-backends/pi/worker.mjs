@@ -14,6 +14,7 @@ import {
 import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
 import { createHppSubagentExtension, normalizeHppSubagentConfig } from "./subagent-extension.mjs";
 import { createHppPresentExtension } from "./present-extension.mjs";
+import { installTransientProviderRetry } from "./transient-provider-retry.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
@@ -1687,6 +1688,10 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
   });
   session = result.session;
   mark("createAgentSession");
+  // 网关把上游临时故障包装成 400 时，Pi 默认不会重试；这里补上判定，
+  // 复用 Pi 自带的退避与 auto_retry 事件，避免一次抖动终结整轮对话。
+  installTransientProviderRetry(session);
+  mark("installTransientProviderRetry");
   // Re-evaluate a restored setting so the session enforces the current
   // model's supported levels; sessions opened from disk may carry a value
   // the SDK accepted before the model catalogue was known.

@@ -85,6 +85,33 @@ function needsLiteralText(document) {
   return document.isDirty || document.uri.scheme !== "file" || document.isUntitled;
 }
 
+async function deliverAll(payloads) {
+  const discovery = readDiscovery();
+  if (!discovery) {
+    void vscode.window.showErrorMessage("Hpp：找不到桥接配置 editor-bridge.json，请确认 Hpp 正在运行。");
+    return false;
+  }
+  for (let index = 0; index < payloads.length; index += 1) {
+    // 批量发送只在第一项抢一次焦点，后续保留 Hpp 里刚插入的内容。
+    const payload = { ...payloads[index], focus: index === 0 };
+    try {
+      await bridgeRequest(discovery, "POST", SEND_PATH, payload);
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `Hpp：发送 ${path.basename(payload.path)} 失败（${error instanceof Error ? error.message : String(error)}）。`,
+      );
+      return false;
+    }
+  }
+  return true;
+}
+
+async function deliver(payload, done) {
+  const ok = await deliverAll([payload]);
+  if (ok) void vscode.window.setStatusBarMessage(done, 2500);
+  return ok;
+}
+
 async function sendActiveEditor(kind) {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
@@ -125,64 +152,148 @@ async function sendActiveEditor(kind) {
     text = document.getText();
   }
 
+  // 协议只有 selection/file/folder：文件带字面内容时必须走 selection，
+  // 否则 Hpp 只拿到路径、读盘会读到未保存前的旧版本。
+  const literal = needsLiteralText(document);
+  const oversized = literal && Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES;
+  const payloadKind = kind !== "file" || (literal && !oversized) ? "selection" : "file";
   const payload = {
     version: 1,
     client: "vscode",
-    // 协议只有 selection/file 两种；"line" 就是起止行相同的一次选区。
-    kind: kind === "file" ? "file" : "selection",
+    kind: payloadKind,
     path: document.uri.fsPath || document.fileName,
     startLine,
     endLine,
     language: document.languageId,
   };
 
-  if (needsLiteralText(document)) {
-    if (Buffer.byteLength(text, "utf8") <= MAX_TEXT_BYTES) payload.text = text;
-    else void vscode.window.showWarningMessage("Hpp：内容超过 512 KB，已只发送路径和行号，Hpp 将读取磁盘上的版本。");
+  if (literal) {
+    if (!oversized) payload.text = text;
+    else if (kind === "file") void vscode.window.showWarningMessage("Hpp：内容超过 512 KB，已改为只发送路径引用。");
+    else void vscode.window.showWarningMessage("Hpp：内容超过 512 KB，已只发送路径和行号；未保存的改动不会包含在内。");
   }
 
-  const discovery = readDiscovery();
-  if (!discovery) {
-    void vscode.window.showErrorMessage("Hpp：找不到桥接配置 editor-bridge.json，请确认 Hpp 正在运行。");
+  const done = kind === "file"
+    ? `已发送 ${path.basename(payload.path)} 到 Hpp`
+    : kind === "line" ? `已发送第 ${startLine} 行到 Hpp` : `已发送 ${endLine - startLine + 1} 行到 Hpp`;
+  await deliver(payload, done);
+}
+
+/**
+ * 资源管理器右键文件：已保存的本地文件只发路径；未保存或非本地文件带字面内容，
+ * 走 selection 让 Hpp 按代码块插入。命令面板调用（无 uri）时退回活动编辑器。
+ * 资源管理器多选时 VSCode 会传入 selectedUris，逐个发送全部选中项。
+ */
+async function sendFile(uri, selectedUris) {
+  if (!uri) {
+    await sendActiveEditor("file");
     return;
   }
+  const uris = Array.isArray(selectedUris) && selectedUris.length ? selectedUris : [uri];
+  await sendExplorerUris(uris);
+}
 
+const findDocument = (uri) => vscode.workspace.textDocuments.find((item) => item.uri.toString() === uri.toString());
+
+async function isDirectory(uri) {
+  if (findDocument(uri)) return false;
+  if (uri.scheme === "file" && uri.fsPath) {
+    try {
+      return fs.statSync(uri.fsPath).isDirectory();
+    } catch {
+      return false;
+    }
+  }
   try {
-    await bridgeRequest(discovery, "POST", SEND_PATH, payload);
-    const done = kind === "file"
-      ? "已发送文件到 Hpp"
-      : kind === "line" ? `已发送第 ${startLine} 行到 Hpp` : `已发送 ${endLine - startLine + 1} 行到 Hpp`;
-    void vscode.window.setStatusBarMessage(done, 2500);
+    const stat = await vscode.workspace.fs.stat(uri);
+    return (stat.type & vscode.FileType.Directory) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+async function buildFilePayload(uri) {
+  const document = findDocument(uri);
+  if (document && document.isUntitled) {
+    void vscode.window.showWarningMessage("Hpp：未保存的新文件没有路径，已跳过。");
+    return null;
+  }
+  const filePath = document ? (document.uri.fsPath || document.fileName) : (uri.fsPath || uri.path);
+  if (!filePath) {
+    void vscode.window.showWarningMessage("Hpp：有文件没有可发送的本地路径，已跳过。");
+    return null;
+  }
+  const language = document ? document.languageId : undefined;
+  if (!(document ? needsLiteralText(document) : uri.scheme !== "file")) {
+    return { version: 1, client: "vscode", kind: "file", path: filePath, ...(language ? { language } : {}) };
+  }
+
+  let text;
+  try {
+    text = document ? document.getText() : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
   } catch (error) {
-    void vscode.window.showErrorMessage(`Hpp：${error instanceof Error ? error.message : String(error)}`);
+    void vscode.window.showErrorMessage(`Hpp：读取文件失败（${error instanceof Error ? error.message : String(error)}）。`);
+    return null;
+  }
+  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
+    void vscode.window.showWarningMessage(`Hpp：${path.basename(filePath)} 超过 512 KB，无法携带未保存或远程内容，已跳过。`);
+    return null;
+  }
+  const lineCount = document ? Math.max(document.lineCount, 1) : text.split(/\r?\n/).length;
+  return {
+    version: 1,
+    client: "vscode",
+    kind: "selection",
+    path: filePath,
+    startLine: 1,
+    endLine: lineCount,
+    text,
+    ...(language ? { language } : {}),
+  };
+}
+
+/** 资源管理器里选中的每一项都发过去：文件夹发引用，文件按是否本地/已保存决定发路径还是内容。 */
+async function sendExplorerUris(uris) {
+  const payloads = [];
+  let skipped = 0;
+  for (const uri of uris) {
+    if (await isDirectory(uri)) {
+      const folderPath = uri.fsPath || uri.path;
+      if (!folderPath) {
+        skipped += 1;
+        continue;
+      }
+      payloads.push({ version: 1, client: "vscode", kind: "folder", path: folderPath });
+      continue;
+    }
+    const payload = await buildFilePayload(uri);
+    if (payload) payloads.push(payload);
+    else skipped += 1;
+  }
+
+  if (!payloads.length) return;
+  if (payloads.length === 1) {
+    await deliver(payloads[0], `已发送 ${path.basename(payloads[0].path)} 到 Hpp`);
+    return;
+  }
+  if (await deliverAll(payloads)) {
+    void vscode.window.setStatusBarMessage(
+      `已发送 ${payloads.length} 项到 Hpp${skipped ? `，跳过 ${skipped} 项` : ""}`,
+      3000,
+    );
   }
 }
 
 /**
  * 资源管理器右键：把整个文件夹作为引用发给 Hpp（不读内容，只发路径）。
  */
-async function sendFolder(uri) {
-  const folderPath = uri && uri.fsPath ? uri.fsPath : "";
-  if (!folderPath) {
-    void vscode.window.showWarningMessage("Hpp：请在资源管理器里右键一个文件夹。");
+async function sendFolder(uri, selectedUris) {
+  const uris = Array.isArray(selectedUris) && selectedUris.length ? selectedUris : (uri ? [uri] : []);
+  if (!uris.length) {
+    void vscode.window.showWarningMessage("Hpp：请在资源管理器里右键一个文件或文件夹。");
     return;
   }
-  const discovery = readDiscovery();
-  if (!discovery) {
-    void vscode.window.showErrorMessage("Hpp：找不到桥接配置 editor-bridge.json，请确认 Hpp 正在运行。");
-    return;
-  }
-  try {
-    await bridgeRequest(discovery, "POST", SEND_PATH, {
-      version: 1,
-      client: "vscode",
-      kind: "folder",
-      path: folderPath,
-    });
-    void vscode.window.setStatusBarMessage("已发送文件夹到 Hpp", 2500);
-  } catch (error) {
-    void vscode.window.showErrorMessage(`Hpp：${error instanceof Error ? error.message : String(error)}`);
-  }
+  await sendExplorerUris(uris);
 }
 
 async function showStatus() {
@@ -205,8 +316,8 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("hpp.sendSelection", () => sendActiveEditor("selection")),
     vscode.commands.registerCommand("hpp.sendLine", () => sendActiveEditor("line")),
-    vscode.commands.registerCommand("hpp.sendFile", () => sendActiveEditor("file")),
-    vscode.commands.registerCommand("hpp.sendFolder", (uri) => sendFolder(uri)),
+    vscode.commands.registerCommand("hpp.sendFile", (uri, selectedUris) => sendFile(uri, selectedUris)),
+    vscode.commands.registerCommand("hpp.sendFolder", (uri, selectedUris) => sendFolder(uri, selectedUris)),
     vscode.commands.registerCommand("hpp.showStatus", () => showStatus()),
   );
 }

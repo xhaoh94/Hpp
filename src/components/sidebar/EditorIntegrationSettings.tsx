@@ -2,16 +2,38 @@ import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Copy, LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
 
 import type { EditorBridgeStatus, EditorBridgeTargetInfo } from "@shared/editor-bridge-protocol";
+import { compareVersions } from "@/lib/version";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 
-const needsUpdate = (target: EditorBridgeTargetInfo) =>
-  !!target.installedVersion && !!target.bundledVersion && target.installedVersion !== target.bundledVersion;
+/** 返回 null 表示版本号不可比较，调用方退回字符串相等判断。 */
+const versionComparison = (target: EditorBridgeTargetInfo) => {
+  if (!target.installedVersion || !target.bundledVersion) return null;
+  try {
+    return compareVersions(target.installedVersion, target.bundledVersion);
+  } catch {
+    return target.installedVersion === target.bundledVersion ? 0 : null;
+  }
+};
+
+// 本地插件版本可以高于 Hpp 自带版本（开发时手动装了新包），不能把它当成
+// “可更新到更低版本”去提示。只有确实落后时才显示更新。
+const needsUpdate = (target: EditorBridgeTargetInfo) => {
+  const comparison = versionComparison(target);
+  return comparison === null
+    ? !!target.installedVersion && !!target.bundledVersion && target.installedVersion !== target.bundledVersion
+    : comparison < 0;
+};
 
 const targetStatusText = (target: EditorBridgeTargetInfo) => {
   if (target.kind === "config") return target.configured ? "任务已写入" : "未接入";
   if (!target.cliPath) return "已安装，但找不到命令行工具";
   if (needsUpdate(target)) return `插件 ${target.installedVersion}，可更新到 ${target.bundledVersion}`;
-  if (target.installedVersion) return `插件已安装 ${target.installedVersion}`;
+  if (target.installedVersion) {
+    const comparison = versionComparison(target);
+    return comparison !== null && comparison > 0
+      ? `插件已安装 ${target.installedVersion}（Hpp 自带 ${target.bundledVersion}）`
+      : `插件已安装 ${target.installedVersion}`;
+  }
   return "已安装，插件未装";
 };
 

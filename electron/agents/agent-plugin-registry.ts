@@ -556,6 +556,31 @@ export function getCliPackageForVersion(
   return packages[0];
 }
 
+/**
+ * 插件宿主里的 getStatus/update 会自己拼一份 descriptor，通常只带
+ * id/name/command/packageName，manifest 里声明的 `packages` 和 `selfUpgrade`
+ * 不会自动跟过来。host 端必须以 registry 加载的完整 descriptor 为准，
+ * 否则 OpenCode 会退回 `npm install -g`，在 /usr 属于 root 的系统上直接 EACCES。
+ */
+export function mergeHostCliDescriptor(
+  known: AgentDescriptor | undefined,
+  incoming: AgentDescriptor,
+): AgentDescriptor {
+  if (!known) return incoming;
+  return {
+    ...known,
+    id: incoming.id || known.id,
+    name: incoming.name || known.name,
+    source: incoming.source || known.source,
+    removable: typeof incoming.removable === "boolean" ? incoming.removable : known.removable,
+    installedPath: incoming.installedPath || known.installedPath,
+    command: incoming.command || known.command,
+    packageName: incoming.packageName || known.packageName,
+    packages: incoming.packages?.length ? incoming.packages : known.packages,
+    selfUpgrade: incoming.selfUpgrade || known.selfUpgrade,
+  };
+}
+
 function descriptorFromManifest(
   manifest: RawAgentPluginManifest,
   source: AgentDescriptor["source"],
@@ -1727,9 +1752,15 @@ export class AgentPluginRegistry {
   }
 
   private createHostApi(): AgentHostApi {
+    // 插件代码只传最小 descriptor；packages/selfUpgrade 这类 CLI 元数据
+    // 必须回到 registry 的 manifest descriptor 上补齐，否则自带升级不生效。
+    const resolveDescriptor = (incoming: AgentDescriptor) => {
+      const known = incoming?.id ? this.pluginRecords.get(incoming.id)?.descriptor : undefined;
+      return mergeHostCliDescriptor(known, incoming);
+    };
     return {
-      getCliAgentStatus,
-      updateCliAgent,
+      getCliAgentStatus: (descriptor) => getCliAgentStatus(resolveDescriptor(descriptor)),
+      updateCliAgent: (descriptor, versionSpec) => updateCliAgent(resolveDescriptor(descriptor), versionSpec),
     };
   }
 
