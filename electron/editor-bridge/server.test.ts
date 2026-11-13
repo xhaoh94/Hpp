@@ -20,6 +20,13 @@ vi.mock("electron", () => ({
   ipcMain: mockState.ipcMain,
 }));
 
+const foregroundState = vi.hoisted(() => ({ requestWindowsForeground: vi.fn() }));
+
+// 真跑 PowerShell 太慢且有副作用，只验证「调了原生抢前台」这条边界。
+vi.mock("./force-foreground", () => ({
+  requestWindowsForeground: foregroundState.requestWindowsForeground,
+}));
+
 import { readFile } from "fs/promises";
 import { request as httpRequest } from "http";
 
@@ -41,9 +48,12 @@ function createWindow() {
     restore: vi.fn(),
     show: vi.fn(),
     focus: vi.fn(),
+    moveTop: vi.fn(),
     setAlwaysOnTop: vi.fn(),
+    getNativeWindowHandle: () => Buffer.alloc(8),
     webContents: {
       isLoading: () => false,
+      focus: vi.fn(),
       send: (channel: string, payload: SentPayload) => {
         if (channel === "editor-bridge:insert") sent.push(payload);
       },
@@ -173,7 +183,10 @@ describe("editor bridge server", () => {
     await completeInsert();
     expect(fake.window.restore).toHaveBeenCalled();
     expect(fake.window.show).toHaveBeenCalled();
+    expect(fake.window.moveTop).toHaveBeenCalled();
     expect(fake.window.focus).toHaveBeenCalled();
+    // 窗口前置后还要让 web 内容拿键盘焦点，否则输入仍留在编辑器里。
+    expect(fake.window.webContents.focus).toHaveBeenCalled();
   });
 
   it("显式 focus:false 时保留编辑器焦点", async () => {

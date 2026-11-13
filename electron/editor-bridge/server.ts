@@ -28,6 +28,7 @@ import {
 } from "./discovery";
 import { installEditorExtension, listEditorTargets } from "./installers";
 import { installZedTasks } from "./zed";
+import { requestWindowsForeground } from "./force-foreground";
 
 type PendingInsert = {
   resolve: () => void;
@@ -70,15 +71,17 @@ function readJsonBody(request: IncomingMessage): Promise<unknown> {
 const bringWindowToFront = (window: BrowserWindow) => {
   if (window.isMinimized()) window.restore();
   if (!window.isVisible()) window.show();
-  if (process.platform !== "win32") {
-    window.focus();
-    return;
-  }
-  window.setAlwaysOnTop(true);
+  window.moveTop();
   window.focus();
+  window.webContents.focus();
+  if (process.platform !== "win32") return;
+  // Windows 的 focus() 受前台锁限制，只改 Z 序、键盘输入仍留在编辑器；
+  // 短暂置顶保证视觉前置，原生调用补真正的键盘焦点。
+  window.setAlwaysOnTop(true);
   setTimeout(() => {
     if (!window.isDestroyed()) window.setAlwaysOnTop(false);
-  }, 200);
+  }, 300);
+  requestWindowsForeground(window);
 };
 
 /**
