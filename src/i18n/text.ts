@@ -2,7 +2,7 @@ import type { ComposerPasteStats } from "@shared/composer-document";
 import { formatPastedTextSize } from "@/lib/paste-fold";
 
 export type AttachmentKind = "file" | "folder" | string;
-export type ProcessFileAction = "read" | "listed" | "written" | "edited" | "modified" | undefined;
+export type ProcessFileAction = "read" | "listed" | "written" | "edited" | "modified" | "presented" | undefined;
 export type ProcessStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type CommandState = "running" | "completed" | "warning" | "error" | "interrupted" | undefined;
 export type ToolSummaryKind =
@@ -193,6 +193,7 @@ export const getProcessFileEntryTitle = (
       case "listed": return `正在查看 ${count} 个目录`;
       case "written": return `正在写入 ${count} ${uiText.process.fileUnit}`;
       case "edited": return `正在编辑 ${count} ${uiText.process.fileUnit}`;
+      case "presented": return `正在呈现 ${count} 个产物`;
       default: return `正在修改 ${count} ${uiText.process.fileUnit}`;
     }
   }
@@ -202,6 +203,7 @@ export const getProcessFileEntryTitle = (
     case "listed": return `已查看 ${count} 个目录`;
     case "written": return `已写入 ${count} ${uiText.process.fileUnit}`;
     case "edited": return `已编辑 ${count} ${uiText.process.fileUnit}`;
+    case "presented": return `已呈现 ${count} 个产物`;
     default: return `已修改 ${count} ${uiText.process.fileUnit}`;
   }
 };
@@ -212,6 +214,7 @@ export const getProcessFileActionLabel = (action: ProcessFileAction) => {
     case "listed": return "已查看";
     case "written": return "已写入";
     case "edited": return "已编辑";
+    case "presented": return "已呈现";
     default: return "已修改";
   }
 };

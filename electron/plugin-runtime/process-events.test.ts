@@ -19,6 +19,33 @@ describe("process event normalization", () => {
     expect(unwrapToolText({ stdout: "ok", stderr: "warn" })).toBe("ok\nwarn");
   });
 
+  it("把 present_files 的声明记成 presented 产物", () => {
+    // 插件的 execute 会把路径解析成绝对值放进 details.files，优先用它；
+    // details 缺失时退回模型入参，保证第三方同名工具也能被识别。
+    expect(normalizeToolEvent("tool_end", {
+      toolName: "present_files",
+      toolCallId: "call-present",
+      args: { files: ["out/report.pdf"] },
+      result: { details: { files: ["C:/proj/out/report.pdf"] } },
+    })).toMatchObject({
+      toolKind: "unknown",
+      files: [{
+        file: "C:/proj/out/report.pdf",
+        label: "report.pdf",
+        action: "presented",
+      }],
+    });
+
+    expect(normalizeToolEvent("tool_end", {
+      toolName: "present_files",
+      toolCallId: "call-present-args",
+      args: { files: ["C:/proj/dist/app.zip", "C:/proj/dist/app.zip"] },
+      result: {},
+    })).toMatchObject({
+      files: [{ file: "C:/proj/dist/app.zip", action: "presented" }],
+    });
+  });
+
   it("normalizes file tool events with paths and file entries", () => {
     expect(normalizeToolEvent("tool_start", {
       toolName: "read_file",

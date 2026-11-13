@@ -17,7 +17,8 @@ export type NormalizedToolKind =
 export interface NormalizedProcessFile {
   file: string;
   label?: string;
-  action?: "read" | "listed" | "edited" | "modified" | "written";
+  /** presented = 模型通过 present_files 显式声明的交付物，不是写盘动作。 */
+  action?: "read" | "listed" | "edited" | "modified" | "written" | "presented";
   patch?: string;
   additions?: number;
   deletions?: number;
@@ -466,6 +467,36 @@ const buildFiles = (
   }];
 };
 
+/** present_files 的别名：插件侧固定这个工具名，第三方 MCP 可能带命名空间前缀。 */
+const PRESENT_TOOL_ALIASES = ["present_files", "presentfiles", "present_file"];
+
+const isPresentTool = (toolName: unknown) => {
+  const normalized = normalizeName(toolName);
+  return PRESENT_TOOL_ALIASES.some((alias) => matchesToolAlias(normalized, alias));
+};
+
+/**
+ * 模型显式声明的交付物。插件的 execute 会把相对路径解析成绝对路径放进
+ * details.files；details 缺失时退回模型原始入参（工作区外的路径也能用）。
+ */
+const getPresentedFiles = (toolName: unknown, args: unknown, result: unknown): NormalizedProcessFile[] => {
+  if (!isPresentTool(toolName)) return [];
+  const resultDetails = asRecord(asRecord(result).details);
+  const argObject = asRecord(args);
+  const detailFiles = resultDetails.files;
+  const argFiles = Array.isArray(argObject.files) ? argObject.files : argObject.paths;
+  const list = Array.isArray(detailFiles) ? detailFiles : Array.isArray(argFiles) ? argFiles : [];
+  const seen = new Set<string>();
+  const files: NormalizedProcessFile[] = [];
+  for (const item of list) {
+    const path = typeof item === "string" ? item.trim() : "";
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    files.push({ file: path, label: getFileName(path), action: "presented" });
+  }
+  return files;
+};
+
 const getErrorText = (data: UnknownRecord, result: unknown) => {
   const direct = unwrapToolText(data.error);
   if (direct) return direct;
@@ -566,6 +597,9 @@ export const normalizeToolEvent = (
     explicitStatus,
     explicitStatus !== undefined,
   );
+  // 模型显式声明的产物优先于写盘推断：presented 的文件不走扩展名/位置过滤。
+  const presentedFiles = getPresentedFiles(toolName, args || {}, result || {});
+  const entryFiles = presentedFiles.length > 0 ? presentedFiles : files;
   const detail = buildDetail({
     phase,
     toolKind,
@@ -589,7 +623,7 @@ export const normalizeToolEvent = (
     detail,
     outputText,
     errorText,
-    files: files.length > 0 ? files : undefined,
+    files: entryFiles.length > 0 ? entryFiles : undefined,
     status: explicitStatus,
     statusExplicit: explicitStatus !== undefined,
     filePath: filePath || undefined,

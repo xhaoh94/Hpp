@@ -15,6 +15,7 @@ const requiredFiles = [
   "shell-environment.mjs",
   "plan-mode-policy.mjs",
   "subagent-extension.mjs",
+  "present-extension.mjs",
   "subagent-bridge-extension.mjs",
   "subagent-policy.mjs",
   "subagent-prompts/implement.md",

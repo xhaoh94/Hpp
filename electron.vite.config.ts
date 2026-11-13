@@ -21,6 +21,7 @@ const copyAgentWorkerPlugin = () => ({
       ["electron/plugin-backends/pi/shell-environment.mjs", "shell-environment.mjs"],
       ["electron/plugin-backends/pi/plan-mode-policy.mjs", "plan-mode-policy.mjs"],
       ["electron/plugin-backends/pi/subagent-extension.mjs", "subagent-extension.mjs"],
+      ["electron/plugin-backends/pi/present-extension.mjs", "present-extension.mjs"],
       ["electron/plugin-backends/pi/subagent-bridge-extension.mjs", "subagent-bridge-extension.mjs"],
       ["electron/plugin-backends/pi/subagent-policy.mjs", "subagent-policy.mjs"],
       ["electron/plugin-backends/claude/worker.mjs", "claude-sdk-worker.mjs"],

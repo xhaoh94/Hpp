@@ -58,4 +58,78 @@ describe("collectMessageArtifacts", () => {
     expect(collectMessageArtifacts(message([{ id: "t", type: "thinking", title: "思考" }]))).toEqual([]);
     expect(collectMessageArtifacts({ id: "m", role: "assistant", content: "", timestamp: 1 })).toEqual([]);
   });
+
+  it("系统临时目录里的文件不算产物", () => {
+    const artifacts = collectMessageArtifacts(message([
+      { id: "w1", type: "tool", files: [{ file: "/tmp/rel_apply2.txt", action: "written" }] },
+      { id: "w2", type: "tool", files: [{ file: "C:\\Users\\x\\AppData\\Local\\Temp\\shot.png", action: "written" }] },
+      { id: "w3", type: "tool", files: [{ file: "/var/tmp/out.pdf", action: "written" }] },
+      { id: "w4", type: "tool", files: [{ file: "C:/proj/release/hpp.exe", action: "written" }] },
+    ]));
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["hpp.exe"]);
+  });
+
+  it("依赖与缓存目录里的文件不算产物", () => {
+    const artifacts = collectMessageArtifacts(message([
+      { id: "w1", type: "tool", files: [{ file: "C:/proj/node_modules/pkg/logo.png", action: "written" }] },
+      { id: "w2", type: "tool", files: [{ file: "C:/proj/.cache/build/report.pdf", action: "written" }] },
+      { id: "w3", type: "tool", files: [{ file: "C:/proj/__pycache__/x.csv", action: "written" }] },
+      { id: "w4", type: "tool", files: [{ file: "C:/proj/docs/report.pdf", action: "written" }] },
+    ]));
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["report.pdf"]);
+  });
+
+  it("工作区自带的 tmp/.tmp 草稿不算产物，工作区外的成品照收", () => {
+    const artifacts = collectMessageArtifacts(
+      message([
+        { id: "w1", type: "tool", files: [{ file: "C:/proj/tmp/demo.html", action: "written" }] },
+        { id: "w2", type: "tool", files: [{ file: "C:/proj/.tmp/probe.png", action: "written" }] },
+        { id: "w3", type: "tool", files: [{ file: "C:/proj/dist/site/index.html", action: "written" }] },
+        // 目录名只是前缀相同，不是 tmp 本身。
+        { id: "w4", type: "tool", files: [{ file: "C:/proj/tmpdata/report.md", action: "written" }] },
+        { id: "w5", type: "tool", files: [{ file: "C:/Users/x/Desktop/报告.docx", action: "written" }] },
+      ]),
+      { workspacePath: "C:\\proj" },
+    );
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["index.html", "report.md", "报告.docx"]);
+  });
+
+  it("写过又被删掉的文件不算产物", () => {
+    const artifacts = collectMessageArtifacts(message([
+      { id: "w", type: "tool", files: [{ file: "C:/proj/out.png", action: "written" }] },
+      { id: "d", type: "tool", files: [{ file: "C:/proj/out.png", action: "deleted" }] },
+      { id: "d2", type: "diff", files: [{ file: "C:/proj/old.pdf", status: "deleted" }] },
+      { id: "w2", type: "tool", files: [{ file: "C:/proj/keep.zip", action: "written" }] },
+    ]));
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["keep.zip"]);
+  });
+
+  it("模型显式声明的产物不受扩展名和位置限制", () => {
+    const artifacts = collectMessageArtifacts(
+      message([
+        // 声明优先：/tmp 里的成品、脚本类交付物都算。
+        { id: "p", type: "tool", toolKind: "unknown", files: [{ file: "/tmp/report.txt", action: "presented" }] },
+        { id: "p2", type: "tool", toolKind: "unknown", files: [{ file: "C:/proj/tools/run.sh", action: "presented" }] },
+        // 没声明的一律按推断规则，仍然被 /tmp 过滤掉。
+        { id: "w", type: "tool", files: [{ file: "/tmp/scratch.txt", action: "written" }] },
+      ]),
+      { workspacePath: "C:/proj" },
+    );
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["report.txt", "run.sh"]);
+  });
+
+  it("收 Office 老格式", () => {
+    const artifacts = collectMessageArtifacts(message([
+      { id: "w1", type: "tool", files: [{ file: "C:/proj/a.doc", action: "written" }] },
+      { id: "w2", type: "tool", files: [{ file: "C:/proj/b.xls", action: "written" }] },
+      { id: "w3", type: "tool", files: [{ file: "C:/proj/c.ppt", action: "written" }] },
+    ]));
+
+    expect(artifacts.map((artifact) => artifact.kind)).toEqual(["document", "document", "document"]);
+  });
 });

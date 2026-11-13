@@ -26,7 +26,8 @@ export interface FileDiff extends DiffLike {
 export interface AgentProcessFile {
   file: string;
   label?: string;
-  action?: "read" | "listed" | "edited" | "modified" | "written";
+  /** presented = 模型通过 present_files 显式声明的交付物。 */
+  action?: "read" | "listed" | "edited" | "modified" | "written" | "presented";
   patch?: string;
   additions?: number;
   deletions?: number;

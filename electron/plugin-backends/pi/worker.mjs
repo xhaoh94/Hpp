@@ -13,12 +13,16 @@ import {
 } from "./shell-environment.mjs";
 import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
 import { createHppSubagentExtension, normalizeHppSubagentConfig } from "./subagent-extension.mjs";
+import { createHppPresentExtension } from "./present-extension.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
 const QUESTIONNAIRE_TOOLS = new Set(["ask_user_question", "questionnaire", "question"]);
 const BUILTIN_SUBAGENT_PROMPT_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "subagent-prompts");
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+// present_files 只把路径登记给宿主，不读写文件内容；放进只读集合，
+// 否则每次任务收尾都会弹一次权限确认。工作区外的路径仍然走下面的
+// outsideProject 判定，由用户决定。
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "present_files"]);
 const MUTATING_TOOLS = new Set(["edit", "write"]);
 const PLAN_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 // codemode 必须显式拉黑，不能靠「不在只读白名单里」兜底：它在 QuickJS 沙箱里用
@@ -103,6 +107,14 @@ const FILE_DISCOVERY_GUIDANCE = [
   // 项目根下不存在的位置，点上去只会提示找不到文件。
   "回答里引用文件时给出相对项目根的完整路径（如 src/lib/foo.ts），不要只写文件名。",
 ].join(" ");
+
+// 产物声明：不写进提示词的话模型基本不会主动调用 present_files，
+// 产物区就只能一直靠写盘推断（临时脚本也会被列出来）。
+const PRESENT_FILES_GUIDANCE = [
+  "任务里产出了用户要的成品文件（报告、表格、文档、网页、图片、安装包等）时，",
+  "在收尾回复前调用一次 present_files，把交付物按绝对路径列出来。",
+  "只列真正交付的成品，不要列中间脚本、日志、缓存或调试截图。",
+].join("");
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const AGENT_COMPACTION_THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_AGENT_COMPACTION_CONFIG = {
@@ -1618,6 +1630,8 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     getSubagentConfig: () => activeSubagentConfig,
   });
   activeHppSubagentExtension = hppSubagentExtension;
+  // 产物声明工具：相对路径按会话工作目录解析，和 pi 的其它工具保持一致。
+  const hppPresentExtension = createHppPresentExtension({ getWorkspaceRoot: () => cwd });
   activeAgentDir = agentDir;
   activeShellEnvironmentContract = shellEnvironmentContract;
   resourceLoader = new sdk.DefaultResourceLoader({
@@ -1638,6 +1652,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
       hppPermissionExtension,
       hppRuntimePolicyExtension,
       hppCompactionExtension,
+      hppPresentExtension,
       hppSubagentExtension,
       // 内置扩展工厂必须带 builtin:true 才会走 builtin:<name> 加载路径；它们不参与
       // <inline:N> 编号，所以插在哪都不影响下面那条 <inline:1> 权限自检。
@@ -1645,6 +1660,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     ],
     appendSystemPrompt: [
       FILE_DISCOVERY_GUIDANCE,
+      PRESENT_FILES_GUIDANCE,
       shellEnvironmentContract,
       // Put the host policy in Pi's native base prompt as well as the
       // per-turn hook. This mirrors a project SYSTEM.md without creating or

@@ -1498,6 +1498,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
             <MessageArtifacts
               message={msg}
               onOpenFile={onOpenFile}
+              workspacePath={projectPath}
               excludePaths={showDiffBlock ? substantiveDiffs.map((diff) => diff.file) : undefined}
             />
           )}

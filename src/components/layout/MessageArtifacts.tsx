@@ -10,6 +10,8 @@ interface MessageArtifactsProps {
   onOpenFile: (path: string, options?: { preview?: boolean }) => void;
   /** 已由 diff 面板展示过的文件；这里跳过，避免同一文件重复列出。 */
   excludePaths?: string[];
+  /** 当前项目根目录：用来把工作区里的 tmp/.tmp 草稿排除掉。 */
+  workspacePath?: string;
 }
 
 const KIND_ICON = {
@@ -45,10 +47,11 @@ export const MessageArtifacts = memo(function MessageArtifacts({
   message,
   onOpenFile,
   excludePaths,
+  workspacePath,
 }: MessageArtifactsProps) {
   const artifacts = useMemo(
-    () => collectMessageArtifacts(message, { excludePaths }),
-    [message, excludePaths],
+    () => collectMessageArtifacts(message, { excludePaths, workspacePath }),
+    [message, excludePaths, workspacePath],
   );
   const [expanded, setExpanded] = useState(false);
   if (artifacts.length === 0) return null;
