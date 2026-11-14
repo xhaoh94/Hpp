@@ -71,6 +71,7 @@ interface GeneralSettings {
 type GeneralSectionId = "appearance" | "behavior" | "editing" | "images" | "storage";
 
 const SHORTCUT_LABELS: Record<string, string> = {
+  globalQuickAsk: "全局唤起",
   fileSearch: "文件搜索",
   switchToFiles: "切换到资源管理器",
   prevModel: "上一个模型",
@@ -164,6 +165,7 @@ function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; nam
 
 export function SettingsView() {
   const [shortcuts, setShortcuts] = useState<ShortcutConfig>(DEFAULT_SHORTCUTS);
+  const [autoApproveCommands, setAutoApproveCommands] = useState("");
   const [filters, setFilters] = useState<FilterConfig>(DEFAULT_FILTERS);
   const [recordingKey, setRecordingKey] = useState<string | null>(null);
   const [showShortcutModal, setShowShortcutModal] = useState(false);
@@ -208,6 +210,11 @@ export function SettingsView() {
       const settings = asRecord(data);
       if (settings.shortcuts) setShortcuts(normalizeShortcuts(settings.shortcuts));
       if (settings.filters) setFilters(normalizeFileFilters(settings.filters));
+      setAutoApproveCommands(
+        Array.isArray(settings.autoApproveCommands)
+          ? settings.autoApproveCommands.filter((item): item is string => typeof item === "string").join("\n")
+          : "",
+      );
       if (settings.general) {
         const originalGeneral = asRecord(settings.general);
         const general = normalizeGeneral(settings.general);
@@ -372,6 +379,21 @@ export function SettingsView() {
     window.dispatchEvent(new CustomEvent(SHORTCUTS_UPDATED_EVENT, { detail: s }));
   };
 
+  const saveAutoApproveCommands = async (value: string) => {
+    const commands = value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    setAutoApproveCommands(commands.join("\n"));
+    const data = await window.electronAPI.loadData("settings");
+    const result = await window.electronAPI.saveData("settings", {
+      ...asRecord(data),
+      autoApproveCommands: commands,
+    });
+    if (result && result.success === false) showFloatingToastMessage(result.error || "保存失败");
+    else showFloatingToastMessage(commands.length > 0 ? "自动批准规则已保存" : "已清空自动批准规则");
+  };
+
   const saveFilters = (f: FilterConfig) => {
     const normalized = normalizeFileFilters(f);
     setFilters(normalized);
@@ -514,12 +536,18 @@ export function SettingsView() {
     setShowGeneralModal(false);
     setRecordingKey(null);
     setShowShortcutModal(true);
+    // 录制期间必须注销系统快捷键：否则按到旧组合会先被主进程截走，界面收不到这次按键。
+    void window.electronAPI.setGlobalQuickAsk("");
   };
 
   const closeShortcutSettings = () => {
     setShowShortcutModal(false);
     setRecordingKey(null);
     setShowGeneralModal(true);
+    // 弹窗期间快捷键处于注销状态，统一在这里按最终配置重新注册。
+    void window.electronAPI.setGlobalQuickAsk(shortcuts.globalQuickAsk).then((result) => {
+      if (!result.ok) showFloatingToastMessage(result.error || "全局快捷键注册失败。");
+    });
   };
 
   const openFilterSettings = () => {
@@ -609,8 +637,31 @@ export function SettingsView() {
                     </select>
                   </div>
                 </div>
+                <div className="shortcut-item">
+                  <span className="shortcut-label">全局唤起</span>
+                  <div className="shortcut-control" style={{ display: "flex", gap: 8 }}>
+                    <button
+                      className={`shortcut-btn ${recordingKey === "globalQuickAsk" ? "recording" : ""}`}
+                      onClick={() => setRecordingKey(recordingKey === "globalQuickAsk" ? null : "globalQuickAsk")}
+                    >
+                      {recordingKey === "globalQuickAsk"
+                        ? "按下快捷键..."
+                        : shortcuts.globalQuickAsk || "未设置"}
+                    </button>
+                    {shortcuts.globalQuickAsk && (
+                      <button
+                        className="shortcut-btn"
+                        onClick={() => saveShortcuts({ ...shortcuts, globalQuickAsk: "" })}
+                        title="停用全局唤起"
+                      >
+                        禁用
+                      </button>
+                    )}
+                  </div>
+                </div>
                 {Object.entries(shortcuts).filter(([k]) =>
                   k !== "sendKey" &&
+                  k !== "globalQuickAsk" &&
                   k !== "prevModel" &&
                   k !== "nextModel" &&
                   k !== "previousMessage" &&
@@ -671,6 +722,7 @@ export function SettingsView() {
               </div>
               <p style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 12 }}>
                 点击快捷键按钮后，按下新的组合键即可设置。按 Esc 取消。
+                全局唤起为系统级快捷键，至少需要一个修饰键，保存后立即生效。
               </p>
             </div>
           </div>
@@ -903,6 +955,23 @@ export function SettingsView() {
                           </button>
                         ))}
                       </div>
+                    </div>
+                    <div className="settings-general-row settings-general-row-column">
+                      <span className="settings-general-row-main">
+                        <strong>自动批准的命令</strong>
+                        <span>
+                          每行一条，按前缀匹配 bash 命令；仅对 Pi 生效。含分号、管道、重定向等拼接的命令不会命中。
+                        </span>
+                      </span>
+                      <textarea
+                        className="settings-command-allowlist"
+                        value={autoApproveCommands}
+                        spellCheck={false}
+                        rows={4}
+                        placeholder={"npm test\ngit status\ntsc --noEmit"}
+                        onChange={(event) => setAutoApproveCommands(event.target.value)}
+                        onBlur={(event) => void saveAutoApproveCommands(event.target.value)}
+                      />
                     </div>
                   </div>
                 )}

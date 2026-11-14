@@ -423,3 +423,110 @@
   border-color: var(--border-color);
   box-shadow: 0 4px 16px var(--shadow-color);
 }
+
+.session-btn.export {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.session-btn.export:hover {
+  background: var(--surface-strong);
+}
+
+.session-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 8px;
+  padding: 0 10px;
+  height: 32px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.session-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.session-search-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.session-search-results {
+  display: flex;
+  flex-direction: column;
+}
+
+.session-hit {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 16px;
+  border: none;
+  border-bottom: 1px solid var(--surface-muted);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.session-hit:hover {
+  background: var(--hover-bg);
+}
+
+.session-hit:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.session-hit-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.session-hit-session {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-hit-role {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: var(--surface-muted);
+}
+
+.session-hit-time {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.session-hit-snippet {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

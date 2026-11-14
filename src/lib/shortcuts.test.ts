@@ -31,6 +31,11 @@ describe("desktop shortcuts", () => {
     expect(matchShortcut({ ...event, ctrlKey: false }, DEFAULT_SHORTCUTS.previousMessage)).toBe(false);
   });
 
+  it("keeps an empty global quick ask as disabled instead of restoring the default", () => {
+    expect(normalizeShortcuts({ globalQuickAsk: "" }).globalQuickAsk).toBe("");
+    expect(normalizeShortcuts({}).globalQuickAsk).toBe(DEFAULT_SHORTCUTS.globalQuickAsk);
+  });
+
   it("keeps user-configured message navigation shortcuts", () => {
     expect(normalizeShortcuts({ previousMessage: "Ctrl+Up", nextMessage: "Ctrl+Down" })).toMatchObject({
       previousMessage: "Ctrl+Up",

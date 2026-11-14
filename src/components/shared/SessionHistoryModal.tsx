@@ -1,9 +1,11 @@
-import { useState } from "react";
-import { GitBranch } from "lucide-react";
+import { useEffect, useState } from "react";
+import { GitBranch, Search } from "lucide-react";
 import type { ProjectSession } from "@/stores/project-store";
 import { isUserSpeechMessage, type ChatMessage } from "@/stores/chat-store";
 import { getAgentName } from "@/lib/agents";
 import { getSessionPreviewLabel } from "@/lib/chat-message-preview";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
+import type { SessionSearchHit } from "../../../shared/session-export";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import "./SessionHistory.css";
 
@@ -12,6 +14,9 @@ interface Props {
   onClose: () => void;
   sessions: ProjectSession[];
   sessionMessages: Record<string, ChatMessage[]>;
+  /** 本项目的全部会话（含打开中的）：搜索按它收口，并用于解析命中项标题。 */
+  allSessions?: ProjectSession[];
+  projectName?: string;
   onResume: (session: ProjectSession) => void;
   onDelete: (sessionId: string) => void | Promise<void>;
   onDeleteAll: () => void | Promise<void>;
@@ -57,9 +62,62 @@ const getSessionPreviewText = (
   return preview || session.preview || session.title;
 };
 
-export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, onResume, onDelete, onDeleteAll }: Props) {
+export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages, allSessions, projectName, onResume, onDelete, onDeleteAll }: Props) {
   const [confirmDelete, setConfirmDelete] = useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<SessionSearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [exportingId, setExportingId] = useState<string | null>(null);
+
+  const trimmedQuery = query.trim();
+  const searchActive = trimmedQuery.length >= 2;
+  const searchScope = allSessions?.length ? allSessions : sessions;
+  const scopeKey = searchScope.map((session) => session.id).join("\u0000");
+
+  useEffect(() => {
+    if (!isOpen || trimmedQuery.length < 2) {
+      setHits([]);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      void window.electronAPI.searchSessionMessages(
+        trimmedQuery,
+        60,
+        searchScope.map((session) => session.id),
+      )
+        .then((result) => { if (!cancelled) setHits(result.hits || []); })
+        .catch(() => { if (!cancelled) setHits([]); })
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, 220);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // scopeKey 代替 searchScope：父组件每次渲染都会新建数组。
+  }, [isOpen, trimmedQuery, scopeKey]);
+
+  const sessionById = new Map(searchScope.map((session) => [session.id, session]));
+
+  const handleExport = async (session: ProjectSession) => {
+    if (exportingId) return;
+    setExportingId(session.id);
+    try {
+      const result = await window.electronAPI.exportSessionMarkdown({
+        sessionId: session.id,
+        title: session.title || session.preview || "会话",
+        projectName,
+        agentName: getAgentName(session.agentId),
+      });
+      if (result.ok) showFloatingToastMessage(`已导出到 ${result.filePath}`);
+      else if (!result.canceled) showFloatingToastMessage(result.error || "导出失败");
+    } finally {
+      setExportingId(null);
+    }
+  };
 
   const handleConfirmDelete = async () => {
     if (!confirmDelete || deleting) return;
@@ -103,7 +161,50 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
         </div>
 
         <div className="session-modal-body">
-          {sessions.length === 0 ? (
+          <div className="session-search">
+            <Search size={14} strokeWidth={2} />
+            <input
+              className="session-search-input"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索全部会话内容（至少 2 个字）"
+              spellCheck={false}
+            />
+            {searchActive && (
+              <span className="session-search-count">
+                {searching ? "搜索中…" : `${hits.length} 条`}
+              </span>
+            )}
+          </div>
+          {searchActive ? (
+            hits.length === 0 ? (
+              <p className="session-empty">{searching ? "正在搜索…" : "没有匹配的消息"}</p>
+            ) : (
+              <div className="session-search-results">
+                {hits.map((hit) => {
+                  const session = sessionById.get(hit.sessionId);
+                  return (
+                    <button
+                      key={`${hit.sessionId}:${hit.messageId}`}
+                      type="button"
+                      className="session-hit"
+                      onClick={() => {
+                        if (session) onResume(session);
+                      }}
+                      disabled={!session}
+                    >
+                      <div className="session-hit-head">
+                        <span className="session-hit-session">{session?.title || hit.sessionId}</span>
+                        <span className="session-hit-role">{hit.role === "user" ? "用户" : hit.role === "system" ? "系统" : "助手"}</span>
+                        <span className="session-hit-time">{hit.timestamp ? formatTime(new Date(hit.timestamp).toISOString()) : ""}</span>
+                      </div>
+                      <div className="session-hit-snippet">{hit.snippet}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )
+          ) : sessions.length === 0 ? (
             <p className="session-empty">暂无会话记录</p>
           ) : (
             <div className="session-list">
@@ -120,6 +221,13 @@ export function SessionHistoryModal({ isOpen, onClose, sessions, sessionMessages
                         </span>
                       </div>
                       <div className="session-actions">
+                        <button
+                          onClick={() => void handleExport(session)}
+                          className="session-btn export"
+                          disabled={exportingId === session.id}
+                        >
+                          {exportingId === session.id ? "导出中…" : "导出"}
+                        </button>
                         <button
                           onClick={() => onResume(session)}
                           className="session-btn resume"

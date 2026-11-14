@@ -45,6 +45,21 @@ export function detectDesktopEnvironment(
   };
 }
 
+/**
+ * 原生 Wayland 会话下拿不到全局按键：Wayland 没有给普通客户端的抓键协议，
+ * 只有实现了 GlobalShortcuts portal 的合成器才可能成功。显式跑 XWayland 时仍可用。
+ */
+export function isNativeWaylandSession(
+  platform = process.platform,
+  variables: EnvironmentVariables = process.env,
+): boolean {
+  if (platform !== "linux") return false;
+  const requested = variables.HPP_OZONE_PLATFORM?.trim().toLowerCase();
+  if (requested === "x11") return false;
+  if (requested === "wayland") return true;
+  return detectDesktopEnvironment(platform, variables).isWayland;
+}
+
 export function getLinuxChromiumSwitches(
   platform = process.platform,
   variables: EnvironmentVariables = process.env,

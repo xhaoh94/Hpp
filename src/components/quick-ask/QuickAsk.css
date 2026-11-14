@@ -1,0 +1,114 @@
+/* 全局唤起窗透明，靠卡片自己撑出视觉边界。 */
+html.quick-ask-mode,
+html.quick-ask-mode body {
+  background: transparent;
+  overflow: hidden;
+}
+
+.quick-ask-shell {
+  width: 100vw;
+  height: 100vh;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.quick-ask-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  box-shadow: 0 18px 48px var(--shadow-color);
+  overflow: hidden;
+}
+
+.quick-ask-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px 6px 12px;
+  -webkit-app-region: drag;
+}
+
+.quick-ask-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-ask-project {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.quick-ask-sep {
+  opacity: 0.5;
+}
+
+.quick-ask-close {
+  -webkit-app-region: no-drag;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.quick-ask-close:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.quick-ask-input {
+  flex: 1;
+  margin: 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  resize: none;
+  outline: none;
+  -webkit-app-region: no-drag;
+}
+
+.quick-ask-input:focus {
+  border-color: var(--accent-color);
+}
+
+.quick-ask-input:disabled {
+  opacity: 0.6;
+}
+
+.quick-ask-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px 6px;
+  font-size: 11px;
+}
+
+.quick-ask-hint {
+  color: var(--text-secondary);
+}
+
+.quick-ask-error {
+  color: var(--danger-color);
+}

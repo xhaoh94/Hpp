@@ -23,6 +23,14 @@ import { AppShutdownCoordinator } from "./app-shutdown";
 import { detectDesktopEnvironment, getLinuxChromiumSwitches } from "./linux-desktop";
 import { getDefaultCloseToTray, resolveCloseToTraySetting } from "../shared/desktop-platform";
 import { createLocalMediaServer, type LocalMediaServer } from "./local-media-server";
+import {
+  destroyQuickAskWindow,
+  disposeGlobalQuickAsk,
+  loadGlobalQuickAskFromSettings,
+  registerQuickAskIpc,
+  setQuickAskMainWindow,
+  showQuickAsk,
+} from "./quick-ask";
 
 const env = detectDesktopEnvironment();
 // Bump the dev AppUserModelID when the taskbar icon changes to bypass
@@ -448,6 +456,9 @@ function createWindow() {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    setQuickAskMainWindow(null);
+    // 唤起窗是常驻的隐藏窗口：不销毁它，window-all-closed 永远不触发，应用关不掉。
+    destroyQuickAskWindow();
   });
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
@@ -455,6 +466,7 @@ function createWindow() {
   } else {
     mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
+  setQuickAskMainWindow(mainWindow);
 }
 
 if (singleInstanceLock) {
@@ -484,6 +496,9 @@ if (singleInstanceLock) {
     registerPiSDKHandlers();
     registerAgentStatusHandlers();
     registerAgentHandlers(() => mainWindow);
+    registerQuickAskIpc();
+    // 冷启动也带 --quick-ask：合成器绑定在 Hpp 还没运行时按下就是这条路。
+    if (process.argv.includes("--quick-ask")) showQuickAsk();
     updateStatusPatch({
       state: "idle",
       canCheck: app.isPackaged,
@@ -491,6 +506,9 @@ if (singleInstanceLock) {
     });
 
     await loadCloseToTraySetting();
+    void loadGlobalQuickAskFromSettings(join(app.getPath("userData"), "hpp-data", "settings.json")).then((result) => {
+      if (!result.ok) console.warn("[Hpp] global quick ask shortcut unavailable:", result.error);
+    });
     await remoteAccessServer.initialize(() => mainWindow);
     // 编辑器桥接失败（端口、权限）不能拖垮启动，失败原因留给设置页展示。
     await editorBridgeServer.initialize(() => mainWindow);
@@ -504,17 +522,24 @@ if (singleInstanceLock) {
     }
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      // 唤起窗是常驻的隐藏窗口，不能拿 getAllWindows() 判断主窗口是否还在。
+      if (!mainWindow) createWindow();
     });
   });
 
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
+    // Wayland 合成器没法给全局快捷键，它通过再启动一次带 --quick-ask 的进程来唤出输入条。
+    if (argv.includes("--quick-ask")) {
+      showQuickAsk();
+      return;
+    }
     focusMainWindow();
   });
 }
 
 app.on("before-quit", (event) => {
   isQuitting = true;
+  disposeGlobalQuickAsk();
   if (!shutdownCoordinator.shouldInterceptQuit()) return;
   event.preventDefault();
   void shutdownCoordinator.prepareAndAllowQuit().then(() => app.quit());

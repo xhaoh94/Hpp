@@ -1,10 +1,18 @@
-import { ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, renameSync } from "fs";
 import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { app } from "electron";
 import type { SessionDataPurgeRequest } from "../../src/types/ipc";
+import {
+  buildSessionMarkdown,
+  buildSearchSnippet,
+  sanitizeExportFileName,
+  type SessionExportRequest,
+  type SessionExportResult,
+  type SessionSearchHit,
+} from "../../shared/session-export";
 import { queueNamedWrite } from "../utils/write-queue";
 
 const dataDir = join(app.getPath("userData"), "hpp-data");
@@ -213,10 +221,93 @@ function loadSessionMessages(sessionId: string): unknown {
 }
 
 /**
+ * 跨会话搜索消息正文。
+ *
+ * SQL 的 LIKE 只是粗筛（payload 里还有字段名、路径等），命中后必须在 JS 里再确认正文包含关键词，
+ * 否则搜 "user" 会把每一条 role 字段都算进来。
+ */
+function searchSessionMessages(query: string, limit = 80, sessionIds?: string[]): SessionSearchHit[] {
+  const needle = typeof query === "string" ? query.trim() : "";
+  if (needle.length < 2) return [];
+  const scope = Array.isArray(sessionIds) && sessionIds.length > 0
+    ? new Set(sessionIds.filter((id): id is string => typeof id === "string"))
+    : null;
+  const cap = Math.min(Math.max(Number(limit) || 80, 1), 200);
+  const db = getSessionMessagesDb();
+  const escaped = needle.replace(/[\\%_]/g, (char) => `\\${char}`);
+  const rows = db.prepare(
+    "SELECT session_id, message_id, sequence, payload FROM session_message_rows WHERE payload LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?",
+  ).all(`%${escaped}%`, cap * 4) as Array<{
+    session_id?: unknown;
+    message_id?: unknown;
+    sequence?: unknown;
+    payload?: unknown;
+  }>;
+
+  const lowered = needle.toLowerCase();
+  const hits: SessionSearchHit[] = [];
+  for (const row of rows) {
+    if (typeof row.payload !== "string") continue;
+    let parsed: { role?: unknown; content?: unknown; timestamp?: unknown };
+    try {
+      parsed = JSON.parse(row.payload);
+    } catch {
+      continue;
+    }
+    const content = typeof parsed.content === "string" ? parsed.content : "";
+    if (!content || !content.toLowerCase().includes(lowered)) continue;
+    const sessionId = String(row.session_id || "");
+    if (scope && !scope.has(sessionId)) continue;
+    hits.push({
+      sessionId,
+      messageId: String(row.message_id || ""),
+      sequence: Number(row.sequence) || 0,
+      role: typeof parsed.role === "string" ? parsed.role : "assistant",
+      snippet: buildSearchSnippet(content, needle),
+      timestamp: Number(parsed.timestamp) || 0,
+    });
+    if (hits.length >= cap) break;
+  }
+  return hits;
+}
+
+async function exportSessionMarkdown(request: SessionExportRequest): Promise<SessionExportResult> {
+  try {
+    const sessionId = normalizeSessionId(request?.sessionId);
+    const db = getSessionMessagesDb();
+    const rows = db
+      .prepare("SELECT payload FROM session_message_rows WHERE session_id = ? ORDER BY sequence ASC")
+      .all(sessionId) as Array<{ payload?: unknown }>;
+    const messages = parseMessageRows(rows) as Array<Record<string, unknown>>;
+    const title = typeof request.title === "string" ? request.title : "";
+    const markdown = buildSessionMarkdown({
+      title,
+      projectName: typeof request.projectName === "string" ? request.projectName : undefined,
+      agentName: typeof request.agentName === "string" ? request.agentName : undefined,
+      messages,
+    });
+
+    const owner = BrowserWindow.getFocusedWindow();
+    const options = {
+      title: "导出会话",
+      defaultPath: `${sanitizeExportFileName(title)}.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    };
+    const target = owner
+      ? await dialog.showSaveDialog(owner, options)
+      : await dialog.showSaveDialog(options);
+    if (target.canceled || !target.filePath) return { ok: false, canceled: true };
+    await writeFile(target.filePath, markdown, "utf8");
+    return { ok: true, filePath: target.filePath };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * 侧栏只需要首条用户消息来显示会话预览，不应因此把每个会话的完整历史
  * 读进渲染进程。每个会话最多检查前 32 条 payload，且所有会话一次查询。
- */
-function loadSessionMessageSummaries(sessionIds: string[]): Record<string, unknown> {
+ */function loadSessionMessageSummaries(sessionIds: string[]): Record<string, unknown> {
   const normalizedSessionIds = [...new Set((sessionIds || []).map(normalizeSessionId))];
   if (normalizedSessionIds.length === 0) return {};
   const db = getSessionMessagesDb();
@@ -570,6 +661,17 @@ export function registerStoreHandlers() {
       return { messages: [], hasMore: false, nextBefore: null, firstSequence: 0 };
     }
   });
+
+  ipcMain.handle("store:searchSessionMessages", (_event, query: string, limit?: number, sessionIds?: string[]) => {
+    try {
+      return { hits: searchSessionMessages(query, limit, sessionIds) };
+    } catch {
+      return { hits: [] };
+    }
+  });
+
+  ipcMain.handle("store:exportSessionMarkdown", (_event, request: SessionExportRequest) =>
+    exportSessionMarkdown(request || ({} as SessionExportRequest)));
 
   ipcMain.handle("store:saveSessionMessages", (_event, sessionId: string, messages: unknown) => {
     try {

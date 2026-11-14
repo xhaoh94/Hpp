@@ -159,3 +159,25 @@ Linux 默认自动选择 Ozone 后端，并且不会强制关闭 Wayland 输入�
 - `HPP_FORCE_DEVICE_SCALE_FACTOR=1.25`：显式覆盖设备缩放比例。
 
 Linux 默认关闭窗口时退出，避免在没有系统托盘宿主的 niri 等桌面中隐藏后无法恢复。需要驻留托盘时，可在通用设置中手动启用；niri 下窗口尺寸由合成器快捷键管理。
+
+### 全局唤起（Wayland / niri）
+
+Wayland 没有给普通客户端的全局按键协议，`globalShortcut` 在原生 Wayland 会话下注册不上（X11 或 `HPP_OZONE_PLATFORM=x11` 时可以正常用）。Wayland 下改用合成器 keybind：再启动一次同一份 Hpp 并带上 `--quick-ask`，第二个进程会通过单实例锁退出，由已在运行的 Hpp 弹出输入条。
+
+niri 的 `~/.config/niri/config.kdl`：
+
+```kdl
+binds {
+    Mod+Shift+Space { spawn "sh" "-lc" "~/Applications/Hpp-Linux-x86_64.AppImage --quick-ask"; }
+}
+
+window-rule {
+    match app-id=r#"hpp"# title=r#"^Hpp Quick Ask$"#
+    open-floating true
+}
+```
+
+- `spawn` 里的路径换成实际的 AppImage 位置；用包管理器安装时直接写启动命令。
+- 窗口规则必须加，否则 760×150 的输入条会被当成平铺窗口塞进滚动列。`app-id` 用 `niri msg windows` 确认，Electron 下通常是 `hpp`。
+- Hpp 没在运行时按这个键会正常启动并直接弹出输入条；托盘隐藏状态下也能唤出。
+

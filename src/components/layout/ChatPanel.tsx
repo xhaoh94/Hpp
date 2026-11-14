@@ -38,6 +38,7 @@ import { useAppStore } from "@/stores/app-store";
 import { AGENT_SETTINGS_UPDATED_EVENT, GENERAL_SETTINGS_UPDATED_EVENT } from "@/lib/app-events";
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
+import { buildSessionHandoff } from "../../../shared/session-handoff";
 import { showAppAlert } from "@/lib/app-dialog";
 import {
   createSessionReferenceSnapshot,
@@ -2420,6 +2421,22 @@ export function ChatPanel({
   const [scrollHeaderTitle, setScrollHeaderTitle] = useState<string | null>(null);
   const [scrollHeaderMessageId, setScrollHeaderMessageId] = useState<string | null>(null);
   const currentAgentId = activeSession?.agentId || activeAgentId;
+
+  const copySessionHandoff = useCallback(async () => {
+    if (!activeSessionId) return;
+    const summary = buildSessionHandoff({
+      title: activeSessionTitle,
+      projectName: activeProject?.name,
+      agentName: getAgentName(currentAgentId),
+      messages: sessionMessages,
+    });
+    try {
+      await navigator.clipboard.writeText(summary);
+      showFloatingToastMessage("交接摘要已复制");
+    } catch {
+      showFloatingToastMessage("复制失败");
+    }
+  }, [activeSessionId, activeSessionTitle, activeProject?.name, currentAgentId, sessionMessages]);
   const activeDraft = useChatStore(useShallow((state) => {
     const draft = activeSessionId
       ? state.sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT
@@ -4112,6 +4129,15 @@ export function ChatPanel({
           </span>
         )}
         {currentSessionRunning && <BrailleSpinner />}
+        <button
+          type="button"
+          className="chat-header-handoff"
+          onClick={() => void copySessionHandoff()}
+          title="复制交接摘要（换模型或换 Agent 时接续上下文）"
+          aria-label="复制交接摘要"
+        >
+          <ArrowRightLeft size={12} strokeWidth={2} />
+        </button>
         <div style={{ flex: 1 }} />
       </div>
 

@@ -43,6 +43,16 @@ import type {
 } from "../../shared/remote-protocol";
 import type { FileFilterConfig } from "../../shared/file-filters";
 import type {
+  QuickAskRegisterResult,
+  QuickAskSubmitPayload,
+  QuickAskTarget,
+} from "../../shared/quick-ask";
+import type {
+  SessionExportRequest,
+  SessionExportResult,
+  SessionSearchHit,
+} from "../../shared/session-export";
+import type {
   EditorBridgeInsertPayload,
   EditorBridgeInsertResult,
   EditorBridgeInstallResult,
@@ -359,6 +369,8 @@ export interface ElectronAPI {
     nextBefore: number | null;
     firstSequence: number;
   }>;
+  searchSessionMessages: (query: string, limit?: number, sessionIds?: string[]) => Promise<{ hits: SessionSearchHit[] }>;
+  exportSessionMarkdown: (request: SessionExportRequest) => Promise<SessionExportResult>;
   saveSessionMessages: (sessionId: string, messages: unknown) => Promise<{ success: boolean; error?: string }>;
   deleteSessionMessages: (sessionIds: string[]) => Promise<{ success: boolean; error?: string }>;
   purgeSessionData: (request: import("./ipc").SessionDataPurgeRequest) => Promise<{ success: boolean; error?: string }>;
@@ -443,6 +455,14 @@ export interface ElectronAPI {
   // Agent events
   onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;
   onAppUpdateStatus: (callback: (status: AppUpdateStatus) => void) => () => void;
+
+  // Global quick ask
+  setGlobalQuickAsk: (shortcut: string) => Promise<QuickAskRegisterResult>;
+  getQuickAskTarget: () => Promise<QuickAskTarget | null>;
+  submitQuickAsk: (payload: QuickAskSubmitPayload) => Promise<{ ok: boolean; error?: string }>;
+  hideQuickAsk: () => Promise<{ ok: boolean }>;
+  onQuickAskSubmit: (callback: (payload: QuickAskSubmitPayload) => void) => () => void;
+  onQuickAskFocus: (callback: () => void) => () => void;
 }
 
 declare global {

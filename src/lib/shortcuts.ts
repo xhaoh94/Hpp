@@ -1,5 +1,9 @@
+import { DEFAULT_GLOBAL_QUICK_ASK } from "../../shared/quick-ask";
+
 export interface ShortcutConfig {
   sendKey: string;
+  /** 系统级快捷键：应用在后台也能唤出快速输入框。空串表示禁用。 */
+  globalQuickAsk: string;
   fileSearch: string;
   switchToFiles: string;
   prevModel: string;
@@ -10,6 +14,7 @@ export interface ShortcutConfig {
 
 export const DEFAULT_SHORTCUTS: ShortcutConfig = {
   sendKey: "normal",
+  globalQuickAsk: DEFAULT_GLOBAL_QUICK_ASK,
   fileSearch: "Ctrl+P",
   switchToFiles: "Ctrl+Shift+F",
   prevModel: "Ctrl+[",
@@ -38,6 +43,11 @@ export function normalizeShortcuts(value: unknown): ShortcutConfig {
   const result = { ...DEFAULT_SHORTCUTS };
   for (const key of Object.keys(DEFAULT_SHORTCUTS) as Array<keyof ShortcutConfig>) {
     if (key === "sendKey") continue;
+    // 全局快捷键允许显式存空串（禁用）；其余项留空视为没配过，回退默认值。
+    if (key === "globalQuickAsk") {
+      if (typeof shortcuts[key] === "string") result[key] = shortcuts[key].trim();
+      continue;
+    }
     if (typeof shortcuts[key] === "string" && shortcuts[key].trim()) result[key] = shortcuts[key].trim();
   }
   result.sendKey = normalizeSendKey(shortcuts.sendKey);

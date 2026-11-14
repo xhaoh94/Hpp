@@ -36,6 +36,16 @@ import type {
   EditorBridgeInsertPayload,
   EditorBridgeInsertResult,
 } from "../shared/editor-bridge-protocol";
+import type {
+  QuickAskRegisterResult,
+  QuickAskSubmitPayload,
+  QuickAskTarget,
+} from "../shared/quick-ask";
+import type {
+  SessionExportRequest,
+  SessionExportResult,
+  SessionSearchHit,
+} from "../shared/session-export";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   // Window controls
@@ -145,6 +155,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("store:loadSessionMessageSummaries", sessionIds),
   loadSessionMessagesPage: (sessionId: string, beforeSequence?: number, limit?: number) =>
     ipcRenderer.invoke("store:loadSessionMessagesPage", sessionId, beforeSequence, limit),
+  searchSessionMessages: (query: string, limit?: number, sessionIds?: string[]): Promise<{ hits: SessionSearchHit[] }> =>
+    ipcRenderer.invoke("store:searchSessionMessages", query, limit, sessionIds),
+  exportSessionMarkdown: (request: SessionExportRequest): Promise<SessionExportResult> =>
+    ipcRenderer.invoke("store:exportSessionMarkdown", request),
   saveSessionMessages: (sessionId: string, messages: unknown) =>
     ipcRenderer.invoke("store:saveSessionMessages", sessionId, messages),
   deleteSessionMessages: (sessionIds: string[]) =>
@@ -291,5 +305,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
     };
     ipcRenderer.on("app:update-status", handler);
     return () => ipcRenderer.removeListener("app:update-status", handler);
+  },
+
+  // Global quick ask
+  setGlobalQuickAsk: (shortcut: string): Promise<QuickAskRegisterResult> =>
+    ipcRenderer.invoke("quick:setShortcut", shortcut),
+  getQuickAskTarget: (): Promise<QuickAskTarget | null> => ipcRenderer.invoke("quick:getTarget"),
+  submitQuickAsk: (payload: QuickAskSubmitPayload): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("quick:submit", payload),
+  hideQuickAsk: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("quick:hide"),
+  onQuickAskSubmit: (callback: (payload: QuickAskSubmitPayload) => void) => {
+    const handler = (_event: unknown, payload: QuickAskSubmitPayload) => callback(payload);
+    ipcRenderer.on("app:quick-submit", handler);
+    return () => ipcRenderer.removeListener("app:quick-submit", handler);
+  },
+  onQuickAskFocus: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("quick:focus", handler);
+    return () => ipcRenderer.removeListener("quick:focus", handler);
   },
 });

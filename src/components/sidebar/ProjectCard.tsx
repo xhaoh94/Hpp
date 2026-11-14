@@ -609,6 +609,8 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
         onClose={() => setShowHistory(false)}
         sessions={closedSessions}
         sessionMessages={sessionMessages}
+        allSessions={project.sessions}
+        projectName={project.name}
         onResume={handleResumeSession}
         onDelete={handleDeleteHistorySession}
         onDeleteAll={() => handleDeleteHistorySessions(closedSessions.map((session) => session.id))}

@@ -7180,3 +7180,24 @@ body.chat-questionnaire-resizing .chat-bubble {
 :root[data-theme="light"] .chat-review-code .hljs-strong {
   color: #0000ff;
 }
+
+.chat-header-handoff {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-header-handoff:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}

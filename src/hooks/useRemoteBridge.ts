@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSessionModel, getSessionThinking, SESSION_CONFIG_UPDATED_EVENT } from "@/hooks/useDataPersistence";
+import { ensureSessionMessagesLoaded, getSessionModel, getSessionThinking, SESSION_CONFIG_UPDATED_EVENT } from "@/hooks/useDataPersistence";
 import { executeRemoteSessionCommand } from "@/lib/remote-session-commands";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { relativeRemotePath } from "@/lib/project-file-path";
 import { getChatMessagePreviewText } from "@/lib/chat-message-preview";
 
@@ -911,6 +912,49 @@ export function useRemoteBridge({
         success: false,
         error: error instanceof Error ? error.message : String(error),
       });
+    });
+  }), [
+    abortSession,
+    clearRemotePendingInteraction,
+    getPendingInteraction,
+    onInteractionResponseAccepted,
+    onInteractionResponseFailed,
+    onInteractionResponsePrepared,
+  ]);
+
+  useEffect(() => window.electronAPI.onQuickAskSubmit((payload) => {
+    // 和手机端同一条路径：走远程命令发送，保证排队、引导、运行时唤起的行为一致。
+    const command = {
+      commandId: payload.clientMessageId,
+      name: "session.send" as const,
+      payload: {
+        sessionId: payload.sessionId,
+        clientMessageId: payload.clientMessageId,
+        content: payload.content,
+      },
+    };
+    void executeRemoteSessionCommand(command, {
+      getPendingInteraction,
+      abortSession,
+      clearPendingInteraction: clearRemotePendingInteraction,
+      onInteractionResponsePrepared,
+      onInteractionResponseAccepted,
+      onInteractionResponseFailed,
+    }).then(() => {
+      // 主窗口可能正停在别的会话上：发完把界面切到目标会话，否则用户看不到刚发的消息。
+      const projectStore = useProjectStore.getState();
+      if (projectStore.activeSessionId === payload.sessionId) return;
+      const project = projectStore.projects.find((candidate) =>
+        candidate.sessions.some((session) => session.id === payload.sessionId));
+      const session = project?.sessions.find((candidate) => candidate.id === payload.sessionId);
+      if (!project || !session) return;
+      projectStore.setActiveProject(project.id);
+      projectStore.setActiveSession(session.id);
+      useChatStore.getState().setActiveAgent(session.agentId);
+      useChatStore.getState().switchSession(session.id);
+      void ensureSessionMessagesLoaded(session.id);
+    }).catch((error: unknown) => {
+      showFloatingToastMessage(error instanceof Error ? error.message : String(error));
     });
   }), [
     abortSession,

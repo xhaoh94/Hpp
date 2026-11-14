@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectDesktopEnvironment, getLinuxChromiumSwitches } from "./linux-desktop";
+import { detectDesktopEnvironment, getLinuxChromiumSwitches, isNativeWaylandSession } from "./linux-desktop";
 
 describe("Linux desktop environment detection", () => {
   it("detects niri from its IPC socket in a Wayland session", () => {
@@ -105,5 +105,28 @@ describe("Linux Chromium switches", () => {
     expect(getLinuxChromiumSwitches("darwin", {
       HPP_OZONE_PLATFORM: "wayland",
     })).toEqual([]);
+  });
+});
+
+describe("native Wayland shortcut availability", () => {
+  it("treats a Wayland session as unable to grab global keys", () => {
+    expect(isNativeWaylandSession("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      WAYLAND_DISPLAY: "wayland-1",
+      NIRI_SOCKET: "/run/user/1000/niri.wayland-1.sock",
+    })).toBe(true);
+  });
+
+  it("keeps the shortcut usable when forced to XWayland", () => {
+    expect(isNativeWaylandSession("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      HPP_OZONE_PLATFORM: "x11",
+    })).toBe(false);
+  });
+
+  it("honours an explicit Wayland request even without session hints", () => {
+    expect(isNativeWaylandSession("linux", { HPP_OZONE_PLATFORM: "wayland" })).toBe(true);
+    expect(isNativeWaylandSession("linux", { XDG_SESSION_TYPE: "x11", DISPLAY: ":0" })).toBe(false);
+    expect(isNativeWaylandSession("win32", { XDG_SESSION_TYPE: "wayland" })).toBe(false);
   });
 });
