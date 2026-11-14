@@ -235,7 +235,10 @@ describe("remote protocol", () => {
       pairingId: "pairing-1",
       secret: "s".repeat(43),
       deviceName: "Pixel",
-    })).toMatchObject({ deviceName: "Pixel" });
-    expect(() => remotePairRequestSchema.parse({ pairingId: "pairing-1", secret: "short", deviceName: "Pixel" })).toThrow();
+      clientId: "client-device-1",
+    })).toMatchObject({ deviceName: "Pixel", clientId: "client-device-1" });
+    expect(() => remotePairRequestSchema.parse({ pairingId: "pairing-1", secret: "short", deviceName: "Pixel", clientId: "client-device-1" })).toThrow();
+    expect(() => remotePairRequestSchema.parse({ pairingId: "pairing-1", secret: "s".repeat(43), deviceName: "Pixel" })).toThrow();
+    expect(() => remotePairRequestSchema.parse({ pairingId: "pairing-1", secret: "s".repeat(43), deviceName: "Pixel", clientId: "short" })).toThrow();
   });
 });

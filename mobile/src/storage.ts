@@ -3,6 +3,7 @@ import { Capacitor } from "@capacitor/core";
 import { MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { isAgentActionInvocation, type AgentActionInvocation } from "@shared/agent-actions";
 import { parseComposerDocument, type ComposerDocument } from "@shared/composer-document";
+import { createClientId } from "./web-platform";
 
 export interface PairedHost {
   id: string;
@@ -37,6 +38,7 @@ export function withPairedHostMetadata(host: PairedHost, aliasValue: string, not
 
 const HOSTS_KEY = "hpp-mobile-hosts";
 const LAST_HOST_KEY = "hpp-mobile-last-host";
+const CLIENT_ID_KEY = "client-id";
 const SESSION_DRAFT_KEY_PREFIX = "hpp-mobile-draft-v1";
 const SESSION_DRAFT_INDEX_PREFIX = "hpp-mobile-draft-index-v1";
 const KEY_PREFIX = "hpp_mobile_";
@@ -72,6 +74,21 @@ export function sanitizePairedHosts(value: unknown): PairedHost[] {
 }
 
 const webStorageKey = (key: string) => `${KEY_PREFIX}${key}`;
+
+/**
+ * 安装级稳定标识：同一个手机 App 重复扫码时都带同一个 clientId，
+ * 桌面端据此复用设备记录；Web 端按 origin 隔离，不同访问地址会各自生成一个。
+ */
+export async function getOrCreateClientId(): Promise<string> {
+  const existing = await readValue(CLIENT_ID_KEY);
+  if (typeof existing === "string") {
+    const value = existing.trim();
+    if (value.length >= 8 && value.length <= 128) return value;
+  }
+  const clientId = createClientId();
+  await writeValue(CLIENT_ID_KEY, clientId);
+  return clientId;
+}
 
 async function readValue(key: string): Promise<unknown> {
   if (!Capacitor.isNativePlatform()) {

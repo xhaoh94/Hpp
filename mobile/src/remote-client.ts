@@ -329,7 +329,7 @@ export function parsePairingUri(value: string) {
   return { baseUrl: normalizedBaseUrl, baseUrls, pairingId, secret };
 }
 
-export async function pairHost(pairingUri: string, deviceName: string): Promise<PairedHost> {
+export async function pairHost(pairingUri: string, deviceName: string, clientId: string): Promise<PairedHost> {
   const offer = parsePairingUri(pairingUri);
   const pairingBaseUrl = await resolveHostBaseUrl({
     baseUrl: offer.baseUrl,
@@ -340,7 +340,7 @@ export async function pairHost(pairingUri: string, deviceName: string): Promise<
   const response = await fetch(`${pairingBaseUrl}/api/v1/pair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pairingId: offer.pairingId, secret: offer.secret, deviceName }),
+    body: JSON.stringify({ pairingId: offer.pairingId, secret: offer.secret, deviceName, clientId }),
   });
   const result = await response.json() as Record<string, unknown>;
   if (!response.ok || result.ok !== true) throw new Error(String(result.error || "Pairing failed."));

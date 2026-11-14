@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearHostSessionDrafts, clearSessionDraft, loadSessionDraft, pruneSessionDrafts, sanitizePairedHosts, sanitizeSessionDraft, saveSessionDraft, withPairedHostMetadata } from "./storage";
+import { clearHostSessionDrafts, clearSessionDraft, getOrCreateClientId, loadSessionDraft, pruneSessionDrafts, sanitizePairedHosts, sanitizeSessionDraft, saveSessionDraft, withPairedHostMetadata } from "./storage";
 
 describe("paired host metadata", () => {
   it("keeps a local alias and note without requiring them for older saved hosts", () => {
@@ -76,6 +76,15 @@ describe("mobile session drafts", () => {
   });
 
   afterEach(() => vi.unstubAllGlobals());
+
+  it("reuses one persisted installation client id across pairings", async () => {
+    const first = await getOrCreateClientId();
+    const second = await getOrCreateClientId();
+
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second).toBe(first);
+    expect(JSON.parse(values.get("hpp_mobile_client-id") || "null")).toBe(first);
+  });
 
   it("keeps text and unique reference session ids", () => {
     expect(sanitizeSessionDraft({

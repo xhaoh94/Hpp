@@ -148,6 +148,11 @@ describe("smart pairing", () => {
         return { ok: true, json: async () => ({ ok: true, protocolVersion: 1, hostId: "desktop-1" }) };
       }
       expect(target).toBe("http://192.168.1.30:47831/api/v1/pair");
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        pairingId: "pair-1",
+        deviceName: "Android device",
+        clientId: "client-device-1",
+      });
       return {
         ok: true,
         json: async () => ({
@@ -162,7 +167,7 @@ describe("smart pairing", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(pairHost(smartPairingUri, "Android device")).resolves.toMatchObject({
+    await expect(pairHost(smartPairingUri, "Android device", "client-device-1")).resolves.toMatchObject({
       hostId: "desktop-1",
       baseUrl: "http://192.168.1.30:47831",
       baseUrls: ["http://192.168.1.30:47831", "http://100.64.0.17:47831"],

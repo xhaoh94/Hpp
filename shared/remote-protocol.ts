@@ -192,6 +192,11 @@ export const remotePairRequestSchema = z.object({
   pairingId: z.string().trim().min(1).max(128),
   secret: z.string().trim().min(32).max(256),
   deviceName: z.string().trim().min(1).max(80),
+  /**
+   * 手机端持久化的安装级标识。重复扫码时宿主据此复用已有设备记录并轮换 token，
+   * 而不是每次配对都追加一条。
+   */
+  clientId: z.string().trim().min(8).max(128),
 });
 
 export type RemoteRequestEnvelope = {

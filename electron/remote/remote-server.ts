@@ -35,6 +35,12 @@ import {
   type RemoteSessionConfig,
 } from "../../shared/remote-protocol";
 
+export type StoredRemoteDevice = RemoteDeviceInfo & {
+  tokenHash: string;
+  /** 手机端持久化的安装级标识，重复配对时据此复用同一条记录。 */
+  clientId: string;
+};
+
 type RemoteConfigFile = {
   version: 1;
   hostId: string;
@@ -42,7 +48,7 @@ type RemoteConfigFile = {
   bindAddress: string;
   advertiseAddress: string;
   port: number;
-  devices: Array<RemoteDeviceInfo & { tokenHash: string }>;
+  devices: StoredRemoteDevice[];
 };
 
 type PendingRendererCommand = {
@@ -113,6 +119,56 @@ function normalizePort(value: unknown) {
   return port;
 }
 
+/** 读取配置文件时只接受带 clientId 的新格式设备；旧格式直接丢弃，等待重新配对。 */
+export function parseStoredDevices(value: unknown): StoredRemoteDevice[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((device): StoredRemoteDevice[] => {
+    if (!device || typeof device !== "object" || Array.isArray(device)) return [];
+    const candidate = device as Record<string, unknown>;
+    if (typeof candidate.id !== "string" || typeof candidate.name !== "string" ||
+      typeof candidate.tokenHash !== "string" || typeof candidate.createdAt !== "string") return [];
+    const clientId = typeof candidate.clientId === "string" ? candidate.clientId.trim() : "";
+    if (clientId.length < 8 || clientId.length > 128) return [];
+    return [{
+      id: candidate.id,
+      name: candidate.name,
+      tokenHash: candidate.tokenHash,
+      createdAt: candidate.createdAt,
+      ...(typeof candidate.lastConnectedAt === "string" ? { lastConnectedAt: candidate.lastConnectedAt } : {}),
+      clientId,
+    }];
+  });
+}
+
+/**
+ * 同一条手机安装记录只保留一条设备记录。
+ *
+ * 手机端每次重新扫码都会拿回一个 token；如果按设备名去重会误伤同名手机，
+ * 所以用手机自己持久化的 `clientId` 作为稳定身份。命中已有记录时只轮换
+ * token 和名称，保留设备 ID 与创建时间。
+ */
+export function upsertPairedDevice(
+  devices: StoredRemoteDevice[],
+  input: { clientId: string; name: string; tokenHash: string; id?: string; createdAt?: string },
+): { device: StoredRemoteDevice; created: boolean } {
+  const clientId = input.clientId.trim();
+  const existing = devices.find((device) => device.clientId === clientId);
+  if (existing) {
+    existing.name = input.name;
+    existing.tokenHash = input.tokenHash;
+    return { device: existing, created: false };
+  }
+  const device: StoredRemoteDevice = {
+    id: input.id || randomUUID(),
+    name: input.name,
+    tokenHash: input.tokenHash,
+    createdAt: input.createdAt || new Date().toISOString(),
+    clientId,
+  };
+  devices.push(device);
+  return { device, created: true };
+}
+
 function readJsonBody(request: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -180,6 +236,10 @@ class RemoteAccessServer {
   private async loadConfig() {
     try {
       const raw = JSON.parse(await readFile(this.configPath, "utf8")) as Partial<RemoteConfigFile>;
+      // 不兼容没有 clientId 的旧设备记录：旧格式无法可靠区分同名手机，
+      // 直接丢弃，升级后重新扫码一次即可。新格式要求 clientId 必填。
+      const devices = parseStoredDevices(raw.devices);
+      const droppedLegacyDevices = Array.isArray(raw.devices) ? raw.devices.length - devices.length : 0;
       this.config = {
         version: CONFIG_VERSION,
         hostId: typeof raw.hostId === "string" && raw.hostId ? raw.hostId : randomUUID(),
@@ -187,13 +247,9 @@ class RemoteAccessServer {
         bindAddress: typeof raw.bindAddress === "string" && raw.bindAddress ? raw.bindAddress : "0.0.0.0",
         advertiseAddress: typeof raw.advertiseAddress === "string" ? raw.advertiseAddress : "",
         port: normalizePort(raw.port ?? DEFAULT_REMOTE_PORT),
-        devices: Array.isArray(raw.devices)
-          ? raw.devices.filter((device): device is RemoteConfigFile["devices"][number] => (
-              !!device && typeof device.id === "string" && typeof device.name === "string" &&
-              typeof device.tokenHash === "string" && typeof device.createdAt === "string"
-            ))
-          : [],
+        devices,
       };
+      if (droppedLegacyDevices > 0) await this.saveConfig();
     } catch {
       this.config = {
         version: CONFIG_VERSION,
@@ -294,7 +350,7 @@ class RemoteAccessServer {
       hostId: config.hostId,
       hostName: hostname(),
       addresses,
-      devices: config.devices.map(({ tokenHash: _tokenHash, ...device }) => device),
+      devices: config.devices.map(({ tokenHash: _tokenHash, clientId: _clientId, ...device }) => device),
       error: this.runningError,
     };
   }
@@ -471,13 +527,11 @@ class RemoteAccessServer {
         }
         this.pairing = null;
         const token = randomBytes(32).toString("base64url");
-        const device: RemoteConfigFile["devices"][number] = {
-          id: randomUUID(),
+        const { device } = upsertPairedDevice(this.config!.devices, {
+          clientId: payload.clientId,
           name: payload.deviceName,
           tokenHash: sha256(token),
-          createdAt: new Date().toISOString(),
-        };
-        this.config!.devices.push(device);
+        });
         await this.saveConfig();
         this.writeJson(response, 200, {
           ok: true,

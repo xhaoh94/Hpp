@@ -270,6 +270,7 @@ import {
 import {
   clearHostSessionDrafts,
   clearSessionDraft,
+  getOrCreateClientId,
   loadLastPairedHostId,
   loadPairedHosts,
   loadSessionDraft,
@@ -3935,7 +3936,8 @@ export default function App() {
     setError("");
     try {
       const deviceKind = IS_NATIVE_APP ? "Android" : "Web";
-      const host = await pairHost(link, `${deviceKind} ${navigator.platform || "device"}`);
+      const clientId = await getOrCreateClientId();
+      const host = await pairHost(link, `${deviceKind} ${navigator.platform || "device"}`, clientId);
       const next = [...hosts.filter((item) => item.hostId !== host.hostId), host];
       await updateHosts(next);
       setPairingMode("closed");

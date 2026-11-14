@@ -13,7 +13,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { remoteAccessServer } from "./remote-server";
+import { parseStoredDevices, remoteAccessServer, upsertPairedDevice, type StoredRemoteDevice } from "./remote-server";
 
 type TestSocket = {
   authenticated: boolean;
@@ -99,6 +99,57 @@ const createSnapshot = (sessionIds: string[] = ["session-1"]): RemoteRendererPub
 };
 
 const decodeSentEvents = (socket: TestSocket) => socket.send.mock.calls.map(([value]) => JSON.parse(String(value)));
+
+describe("paired device identity", () => {
+  it("reuses one record for the same client id and rotates its token", () => {
+    const devices: StoredRemoteDevice[] = [];
+    const first = upsertPairedDevice(devices, {
+      clientId: "client-device-1",
+      name: "Android",
+      tokenHash: "hash-1",
+      id: "device-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const second = upsertPairedDevice(devices, {
+      clientId: "client-device-1",
+      name: "Android renamed",
+      tokenHash: "hash-2",
+    });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.device.id).toBe("device-1");
+    expect(devices).toHaveLength(1);
+    expect(devices[0]).toMatchObject({
+      id: "device-1",
+      name: "Android renamed",
+      tokenHash: "hash-2",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      clientId: "client-device-1",
+    });
+  });
+
+  it("keeps separate records for different client ids", () => {
+    const devices: StoredRemoteDevice[] = [];
+    upsertPairedDevice(devices, { clientId: "client-device-1", name: "Phone", tokenHash: "hash-1" });
+    upsertPairedDevice(devices, { clientId: "client-device-2", name: "Phone", tokenHash: "hash-2" });
+    expect(devices).toHaveLength(2);
+  });
+
+  it("drops legacy device records without a client id", () => {
+    const legacy = {
+      id: "device-1",
+      name: "Android",
+      tokenHash: "hash-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const current = { ...legacy, id: "device-2", clientId: "client-device-2" };
+    expect(parseStoredDevices([legacy, current])).toEqual([{
+      ...current,
+      clientId: "client-device-2",
+    }]);
+  });
+});
 
 describe("remote renderer snapshot publishing", () => {
   beforeEach(() => {
