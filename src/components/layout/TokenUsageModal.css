@@ -1,0 +1,222 @@
+.token-usage-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+}
+
+/* 位置由 useAnchoredOverlay 内联给出（锚定标题栏的 Token 统计按钮）。 */
+.token-usage-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(600px, calc(100vw - 24px));
+  max-height: min(72vh, 620px);
+  box-sizing: border-box;
+  padding: 12px 14px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background-color: var(--bg-secondary);
+  box-shadow: 0 16px 40px var(--shadow-color, rgba(0, 0, 0, 0.45));
+  color: var(--text-primary);
+}
+
+.token-usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.token-usage-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.token-usage-heading h3 {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.token-usage-heading span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-usage-close {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.token-usage-close:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.token-usage-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  flex: 0 0 auto;
+  margin: 10px 0 12px;
+}
+
+.token-usage-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: color-mix(in srgb, var(--bg-tertiary) 45%, transparent);
+}
+
+.token-usage-summary-item > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.token-usage-summary-item > strong {
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-usage-summary-item > small {
+  overflow: hidden;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-usage-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.token-usage-section {
+  min-width: 0;
+}
+
+.token-usage-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.token-usage-section-head h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.token-usage-section-head span {
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-usage-table th,
+.token-usage-table td {
+  padding: 6px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.token-usage-table thead th {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.token-usage-table thead th:first-child,
+.token-usage-table tbody th {
+  width: 38%;
+  padding-left: 2px;
+  text-align: left;
+}
+
+.token-usage-table tbody tr:last-child th,
+.token-usage-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.token-usage-table tbody th {
+  overflow: hidden;
+  font-weight: 500;
+}
+
+.token-usage-name {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.token-usage-detail {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 10px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+}
+
+.token-usage-empty {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.token-usage-footnote {
+  flex: 0 0 auto;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 10px;
+  line-height: 1.5;
+  word-break: break-all;
+}

@@ -165,7 +165,6 @@ function syncActiveAgentModels(agentId: string, models?: Array<{ id: string; nam
 
 export function SettingsView() {
   const [shortcuts, setShortcuts] = useState<ShortcutConfig>(DEFAULT_SHORTCUTS);
-  const [autoApproveCommands, setAutoApproveCommands] = useState("");
   const [filters, setFilters] = useState<FilterConfig>(DEFAULT_FILTERS);
   const [recordingKey, setRecordingKey] = useState<string | null>(null);
   const [showShortcutModal, setShowShortcutModal] = useState(false);
@@ -210,11 +209,6 @@ export function SettingsView() {
       const settings = asRecord(data);
       if (settings.shortcuts) setShortcuts(normalizeShortcuts(settings.shortcuts));
       if (settings.filters) setFilters(normalizeFileFilters(settings.filters));
-      setAutoApproveCommands(
-        Array.isArray(settings.autoApproveCommands)
-          ? settings.autoApproveCommands.filter((item): item is string => typeof item === "string").join("\n")
-          : "",
-      );
       if (settings.general) {
         const originalGeneral = asRecord(settings.general);
         const general = normalizeGeneral(settings.general);
@@ -377,21 +371,6 @@ export function SettingsView() {
     setShortcuts(s);
     void saveSettings(s, filters);
     window.dispatchEvent(new CustomEvent(SHORTCUTS_UPDATED_EVENT, { detail: s }));
-  };
-
-  const saveAutoApproveCommands = async (value: string) => {
-    const commands = value
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    setAutoApproveCommands(commands.join("\n"));
-    const data = await window.electronAPI.loadData("settings");
-    const result = await window.electronAPI.saveData("settings", {
-      ...asRecord(data),
-      autoApproveCommands: commands,
-    });
-    if (result && result.success === false) showFloatingToastMessage(result.error || "保存失败");
-    else showFloatingToastMessage(commands.length > 0 ? "自动批准规则已保存" : "已清空自动批准规则");
   };
 
   const saveFilters = (f: FilterConfig) => {
@@ -955,23 +934,6 @@ export function SettingsView() {
                           </button>
                         ))}
                       </div>
-                    </div>
-                    <div className="settings-general-row settings-general-row-column">
-                      <span className="settings-general-row-main">
-                        <strong>自动批准的命令</strong>
-                        <span>
-                          每行一条，按前缀匹配 bash 命令；仅对 Pi 生效。含分号、管道、重定向等拼接的命令不会命中。
-                        </span>
-                      </span>
-                      <textarea
-                        className="settings-command-allowlist"
-                        value={autoApproveCommands}
-                        spellCheck={false}
-                        rows={4}
-                        placeholder={"npm test\ngit status\ntsc --noEmit"}
-                        onChange={(event) => setAutoApproveCommands(event.target.value)}
-                        onBlur={(event) => void saveAutoApproveCommands(event.target.value)}
-                      />
                     </div>
                   </div>
                 )}

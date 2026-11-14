@@ -1,0 +1,16 @@
+2026-11-14T15:30:05.497Z [Hpp timing] agent:createSession:start sessionId=future-native-session agent=future-native
+2026-11-14T15:30:05.505Z [Hpp timing] agent:createSession:backend sessionId=future-native-session agent=future-native durationMs=3
+2026-11-14T15:30:05.510Z [Hpp timing] agent:init agent=future-native project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:30:05.511Z [Hpp timing] agent:init agent=future-native project=C:\project compactionConfig +1ms total=2ms
+2026-11-14T15:30:05.511Z [Hpp timing] agent:init agent=future-native project=C:\project subagentConfig +0ms total=2ms
+2026-11-14T15:30:05.512Z [Hpp timing] agent:init agent=future-native project=C:\project builtinExtensions +1ms total=3ms
+2026-11-14T15:30:05.513Z [Hpp timing] agent:init agent=future-native project=C:\project agent.init +0ms total=3ms
+2026-11-14T15:30:05.518Z [Hpp timing] agent:createSession:done sessionId=future-native-session durationMs=23 modelsMs=2 models=0
+2026-11-14T15:30:05.542Z [Hpp timing] agent:createSession:start sessionId=pi-session agent=pi
+2026-11-14T15:30:05.544Z [Hpp timing] agent:createSession:backend sessionId=pi-session agent=pi durationMs=1
+2026-11-14T15:30:05.545Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:30:05.545Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=1ms
+2026-11-14T15:30:05.545Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:30:05.546Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +1ms total=2ms
+2026-11-14T15:30:05.546Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=2ms
+2026-11-14T15:30:05.547Z [Hpp timing] agent:createSession:done sessionId=pi-session durationMs=4 modelsMs=1 models=0

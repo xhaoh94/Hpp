@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { isDefaultWorkspaceProject, withDefaultWorkspace } from "@/lib/default-workspace";
+import type { SessionWorkspace } from "@shared/session-workspace";
 
 export interface ProjectSession {
   id: string;
@@ -11,6 +12,8 @@ export interface ProjectSession {
   createdAt: string;
   lastActiveAt: string;
   sessionFilePath?: string;
+  /** 可选：本会话运行在独立 Git worktree 中；缺省表示共享项目目录。 */
+  workspace?: SessionWorkspace;
   closed?: boolean;
   references?: SessionReference[];
   forkedFrom?: SessionForkOrigin;
@@ -82,6 +85,7 @@ interface ProjectState {
   removeSessionReference: (projectId: string, sessionId: string, sourceSessionId: string) => void;
   setSessionForkContext: (projectId: string, sessionId: string, forkContext?: SessionForkContext) => void;
   setSessionFilePath: (projectId: string, sessionId: string, sessionFilePath: string) => void;
+  setSessionWorkspace: (projectId: string, sessionId: string, workspace?: SessionWorkspace) => void;
   setAgentStatus: (sessionId: string, status: AgentStatus) => void;
   markSessionInitialized: (sessionId: string) => void;
   markSessionInitializing: (sessionId: string) => void;
@@ -357,6 +361,22 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
                 se.id === sessionId && se.sessionFilePath !== sessionFilePath
                   ? { ...se, sessionFilePath }
                   : se
+              ),
+            }
+          : p
+      ),
+    })),
+
+  setSessionWorkspace: (projectId, sessionId, workspace) =>
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              sessions: p.sessions.map((session) =>
+                session.id === sessionId
+                  ? { ...session, workspace }
+                  : session
               ),
             }
           : p

@@ -138,6 +138,9 @@ export interface ChatMessage {
   composerDocument?: ComposerDocument;
   /** 回合开始时记录的调用模型名称与思考档位，用于消息底部展示。 */
   modelLabel?: string;
+  /** 回合实际使用的渠道（provider）与模型 ID，用于按渠道/模型统计 token。 */
+  modelProvider?: string;
+  modelId?: string;
   thinkingLevel?: string;
   /** 本回合累计的输入/输出 token 消耗，cacheInput 为输入中命中缓存的部分。 */
   tokenUsage?: { input: number; output: number; cacheInput?: number };
@@ -316,7 +319,13 @@ interface ChatState {
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
   updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
-  addAssistantTokenUsage: (inputTokens: number, outputTokens: number, cacheInputTokens: number, sessionId?: string | null) => void;
+  addAssistantTokenUsage: (
+    inputTokens: number,
+    outputTokens: number,
+    cacheInputTokens: number,
+    sessionId?: string | null,
+    model?: Pick<ModelInfo, "provider" | "id"> | null,
+  ) => void;
   finishLastAssistantProcess: (endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   finishAssistantProcessContainingEntry: (entryId: string, endedAt?: number, finalState?: "completed" | "interrupted", sessionId?: string | null) => void;
   finishAllAssistantProcesses: (endedAt?: number, finalState?: AgentProcessFinalState, sessionId?: string | null) => void;
@@ -385,7 +394,7 @@ const findLastAssistantIndex = (messages: ChatMessage[]) => {
 const ensureAssistantProcess = (
   messages: ChatMessage[],
   startedAt = Date.now(),
-  turnModel?: { modelLabel?: string; thinkingLevel?: string },
+  turnModel?: { modelLabel?: string; modelProvider?: string; modelId?: string; thinkingLevel?: string },
 ) => {
   const msgs = [...messages];
   let index = findLastAssistantIndex(msgs);
@@ -418,6 +427,8 @@ const ensureAssistantProcess = (
       isStreaming: true,
       process: { startedAt, expanded: true, entries: [] },
       modelLabel: turnModel?.modelLabel,
+      modelProvider: turnModel?.modelProvider,
+      modelId: turnModel?.modelId,
       thinkingLevel: turnModel?.thinkingLevel,
     };
     // A provider may resume the same turn after compacting its context. Keep
@@ -445,6 +456,8 @@ const ensureAssistantProcess = (
 // 回合创建时快照当前会话的调用模型与思考档位，后续同一回合的追加事件复用首次记录。
 const getTurnModelSnapshot = (state: ChatState) => ({
   modelLabel: state.currentModel?.name || state.currentModel?.id,
+  modelProvider: state.currentModel?.provider,
+  modelId: state.currentModel?.id,
   thinkingLevel: state.thinkingLevel,
 });
 
@@ -1153,7 +1166,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
 
   // 后端上报的 token 用量累加到当前回合的助手消息上（同一回合多次上报时求和）。
-  addAssistantTokenUsage: (inputTokens, outputTokens, cacheInputTokens, sessionId) =>
+  // model 是实际产生用量的模型：回合创建时可能用的是其它会话的模型快照，
+  // 这里以用量事件为准补正渠道/模型 ID，供统计弹窗分组。
+  addAssistantTokenUsage: (inputTokens, outputTokens, cacheInputTokens, sessionId, model) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => {
       const input = Number(inputTokens) || 0;
       const output = Number(outputTokens) || 0;
@@ -1166,6 +1181,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const msgs = [...messages];
       msgs[index] = {
         ...message,
+        ...(model?.provider ? { modelProvider: model.provider } : {}),
+        ...(model?.id ? { modelId: model.id } : {}),
         tokenUsage: {
           input: previous.input + input,
           output: previous.output + output,

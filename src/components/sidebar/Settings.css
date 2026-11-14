@@ -5541,22 +5541,3 @@
   align-items: stretch;
   gap: 8px;
 }
-
-.settings-command-allowlist {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 8px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  resize: vertical;
-  outline: none;
-}
-
-.settings-command-allowlist:focus {
-  border-color: var(--accent-color);
-}

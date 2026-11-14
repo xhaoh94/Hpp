@@ -169,6 +169,11 @@ export function getSessionCommandTarget(sessionId: string) {
   return { project, session };
 }
 
+/** 会话实际传给 Agent 的 cwd：独立 worktree 优先，缺省使用项目目录。 */
+export function getSessionWorkspacePath(project: Project, session: ProjectSession): string {
+  return session.workspace?.rootPath || project.path;
+}
+
 const sessionIsOpen = (sessionId: string) => useProjectStore.getState().projects.some((project) =>
   project.sessions.some((session) => session.id === sessionId && !session.closed));
 
@@ -316,9 +321,16 @@ async function runInitialization(
       }
       if (backendActivity === "missing") {
         console.info(`[agent] init(${sessionId}): creating session runtime (${session.agentId})`);
+        const workspacePath = getSessionWorkspacePath(project, session);
+        if (session.workspace) {
+          const worktreeStatus = await window.electronAPI.worktreeStatus(session.workspace);
+          if (!worktreeStatus.success) {
+            throw new Error(`独立工作区不可用：${worktreeStatus.error || workspacePath}`);
+          }
+        }
         const result = await window.electronAPI.agentCreateSession(
           session.agentId,
-          project.path,
+          workspacePath,
           session.id,
           session.sessionFilePath,
         );
@@ -448,6 +460,7 @@ export async function createSession(input: {
   sessionId?: string;
   activate?: boolean;
   verifyInstalled?: boolean;
+  workspaceMode?: "shared" | "worktree";
 }) {
   const sessionId = input.sessionId || crypto.randomUUID();
   const projectState = useProjectStore.getState();
@@ -473,6 +486,13 @@ export async function createSession(input: {
     candidate.sessions.some((session) => session.id === sessionId));
   if (concurrent) throw new Error("SESSION_ID_CONFLICT");
 
+  const workspaceResult = input.workspaceMode === "worktree"
+    ? await window.electronAPI.worktreeCreate(project.path, sessionId)
+    : undefined;
+  if (workspaceResult && (!workspaceResult.success || !workspaceResult.workspace)) {
+    throw new Error(workspaceResult.error || "创建独立工作区失败。");
+  }
+
   const now = new Date();
   const session: ProjectSession = {
     id: sessionId,
@@ -481,6 +501,7 @@ export async function createSession(input: {
     title: createDefaultSessionTitle(now),
     createdAt: now.toISOString(),
     lastActiveAt: now.toISOString(),
+    ...(workspaceResult?.workspace ? { workspace: workspaceResult.workspace } : {}),
   };
   const currentModel = useChatStore.getState().currentModel;
   const activeSession = projectState.activeSessionId
@@ -603,6 +624,9 @@ export async function forkSession(input: {
   const sessionId = input.sessionId || crypto.randomUUID();
   const projectState = useProjectStore.getState();
   const { project, session: sourceSession } = getSessionCommandTarget(input.sourceSessionId);
+  if (sourceSession.workspace) {
+    throw new Error("独立工作区的会话暂不支持 fork；请先把工作区合并回主工作区。");
+  }
   const existingProject = projectState.projects.find((candidate) =>
     candidate.sessions.some((session) => session.id === sessionId));
   const existing = existingProject?.sessions.find((session) => session.id === sessionId);
@@ -1267,7 +1291,7 @@ export async function prepareSessionReferenceContext(
   await Promise.all(sourceSessions.map((source) => ensureSessionMessagesLoaded(source.id)));
   const sessionMessages = useChatStore.getState().sessionMessages;
   const references = sourceSessions.map((source) =>
-    createSessionReferenceSnapshot(source, sessionMessages[source.id] || []));
+    createSessionReferenceSnapshot(source, sessionMessages[source.id] || [], project.name));
   return {
     session,
     references,

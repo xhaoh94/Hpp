@@ -463,9 +463,6 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         const contextTokens = Number(event.contextTokens);
         const contextWindow = Number(event.contextWindow);
         const chat = useChatStore.getState();
-        if (inputTokens > 0 || outputTokens > 0) {
-          chat.addAssistantTokenUsage(inputTokens, outputTokens, cacheInputTokens, currentSessionId);
-        }
         // 各后端把最近一次请求携带的输入上下文统一映射到 contextTokens。
         // 精度由后端自己声明：专用接口=exact，官方上报=official，借位请求计数=estimated。
         const usedTokens = Number.isFinite(contextTokens) && contextTokens > 0
@@ -473,6 +470,18 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
           : inputTokens > 0
             ? inputTokens
             : 0;
+        const usageModel = chat.activeSessionId === currentSessionId
+          ? chat.currentModel
+          : getSessionModel(currentSessionId);
+        if (inputTokens > 0 || outputTokens > 0) {
+          chat.addAssistantTokenUsage(
+            inputTokens,
+            outputTokens,
+            cacheInputTokens,
+            currentSessionId,
+            usageModel,
+          );
+        }
         const breakdown = Array.isArray(event.contextBreakdown)
           ? event.contextBreakdown.flatMap((entry) => {
               const item = entry as { id?: unknown; label?: unknown; tokens?: unknown };
@@ -482,9 +491,6 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
               return id && label && Number.isFinite(tokens) && tokens > 0 ? [{ id, label, tokens }] : [];
             })
           : undefined;
-        const usageModel = chat.activeSessionId === currentSessionId
-          ? chat.currentModel
-          : getSessionModel(currentSessionId);
         const resolvedWindow = Number.isFinite(contextWindow) && contextWindow > 0
           ? contextWindow
           : usageModel?.contextWindow;

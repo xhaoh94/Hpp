@@ -377,7 +377,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 .project-actions {
   display: flex;
   gap: 4px;
@@ -544,6 +543,23 @@
 }
 
 .terminal-child-fork-badge svg {
+  flex-shrink: 0;
+}
+.terminal-child-worktree-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid rgba(102, 187, 106, 0.45);
+  border-radius: 4px;
+  background: rgba(102, 187, 106, 0.12);
+  color: #66bb6a;
+}
+
+.terminal-child-worktree-badge svg {
   flex-shrink: 0;
 }
 
@@ -810,4 +826,133 @@
   height: 4px;
   border-radius: 1px;
   background: var(--accent-color);
+}
+
+.new-session-worktree {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.new-session-worktree.disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.new-session-worktree input {
+  margin: 2px 0 0;
+  accent-color: var(--accent-color);
+  flex: 0 0 auto;
+}
+
+.new-session-worktree svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #66bb6a;
+}
+
+.new-session-worktree span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.new-session-worktree strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.new-session-worktree small {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.new-session-worktree .spin {
+  margin-left: auto;
+  animation: new-session-spin 0.8s linear infinite;
+}
+
+@keyframes new-session-spin {
+  to { transform: rotate(360deg); }
+}
+
+.new-session-error {
+  padding: 8px 10px;
+  border: 1px solid rgba(244, 67, 54, 0.4);
+  border-radius: 5px;
+  background: rgba(244, 67, 54, 0.08);
+  color: var(--danger-color, #f44336);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+/* 新建会话弹窗：路径可能很长，内容之间需要有明确间距 */
+.new-session-modal {
+  width: min(480px, calc(100vw - 32px));
+}
+
+.new-session-modal .project-modal-header p {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.new-session-modal .project-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.new-session-modal .form-actions {
+  margin-top: 2px;
+}
+
+.new-session-worktree {
+  margin-bottom: 0;
+}
+
+.new-session-worktree span {
+  flex: 1;
+}
+
+.new-session-worktree small {
+  display: block;
+}
+
+.new-session-git-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: -4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.new-session-git-hint button {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.new-session-git-hint button:hover:not(:disabled) {
+  background: var(--bg-hover);
 }

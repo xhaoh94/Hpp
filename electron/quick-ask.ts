@@ -3,7 +3,8 @@ import { randomUUID } from "crypto";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
-import { isNativeWaylandSession } from "./linux-desktop";
+import { detectDesktopEnvironment, isNativeWaylandSession } from "./linux-desktop";
+import { syncNiriQuickAsk } from "./niri-quick-ask";
 import {
   DEFAULT_GLOBAL_QUICK_ASK,
   pickQuickAskTarget,
@@ -52,6 +53,10 @@ function createQuickAskWindow(): BrowserWindow {
 
   win.setAlwaysOnTop(true, "floating");
   if (process.platform === "darwin") win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // 渲染页面的 <title> 会把 BrowserWindow 的标题改回 "Hpp"，niri 的浮动窗口规则
+  // 依赖 "Hpp Quick Ask" 这个标题；页面加载时拒绝标题更新。
+  win.on("page-title-updated", (event) => event.preventDefault());
 
   // 失焦即收起；开着 devtools 时不收，否则没法调试。
   win.on("blur", () => {
@@ -107,19 +112,33 @@ function hideQuickAskWindow() {
   if (quickAskWindow && !quickAskWindow.isDestroyed()) quickAskWindow.hide();
 }
 
+/**
+ * 主窗口已经在前台时，不再弹快速输入条，直接把焦点交给当前会话的输入框。
+ * 冷启动的 --quick-ask 必须绕过这个判断，否则首帧还没加载完就会吞掉事件。
+ */
+function focusMainComposer(): boolean {
+  const main = mainWindowRef;
+  if (!main || main.isDestroyed() || !main.isFocused()) return false;
+  main.webContents.focus();
+  main.webContents.send("app:focus-composer");
+  return true;
+}
+
 function toggleQuickAskWindow() {
   if (quickAskWindow && !quickAskWindow.isDestroyed() && quickAskWindow.isVisible()) {
     hideQuickAskWindow();
     return;
   }
+  if (focusMainComposer()) return;
   showQuickAskWindow();
 }
 
 /**
  * 供外部启动器调用（Wayland 合成器的 keybind 就是靠二次启动带 --quick-ask 进来的）。
- * 主窗口可能没显示，这里只负责把输入条弹出来。
+ * 主窗口已经在前台时直接聚焦输入框；否则弹出快速输入条。
  */
-export function showQuickAsk() {
+export function showQuickAsk(options: { forceQuickAsk?: boolean } = {}) {
+  if (!options.forceQuickAsk && focusMainComposer()) return;
   showQuickAskWindow();
 }
 
@@ -134,6 +153,13 @@ export function applyGlobalQuickAsk(displayShortcut: string): QuickAskRegisterRe
     registeredAccelerator = null;
   }
   const shortcut = displayShortcut.trim();
+
+  // niri 没有全局快捷键协议，Electron 的 register() 可能表面成功但系统按键不会送达。
+  // 改为把设置里的组合键同步到 niri 的 include 文件，再让 niri 重载配置。
+  if (isNativeWaylandSession() && detectDesktopEnvironment().isNiri) {
+    return syncNiriQuickAsk(shortcut);
+  }
+
   if (!shortcut) return { ok: true };
 
   const accelerator = toElectronAccelerator(shortcut);
@@ -203,9 +229,23 @@ export function registerQuickAskIpc() {
     return { ok: true };
   });
 
+  // 空内容按 Enter：收起快速输入条，回到主窗口并聚焦当前会话的输入框。
+  ipcMain.handle("quick:focusMain", () => {
+    const main = mainWindowRef;
+    if (!main || main.isDestroyed()) return { ok: false, error: "主窗口不可用。" };
+    hideQuickAskWindow();
+    if (main.isMinimized()) main.restore();
+    if (!main.isVisible()) main.show();
+    main.focus();
+    main.webContents.focus();
+    main.webContents.send("app:focus-composer");
+    return { ok: true };
+  });
+
   // 应用内兜底：Wayland 下系统快捷键注册不上，靠窗口内的同一个组合键唤出。
+  // 主窗口已经在前台时直接聚焦输入框，不弹快速输入条。
   ipcMain.handle("quick:show", () => {
-    showQuickAskWindow();
+    if (!focusMainComposer()) showQuickAskWindow();
     return { ok: true };
   });
 

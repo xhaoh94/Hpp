@@ -16,6 +16,20 @@ import type { FileSystemChange } from "../src/types/ipc";
 import type { McpConfigScope, McpServerConfig } from "../src/types/ipc";
 import type { AgentCodemodeConfig } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
+import type {
+  GitActionResult,
+  GitCommitResult,
+  GitDiffResult,
+  GitStashListResult,
+  GitStatus,
+} from "../shared/git-types";
+import type {
+  SessionWorkspace,
+  WorktreeActionResult,
+  WorktreeCreateResult,
+  WorktreeProbeResult,
+  WorktreeStatusResult,
+} from "../shared/session-workspace";
 import type { AgentSubagentConfig } from "../shared/agent-subagent";
 import type {
   PrepareReviewUndoRequest,
@@ -220,6 +234,36 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) =>
     ipcRenderer.invoke("agent:createSession", agentId, projectPath, sessionId, sessionFilePath),
+  gitStatus: (target: string): Promise<GitStatus> => ipcRenderer.invoke("git:status", target),
+  gitDiff: (target: string, path: string, staged?: boolean): Promise<GitDiffResult> =>
+    ipcRenderer.invoke("git:diff", target, path, staged === true),
+  gitStage: (target: string, paths: string[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stage", target, paths),
+  gitUnstage: (target: string, paths: string[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:unstage", target, paths),
+  gitDiscard: (target: string, paths: string[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:discard", target, paths),
+  gitCommit: (target: string, message: string, amend?: boolean): Promise<GitCommitResult> =>
+    ipcRenderer.invoke("git:commit", target, message, amend === true),
+  gitStashCreate: (target: string, message?: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stashCreate", target, message),
+  gitStashList: (target: string): Promise<GitStashListResult> =>
+    ipcRenderer.invoke("git:stashList", target),
+  gitStashPop: (target: string, ref?: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stashPop", target, ref),
+
+  worktreeProbe: (projectPath: string): Promise<WorktreeProbeResult> =>
+    ipcRenderer.invoke("worktree:probe", projectPath),
+  worktreeCreate: (projectPath: string, sessionId: string): Promise<WorktreeCreateResult> =>
+    ipcRenderer.invoke("worktree:create", projectPath, sessionId),
+  worktreeStatus: (workspace: SessionWorkspace): Promise<WorktreeStatusResult> =>
+    ipcRenderer.invoke("worktree:status", workspace),
+  worktreeCheckpoint: (workspace: SessionWorkspace, message?: string): Promise<WorktreeActionResult> =>
+    ipcRenderer.invoke("worktree:checkpoint", workspace, message),
+  worktreeMerge: (workspace: SessionWorkspace): Promise<WorktreeActionResult> =>
+    ipcRenderer.invoke("worktree:merge", workspace),
+  worktreeRemove: (workspace: SessionWorkspace): Promise<WorktreeActionResult> =>
+    ipcRenderer.invoke("worktree:remove", workspace),
   agentSwitchSession: (sessionId: string) =>
     ipcRenderer.invoke("agent:switchSession", sessionId),
   agentRemoveSession: (sessionId: string) =>
@@ -314,6 +358,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   submitQuickAsk: (payload: QuickAskSubmitPayload): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("quick:submit", payload),
   hideQuickAsk: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("quick:hide"),
+  focusMainWindow: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("quick:focusMain"),
   showQuickAsk: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("quick:show"),
   getQuickAskStatus: (): Promise<{ supported: boolean }> => ipcRenderer.invoke("quick:getStatus"),
   onQuickAskSubmit: (callback: (payload: QuickAskSubmitPayload) => void) => {
@@ -325,5 +370,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const handler = () => callback();
     ipcRenderer.on("quick:focus", handler);
     return () => ipcRenderer.removeListener("quick:focus", handler);
+  },
+  onComposerFocus: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("app:focus-composer", handler);
+    return () => ipcRenderer.removeListener("app:focus-composer", handler);
   },
 });

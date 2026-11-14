@@ -365,6 +365,9 @@ export interface RemoteChatMessage {
   modelChange?: { from: string; to: string; performanceHint?: boolean };
   /** 回合开始时的调用模型名称。 */
   modelLabel?: string;
+  /** 回合实际使用的渠道（provider）与模型 ID，用于 token 统计分组。 */
+  modelProvider?: string;
+  modelId?: string;
   /** 本回合累计 token 消耗，cacheInput 为输入中命中缓存的部分。 */
   tokenUsage?: { input: number; output: number; cacheInput?: number };
   images?: Array<{ id: string; src: string; name: string }>;

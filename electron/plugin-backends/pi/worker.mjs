@@ -15,7 +15,6 @@ import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
 import { createHppSubagentExtension, normalizeHppSubagentConfig } from "./subagent-extension.mjs";
 import { createHppPresentExtension } from "./present-extension.mjs";
 import { installTransientProviderRetry } from "./transient-provider-retry.mjs";
-import { isAutoApprovedCommand, loadAutoApproveRules } from "./permission-rules.mjs";
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
@@ -1011,16 +1010,6 @@ const hppPermissionExtension = (pi) => {
     // mode, for example when a read targets a path outside the project.
     if (activePlanMode && planModeToolBlockReason(event)) return undefined;
     if (!shouldRequestPiToolPermission(event)) return undefined;
-    // 设置里的自动批准规则只作用于 bash：判据是命令前缀，拼接类命令会被规则本身拒绝。
-    if (
-      normalizeToolName(event?.toolName) === "bash"
-      && isAutoApprovedCommand(
-        loadAutoApproveRules(process.env.HPP_DATA_DIR || ""),
-        isRecord(event?.input) ? event.input.command : "",
-      )
-    ) {
-      return undefined;
-    }
     if (!context?.hasUI) {
       return { block: true, reason: "Hpp permission approval is unavailable" };
     }

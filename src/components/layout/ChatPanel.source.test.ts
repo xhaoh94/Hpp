@@ -44,3 +44,17 @@ describe("chat history never waits for the agent backend", () => {
     expect(source).toContain("!processRunning && (hasContent || hasImages || hasDiffs");
   });
 });
+
+describe("chat panel worktree workspace", () => {
+  it("routes file and diff paths through the active session workspace", () => {
+    const source = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
+    const explorer = readWorkspaceFile("src/components/sidebar/FileExplorer.tsx");
+    const composer = readWorkspaceFile("src/components/layout/ChatComposer.tsx");
+
+    expect(source).toContain('const activeWorkspacePath = activeSession?.workspace?.rootPath || activeProject?.path || ""');
+    expect(source).toContain("projectPath={activeWorkspacePath}");
+    expect(source).toContain("<WorktreeControl");
+    expect(explorer).toContain("const activeWorkspacePath = activeSession?.workspace?.rootPath || activeProject?.path || \"\"");
+    expect(composer).toContain("const activeProjectPath = activeSession?.workspace?.rootPath || activeProject?.path || \"\"");
+  });
+});

@@ -327,9 +327,10 @@ export function FileExplorer() {
   const centeredRevealRequestIdRef = useRef<number | null>(null);
   const treeContentRef = useRef<HTMLDivElement>(null);
   const handleRefreshRef = useRef<() => void>(() => undefined);
-  const { projects, activeProjectId } = useProjectStore(useShallow((state) => ({
+  const { projects, activeProjectId, activeSessionId } = useProjectStore(useShallow((state) => ({
     projects: state.projects,
     activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
   })));
   const sidebarTab = useAppStore((state) => state.sidebarTab);
   const sidebarCollapsed = useAppStore((state) => state.sidebarCollapsed);
@@ -337,8 +338,10 @@ export function FileExplorer() {
   const filters = useFileFilters();
   const filterKey = getFileFilterKey(filters);
   const activeProject = projects.find((p) => p.id === activeProjectId);
+  const activeSession = activeProject?.sessions.find((session) => session.id === activeSessionId);
+  const activeWorkspacePath = activeSession?.workspace?.rootPath || activeProject?.path || "";
   const explorerVisible = sidebarTab === "files" && !sidebarCollapsed;
-  const treeScopeKey = `${activeProject?.path || ""}:${filterKey}`;
+  const treeScopeKey = `${activeWorkspacePath}:${filterKey}`;
   const activeTreeCommand = treeCommand?.scopeKey === treeScopeKey ? treeCommand : null;
 
   const handleFileClick = useCallback((path: string) => {
@@ -455,7 +458,7 @@ export function FileExplorer() {
   }, [treeScopeKey]);
 
   const loadRootEntries = useCallback(async () => {
-    const projectPath = activeProject?.path;
+    const projectPath = activeWorkspacePath;
     const requestId = rootRequestRef.current + 1;
     rootRequestRef.current = requestId;
     if (!projectPath) {
@@ -464,7 +467,7 @@ export function FileExplorer() {
     }
     const entries = await window.electronAPI.readDirectory(projectPath, filters);
     if (rootRequestRef.current === requestId) setRootEntries(entries);
-  }, [activeProject?.path, filterKey, filters]);
+  }, [activeWorkspacePath, filterKey, filters]);
 
   useEffect(() => {
     void loadRootEntries();
@@ -482,15 +485,15 @@ export function FileExplorer() {
       handledPaths: new Set<string>(),
     });
     setRefreshVersion((current) => current + 1);
-    if (activeProject?.path) invalidateProjectFileIndex(activeProject.path, filters);
+    if (activeWorkspacePath) invalidateProjectFileIndex(activeWorkspacePath, filters);
     void loadRootEntries();
-  }, [activeProject?.path, filters, loadRootEntries, treeCommand?.requestId, treeScopeKey]);
+  }, [activeWorkspacePath, filters, loadRootEntries, treeCommand?.requestId, treeScopeKey]);
   handleRefreshRef.current = handleRefresh;
 
   // 资源管理器只在当前可见时监听项目目录；切换到其它侧边栏或收起侧边栏后立即停止监听。
   // fs.watch 的事件做短暂合并，避免编辑器/外部工具一次保存触发多次整树刷新。
   useEffect(() => {
-    const projectPath = activeProject?.path;
+    const projectPath = activeWorkspacePath;
     if (!explorerVisible || !projectPath) return;
 
     let disposed = false;
@@ -535,7 +538,7 @@ export function FileExplorer() {
       if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
       void window.electronAPI.unwatchPath(projectPath, true);
     };
-  }, [activeProject?.path, explorerVisible, filterKey]);
+  }, [activeWorkspacePath, explorerVisible, filterKey]);
 
   useEffect(() => {
     if (revealRequest) setSearch("");
@@ -560,7 +563,7 @@ export function FileExplorer() {
     searchRequestRef.current = requestId;
     const scheduledSearch = scheduleAbortableTask((signal) => {
       void queryProjectFileIndex({
-        projectPath: activeProject.path,
+        projectPath: activeWorkspacePath,
         filters,
         query: search,
         signal,
@@ -577,7 +580,7 @@ export function FileExplorer() {
       });
     }, FILE_EXPLORER_SEARCH_DEBOUNCE_MS);
     return scheduledSearch.cancel;
-  }, [search, activeProject?.path, filterKey, filters, refreshVersion]);
+  }, [search, activeWorkspacePath, filterKey, filters, refreshVersion]);
 
   const displayEntries = useMemo(
     () => (search.trim() ? searchResults : rootEntries)
@@ -706,7 +709,7 @@ export function FileExplorer() {
           <button type="button" onClick={() => void openInExplorer(contextMenu.entries)}><FolderOpen size={15} />在资源管理器打开</button>
           <button type="button" onClick={() => void addToChat(contextMenu.entries)}><MessageCirclePlus size={15} />添加到聊天</button>
           <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => entry.path).join("\n"))}><Clipboard size={15} />复制路径</button>
-          <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => activeProject ? getRelativeFilePath(entry.path, activeProject.path) : entry.path).join("\n"))}><Clipboard size={15} />复制相对路径</button>
+          <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => getRelativeFilePath(entry.path, activeWorkspacePath)).join("\n"))}><Clipboard size={15} />复制相对路径</button>
           <button type="button" onClick={() => void copyName(contextMenu.entries.map((entry) => entry.name).join("\n"))}><Copy size={15} />复制名字</button>
         </div>,
         document.body,

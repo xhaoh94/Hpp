@@ -282,6 +282,22 @@ describe("会话标题在正文加载前也要可读", () => {
   it("没有 preview 时保持占位标题，等首条用户消息落盘后再迁移", () => {
     expect(parseFirstSession(makeSession())?.title).toBe("新会话 - 2025/10/15 21:26");
   });
+
+  it("读回项目时保留会话的独立工作区信息", () => {
+    const workspace = {
+      mode: "worktree",
+      projectRoot: "C:/repo",
+      repoRoot: "C:/repo",
+      rootPath: "C:/hpp-data/worktrees/session-one",
+      worktreePath: "C:/hpp-data/worktrees/session-one",
+      branch: "hpp/session-one",
+      baseRef: "main",
+      baseCommit: "abc123",
+      status: "active",
+      createdAt: "2025-10-15T13:26:00.000Z",
+    };
+    expect(parseFirstSession(makeSession({ workspace }))?.workspace).toEqual(workspace);
+  });
 });
 
 describe("按需恢复会话消息", () => {

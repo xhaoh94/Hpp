@@ -79,6 +79,8 @@ export function sanitizeRemoteMessage(
     compactionState: message.compactionState,
     modelChange: message.modelChange ? { ...message.modelChange } : undefined,
     modelLabel: message.modelLabel,
+    modelProvider: message.modelProvider,
+    modelId: message.modelId,
     tokenUsage: message.tokenUsage ? { ...message.tokenUsage } : undefined,
     nativeTurnId: message.nativeTurnId,
     commentary: message.commentary?.map((item) => ({

@@ -206,7 +206,10 @@ export const ChatComposer = memo(function ChatComposer({
   const composingRef = useRef(false);
   const projects = useProjectStore((state) => state.projects);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
-  const activeProjectPath = projects.find((project) => project.id === activeProjectId)?.path || "";
+  const activeSessionId = useProjectStore((state) => state.activeSessionId);
+  const activeProject = projects.find((project) => project.id === activeProjectId);
+  const activeSession = activeProject?.sessions.find((session) => session.id === activeSessionId);
+  const activeProjectPath = activeSession?.workspace?.rootPath || activeProject?.path || "";
   const fileFilters = useFileFilters();
   const fileFilterKey = getFileFilterKey(fileFilters);
   const fileMentionOpen = fileMention !== null;

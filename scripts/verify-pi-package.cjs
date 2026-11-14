@@ -15,7 +15,6 @@ const requiredFiles = [
   "pi-agent-dir.mjs",
   "shell-environment.mjs",
   "plan-mode-policy.mjs",
-  "permission-rules.mjs",
   "subagent-extension.mjs",
   "present-extension.mjs",
   "subagent-bridge-extension.mjs",

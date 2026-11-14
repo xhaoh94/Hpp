@@ -43,6 +43,20 @@ import type {
 } from "../../shared/remote-protocol";
 import type { FileFilterConfig } from "../../shared/file-filters";
 import type {
+  GitActionResult,
+  GitCommitResult,
+  GitDiffResult,
+  GitStashListResult,
+  GitStatus,
+} from "../../shared/git-types";
+import type {
+  SessionWorkspace,
+  WorktreeActionResult,
+  WorktreeCreateResult,
+  WorktreeProbeResult,
+  WorktreeStatusResult,
+} from "../../shared/session-workspace";
+import type {
   QuickAskRegisterResult,
   QuickAskSubmitPayload,
   QuickAskTarget,
@@ -401,6 +415,25 @@ export interface ElectronAPI {
 
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
+
+  // Git workspace
+  gitStatus: (target: string) => Promise<GitStatus>;
+  gitDiff: (target: string, path: string, staged?: boolean) => Promise<GitDiffResult>;
+  gitStage: (target: string, paths: string[]) => Promise<GitActionResult>;
+  gitUnstage: (target: string, paths: string[]) => Promise<GitActionResult>;
+  gitDiscard: (target: string, paths: string[]) => Promise<GitActionResult>;
+  gitCommit: (target: string, message: string, amend?: boolean) => Promise<GitCommitResult>;
+  gitStashCreate: (target: string, message?: string) => Promise<GitActionResult>;
+  gitStashList: (target: string) => Promise<GitStashListResult>;
+  gitStashPop: (target: string, ref?: string) => Promise<GitActionResult>;
+
+  // Session worktree
+  worktreeProbe: (projectPath: string) => Promise<WorktreeProbeResult>;
+  worktreeCreate: (projectPath: string, sessionId: string) => Promise<WorktreeCreateResult>;
+  worktreeStatus: (workspace: SessionWorkspace) => Promise<WorktreeStatusResult>;
+  worktreeCheckpoint: (workspace: SessionWorkspace, message?: string) => Promise<WorktreeActionResult>;
+  worktreeMerge: (workspace: SessionWorkspace) => Promise<WorktreeActionResult>;
+  worktreeRemove: (workspace: SessionWorkspace) => Promise<WorktreeActionResult>;
   agentSwitchSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentRemoveSession: (sessionId: string) => Promise<{ success: boolean }>;
   agentGetSessionState: (sessionId: string) => Promise<{
@@ -461,11 +494,16 @@ export interface ElectronAPI {
   getQuickAskTarget: () => Promise<QuickAskTarget | null>;
   submitQuickAsk: (payload: QuickAskSubmitPayload) => Promise<{ ok: boolean; error?: string }>;
   hideQuickAsk: () => Promise<{ ok: boolean }>;
+  focusMainWindow: () => Promise<{ ok: boolean; error?: string }>;
   showQuickAsk: () => Promise<{ ok: boolean }>;
   getQuickAskStatus: () => Promise<{ supported: boolean }>;
   onQuickAskSubmit: (callback: (payload: QuickAskSubmitPayload) => void) => () => void;
   onQuickAskFocus: (callback: () => void) => () => void;
+  onComposerFocus: (callback: () => void) => () => void;
 }
+
+export type { GitActionResult, GitCommitResult, GitDiffResult, GitStashListResult, GitStatus };
+export type { SessionWorkspace, WorktreeActionResult, WorktreeCreateResult, WorktreeProbeResult, WorktreeStatusResult };
 
 declare global {
   interface Window {

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import type { SessionWorkspace } from "@shared/session-workspace";
 import {
   useProjectStore,
   type Project,
@@ -132,6 +133,23 @@ const parseSessionForkOrigin = (value: unknown): SessionForkOrigin | undefined =
   };
 };
 
+const parseSessionWorkspace = (value: unknown): SessionWorkspace | undefined => {
+  if (!isRecord(value) || value.mode !== "worktree") return undefined;
+  const projectRoot = getString(value.projectRoot);
+  const repoRoot = getString(value.repoRoot);
+  const rootPath = getString(value.rootPath);
+  const worktreePath = getString(value.worktreePath);
+  const branch = getString(value.branch);
+  const baseRef = getString(value.baseRef);
+  const baseCommit = getString(value.baseCommit);
+  const createdAt = getString(value.createdAt);
+  if (!projectRoot || !repoRoot || !rootPath || !worktreePath || !branch || !baseRef || !baseCommit || !createdAt) return undefined;
+  const status = value.status === "merged" || value.status === "discarded" || value.status === "missing" || value.status === "active"
+    ? value.status
+    : "active";
+  return { mode: "worktree", projectRoot, repoRoot, rootPath, worktreePath, branch, baseRef, baseCommit, status, createdAt };
+};
+
 const parseProjectSession = (value: unknown): ProjectSession | null => {
   if (!isRecord(value)) return null;
   const id = getString(value.id);
@@ -159,6 +177,7 @@ const parseProjectSession = (value: unknown): ProjectSession | null => {
     createdAt,
     lastActiveAt,
     sessionFilePath: getString(value.sessionFilePath),
+    workspace: parseSessionWorkspace(value.workspace),
     closed: typeof value.closed === "boolean" ? value.closed : undefined,
     references: Array.isArray(value.references)
       ? value.references.map(parseSessionReference).filter((ref): ref is SessionReference => !!ref)

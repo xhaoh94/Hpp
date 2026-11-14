@@ -91,7 +91,7 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("loadChildren(true)");
     expect(source).toContain("setRefreshVersion((current) => current + 1)");
     expect(source).toContain("refreshVersion");
-    expect(source).toContain("invalidateProjectFileIndex(activeProject.path, filters)");
+    expect(source).toContain("invalidateProjectFileIndex(activeWorkspacePath, filters)");
   });
 
   it("watches the project only while the visible file explorer is open", () => {
@@ -102,7 +102,7 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("watchPath(projectPath, true)");
     expect(source).toContain("unwatchPath(projectPath, true)");
     expect(source).toContain("startFallbackPolling");
-    expect(source).toContain("[activeProject?.path, explorerVisible, filterKey]");
+    expect(source).toContain("[activeWorkspacePath, explorerVisible, filterKey]");
   });
 
   it("portals the right-click menu to the body so collapsed sidebar styles can't occlude it", () => {

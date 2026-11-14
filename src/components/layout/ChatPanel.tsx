@@ -14,7 +14,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
+import { ArrowRightLeft, ChartColumn, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -39,6 +39,8 @@ import { AGENT_SETTINGS_UPDATED_EVENT, GENERAL_SETTINGS_UPDATED_EVENT } from "@/
 import { getAgentName, getAgentPlanModeTooltip, supportsAgentActions, supportsGuidance, supportsPermissionModes } from "@/lib/agents";
 import { getModelSwitchToastText, showFloatingToastMessage } from "@/lib/floating-toast";
 import { buildSessionHandoff } from "../../../shared/session-handoff";
+import type { SessionWorkspace } from "../../../shared/session-workspace";
+import { renderSessionHandoffFromBody } from "../../../shared/session-summary";
 import { showAppAlert } from "@/lib/app-dialog";
 import {
   createSessionReferenceSnapshot,
@@ -84,6 +86,7 @@ import { VideoThumbnail } from "@/components/shared/VideoThumbnail";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ContextUsageModal } from "./ContextUsageModal";
+import { TokenUsageModal } from "./TokenUsageModal";
 import { ChatComposer } from "./ChatComposer";
 import { InlineComposerEditor, type InlineComposerEditorHandle } from "@/components/shared/InlineComposerEditor";
 import { ChatToolbar } from "./ChatToolbar";
@@ -92,6 +95,7 @@ import { DiffBlock } from "./DiffBlock";
 import { PermissionChoicePanel } from "./PermissionChoicePanel";
 import { ProcessBlock } from "./ProcessBlock";
 import { SubagentMonitor } from "./SubagentMonitor";
+import { WorktreeControl } from "./WorktreeControl";
 import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { resolvePreviousUserTargetIndex } from "./previousUserTarget";
@@ -465,7 +469,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage 
   const fallbackReferences = (item.sessionReferences || []).map((reference): SessionReference => {
     const source = project.sessions.find((candidate) => candidate.id === reference.sourceSessionId);
     return source
-      ? createSessionReferenceSnapshot(source, sessionMessages[source.id] || [])
+      ? createSessionReferenceSnapshot(source, sessionMessages[source.id] || [], project.name)
       : {
           sourceSessionId: reference.sourceSessionId,
           sourceAgentId: "",
@@ -608,7 +612,7 @@ function QueueEditDialog({ item, project, session, onClose, onSave, onOpenImage 
     queueEditorRef.current?.insertNode({
       id: crypto.randomUUID(),
       type: "session",
-      reference: createSessionReferenceSnapshot(source, sessionMessages[source.id] || []),
+      reference: createSessionReferenceSnapshot(source, sessionMessages[source.id] || [], project.name),
     });
   }, [draft, sessionMessages]);
 
@@ -763,6 +767,7 @@ type SessionReferenceControlProps = {
   onOpenChange: (open: boolean) => void;
   onAddOrRefresh: (session: ProjectSession) => void;
   onRemove: (sourceSessionId: string) => void;
+  onCopy: (reference: SessionReference) => void;
 };
 
 function SessionReferenceControl({
@@ -774,6 +779,7 @@ function SessionReferenceControl({
   onOpenChange,
   onAddOrRefresh,
   onRemove,
+  onCopy,
 }: SessionReferenceControlProps) {
   const sessionMessages = useChatStore((state) => state.sessionMessages);
   const referencedSessionIds = new Set(references.map((reference) => reference.sourceSessionId));
@@ -821,6 +827,14 @@ function SessionReferenceControl({
                         {sourceSession?.closed ? " · 已关闭" : ""}
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      className="chat-reference-icon-btn"
+                      onClick={() => onCopy(reference)}
+                      title="复制交接摘要（可粘贴到其他 App）"
+                    >
+                      <Copy size={13} />
+                    </button>
                     <button
                       type="button"
                       className="chat-reference-icon-btn"
@@ -2404,6 +2418,7 @@ export function ChatPanel({
   const triggerAddProject = useAppStore((state) => state.triggerAddProject);
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeSession = activeProject?.sessions.find((s) => s.id === activeSessionId);
+  const activeWorkspacePath = activeSession?.workspace?.rootPath || activeProject?.path || "";
   const activeSessionTitle = activeSession
     ? getSessionHeaderTitle(activeSession, sessionMessages)
     : "";
@@ -2425,7 +2440,9 @@ export function ChatPanel({
   const copySessionHandoff = useCallback(async () => {
     if (!activeSessionId) return;
     const summary = buildSessionHandoff({
-      title: activeSessionTitle,
+      // 与「引用会话」快照使用同一个标题规则（首条用户发言），
+      // 否则同一条消息里的两份摘要会出现不同标题。
+      title: activeSession ? getSessionReferenceTitle(activeSession, sessionMessages) : activeSessionTitle,
       projectName: activeProject?.name,
       agentName: getAgentName(currentAgentId),
       messages: sessionMessages,
@@ -2436,7 +2453,22 @@ export function ChatPanel({
     } catch {
       showFloatingToastMessage("复制失败");
     }
-  }, [activeSessionId, activeSessionTitle, activeProject?.name, currentAgentId, sessionMessages]);
+  }, [activeSession, activeSessionId, activeSessionTitle, activeProject?.name, currentAgentId, sessionMessages]);
+
+  const copyReferenceHandoff = useCallback(async (reference: SessionReference) => {
+    try {
+      await navigator.clipboard.writeText(renderSessionHandoffFromBody(reference.sourceTitle, reference.summary));
+      showFloatingToastMessage("交接摘要已复制");
+    } catch {
+      showFloatingToastMessage("复制失败");
+    }
+  }, []);
+
+  const updateSessionWorkspace = useCallback((workspace: SessionWorkspace) => {
+    if (!activeProject || !activeSession) return;
+    useProjectStore.getState().setSessionWorkspace(activeProject.id, activeSession.id, workspace);
+  }, [activeProject, activeSession]);
+
   const activeDraft = useChatStore(useShallow((state) => {
     const draft = activeSessionId
       ? state.sessionDrafts[activeSessionId] || EMPTY_CHAT_DRAFT
@@ -2549,6 +2581,8 @@ export function ChatPanel({
   const [agentReloadConfirmOpen, setAgentReloadConfirmOpen] = useState(false);
   const [contextUsageOpen, setContextUsageOpen] = useState(false);
   const contextRingRef = useRef<HTMLButtonElement>(null);
+  const [tokenUsageOpen, setTokenUsageOpen] = useState(false);
+  const tokenUsageRef = useRef<HTMLButtonElement>(null);
   // 重启/热重载后事件流不会重放：当前会话没有实时用量时，
   // 用磁盘里上次已知的值补一次，避免标题栏与弹窗显示空数据。
   useEffect(() => {
@@ -2560,6 +2594,7 @@ export function ChatPanel({
   // 弹窗展示的是当前会话的用量，切会话时关闭，避免看到上一个会话的明细。
   useEffect(() => {
     setContextUsageOpen(false);
+    setTokenUsageOpen(false);
   }, [activeSessionId]);
   const [agentReloading, setAgentReloading] = useState(false);
   const [agentReloadError, setAgentReloadError] = useState("");
@@ -2597,6 +2632,13 @@ export function ChatPanel({
     window.addEventListener(COMPOSER_INSERT_EVENT, handleComposerInsert);
     return () => window.removeEventListener(COMPOSER_INSERT_EVENT, handleComposerInsert);
   }, []);
+
+  useEffect(() => window.electronAPI.onComposerFocus(() => {
+    // 全局唤起窗空内容回车时由主进程通知；等窗口恢复后再补一帧，
+    // 避免刚从后台切回来时 rAF 尚未恢复导致焦点丢失。
+    editorRef.current?.focus();
+    requestAnimationFrame(() => editorRef.current?.focus());
+  }), []);
 
   useEffect(() => {
     const handleSessionDataPurged = (event: Event) => {
@@ -2813,7 +2855,9 @@ export function ChatPanel({
       .find((session) => session.id === reference.sourceSessionId);
     if (!source) return undefined;
     const chatState = useChatStore.getState();
-    return createSessionReferenceSnapshot(source, chatState.sessionMessages[source.id] || []);
+    const sourceProject = projectState.projects.find((project) =>
+      project.sessions.some((session) => session.id === reference.sourceSessionId));
+    return createSessionReferenceSnapshot(source, chatState.sessionMessages[source.id] || [], sourceProject?.name);
   }, []);
 
   const getCurrentSessionDraft = useCallback((sessionId: string) => {
@@ -3111,7 +3155,7 @@ export function ChatPanel({
   }, []);
 
   const handleOpenFile = useCallback(async (path: string, options: { preview?: boolean } = {}) => {
-    const projectPath = activeProject?.path || "";
+    const projectPath = activeWorkspacePath;
     let resolvedPath = resolveProjectFilePath(path, projectPath);
     // 直接解析不到时，按相对路径后缀在项目树里兜底找（模型常以代码根为基准写路径）。
     if (!(await window.electronAPI.fileExists(resolvedPath))) {
@@ -3132,7 +3176,7 @@ export function ChatPanel({
       return;
     }
     setPreviewFile(resolvedPath);
-  }, [activeProject?.path]);
+  }, [activeWorkspacePath]);
 
   const scrollToMessage = useCallback((msgId: string) => {
     scrollToMessageElement(msgId);
@@ -3159,7 +3203,7 @@ export function ChatPanel({
     await ensureSessionMessagesLoaded(sourceSession.id);
     if (useProjectStore.getState().activeSessionId !== activeSessionId) return;
     const sessionMessages = useChatStore.getState().sessionMessages;
-    const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || []);
+    const reference = createSessionReferenceSnapshot(sourceSession, sessionMessages[sourceSession.id] || [], activeProject.name);
     const existing = activeComposerDocument.nodes.find((node) =>
       node.type === "session" && node.reference.sourceSessionId === sourceSession.id
     );
@@ -4113,6 +4157,18 @@ export function ChatPanel({
           </svg>
           <span className="chat-context-ring-value">{contextPercentLabel}</span>
         </button>
+        <button
+          type="button"
+          ref={tokenUsageRef}
+          className="chat-header-token-usage"
+          onClick={() => setTokenUsageOpen(true)}
+          title="Token 统计（输入 / 输出 / 缓存）"
+          aria-label="Token 统计"
+          aria-haspopup="dialog"
+          aria-expanded={tokenUsageOpen}
+        >
+          <ChartColumn size={13} strokeWidth={2} />
+        </button>
         <span className="chat-header-separator" aria-hidden="true">·</span>
         {scrollHeaderTitle && scrollHeaderMessageId ? (
           <button
@@ -4129,6 +4185,13 @@ export function ChatPanel({
           </span>
         )}
         {currentSessionRunning && <BrailleSpinner />}
+        {activeSession?.workspace && (
+          <WorktreeControl
+            workspace={activeSession.workspace}
+            running={currentSessionRunning}
+            onUpdate={updateSessionWorkspace}
+          />
+        )}
         <button
           type="button"
           className="chat-header-handoff"
@@ -4151,7 +4214,7 @@ export function ChatPanel({
         currentSessionCompacting={activeSessionCompacting}
         expandThinkingWhileRunning={expandThinkingWhileRunning}
         outputDetailLevel={outputDetailLevel}
-        projectPath={activeProject.path}
+        projectPath={activeWorkspacePath}
         scrollRef={scrollRef}
         showScrollBottom={showScrollBottom}
         userMsgHistoryOpen={userMsgHistoryOpen}
@@ -4304,6 +4367,7 @@ export function ChatPanel({
               onOpenChange={setReferenceOpen}
               onAddOrRefresh={handleAddOrRefreshReference}
               onRemove={handleRemoveReference}
+              onCopy={copyReferenceHandoff}
             />
           </div>
         )}
@@ -4450,6 +4514,14 @@ export function ChatPanel({
           usage={activeSessionContextUsage}
           anchorRef={contextRingRef}
           onClose={() => setContextUsageOpen(false)}
+        />
+      )}
+      {tokenUsageOpen && activeSessionId && (
+        <TokenUsageModal
+          sessionId={activeSessionId}
+          messages={sessionMessages}
+          anchorRef={tokenUsageRef}
+          onClose={() => setTokenUsageOpen(false)}
         />
       )}
       {modelConfigAgentId && (

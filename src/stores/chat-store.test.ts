@@ -823,3 +823,42 @@ describe("appendLastAssistantDiffs per-file upsert", () => {
     expect(diffs?.[0].patch).toBe("new");
   });
 });
+
+describe("assistant token usage", () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      messages: [],
+      sessionMessages: {},
+      activeSessionId: "session-1",
+      currentModel: null,
+    });
+  });
+
+  it("accumulates turn usage and records the reporting channel/model", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantContent("回复", "session-1");
+
+    store.addAssistantTokenUsage(100, 20, 30, "session-1", { provider: "channel-a", id: "model-x" });
+    store.addAssistantTokenUsage(50, 10, 5, "session-1", { provider: "channel-a", id: "model-x" });
+
+    expect(useChatStore.getState().messages[0]).toMatchObject({
+      modelProvider: "channel-a",
+      modelId: "model-x",
+      tokenUsage: { input: 150, output: 30, cacheInput: 35 },
+    });
+  });
+
+  it("refreshes the recorded model when a later usage event reports another one", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantContent("回复", "session-1");
+    store.addAssistantTokenUsage(100, 20, 0, "session-1", { provider: "channel-a", id: "model-x" });
+    // 回合创建时可能用了当前活跃会话的模型快照；后端用量事件才是实际计费模型。
+    store.addAssistantTokenUsage(10, 1, 0, "session-1", { provider: "channel-b", id: "model-y" });
+
+    expect(useChatStore.getState().messages[0]).toMatchObject({
+      modelProvider: "channel-b",
+      modelId: "model-y",
+      tokenUsage: { input: 110, output: 21, cacheInput: 0 },
+    });
+  });
+});

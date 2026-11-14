@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import projectCardSource from "./ProjectCard.tsx?raw";
 import projectViewSource from "./ProjectView.tsx?raw";
+import newSessionSource from "./NewSessionModal.tsx?raw";
 
 const chatPanelStyles = readFileSync(new URL("../layout/ChatPanel.css", import.meta.url), "utf8");
 const sidebarStyles = readFileSync(new URL("./Sidebar.css", import.meta.url), "utf8");
@@ -186,5 +187,26 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(projectCardSource).toContain("{!isDefaultWorkspace && (");
     expect(projectViewSource).toContain("defaultWorkspaceProject");
     expect(projectViewSource).toContain("draggableProjects = projects.filter");
+  });
+});
+
+describe("ProjectCard worktree session option", () => {
+  it("asks for the workspace mode per new session", () => {
+    expect(projectCardSource).toContain("const [newSessionAgent, setNewSessionAgent]");
+    expect(projectCardSource).toContain("setNewSessionAgent(agent)");
+    expect(projectCardSource).toContain("<NewSessionModal");
+    expect(projectCardSource).toContain("workspaceMode");
+    expect(newSessionSource).toContain("worktreeProbe(project.path)");
+    expect(newSessionSource).toContain("{!defaultWorkspace && (");
+    expect(newSessionSource).toContain("useWorktree && canUseWorktree ? \"worktree\" : \"shared\"");
+    expect(sidebarStyles).toContain(".new-session-worktree");
+    expect(sidebarStyles).toContain(".terminal-child-worktree-badge");
+  });
+
+  it("opens the Git workspace from the project card and dirty new-session modal", () => {
+    expect(projectCardSource).toContain("<GitWorkspaceModal");
+    expect(projectCardSource).toContain("打开 Git 工作台");
+    expect(newSessionSource).toContain("onOpenGit");
+    expect(newSessionSource).toContain("打开 Git 工作台");
   });
 });

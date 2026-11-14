@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useProjectStore, type AgentStatus, type Project, type ProjectSession } from "@/stores/project-store";
+import type { AgentDescriptor } from "@/types";
 import { useChatStore, isUserSpeechMessage, type ChatMessage } from "@/stores/chat-store";
 import { useShallow } from "zustand/react/shallow";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
@@ -16,6 +17,8 @@ import { discardSessionsCompletely } from "@/lib/session-discard";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
 import { isDefaultWorkspaceProject, saveDefaultWorkspacePath } from "@/lib/default-workspace";
 import { ProjectEditModal } from "./ProjectEditModal";
+import { NewSessionModal } from "./NewSessionModal";
+import { GitWorkspaceModal, type GitWorkspaceTarget } from "@/components/git/GitWorkspaceModal";
 import { showAppAlert } from "@/lib/app-dialog";
 import { GitBranch, Pencil, Terminal } from "lucide-react";
 
@@ -106,6 +109,9 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [newSessionAgent, setNewSessionAgent] = useState<AgentDescriptor | null>(null);
+  const [gitModalTarget, setGitModalTarget] = useState<GitWorkspaceTarget | null>(null);
+  const [gitProbeVersion, setGitProbeVersion] = useState(0);
   const [visibleAgentCount, setVisibleAgentCount] = useState(0);
   const [agentMenuPosition, setAgentMenuPosition] = useState<{ left: number; top: number } | null>(null);
   const agentShortcutsRef = useRef<HTMLDivElement>(null);
@@ -224,16 +230,22 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
       return;
     }
 
-    try {
-      await SessionCommandCoordinator.createSession({
-        projectId: project.id,
-        agentId,
-        activate: true,
-        verifyInstalled: false,
-      });
-    } catch (error) {
-      showAppAlert(getErrorMessage(error));
-    }
+    const agent = agents.find((candidate) => candidate.id === agentId);
+    if (!agent) return;
+    setNewSessionAgent(agent);
+  };
+
+  const handleConfirmNewSession = async ({ workspaceMode }: { workspaceMode: "shared" | "worktree" }) => {
+    const agent = newSessionAgent;
+    if (!agent) return;
+    await SessionCommandCoordinator.createSession({
+      projectId: project.id,
+      agentId: agent.id,
+      activate: true,
+      verifyInstalled: false,
+      workspaceMode,
+    });
+    setNewSessionAgent(null);
   };
 
   const handleSelectSession = (session: ProjectSession) => {
@@ -396,6 +408,17 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
           title={sessionsCollapsed ? "展开会话" : "收起会话"}
         >
           <div className="project-card-actions">
+            <button
+              className="project-edit-btn"
+              onClick={(event) => {
+                event.stopPropagation();
+                setGitModalTarget({ path: project.path, label: project.name });
+              }}
+              title="打开 Git 工作台"
+              aria-label={`打开 Git 工作台：${project.name}`}
+            >
+              <GitBranch size={12} strokeWidth={1.8} />
+            </button>
             <button
               className="project-edit-btn"
               onClick={(event) => {
@@ -577,6 +600,14 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
                     <GitBranch size={11} strokeWidth={2} />
                   </span>
                 )}
+                {session.workspace && (
+                  <span
+                    className="terminal-child-worktree-badge"
+                    title={`独立工作区：${session.workspace.branch}\n${session.workspace.rootPath}`}
+                  >
+                    <GitBranch size={11} strokeWidth={2} />
+                  </span>
+                )}
                 {status === "completed" && session.id !== activeSessionId && (
                   <span className="terminal-child-dot" />
                 )}
@@ -601,6 +632,28 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
           project={project}
           onClose={() => setShowEdit(false)}
           onSubmit={handleSaveProjectEdit}
+        />
+      )}
+
+      {gitModalTarget && (
+        <GitWorkspaceModal
+          target={gitModalTarget}
+          onClose={() => {
+            setGitModalTarget(null);
+            setGitProbeVersion((value) => value + 1);
+          }}
+          onChanged={() => setGitProbeVersion((value) => value + 1)}
+        />
+      )}
+
+      {newSessionAgent && (
+        <NewSessionModal
+          project={project}
+          agent={newSessionAgent}
+          onClose={() => setNewSessionAgent(null)}
+          onConfirm={handleConfirmNewSession}
+          onOpenGit={() => setGitModalTarget({ path: project.path, label: project.name })}
+          probeVersion={gitProbeVersion}
         />
       )}
 
