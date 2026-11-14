@@ -203,6 +203,14 @@ export function registerQuickAskIpc() {
     return { ok: true };
   });
 
+  // 应用内兜底：Wayland 下系统快捷键注册不上，靠窗口内的同一个组合键唤出。
+  ipcMain.handle("quick:show", () => {
+    showQuickAskWindow();
+    return { ok: true };
+  });
+
+  ipcMain.handle("quick:getStatus", () => ({ supported: registeredAccelerator !== null }));
+
   ipcMain.handle("quick:submit", (_event, payload: QuickAskSubmitPayload) => {
     const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
     const content = typeof payload?.content === "string" ? payload.content.trim() : "";

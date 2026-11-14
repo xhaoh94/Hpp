@@ -51,6 +51,14 @@ export default function App() {
   useIdleSessionRuntimeRelease();
   useEditorBridge();
   const [showFileSearch, setShowFileSearch] = useState(false);
+  // 系统级唤起是否注册成功；失败时（典型是原生 Wayland）退回到窗口内同一个组合键。
+  const [globalQuickAskReady, setGlobalQuickAskReady] = useState(true);
+
+  useEffect(() => {
+    void window.electronAPI.getQuickAskStatus()
+      .then((status) => setGlobalQuickAskReady(status.supported))
+      .catch(() => setGlobalQuickAskReady(false));
+  }, []);
   const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);
   const layoutContentRef = useRef<HTMLDivElement>(null);
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
@@ -161,10 +169,20 @@ export default function App() {
         cycleModel("next");
         return;
       }
+      // 系统快捷键注册不上时，窗口内按同一个组合照样能唤出输入条。
+      if (
+        !globalQuickAskReady
+        && shortcuts.globalQuickAsk
+        && matchShortcut(e, shortcuts.globalQuickAsk)
+      ) {
+        e.preventDefault();
+        void window.electronAPI.showQuickAsk();
+        return;
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [shortcuts, cycleModel]);
+  }, [shortcuts, cycleModel, globalQuickAskReady]);
 
   const handleFileSelect = useCallback((selection: FileSearchSelection) => {
     if (selection.isDirectory) {

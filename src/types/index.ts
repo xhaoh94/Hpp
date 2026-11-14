@@ -461,6 +461,8 @@ export interface ElectronAPI {
   getQuickAskTarget: () => Promise<QuickAskTarget | null>;
   submitQuickAsk: (payload: QuickAskSubmitPayload) => Promise<{ ok: boolean; error?: string }>;
   hideQuickAsk: () => Promise<{ ok: boolean }>;
+  showQuickAsk: () => Promise<{ ok: boolean }>;
+  getQuickAskStatus: () => Promise<{ supported: boolean }>;
   onQuickAskSubmit: (callback: (payload: QuickAskSubmitPayload) => void) => () => void;
   onQuickAskFocus: (callback: () => void) => () => void;
 }

@@ -314,6 +314,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   submitQuickAsk: (payload: QuickAskSubmitPayload): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("quick:submit", payload),
   hideQuickAsk: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("quick:hide"),
+  showQuickAsk: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("quick:show"),
+  getQuickAskStatus: (): Promise<{ supported: boolean }> => ipcRenderer.invoke("quick:getStatus"),
   onQuickAskSubmit: (callback: (payload: QuickAskSubmitPayload) => void) => {
     const handler = (_event: unknown, payload: QuickAskSubmitPayload) => callback(payload);
     ipcRenderer.on("app:quick-submit", handler);

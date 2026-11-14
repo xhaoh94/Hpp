@@ -180,4 +180,5 @@ window-rule {
 - `spawn` 里的路径换成实际的 AppImage 位置；用包管理器安装时直接写启动命令。
 - 窗口规则必须加，否则 760×150 的输入条会被当成平铺窗口塞进滚动列。`app-id` 用 `niri msg windows` 确认，Electron 下通常是 `hpp`。
 - Hpp 没在运行时按这个键会正常启动并直接弹出输入条；托盘隐藏状态下也能唤出。
+- `npm run dev` 时没有 AppImage 路径可绑定：系统快捷键注册失败后，Hpp 窗口内的同一个组合键（默认 `Ctrl+Shift+Space`）会直接唤出输入条，用它验证界面即可。
 
