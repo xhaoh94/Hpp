@@ -527,3 +527,346 @@
 .git-file-search input:focus {
   border-color: var(--accent-color);
 }
+
+.git-commit-label {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.git-commit-actions .git-primary-btn {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-remote-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-remote-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-remote-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.git-workspace-tabs > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.git-commit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
+}
+
+.git-commit-row:hover {
+  background: var(--bg-hover);
+}
+
+.git-commit-row.active {
+  background: var(--accent-color);
+  color: #fff;
+}
+
+.git-commit-row strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-commit-row span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.git-commit-row.active span {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.git-simple-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+.git-branch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.git-simple-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+}
+
+.git-simple-row > svg {
+  flex: 0 0 auto;
+  color: #66bb6a;
+}
+
+.git-simple-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.git-simple-row strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-simple-row span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-simple-row button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-simple-row button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.git-simple-row button.danger:hover:not(:disabled) {
+  color: #ff8a80;
+  border-color: rgba(244, 67, 54, 0.45);
+}
+
+.git-simple-row button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.git-simple-note {
+  margin: 12px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.git-simple-pane .git-diff-empty {
+  min-height: 160px;
+}
+
+.git-conflict-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 16px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(232, 168, 56, 0.5);
+  border-radius: 6px;
+  background: rgba(232, 168, 56, 0.1);
+  color: #d99a2b;
+  font-size: 11px;
+}
+
+.git-conflict-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-conflict-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.git-conflict-actions button,
+.git-conflict-row button {
+  padding: 4px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.git-conflict-actions button:hover:not(:disabled),
+.git-conflict-row button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.git-conflict-actions button:disabled,
+.git-conflict-row button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.git-conflict-actions button.danger {
+  color: #ff8a80;
+  border-color: rgba(244, 67, 54, 0.35);
+}
+
+.git-file-section-title.conflict {
+  color: #d99a2b;
+}
+
+.git-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(232, 168, 56, 0.16);
+  background: rgba(232, 168, 56, 0.06);
+}
+
+.git-conflict-row > svg {
+  flex: 0 0 auto;
+  color: #d99a2b;
+}
+
+.git-conflict-row .git-file-path {
+  min-width: 0;
+  flex: 1;
+}
+
+.git-conflict-row button {
+  flex: 0 0 auto;
+  padding: 3px 5px;
+}
+
+.git-conflict-row .git-file-action {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.git-hunks {
+  min-width: max-content;
+  padding: 8px 0;
+}
+
+.git-hunk-block {
+  margin: 0 10px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.git-hunk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.git-hunk-header code {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-hunk-actions {
+  display: flex;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.git-hunk-header button {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.git-hunk-header button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.git-hunk-header button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.git-hunk-header button.danger {
+  color: #ff8a80;
+  border-color: rgba(244, 67, 54, 0.35);
+}
+
+.git-hunk-lines {
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.git-hunk-line {
+  min-width: max-content;
+  padding: 0 9px;
+  white-space: pre;
+}
+
+.git-hunk-line.add {
+  background: rgba(102, 187, 106, 0.13);
+  color: #8bd18e;
+}
+
+.git-hunk-line.remove {
+  background: rgba(239, 83, 80, 0.12);
+  color: #ff9a96;
+}

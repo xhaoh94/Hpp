@@ -180,12 +180,13 @@ export class WorktreeManager {
       await runGit(workspace.repoRoot, ["merge", "--no-ff", workspace.branch, "-m", `Merge ${workspace.branch}`]);
       return { success: true, workspace: { ...workspace, status: "merged" }, output: `已合并 ${workspace.branch}` };
     } catch (error) {
-      try {
-        await runGit(workspace.repoRoot, ["merge", "--abort"]);
-      } catch {
-        // 没有可中止的合并
-      }
-      return { success: false, workspace: normalizeWorkspace(workspace), error: `合并失败，已回滚：${errorMessage(error)}` };
+      // 保留冲突状态，让 Git 工作台可以逐文件解决；用户也可以在那里中止合并。
+      return {
+        success: false,
+        workspace: normalizeWorkspace(workspace),
+        error: `合并出现冲突，已保留在主工作区。请打开 Git 工作台解决冲突后继续或中止。\n${errorMessage(error)}`,
+        conflict: true,
+      };
     }
   }
 

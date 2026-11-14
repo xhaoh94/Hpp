@@ -42,4 +42,5 @@ export interface WorktreeActionResult {
   workspace?: SessionWorkspace;
   error?: string;
   output?: string;
+  conflict?: boolean;
 }

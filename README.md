@@ -18,6 +18,40 @@ Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理
 - 聊天框提供“请求权限、自动权限、完全访问权限”三档通用策略，并将所选档位固化到每条消息和队列项。
 - 内置编辑器桥接：VSCode 系扩展、Zed 任务和通用 CLI 可以把选区、文件或文件夹直接送进当前会话的输入框。
 - 提供子 Agent 运行监视、本轮产物清单、HTML/SVG 预览和粘贴文本折叠。
+- 会话可选独立 Git worktree，支持并行任务隔离、检查点和合并回主工作区。
+- 内置独立 Git 工作台弹窗：查看状态、暂存/取消暂存、diff、提交和 stash。
+
+## 独立 Git 工作区
+
+点击项目卡片里的 Agent 后，会弹出新建会话窗口；在其中勾选「在独立 Git worktree 中运行」，Hpp 会为这个会话创建一个独立的 Git worktree，Agent 的 cwd、文件树和 diff 都指向该工作区。默认工作区不显示这个选项；普通项目要求主工作区干净，否则会拒绝创建，避免 Agent 看不到你未提交的改动。
+
+- worktree 默认放在 Hpp 数据目录的 `worktrees/` 下，分支名为 `hpp/<session-id>`；
+- 会话头部的工作区徽章可以复制路径、创建检查点或合并回主工作区；
+- 合并要求主工作区干净，使用 `git merge --no-ff`；发生冲突时保留冲突状态，可在 Git 工作台解决或中止；
+- 合并后 worktree 不会自动删除，可用 `git worktree remove` 清理；
+- 独立工作区目前不支持 fork，避免两个会话同时写同一个目录。
+
+
+## Git 工作台
+
+项目卡片右上角的 Git 图标会打开独立的 Git 工作台弹窗，不占用右侧窄栏。当前支持：
+
+- 当前分支、upstream、ahead/behind 和工作区状态；
+- 已暂存 / 未暂存 / 未跟踪文件；
+- 文件级和 hunk 级暂存、取消暂存；文件级和 hunk 级丢弃（丢弃前确认）；
+- diff 查看；
+- 提交已暂存改动，支持 amend；
+- 创建、列出和恢复 stash；
+- 提交历史、提交详情；
+- 本地分支列表、创建、切换、合并、删除和发起 rebase；
+- worktree 列表和安全删除；
+- fetch / pull --ff-only / push；
+- 文件级冲突解决：使用当前版本、对方版本、打开文件、标记已解决，以及继续/中止 merge、rebase、cherry-pick、revert。
+
+创建独立 worktree 时，如果主工作区有未提交改动，新建会话弹窗会提供「打开 Git 工作台」入口；提交或 stash 后关闭弹窗，Hpp 会自动重新检测，worktree 勾选随即可用。
+
+pull 只执行 `--ff-only`，不会自动创建 merge commit；push 使用系统 Git 凭据助手，不把 token 存进 Hpp。PR 和 interactive rebase 仍未包含；冲突解决是文件级操作，不提供 inline 三方合并编辑器。
+
 
 ## 开发
 
@@ -133,6 +167,8 @@ electron/agent-plugins/    官方插件清单、入口和原生配置适配器
 electron/plugin-backends/  官方后端实现
 electron/plugin-runtime/   插件宿主和后端运行时
 electron/editor-bridge/    编辑器桥接服务、安装器和 Zed 配置
+electron/worktree/         会话级 Git worktree 管理
+electron/git/              Git 工作台主进程服务
 editors/vscode/            VSCode 系编辑器扩展源码
 bin/hpp-send.cjs           通用编辑器发送 CLI
 mobile/                    Android / Web 远程访问客户端
@@ -164,21 +200,21 @@ Linux 默认关闭窗口时退出，避免在没有系统托盘宿主的 niri �
 
 Wayland 没有给普通客户端的全局按键协议，`globalShortcut` 在原生 Wayland 会话下注册不上（X11 或 `HPP_OZONE_PLATFORM=x11` 时可以正常用）。Wayland 下改用合成器 keybind：再启动一次同一份 Hpp 并带上 `--quick-ask`，第二个进程会通过单实例锁退出，由已在运行的 Hpp 弹出输入条。
 
-niri 的 `~/.config/niri/config.kdl`：
+Hpp 会把设置里的「全局唤起」同步到 niri 的 include 文件，并在保存后让 niri 重载配置。`~/.config/niri/config.kdl` 只需要包含一次：
 
 ```kdl
-binds {
-    Mod+Shift+Space { spawn "sh" "-lc" "~/Applications/Hpp-Linux-x86_64.AppImage --quick-ask"; }
-}
+include "hpp-quick-ask.kdl"
 
 window-rule {
     match app-id=r#"hpp"# title=r#"^Hpp Quick Ask$"#
     open-floating true
+    open-focused true
 }
 ```
 
-- `spawn` 里的路径换成实际的 AppImage 位置；用包管理器安装时直接写启动命令。
-- 窗口规则必须加，否则 760×150 的输入条会被当成平铺窗口塞进滚动列。`app-id` 用 `niri msg windows` 确认，Electron 下通常是 `hpp`。
+之后在 Hpp 设置里修改快捷键，Hpp 会更新 `~/.config/niri/hpp-quick-ask.kdl`，不需要再手动改主配置。生成文件由 Hpp 维护，不要手改；主配置缺少 include 时 Hpp 会在设置页提示。
+
+- 窗口规则必须加，否则 760×150 的输入条会被当成平铺窗口塞进滚动列；`open-focused` 保证从其他窗口触发时输入条能拿到焦点。`app-id` 用 `niri msg windows` 确认，Electron 下通常是 `hpp`。
 - Hpp 没在运行时按这个键会正常启动并直接弹出输入条；托盘隐藏状态下也能唤出。
-- `npm run dev` 时没有 AppImage 路径可绑定：系统快捷键注册失败后，Hpp 窗口内的同一个组合键（默认 `Ctrl+Shift+Space`）会直接唤出输入条，用它验证界面即可。
+- `npm run dev` 时生成文件会指向当前的 Electron 开发命令；切换回打包版后 Hpp 会自动改写。
 

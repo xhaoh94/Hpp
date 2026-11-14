@@ -18,10 +18,15 @@ import type { AgentCodemodeConfig } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
 import type {
   GitActionResult,
+  GitBranchListResult,
+  GitCommitDiffResult,
   GitCommitResult,
+  GitConflictChoice,
   GitDiffResult,
+  GitLogResult,
   GitStashListResult,
   GitStatus,
+  GitWorktreeListResult,
 } from "../shared/git-types";
 import type {
   SessionWorkspace,
@@ -239,10 +244,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:diff", target, path, staged === true),
   gitStage: (target: string, paths: string[]): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:stage", target, paths),
+  gitStageHunks: (target: string, path: string, indexes: number[], direction: "stage" | "unstage"): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stageHunks", target, path, indexes, direction),
   gitUnstage: (target: string, paths: string[]): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:unstage", target, paths),
   gitDiscard: (target: string, paths: string[]): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:discard", target, paths),
+  gitDiscardHunks: (target: string, path: string, indexes: number[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:discardHunks", target, path, indexes),
   gitCommit: (target: string, message: string, amend?: boolean): Promise<GitCommitResult> =>
     ipcRenderer.invoke("git:commit", target, message, amend === true),
   gitStashCreate: (target: string, message?: string): Promise<GitActionResult> =>
@@ -251,6 +260,33 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:stashList", target),
   gitStashPop: (target: string, ref?: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:stashPop", target, ref),
+  gitResolveConflict: (target: string, path: string, choice: GitConflictChoice): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:resolveConflict", target, path, choice),
+  gitContinueOperation: (target: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:continueOperation", target),
+  gitAbortOperation: (target: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:abortOperation", target),
+  gitBranches: (target: string): Promise<GitBranchListResult> => ipcRenderer.invoke("git:branches", target),
+  gitCreateBranch: (target: string, name: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:createBranch", target, name),
+  gitSwitchBranch: (target: string, name: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:switchBranch", target, name),
+  gitDeleteBranch: (target: string, name: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:deleteBranch", target, name),
+  gitLog: (target: string, limit?: number): Promise<GitLogResult> =>
+    ipcRenderer.invoke("git:log", target, limit),
+  gitShowCommit: (target: string, hash: string): Promise<GitCommitDiffResult> =>
+    ipcRenderer.invoke("git:showCommit", target, hash),
+  gitFetch: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:fetch", target),
+  gitPull: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:pull", target),
+  gitPush: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:push", target),
+  gitMerge: (target: string, branch: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:merge", target, branch),
+  gitRebase: (target: string, branch: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:rebase", target, branch),
+  gitWorktrees: (target: string): Promise<GitWorktreeListResult> => ipcRenderer.invoke("git:worktrees", target),
+  gitRemoveWorktree: (target: string, path: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:removeWorktree", target, path),
 
   worktreeProbe: (projectPath: string): Promise<WorktreeProbeResult> =>
     ipcRenderer.invoke("worktree:probe", projectPath),

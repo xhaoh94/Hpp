@@ -1,0 +1,363 @@
+2026-11-14T15:44:14.029Z [Hpp timing] agent:createSession:backend sessionId=same-session agent=pi durationMs=1
+2026-11-14T15:44:14.030Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.031Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.031Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +1ms total=1ms
+2026-11-14T15:44:14.031Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.031Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.044Z [Hpp timing] agent:createSession:backend sessionId=session-1 agent=opencode durationMs=0
+2026-11-14T15:44:14.045Z [Hpp timing] agent:init agent=opencode project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:44:14.045Z [Hpp timing] agent:init agent=opencode project=C:\project compactionConfig +0ms total=1ms
+2026-11-14T15:44:14.045Z [Hpp timing] agent:init agent=opencode project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.045Z [Hpp timing] agent:init agent=opencode project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.046Z [Hpp timing] agent:init agent=opencode project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.048Z [Hpp timing] agent:init agent=opencode project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.048Z [Hpp timing] agent:init agent=opencode project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.048Z [Hpp timing] agent:init agent=opencode project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.048Z [Hpp timing] agent:init agent=opencode project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.048Z [Hpp timing] agent:init agent=opencode project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.054Z [Hpp timing] agent:createSession:backend sessionId=guidance-session agent=pi durationMs=0
+2026-11-14T15:44:14.054Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.054Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.054Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.054Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.055Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +1ms total=1ms
+2026-11-14T15:44:14.059Z [Hpp timing] agent:createSession:backend sessionId=session-2 agent=droid durationMs=1
+2026-11-14T15:44:14.059Z [Hpp timing] agent:init agent=droid project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.059Z [Hpp timing] agent:init agent=droid project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.059Z [Hpp timing] agent:init agent=droid project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.059Z [Hpp timing] agent:init agent=droid project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.059Z [Hpp timing] agent:init agent=droid project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.063Z [Hpp timing] agent:createSession:backend sessionId=session-3 agent=opencode durationMs=1
+2026-11-14T15:44:14.063Z [Hpp timing] agent:init agent=opencode project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.063Z [Hpp timing] agent:init agent=opencode project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.063Z [Hpp timing] agent:init agent=opencode project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.063Z [Hpp timing] agent:init agent=opencode project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.063Z [Hpp timing] agent:init agent=opencode project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.064Z [Hpp timing] agent:createSession:backend sessionId=session-4 agent=codex durationMs=0
+2026-11-14T15:44:14.064Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.065Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.065Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +1ms total=1ms
+2026-11-14T15:44:14.065Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.065Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.069Z [Hpp timing] agent:createSession:backend sessionId=reload-session agent=codex durationMs=0
+2026-11-14T15:44:14.069Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.069Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.069Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.069Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.069Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.071Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.072Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.072Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +1ms total=1ms
+2026-11-14T15:44:14.072Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.072Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.124Z [Hpp timing] agent:createSession:backend sessionId=failed-reload agent=codex durationMs=0
+2026-11-14T15:44:14.124Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.124Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.124Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.124Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.125Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.125Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.125Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.125Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.125Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.129Z [Hpp timing] agent:createSession:start sessionId=compaction-session agent=pi
+2026-11-14T15:44:14.129Z [Hpp timing] agent:createSession:backend sessionId=compaction-session agent=pi durationMs=0
+2026-11-14T15:44:14.129Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.129Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.129Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.130Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.130Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +1ms total=1ms
+2026-11-14T15:44:14.130Z [Hpp timing] agent:createSession:done sessionId=compaction-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.133Z [Hpp timing] agent:createSession:start sessionId=save-reload-fail agent=pi
+2026-11-14T15:44:14.134Z [Hpp timing] agent:createSession:backend sessionId=save-reload-fail agent=pi durationMs=1
+2026-11-14T15:44:14.135Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:44:14.135Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=1ms
+2026-11-14T15:44:14.135Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.135Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.136Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.136Z [Hpp timing] agent:createSession:done sessionId=save-reload-fail durationMs=3 modelsMs=0 models=0
+2026-11-14T15:44:14.136Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.137Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.137Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.137Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.139Z [Hpp timing] agent:createSession:start sessionId=full-compaction-session agent=full-support
+2026-11-14T15:44:14.139Z [Hpp timing] agent:createSession:backend sessionId=full-compaction-session agent=full-support durationMs=0
+2026-11-14T15:44:14.140Z [Hpp timing] agent:init agent=full-support project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:44:14.141Z [Hpp timing] agent:init agent=full-support project=C:\project compactionConfig +1ms total=2ms
+2026-11-14T15:44:14.141Z [Hpp timing] agent:init agent=full-support project=C:\project subagentConfig +0ms total=2ms
+2026-11-14T15:44:14.142Z [Hpp timing] agent:init agent=full-support project=C:\project builtinExtensions +0ms total=2ms
+2026-11-14T15:44:14.142Z [Hpp timing] agent:init agent=full-support project=C:\project agent.init +1ms total=3ms
+2026-11-14T15:44:14.142Z [Hpp timing] agent:createSession:done sessionId=full-compaction-session durationMs=3 modelsMs=0 models=0
+2026-11-14T15:44:14.142Z [Hpp timing] agent:createSession:start sessionId=model-only-compaction-session agent=model-only
+2026-11-14T15:44:14.142Z [Hpp timing] agent:createSession:backend sessionId=model-only-compaction-session agent=model-only durationMs=0
+2026-11-14T15:44:14.143Z [Hpp timing] agent:init agent=model-only project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:44:14.143Z [Hpp timing] agent:init agent=model-only project=C:\project compactionConfig +0ms total=1ms
+2026-11-14T15:44:14.143Z [Hpp timing] agent:init agent=model-only project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.143Z [Hpp timing] agent:init agent=model-only project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.143Z [Hpp timing] agent:init agent=model-only project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.144Z [Hpp timing] agent:createSession:done sessionId=model-only-compaction-session durationMs=2 modelsMs=0 models=0
+2026-11-14T15:44:14.147Z [Hpp timing] agent:createSession:start sessionId=subagent-session agent=pi
+2026-11-14T15:44:14.147Z [Hpp timing] agent:createSession:backend sessionId=subagent-session agent=pi durationMs=0
+2026-11-14T15:44:14.147Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.147Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.148Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +1ms total=1ms
+2026-11-14T15:44:14.148Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.148Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.148Z [Hpp timing] agent:createSession:done sessionId=subagent-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.149Z [Hpp timing] agent:createSession:start sessionId=codex-subagent-session agent=codex
+2026-11-14T15:44:14.149Z [Hpp timing] agent:createSession:backend sessionId=codex-subagent-session agent=codex durationMs=0
+2026-11-14T15:44:14.149Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.149Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.149Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.149Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.149Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.150Z [Hpp timing] agent:createSession:done sessionId=codex-subagent-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.155Z [Hpp timing] agent:createSession:start sessionId=ui-session agent=pi
+2026-11-14T15:44:14.155Z [Hpp timing] agent:createSession:backend sessionId=ui-session agent=pi durationMs=0
+2026-11-14T15:44:14.155Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.155Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.155Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.155Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.155Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.156Z [Hpp timing] agent:createSession:done sessionId=ui-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.159Z [Hpp timing] agent:createSession:start sessionId=pending-ui-session agent=pi
+2026-11-14T15:44:14.159Z [Hpp timing] agent:createSession:backend sessionId=pending-ui-session agent=pi durationMs=0
+2026-11-14T15:44:14.159Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.159Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.159Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.159Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.160Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +1ms total=1ms
+2026-11-14T15:44:14.160Z [Hpp timing] agent:createSession:done sessionId=pending-ui-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.164Z [Hpp timing] agent:createSession:start sessionId=stale-ui-session agent=pi
+2026-11-14T15:44:14.164Z [Hpp timing] agent:createSession:backend sessionId=stale-ui-session agent=pi durationMs=0
+2026-11-14T15:44:14.164Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.164Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.164Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.164Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.165Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +1ms total=1ms
+2026-11-14T15:44:14.165Z [Hpp timing] agent:createSession:done sessionId=stale-ui-session durationMs=2 modelsMs=0 models=0
+2026-11-14T15:44:14.169Z [Hpp timing] agent:createSession:backend sessionId=revision-session agent=pi durationMs=0
+2026-11-14T15:44:14.169Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.170Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.170Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.170Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.170Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.174Z [Hpp timing] agent:createSession:start sessionId=abort-pending-session agent=pi
+2026-11-14T15:44:14.174Z [Hpp timing] agent:createSession:backend sessionId=abort-pending-session agent=pi durationMs=0
+2026-11-14T15:44:14.175Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.175Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.175Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.175Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.175Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.175Z [Hpp timing] agent:createSession:done sessionId=abort-pending-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.175Z [Hpp timing] agent:createSession:start sessionId=remove-pending-session agent=pi
+2026-11-14T15:44:14.175Z [Hpp timing] agent:createSession:backend sessionId=remove-pending-session agent=pi durationMs=0
+2026-11-14T15:44:14.176Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.176Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.176Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.176Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.176Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.176Z [Hpp timing] agent:createSession:done sessionId=remove-pending-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.178Z [Hpp timing] agent:createSession:start sessionId=refresh-idle-session agent=pi
+2026-11-14T15:44:14.178Z [Hpp timing] agent:createSession:backend sessionId=refresh-idle-session agent=pi durationMs=0
+2026-11-14T15:44:14.178Z [Hpp timing] agent:init agent=pi project=C:project capabilities +0ms total=0ms
+2026-11-14T15:44:14.178Z [Hpp timing] agent:init agent=pi project=C:project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.178Z [Hpp timing] agent:init agent=pi project=C:project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.178Z [Hpp timing] agent:init agent=pi project=C:project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.179Z [Hpp timing] agent:init agent=pi project=C:project agent.init +0ms total=0ms
+2026-11-14T15:44:14.179Z [Hpp timing] agent:createSession:done sessionId=refresh-idle-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.180Z [Hpp timing] agent:createSession:start sessionId=forced-terminal-session agent=pi
+2026-11-14T15:44:14.180Z [Hpp timing] agent:createSession:backend sessionId=forced-terminal-session agent=pi durationMs=0
+2026-11-14T15:44:14.180Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.180Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.181Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.181Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +1ms total=1ms
+2026-11-14T15:44:14.181Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.181Z [Hpp timing] agent:createSession:done sessionId=forced-terminal-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.182Z [Hpp timing] agent:createSession:start sessionId=stale-idle-session agent=pi
+2026-11-14T15:44:14.183Z [Hpp timing] agent:createSession:backend sessionId=stale-idle-session agent=pi durationMs=1
+2026-11-14T15:44:14.183Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.183Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.184Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.184Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +1ms total=1ms
+2026-11-14T15:44:14.184Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.184Z [Hpp timing] agent:createSession:done sessionId=stale-idle-session durationMs=2 modelsMs=0 models=0
+2026-11-14T15:44:14.186Z [Hpp timing] agent:createSession:start sessionId=hanging-idle-session agent=pi
+2026-11-14T15:44:14.186Z [Hpp timing] agent:createSession:backend sessionId=hanging-idle-session agent=pi durationMs=0
+2026-11-14T15:44:14.186Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.186Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.186Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.186Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.186Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.186Z [Hpp timing] agent:createSession:done sessionId=hanging-idle-session durationMs=0 modelsMs=0 models=0
+2026-11-14T15:44:14.192Z [Hpp timing] agent:createSession:start sessionId=idle-pi-session agent=pi
+2026-11-14T15:44:14.193Z [Hpp timing] agent:createSession:backend sessionId=idle-pi-session agent=pi durationMs=1
+2026-11-14T15:44:14.193Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.193Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.193Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.193Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.193Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.193Z [Hpp timing] agent:createSession:done sessionId=idle-pi-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.202Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.202Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.202Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.202Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.204Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +2ms total=3ms
+2026-11-14T15:44:14.207Z [Hpp timing] agent:createSession:start sessionId=local-idle-pi agent=pi
+2026-11-14T15:44:14.207Z [Hpp timing] agent:createSession:backend sessionId=local-idle-pi agent=pi durationMs=0
+2026-11-14T15:44:14.207Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.207Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.208Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +1ms total=1ms
+2026-11-14T15:44:14.208Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.208Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.208Z [Hpp timing] agent:createSession:done sessionId=local-idle-pi durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.209Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.209Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.209Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.209Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.209Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.211Z [Hpp timing] agent:createSession:start sessionId=running-pi-session agent=pi
+2026-11-14T15:44:14.211Z [Hpp timing] agent:createSession:backend sessionId=running-pi-session agent=pi durationMs=0
+2026-11-14T15:44:14.211Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.211Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.211Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.212Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +1ms total=1ms
+2026-11-14T15:44:14.212Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.212Z [Hpp timing] agent:createSession:done sessionId=running-pi-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.213Z [Hpp timing] agent:createSession:start sessionId=idle-session agent=codex
+2026-11-14T15:44:14.214Z [Hpp timing] agent:createSession:backend sessionId=idle-session agent=codex durationMs=0
+2026-11-14T15:44:14.214Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.214Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.214Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.214Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.214Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.215Z [Hpp timing] agent:createSession:done sessionId=idle-session durationMs=2 modelsMs=0 models=0
+2026-11-14T15:44:14.222Z [Hpp timing] agent:createSession:start sessionId=permission-session agent=codex
+2026-11-14T15:44:14.222Z [Hpp timing] agent:createSession:backend sessionId=permission-session agent=codex durationMs=0
+2026-11-14T15:44:14.222Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.222Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.222Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.222Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.223Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +1ms total=1ms
+2026-11-14T15:44:14.223Z [Hpp timing] agent:createSession:done sessionId=permission-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.226Z [Hpp timing] agent:createSession:start sessionId=pi-native-plan agent=pi
+2026-11-14T15:44:14.226Z [Hpp timing] agent:createSession:backend sessionId=pi-native-plan agent=pi durationMs=0
+2026-11-14T15:44:14.226Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.227Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.227Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.227Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.227Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.227Z [Hpp timing] agent:createSession:done sessionId=pi-native-plan durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.229Z [Hpp timing] agent:createSession:start sessionId=unprotected-session agent=third-party
+2026-11-14T15:44:14.229Z [Hpp timing] agent:createSession:backend sessionId=unprotected-session agent=third-party durationMs=0
+2026-11-14T15:44:14.230Z [Hpp timing] agent:init agent=third-party project=C:\project capabilities +1ms total=1ms
+2026-11-14T15:44:14.230Z [Hpp timing] agent:init agent=third-party project=C:\project compactionConfig +0ms total=1ms
+2026-11-14T15:44:14.230Z [Hpp timing] agent:init agent=third-party project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.230Z [Hpp timing] agent:init agent=third-party project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.230Z [Hpp timing] agent:init agent=third-party project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.231Z [Hpp timing] agent:createSession:done sessionId=unprotected-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.237Z [Hpp timing] agent:createSession:start sessionId=running-session agent=codex
+2026-11-14T15:44:14.238Z [Hpp timing] agent:createSession:backend sessionId=running-session agent=codex durationMs=0
+2026-11-14T15:44:14.238Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.238Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.238Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.238Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.238Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.239Z [Hpp timing] agent:createSession:done sessionId=running-session durationMs=3 modelsMs=0 models=0
+2026-11-14T15:44:14.241Z [Hpp timing] agent:createSession:start sessionId=interrupted-session agent=codex
+2026-11-14T15:44:14.241Z [Hpp timing] agent:createSession:backend sessionId=interrupted-session agent=codex durationMs=0
+2026-11-14T15:44:14.242Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.242Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.242Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.242Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.242Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.242Z [Hpp timing] agent:createSession:done sessionId=interrupted-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.243Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.243Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.243Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.243Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.243Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.245Z [Hpp timing] agent:createSession:start sessionId=first-session agent=codex
+2026-11-14T15:44:14.246Z [Hpp timing] agent:createSession:backend sessionId=first-session agent=codex durationMs=1
+2026-11-14T15:44:14.246Z [Hpp timing] agent:init agent=codex project=C:\first capabilities +0ms total=0ms
+2026-11-14T15:44:14.246Z [Hpp timing] agent:init agent=codex project=C:\first compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.246Z [Hpp timing] agent:init agent=codex project=C:\first subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.246Z [Hpp timing] agent:init agent=codex project=C:\first builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.246Z [Hpp timing] agent:init agent=codex project=C:\first agent.init +0ms total=0ms
+2026-11-14T15:44:14.246Z [Hpp timing] agent:createSession:done sessionId=first-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.246Z [Hpp timing] agent:createSession:start sessionId=second-session agent=codex
+2026-11-14T15:44:14.246Z [Hpp timing] agent:createSession:backend sessionId=second-session agent=codex durationMs=0
+2026-11-14T15:44:14.247Z [Hpp timing] agent:init agent=codex project=C:\second capabilities +0ms total=0ms
+2026-11-14T15:44:14.247Z [Hpp timing] agent:init agent=codex project=C:\second compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.247Z [Hpp timing] agent:init agent=codex project=C:\second subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.247Z [Hpp timing] agent:init agent=codex project=C:\second builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.247Z [Hpp timing] agent:init agent=codex project=C:\second agent.init +0ms total=0ms
+2026-11-14T15:44:14.247Z [Hpp timing] agent:createSession:done sessionId=second-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.248Z [Hpp timing] agent:init agent=codex project=C:\first capabilities +1ms total=1ms
+2026-11-14T15:44:14.248Z [Hpp timing] agent:init agent=codex project=C:\first compactionConfig +0ms total=1ms
+2026-11-14T15:44:14.248Z [Hpp timing] agent:init agent=codex project=C:\first subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.248Z [Hpp timing] agent:init agent=codex project=C:\first builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.248Z [Hpp timing] agent:init agent=codex project=C:\first agent.init +0ms total=1ms
+2026-11-14T15:44:14.251Z [Hpp timing] agent:createSession:start sessionId=restore-failure agent=codex
+2026-11-14T15:44:14.251Z [Hpp timing] agent:createSession:backend sessionId=restore-failure agent=codex durationMs=0
+2026-11-14T15:44:14.252Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.252Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.252Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.252Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.252Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.253Z [Hpp timing] agent:createSession:done sessionId=restore-failure durationMs=2 modelsMs=0 models=0
+2026-11-14T15:44:14.253Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.253Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.253Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.253Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.255Z [Hpp timing] agent:createSession:start sessionId=initializing-session agent=codex
+2026-11-14T15:44:14.256Z [Hpp timing] agent:createSession:backend sessionId=initializing-session agent=codex durationMs=0
+2026-11-14T15:44:14.257Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.257Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.257Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.257Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.308Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +51ms total=52ms
+2026-11-14T15:44:14.308Z [Hpp timing] agent:createSession:done sessionId=initializing-session durationMs=53 modelsMs=0 models=0
+2026-11-14T15:44:14.309Z [Hpp timing] agent:createSession:start sessionId=queued-removal agent=codex
+2026-11-14T15:44:14.310Z [Hpp timing] agent:createSession:backend sessionId=queued-removal agent=codex durationMs=0
+2026-11-14T15:44:14.310Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.310Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.310Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.310Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.310Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.310Z [Hpp timing] agent:createSession:done sessionId=queued-removal durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.362Z [Hpp timing] agent:createSession:start sessionId=closing-session agent=codex
+2026-11-14T15:44:14.362Z [Hpp timing] agent:createSession:backend sessionId=closing-session agent=codex durationMs=0
+2026-11-14T15:44:14.362Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.363Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +1ms total=1ms
+2026-11-14T15:44:14.363Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=1ms
+2026-11-14T15:44:14.363Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.363Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=1ms
+2026-11-14T15:44:14.363Z [Hpp timing] agent:createSession:done sessionId=closing-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.416Z [Hpp timing] agent:createSession:start sessionId=send-race agent=codex
+2026-11-14T15:44:14.416Z [Hpp timing] agent:createSession:backend sessionId=send-race agent=codex durationMs=0
+2026-11-14T15:44:14.416Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.417Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.417Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +1ms total=1ms
+2026-11-14T15:44:14.417Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=1ms
+2026-11-14T15:44:14.418Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +1ms total=2ms
+2026-11-14T15:44:14.419Z [Hpp timing] agent:createSession:done sessionId=send-race durationMs=4 modelsMs=0 models=0
+2026-11-14T15:44:14.523Z [Hpp timing] agent:createSession:start sessionId=install-race agent=codex
+2026-11-14T15:44:14.525Z [Hpp timing] agent:createSession:start sessionId=reload-guard agent=codex
+2026-11-14T15:44:14.526Z [Hpp timing] agent:createSession:backend sessionId=reload-guard agent=codex durationMs=1
+2026-11-14T15:44:14.526Z [Hpp timing] agent:init agent=codex project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.526Z [Hpp timing] agent:init agent=codex project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.526Z [Hpp timing] agent:init agent=codex project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.526Z [Hpp timing] agent:init agent=codex project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.526Z [Hpp timing] agent:init agent=codex project=C:\project agent.init +0ms total=0ms
+2026-11-14T15:44:14.526Z [Hpp timing] agent:createSession:done sessionId=reload-guard durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.528Z [Hpp timing] agent:createSession:start sessionId=slow-session agent=pi
+2026-11-14T15:44:14.528Z [Hpp timing] agent:createSession:start sessionId=slow-session agent=pi
+2026-11-14T15:44:14.528Z [Hpp timing] agent:createSession:backend sessionId=slow-session agent=pi durationMs=0
+2026-11-14T15:44:14.528Z [Hpp timing] agent:init agent=pi project=C:\project capabilities +0ms total=0ms
+2026-11-14T15:44:14.528Z [Hpp timing] agent:init agent=pi project=C:\project compactionConfig +0ms total=0ms
+2026-11-14T15:44:14.528Z [Hpp timing] agent:init agent=pi project=C:\project subagentConfig +0ms total=0ms
+2026-11-14T15:44:14.528Z [Hpp timing] agent:init agent=pi project=C:\project builtinExtensions +0ms total=0ms
+2026-11-14T15:44:14.529Z [Hpp timing] agent:init agent=pi project=C:\project agent.init +1ms total=1ms
+2026-11-14T15:44:14.529Z [Hpp timing] agent:createSession:done sessionId=slow-session durationMs=1 modelsMs=0 models=0
+2026-11-14T15:44:14.529Z [Hpp timing] agent:createSession:done sessionId=slow-session durationMs=1 modelsMs=0 models=0

@@ -85,6 +85,28 @@ describe("WorktreeManager", () => {
     expect(await manager.probe(repo)).toMatchObject({ supported: true, isGitRepo: true, clean: false });
   });
 
+  it("keeps the conflict state when merging a conflicting worktree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hpp-worktree-conflict-"));
+    temps.push(root);
+    const repo = join(root, "repo");
+    createRepo(repo);
+    const manager = new WorktreeManager(join(root, "worktrees"));
+    const created = await manager.create(repo, "session-conflict");
+    const workspace = created.workspace!;
+
+    writeFileSync(join(workspace.worktreePath, "README.md"), "feature\n", "utf8");
+    expect((await manager.checkpoint(workspace)).success).toBe(true);
+    writeFileSync(join(repo, "README.md"), "main\n", "utf8");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "main change"]);
+
+    const merged = await manager.merge(workspace);
+    expect(merged.success).toBe(false);
+    expect(merged.conflict).toBe(true);
+    expect(git(repo, ["status", "--porcelain"]).split(/\r?\n/).some((line) => line.includes("UU README.md"))).toBe(true);
+    git(repo, ["merge", "--abort"]);
+  });
+
   it("refuses to create from a dirty main worktree", async () => {
     const root = mkdtempSync(join(tmpdir(), "hpp-worktree-dirty-"));
     temps.push(root);

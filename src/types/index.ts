@@ -44,10 +44,15 @@ import type {
 import type { FileFilterConfig } from "../../shared/file-filters";
 import type {
   GitActionResult,
+  GitBranchListResult,
+  GitCommitDiffResult,
   GitCommitResult,
+  GitConflictChoice,
   GitDiffResult,
+  GitLogResult,
   GitStashListResult,
   GitStatus,
+  GitWorktreeListResult,
 } from "../../shared/git-types";
 import type {
   SessionWorkspace,
@@ -420,12 +425,30 @@ export interface ElectronAPI {
   gitStatus: (target: string) => Promise<GitStatus>;
   gitDiff: (target: string, path: string, staged?: boolean) => Promise<GitDiffResult>;
   gitStage: (target: string, paths: string[]) => Promise<GitActionResult>;
+  gitStageHunks: (target: string, path: string, indexes: number[], direction: "stage" | "unstage") => Promise<GitActionResult>;
   gitUnstage: (target: string, paths: string[]) => Promise<GitActionResult>;
   gitDiscard: (target: string, paths: string[]) => Promise<GitActionResult>;
+  gitDiscardHunks: (target: string, path: string, indexes: number[]) => Promise<GitActionResult>;
   gitCommit: (target: string, message: string, amend?: boolean) => Promise<GitCommitResult>;
   gitStashCreate: (target: string, message?: string) => Promise<GitActionResult>;
   gitStashList: (target: string) => Promise<GitStashListResult>;
   gitStashPop: (target: string, ref?: string) => Promise<GitActionResult>;
+  gitResolveConflict: (target: string, path: string, choice: GitConflictChoice) => Promise<GitActionResult>;
+  gitContinueOperation: (target: string) => Promise<GitActionResult>;
+  gitAbortOperation: (target: string) => Promise<GitActionResult>;
+  gitBranches: (target: string) => Promise<GitBranchListResult>;
+  gitCreateBranch: (target: string, name: string) => Promise<GitActionResult>;
+  gitSwitchBranch: (target: string, name: string) => Promise<GitActionResult>;
+  gitDeleteBranch: (target: string, name: string) => Promise<GitActionResult>;
+  gitLog: (target: string, limit?: number) => Promise<GitLogResult>;
+  gitShowCommit: (target: string, hash: string) => Promise<GitCommitDiffResult>;
+  gitFetch: (target: string) => Promise<GitActionResult>;
+  gitPull: (target: string) => Promise<GitActionResult>;
+  gitPush: (target: string) => Promise<GitActionResult>;
+  gitMerge: (target: string, branch: string) => Promise<GitActionResult>;
+  gitRebase: (target: string, branch: string) => Promise<GitActionResult>;
+  gitWorktrees: (target: string) => Promise<GitWorktreeListResult>;
+  gitRemoveWorktree: (target: string, path: string) => Promise<GitActionResult>;
 
   // Session worktree
   worktreeProbe: (projectPath: string) => Promise<WorktreeProbeResult>;
@@ -502,7 +525,18 @@ export interface ElectronAPI {
   onComposerFocus: (callback: () => void) => () => void;
 }
 
-export type { GitActionResult, GitCommitResult, GitDiffResult, GitStashListResult, GitStatus };
+export type {
+  GitActionResult,
+  GitBranchListResult,
+  GitCommitDiffResult,
+  GitConflictChoice,
+  GitCommitResult,
+  GitDiffResult,
+  GitLogResult,
+  GitStashListResult,
+  GitStatus,
+  GitWorktreeListResult,
+};
 export type { SessionWorkspace, WorktreeActionResult, WorktreeCreateResult, WorktreeProbeResult, WorktreeStatusResult };
 
 declare global {
