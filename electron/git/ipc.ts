@@ -8,6 +8,9 @@ const requireTarget = (target: unknown) => {
 };
 
 export function registerGitIpc() {
+  ipcMain.handle("git:probe", (_event, target: unknown) => gitService.probeRepo(target));
+  ipcMain.handle("git:clone", (_event, url: unknown, parentDir: unknown, name: unknown) =>
+    gitService.clone(url, parentDir, name));
   ipcMain.handle("git:status", (_event, target: unknown) => gitService.status(requireTarget(target)));
   ipcMain.handle("git:diff", (_event, target: unknown, path: unknown, staged: unknown) =>
     gitService.diff(requireTarget(target), path, staged === true));
@@ -19,6 +22,8 @@ export function registerGitIpc() {
     gitService.unstage(requireTarget(target), paths));
   ipcMain.handle("git:discard", (_event, target: unknown, paths: unknown) =>
     gitService.discard(requireTarget(target), paths));
+  ipcMain.handle("git:deleteFiles", (_event, target: unknown, paths: unknown) =>
+    gitService.deleteFiles(requireTarget(target), paths));
   ipcMain.handle("git:discardHunks", (_event, target: unknown, path: unknown, indexes: unknown) =>
     gitService.discardHunks(requireTarget(target), path, indexes));
   ipcMain.handle("git:commit", (_event, target: unknown, message: unknown, amend: unknown) =>
@@ -45,18 +50,30 @@ export function registerGitIpc() {
     gitService.deleteBranch(requireTarget(target), name));
   ipcMain.handle("git:log", (_event, target: unknown, limit: unknown) =>
     gitService.log(requireTarget(target), Number(limit) || 50));
+  ipcMain.handle("git:blame", (_event, target: unknown, path: unknown) =>
+    gitService.blame(requireTarget(target), path));
   ipcMain.handle("git:showCommit", (_event, target: unknown, hash: unknown) =>
     gitService.showCommit(requireTarget(target), hash));
   ipcMain.handle("git:fetch", (_event, target: unknown) =>
     gitService.fetch(requireTarget(target)));
   ipcMain.handle("git:pull", (_event, target: unknown) =>
     gitService.pull(requireTarget(target)));
+  ipcMain.handle("git:pullRebase", (_event, target: unknown) =>
+    gitService.pullRebase(requireTarget(target)));
   ipcMain.handle("git:push", (_event, target: unknown) =>
     gitService.push(requireTarget(target)));
   ipcMain.handle("git:merge", (_event, target: unknown, branch: unknown) =>
     gitService.merge(requireTarget(target), branch));
   ipcMain.handle("git:rebase", (_event, target: unknown, branch: unknown) =>
     gitService.rebase(requireTarget(target), branch));
+  ipcMain.handle("git:rebasePlan", (_event, target: unknown, base: unknown) =>
+    gitService.rebasePlan(requireTarget(target), base));
+  ipcMain.handle("git:interactiveRebase", (_event, target: unknown, base: unknown, steps: unknown) =>
+    gitService.interactiveRebase(requireTarget(target), base, steps));
+  ipcMain.handle("git:conflictFile", (_event, target: unknown, path: unknown) =>
+    gitService.conflictFile(requireTarget(target), path));
+  ipcMain.handle("git:writeConflictFile", (_event, target: unknown, path: unknown, content: unknown, stage: unknown) =>
+    gitService.writeConflictFile(requireTarget(target), path, content, stage === true));
   ipcMain.handle("git:worktrees", (_event, target: unknown) =>
     gitService.worktrees(requireTarget(target)));
   ipcMain.handle("git:removeWorktree", (_event, target: unknown, path: unknown) =>

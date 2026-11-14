@@ -18,12 +18,19 @@ import type { AgentCodemodeConfig } from "../src/types/ipc";
 import type { FileFilterConfig } from "../shared/file-filters";
 import type {
   GitActionResult,
+  GitBlameResult,
   GitBranchListResult,
+  GitCloneResult,
   GitCommitDiffResult,
   GitCommitResult,
   GitConflictChoice,
+  GitConflictFileResult,
   GitDiffResult,
   GitLogResult,
+  GitPushResult,
+  GitRebasePlanResult,
+  GitRebaseStep,
+  GitRepoProbeResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeListResult,
@@ -239,6 +246,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Agent
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) =>
     ipcRenderer.invoke("agent:createSession", agentId, projectPath, sessionId, sessionFilePath),
+  gitProbe: (target: string): Promise<GitRepoProbeResult> => ipcRenderer.invoke("git:probe", target),
+  gitClone: (url: string, parentDir?: string, name?: string): Promise<GitCloneResult> =>
+    ipcRenderer.invoke("git:clone", url, parentDir, name),
   gitStatus: (target: string): Promise<GitStatus> => ipcRenderer.invoke("git:status", target),
   gitDiff: (target: string, path: string, staged?: boolean): Promise<GitDiffResult> =>
     ipcRenderer.invoke("git:diff", target, path, staged === true),
@@ -250,6 +260,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:unstage", target, paths),
   gitDiscard: (target: string, paths: string[]): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:discard", target, paths),
+  gitDeleteFiles: (target: string, paths: string[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:deleteFiles", target, paths),
   gitDiscardHunks: (target: string, path: string, indexes: number[]): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:discardHunks", target, path, indexes),
   gitCommit: (target: string, message: string, amend?: boolean): Promise<GitCommitResult> =>
@@ -275,15 +287,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:deleteBranch", target, name),
   gitLog: (target: string, limit?: number): Promise<GitLogResult> =>
     ipcRenderer.invoke("git:log", target, limit),
+  gitBlame: (target: string, path: string): Promise<GitBlameResult> =>
+    ipcRenderer.invoke("git:blame", target, path),
   gitShowCommit: (target: string, hash: string): Promise<GitCommitDiffResult> =>
     ipcRenderer.invoke("git:showCommit", target, hash),
   gitFetch: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:fetch", target),
   gitPull: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:pull", target),
-  gitPush: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:push", target),
+  gitPullRebase: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:pullRebase", target),
+  gitPush: (target: string): Promise<GitPushResult> => ipcRenderer.invoke("git:push", target),
   gitMerge: (target: string, branch: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:merge", target, branch),
   gitRebase: (target: string, branch: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:rebase", target, branch),
+  gitRebasePlan: (target: string, base: string): Promise<GitRebasePlanResult> =>
+    ipcRenderer.invoke("git:rebasePlan", target, base),
+  gitInteractiveRebase: (target: string, base: string, steps: GitRebaseStep[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:interactiveRebase", target, base, steps),
+  gitConflictFile: (target: string, path: string): Promise<GitConflictFileResult> =>
+    ipcRenderer.invoke("git:conflictFile", target, path),
+  gitWriteConflictFile: (target: string, path: string, content: string, stage?: boolean): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:writeConflictFile", target, path, content, stage === true),
   gitWorktrees: (target: string): Promise<GitWorktreeListResult> => ipcRenderer.invoke("git:worktrees", target),
   gitRemoveWorktree: (target: string, path: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:removeWorktree", target, path),

@@ -6,6 +6,7 @@ import { SUBAGENT_MONITOR_OPEN_EVENT } from "@/lib/app-events";
 import {
   collectRunningSubagents,
   formatIdleAgo,
+  formatSubagentUsage,
   getSubagentElapsedMs,
   getSubagentIdleMs,
   isSubagentStalled,
@@ -22,17 +23,6 @@ const STATUS_TEXT: Record<string, string> = {
   error: "失败",
   interrupted: "已中断",
 };
-
-function formatTokens(value?: number): string {
-  if (!value || value <= 0) return "";
-  return value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
-}
-
-function usageLabel(subagent: MonitoredSubagent): string {
-  const turns = subagent.usage?.turns;
-  const tokens = formatTokens(subagent.usage?.totalTokens);
-  return [turns ? `${turns} 轮` : "", tokens ? `${tokens} tokens` : ""].filter(Boolean).join(" · ");
-}
 
 type SubagentMonitorViewProps = {
   subagents: MonitoredSubagent[];
@@ -117,7 +107,12 @@ export function SubagentMonitorView({
                       onClick={() => onSelect(subagent.id)}
                     >
                       <span className={`subagent-monitor-dot ${itemStalled ? "stalled" : subagent.status || ""}`} />
-                      <span className="subagent-monitor-item-label">{subagent.label}</span>
+                      <span className="subagent-monitor-item-main">
+                        <span className="subagent-monitor-item-label">{subagent.label}</span>
+                        {formatSubagentUsage(subagent.usage) && (
+                          <span className="subagent-monitor-item-usage">{formatSubagentUsage(subagent.usage)}</span>
+                        )}
+                      </span>
                       <span className="subagent-monitor-item-time">
                         {elapsed !== undefined ? formatProcessDuration(elapsed) : "—"}
                       </span>
@@ -133,8 +128,8 @@ export function SubagentMonitorView({
                 <span>{STATUS_TEXT[selected.status || ""] || selected.status}</span>
                 {selected.model && <span className="subagent-monitor-model">{selected.model}</span>}
               </div>
-              {usageLabel(selected) && (
-                <div className="subagent-monitor-usage">{usageLabel(selected)}</div>
+              {formatSubagentUsage(selected.usage) && (
+                <div className="subagent-monitor-usage">{formatSubagentUsage(selected.usage)}</div>
               )}
               <div className="subagent-monitor-activity">
                 {selected.message || "正在等待第一段输出…"}

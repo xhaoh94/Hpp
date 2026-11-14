@@ -956,3 +956,52 @@
 .new-session-git-hint button:hover:not(:disabled) {
   background: var(--bg-hover);
 }
+
+/* 添加项目：本地目录 / 克隆仓库 */
+.add-project-mode {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 3px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+}
+
+.add-project-mode button {
+  flex: 1;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.add-project-mode button:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.add-project-mode button.active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px var(--shadow-color);
+}
+
+.add-project-mode button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.add-project-error {
+  margin: -2px 0 10px;
+  padding: 7px 9px;
+  border: 1px solid rgba(244, 67, 54, 0.4);
+  border-radius: 5px;
+  background: rgba(244, 67, 54, 0.08);
+  color: #d9363e;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

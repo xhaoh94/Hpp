@@ -6,6 +6,8 @@ const modalSource = readFileSync(resolve(process.cwd(), "src/components/layout/T
 const modalStyles = readFileSync(resolve(process.cwd(), "src/components/layout/TokenUsageModal.css"), "utf8");
 const chatPanelSource = readFileSync(resolve(process.cwd(), "src/components/layout/ChatPanel.tsx"), "utf8");
 const chatPanelStyles = readFileSync(resolve(process.cwd(), "src/components/layout/ChatPanel.css"), "utf8");
+const historyHookSource = readFileSync(resolve(process.cwd(), "src/hooks/useFullSessionMessages.ts"), "utf8");
+const entrySource = readFileSync(resolve(process.cwd(), "src/components/layout/ChatTokenUsageItem.tsx"), "utf8");
 
 describe("token usage modal", () => {
   it("shows input, output, cache, cache rate and the overall summary", () => {
@@ -19,14 +21,16 @@ describe("token usage modal", () => {
     expect(modalSource).toContain("累计 ");
   });
 
-  it("breaks the totals down by channel and by model id", () => {
-    expect(modalSource).toContain('title="按渠道"');
-    expect(modalSource).toContain('title="按模型 ID"');
-    expect(modalSource).toContain("summarizeTokenUsage");
-    expect(modalSource).toContain("byChannel");
+  it("lists one table by model id with the channel next to it", () => {
+    // 只剩一张表，不再渲染分区标题。
+    expect(modalSource).not.toContain("按模型 ID");
+    expect(modalSource).not.toContain("token-usage-section-head");
+    expect(modalSource).not.toContain("byChannel");
+    // 汇总逻辑抽到 hook 里，弹窗和输入框下方的状态条共用
+    expect(historyHookSource).toContain("summarizeTokenUsage");
     expect(modalSource).toContain("byModel");
-    // 旧消息没有记录渠道/模型 ID 时要如实标注，而不是伪造分组。
-    expect(modalSource).toContain("旧消息未记录渠道时归入");
+    // 模型名下面要标出渠道。
+    expect(modalSource).toContain("group.detail");
   });
 
   it("anchors the panel next to the header button and closes predictably", () => {
@@ -40,16 +44,20 @@ describe("token usage modal", () => {
   });
 
   it("reads the full persisted history when only a page is loaded", () => {
-    expect(modalSource).toContain("hasOlderSessionMessages(sessionId)");
-    expect(modalSource).toContain("loadSessionMessages");
-    expect(modalSource).toContain("parsePersistedChatMessage");
+    expect(historyHookSource).toContain("hasOlderSessionMessages(sessionId)");
+    expect(historyHookSource).toContain("loadSessionMessages");
+    expect(historyHookSource).toContain("parsePersistedChatMessage");
     expect(modalSource).toContain("已合并完整历史消息");
   });
 
-  it("places the entry in the session header next to the context ring", () => {
-    expect(chatPanelSource).toContain("chat-header-token-usage");
-    expect(chatPanelSource).toContain("title=\"Token 统计（输入 / 输出 / 缓存）\"");
+  it("puts the token summary into the status bar under the composer", () => {
+    expect(chatPanelSource).toContain("chat-status-bar");
+    expect(chatPanelSource).toContain("<ChatTokenUsageItem");
     expect(chatPanelSource).toContain("<TokenUsageModal");
+    // 入口自己订阅消息，避免整块 ChatPanel 跟着流式重渲染
+    expect(entrySource).toContain("chat-header-token-usage");
+    expect(entrySource).toContain("sessionMessages[sessionId]");
     expect(chatPanelStyles).toContain(".chat-header-token-usage");
+    expect(chatPanelStyles).toContain(".chat-status-bar");
   });
 });

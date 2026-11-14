@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<title>Hpp UI 预览</title>
+<!-- 源文件；node scripts/build-ui-preview.mjs 会把下面这些 CSS 内联成自包含版本 -->
+<link rel="stylesheet" href="../../src/styles/global.css" />
+<link rel="stylesheet" href="../../src/components/layout/ChatPanel.css" />
+<link rel="stylesheet" href="../../src/components/layout/SubagentMonitor.css" />
+<link rel="stylesheet" href="../../src/components/git/GitWorkspaceModal.css" />
+<style>
+  /* 仅用于把组件摆进预览页：覆盖 fixed/absolute 定位，不改任何视觉规则 */
+  html, body { overflow: auto; height: auto; background: #eceef2; }
+  body { padding: 24px 24px 64px; }
+  .preview { max-width: 1180px; margin: 0 auto 36px; }
+  .preview-title { margin: 0 0 4px; color: #3a3f47; font-size: 14px; font-weight: 600; }
+  .preview-note { margin: 0 0 10px; color: #7a828d; font-size: 12px; }
+  .preview-frame {
+    position: relative; overflow: hidden;
+    border: 1px solid var(--border-color); border-radius: 12px;
+    background: var(--bg-primary); box-shadow: 0 10px 30px rgba(15, 23, 42, .08);
+  }
+  .preview-chat { height: 660px; }
+  .preview-chat .chat-panel { height: 100%; }
+  .preview-git .git-workspace-overlay { position: static; inset: auto; padding: 0; background: transparent; }
+  .preview-git .git-workspace-modal { width: 100%; height: 880px; border: 0; border-radius: 0; box-shadow: none; }
+  .preview-monitor { display: flex; justify-content: center; padding: 16px; }
+  .preview-monitor .subagent-monitor { position: relative; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .preview-monitor .subagent-monitor-panel { position: static; left: auto; bottom: auto; transform: none; max-height: none; }
+  .fake-msg { padding: 0 20px 8px; }
+  .fake-msg p { margin: 0 0 10px; color: var(--text-primary); font-size: 13px; line-height: 1.6; }
+  [hidden] { display: none !important; }
+  .git-sync-menu.floating { position: fixed; z-index: 60; }
+  /* 用两级选择器压过应用里的 .session-stats-popover（position: fixed） */
+  .preview-frame .session-stats-popover {
+    position: absolute;
+    left: 50%;
+    bottom: 46px;
+    transform: translateX(-50%);
+    z-index: 30;
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================ 1. 聊天 ============================ -->
+<section class="preview">
+  <h1 class="preview-title">聊天区：输入卡片 + 底部状态条</h1>
+  <p class="preview-note">可以点：子 agent 条目（展开消耗摘要）、输入框、状态条三项。</p>
+
+  <div class="preview-frame preview-chat">
+    <div class="chat-panel">
+      <div class="chat-header">
+        <div class="chat-agent-dot"></div>
+        <span class="chat-agent-name">Hpp</span>
+        <span class="chat-header-separator" aria-hidden="true">·</span>
+        <button type="button" class="chat-agent-tag chat-agent-reload-trigger">
+          <span>Pi</span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4" stroke-linecap="round"/></svg>
+        </button>
+        <span class="chat-header-separator" aria-hidden="true">·</span>
+        <span class="chat-header-session-title">Git 工作台审查</span>
+        <div style="flex:1"></div>
+      </div>
+
+      <div class="chat-messages">
+        <div class="fake-msg"><p>子任务跑完了，下面是这次并行子 agent 的结果。</p></div>
+
+        <div class="fake-msg">
+          <div class="chat-subagent-entry completed">
+            <div class="chat-subagent-event">
+              <span class="chat-subagent-chips">
+                <button type="button" class="chat-subagent-chip completed active" data-subagent="scout" aria-expanded="true">
+                  <span class="chat-subagent-avatar tone-1">
+                    <svg width="10" height="10" viewBox="0 0 20 20" fill="none"><rect x="3.5" y="5" width="13" height="11" rx="3" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="9.5" r="2.2" fill="currentColor"/></svg>
+                  </span>
+                  <span class="chat-subagent-label">Scout</span>
+                </button>
+                <button type="button" class="chat-subagent-chip completed" data-subagent="reviewer" aria-expanded="false">
+                  <span class="chat-subagent-avatar tone-2">
+                    <svg width="10" height="10" viewBox="0 0 20 20" fill="none"><rect x="3.5" y="5" width="13" height="11" rx="3" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="9.5" r="2.2" fill="currentColor"/></svg>
+                  </span>
+                  <span class="chat-subagent-label">Reviewer</span>
+                </button>
+              </span>
+              <span class="chat-subagent-event-meta-group">
+                <span class="chat-subagent-event-meta">2 个子任务</span>
+                <span class="chat-subagent-event-meta">已运行 2m</span>
+              </span>
+            </div>
+
+            <div class="chat-subagent-detail" data-detail="scout">
+              <div class="chat-subagent-usage">
+                <div class="chat-subagent-usage-row">
+                  <span class="chat-subagent-usage-label">Scout</span>
+                  <span class="chat-subagent-usage-value">18.4k token · 缓存 92% · 4 轮</span>
+                </div>
+              </div>
+              <p>我看了 git-service 的状态解析，`runGit` 里的 trim 会吃掉 porcelain 的前导空格。</p>
+            </div>
+
+            <div class="chat-subagent-detail" data-detail="reviewer" hidden>
+              <div class="chat-subagent-usage">
+                <div class="chat-subagent-usage-row">
+                  <span class="chat-subagent-usage-label">Reviewer</span>
+                  <span class="chat-subagent-usage-value">15.4k token · 缓存 87% · 3 轮</span>
+                </div>
+              </div>
+              <p>我复核了 IPC 契约测试，36 个方法都有对应的 handler。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-content">
+          <div class="chat-input-container">
+            <div class="chat-input-actions-left">
+              <div class="chat-upload-control">
+                <button type="button" class="chat-input-btn" title="添加附件">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="inline-composer-editor chat-textarea">
+              <div class="inline-composer-content" contenteditable="true" spellcheck="false">接下来看下子 agent 的用量展示</div>
+            </div>
+            <button type="button" class="chat-send-btn" title="发送">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+            </button>
+          </div>
+
+          <div class="chat-input-toolbar">
+            <button type="button" class="chat-toolbar-select chat-toolbar-plan-toggle">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 11l3 3 5-6"/></svg>
+              计划
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <button type="button" class="chat-toolbar-select chat-permission-trigger">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l7 3v6c0 4.2-2.8 7.4-7 9-4.2-1.6-7-4.8-7-9V6z"/></svg>
+              工作区内修改
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <button type="button" class="chat-toolbar-select">
+              deepseek-chat
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <button type="button" class="chat-toolbar-select chat-toolbar-thinking-toggle active">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3a6 6 0 0 1 3.5 10.9V17h-7v-3.1A6 6 0 0 1 12 3z"/></svg>
+              高
+            </button>
+          </div>
+        </div>
+
+        <div class="chat-status-bar">
+          <button type="button" class="chat-session-stats-trigger" data-action="toggle-stats" aria-expanded="false">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 7 4-14 3 7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>4 轮 147 步 · 193 token/s</span>
+          </button>
+          <span class="chat-status-divider" aria-hidden="true"></span>
+          <button type="button" class="chat-header-token-usage">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 20V10M12 20V4M19 20v-6" stroke-linecap="round"/></svg>
+            <span>148.6k token · 缓存命中 91.2%</span>
+          </button>
+          <span class="chat-status-divider" aria-hidden="true"></span>
+          <button type="button" class="chat-context-ring" data-tooltip="上下文 43% · 已用 86.1k / 200k">
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+              <circle class="chat-context-ring-track" cx="7" cy="7" r="6.1" fill="none" stroke-width="1.8" />
+              <circle class="chat-context-ring-progress" cx="7" cy="7" r="6.1" fill="none" stroke-width="1.8"
+                      stroke-dasharray="38.3" stroke-dashoffset="21.9" transform="rotate(-90 7 7)" />
+            </svg>
+            <span class="chat-context-ring-value">43%</span>
+          </button>
+          <span class="chat-status-divider" aria-hidden="true"></span>
+          <button type="button" class="chat-header-handoff">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h13l-3-3M20 16H7l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>生成摘要</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="session-stats-popover preview-stats-popover" role="dialog" aria-label="会话统计" hidden>
+        <div class="session-stats-header">
+          <span>会话统计</span>
+          <button type="button" data-action="toggle-stats" aria-label="关闭">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="session-stats-rows">
+          <div class="session-stats-row strong"><span>会话统计</span><span>4 轮 147 步</span></div>
+          <div class="session-stats-row"><span>模型用时</span><span>17分27秒</span></div>
+          <div class="session-stats-row"><span>工具调用用时</span><span>5分31秒</span></div>
+          <div class="session-stats-row"><span>输出速度</span><span>193 token/s</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 2. 监视窗 ============================ -->
+<section class="preview">
+  <h1 class="preview-title">子 agent 悬浮胶囊（展开态）</h1>
+  <p class="preview-note">列表每项两行：名称 + 当前消耗；下方是选中项的详情与实时输出。可以点胶囊收起/展开。</p>
+
+  <div class="preview-frame">
+    <div class="preview-monitor">
+      <div class="subagent-monitor">
+        <div class="subagent-monitor-panel" role="dialog" aria-label="Subagent 运行状态">
+          <div class="subagent-monitor-header">
+            <span class="subagent-monitor-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 7 4-14 3 7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Subagent 监视
+            </span>
+            <button type="button" class="subagent-monitor-close" aria-label="关闭" data-action="toggle-monitor">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <div class="subagent-monitor-body">
+            <ul class="subagent-monitor-list">
+              <li>
+                <button type="button" class="subagent-monitor-item active">
+                  <span class="subagent-monitor-dot running"></span>
+                  <span class="subagent-monitor-item-main">
+                    <span class="subagent-monitor-item-label">Scout</span>
+                    <span class="subagent-monitor-item-usage">9.2k token · 缓存 90% · 2 轮</span>
+                  </span>
+                  <span class="subagent-monitor-item-time">42s</span>
+                </button>
+              </li>
+              <li>
+                <button type="button" class="subagent-monitor-item">
+                  <span class="subagent-monitor-dot running"></span>
+                  <span class="subagent-monitor-item-main">
+                    <span class="subagent-monitor-item-label">Reviewer</span>
+                    <span class="subagent-monitor-item-usage">6.4k token · 缓存 84% · 1 轮</span>
+                  </span>
+                  <span class="subagent-monitor-item-time">31s</span>
+                </button>
+              </li>
+            </ul>
+
+            <div class="subagent-monitor-detail">
+              <div class="subagent-monitor-detail-head">
+                <strong>Scout</strong>
+                <span>运行中</span>
+                <span class="subagent-monitor-model">deepseek-chat</span>
+              </div>
+              <div class="subagent-monitor-usage">9.2k token · 缓存 90% · 2 轮</div>
+              <div class="subagent-monitor-activity">正在读取 src/lib/foo.ts</div>
+              <div class="subagent-monitor-idle">最后活动 3 秒前</div>
+              <pre class="subagent-monitor-output">src/lib/foo.ts:42  export const foo = () =&gt; bar();</pre>
+            </div>
+          </div>
+        </div>
+
+        <button type="button" class="subagent-monitor-pill" title="查看 Subagent 运行状态" aria-expanded="true" data-action="toggle-monitor">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 7 4-14 3 7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>2 个 Subagent 运行中</span>
+          <span class="subagent-monitor-pill-time">1m 13s</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 3. Git 工作台 ============================ -->
+<section class="preview">
+  <h1 class="preview-title">Git 工作台（变更页）</h1>
+  <p class="preview-note">可以点：左侧导航、目录树、文件行（切换右侧 diff）、↓ 箭头（移到待提交）、拉取的 chevron（弹出菜单）。</p>
+
+  <div class="preview-frame preview-git">
+    <div class="git-workspace-overlay">
+      <div class="git-workspace-modal">
+        <div class="git-repo-tabs" role="tablist" aria-label="Git 仓库">
+          <button type="button" class="git-repo-tab active">
+            <span class="git-repo-tab-name">Hpp</span>
+            <span class="git-repo-tab-branch">main</span>
+          </button>
+          <button type="button" class="git-repo-tab">
+            <span class="git-repo-tab-name">UxGame</span>
+            <span class="git-repo-tab-branch">main</span>
+          </button>
+          <span class="git-repo-tabs-spacer"></span>
+          <button type="button" class="git-repo-tabs-close" title="关闭">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+
+        <div class="git-workspace-header">
+          <div class="git-workspace-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.5v7M8.4 6.6H14a2.5 2.5 0 0 1 2.5 2.5v.6" stroke-linecap="round"/></svg>
+            <div>
+              <div class="git-title-row">
+                <h2>Git · Hpp</h2>
+                <span class="git-workspace-path" title="C:\Project\Hpp">C:\Project\Hpp</span>
+              </div>
+              <span>main · origin/main · ↑1 ↓2</span>
+            </div>
+          </div>
+          <div class="git-workspace-actions">
+            <div class="git-sync-actions">
+              <button type="button" class="git-sync-card">
+                <span class="git-sync-caption">origin</span>
+                <span class="git-sync-label">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 17a4 4 0 0 1 .6-8A5.5 5.5 0 0 1 18 9.6 3.7 3.7 0 0 1 17.5 17" stroke-linecap="round"/><path d="M12 11v7m0 0l-2.5-2.5M12 18l2.5-2.5" stroke-linecap="round"/></svg>
+                  获取
+                </span>
+              </button>
+              <div class="git-sync-group">
+                <button type="button" class="git-sync-main">
+                  <span class="git-sync-caption">落后 2</span>
+                  <span class="git-sync-label">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M6 13l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    拉取
+                  </span>
+                </button>
+                <button type="button" class="git-sync-more" title="更多拉取方式" data-action="pull-menu">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+              </div>
+              <button type="button" class="git-sync-card">
+                <span class="git-sync-caption">领先 1</span>
+                <span class="git-sync-label">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 19V5M6 11l6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  推送
+                </span>
+              </button>
+            </div>
+            <button type="button" class="git-icon-btn" title="刷新状态">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="git-workspace-main">
+          <nav class="git-workspace-nav" role="tablist" aria-orientation="vertical">
+            <button type="button" class="git-nav-item active" data-label="变更 (3)" data-action="nav">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h8l4 4v14H6z"/><path d="M9 13h6M9 17h4"/></svg>
+              <span class="git-nav-badge">3</span>
+            </button>
+            <button type="button" class="git-nav-item" data-label="历史" data-action="nav">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12a8 8 0 1 0 2.3-5.6" stroke-linecap="round"/><path d="M12 8v4l3 2" stroke-linecap="round"/></svg>
+            </button>
+            <button type="button" class="git-nav-item" data-label="分支" data-action="nav">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.5v7M8.4 6.6H14a2.5 2.5 0 0 1 2.5 2.5v.6" stroke-linecap="round"/></svg>
+            </button>
+            <button type="button" class="git-nav-item" data-label="工作区" data-action="nav">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h6l2 2h10v9H3z"/></svg>
+            </button>
+            <button type="button" class="git-nav-item" data-label="Stash (2)" data-action="nav">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="5" rx="1.4"/><path d="M5 9v9h14V9M10 13h4"/></svg>
+              <span class="git-nav-badge">2</span>
+            </button>
+          </nav>
+
+          <div class="git-workspace-content">
+            <div class="git-workspace-body with-tree">
+              <section class="git-file-tree">
+                <div class="git-file-section-title">
+                  <span class="git-file-section-label">目录树</span>
+                  <button type="button" class="git-file-section-action" title="重新读取目录">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4" stroke-linecap="round"/></svg>
+                  </button>
+                </div>
+                <div class="git-tree-scroll persistent-scroll">
+                  <div class="git-tree-row" style="padding-left:8px">
+                    <span class="git-tree-caret"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v9H3z"/></svg>
+                    <span class="git-tree-name">electron</span>
+                  </div>
+                  <div class="git-tree-row" style="padding-left:20px">
+                    <span class="git-tree-caret"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M9 6l6 6-6 6"/></svg></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v9H3z"/></svg>
+                    <span class="git-tree-name">git</span>
+                  </div>
+                  <div class="git-tree-row active" style="padding-left:20px" data-action="pick-file" data-file="electron/preload.ts">
+                    <span class="git-tree-caret"></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h7l5 5v13H6z"/></svg>
+                    <span class="git-tree-name">preload.ts</span>
+                    <span class="git-tree-badge M">M</span>
+                  </div>
+                  <div class="git-tree-row" style="padding-left:8px">
+                    <span class="git-tree-caret"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v9H3z"/></svg>
+                    <span class="git-tree-name">src</span>
+                  </div>
+                  <div class="git-tree-row" style="padding-left:20px">
+                    <span class="git-tree-caret"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v9H3z"/></svg>
+                    <span class="git-tree-name">components</span>
+                  </div>
+                  <div class="git-tree-row" style="padding-left:32px" data-action="pick-file" data-file="src/components/layout/ChatPanel.tsx">
+                    <span class="git-tree-caret"></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h7l5 5v13H6z"/></svg>
+                    <span class="git-tree-name">ChatPanel.tsx</span>
+                    <span class="git-tree-badge M">M</span>
+                  </div>
+                  <div class="git-tree-row" style="padding-left:32px">
+                    <span class="git-tree-caret"></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h7l5 5v13H6z"/></svg>
+                    <span class="git-tree-name">ChatTokenUsageItem.tsx</span>
+                    <span class="git-tree-badge A">A</span>
+                  </div>
+                  <div class="git-tree-row" style="padding-left:8px">
+                    <span class="git-tree-caret"></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h7l5 5v13H6z"/></svg>
+                    <span class="git-tree-name">package.json</span>
+                    <span class="git-tree-badge M">M</span>
+                  </div>
+                </div>
+              </section>
+
+              <aside class="git-files-pane">
+                <label class="git-file-search">
+                  <span>搜索</span>
+                  <input placeholder="筛选文件…" />
+                </label>
+
+                <section class="git-file-block changes" style="flex-grow:5">
+                  <div class="git-file-section-title">
+                    <span class="git-file-section-label">变更</span>
+                    <span class="git-file-section-count" id="changes-count">3</span>
+                    <button type="button" class="git-file-section-action" title="全部下移到待提交">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M6 13l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                  </div>
+                  <div class="git-file-lines persistent-scroll" id="changes-list">
+                    <div class="git-file-row active" data-file="electron/preload.ts">
+                      <span class="git-status-dot M"></span>
+                      <span class="git-file-path">electron/preload.ts</span>
+                      <button type="button" class="git-file-action" title="下移到待提交" data-action="stage">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M6 13l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      </button>
+                      <button type="button" class="git-file-action danger" title="丢弃未暂存的改动">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" stroke-linecap="round"/></svg>
+                      </button>
+                    </div>
+                    <div class="git-file-row" data-file="src/components/layout/ChatPanel.tsx">
+                      <span class="git-status-dot M"></span>
+                      <span class="git-file-path">src/components/layout/ChatPanel.tsx</span>
+                      <button type="button" class="git-file-action" title="下移到待提交" data-action="stage">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M6 13l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      </button>
+                      <button type="button" class="git-file-action danger" title="丢弃未暂存的改动">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" stroke-linecap="round"/></svg>
+                      </button>
+                    </div>
+                    <div class="git-file-row" data-file="src/components/layout/ChatTokenUsageItem.tsx">
+                      <span class="git-status-dot untracked"></span>
+                      <span class="git-file-path">src/components/layout/ChatTokenUsageItem.tsx</span>
+                      <button type="button" class="git-file-action" title="下移到待提交" data-action="stage">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M6 13l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      </button>
+                      <button type="button" class="git-file-action danger" title="删除未跟踪文件">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" stroke-linecap="round"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <div class="git-pane-resizer"></div>
+
+                <section class="git-file-block staged" style="flex-grow:2">
+                  <div class="git-file-section-title">
+                    <span class="git-file-section-label">待提交</span>
+                    <span class="git-file-section-count" id="staged-count">1</span>
+                    <button type="button" class="git-file-section-action" title="全部取消暂存">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                  </div>
+                  <div class="git-file-lines persistent-scroll" id="staged-list">
+                    <div class="git-file-row">
+                      <span class="git-status-dot A"></span>
+                      <span class="git-file-path">src/hooks/useFullSessionMessages.ts</span>
+                      <button type="button" class="git-file-action" title="上移回变更">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <div class="git-pane-resizer"></div>
+
+                <div class="git-commit-pane" style="flex-grow:2">
+                  <div class="git-commit-label">提交信息</div>
+                  <textarea rows="2" placeholder="输入提交信息（必填）">修复 status 解析吃字符的问题</textarea>
+                  <div class="git-commit-actions">
+                    <div class="git-commit-switches">
+                      <label class="git-amend"><input type="checkbox" />修改上次提交</label>
+                      <label class="git-amend"><input type="checkbox" checked />提交后推送</label>
+                    </div>
+                    <button type="button" class="git-primary-btn">提交到 main</button>
+                  </div>
+                </div>
+              </aside>
+
+              <section class="git-diff-pane">
+                <div class="git-diff-header">
+                  <span id="diff-title">electron/preload.ts</span>
+                  <span class="git-diff-header-actions">
+                    <span id="diff-status">修改 · 工作区</span>
+                    <button type="button" class="git-diff-blame-btn">追溯</button>
+                  </span>
+                </div>
+                <div class="git-diff-content persistent-scroll">
+                  <div class="git-hunks" id="diff-preload">
+                    <div class="git-hunk-block">
+                      <div class="git-hunk-header">
+                        <code>@@ -198,6 +198,9 @@</code>
+                        <div class="git-hunk-actions">
+                          <button type="button">暂存此块</button>
+                          <button type="button" class="danger">丢弃此块</button>
+                        </div>
+                      </div>
+                      <div class="git-hunk-lines">
+                        <div class="git-hunk-line">  gitBlame: (target: string, path: string) =&gt;</div>
+                        <div class="git-hunk-line remove">-    ipcRenderer.invoke("git:blame", target),</div>
+                        <div class="git-hunk-line add">+    ipcRenderer.invoke("git:blame", target, path),</div>
+                        <div class="git-hunk-line">  gitShowCommit: (target: string, hash: string) =&gt;</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="git-hunks" id="diff-chatpanel" hidden>
+                    <div class="git-hunk-block">
+                      <div class="git-hunk-header">
+                        <code>@@ -4290,8 +4290,34 @@</code>
+                        <div class="git-hunk-actions">
+                          <button type="button">暂存此块</button>
+                          <button type="button" class="danger">丢弃此块</button>
+                        </div>
+                      </div>
+                      <div class="git-hunk-lines">
+                        <div class="git-hunk-line">        &lt;/ChatComposer&gt;</div>
+                        <div class="git-hunk-line remove">-      &lt;/div&gt;</div>
+                        <div class="git-hunk-line add">+        &lt;div className="chat-status-bar"&gt;</div>
+                        <div class="git-hunk-line add">+          &lt;ChatContextRing /&gt;</div>
+                        <div class="git-hunk-line add">+          &lt;ChatTokenUsageItem /&gt;</div>
+                        <div class="git-hunk-line add">+        &lt;/div&gt;</div>
+                        <div class="git-hunk-line">+      &lt;/div&gt;</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="git-hunks" id="diff-untracked" hidden>
+                    <div class="git-hunk-block">
+                      <div class="git-hunk-header">
+                        <code>@@ -0,0 +1,12 @@</code>
+                        <div class="git-hunk-actions">
+                          <button type="button">暂存此块</button>
+                          <button type="button" class="danger">丢弃此块</button>
+                        </div>
+                      </div>
+                      <div class="git-hunk-lines">
+                        <div class="git-hunk-line add">+import { ChartColumn } from "lucide-react";</div>
+                        <div class="git-hunk-line add">+</div>
+                        <div class="git-hunk-line add">+export function ChatTokenUsageItem() {</div>
+                        <div class="git-hunk-line add">+  const { summary } = useSessionTokenSummary(sessionId, messages);</div>
+                        <div class="git-hunk-line add">+}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+  // 子任务：点哪个胶囊就只展开哪个，再点一次收起
+  $$('.chat-subagent-chip[data-subagent]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const entry = chip.closest('.chat-subagent-entry');
+      const id = chip.dataset.subagent;
+      const willOpen = !chip.classList.contains('active');
+      $$('.chat-subagent-chip', entry).forEach((other) => {
+        other.classList.toggle('active', other === chip && willOpen);
+        other.setAttribute('aria-expanded', String(other === chip && willOpen));
+      });
+      $$('.chat-subagent-detail', entry).forEach((detail) => {
+        detail.hidden = !(willOpen && detail.dataset.detail === id);
+      });
+    });
+  });
+
+  // 会话统计弹层
+  $$('[data-action="toggle-stats"]').forEach((trigger) => {
+    trigger.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const popover = document.querySelector('.preview-stats-popover');
+      popover.hidden = !popover.hidden;
+      const button = document.querySelector('.chat-session-stats-trigger');
+      if (button) button.setAttribute('aria-expanded', String(!popover.hidden));
+    });
+  });
+
+  // 预览用：?open=stats 时默认展开会话统计弹层，方便截图核对
+  if (new URLSearchParams(location.search).get('open') === 'stats') {
+    const popover = document.querySelector('.preview-stats-popover');
+    if (popover) popover.hidden = false;
+  }
+
+  // 监视窗收起 / 展开
+  $$('[data-action="toggle-monitor"]').forEach((trigger) => {
+    trigger.addEventListener('click', () => {
+      const panel = $('.preview-monitor .subagent-monitor-panel');
+      panel.hidden = !panel.hidden;
+    });
+  });
+
+  // 选文件 → 换右侧 diff
+  const diffs = { 'electron/preload.ts': 'diff-preload', 'src/components/layout/ChatPanel.tsx': 'diff-chatpanel' };
+  const statusText = { 'electron/preload.ts': '修改 · 工作区', 'src/components/layout/ChatPanel.tsx': '修改 · 工作区' };
+
+  const selectFile = (file) => {
+    $$('.git-file-row').forEach((row) => row.classList.toggle('active', row.dataset.file === file));
+    $$('.git-tree-row').forEach((row) => row.classList.toggle('active', row.dataset.file === file));
+    $('#diff-title').textContent = file;
+    $('#diff-status').textContent = statusText[file] || '未跟踪 · 工作区';
+    const target = diffs[file] || 'diff-untracked';
+    ['diff-preload', 'diff-chatpanel', 'diff-untracked'].forEach((id) => {
+      $('#' + id).hidden = id !== target;
+    });
+  };
+
+  // 箭头：移到待提交
+  $$('[data-action="stage"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const row = button.closest('.git-file-row');
+      const list = $('#staged-list');
+      list.appendChild(row);
+      button.remove();
+      $('#changes-count').textContent = String($('#changes-list').children.length);
+      $('#staged-count').textContent = String(list.children.length);
+    });
+  });
+
+  // 拉取下拉
+  let menu = null;
+  const closeMenu = () => {
+    if (menu) { menu.remove(); menu = null; }
+  };
+  $$('[data-action="pull-menu"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (menu) { closeMenu(); return; }
+      const rect = button.getBoundingClientRect();
+      menu = document.createElement('div');
+      menu.className = 'git-context-menu git-sync-menu floating';
+      menu.style.left = Math.max(8, rect.right - 172) + 'px';
+      menu.style.top = rect.bottom + 6 + 'px';
+      menu.innerHTML = '<button type="button" role="menuitem">仅快进拉取</button>'
+        + '<button type="button" role="menuitem">拉取并变基</button>';
+      document.body.appendChild(menu);
+    });
+  });
+  document.addEventListener('click', closeMenu);
+
+  // 文件行 / 目录树行点击
+  $$('.git-file-row[data-file]').forEach((row) => {
+    row.addEventListener('click', () => selectFile(row.dataset.file));
+  });
+  $$('.git-tree-row[data-file]').forEach((row) => {
+    row.addEventListener('click', () => selectFile(row.dataset.file));
+  });
+
+  // 左侧导航高亮
+  $$('.git-nav-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      $$('.git-nav-item').forEach((other) => other.classList.toggle('active', other === item));
+    });
+  });
+</script>
+</body>
+</html>

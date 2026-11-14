@@ -1,17 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 import { X } from "lucide-react";
 import { formatContextTokenAmount } from "@shared/models";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
-import {
-  hasOlderSessionMessages,
-  parsePersistedChatMessage,
-} from "@/hooks/useDataPersistence";
 import type { ChatMessage } from "@/stores/chat-store";
+import { useSessionTokenSummary } from "@/hooks/useFullSessionMessages";
 import {
   formatTokenCacheRate,
   getTokenCacheRate,
-  summarizeTokenUsage,
-  UNKNOWN_TOKEN_CHANNEL,
   type TokenUsageGroup,
 } from "@/lib/token-usage-stats";
 import "./TokenUsageModal.css";
@@ -27,22 +22,16 @@ type TokenUsageModalProps = {
 const fullTokenTitle = (count: number) => `${count.toLocaleString()} tokens`;
 
 function TokenUsageTable({
-  title,
   groups,
   nameHeading,
   emptyText,
 }: {
-  title: string;
   groups: TokenUsageGroup[];
   nameHeading: string;
   emptyText: string;
 }) {
   return (
     <section className="token-usage-section">
-      <div className="token-usage-section-head">
-        <h4>{title}</h4>
-        <span>{groups.length} 项</span>
-      </div>
       {groups.length > 0 ? (
         <table className="token-usage-table">
           <thead>
@@ -81,7 +70,7 @@ function TokenUsageTable({
 export function TokenUsageModal({ sessionId, messages, anchorRef, onClose }: TokenUsageModalProps) {
   const modalRef = useRef<HTMLDivElement>(null);
   const overlayStyle = useAnchoredOverlay(true, anchorRef, modalRef, { gap: 8 });
-  const [persistedMessages, setPersistedMessages] = useState<ChatMessage[] | null>(null);
+  const { summary, cacheRate, mergedHistory } = useSessionTokenSummary(sessionId, messages);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -90,41 +79,6 @@ export function TokenUsageModal({ sessionId, messages, anchorRef, onClose }: Tok
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
-
-  // 会话消息按页恢复，长时间会话可能只加载了最近 500 条。统计要覆盖完整
-  // 历史，因此在存在更早分页时一次性读取 SQLite，再与内存中的实时消息按 ID 合并。
-  useEffect(() => {
-    if (!hasOlderSessionMessages(sessionId)) {
-      setPersistedMessages(null);
-      return;
-    }
-    const loadAll = window.electronAPI?.loadSessionMessages;
-    if (typeof loadAll !== "function") return;
-    let cancelled = false;
-    void Promise.resolve(loadAll(sessionId)).then((value) => {
-      if (cancelled || !Array.isArray(value)) return;
-      const parsed = value.flatMap((item) => {
-        const message = parsePersistedChatMessage(item);
-        return message ? [message] : [];
-      });
-      setPersistedMessages(parsed);
-    }).catch(() => {
-      // 读取失败时退回当前已加载的消息，统计仍可用。
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
-
-  const allMessages = useMemo(() => {
-    if (!persistedMessages) return messages;
-    const byId = new Map(persistedMessages.map((message) => [message.id, message]));
-    for (const message of messages) byId.set(message.id, message);
-    return [...byId.values()];
-  }, [messages, persistedMessages]);
-
-  const summary = useMemo(() => summarizeTokenUsage(allMessages), [allMessages]);
-  const cacheRate = getTokenCacheRate(summary.totals);
   const uncachedInput = Math.max(0, summary.totals.input - summary.totals.cachedInput);
 
   return (
@@ -181,25 +135,15 @@ export function TokenUsageModal({ sessionId, messages, anchorRef, onClose }: Tok
 
         <div className="token-usage-scroll">
           <TokenUsageTable
-            title="按渠道"
-            groups={summary.byChannel}
-            nameHeading="渠道"
-            emptyText="当前会话还没有 token 消耗记录。"
-          />
-          <TokenUsageTable
-            title="按模型 ID"
             groups={summary.byModel}
             nameHeading="模型"
-            emptyText="当前会话还没有模型维度的 token 记录。"
+            emptyText="当前会话还没有 token 消耗记录。"
           />
         </div>
 
         <div className="token-usage-footnote">
           共 {summary.messageCount} 个助手回合 · 缓存率为输入中命中缓存的比例
-          {persistedMessages ? " · 已合并完整历史消息" : ""}
-          {summary.byChannel.some((group) => group.name === UNKNOWN_TOKEN_CHANNEL)
-            ? ` · 旧消息未记录渠道时归入“${UNKNOWN_TOKEN_CHANNEL}”`
-            : ""}
+          {mergedHistory ? " · 已合并完整历史消息" : ""}
         </div>
       </div>
     </div>

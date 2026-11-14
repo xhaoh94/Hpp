@@ -1,5 +1,5 @@
 import type { AgentSubagent, ChatMessage } from "@/stores/chat-store";
-import { getEffectiveProcessSubagents } from "@shared/process-view";
+import { getEffectiveProcessSubagents, type ProcessSubagentUsage } from "@shared/process-view";
 
 export type MonitoredSubagent = AgentSubagent & {
   messageId: string;
@@ -26,6 +26,39 @@ export const collectRunningSubagents = (messages: ChatMessage[]): MonitoredSubag
     }
   }
   return [...byId.values()].filter(isActiveStatus);
+};
+
+/** 紧凑计数：1.2k / 3.4M。 */
+export const formatSubagentTokenCount = (value?: number): string => {
+  if (!value || value <= 0) return "";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(value);
+};
+
+/** 缓存命中率 = 缓存读 / 输入；没有输入数据时返回 undefined。 */
+export const getSubagentCacheRate = (usage?: ProcessSubagentUsage): number | undefined => {
+  const input = usage?.inputTokens;
+  const cached = usage?.cacheReadTokens;
+  if (!input || input <= 0 || !cached) return undefined;
+  return Math.max(0, Math.min(cached, input)) / input;
+};
+
+/**
+ * 子任务消耗摘要：`12.3k token · 缓存 87% · 3 轮`。
+ * 没有 totalTokens 的后端（pi 只报 input/output）自己加一下，否则只会显示轮次。
+ */
+export const formatSubagentUsage = (usage?: ProcessSubagentUsage): string => {
+  if (!usage) return "";
+  const total = usage.totalTokens
+    ?? ((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) || undefined);
+  const tokens = formatSubagentTokenCount(total);
+  const rate = getSubagentCacheRate(usage);
+  return [
+    tokens ? `${tokens} token` : "",
+    rate !== undefined ? `缓存 ${Math.round(rate * 100)}%` : "",
+    usage.turns ? `${usage.turns} 轮` : "",
+  ].filter(Boolean).join(" · ");
 };
 
 /** 单个子任务的已运行时长；没有 startedAt 时返回 undefined（老后端）。 */

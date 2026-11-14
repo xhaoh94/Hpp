@@ -3,6 +3,8 @@ import type { AgentSubagent, ChatMessage } from "@/stores/chat-store";
 import {
   collectRunningSubagents,
   formatIdleAgo,
+  formatSubagentUsage,
+  getSubagentCacheRate,
   getSubagentElapsedMs,
   getSubagentIdleMs,
   isSubagentStalled,
@@ -100,5 +102,36 @@ describe("Subagent 监视窗数据", () => {
     expect(formatIdleAgo(59_000)).toBe("59 秒前");
     expect(formatIdleAgo(8 * 60_000)).toBe("8 分钟前");
     expect(formatIdleAgo(2 * 60 * 60_000)).toBe("2 小时前");
+  });
+});
+
+describe("子任务消耗摘要", () => {
+  it("拼出 token / 缓存命中 / 轮次", () => {
+    expect(formatSubagentUsage({
+      inputTokens: 12_000,
+      outputTokens: 3_400,
+      cacheReadTokens: 10_440,
+      totalTokens: 15_400,
+      turns: 3,
+    })).toBe("15.4k token · 缓存 87% · 3 轮");
+  });
+
+  it("后端只报 input/output 时自己算总数", () => {
+    // pi 的 usage 没有 totalTokens，不补的话只会显示轮次
+    expect(formatSubagentUsage({ inputTokens: 512, outputTokens: 128, turns: 1 }))
+      .toBe("640 token · 1 轮");
+  });
+
+  it("没有缓存数据时不写缓存率，空用量返回空串", () => {
+    expect(formatSubagentUsage({ inputTokens: 800 })).toBe("800 token");
+    expect(formatSubagentUsage({})).toBe("");
+    expect(formatSubagentUsage(undefined)).toBe("");
+  });
+
+  it("缓存率落在 0..1 且没有输入时为 undefined", () => {
+    expect(getSubagentCacheRate({ inputTokens: 100, cacheReadTokens: 250 })).toBe(1);
+    expect(getSubagentCacheRate({ inputTokens: 4, cacheReadTokens: 1 })).toBe(0.25);
+    expect(getSubagentCacheRate({ outputTokens: 10 })).toBeUndefined();
+    expect(getSubagentCacheRate(undefined)).toBeUndefined();
   });
 });

@@ -44,12 +44,19 @@ import type {
 import type { FileFilterConfig } from "../../shared/file-filters";
 import type {
   GitActionResult,
+  GitBlameResult,
   GitBranchListResult,
+  GitCloneResult,
   GitCommitDiffResult,
   GitCommitResult,
   GitConflictChoice,
+  GitConflictFileResult,
   GitDiffResult,
   GitLogResult,
+  GitPushResult,
+  GitRebasePlanResult,
+  GitRebaseStep,
+  GitRepoProbeResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeListResult,
@@ -422,12 +429,15 @@ export interface ElectronAPI {
   agentCreateSession: (agentId: string, projectPath: string, sessionId?: string, sessionFilePath?: string) => Promise<{ success: boolean; error?: string; sessionFilePath?: string; models?: AgentModel[] }>;
 
   // Git workspace
+  gitProbe: (target: string) => Promise<GitRepoProbeResult>;
+  gitClone: (url: string, parentDir?: string, name?: string) => Promise<GitCloneResult>;
   gitStatus: (target: string) => Promise<GitStatus>;
   gitDiff: (target: string, path: string, staged?: boolean) => Promise<GitDiffResult>;
   gitStage: (target: string, paths: string[]) => Promise<GitActionResult>;
   gitStageHunks: (target: string, path: string, indexes: number[], direction: "stage" | "unstage") => Promise<GitActionResult>;
   gitUnstage: (target: string, paths: string[]) => Promise<GitActionResult>;
   gitDiscard: (target: string, paths: string[]) => Promise<GitActionResult>;
+  gitDeleteFiles: (target: string, paths: string[]) => Promise<GitActionResult>;
   gitDiscardHunks: (target: string, path: string, indexes: number[]) => Promise<GitActionResult>;
   gitCommit: (target: string, message: string, amend?: boolean) => Promise<GitCommitResult>;
   gitStashCreate: (target: string, message?: string) => Promise<GitActionResult>;
@@ -441,12 +451,18 @@ export interface ElectronAPI {
   gitSwitchBranch: (target: string, name: string) => Promise<GitActionResult>;
   gitDeleteBranch: (target: string, name: string) => Promise<GitActionResult>;
   gitLog: (target: string, limit?: number) => Promise<GitLogResult>;
+  gitBlame: (target: string, path: string) => Promise<GitBlameResult>;
   gitShowCommit: (target: string, hash: string) => Promise<GitCommitDiffResult>;
   gitFetch: (target: string) => Promise<GitActionResult>;
   gitPull: (target: string) => Promise<GitActionResult>;
-  gitPush: (target: string) => Promise<GitActionResult>;
+  gitPullRebase: (target: string) => Promise<GitActionResult>;
+  gitPush: (target: string) => Promise<GitPushResult>;
   gitMerge: (target: string, branch: string) => Promise<GitActionResult>;
   gitRebase: (target: string, branch: string) => Promise<GitActionResult>;
+  gitRebasePlan: (target: string, base: string) => Promise<GitRebasePlanResult>;
+  gitInteractiveRebase: (target: string, base: string, steps: GitRebaseStep[]) => Promise<GitActionResult>;
+  gitConflictFile: (target: string, path: string) => Promise<GitConflictFileResult>;
+  gitWriteConflictFile: (target: string, path: string, content: string, stage?: boolean) => Promise<GitActionResult>;
   gitWorktrees: (target: string) => Promise<GitWorktreeListResult>;
   gitRemoveWorktree: (target: string, path: string) => Promise<GitActionResult>;
 
@@ -527,12 +543,19 @@ export interface ElectronAPI {
 
 export type {
   GitActionResult,
+  GitBlameResult,
   GitBranchListResult,
+  GitCloneResult,
   GitCommitDiffResult,
   GitConflictChoice,
+  GitConflictFileResult,
   GitCommitResult,
   GitDiffResult,
   GitLogResult,
+  GitPushResult,
+  GitRebasePlanResult,
+  GitRebaseStep,
+  GitRepoProbeResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeListResult,

@@ -203,9 +203,14 @@ describe("ProjectCard worktree session option", () => {
     expect(sidebarStyles).toContain(".terminal-child-worktree-badge");
   });
 
-  it("opens the Git workspace from the project card and dirty new-session modal", () => {
-    expect(projectCardSource).toContain("<GitWorkspaceModal");
+  it("opens the multi-repo Git workspace from the git-project card and dirty new-session modal", () => {
+    // 工作台由 ProjectView 统一托管，卡片只负责发「打开某个项目」的请求。
+    expect(projectViewSource).toContain("<GitWorkspaceModal");
+    expect(projectViewSource).toContain("gitProbe(");
+    expect(projectViewSource).toContain("gitClone(");
+    expect(projectCardSource).toContain("onOpenGit?.(project.id)");
     expect(projectCardSource).toContain("打开 Git 工作台");
+    expect(projectCardSource).toContain("{isGitRepo && (");
     expect(newSessionSource).toContain("onOpenGit");
     expect(newSessionSource).toContain("打开 Git 工作台");
   });

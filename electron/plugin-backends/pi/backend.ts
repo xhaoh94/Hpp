@@ -206,12 +206,16 @@ const getPiSubagentUsage = (result: UnknownRecord) => {
     return undefined;
   };
   const costRecord = asRecord(usage.cost);
+  const inputTokens = numberValue(usage.inputTokens, usage.input, usage.promptTokens);
+  const outputTokens = numberValue(usage.outputTokens, usage.output, usage.completionTokens);
   const parsed = {
-    inputTokens: numberValue(usage.inputTokens, usage.input, usage.promptTokens),
-    outputTokens: numberValue(usage.outputTokens, usage.output, usage.completionTokens),
+    inputTokens,
+    outputTokens,
     cacheReadTokens: numberValue(usage.cacheReadTokens, usage.cacheRead, usage.cache_read),
     cacheWriteTokens: numberValue(usage.cacheWriteTokens, usage.cacheWrite, usage.cache_write),
-    totalTokens: numberValue(usage.totalTokens, usage.total_tokens),
+    // pi 只累加 input/output，没有 totalTokens；不补的话监视窗只能显示轮次
+    totalTokens: numberValue(usage.totalTokens, usage.total_tokens)
+      ?? ((inputTokens || outputTokens) ? (inputTokens ?? 0) + (outputTokens ?? 0) : undefined),
     cost: numberValue(usage.cost, costRecord.total, costRecord.totalUsd, costRecord.usd),
     turns: numberValue(usage.turns),
   };

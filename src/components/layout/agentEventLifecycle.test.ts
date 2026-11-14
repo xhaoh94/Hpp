@@ -1193,6 +1193,43 @@ describe("agent event terminal reconciliation", () => {
     expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("error");
   });
 
+  // 新建会话后还没发过任何消息，后端 worker 在空闲时退出会上报
+  // agent_disconnected。此时没有任何轮次可收尾，不能凭空建出一条
+  // 「处理耗时 0s / 未收到响应结束事件」的空 assistant 消息。
+  it("ignores an idle backend disconnect before any turn starts", () => {
+    const harness = createHarness();
+    expect(getMessages()).toHaveLength(0);
+
+    dispatchAgentEvent({
+      type: "agent_disconnected",
+      detail: "worker exited",
+    }, harness.controller);
+
+    expect(getMessages()).toHaveLength(0);
+    const runtime = harness.controller.getRuntime(SESSION_ID);
+    expect(runtime.turnEventState).toBe("initial");
+    expect(runtime.processActive).toBe(false);
+    expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBeUndefined();
+    expect(harness.streaming.current).toBe(false);
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
+  it("still finishes a running turn when the backend disconnects", () => {
+    const harness = createHarness();
+    dispatchAgentEvent({ type: "stream_start" }, harness.controller);
+    dispatchAgentEvent({ type: "stream_delta", delta: "partial answer" }, harness.controller);
+
+    dispatchAgentEvent({
+      type: "agent_disconnected",
+      detail: "worker exited",
+    }, harness.controller);
+
+    const process = getMessages().find((message) => message.process)?.process;
+    expect(process?.endedAt).toBeTypeOf("number");
+    expect(useProjectStore.getState().agentStatuses[SESSION_ID]).toBe("error");
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   // 「Pi 仍在运行，暂时没有新输出」提示已下线：即使 watchdog 判定后端仍在跑、
   // 且一个字节的新输出都没有，也不允许往处理过程里插状态条目。
   it("does not insert an idle notice when the watchdog sees no new output", async () => {

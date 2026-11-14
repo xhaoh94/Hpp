@@ -20,7 +20,8 @@ const createRepo = (root: string, subdir?: string) => {
   git(root, ["commit", "-m", "initial"]);
 };
 
-describe("WorktreeManager", () => {
+// 同样要反复起 git 子进程，满载并行时默认 5s 会假超时。
+describe("WorktreeManager", { timeout: 20_000 }, () => {
   const temps: string[] = [];
 
   afterEach(() => {
@@ -106,6 +107,22 @@ describe("WorktreeManager", () => {
     expect(git(repo, ["status", "--porcelain"]).split(/\r?\n/).some((line) => line.includes("UU README.md"))).toBe(true);
     git(repo, ["merge", "--abort"]);
   });
+
+  it("skips the checkpoint when the worktree has no changes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hpp-worktree-clean-"));
+    temps.push(root);
+    const repo = join(root, "repo");
+    createRepo(repo);
+    const manager = new WorktreeManager(join(root, "worktrees"));
+    const workspace = (await manager.create(repo, "session-clean")).workspace!;
+    const before = git(workspace.worktreePath, ["rev-list", "--count", "HEAD"]);
+
+    const checkpoint = await manager.checkpoint(workspace);
+    expect(checkpoint.success).toBe(true);
+    expect(checkpoint.output).toContain("没有需要提交的改动");
+    // 空改动不能造出空提交
+    expect(git(workspace.worktreePath, ["rev-list", "--count", "HEAD"])).toBe(before);
+  }, 60_000);
 
   it("refuses to create from a dirty main worktree", async () => {
     const root = mkdtempSync(join(tmpdir(), "hpp-worktree-dirty-"));

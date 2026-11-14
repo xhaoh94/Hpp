@@ -1,6 +1,5 @@
 import type { ChatMessage } from "@/stores/chat-store";
 
-export const UNKNOWN_TOKEN_CHANNEL = "未记录渠道";
 export const UNKNOWN_TOKEN_MODEL = "未记录模型";
 
 /** 一条消息或一组消息的 token 累计值。input 为总输入，cachedInput 是其中命中缓存的部分。 */
@@ -14,9 +13,9 @@ export interface TokenUsageTotals {
 
 export interface TokenUsageGroup extends TokenUsageTotals {
   key: string;
-  /** 渠道 ID 或模型 ID。 */
+  /** 模型 ID。 */
   name: string;
-  /** 模型组的渠道；渠道组为空。 */
+  /** 模型行下方的渠道标注；跨渠道合并时用「 · 」拼接。 */
   detail?: string;
   messageCount: number;
   /** 名称来自旧消息的 modelLabel 回退，而不是真实记录的模型 ID。 */
@@ -25,7 +24,6 @@ export interface TokenUsageGroup extends TokenUsageTotals {
 
 export interface SessionTokenUsageSummary {
   totals: TokenUsageTotals;
-  byChannel: TokenUsageGroup[];
   byModel: TokenUsageGroup[];
   /** 参与统计的助手回合数。 */
   messageCount: number;
@@ -79,6 +77,13 @@ export const formatTokenCacheRate = (rate: number | undefined): string => (
   rate === undefined ? "—" : `${(rate * 100).toFixed(1)}%`
 );
 
+/** 紧凑计数：1.2k / 3.4M，完整数字放 title 里。 */
+export const formatTokenCount = (count: number): string => {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(count);
+};
+
 const compareGroups = (left: TokenUsageGroup, right: TokenUsageGroup) => (
   right.total - left.total || left.name.localeCompare(right.name)
 );
@@ -95,18 +100,19 @@ const getMessageUsage = (message: TokenUsageMessage) => {
 /**
  * 汇总当前会话的 token 消耗。
  *
- * 渠道按消息上的 modelProvider 分组；模型按 provider + 模型 ID 复合分组，
- * 避免不同渠道下的同名模型被误合并。旧消息没有记录这两项时，模型名回退
- * 到 modelLabel，并归入“未记录渠道 / 未记录模型”。
+ * 只按模型 ID 分组，同名模型跨渠道合并成一行；旧消息没有记录模型 ID 时
+ * 回退到 modelLabel，再没有就归入“未记录模型”。
  */
 export function summarizeTokenUsage(
   messages: ReadonlyArray<TokenUsageMessage>,
 ): SessionTokenUsageSummary {
   const totals = createAccumulator();
-  const channels = new Map<string, { name: string; usage: TotalsAccumulator }>();
   const models = new Map<string, {
     name: string;
-    detail?: string;
+    /** 该模型出现过的渠道，跨渠道合并后按首次出现顺序拼接。 */
+    providers: Set<string>;
+    /** 旧消息只有 modelLabel 时的可读名称。 */
+    labels: Set<string>;
     inferred?: boolean;
     usage: TotalsAccumulator;
   }>();
@@ -118,52 +124,31 @@ export function summarizeTokenUsage(
     addUsage(totals, usage.input, usage.output, usage.cachedInput);
 
     const provider = message.modelProvider?.trim() || "";
-    const channelName = provider || UNKNOWN_TOKEN_CHANNEL;
-    const channel = channels.get(channelName);
-    if (channel) {
-      addUsage(channel.usage, usage.input, usage.output, usage.cachedInput);
-    } else {
-      const created = { name: channelName, usage: createAccumulator() };
-      addUsage(created.usage, usage.input, usage.output, usage.cachedInput);
-      channels.set(channelName, created);
-    }
-
     const recordedModelId = message.modelId?.trim() || "";
     const fallbackLabel = message.modelLabel?.trim() || "";
     const modelName = recordedModelId || fallbackLabel || UNKNOWN_TOKEN_MODEL;
-    const modelKey = `${channelName}\u0000${modelName}`;
-    const model = models.get(modelKey);
+    const model = models.get(modelName);
     if (model) {
+      if (provider) model.providers.add(provider);
       addUsage(model.usage, usage.input, usage.output, usage.cachedInput);
     } else {
       const created = {
         name: modelName,
-        // 模型行同时标出渠道与友好名称，便于区分同一模型 ID 的不同接入方式。
-        detail: [provider, fallbackLabel && fallbackLabel !== modelName ? fallbackLabel : ""]
-          .filter(Boolean)
-          .join(" · ") || undefined,
+        providers: new Set(provider ? [provider] : []),
+        labels: new Set(fallbackLabel && fallbackLabel !== modelName ? [fallbackLabel] : []),
         inferred: !recordedModelId || undefined,
         usage: createAccumulator(),
       };
       addUsage(created.usage, usage.input, usage.output, usage.cachedInput);
-      models.set(modelKey, created);
+      models.set(modelName, created);
     }
   }
-
-  const byChannel = [...channels.entries()]
-    .map(([key, group]): TokenUsageGroup => ({
-      key,
-      name: group.name,
-      ...toTotals(group.usage),
-      messageCount: group.usage.messageCount,
-    }))
-    .sort(compareGroups);
 
   const byModel = [...models.entries()]
     .map(([key, group]): TokenUsageGroup => ({
       key,
       name: group.name,
-      detail: group.detail,
+      detail: [...group.providers, ...group.labels].join(" · ") || undefined,
       inferred: group.inferred,
       ...toTotals(group.usage),
       messageCount: group.usage.messageCount,
@@ -172,7 +157,6 @@ export function summarizeTokenUsage(
 
   return {
     totals: toTotals(totals),
-    byChannel,
     byModel,
     messageCount: totals.messageCount,
   };

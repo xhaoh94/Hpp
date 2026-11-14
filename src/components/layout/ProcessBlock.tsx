@@ -24,6 +24,7 @@ import {
   createProcessEntryMerger,
   mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
+import { formatSubagentUsage } from "./subagentMonitorModel";
 import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
 import { relativeRemotePath, resolveProjectFilePath } from "@/lib/project-file-path";
 import { SUBAGENT_MONITOR_OPEN_EVENT } from "@/lib/app-events";
@@ -341,6 +342,7 @@ const openSubagentMonitor = (subagentId: string) => {
 const getSubagentTooltip = (subagent: AgentSubagent) => [
   getSubagentStatusLabel(subagent.status),
   subagent.model,
+  formatSubagentUsage(subagent.usage),
   subagent.path,
   subagent.message,
 ].filter(Boolean).join(" · ");
@@ -355,16 +357,14 @@ const isActiveSubagentEntry = (entry: ProcessEntryView) =>
     .some((subagent) => subagent.status === "running" || subagent.status === "pending");
 
 function SubagentEntryRow({
-  messageId,
+  messageId: _messageId,
   entry,
   now,
-  onToggleEntry,
   projectPath,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
   now: number;
-  onToggleEntry: (messageId: string, entryId: string, anchor?: HTMLElement | null) => void;
   projectPath?: string;
 }) {
   const subagents = getEffectiveProcessSubagents(entry.subagents, entry.state);
@@ -372,12 +372,11 @@ function SubagentEntryRow({
   const elapsed = typeof entry.startedAt === "number"
     ? `已运行 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
     : "";
-  const messages = subagents
-    .map((subagent) => subagent.message?.trim())
-    .filter((message): message is string => !!message && message !== entry.detail?.trim());
-  const detail = [entry.detail?.trim(), ...new Set(messages)].filter(Boolean).join("\n\n");
-  const canExpand = detail.length > 0;
-  const toggle = (element?: HTMLElement | null) => onToggleEntry(messageId, entry.id, element);
+  // 一次只展开一个：点哪个子任务就只看哪个，再点一次收起。
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const expanded = expandedId ? subagents.find((subagent) => subagent.id === expandedId) : undefined;
+  const expandedUsage = formatSubagentUsage(expanded?.usage);
+  const expandedText = expanded?.message?.trim() || "";
 
   return (
     <div className={`chat-subagent-entry ${entry.state || ""}`}>
@@ -385,19 +384,23 @@ function SubagentEntryRow({
         <span className="chat-subagent-chips">
           {subagents.map((subagent) => {
             const monitorable = subagent.status === "running" || subagent.status === "pending";
+            const usage = formatSubagentUsage(subagent.usage);
+            const expandable = !!subagent.message?.trim() || !!usage;
+            const open = expandedId === subagent.id;
             return (
               <button
                 type="button"
-                className={`chat-subagent-chip ${subagent.status || ""}`}
+                className={`chat-subagent-chip ${subagent.status || ""} ${open ? "active" : ""}`}
                 key={subagent.id}
                 title={getSubagentTooltip(subagent) || subagent.label}
-                // 运行中的子任务有实时输出，点开监视窗；已结束的没有可监视内容，退化成展开详情。
+                aria-expanded={monitorable ? undefined : open}
+                // 运行中的子任务有实时输出，点开监视窗；已结束的点开只看它自己那一份。
                 onClick={
                   monitorable
                     ? () => openSubagentMonitor(subagent.id)
-                    : canExpand ? () => toggle() : undefined
+                    : expandable ? () => setExpandedId(open ? null : subagent.id) : undefined
                 }
-                disabled={!monitorable && !canExpand}
+                disabled={!monitorable && !expandable}
               >
                 <span className={`chat-subagent-avatar tone-${getSubagentTone(subagent.id)}`}>
                   <SubagentGlyph />
@@ -407,30 +410,22 @@ function SubagentEntryRow({
             );
           })}
         </span>
-        <button
-          type="button"
-          className={`chat-subagent-event-toggle ${canExpand ? "expandable" : ""}`}
-          onClick={canExpand ? (event) => toggle(event.currentTarget) : undefined}
-          disabled={!canExpand}
-          aria-expanded={canExpand ? !!entry.expanded : undefined}
-        >
+        <span className="chat-subagent-event-meta-group">
           {progress && <span className="chat-subagent-event-meta">{progress}</span>}
           {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
-          {canExpand && (
-            <svg
-              className="chat-subagent-chevron"
-              width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-              style={{ transform: entry.expanded ? "rotate(90deg)" : "rotate(0deg)" }}
-              aria-hidden="true"
-            >
-              <path d="M9 18l6-6-6-6" />
-            </svg>
-          )}
-        </button>
+        </span>
       </div>
-      {canExpand && entry.expanded && (
+      {expanded && (expandedText || expandedUsage) && (
         <div className="chat-subagent-detail">
-          <MarkdownRenderer content={detail} projectPath={projectPath} />
+          {expandedUsage && (
+            <div className="chat-subagent-usage">
+              <div className="chat-subagent-usage-row">
+                <span className="chat-subagent-usage-label">{expanded.label}</span>
+                <span className="chat-subagent-usage-value">{expandedUsage}</span>
+              </div>
+            </div>
+          )}
+          {expandedText && <MarkdownRenderer content={expandedText} projectPath={projectPath} />}
         </div>
       )}
     </div>
@@ -599,7 +594,6 @@ function ProcessEntryRow({
         messageId={messageId}
         entry={entry}
         now={now}
-        onToggleEntry={onToggleEntry}
         projectPath={projectPath}
       />
     );

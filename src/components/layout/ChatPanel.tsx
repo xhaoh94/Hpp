@@ -14,7 +14,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { ArrowRightLeft, ChartColumn, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -87,7 +87,10 @@ import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { AgentConfigModal } from "@/components/sidebar/AgentConfigModal";
 import { ContextUsageModal } from "./ContextUsageModal";
 import { TokenUsageModal } from "./TokenUsageModal";
+import { formatTokenCount } from "@/lib/token-usage-stats";
 import { ChatComposer } from "./ChatComposer";
+import { ChatSessionStatsItem } from "./ChatSessionStatsItem";
+import { ChatTokenUsageItem } from "./ChatTokenUsageItem";
 import { InlineComposerEditor, type InlineComposerEditorHandle } from "@/components/shared/InlineComposerEditor";
 import { ChatToolbar } from "./ChatToolbar";
 import { ConfirmationPanel } from "./ConfirmationPanel";
@@ -907,13 +910,6 @@ type UserMessageHistoryControlProps = {
   onScrollToMessage: (messageId: string) => void;
 };
 
-// 消息底部的 token 数量用紧凑格式（1.2k / 3.4M），悬停 title 里保留完整数字。
-const formatTokenCount = (count: number) => {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(count);
-};
-
 const getContextUsageTone = (ratio?: number) => {
   if (ratio === undefined) return "unknown";
   if (ratio >= 0.95) return "critical";
@@ -927,6 +923,12 @@ const CONTEXT_RING_SIZE = 20;
 const CONTEXT_RING_STROKE = 2;
 const CONTEXT_RING_RADIUS = (CONTEXT_RING_SIZE - CONTEXT_RING_STROKE) / 2;
 const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
+
+// 输入框下方状态条里的小环：14px，数字放到环外面。
+const STATUS_RING_SIZE = 14;
+const STATUS_RING_STROKE = 1.8;
+const STATUS_RING_RADIUS = (STATUS_RING_SIZE - STATUS_RING_STROKE) / 2;
+const STATUS_RING_CIRCUMFERENCE = 2 * Math.PI * STATUS_RING_RADIUS;
 
 // 发言记录弹窗的虚拟行高度估算：12px 文本行高（约 16.8px）+ 上下 8px padding
 // + 1px 底部边框。真实高度由 ResizeObserver 测量后自动校正。
@@ -4025,11 +4027,7 @@ export function ChatPanel({
     ? Math.min(1, contextUsedTokens / contextWindow)
     : undefined;
   // 标题栏只留一个进度环 + 中心百分比，完整数值放到悬浮提示里。
-  const contextPercentLabel = contextUsageRatio !== undefined
-    ? `${Math.round(contextUsageRatio * 100)}`
-    : contextWindow
-      ? "–"
-      : "?";
+  const contextPercentLabel = `${Math.round((contextUsageRatio ?? 0) * 100)}`;
   // 百分比太小（不足 0.5%）时取整会显示 0，仍应让环上留出可见进度。
   const contextRingProgress = contextUsageRatio !== undefined
     ? Math.max(contextUsageRatio, contextUsageRatio > 0 ? 0.02 : 0)
@@ -4126,50 +4124,6 @@ export function ChatPanel({
           <RefreshCw size={10} strokeWidth={2} />
         </button>
         <span className="chat-header-separator" aria-hidden="true">·</span>
-        <button
-          type="button"
-          ref={contextRingRef}
-          className={`chat-context-ring ${getContextUsageTone(contextUsageRatio)}`}
-          data-tooltip={contextUsageTitle}
-          aria-label={`上下文：${contextUsageTitle}`}
-          onClick={() => setContextUsageOpen(true)}
-        >
-          <svg width={CONTEXT_RING_SIZE} height={CONTEXT_RING_SIZE} viewBox={`0 0 ${CONTEXT_RING_SIZE} ${CONTEXT_RING_SIZE}`} aria-hidden="true">
-            <circle
-              className="chat-context-ring-track"
-              cx={CONTEXT_RING_SIZE / 2}
-              cy={CONTEXT_RING_SIZE / 2}
-              r={CONTEXT_RING_RADIUS}
-              fill="none"
-              strokeWidth={CONTEXT_RING_STROKE}
-            />
-            <circle
-              className="chat-context-ring-progress"
-              cx={CONTEXT_RING_SIZE / 2}
-              cy={CONTEXT_RING_SIZE / 2}
-              r={CONTEXT_RING_RADIUS}
-              fill="none"
-              strokeWidth={CONTEXT_RING_STROKE}
-              strokeDasharray={CONTEXT_RING_CIRCUMFERENCE}
-              strokeDashoffset={CONTEXT_RING_CIRCUMFERENCE * (1 - contextRingProgress)}
-              transform={`rotate(-90 ${CONTEXT_RING_SIZE / 2} ${CONTEXT_RING_SIZE / 2})`}
-            />
-          </svg>
-          <span className="chat-context-ring-value">{contextPercentLabel}</span>
-        </button>
-        <button
-          type="button"
-          ref={tokenUsageRef}
-          className="chat-header-token-usage"
-          onClick={() => setTokenUsageOpen(true)}
-          title="Token 统计（输入 / 输出 / 缓存）"
-          aria-label="Token 统计"
-          aria-haspopup="dialog"
-          aria-expanded={tokenUsageOpen}
-        >
-          <ChartColumn size={13} strokeWidth={2} />
-        </button>
-        <span className="chat-header-separator" aria-hidden="true">·</span>
         {scrollHeaderTitle && scrollHeaderMessageId ? (
           <button
             type="button"
@@ -4192,15 +4146,6 @@ export function ChatPanel({
             onUpdate={updateSessionWorkspace}
           />
         )}
-        <button
-          type="button"
-          className="chat-header-handoff"
-          onClick={() => void copySessionHandoff()}
-          title="复制交接摘要（换模型或换 Agent 时接续上下文）"
-          aria-label="复制交接摘要"
-        >
-          <ArrowRightLeft size={12} strokeWidth={2} />
-        </button>
         <div style={{ flex: 1 }} />
       </div>
 
@@ -4414,6 +4359,62 @@ export function ChatPanel({
           onSelectThinking={handleSelectThinking}
           onToggleFavorite={toggleFavorite}
         />
+        </div>
+
+        <div className="chat-status-bar">
+          {activeSessionId && <ChatSessionStatsItem sessionId={activeSessionId} />}
+          <span className="chat-status-divider" aria-hidden="true" />
+          {activeSessionId && (
+            <ChatTokenUsageItem
+              sessionId={activeSessionId}
+              itemRef={tokenUsageRef}
+              open={tokenUsageOpen}
+              onOpen={() => setTokenUsageOpen(true)}
+            />
+          )}
+          <span className="chat-status-divider" aria-hidden="true" />
+          <button
+            type="button"
+            ref={contextRingRef}
+            className={`chat-context-ring ${getContextUsageTone(contextUsageRatio)}`}
+            data-tooltip={contextUsageTitle}
+            aria-label={`上下文：${contextUsageTitle}`}
+            onClick={() => setContextUsageOpen(true)}
+          >
+            <svg width={STATUS_RING_SIZE} height={STATUS_RING_SIZE} viewBox={`0 0 ${STATUS_RING_SIZE} ${STATUS_RING_SIZE}`} aria-hidden="true">
+              <circle
+                className="chat-context-ring-track"
+                cx={STATUS_RING_SIZE / 2}
+                cy={STATUS_RING_SIZE / 2}
+                r={STATUS_RING_RADIUS}
+                fill="none"
+                strokeWidth={STATUS_RING_STROKE}
+              />
+              <circle
+                className="chat-context-ring-progress"
+                cx={STATUS_RING_SIZE / 2}
+                cy={STATUS_RING_SIZE / 2}
+                r={STATUS_RING_RADIUS}
+                fill="none"
+                strokeWidth={STATUS_RING_STROKE}
+                strokeDasharray={STATUS_RING_CIRCUMFERENCE}
+                strokeDashoffset={STATUS_RING_CIRCUMFERENCE * (1 - contextRingProgress)}
+                transform={`rotate(-90 ${STATUS_RING_SIZE / 2} ${STATUS_RING_SIZE / 2})`}
+              />
+            </svg>
+            <span className="chat-context-ring-value">{contextPercentLabel}%</span>
+          </button>
+          <span className="chat-status-divider" aria-hidden="true" />
+          <button
+            type="button"
+            className="chat-header-handoff"
+            onClick={() => void copySessionHandoff()}
+            title="生成摘要（换模型或换 Agent 时接续上下文，自动复制）"
+            aria-label="生成摘要"
+          >
+            <ArrowRightLeft size={12} strokeWidth={2} />
+            <span>生成摘要</span>
+          </button>
         </div>
       </div>
 

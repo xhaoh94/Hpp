@@ -39,6 +39,8 @@ class ErrorBoundary extends Component<
 interface FilePreviewProps {
   filePath: string | null;
   onClose: () => void;
+  /** 需要盖在其他弹层（Git 工作台 1300）之上时传入。 */
+  zIndex?: number;
 }
 
 const MAX_RENDER_LINES = 1000;
@@ -88,7 +90,7 @@ function resolveMarkdownLinkPath(baseFilePath: string, href: string) {
   return `${rootPrefix}${nextParts.join(separator)}`;
 }
 
-export function FilePreview({ filePath, onClose }: FilePreviewProps) {
+export function FilePreview({ filePath, onClose, zIndex }: FilePreviewProps) {
   const [content, setContent] = useState("");
   const [imageSrc, setImageSrc] = useState("");
   const [loading, setLoading] = useState(false);
@@ -534,7 +536,7 @@ export function FilePreview({ filePath, onClose }: FilePreviewProps) {
   if (!activeFilePath) return null;
 
   return createPortal(
-    <div className="fp-overlay" onClick={handleClose}>
+    <div className="fp-overlay" style={zIndex ? { zIndex } : undefined} onClick={handleClose}>
       <div className={`fp-modal ${isMarkdown ? "fp-has-toolbar" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="fp-header">
           <div className="fp-title">

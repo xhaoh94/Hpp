@@ -40,7 +40,7 @@ export function ContextUsageModal({ usage, anchorRef, onClose }: ContextUsageMod
   const usageRatio = contextWindow && usedTokens !== undefined
     ? Math.min(1, usedTokens / contextWindow)
     : undefined;
-  const percentText = usageRatio !== undefined ? `${(usageRatio * 100).toFixed(1)}%` : "—";
+  const percentText = `${((usageRatio ?? 0) * 100).toFixed(1)}%`;
   // 明细的 token 已按实际总量归一化，因此可直接换算成占窗口的比例。
   const segments = (usage?.breakdown || []).map((entry, index) => ({
     id: entry.id,

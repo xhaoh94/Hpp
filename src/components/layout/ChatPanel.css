@@ -7343,3 +7343,176 @@ body.chat-questionnaire-resizing .chat-bubble {
 @keyframes worktree-spin {
   to { transform: rotate(360deg); }
 }
+
+/* 输入框下方的状态条：会话统计 / token / 上下文 / 生成摘要 */
+.chat-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  width: calc(100% - var(--chat-content-horizontal-gutter));
+  max-width: none;
+  margin: 6px auto 0;
+  padding: 0 8px;
+  color: var(--text-secondary);
+}
+
+.chat-status-divider {
+  width: 1px;
+  height: 10px;
+  flex: 0 0 auto;
+  background: var(--border-color);
+}
+
+.chat-status-bar .chat-context-ring,
+.chat-status-bar .chat-header-token-usage,
+.chat-status-bar .chat-header-handoff,
+.chat-status-bar .chat-session-stats-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  width: auto;
+  height: 22px;
+  margin-left: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-status-bar .chat-context-ring:hover,
+.chat-status-bar .chat-header-token-usage:hover,
+.chat-status-bar .chat-header-handoff:hover,
+.chat-status-bar .chat-session-stats-trigger:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.chat-status-bar .chat-context-ring-value {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+/* 头部那个环是用绝对定位把 svg 铺满 20px 按钮的；状态条里按钮是自适应宽度，
+   不改成静态定位的话 svg 会铺到文字上面 */
+.chat-status-bar .chat-context-ring svg {
+  position: static;
+  inset: auto;
+  flex: 0 0 auto;
+}
+
+/* 子任务结束后展开的消耗摘要 */
+.chat-subagent-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.chat-subagent-usage-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.chat-subagent-usage-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-subagent-usage-value {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 子任务条目：右侧只剩进度文案，展开完全交给 chip 自己 */
+.chat-subagent-event-meta-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.chat-subagent-chip.active {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+  color: var(--accent-color);
+}
+
+/* 会话统计弹层 */
+.session-stats-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+
+.session-stats-popover {
+  position: fixed;
+  z-index: 71;
+  min-width: 218px;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+}
+
+.session-stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-stats-header button {
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.session-stats-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.session-stats-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.session-stats-row > span:last-child {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-stats-row.strong {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-weight: 600;
+}

@@ -16,9 +16,9 @@ import { hasNoSessionMessages } from "@/lib/session-lifecycle";
 import { discardSessionsCompletely } from "@/lib/session-discard";
 import { calculateVisibleAgentCount } from "@/lib/agent-shortcuts-layout";
 import { isDefaultWorkspaceProject, saveDefaultWorkspacePath } from "@/lib/default-workspace";
+import { shouldCreateSessionDirectly } from "@/lib/new-session-flow";
 import { ProjectEditModal } from "./ProjectEditModal";
 import { NewSessionModal } from "./NewSessionModal";
-import { GitWorkspaceModal, type GitWorkspaceTarget } from "@/components/git/GitWorkspaceModal";
 import { showAppAlert } from "@/lib/app-dialog";
 import { GitBranch, Pencil, Terminal } from "lucide-react";
 
@@ -50,9 +50,17 @@ const getSessionSortTime = (session: ProjectSession) => {
 interface Props {
   project: Project;
   initialSessionsCollapsed?: boolean;
+  /** 是否是 Git 仓库：只有仓库才显示工作台入口。 */
+  isGitRepo?: boolean;
+  /** 卡片上显示的当前分支（探测结果，可能为空）。 */
+  gitBranch?: string;
+  /** 打开 Git 工作台并选中本项目页签，由 ProjectView 统一托管。 */
+  onOpenGit?: (projectId: string) => void;
+  /** 工作台操作后 +1，用来让新建会话弹窗重新探测 worktree 可用性。 */
+  gitProbeVersion?: number;
 }
 
-export function ProjectCard({ project, initialSessionsCollapsed = false }: Props) {
+export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRepo = false, gitBranch, onOpenGit, gitProbeVersion = 0 }: Props) {
   const {
     removeProject,
     removeSession,
@@ -110,8 +118,6 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
   const [loading, setLoading] = useState(true);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
   const [newSessionAgent, setNewSessionAgent] = useState<AgentDescriptor | null>(null);
-  const [gitModalTarget, setGitModalTarget] = useState<GitWorkspaceTarget | null>(null);
-  const [gitProbeVersion, setGitProbeVersion] = useState(0);
   const [visibleAgentCount, setVisibleAgentCount] = useState(0);
   const [agentMenuPosition, setAgentMenuPosition] = useState<{ left: number; top: number } | null>(null);
   const agentShortcutsRef = useRef<HTMLDivElement>(null);
@@ -232,12 +238,21 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
 
     const agent = agents.find((candidate) => candidate.id === agentId);
     if (!agent) return;
+
+    // 没有 Git 环境（含默认工作区）直接建会话：弹窗里只剩一个用不了的 worktree 选项，
+    // 白让人多点一次。只有探测失败才退回弹窗，避免静默改变有 worktree 可用时的行为。
+    const defaultWorkspace = isDefaultWorkspaceProject(project);
+    const probe = defaultWorkspace
+      ? null
+      : await window.electronAPI.worktreeProbe(project.path).catch(() => null);
+    if (shouldCreateSessionDirectly(defaultWorkspace, probe)) {
+      await createSessionWith(agent, "shared");
+      return;
+    }
     setNewSessionAgent(agent);
   };
 
-  const handleConfirmNewSession = async ({ workspaceMode }: { workspaceMode: "shared" | "worktree" }) => {
-    const agent = newSessionAgent;
-    if (!agent) return;
+  const createSessionWith = async (agent: AgentDescriptor, workspaceMode: "shared" | "worktree") => {
     await SessionCommandCoordinator.createSession({
       projectId: project.id,
       agentId: agent.id,
@@ -246,6 +261,11 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
       workspaceMode,
     });
     setNewSessionAgent(null);
+  };
+
+  const handleConfirmNewSession = async ({ workspaceMode }: { workspaceMode: "shared" | "worktree" }) => {
+    if (!newSessionAgent) return;
+    await createSessionWith(newSessionAgent, workspaceMode);
   };
 
   const handleSelectSession = (session: ProjectSession) => {
@@ -408,17 +428,19 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
           title={sessionsCollapsed ? "展开会话" : "收起会话"}
         >
           <div className="project-card-actions">
-            <button
-              className="project-edit-btn"
-              onClick={(event) => {
-                event.stopPropagation();
-                setGitModalTarget({ path: project.path, label: project.name });
-              }}
-              title="打开 Git 工作台"
-              aria-label={`打开 Git 工作台：${project.name}`}
-            >
-              <GitBranch size={12} strokeWidth={1.8} />
-            </button>
+            {isGitRepo && (
+              <button
+                className="project-edit-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenGit?.(project.id);
+                }}
+                title={gitBranch ? `打开 Git 工作台（当前分支 ${gitBranch}）` : "打开 Git 工作台"}
+                aria-label={`打开 Git 工作台：${project.name}`}
+              >
+                <GitBranch size={12} strokeWidth={1.8} />
+              </button>
+            )}
             <button
               className="project-edit-btn"
               onClick={(event) => {
@@ -635,24 +657,13 @@ export function ProjectCard({ project, initialSessionsCollapsed = false }: Props
         />
       )}
 
-      {gitModalTarget && (
-        <GitWorkspaceModal
-          target={gitModalTarget}
-          onClose={() => {
-            setGitModalTarget(null);
-            setGitProbeVersion((value) => value + 1);
-          }}
-          onChanged={() => setGitProbeVersion((value) => value + 1)}
-        />
-      )}
-
       {newSessionAgent && (
         <NewSessionModal
           project={project}
           agent={newSessionAgent}
           onClose={() => setNewSessionAgent(null)}
           onConfirm={handleConfirmNewSession}
-          onOpenGit={() => setGitModalTarget({ path: project.path, label: project.name })}
+          onOpenGit={() => onOpenGit?.(project.id)}
           probeVersion={gitProbeVersion}
         />
       )}

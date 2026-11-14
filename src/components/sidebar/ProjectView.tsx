@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { createPortal } from "react-dom";
 import { useProjectStore } from "@/stores/project-store";
 import { useAppStore } from "@/stores/app-store";
@@ -6,8 +6,11 @@ import { useShallow } from "zustand/react/shallow";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { isDefaultWorkspaceProject } from "@/lib/default-workspace";
+import { GitWorkspaceModal, type GitWorkspaceRepo } from "@/components/git/GitWorkspaceModal";
 import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
+
+type RepoState = { isRepo: boolean; branch?: string };
 
 export function ProjectView() {
   const { projects, activeSessionId, projectDataHydrated, addProject, reorderProjects } = useProjectStore(
@@ -34,6 +37,66 @@ export function ProjectView() {
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
+  const [addMode, setAddMode] = useState<"local" | "clone">("local");
+  const [cloneUrl, setCloneUrl] = useState("");
+  const [cloneParent, setCloneParent] = useState("");
+  const [cloneName, setCloneName] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState("");
+  // 每个项目的 Git 探测结果：决定卡片上是否出现工作台入口，以及页签显示的当前分支。
+  const [repoStates, setRepoStates] = useState<Record<string, RepoState>>({});
+  const [gitActiveId, setGitActiveId] = useState<string | null>(null);
+  const [gitProbeVersion, setGitProbeVersion] = useState(0);
+
+  // 只按「项目 id + 路径」重算，会话变化不触发重新探测（一次探测要起 git 子进程）。
+  const projectsKey = projects.map((project) => `${project.id}\u0000${project.path}`).join("\u0001");
+  const probeTargets = useMemo(
+    () => projects.map((project) => ({ id: project.id, path: project.path })),
+    [projectsKey],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all(probeTargets.map(async (target) => {
+      const result = await window.electronAPI.gitProbe(target.path).catch(() => null);
+      return [target.id, result] as const;
+    })).then((entries) => {
+      if (cancelled) return;
+      const next: Record<string, RepoState> = {};
+      for (const [id, result] of entries) {
+        next[id] = { isRepo: !!result?.isRepo, ...(result?.branch ? { branch: result.branch } : {}) };
+      }
+      setRepoStates(next);
+    });
+    return () => { cancelled = true; };
+  }, [probeTargets]);
+
+  const gitRepos: GitWorkspaceRepo[] = useMemo(
+    () => projects
+      .filter((project) => repoStates[project.id]?.isRepo)
+      .map((project) => ({
+        id: project.id,
+        path: project.path,
+        label: project.name,
+        branch: repoStates[project.id]?.branch,
+      })),
+    [projects, repoStates],
+  );
+
+  const handleGitChanged = useCallback((projectId: string) => {
+    // 让 ProjectCard 传给新建会话弹窗的 probeVersion 变化，重新判断 worktree 可用性。
+    setGitProbeVersion((value) => value + 1);
+    const project = projects.find((item) => item.id === projectId);
+    if (!project) return;
+    void window.electronAPI.gitProbe(project.path)
+      .then((result) => {
+        setRepoStates((current) => ({
+          ...current,
+          [projectId]: { isRepo: !!result.isRepo, ...(result.branch ? { branch: result.branch } : {}) },
+        }));
+      })
+      .catch(() => undefined);
+  }, [projects]);
 
   // 只给“从未手动切换过展开状态”的项目算一个启动默认：默认只展开当前会话
   // 所在的项目。用户手动展开/收起后，项目上会记住 sessionsCollapsed，
@@ -78,6 +141,33 @@ export function ProjectView() {
     setShowAdd(false);
   };
 
+  const handleClone = async () => {
+    const url = cloneUrl.trim();
+    if (!url || addBusy) return;
+    setAddBusy(true);
+    setAddError("");
+    try {
+      const result = await window.electronAPI.gitClone(url, cloneParent.trim() || undefined, cloneName.trim() || undefined);
+      if (!result.success || !result.path) {
+        setAddError(result.error || "克隆失败。");
+        return;
+      }
+      const folderName = result.path.split(/[/\\]/).filter(Boolean).pop() || cloneName.trim() || "repo";
+      addProject(cloneName.trim() || folderName, result.path, agents.map((agent) => agent.id));
+      setCloneUrl("");
+      setCloneName("");
+      setCloneParent("");
+      setShowAdd(false);
+    } finally {
+      setAddBusy(false);
+    }
+  };
+
+  const handleBrowseParent = async () => {
+    const result = await window.electronAPI.openDirectory();
+    if (!result.canceled && result.path) setCloneParent(result.path);
+  };
+
   const handleBrowse = async () => {
     const result = await window.electronAPI.openDirectory();
     if (!result.canceled && result.path) {
@@ -119,14 +209,15 @@ export function ProjectView() {
             aria-labelledby="add-project-title"
             onSubmit={(event) => {
               event.preventDefault();
-              handleAdd();
+              if (addMode === "clone") void handleClone();
+              else handleAdd();
             }}
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="project-modal-header">
               <div>
                 <h2 id="add-project-title">添加项目</h2>
-                <p>添加项目目录以开始新的会话</p>
+                <p>添加本地目录，或从 Git 地址克隆一个仓库</p>
               </div>
               <button
                 type="button"
@@ -141,27 +232,92 @@ export function ProjectView() {
               </button>
             </div>
             <div className="project-modal-body">
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="项目名称"
-                aria-label="项目名称"
-                autoFocus
-                className="input-field"
-              />
-              <div className="path-input-row">
-                <input
-                  value={path}
-                  onChange={(e) => setPath(e.target.value)}
-                  placeholder="项目路径"
-                  aria-label="项目路径"
-                  className="input-field path-input"
-                />
-                <button type="button" onClick={handleBrowse} className="btn-browse">浏览</button>
+              <div className="add-project-mode" role="tablist" aria-label="添加方式">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={addMode === "local"}
+                  className={addMode === "local" ? "active" : ""}
+                  onClick={() => { setAddMode("local"); setAddError(""); }}
+                  disabled={addBusy}
+                >
+                  本地目录
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={addMode === "clone"}
+                  className={addMode === "clone" ? "active" : ""}
+                  onClick={() => { setAddMode("clone"); setAddError(""); }}
+                  disabled={addBusy}
+                >
+                  克隆 Git 仓库
+                </button>
               </div>
+
+              {addMode === "local" ? (
+                <>
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="项目名称"
+                    aria-label="项目名称"
+                    autoFocus
+                    className="input-field"
+                  />
+                  <div className="path-input-row">
+                    <input
+                      value={path}
+                      onChange={(e) => setPath(e.target.value)}
+                      placeholder="项目路径"
+                      aria-label="项目路径"
+                      className="input-field path-input"
+                    />
+                    <button type="button" onClick={handleBrowse} className="btn-browse">浏览</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <input
+                    value={cloneUrl}
+                    onChange={(e) => setCloneUrl(e.target.value)}
+                    placeholder="仓库地址，如 https://github.com/user/repo.git"
+                    aria-label="Git 仓库地址"
+                    autoFocus
+                    className="input-field"
+                    disabled={addBusy}
+                  />
+                  <div className="path-input-row">
+                    <input
+                      value={cloneParent}
+                      onChange={(e) => setCloneParent(e.target.value)}
+                      placeholder="克隆到哪个目录（留空用用户目录）"
+                      aria-label="克隆父目录"
+                      className="input-field path-input"
+                      disabled={addBusy}
+                    />
+                    <button type="button" onClick={() => void handleBrowseParent()} className="btn-browse" disabled={addBusy}>浏览</button>
+                  </div>
+                  <input
+                    value={cloneName}
+                    onChange={(e) => setCloneName(e.target.value)}
+                    placeholder="目录名 / 项目名（留空按仓库名）"
+                    aria-label="克隆目录名"
+                    className="input-field"
+                    disabled={addBusy}
+                  />
+                </>
+              )}
+              {addError && <div className="add-project-error">{addError}</div>}
               <div className="form-actions">
-                <button type="button" onClick={() => setShowAdd(false)} className="btn btn-cancel">取消</button>
-                <button type="submit" className="btn btn-primary">添加</button>
+                <button type="button" onClick={() => setShowAdd(false)} className="btn btn-cancel" disabled={addBusy}>取消</button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={addBusy || (addMode === "clone" ? !cloneUrl.trim() : false)}
+                >
+                  {addBusy ? "克隆中…" : addMode === "clone" ? "克隆并添加" : "添加"}
+                </button>
               </div>
             </div>
           </form>
@@ -185,7 +341,14 @@ export function ProjectView() {
               启动时强制展开 —— 收起状态会把 Agent 快捷启动按钮一起藏掉。 */}
           {defaultWorkspaceProject && (
             <div className="project-card-pinned">
-              <ProjectCard project={defaultWorkspaceProject} initialSessionsCollapsed={false} />
+              <ProjectCard
+                project={defaultWorkspaceProject}
+                initialSessionsCollapsed={false}
+                isGitRepo={!!repoStates[defaultWorkspaceProject.id]?.isRepo}
+                gitBranch={repoStates[defaultWorkspaceProject.id]?.branch}
+                onOpenGit={setGitActiveId}
+                gitProbeVersion={gitProbeVersion}
+              />
             </div>
           )}
           {draggableProjects.map((project) => (
@@ -249,11 +412,25 @@ export function ProjectView() {
                   ?? startupCollapseStateRef.current?.get(project.id)
                   ?? false
                 }
+                isGitRepo={!!repoStates[project.id]?.isRepo}
+                gitBranch={repoStates[project.id]?.branch}
+                onOpenGit={setGitActiveId}
+                gitProbeVersion={gitProbeVersion}
               />
             </div>
           ))}
         </div>
       </div>
+
+      {gitActiveId && gitRepos.length > 0 && (
+        <GitWorkspaceModal
+          repos={gitRepos}
+          activeId={gitActiveId}
+          onSelect={setGitActiveId}
+          onClose={() => setGitActiveId(null)}
+          onChanged={handleGitChanged}
+        />
+      )}
     </div>
   );
 }

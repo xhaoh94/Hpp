@@ -20,6 +20,7 @@ import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import {
   ArrowLeft,
   ArrowDown,
+  ArrowRightLeft,
   ArrowUp,
   Bot,
   Camera,
@@ -210,6 +211,7 @@ function SessionRunningIndicator() {
 }
 import { MAX_REMOTE_IMAGES, MAX_REMOTE_SESSION_REFERENCES } from "@shared/remote-protocol";
 import { formatModelSwitchToastText } from "@shared/model-switch";
+import { buildSessionHandoff } from "@shared/session-handoff";
 import {
   getEffectiveThinkingLevelMode,
   getModelThinkingLevels,
@@ -2774,6 +2776,7 @@ export default function App() {
   const [pendingAction, setPendingAction] = useState<RemoteAgentActionInvocation | undefined>();
   const [composerAddMenuOpen, setComposerAddMenuOpen] = useState(false);
   const [referenceSheetOpen, setReferenceSheetOpen] = useState(false);
+  const [composerSheet, setComposerSheet] = useState<"usage" | "handoff" | null>(null);
   const [actionSheetOpen, setActionSheetOpen] = useState(false);
   const [actionCatalog, setActionCatalog] = useState<RemoteAgentAction[]>([]);
   const [actionLoading, setActionLoading] = useState(false);
@@ -4032,6 +4035,43 @@ export default function App() {
     () => selectedSessionId ? messages[selectedSessionId] || [] : [],
     [messages, selectedSessionId],
   );
+  // 上下文按「最后一次请求的输入 token / 模型窗口」估算，和桌面端口径一致。
+  const composerUsage = useMemo(() => {
+    let input = 0;
+    let output = 0;
+    let cached = 0;
+    let lastInput = 0;
+    for (const message of selectedMessages) {
+      const usage = message.tokenUsage;
+      if (!usage) continue;
+      input += usage.input || 0;
+      output += usage.output || 0;
+      cached += usage.cacheInput || 0;
+      if (usage.input) lastInput = usage.input;
+    }
+    const contextWindow = selectedConfig?.model?.contextWindow || 0;
+    return {
+      input,
+      output,
+      cached,
+      lastInput,
+      contextWindow,
+      total: input + output,
+      cacheRate: input > 0 ? Math.min(1, cached / input) : undefined,
+      contextRate: contextWindow > 0 && lastInput > 0 ? Math.min(1, lastInput / contextWindow) : undefined,
+    };
+  }, [selectedMessages, selectedConfig?.model?.contextWindow]);
+  // 手机端只加载最近一页消息，摘要基于当前已加载的内容。
+  const handoffText = useMemo(() => {
+    const firstSpeech = selectedMessages.find((message) => message.role === "user" && message.content.trim());
+    const title = (firstSpeech?.content || selected?.session.title || "会话").replace(/\s+/g, " ").trim().slice(0, 48);
+    return buildSessionHandoff({
+      title,
+      projectName: selected?.project.name,
+      agentName: selectedAgent?.name || selected?.session.agentId,
+      messages: selectedMessages,
+    });
+  }, [selectedMessages, selected, selectedAgent?.name]);
   const receivedUserMessages = useMemo(() => {
     const byAssistantId: Record<string, RemoteChatMessage> = {};
     let latestUserMessage: RemoteChatMessage | undefined;
@@ -5271,6 +5311,62 @@ export default function App() {
 
       {overlayUi}
 
+      {composerSheet === "usage" && selected && (
+        <div className="sheet-backdrop" onClick={() => setComposerSheet(null)}>
+          <section
+            className="bottom-sheet composer-info-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-label="会话用量"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sheet-handle" />
+            <div className="sheet-title">
+              <div><h2>会话用量</h2><p>{selected.session.title}</p></div>
+              <button type="button" className="icon-button" onClick={() => setComposerSheet(null)} title="关闭" aria-label="关闭"><X size={19} /></button>
+            </div>
+            <div className="composer-info-rows">
+              <div className="composer-info-row"><span>累计输入</span><strong>{formatTokenCount(composerUsage.input)}</strong></div>
+              <div className="composer-info-row"><span>累计输出</span><strong>{formatTokenCount(composerUsage.output)}</strong></div>
+              <div className="composer-info-row">
+                <span>缓存命中</span>
+                <strong>{formatTokenCount(composerUsage.cached)}（{Math.round((composerUsage.cacheRate ?? 0) * 100)}%）</strong>
+              </div>
+              <div className="composer-info-row">
+                <span>上下文窗口</span>
+                <strong>{composerUsage.contextWindow > 0 ? formatTokenCount(composerUsage.contextWindow) : "未提供"}</strong>
+              </div>
+              <div className="composer-info-row"><span>最近一轮输入</span><strong>{formatTokenCount(composerUsage.lastInput)}</strong></div>
+              <div className="composer-info-row"><span>上下文占用</span><strong>{Math.round((composerUsage.contextRate ?? 0) * 100)}%</strong></div>
+            </div>
+            <p className="composer-info-note">统计基于当前已加载的消息，更早的历史需加载后才计入。</p>
+          </section>
+        </div>
+      )}
+
+      {composerSheet === "handoff" && selected && (
+        <div className="sheet-backdrop" onClick={() => setComposerSheet(null)}>
+          <section
+            className="bottom-sheet composer-info-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-label="会话摘要"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sheet-handle" />
+            <div className="sheet-title">
+              <div><h2>会话摘要</h2><p>{selected.session.title}</p></div>
+              <button type="button" className="icon-button" onClick={() => setComposerSheet(null)} title="关闭" aria-label="关闭"><X size={19} /></button>
+            </div>
+            <pre className="composer-handoff-text">{handoffText}</pre>
+            <button type="button" className="composer-handoff-copy" onClick={() => copyMessage(handoffText)}>
+              <Copy size={14} /> 复制摘要
+            </button>
+            <p className="composer-info-note">摘要基于当前已加载的消息生成。</p>
+          </section>
+        </div>
+      )}
+
       {editingQueueItem && selected && (
         <QueueEditDialog
           key={`${selected.session.id}:${editingQueueItem.id}`}
@@ -5854,6 +5950,51 @@ export default function App() {
                 onSelect={(level) => void runCommand<RemoteSessionConfig>("session.setThinking", { sessionId: selected.session.id, level }).then((config) => setConfigs((current) => ({ ...current, [selected.session.id]: config })))}
               />
             </div>
+
+            {selected && (
+              <div className="composer-status">
+                <button
+                  type="button"
+                  className="composer-status-stats"
+                  onClick={() => setComposerSheet("usage")}
+                  aria-label="查看用量详情"
+                  aria-haspopup="dialog"
+                >
+                  <span className="composer-status-item">
+                    <svg width="11" height="11" viewBox="0 0 14 14" aria-hidden="true">
+                      <circle cx="7" cy="7" r="5.6" fill="none" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2" />
+                      <circle
+                        cx="7" cy="7" r="5.6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                        strokeDasharray={2 * Math.PI * 5.6}
+                        strokeDashoffset={2 * Math.PI * 5.6 * (1 - (composerUsage.contextRate ?? 0))}
+                        transform="rotate(-90 7 7)"
+                      />
+                    </svg>
+                    {Math.round((composerUsage.contextRate ?? 0) * 100)}%
+                  </span>
+                  <span className="composer-status-divider" aria-hidden="true">·</span>
+                  <span className="composer-status-item">
+                    {composerUsage.total > 0 ? `${formatTokenCount(composerUsage.total)} token` : "暂无用量记录"}
+                  </span>
+                  {composerUsage.cacheRate !== undefined && (
+                    <>
+                      <span className="composer-status-divider" aria-hidden="true">·</span>
+                      <span className="composer-status-item">{Math.round(composerUsage.cacheRate * 100)}%</span>
+                    </>
+                  )}
+                </button>
+                <span className="composer-status-divider" aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  className="composer-status-handoff"
+                  onClick={() => setComposerSheet("handoff")}
+                  aria-haspopup="dialog"
+                >
+                  <ArrowRightLeft size={11} strokeWidth={2} />
+                  生成摘要
+                </button>
+              </div>
+            )}
           </footer>
         </section>
       )}

@@ -1935,3 +1935,107 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
 .android-update-pill:active { background: var(--surface-hover); }
 .android-update-pill.ready { border-color: var(--success); }
 .android-update-pill .pill-progress { flex: 0 0 auto; color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 680; }
+
+/* 输入框下方：上下文占用 / 累计 token / 缓存命中 / 生成摘要 */
+.composer-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  max-width: 860px;
+  margin: 2px auto 0;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.composer-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-status-divider {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+
+.composer-status-stats,
+.composer-status-handoff {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.composer-status-stats:active,
+.composer-status-handoff:active { background: var(--surface-hover); color: var(--text); }
+@media (hover: hover) {
+  .composer-status-stats:hover,
+  .composer-status-handoff:hover { background: var(--surface-hover); color: var(--text); }
+}
+.composer-status-handoff { flex: 0 0 auto; }
+.composer-status-handoff svg { flex: 0 0 auto; }
+
+/* 状态条弹窗：用量明细与会话摘要 */
+.composer-info-sheet .sheet-title { margin-bottom: 6px; }
+.composer-info-rows { margin-top: 6px; }
+.composer-info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.composer-info-row span { color: var(--muted); }
+.composer-info-row strong { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.composer-info-note { margin: 12px 0 0; color: var(--faint); font-size: 11px; line-height: 1.5; }
+.composer-handoff-text {
+  max-height: 46dvh;
+  margin: 10px 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-hover);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.composer-handoff-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}

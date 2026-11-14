@@ -16,15 +16,52 @@ describe("Git workspace modal", () => {
     expect(source).toContain("gitStashCreate(target.path");
     expect(source).toContain("gitStashList(target.path");
     expect(source).toContain("gitStashPop(target.path");
+    // 「修改上次提交」= git commit --amend（本地改写），推送是独立开关
+    expect(source).toContain("pushAfterCommit");
+    expect(source).toContain("gitPush(target.path)");
   });
 
-  it("is a wide standalone modal rather than a sidebar panel", () => {
+  it("embeds the project tree with its own context menu", () => {
+    const source = read("src/components/git/GitWorkspaceModal.tsx");
+    const tree = read("src/components/git/GitFileTree.tsx");
+    const menu = read("src/components/git/GitTreeMenu.tsx");
+    expect(source).toContain("<GitFileTree");
+    expect(source).toContain("<GitTreeMenu");
+    expect(tree).toContain("onContextMenu");
+    expect(tree).toContain("readDirectory");
+    expect(menu).toContain("添加至「待提交」");
+    // 树里的操作必须走仓库相对路径
+    expect(source).toContain("gitDiscard(target.path, [relativePath])");
+    expect(source).toContain("<GitBlamePanel");
+    expect(read("src/components/git/GitBlamePanel.tsx")).toContain("electronAPI?.gitBlame");
+    expect(source).toContain("stage([treeMenu.relativePath])");
+  });
+
+  it("uses one selection key for both the rows and the diff lookup", () => {
+    const source = read("src/components/git/GitWorkspaceModal.tsx");
+    // 行里曾经写死 `${path}:unstaged`，查询用 `${path}:${stagedView}`（= :true/:false），
+    // 选中永远匹配不上，右侧 diff 一直是空的。
+    expect(source).toContain("const changeKey = (item: ChangeItem)");
+    expect(source).toContain("items.find((item) => changeKey(item) === selectedKey)");
+    expect(source).not.toContain("${item.path}:unstaged");
+    expect(source).not.toContain("${item.path}:staged");
+  });
+
+  it("is a wide standalone modal that fills the viewport instead of a fixed max width", () => {
     const source = read("src/components/git/GitWorkspaceModal.tsx");
     const styles = read("src/components/git/GitWorkspaceModal.css");
+    const rule = (selector: string) => {
+      const start = styles.indexOf(`${selector} {`);
+      return start < 0 ? "" : styles.slice(start, styles.indexOf("}", start));
+    };
     expect(source).toContain('className="git-workspace-overlay"');
-    expect(source).toContain('className="git-workspace-modal"');
-    expect(styles).toContain(".git-workspace-overlay");
-    expect(styles).toContain("width: min(1120px, calc(100vw - 48px))");
-    expect(styles).toContain("grid-template-columns: 330px minmax(0, 1fr)");
+    expect(source).toContain("className={`git-workspace-modal ");
+
+    const modal = rule(".git-workspace-modal");
+    expect(modal).toContain("width: 100%");
+    expect(modal).toContain("height: 100%");
+    // 不要写死 px 上限：窗口尺寸跟着视口走
+    expect(modal).not.toContain("min(");
+    expect(rule(".git-workspace-body")).toContain("grid-template-columns: clamp(");
   });
 });

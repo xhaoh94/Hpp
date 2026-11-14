@@ -8,6 +8,7 @@ import {
 } from "@/hooks/useDataPersistence";
 import { useProjectStore } from "@/stores/project-store";
 import {
+  hasOpenAssistantProcessState,
   useChatStore,
   type AgentCommentary,
   type AgentProcessFile,
@@ -98,6 +99,21 @@ const getLatestUserMessageId = (sessionId: string) => {
   return null;
 };
 
+/**
+ * 渲染层是否还有「看得见」的轮次痕迹（未结束的处理过程、进行中的压缩、
+ * running 状态）。用于区分「真的有关掉一个轮次」和「后端空闲断开时顺手
+ * 上报的一个终止事件」。
+ */
+const hasVisibleSessionTurnState = (sessionId: string) => {
+  const chatState = useChatStore.getState();
+  const messages = chatState.sessionMessages[sessionId] || (
+    chatState.activeSessionId === sessionId ? chatState.messages : []
+  );
+  return messages.some(hasOpenAssistantProcessState) ||
+    chatState.compactingSessions[sessionId] === true ||
+    useProjectStore.getState().agentStatuses[sessionId] === "running";
+};
+
 const getEventTurnRevision = (event: AgentEvent) => normalizeAgentTurnRevision(
   event.lifecycleRevision ?? event.turnRevision,
 );
@@ -129,6 +145,32 @@ export function shouldAcceptTurnScopedAgentEvent(
   const isTerminal = TURN_TERMINAL_EVENT_TYPES.has(event.type);
   const isActivity = TURN_ACTIVITY_EVENT_TYPES.has(event.type) || isQuestionLikeEvent(event);
   if (!isTerminal && !isActivity) return true;
+
+  // 后端在没有轮次的空闲态也会上报终止事件：worker 进程退出、插件宿主重启
+  // 都会发 agent_disconnected。这类事件既没有 lifecycle revision，也没有
+  // clientUserMessageId，放行会把 runtime 从 initial/idle 直接推到 active，
+  // 收尾时再凭空建出一条「处理耗时 0s / 未收到响应结束事件」的空消息。
+  // 只有渲染层确实还有可见轮次（残留的处理过程、压缩、running 状态）时，
+  // 这种无身份终止事件才可信，用来兜住「runtime 状态丢失但界面还开着」的场景。
+  const hasTurnIdentity = !!revision || (
+    typeof event.clientUserMessageId === "string" && event.clientUserMessageId.trim() !== ""
+  );
+  if (
+    isTerminal &&
+    !hasTurnIdentity &&
+    runtime.turnEventState !== "active" &&
+    !runtime.processActive &&
+    !hasVisibleSessionTurnState(sessionId)
+  ) {
+    // 保留一条日志：界面上不再显示中断错误，排查「后端为何空闲时掉线」时
+    // 需要靠它定位是哪个后端、哪个进程退出。
+    console.warn("[agent] 忽略无轮次的终止事件", {
+      sessionId,
+      type: event.type,
+      detail: typeof event.detail === "string" ? event.detail : undefined,
+    });
+    return false;
+  }
 
   // Once a turn has reached a terminal state, unscoped events are ambiguous
   // and must not reopen it. A host-stamped new revision is authoritative and

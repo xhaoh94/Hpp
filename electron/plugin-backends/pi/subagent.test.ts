@@ -100,7 +100,14 @@ describe("Pi subagent lifecycle", () => {
           label: "Reviewer",
           status: "completed",
           model: "test/reviewer",
-          usage: expect.objectContaining({ inputTokens: 512, outputTokens: 128, cacheReadTokens: 64, turns: 1 }),
+          // pi 只报 input/output，totalTokens 由后端补成两者之和（监视窗靠它显示消耗）
+          usage: expect.objectContaining({
+            inputTokens: 512,
+            outputTokens: 128,
+            cacheReadTokens: 64,
+            totalTokens: 640,
+            turns: 1,
+          }),
         }),
       ],
     });

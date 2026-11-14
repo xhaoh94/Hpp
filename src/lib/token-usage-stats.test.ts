@@ -3,7 +3,6 @@ import {
   formatTokenCacheRate,
   getTokenCacheRate,
   summarizeTokenUsage,
-  UNKNOWN_TOKEN_CHANNEL,
   UNKNOWN_TOKEN_MODEL,
 } from "./token-usage-stats";
 
@@ -38,7 +37,7 @@ describe("token usage stats", () => {
     expect(formatTokenCacheRate(getTokenCacheRate(summary.totals))).toBe("33.3%");
   });
 
-  it("groups by channel and by channel + model id", () => {
+  it("groups by model id and merges the same model across channels", () => {
     const summary = summarizeTokenUsage([
       {
         role: "assistant",
@@ -66,24 +65,17 @@ describe("token usage stats", () => {
       },
     ]);
 
-    expect(summary.byChannel.map((group) => group.name)).toEqual(["channel-b", "channel-a"]);
-    expect(summary.byChannel.find((group) => group.name === "channel-a")).toMatchObject({
-      input: 450,
-      output: 45,
-      cachedInput: 30,
+    // 同名模型跨渠道合并：model-x 在 channel-a / channel-b 合成一行。
+    expect(summary.byModel.map((group) => group.name)).toEqual(["model-x", "model-y"]);
+    expect(summary.byModel[0]).toMatchObject({
+      input: 1050,
+      output: 105,
+      cachedInput: 480,
       messageCount: 3,
+      // 合并后渠道要保留下来，按首次出现顺序拼接。
+      detail: "channel-a · channel-b",
     });
-    // 同名模型跨渠道不能合并：model-x 在 channel-a / channel-b 各一行。
-    expect(summary.byModel).toHaveLength(3);
-    expect(summary.byModel.map((group) => `${group.detail}/${group.name}`)).toEqual([
-      "channel-b/model-x",
-      "channel-a/model-y",
-      "channel-a/model-x",
-    ]);
-    expect(summary.byModel.find((group) => group.detail === "channel-b")).toMatchObject({
-      input: 900,
-      cachedInput: 450,
-    });
+    expect(summary.byModel[1]).toMatchObject({ name: "model-y", input: 300 });
   });
 
   it("falls back to the model label for legacy messages without provider or model id", () => {
@@ -95,9 +87,6 @@ describe("token usage stats", () => {
       },
     ]);
 
-    expect(summary.byChannel).toEqual([
-      expect.objectContaining({ name: UNKNOWN_TOKEN_CHANNEL, input: 200 }),
-    ]);
     expect(summary.byModel).toEqual([
       expect.objectContaining({
         name: "Claude Sonnet",
@@ -117,7 +106,6 @@ describe("token usage stats", () => {
 
     expect(summary.totals).toEqual({ input: 0, output: 0, cachedInput: 0, total: 0 });
     expect(summary.messageCount).toBe(0);
-    expect(summary.byChannel).toEqual([]);
     expect(summary.byModel).toEqual([]);
     expect(getTokenCacheRate(summary.totals)).toBeUndefined();
     expect(formatTokenCacheRate(undefined)).toBe("—");

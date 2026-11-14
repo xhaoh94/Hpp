@@ -256,10 +256,14 @@ describe("ProcessBlock", () => {
     expect(html).not.toContain("正在工作");
     // 胶囊里只留名字，耗时只在右侧「已运行」里出现。
     expect(html).not.toContain("chat-subagent-chip-time");
-    // 胶囊是按钮，展开/折叠只挂在右侧那块点击区上。
-    expect(html).toContain('class="chat-subagent-chip completed"');
-    expect(html).toContain("chat-subagent-event-toggle");
-    expect(html).toContain('class="chat-subagent-event-toggle expandable"');
+    // 展开入口只在胶囊自己身上：右侧不再有折叠箭头
+    expect(html).toContain("chat-subagent-chip completed");
+    expect(html).not.toContain("chat-subagent-event-toggle");
+    expect(html).not.toContain("chat-subagent-chevron");
+    // 右侧只剩进度文案
+    expect(html).toContain("chat-subagent-event-meta-group");
+    // 默认什么都不展开，点哪个胶囊才显示哪个子任务
+    expect(html).not.toContain("chat-subagent-detail");
     expect(html).toContain('aria-expanded="false"');
   });
 
