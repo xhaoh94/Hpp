@@ -25,11 +25,12 @@ describe("session markdown export", () => {
       title: "修复登录竞态",
       projectName: "Hpp",
       agentName: "Pi",
-      exportedAt: new Date("2026-11-14T10:00:00+08:00").getTime(),
+      // formatTime 按本地时间渲染，输入也用本地时间构造，避免 CI（UTC）与开发机时区不同导致断言漂移。
+      exportedAt: new Date(2026, 10, 14, 10, 0).getTime(),
       messages: [
-        { role: "user", content: "登录偶发失败，帮我看下", timestamp: new Date("2026-11-14T09:58:00+08:00").getTime() },
+        { role: "user", content: "登录偶发失败，帮我看下", timestamp: new Date(2026, 10, 14, 9, 58).getTime() },
         { role: "assistant", content: "", timestamp: Date.now() },
-        { role: "assistant", content: "定位到 token 刷新时序。", timestamp: new Date("2026-11-14T09:59:00+08:00").getTime() },
+        { role: "assistant", content: "定位到 token 刷新时序。", timestamp: new Date(2026, 10, 14, 9, 59).getTime() },
       ],
     });
     expect(markdown).toContain("# 修复登录竞态");
