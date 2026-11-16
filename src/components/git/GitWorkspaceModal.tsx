@@ -35,6 +35,8 @@ import type {
 } from "@shared/git-types";
 import { showAppConfirm } from "@/lib/app-dialog";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
+import { readCommitHistory, rememberCommitMessage } from "@/lib/git-commit-history";
+import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import { GitConflictEditor } from "./GitConflictEditor";
 import { GitRebaseDialog } from "./GitRebaseDialog";
 import { GitBlamePanel } from "./GitBlamePanel";
@@ -155,6 +157,16 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [commitHistory, setCommitHistory] = useState<string[]>([]);
+  const [commitHistoryOpen, setCommitHistoryOpen] = useState(false);
+  const commitHistoryBtnRef = useRef<HTMLButtonElement>(null);
+  const commitHistoryPopoverRef = useRef<HTMLDivElement>(null);
+  const commitHistoryStyle = useAnchoredOverlay(
+    commitHistoryOpen,
+    commitHistoryBtnRef,
+    commitHistoryPopoverRef,
+    { gap: 6 },
+  );
   const [amend, setAmend] = useState(false);
   // 提交后推送默认勾上：多数场景提交就是要推上去。
   const [pushAfterCommit, setPushAfterCommit] = useState(true);
@@ -514,6 +526,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     if (!result.success) {
       setError(result.error || "提交失败。");
     } else {
+      rememberCommitMessage(target.path, message);
       setMessage("");
       setAmend(false);
       if (pushAfterCommit) {
@@ -762,6 +775,21 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     if (item) setSelectedKey(changeKey(item));
   };
 
+  /** 历史 = 本地记录过的提交信息 + git log 的最近标题，去重后最多 30 条。 */
+  const openCommitHistory = async () => {
+    if (commitHistoryOpen) {
+      setCommitHistoryOpen(false);
+      return;
+    }
+    const saved = readCommitHistory(target.path);
+    const result = await window.electronAPI.gitLog(target.path, 30);
+    const logged = result.success
+      ? (result.entries || []).map((entry) => entry.subject.trim()).filter(Boolean)
+      : [];
+    setCommitHistory([...new Set([...saved, ...logged])].slice(0, 30));
+    setCommitHistoryOpen(true);
+  };
+
   const copyTreePath = async (relativePath: string) => {
     try {
       await navigator.clipboard.writeText(relativePath);
@@ -818,6 +846,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   );
 
   useMenuDismiss(!!pullMenu, () => setPullMenu(null), ".git-sync-menu, .git-sync-more");
+  useMenuDismiss(commitHistoryOpen, () => setCommitHistoryOpen(false), ".git-commit-history-popover, .git-commit-history-trigger");
 
   return createPortal(
     <div
@@ -1155,7 +1184,20 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                   ref={(element) => { paneRefs.current.commit = element; }}
                   style={{ flexGrow: paneRatio.commit }}
                 >
-                  <div className="git-commit-label">提交信息</div>
+                  <div className="git-commit-label">
+                    <span>提交信息</span>
+                    <button
+                      type="button"
+                      ref={commitHistoryBtnRef}
+                      className="git-commit-history-trigger"
+                      onClick={() => void openCommitHistory()}
+                      disabled={!!busy}
+                      title="从历史提交信息里选一条填入"
+                    >
+                      <History size={12} />
+                      历史
+                    </button>
+                  </div>
                   <textarea
                     value={message}
                     rows={2}
@@ -1402,6 +1444,44 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             <button type="button" role="menuitem" onClick={() => { setPullMenu(null); void rebasePull(); }}>
               <GitBranch size={14} />拉取并变基
             </button>
+          </div>,
+          document.body,
+        )}
+
+        {commitHistoryOpen && createPortal(
+          <div
+            ref={commitHistoryPopoverRef}
+            className="git-commit-history-popover"
+            style={commitHistoryStyle}
+            role="dialog"
+            aria-label="提交信息历史"
+          >
+            <div className="git-commit-history-head">
+              <span>提交信息历史</span>
+              <button type="button" onClick={() => setCommitHistoryOpen(false)} aria-label="关闭提交信息历史">
+                <X size={13} />
+              </button>
+            </div>
+            {commitHistory.length === 0 ? (
+              <div className="git-commit-history-empty">还没有历史提交信息</div>
+            ) : (
+              <div className="git-commit-history-list persistent-scroll">
+                {commitHistory.map((text) => (
+                  <button
+                    type="button"
+                    key={text}
+                    className="git-commit-history-item"
+                    title={text}
+                    onClick={() => {
+                      setMessage(text);
+                      setCommitHistoryOpen(false);
+                    }}
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>,
           document.body,
         )}

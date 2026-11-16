@@ -801,11 +801,119 @@
 }
 
 .git-commit-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   color: var(--text-secondary);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.git-commit-history-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.git-commit-history-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-commit-history-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 浮层走 portal + fixed：提交区是 overflow: hidden，放在里面会被裁掉。 */
+.git-commit-history-popover {
+  z-index: 1320;
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  max-height: 260px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 32px var(--shadow-color, rgba(0, 0, 0, 0.32));
+  overflow: hidden;
+}
+
+.git-commit-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.git-commit-history-head button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.git-commit-history-head button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-commit-history-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+}
+
+.git-commit-history-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.git-commit-history-item:hover {
+  background: var(--bg-hover);
+}
+
+.git-commit-history-empty {
+  padding: 12px 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .git-commit-actions .git-primary-btn {
