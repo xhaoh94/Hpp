@@ -18,8 +18,10 @@ Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理
 - 聊天框提供“请求权限、自动权限、完全访问权限”三档通用策略，并将所选档位固化到每条消息和队列项。
 - 内置编辑器桥接：VSCode 系扩展、Zed 任务和通用 CLI 可以把选区、文件或文件夹直接送进当前会话的输入框。
 - 提供子 Agent 运行监视、本轮产物清单、HTML/SVG 预览和粘贴文本折叠。
+- 会话历史支持全文搜索、导出 Markdown，以及生成交接摘要供新会话接续。
+- 聊天底部显示本轮 token 用量，按模型分组统计输入、缓存命中和输出，可查看明细。
 - 会话可选独立 Git worktree，支持并行任务隔离、检查点和合并回主工作区。
-- 内置独立 Git 工作台弹窗：查看状态、暂存/取消暂存、diff、提交和 stash。
+- 内置独立 Git 工作台弹窗：查看状态、暂存/取消暂存、diff、提交、stash、分支、rebase、冲突解决和文件追溯。
 
 ## 独立 Git 工作区
 
@@ -42,11 +44,12 @@ Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理
 - diff 查看；
 - 提交已暂存改动，支持 amend；
 - 创建、列出和恢复 stash；
-- 提交历史、提交详情；
-- 本地分支列表、创建、切换、合并、删除和发起 rebase；
+- 提交历史、提交详情；单文件历史与逐行追溯（blame，长文件虚拟滚动）；
+- 本地分支列表、创建、切换、合并、删除和发起 rebase；rebase 冲突可在弹窗里继续、跳过或中止；
 - worktree 列表和安全删除；
 - fetch / pull --ff-only / push；
-- 文件级冲突解决：使用当前版本、对方版本、打开文件、标记已解决，以及继续/中止 merge、rebase、cherry-pick、revert。
+- 文件级冲突解决：使用当前版本、对方版本、打开文件、标记已解决，以及继续/中止 merge、rebase、cherry-pick、revert；
+- Git 操作日志：记录本会话内的 Git 命令与结果，便于回溯。
 
 创建独立 worktree 时，如果主工作区有未提交改动，新建会话弹窗会提供「打开 Git 工作台」入口；提交或 stash 后关闭弹窗，Hpp 会自动重新检测，worktree 勾选随即可用。
 
@@ -196,11 +199,17 @@ Linux 默认自动选择 Ozone 后端，并且不会强制关闭 Wayland 输入�
 
 Linux 默认关闭窗口时退出，避免在没有系统托盘宿主的 niri 等桌面中隐藏后无法恢复。需要驻留托盘时，可在通用设置中手动启用；niri 下窗口尺寸由合成器快捷键管理。
 
-### 全局唤起（Wayland / niri）
+### 全局唤起（Wayland）
 
 Wayland 没有给普通客户端的全局按键协议，`globalShortcut` 在原生 Wayland 会话下注册不上（X11 或 `HPP_OZONE_PLATFORM=x11` 时可以正常用）。Wayland 下改用合成器 keybind：再启动一次同一份 Hpp 并带上 `--quick-ask`，第二个进程会通过单实例锁退出，由已在运行的 Hpp 弹出输入条。
 
-Hpp 会把设置里的「全局唤起」同步到 niri 的 include 文件，并在保存后让 niri 重载配置。`~/.config/niri/config.kdl` 只需要包含一次：
+Hpp 会按运行环境自动识别合成器，把设置里的「全局唤起」同步到对应配置并在保存后热重载，目前支持：
+
+- **Hyprland**：写入 `~/.config/hypr/hpp-quick-ask.conf` 并 `hyprctl reload`。主配置 `~/.config/hypr/hyprland.conf` 需要包含一次：
+  `source = ~/.config/hypr/hpp-quick-ask.conf`
+- **sway**：写入 `~/.config/sway/hpp-quick-ask.conf` 并 `swaymsg reload`。主配置 `~/.config/sway/config` 需要包含一次：
+  `include ~/.config/sway/hpp-quick-ask.conf`
+- **niri**：写入 `~/.config/niri/hpp-quick-ask.kdl` 并让 niri 重载配置。`~/.config/niri/config.kdl` 只需要包含一次：
 
 ```kdl
 include "hpp-quick-ask.kdl"
@@ -212,9 +221,10 @@ window-rule {
 }
 ```
 
-之后在 Hpp 设置里修改快捷键，Hpp 会更新 `~/.config/niri/hpp-quick-ask.kdl`，不需要再手动改主配置。生成文件由 Hpp 维护，不要手改；主配置缺少 include 时 Hpp 会在设置页提示。
+之后在 Hpp 设置里修改快捷键，Hpp 会更新对应的生成文件，不需要再手动改主配置。生成文件由 Hpp 维护，不要手改；主配置缺少 source/include 时 Hpp 会在设置页提示。
 
-- 窗口规则必须加，否则 760×150 的输入条会被当成平铺窗口塞进滚动列；`open-focused` 保证从其他窗口触发时输入条能拿到焦点。`app-id` 用 `niri msg windows` 确认，Electron 下通常是 `hpp`。
+- niri 的窗口规则必须加，否则 760×150 的输入条会被当成平铺窗口塞进滚动列；`open-focused` 保证从其他窗口触发时输入条能拿到焦点。`app-id` 用 `niri msg windows` 确认，Electron 下通常是 `hpp`。Hyprland / sway 的浮动窗口规则按 `class:`（XWayland）或 `initialClass:` 匹配 `hpp`。
+- KDE Wayland / GNOME Wayland 没有可写的纯文本配置：注册失败时设置页会给出手动绑定的指引（KDE：系统设置 → 快捷键 → 添加自定义命令；GNOME：安装 Custom Shortcut 类扩展），命令为 `Hpp --quick-ask`。
 - Hpp 没在运行时按这个键会正常启动并直接弹出输入条；托盘隐藏状态下也能唤出。
 - `npm run dev` 时生成文件会指向当前的 Electron 开发命令；切换回打包版后 Hpp 会自动改写。
 

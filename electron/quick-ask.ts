@@ -4,7 +4,8 @@ import { readFile } from "fs/promises";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
 import { detectDesktopEnvironment, isNativeWaylandSession } from "./linux-desktop";
-import { syncNiriQuickAsk } from "./niri-quick-ask";
+import { syncHyprlandQuickAsk, syncSwayQuickAsk } from "./compositor-quick-ask";
+import { resolveQuickAskCommand, syncNiriQuickAsk } from "./niri-quick-ask";
 import {
   DEFAULT_GLOBAL_QUICK_ASK,
   pickQuickAskTarget,
@@ -147,6 +148,19 @@ export function showQuickAsk(options: { forceQuickAsk?: boolean } = {}) {
  *
  * 注册失败通常是被其它程序占用；必须把错误回给设置页，静默失败会让用户以为功能坏了。
  */
+/** 没有配置同步能力的 Wayland 桌面，按桌面给出手动绑定的指引。 */
+function waylandFallbackHint(): string {
+  const desktop = detectDesktopEnvironment();
+  const command = "Hpp（或可执行文件名） --quick-ask";
+  if (desktop.isKde) {
+    return `KDE Wayland 需要手动绑定：系统设置 → 快捷键 → 添加自定义命令，绑定 ${command}。`;
+  }
+  if (desktop.isGnome) {
+    return `GNOME Wayland 需要手动绑定：安装 Custom Shortcut 类扩展，绑定 ${command}。`;
+  }
+  return "当前 Wayland 桌面不支持系统级快捷键，请在合成器里绑定 `--quick-ask`（README 有 Hyprland / sway / niri 示例）。";
+}
+
 export function applyGlobalQuickAsk(displayShortcut: string): QuickAskRegisterResult {
   if (registeredAccelerator) {
     globalShortcut.unregister(registeredAccelerator);
@@ -154,10 +168,14 @@ export function applyGlobalQuickAsk(displayShortcut: string): QuickAskRegisterRe
   }
   const shortcut = displayShortcut.trim();
 
-  // niri 没有全局快捷键协议，Electron 的 register() 可能表面成功但系统按键不会送达。
-  // 改为把设置里的组合键同步到 niri 的 include 文件，再让 niri 重载配置。
-  if (isNativeWaylandSession() && detectDesktopEnvironment().isNiri) {
-    return syncNiriQuickAsk(shortcut);
+  // 原生 Wayland 下 Electron 的 register() 可能表面成功但系统按键不会送达。
+  // 有纯文本配置 + 热重载命令的合成器（Hyprland / sway / niri）走配置同步；
+  // KDE / GNOME 等给出手动绑定的指引，其余合成器退回 register 并如实报告失败。
+  if (isNativeWaylandSession()) {
+    const desktop = detectDesktopEnvironment();
+    if (desktop.isHyprland) return syncHyprlandQuickAsk(shortcut, resolveQuickAskCommand());
+    if (desktop.isSway) return syncSwayQuickAsk(shortcut, resolveQuickAskCommand());
+    if (desktop.isNiri) return syncNiriQuickAsk(shortcut);
   }
 
   if (!shortcut) return { ok: true };
@@ -171,7 +189,7 @@ export function applyGlobalQuickAsk(displayShortcut: string): QuickAskRegisterRe
       return {
         ok: false,
         error: isNativeWaylandSession()
-          ? "当前 Wayland 桌面不支持系统级快捷键，请在合成器里绑定 `--quick-ask`（README 有 niri 示例）。"
+          ? waylandFallbackHint()
           : "该快捷键已被其它程序占用。",
       };
     }

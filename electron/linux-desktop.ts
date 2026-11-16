@@ -1,6 +1,10 @@
 export type DesktopEnvironment = {
   isWayland: boolean;
   isNiri: boolean;
+  isHyprland: boolean;
+  isSway: boolean;
+  isKde: boolean;
+  isGnome: boolean;
   isX11: boolean;
   displayServer: "wayland" | "x11" | "unknown";
 };
@@ -27,7 +31,16 @@ export function detectDesktopEnvironment(
   variables: EnvironmentVariables = process.env,
 ): DesktopEnvironment {
   if (platform !== "linux") {
-    return { isWayland: false, isNiri: false, isX11: false, displayServer: "unknown" };
+    return {
+      isWayland: false,
+      isNiri: false,
+      isHyprland: false,
+      isSway: false,
+      isKde: false,
+      isGnome: false,
+      isX11: false,
+      displayServer: "unknown",
+    };
   }
 
   const sessionType = variables.XDG_SESSION_TYPE?.trim().toLowerCase();
@@ -36,10 +49,24 @@ export function detectDesktopEnvironment(
   const isNiri = !!variables.NIRI_SOCKET?.trim()
     || containsDesktop(variables.XDG_CURRENT_DESKTOP, "niri")
     || containsDesktop(variables.DESKTOP_SESSION, "niri");
+  const isHyprland = !!variables.HYPRLAND_INSTANCE_SIGNATURE?.trim()
+    || containsDesktop(variables.XDG_CURRENT_DESKTOP, "hyprland")
+    || containsDesktop(variables.DESKTOP_SESSION, "hyprland");
+  const isSway = !!variables.SWAYSOCK?.trim()
+    || containsDesktop(variables.XDG_CURRENT_DESKTOP, "sway")
+    || containsDesktop(variables.DESKTOP_SESSION, "sway");
+  const isKde = containsDesktop(variables.XDG_CURRENT_DESKTOP, "kde")
+    || containsDesktop(variables.DESKTOP_SESSION, "kde");
+  const isGnome = containsDesktop(variables.XDG_CURRENT_DESKTOP, "gnome")
+    || containsDesktop(variables.DESKTOP_SESSION, "gnome");
 
   return {
     isWayland,
     isNiri,
+    isHyprland,
+    isSway,
+    isKde,
+    isGnome,
     isX11,
     displayServer: isWayland ? "wayland" : isX11 ? "x11" : "unknown",
   };

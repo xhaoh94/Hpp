@@ -85,7 +85,8 @@ export function resolveNiriConfigPath(): string {
   return join(configHome, "niri", "config.kdl");
 }
 
-function resolveQuickAskCommand(): string[] {
+/** Hyprland / sway 的同步也要拼同一条启动命令，导出共用。 */
+export function resolveQuickAskCommand(): string[] {
   const appImage = process.env.APPIMAGE?.trim();
   if (appImage) return [appImage, "--quick-ask"];
   if (app.isPackaged) return [process.execPath, "--quick-ask"];

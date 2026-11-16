@@ -42,6 +42,15 @@ describe("collectMessageArtifacts", () => {
     expect(artifacts[0].kind).toBe("document");
   });
 
+  it("同一文件的相对路径与绝对路径写法只保留一条", () => {
+    const artifacts = collectMessageArtifacts(message([
+      { id: "w1", type: "tool", files: [{ file: "Docs/对接清单.md", action: "written" }] },
+      { id: "w2", type: "tool", files: [{ file: "G:/Work/Projects/Pro2/dev/Docs/对接清单.md", action: "written" }] },
+    ]));
+
+    expect(artifacts).toHaveLength(1);
+  });
+
   it("跳过已经在 diff 面板里展示过的文件（含相对/绝对路径混用）", () => {
     const artifacts = collectMessageArtifacts(
       message([

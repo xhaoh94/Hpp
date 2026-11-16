@@ -183,6 +183,8 @@ export function collectMessageArtifacts(
   }
 
   const seen = new Set<string>();
+  // 同一文件可能一次记相对路径、一次记绝对路径，去重要用结尾匹配，不能只比精确 key。
+  const seenKeys: string[] = [];
   const artifacts: MessageArtifact[] = [];
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
@@ -191,9 +193,10 @@ export function collectMessageArtifacts(
       // 模型显式声明的不受这条限制——它说了这是交付物就按交付物算。
       if (!item.presented && !isArtifactPath(item.path, options.workspacePath)) continue;
       const key = normalizePath(item.path);
-      if (seen.has(key) || deleted.has(key)) continue;
+      if (seen.has(key) || seenKeys.some((existing) => isSamePath(existing, key)) || deleted.has(key)) continue;
       if (excluded.some((candidate) => isSamePath(key, candidate))) continue;
       seen.add(key);
+      seenKeys.push(key);
       artifacts.push({ path: item.path, name: getFileName(item.path), kind: classify(item.path) });
     }
   }

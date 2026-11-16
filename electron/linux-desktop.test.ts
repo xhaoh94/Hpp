@@ -10,6 +10,10 @@ describe("Linux desktop environment detection", () => {
     })).toEqual({
       isWayland: true,
       isNiri: true,
+      isHyprland: false,
+      isSway: false,
+      isKde: false,
+      isGnome: false,
       isX11: false,
       displayServer: "wayland",
     });
@@ -20,6 +24,42 @@ describe("Linux desktop environment detection", () => {
       XDG_CURRENT_DESKTOP: "niri:GNOME",
       WAYLAND_DISPLAY: "wayland-0",
     }).isNiri).toBe(true);
+  });
+
+  it("detects Hyprland from its instance signature", () => {
+    const desktop = detectDesktopEnvironment("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      WAYLAND_DISPLAY: "wayland-1",
+      HYPRLAND_INSTANCE_SIGNATURE: "e2b1c0",
+    });
+    expect(desktop.isHyprland).toBe(true);
+    expect(desktop.isNiri).toBe(false);
+    expect(desktop.isSway).toBe(false);
+  });
+
+  it("detects Hyprland from desktop session names as a fallback", () => {
+    expect(detectDesktopEnvironment("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      XDG_CURRENT_DESKTOP: "Hyprland",
+    }).isHyprland).toBe(true);
+  });
+
+  it("detects sway from its IPC socket", () => {
+    expect(detectDesktopEnvironment("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      SWAYSOCK: "/run/user/1000/sway-ipc.sock",
+    }).isSway).toBe(true);
+  });
+
+  it("detects KDE and GNOME desktops", () => {
+    expect(detectDesktopEnvironment("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      XDG_CURRENT_DESKTOP: "KDE",
+    }).isKde).toBe(true);
+    expect(detectDesktopEnvironment("linux", {
+      XDG_SESSION_TYPE: "wayland",
+      XDG_CURRENT_DESKTOP: "GNOME",
+    }).isGnome).toBe(true);
   });
 
   it("detects an X11 fallback from DISPLAY", () => {
@@ -34,9 +74,14 @@ describe("Linux desktop environment detection", () => {
     expect(detectDesktopEnvironment("win32", {
       WAYLAND_DISPLAY: "wayland-0",
       NIRI_SOCKET: "/tmp/niri.sock",
+      HYPRLAND_INSTANCE_SIGNATURE: "e2b1c0",
     })).toEqual({
       isWayland: false,
       isNiri: false,
+      isHyprland: false,
+      isSway: false,
+      isKde: false,
+      isGnome: false,
       isX11: false,
       displayServer: "unknown",
     });
