@@ -691,8 +691,9 @@ export class GitService {
   }
 
   async push(target: string): Promise<GitPushResult> {
+    let root = "";
     try {
-      const root = await this.repoRoot(target);
+      root = await this.repoRoot(target);
       const head = await runGitResult(root, ["symbolic-ref", "-q", "--short", "HEAD"]);
       const branch = head.stdout.trim();
       if (head.code !== 0 || !branch) throw new Error("当前处于分离 HEAD 状态，先切到分支再推送。");
@@ -714,7 +715,33 @@ export class GitService {
         upstream: `${remote}/${branch}`,
       };
     } catch (error) {
-      return { success: false, error: errorMessage(error) };
+      return { success: false, error: await this.describePushFailure(root, error) };
+    }
+  }
+
+  /**
+   * 非快进被拒时 git 自己的 hint 只说 "behind"（落后），分叉场景会误导人。
+   * 按实际 ahead/behind 换成能照着做的提示，原始 stderr 附在后面。
+   */
+  private async describePushFailure(root: string, error: unknown): Promise<string> {
+    const raw = errorMessage(error);
+    if (!root || !/non-fast-forward|fetch first/i.test(raw)) return raw;
+    try {
+      const upstreamRef = await runGitResult(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+      const upstream = upstreamRef.stdout.trim();
+      if (!upstream) return raw;
+      // 左数是 HEAD 独有（领先），右数是 upstream 独有（落后）。
+      const counts = await runGit(root, ["rev-list", "--left-right", "--count", `HEAD...${upstream}`]);
+      const [ahead = 0, behind = 0] = counts.trim().split(/\s+/).map((value) => Number(value) || 0);
+      if (ahead > 0 && behind > 0) {
+        return `推送被拒绝：本地分支和 ${upstream} 已分叉（领先 ${ahead} 个提交，落后 ${behind} 个），不是单纯落后。\n先拉取（合并或变基）把远程提交合进来，再推送。\n\n${raw}`;
+      }
+      if (behind > 0) {
+        return `推送被拒绝：${upstream} 有 ${behind} 个本地没有的提交。\n先拉取再推送。\n\n${raw}`;
+      }
+      return `推送被拒绝：${upstream} 已不是本地提交历史的前缀（可能被强制推送过）。\n先拉取确认远程状态，再决定是否覆盖。\n\n${raw}`;
+    } catch {
+      return raw;
     }
   }
 
