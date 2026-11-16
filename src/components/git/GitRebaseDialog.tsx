@@ -7,6 +7,8 @@ interface Props {
   repoPath: string;
   base: GitLogEntry;
   disabled: boolean;
+  /** 传了就走工作台的通知控制台，不再在弹窗里插错误条。 */
+  onError?: (message: string) => void;
   onClose: () => void;
   onFinished: (result: GitActionResult) => void;
 }
@@ -20,13 +22,16 @@ const ACTIONS: { value: GitRebaseAction; label: string }[] = [
   { value: "drop", label: "drop · 丢弃这个提交" },
 ];
 
-export function GitRebaseDialog({ repoPath, base, disabled, onClose, onFinished }: Props) {
+export function GitRebaseDialog({ repoPath, base, disabled, onError, onClose, onFinished }: Props) {
   const [loading, setLoading] = useState(true);
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
   const [actions, setActions] = useState<Record<string, GitRebaseAction>>({});
   const [messages, setMessages] = useState<Record<string, string>>({});
   const [running, setRunning] = useState(false);
-  const [error, setError] = useState("");
+  const reportError = useCallback(
+    (message: string) => (onError ? onError(message) : undefined),
+    [onError],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -35,17 +40,17 @@ export function GitRebaseDialog({ repoPath, base, disabled, onClose, onFinished 
       if (cancelled) return;
       setLoading(false);
       if (!result.success) {
-        setError(result.error || "读取变基范围失败。");
+        reportError(result.error || "读取变基范围失败。");
         return;
       }
       const entries = result.commits || [];
       setCommits(entries);
       setActions(Object.fromEntries(entries.map((entry) => [entry.hash, "pick" as GitRebaseAction])));
       setMessages(Object.fromEntries(entries.map((entry) => [entry.hash, entry.subject])));
-      if (entries.length === 0) setError("这个提交之后没有提交，无法交互式变基。");
+      if (entries.length === 0) reportError("这个提交之后没有提交，无法交互式变基。");
     });
     return () => { cancelled = true; };
-  }, [base.hash, repoPath]);
+  }, [base.hash, repoPath, reportError]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -64,7 +69,6 @@ export function GitRebaseDialog({ repoPath, base, disabled, onClose, onFinished 
 
   const run = useCallback(async () => {
     setRunning(true);
-    setError("");
     const steps: GitRebaseStep[] = commits.map((commit) => {
       const action = actions[commit.hash] || "pick";
       return action === "reword"
@@ -75,11 +79,11 @@ export function GitRebaseDialog({ repoPath, base, disabled, onClose, onFinished 
     setRunning(false);
     // 冲突时 rebase 已经停在那里了，交给工作台去显示横幅 + 变更页。
     if (!result.success && !result.conflict) {
-      setError(result.error || "交互式变基失败。");
+      reportError(result.error || "交互式变基失败。");
       return;
     }
     onFinished(result);
-  }, [actions, base.hash, commits, messages, onFinished, repoPath]);
+  }, [actions, base.hash, commits, messages, onFinished, repoPath, reportError]);
 
   return (
     <div className="git-rebase-overlay" role="presentation" onMouseDown={(event) => {
@@ -95,8 +99,6 @@ export function GitRebaseDialog({ repoPath, base, disabled, onClose, onFinished 
             <X size={15} />
           </button>
         </div>
-
-        {error && <div className="git-workspace-error">{error}</div>}
 
         <div className="git-rebase-list persistent-scroll">
           {loading ? <div className="git-diff-empty"><LoaderCircle className="spin" size={15} /> 读取提交…</div>

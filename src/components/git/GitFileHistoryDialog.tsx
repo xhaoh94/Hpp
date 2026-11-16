@@ -6,27 +6,27 @@ import type { GitLogEntry } from "@shared/git-types";
 interface Props {
   repoPath: string;
   path: string;
+  /** 传了就走工作台的通知控制台，不再在弹窗里插错误条。 */
+  onError?: (message: string) => void;
   onClose: () => void;
 }
 
 /** 目录树右键的「查看历史」：只看这个文件 / 目录的提交。 */
-export function GitFileHistoryDialog({ repoPath, path, onClose }: Props) {
+export function GitFileHistoryDialog({ repoPath, path, onError, onClose }: Props) {
   const [entries, setEntries] = useState<GitLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError("");
     void window.electronAPI.gitFileHistory(repoPath, path, 50).then((result) => {
       if (cancelled) return;
       setLoading(false);
-      if (!result.success) setError(result.error || "读取历史失败。");
+      if (!result.success) onError?.(result.error || "读取历史失败。");
       else setEntries(result.entries || []);
     });
     return () => { cancelled = true; };
-  }, [path, repoPath]);
+  }, [onError, path, repoPath]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -60,8 +60,6 @@ export function GitFileHistoryDialog({ repoPath, path, onClose }: Props) {
             <X size={15} />
           </button>
         </div>
-
-        {error && <div className="git-workspace-error">{error}</div>}
 
         <div className="git-rebase-list persistent-scroll">
           {loading ? (
