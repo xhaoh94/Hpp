@@ -468,15 +468,34 @@ export class GitService {
     }
   }
 
-  async stashPop(target: string, ref: unknown): Promise<GitActionResult> {
+  /** 应用储藏。drop=false 用 apply（保留储藏）；overwrite=true 先丢弃这些文件在当前工作区的改动。 */
+  async stashPop(target: string, ref: unknown, options?: { overwrite?: boolean; drop?: boolean }): Promise<GitActionResult> {
     try {
       const root = await this.repoRoot(target);
       const stashRef = typeof ref === "string" && /^stash@\{\d+\}$/.test(ref) ? ref : undefined;
-      const result = await runGitResult(root, ["stash", "pop", ...(stashRef ? [stashRef] : [])]);
+      const drop = options?.drop !== false;
+      if (options?.overwrite) {
+        const listing = await runGitResult(root, ["stash", "show", "--name-only", "--include-untracked", ...(stashRef ? [stashRef] : [])]);
+        const files = listing.code === 0
+          ? listing.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+          : [];
+        if (files.length) {
+          // 未跟踪的同名文件会让 apply 直接报 already exists，先清掉；已跟踪的丢弃本地改动。
+          const others = await runGitResult(root, ["ls-files", "--others", "--", ...files]);
+          const untracked = others.code === 0
+            ? others.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+            : [];
+          if (untracked.length) await runGit(root, ["clean", "-f", "--", ...untracked]);
+          const tracked = files.filter((file) => !untracked.includes(file));
+          if (tracked.length) await runGit(root, ["checkout", "--", ...tracked]);
+        }
+      }
+      const verb = drop ? "pop" : "apply";
+      const result = await runGitResult(root, ["stash", verb, ...(stashRef ? [stashRef] : [])]);
       if (result.code !== 0) {
         // 冲突提示可能落在 stderr 或 stdout，合并起来，渲染层才能判断是不是冲突。
         const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-        return { success: false, error: detail || `git stash pop 退出码 ${result.code}` };
+        return { success: false, error: detail || `git stash ${verb} 退出码 ${result.code}` };
       }
       return { success: true, output: result.stdout.trim() };
     } catch (error) {

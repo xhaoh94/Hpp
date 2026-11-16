@@ -19,6 +19,8 @@ export interface GitOpLogItem {
   detail?: string;
   durationMs?: number;
   time: string;
+  /** 行内的引导动作（如「合并恢复」），随条目一起出现、清空日志时一起消失。 */
+  action?: { label: string; run: () => void };
 }
 
 export const formatOpDuration = (ms: number | undefined) => {
@@ -28,12 +30,13 @@ export const formatOpDuration = (ms: number | undefined) => {
 
 interface Props {
   entries: GitOpLogItem[];
+  busy?: boolean;
   onClear: () => void;
   onClose: () => void;
 }
 
 /** 操作日志弹窗：居中宽幅，行可展开看完整输出，支持复制、清空。 */
-export function GitOpLogDialog({ entries, onClear, onClose }: Props) {
+export function GitOpLogDialog({ entries, busy = false, onClear, onClose }: Props) {
   const [expanded, setExpanded] = useState<number | null>(null);
 
   useEffect(() => {
@@ -85,12 +88,14 @@ export function GitOpLogDialog({ entries, onClear, onClose }: Props) {
             <strong>操作日志</strong>
             <span>提交、推送、储藏等 git 操作的执行记录</span>
           </div>
-          <button type="button" className="git-notice-console-tool" onClick={onClear} disabled={entries.length === 0}>
-            <Eraser size={13} /> 清除
-          </button>
-          <button type="button" className="git-icon-btn" onClick={onClose} title="关闭">
-            <X size={15} />
-          </button>
+          <div className="git-log-dialog-actions">
+            <button type="button" className="git-notice-console-tool" onClick={onClear} disabled={entries.length === 0}>
+              <Eraser size={13} /> 清除
+            </button>
+            <button type="button" className="git-icon-btn" onClick={onClose} title="关闭">
+              <X size={15} />
+            </button>
+          </div>
         </div>
 
         <div className="git-log-list persistent-scroll">
@@ -122,6 +127,19 @@ export function GitOpLogDialog({ entries, onClear, onClose }: Props) {
                   >
                     <Copy size={12} /> 复制
                   </button>
+                  {entry.action && (
+                    <button
+                      type="button"
+                      className="git-log-action"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        entry.action?.run();
+                      }}
+                      disabled={busy}
+                    >
+                      {entry.action.label}
+                    </button>
+                  )}
                   <span className="git-log-meta">
                     {entry.time}
                     {entry.durationMs !== undefined ? ` · ${formatOpDuration(entry.durationMs)}` : ""}

@@ -271,8 +271,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:stashCreate", target, message, paths),
   gitStashList: (target: string): Promise<GitStashListResult> =>
     ipcRenderer.invoke("git:stashList", target),
-  gitStashPop: (target: string, ref?: string): Promise<GitActionResult> =>
-    ipcRenderer.invoke("git:stashPop", target, ref),
+  gitStashPop: (target: string, ref?: string, options?: { overwrite?: boolean; drop?: boolean }): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stashPop", target, ref, options),
   gitStashDrop: (target: string, ref?: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:stashDrop", target, ref),
   gitStashFiles: (target: string, ref?: string): Promise<GitStashFilesResult> =>

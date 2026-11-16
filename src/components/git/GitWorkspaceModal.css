@@ -775,6 +775,38 @@
   border-color: var(--accent-color);
 }
 
+/* 恢复储藏弹窗：说明 + 两个勾选项，勾选下带一行灰字说明。 */
+.git-stash-restore-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+}
+
+.git-stash-restore-body p {
+  margin: 0 0 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.git-stash-restore-body .git-amend {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.git-stash-restore-hint {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 按钮组居中，确定（主色）在前，与恢复确认的设计一致。 */
+.git-rebase-footer.git-restore-footer > div {
+  justify-content: center;
+  flex: 1;
+  gap: 8px;
+}
+
 .git-stash-list {
   display: flex;
   flex-direction: column;
@@ -1261,32 +1293,7 @@
   border-color: rgba(244, 67, 54, 0.35);
 }
 
-/* 浮动通知窗：独立于工作台布局，挂 body 右上角，可收起、可重新打开、可清空。 */
-.git-notice-console-stack {
-  position: fixed;
-  top: 46px;
-  right: 14px;
-  z-index: 1330;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: min(380px, calc(100vw - 28px));
-}
-
-.git-notice-console-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
-.git-notice-console-head strong {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
+/* 日志弹窗头部的「清除」按钮沿用通知工具按钮样式。 */
 .git-notice-console-tool {
   display: inline-flex;
   align-items: center;
@@ -1308,43 +1315,6 @@
 .git-notice-console-tool:disabled {
   opacity: 0.45;
   cursor: default;
-}
-
-/* 面板收起后的重新打开按钮：右下角小圆钮 + 数量角标。 */
-.git-notice-launcher {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 1330;
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid rgba(232, 168, 56, 0.55);
-  border-radius: 50%;
-  background: var(--bg-secondary);
-  color: #d99a2b;
-  cursor: pointer;
-  box-shadow: 0 6px 20px var(--shadow-color);
-}
-
-.git-notice-launcher:hover {
-  background: var(--bg-hover);
-}
-
-.git-notice-launcher-badge {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
-  border-radius: 999px;
-  background: var(--accent-color);
-  color: #fff;
-  font-size: 9px;
-  line-height: 15px;
-  text-align: center;
 }
 
 /* 工作台最底部的日志状态条：显示最新一条操作 / 错误，点开完整日志。 */
@@ -1398,22 +1368,6 @@
   color: #d99a2b;
 }
 
-.git-log-bar-close {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 26px;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.git-log-bar-close:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
 .git-log-tone.ok {
   color: #3fb950;
 }
@@ -1446,6 +1400,13 @@
 
 .git-rebase-header .git-notice-console-tool {
   margin-right: 4px;
+}
+
+/* 日志弹窗头部的按钮组：贴右侧成组，别被 space-between 拆到中间。 */
+.git-rebase-header .git-log-dialog-actions {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
 }
 
 .git-log-list {
@@ -1510,8 +1471,10 @@
   white-space: nowrap;
 }
 
+/* 复制按钮悬浮行时才出现；用 visibility 占位，避免出现/消失时布局跳动。 */
 .git-log-copy {
-  display: none;
+  visibility: hidden;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
@@ -1524,13 +1487,14 @@
   cursor: pointer;
 }
 
-.git-log-row:hover .git-log-copy {
-  display: inline-flex;
-}
-
 .git-log-copy:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.git-log-row:hover .git-log-copy,
+.git-log-copy:focus-visible {
+  visibility: visible;
 }
 
 .git-log-meta {
@@ -1538,6 +1502,28 @@
   color: var(--text-secondary);
   font-family: ui-monospace, monospace;
   font-size: 10px;
+}
+
+/* 行内引导按钮（如「合并恢复」）：随警告条出现在复制按钮左侧。 */
+.git-log-action {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid rgba(232, 168, 56, 0.55);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: #d99a2b;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.git-log-action:hover:not(:disabled) {
+  background: rgba(232, 168, 56, 0.12);
+  color: var(--text-primary);
+}
+
+.git-log-action:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .git-log-detail {

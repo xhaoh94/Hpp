@@ -443,7 +443,7 @@ export interface ElectronAPI {
   gitCommit: (target: string, message: string, amend?: boolean) => Promise<GitCommitResult>;
   gitStashCreate: (target: string, message?: string, paths?: string[]) => Promise<GitActionResult>;
   gitStashList: (target: string) => Promise<GitStashListResult>;
-  gitStashPop: (target: string, ref?: string) => Promise<GitActionResult>;
+  gitStashPop: (target: string, ref?: string, options?: { overwrite?: boolean; drop?: boolean }) => Promise<GitActionResult>;
   gitStashDrop: (target: string, ref?: string) => Promise<GitActionResult>;
   gitStashFiles: (target: string, ref?: string) => Promise<GitStashFilesResult>;
   gitStashMerge: (target: string, ref: string) => Promise<GitActionResult>;

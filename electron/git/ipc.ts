@@ -32,8 +32,8 @@ export function registerGitIpc() {
     gitService.stashCreate(requireTarget(target), message, paths));
   ipcMain.handle("git:stashList", (_event, target: unknown) =>
     gitService.stashList(requireTarget(target)));
-  ipcMain.handle("git:stashPop", (_event, target: unknown, ref: unknown) =>
-    gitService.stashPop(requireTarget(target), ref));
+  ipcMain.handle("git:stashPop", (_event, target: unknown, ref: unknown, options?: { overwrite?: boolean; drop?: boolean }) =>
+    gitService.stashPop(requireTarget(target), ref, options));
   ipcMain.handle("git:stashDrop", (_event, target: unknown, ref: unknown) =>
     gitService.stashDrop(requireTarget(target), ref));
   ipcMain.handle("git:stashFiles", (_event, target: unknown, ref: unknown) =>

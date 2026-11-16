@@ -43,8 +43,8 @@ import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import { GitConflictEditor } from "./GitConflictEditor";
 import { GitRebaseDialog } from "./GitRebaseDialog";
 import { GitStashDialog } from "./GitStashDialog";
+import { GitStashRestoreDialog } from "./GitStashRestoreDialog";
 import { GitFileHistoryDialog } from "./GitFileHistoryDialog";
-import { GitNoticeConsole, type GitNotice } from "./GitNoticeConsole";
 import { GitOpLogDialog, type GitOpLogItem } from "./GitOpLogDialog";
 import { GitBlamePanel } from "./GitBlamePanel";
 import { GitChangesMenu } from "./GitChangesMenu";
@@ -198,17 +198,15 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const [treeMenu, setTreeMenu] = useState<GitTreeContextTarget | null>(null);
   const [blamePath, setBlamePath] = useState<string | null>(null);
   const [historyPath, setHistoryPath] = useState<string | null>(null);
-  // 恢复储藏时发生冲突：pop 不会删掉这条 stash，记下来等冲突解决后引导删除。
+  // 恢复储藏时发生冲突：pop 不会删掉这条 stash，记下来等冲突解决后引导删除（入口在操作日志）。
   const [conflictStashRef, setConflictStashRef] = useState<string | null>(null);
-  // 工作区还有改动导致 pop 被拒绝：提供「合并恢复」入口。
-  const [mergeStashRef, setMergeStashRef] = useState<string | null>(null);
-  // 两条储藏通知卡的正文（附 git 原始输出）；关掉通知即清空。
-  const [conflictMessage, setConflictMessage] = useState("");
-  const [mergeStashMessage, setMergeStashMessage] = useState("");
+  // 操作日志弹窗关闭后要聚焦到的冲突文件（视角带到冲突编辑器）。
+  const [pendingConflictKey, setPendingConflictKey] = useState<string | null>(null);
+  // 正在确认恢复的储藏（弹窗）。
+  const [restoreStash, setRestoreStash] = useState<GitStashEntry | null>(null);
   // 操作日志：提交 / 推送 / 储藏等动作与错误都记在这里，底部状态条显示最新一条。
   const [opLog, setOpLog] = useState<GitOpLogItem[]>([]);
   const [logDialogOpen, setLogDialogOpen] = useState(false);
-  const [noticePanelOpen, setNoticePanelOpen] = useState(true);
   const [paneRatio, setPaneRatio] = useState<PaneRatio>(DEFAULT_PANE_RATIO);
   const [paneDrag, setPaneDrag] = useState<{
     kind: "changes" | "commit";
@@ -291,7 +289,6 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       { ...entry, id: opLogSeqRef.current, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) },
     ]);
   }, []);
-  const removeOpLog = (id: number) => setOpLog((log) => log.filter((item) => item.id !== id));
 
   useEffect(() => {
     if (!error) return;
@@ -304,14 +301,14 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setError("");
   }, [error, pushOpLog]);
 
-  // 储藏引导卡出现时自动展开浮动通知面板；用户手动收起后，同一条不反复弹出。
-  const lastNoticeSigRef = useRef("");
+  // 操作日志弹窗关闭后，把视角带回待解决的冲突（选中文件让冲突编辑器出现）。
   useEffect(() => {
-    const sig = `${mergeStashRef ?? ""}|${conflictStashRef ?? ""}`;
-    if (sig === lastNoticeSigRef.current) return;
-    lastNoticeSigRef.current = sig;
-    if (mergeStashRef || conflictStashRef) setNoticePanelOpen(true);
-  }, [conflictStashRef, mergeStashRef]);
+    if (logDialogOpen || !pendingConflictKey) return;
+    const key = pendingConflictKey;
+    setPendingConflictKey(null);
+    setTab("changes");
+    setSelectedKey(key);
+  }, [logDialogOpen, pendingConflictKey]);
 
   // silent 用于定时 / 窗口聚焦的自动刷新：不动 busy、不清错误提示，避免界面闪。
   const loadStatus = useCallback(async (preferredKey?: string, silent = false) => {
@@ -443,7 +440,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       // 变基计划对话框和右键菜单自己处理 Esc，别连带关掉整个工作台。
-      if (rebaseBase || changesMenu || pullMenu || treeMenu || logDialogOpen) return;
+      if (rebaseBase || changesMenu || pullMenu || treeMenu || logDialogOpen || restoreStash) return;
       if (event.key !== "Escape" || busy) return;
       event.preventDefault();
       event.stopPropagation();
@@ -451,7 +448,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [busy, changesMenu, logDialogOpen, onClose, pullMenu, rebaseBase, treeMenu]);
+  }, [busy, changesMenu, logDialogOpen, onClose, pullMenu, rebaseBase, restoreStash, treeMenu]);
 
   const refresh = async (preferredKey?: string, silent = false) => {
     const outcome = await loadStatus(preferredKey || selectedKey, silent);
@@ -693,7 +690,6 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       return match ? `stash@{${Number(match[1]) + 1}}` : null;
     };
     setConflictStashRef(shiftRef);
-    setMergeStashRef(shiftRef);
     // 储藏完直接跳到储藏页，免得用户还要自己找刚存进去的那条。
     setTab("stash");
     setStashFiles({});
@@ -701,16 +697,12 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     await refresh();
   };
 
-  const popStash = async (entry: GitStashEntry) => {
-    const confirmed = await showAppConfirm(`恢复 ${entry.ref}？\n\n${entry.message}`, {
-      title: "恢复 Stash",
-      confirmLabel: "恢复",
-    });
-    if (!confirmed) return;
+  const popStash = async (entry: GitStashEntry, overwrite: boolean, dropAfter: boolean) => {
+    setRestoreStash(null);
     setBusy("stashPop");
     setError("");
     const startedAt = performance.now();
-    const result = await window.electronAPI.gitStashPop(target.path, entry.ref);
+    const result = await window.electronAPI.gitStashPop(target.path, entry.ref, { overwrite, drop: dropAfter });
     const durationMs = performance.now() - startedAt;
     if (!result.success) {
       const text = result.error || "恢复 stash 失败。";
@@ -720,22 +712,45 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       if (conflicted) {
         setConflictStashRef(entry.ref);
         setTab("changes");
-        // 详情直接放进对应的通知卡，不再往通用 error 里塞一份重复内容。
-        setConflictMessage(text);
-        pushOpLog({ title: "恢复储藏", tone: "warning", message: "恢复时发生冲突，储藏已保留", detail: text, durationMs });
+        pushOpLog({
+          title: "恢复储藏",
+          tone: "warning",
+          message: `${entry.ref} 恢复时发生冲突，储藏已保留；解决冲突并加入待提交后可删除该储藏`,
+          detail: text,
+          durationMs,
+          action: { label: "删除该储藏", run: () => void dropConflictStash() },
+        });
       } else if (blocked) {
-        setMergeStashRef(entry.ref);
-        setMergeStashMessage(text);
-        pushOpLog({ title: "恢复储藏", tone: "warning", message: "工作区有未提交改动，恢复被拒绝，储藏已保留", detail: text, durationMs });
+        // 引导走操作日志弹窗：警告条上带「合并恢复」按钮。
+        pushOpLog({
+          title: "恢复储藏",
+          tone: "warning",
+          message: `工作区有未提交改动，${entry.ref} 无法直接恢复，储藏已保留`,
+          detail: text,
+          durationMs,
+          action: { label: "合并恢复", run: () => void mergeStash(entry.ref) },
+        });
+        setLogDialogOpen(true);
       } else {
         pushOpLog({ title: "恢复储藏", tone: "error", message: text.split("\n")[0], detail: text, durationMs });
       }
       // 静默刷新：非静默的 loadStatus 会 setError("")，把刚写的失败原因冲掉。
       const outcome = await refresh(undefined, true);
-      if (conflicted && outcome?.conflictKeys.length) setSelectedKey(outcome.conflictKeys[0]);
+      if (conflicted && outcome?.conflictKeys.length) {
+        setSelectedKey(outcome.conflictKeys[0]);
+        // 冲突时主动关掉操作日志弹窗（入口在底部日志条仍可查看），视角聚焦到冲突编辑器。
+        setLogDialogOpen(false);
+        setPendingConflictKey(outcome.conflictKeys[0]);
+      }
     } else {
-      pushOpLog({ title: "恢复储藏", tone: "success", message: `${entry.ref} 已恢复到工作区`, detail: result.output, durationMs });
-      showFloatingToastMessage("stash 已恢复");
+      pushOpLog({
+        title: "恢复储藏",
+        tone: "success",
+        message: `${entry.ref} 已恢复到工作区${dropAfter ? "" : "（储藏已保留）"}`,
+        detail: result.output,
+        durationMs,
+      });
+      showFloatingToastMessage(dropAfter ? "储藏已恢复" : "已恢复，储藏保留");
       setConflictStashRef(null);
       // pop 之后 stash@{n} 会整体前移，缓存的文件列表不能复用。
       setStashFiles({});
@@ -768,7 +783,6 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       pushOpLog({ title: "删除储藏", tone: "success", message: `${entry.ref} 已删除`, detail: result.output, durationMs });
       showFloatingToastMessage("stash 已删除");
       setConflictStashRef((current) => (current === entry.ref ? null : current));
-      setMergeStashRef((current) => (current === entry.ref ? null : current));
       setStashFiles({});
       setExpandedStashRef(null);
       await loadStashes();
@@ -783,9 +797,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     await dropStash(entry);
   };
 
-  const mergeStash = async () => {
-    const ref = mergeStashRef;
-    if (!ref) return;
+  const mergeStash = async (ref: string) => {
     const confirmed = await showAppConfirm(
       `把 ${ref} 的改动合并进当前工作区？\n\n先把相关改动加入「待提交」，再做三方合并；改到同一处会留下冲突标记，可在冲突编辑器里解决。储藏会保留，确认结果后再删除。`,
       { title: "合并恢复储藏", confirmLabel: "合并恢复" },
@@ -815,11 +827,24 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       durationMs,
     });
     showFloatingToastMessage("已合并储藏内容");
-    setMergeStashRef(null);
-    setConflictStashRef(ref);
     setTab("changes");
     const outcome = await refresh();
-    if (outcome?.conflictKeys.length) setSelectedKey(outcome.conflictKeys[0]);
+    if (outcome?.conflictKeys.length) {
+      setSelectedKey(outcome.conflictKeys[0]);
+      setConflictStashRef(ref);
+      // 冲突时主动关掉操作日志弹窗（合并恢复按钮就在弹窗里触发的），视角聚焦到冲突编辑器；
+      // 「删除该储藏」入口仍在底部日志条上。
+      setLogDialogOpen(false);
+      setPendingConflictKey(outcome.conflictKeys[0]);
+      pushOpLog({
+        title: "解决冲突",
+        tone: "warning",
+        message: `${ref} 合并后存在冲突标记，解决并加入待提交后可删除该储藏`,
+        action: { label: "删除该储藏", run: () => void dropConflictStash() },
+      });
+    } else {
+      setConflictStashRef(null);
+    }
   };
 
   const toggleStashFiles = async (entry: GitStashEntry) => {
@@ -1167,30 +1192,6 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   useMenuDismiss(!!pullMenu, () => setPullMenu(null), ".git-sync-menu, .git-sync-more");
   useMenuDismiss(commitHistoryOpen, () => setCommitHistoryOpen(false), ".git-commit-history-popover, .git-commit-history-trigger");
 
-  // 控制台通知面板的内容：两条储藏引导卡。错误日志走底部的操作日志条。
-  const noticeLog: GitNotice[] = [
-    ...(mergeStashRef ? [{
-      id: "merge-stash",
-      title: "无法直接恢复储藏",
-      message: `工作区还有改动，${mergeStashRef} 无法直接恢复。可以走冲突合并，把两边改动合起来。\n\n${mergeStashMessage}`,
-      actions: [
-        { label: "合并恢复", onClick: () => void mergeStash(), disabled: !!busy },
-        { label: "知道了", onClick: () => setMergeStashRef(null), disabled: !!busy },
-      ],
-      onClose: () => setMergeStashRef(null),
-    }] : []),
-    ...(conflictStashRef ? [{
-      id: "conflict-stash",
-      title: "恢复储藏时发生冲突",
-      message: `${conflictStashRef} 仍保留在储藏列表里。解决冲突并加入待提交后，可以删除这条储藏。\n\n${conflictMessage}`,
-      actions: [
-        { label: "删除该储藏", onClick: () => void dropConflictStash(), danger: true, disabled: !!busy },
-        { label: "知道了", onClick: () => setConflictStashRef(null), disabled: !!busy },
-      ],
-      onClose: () => setConflictStashRef(null),
-    }] : []),
-  ];
-
   // 底部状态条只显示最新一条；点它打开完整操作日志。
   const lastOpLog = opLog.length > 0 ? opLog[opLog.length - 1] : null;
 
@@ -1285,16 +1286,6 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             </button>
           </div>
         </div>
-
-        <GitNoticeConsole
-          notices={noticeLog}
-          open={noticePanelOpen}
-          onOpenChange={setNoticePanelOpen}
-          onClearAll={() => {
-            setMergeStashRef(null);
-            setConflictStashRef(null);
-          }}
-        />
 
         {status?.operation && status.operation !== "none" && (
           <div className="git-conflict-banner">
@@ -1805,7 +1796,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                         </span>
                       </div>
                       <div className="git-stash-actions">
-                        <button type="button" onClick={() => void popStash(entry)} disabled={!!busy}>
+                        <button type="button" onClick={() => setRestoreStash(entry)} disabled={!!busy}>
                           <Undo2 size={14} /> 恢复
                         </button>
                         <button type="button" className="danger" onClick={() => void dropStash(entry)} disabled={!!busy}>
@@ -1968,36 +1959,28 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
           />
         )}
 
-        {lastOpLog && (
-          <div className={`git-log-bar ${lastOpLog.tone}`}>
-            <button
-              type="button"
-              className="git-log-bar-main"
-              onClick={() => setLogDialogOpen(true)}
-              title="打开操作日志"
-            >
-              {lastOpLog.tone === "success" && <CheckCircle2 size={13} className="git-log-tone ok" />}
-              {lastOpLog.tone === "warning" && <AlertTriangle size={13} className="git-log-tone warn" />}
-              {lastOpLog.tone === "error" && <XCircle size={13} className="git-log-tone err" />}
-              <strong>{lastOpLog.title}</strong>
-              {lastOpLog.message && <span className="git-log-bar-message">{lastOpLog.message}</span>}
-              <span className="git-log-meta">{lastOpLog.time}</span>
-            </button>
-            <button
-              type="button"
-              className="git-log-bar-close"
-              onClick={() => removeOpLog(lastOpLog.id)}
-              aria-label="清除这条日志"
-              title="清除这条日志"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        )}
+        {/* 常驻底部状态条：没日志时也占住这一行，避免布局跳动。 */}
+        <div className={`git-log-bar${lastOpLog ? ` ${lastOpLog.tone}` : ""}`}>
+          <button
+            type="button"
+            className="git-log-bar-main"
+            onClick={() => setLogDialogOpen(true)}
+            title="打开操作日志"
+          >
+            {lastOpLog?.tone === "success" && <CheckCircle2 size={13} className="git-log-tone ok" />}
+            {lastOpLog?.tone === "warning" && <AlertTriangle size={13} className="git-log-tone warn" />}
+            {lastOpLog?.tone === "error" && <XCircle size={13} className="git-log-tone err" />}
+            <strong>{lastOpLog ? lastOpLog.title : "操作日志"}</strong>
+            {lastOpLog?.message && <span className="git-log-bar-message">{lastOpLog.message}</span>}
+            {!lastOpLog && <span className="git-log-bar-message">暂无记录，点这里查看提交、推送等执行记录</span>}
+            {lastOpLog && <span className="git-log-meta">{lastOpLog.time}</span>}
+          </button>
+        </div>
 
         {logDialogOpen && (
           <GitOpLogDialog
             entries={opLog}
+            busy={!!busy}
             onClear={() => setOpLog([])}
             onClose={() => setLogDialogOpen(false)}
           />
@@ -2009,6 +1992,15 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             scope={stashDialog.paths}
             onCancel={() => setStashDialog(null)}
             onConfirm={(description) => void createStash(description, stashDialog.paths)}
+          />
+        )}
+
+        {restoreStash && (
+          <GitStashRestoreDialog
+            busy={busy === "stashPop"}
+            stashLabel={restoreStash.message || restoreStash.ref}
+            onCancel={() => setRestoreStash(null)}
+            onConfirm={({ overwrite, dropAfter }) => void popStash(restoreStash, overwrite, dropAfter)}
           />
         )}
 
