@@ -115,6 +115,8 @@ const PRESENT_FILES_GUIDANCE = [
   "任务里产出了用户要的成品文件（报告、表格、文档、网页、图片、安装包等）时，",
   "在收尾回复前调用一次 present_files，把交付物按绝对路径列出来。",
   "只列真正交付的成品，不要列中间脚本、日志、缓存或调试截图。",
+  "代码与工程资源文件（如 .ts/.py/.lua/.prefab/.unity/.json 等源码、配置、场景资源）不算产物，",
+  "它们由界面的 diff/改动面板展示，即使这次任务的主要工作就是改它们也不要 present。",
 ].join("");
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const AGENT_COMPACTION_THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);

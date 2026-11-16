@@ -96,7 +96,7 @@ export function TokenUsageModal({ sessionId, messages, anchorRef, onClose }: Tok
           <div className="token-usage-heading">
             <h3>Token 统计</h3>
             <span title={fullTokenTitle(summary.totals.total)}>
-              累计 {formatContextTokenAmount(summary.totals.total)} · {summary.messageCount} 个助手回合
+              累计 {formatContextTokenAmount(summary.totals.total)} · {summary.messageCount} 个回合
             </span>
           </div>
           <button type="button" className="token-usage-close" onClick={onClose} aria-label="关闭">
@@ -142,7 +142,7 @@ export function TokenUsageModal({ sessionId, messages, anchorRef, onClose }: Tok
         </div>
 
         <div className="token-usage-footnote">
-          共 {summary.messageCount} 个助手回合 · 缓存率为输入中命中缓存的比例
+          共 {summary.messageCount} 个回合 · 缓存率为输入中命中缓存的比例
           {mergedHistory ? " · 已合并完整历史消息" : ""}
         </div>
       </div>

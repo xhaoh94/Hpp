@@ -123,6 +123,9 @@ export function handleToolStartEvent(
       description: runtime.activeToolDescription[key] || undefined,
       state: "running",
       expanded: false,
+      // 工具行自身的「运行时间」和会话统计里的「工具调用用时」都靠这对时间戳，
+      // 不记录的话耗时永远是 0。
+      startedAt: Date.now(),
     });
   }
 }
@@ -281,6 +284,8 @@ export function handleToolEndEvent(
     state: toolWarning || commandExitWarning ? "warning" : "completed",
     type: entryType,
     expanded: false,
+    // 与 startedAt 配对，让工具行能显示本次调用耗时，会话统计也能累加。
+    completedAt: Date.now(),
   } satisfies Partial<Omit<AgentProcessEntry, "id">>;
 
   if (entryId) {
@@ -300,6 +305,8 @@ export function handleToolEndEvent(
       exitCode: patch.exitCode,
       state: patch.state,
       expanded: patch.expanded,
+      // 没收到开始事件时算不出耗时，但仍要落下完成时间，避免后续把它当未结束。
+      completedAt: patch.completedAt,
     });
   }
 }

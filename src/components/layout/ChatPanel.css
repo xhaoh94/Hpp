@@ -1502,7 +1502,7 @@
   margin: 0 4px;
 }
 
-/* 助手回合底部：模型名 · ↑未命中缓存(缓存命中) ↓输出 */
+/* 回合底部：模型名 · ↑未命中缓存(缓存命中) ↓输出 */
 .chat-assistant-model-info {
   max-width: 320px;
   align-self: center;
@@ -3036,6 +3036,115 @@
 }
 
 .chat-subagent-detail .md-content > :last-child {
+  margin-bottom: 0;
+}
+
+/* 子任务两级展开：摘要卡 → 详细流程 */
+.chat-subagent-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chat-subagent-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-subagent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+  color: var(--accent-color);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.chat-subagent-status.status-completed {
+  border-color: color-mix(in srgb, var(--success-color, #34d399) 32%, transparent);
+  background: color-mix(in srgb, var(--success-color, #34d399) 10%, transparent);
+  color: var(--success-color, #34d399);
+}
+
+.chat-subagent-status.status-error,
+.chat-subagent-status.status-interrupted {
+  border-color: color-mix(in srgb, var(--danger-color) 32%, transparent);
+  background: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  color: var(--danger-color);
+}
+
+.chat-subagent-usage-inline {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-subagent-summary-text {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 展开详情后摘要收敛到最多三行，避免摘要与流程重复占满屏。 */
+.chat-subagent-summary-text.collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.chat-subagent-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-subagent-detail-toggle:hover {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+  color: var(--accent-color);
+}
+
+.chat-subagent-detail-toggle .rotated {
+  transform: rotate(180deg);
+}
+
+.chat-subagent-flow {
+  margin-top: 9px;
+  padding: 10px 12px;
+  border-left: 2px solid color-mix(in srgb, var(--accent-color) 45%, transparent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--bg-secondary, var(--bg-tertiary)) 55%, transparent);
+  max-height: min(420px, 55vh);
+  overflow: auto;
+}
+
+.chat-subagent-flow .md-content > :first-child {
+  margin-top: 0;
+}
+
+.chat-subagent-flow .md-content > :last-child {
   margin-bottom: 0;
 }
 

@@ -333,3 +333,48 @@ describe("handleToolEndEvent", () => {
     expect(context.recordProcessFiles).not.toHaveBeenCalled();
   });
 });
+
+describe("工具耗时记录", () => {
+  it("记录开始与完成时间，工具调用用时不再恒为 0", () => {
+    const sessionId = "tool-timing-session";
+    const chat = useChatStore.getState();
+    chat.startAssistantProcess(1000, sessionId);
+
+    const runtime = createSessionRuntime();
+    runtime.processActive = true;
+    const { context, entries } = createContext();
+
+    handleToolStartEvent({
+      type: "tool_start",
+      toolKind: "run_command",
+      toolCallId: "timing-tool",
+      command: "sleep 1",
+    }, sessionId, runtime, context);
+
+    const startedAt = entries[0]?.startedAt;
+    expect(typeof startedAt).toBe("number");
+    const entryId = Object.values(runtime.activeToolEntry)[0];
+    expect(entryId).toBeTruthy();
+
+    // 真实 controller 会把 draft 落到 store；这里写入同一条，供 end 事件更新。
+    chat.appendLastAssistantProcessEntry({
+      id: entryId,
+      timestamp: startedAt as number,
+      type: "tool",
+      title: "运行 sleep 1",
+      state: "running",
+      startedAt,
+    }, sessionId);
+
+    handleToolEndEvent({
+      type: "tool_end",
+      toolKind: "run_command",
+      toolCallId: "timing-tool",
+    }, sessionId, runtime, context);
+
+    const message = (useChatStore.getState().sessionMessages[sessionId] || []).at(-1);
+    const tool = message?.process?.entries.find((entry) => entry.id === entryId);
+    expect(tool?.completedAt).toBeTypeOf("number");
+    expect((tool?.completedAt ?? 0) >= (startedAt as number)).toBe(true);
+  });
+});

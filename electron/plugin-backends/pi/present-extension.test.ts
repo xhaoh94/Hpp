@@ -19,6 +19,10 @@ describe("Pi present_files extension", () => {
     expect(tools).toHaveLength(1);
     expect(tools[0].name).toBe("present_files");
     expect(tools[0].parameters.required).toEqual(["files"]);
+    // 工具描述要明确挡住源码 / 工程资源，模型才不会把改过的 lua/prefab 当交付物。
+    expect(tools[0].description).toContain("代码与工程资源文件");
+    expect(tools[0].description).toContain("不算产物");
+    expect(tools[0].description).toContain("diff/改动面板");
 
     expect(() => createHppPresentExtension()({})).not.toThrow();
   });

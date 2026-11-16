@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectMessageArtifacts } from "./message-artifacts";
 import type { ChatMessage } from "@/stores/chat-store";
@@ -117,19 +119,37 @@ describe("collectMessageArtifacts", () => {
     expect(artifacts.map((artifact) => artifact.name)).toEqual(["keep.zip"]);
   });
 
-  it("模型显式声明的产物不受扩展名和位置限制", () => {
+  it("模型显式声明的产物豁免位置限制，但源码文件即使声明了也不算产物", () => {
     const artifacts = collectMessageArtifacts(
       message([
-        // 声明优先：/tmp 里的成品、脚本类交付物都算。
+        // 声明优先：/tmp 里的成品、工作区外的自定义格式都算。
         { id: "p", type: "tool", toolKind: "unknown", files: [{ file: "/tmp/report.txt", action: "presented" }] },
-        { id: "p2", type: "tool", toolKind: "unknown", files: [{ file: "C:/proj/tools/run.sh", action: "presented" }] },
+        { id: "p2", type: "tool", toolKind: "unknown", files: [{ file: "C:/proj/tools/payload.dat", action: "presented" }] },
+        // 源码 / 工程资源即使被 present_files 声明也归 diff，不进产物。
+        { id: "p3", type: "tool", toolKind: "unknown", files: [{ file: "C:/proj/Assets/Lua/GuildWar.lua", action: "presented" }] },
+        { id: "p4", type: "tool", toolKind: "unknown", files: [{ file: "C:/proj/Assets/UI/Wnd.prefab", action: "presented" }] },
+        { id: "p5", type: "tool", toolKind: "unknown", files: [{ file: "/tmp/run.sh", action: "presented" }] },
         // 没声明的一律按推断规则，仍然被 /tmp 过滤掉。
         { id: "w", type: "tool", files: [{ file: "/tmp/scratch.txt", action: "written" }] },
       ]),
       { workspacePath: "C:/proj" },
     );
 
-    expect(artifacts.map((artifact) => artifact.name)).toEqual(["report.txt", "run.sh"]);
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["report.txt", "payload.dat"]);
+  });
+
+  it("present_files 声明的一批代码文件不会涌入产物清单", () => {
+    const artifacts = collectMessageArtifacts(message([
+      { id: "present", type: "tool", toolKind: "unknown", files: [
+        { file: "G:/Work/Projects/Pro2/dev/Assets/Lua/Logic/GuildWar/WndGuildwarDefDeploy.lua", action: "presented" },
+        { file: "G:/Work/Projects/Pro2/dev/Assets/Lua/Logic/GuildWar/WndGuildwarDefDeployItem.lua", action: "presented" },
+        { file: "G:/Work/Projects/Pro2/dev/Assets/Lua/Logic/GuildWar/GuildWarDefine.lua", action: "presented" },
+        { file: "G:/Work/Projects/Pro2/dev/Assets/ResourceLib/Prefab/UI/WndGuildwarDefDeploy.prefab", action: "presented" },
+        { file: "G:/Work/Projects/Pro2/dev/build/Pro2.apk", action: "presented" },
+      ] },
+    ]));
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["Pro2.apk"]);
   });
 
   it("收 Office 老格式", () => {
@@ -140,5 +160,21 @@ describe("collectMessageArtifacts", () => {
     ]));
 
     expect(artifacts.map((artifact) => artifact.kind)).toEqual(["document", "document", "document"]);
+  });
+});
+
+describe("present_files 提示词与产物边界一致", () => {
+  it("Pi worker 的注入提示词明确排除源码与工程资源", () => {
+    const worker = readFileSync(
+      resolve(process.cwd(), "electron/plugin-backends/pi/worker.mjs"),
+      "utf8",
+    );
+    const guidance = worker.slice(
+      worker.indexOf("const PRESENT_FILES_GUIDANCE"),
+      worker.indexOf("const isRecord", worker.indexOf("const PRESENT_FILES_GUIDANCE")),
+    );
+    expect(guidance).toContain("代码与工程资源文件");
+    expect(guidance).toContain("不算产物");
+    expect(guidance).toContain("diff/改动面板");
   });
 });

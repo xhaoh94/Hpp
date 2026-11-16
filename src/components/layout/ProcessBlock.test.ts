@@ -248,13 +248,13 @@ describe("ProcessBlock", () => {
     }));
 
     expect(html).toContain("进度 2/2");
-    expect(html).toContain("已运行");
+    expect(html).toContain("运行时间 2m 12s");
     // 标题与活动预览已去掉，只留胶囊 + 右侧进度。
     expect(html).not.toContain("chat-subagent-event-activity");
     expect(html).not.toContain("Scout：读完文件");
     expect(html).not.toContain("chat-subagent-event-title");
     expect(html).not.toContain("正在工作");
-    // 胶囊里只留名字，耗时只在右侧「已运行」里出现。
+    // 胶囊里只留名字，耗时只在右侧「运行时间」里出现。
     expect(html).not.toContain("chat-subagent-chip-time");
     // 展开入口只在胶囊自己身上：右侧不再有折叠箭头
     expect(html).toContain("chat-subagent-chip completed");

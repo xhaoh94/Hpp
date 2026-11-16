@@ -8,7 +8,6 @@ import {
   Eraser,
   FolderOpen,
   HardDrive,
-  Image as ImageIcon,
   Keyboard,
   ListFilter,
   Palette,
@@ -68,7 +67,7 @@ interface GeneralSettings {
   outputDetailLevel: OutputDetailLevel;
 }
 
-type GeneralSectionId = "appearance" | "behavior" | "editing" | "images" | "storage";
+type GeneralSectionId = "appearance" | "behavior" | "other" | "storage";
 
 const SHORTCUT_LABELS: Record<string, string> = {
   globalQuickAsk: "全局唤起",
@@ -880,7 +879,7 @@ export function SettingsView() {
                   <span className="settings-general-heading-icon"><AppWindow size={15} /></span>
                   <div>
                     <h4>应用行为</h4>
-                    <p>控制桌面窗口关闭时的行为</p>
+                    <p>窗口行为、思考与输出展示、快捷键</p>
                   </div>
                   <ChevronDown className="settings-general-collapse-icon" size={16} />
                 </button>
@@ -935,27 +934,6 @@ export function SettingsView() {
                         ))}
                       </div>
                     </div>
-                  </div>
-                )}
-              </section>
-
-              <section className={`settings-general-section ${expandedGeneralSection === "editing" ? "expanded" : "collapsed"}`}>
-                <button
-                  type="button"
-                  className="settings-general-heading settings-general-heading-button"
-                  onClick={() => toggleGeneralSection("editing")}
-                  aria-expanded={expandedGeneralSection === "editing"}
-                  aria-controls="general-settings-editing"
-                >
-                  <span className="settings-general-heading-icon"><Settings size={15} /></span>
-                  <div>
-                    <h4>编辑与文件</h4>
-                    <p>配置输入方式和项目文件的索引范围</p>
-                  </div>
-                  <ChevronDown className="settings-general-collapse-icon" size={16} />
-                </button>
-                {expandedGeneralSection === "editing" && (
-                  <div id="general-settings-editing" className="settings-general-section-body">
                     <div className="settings-general-links">
                       <button type="button" className="settings-general-link" onClick={openShortcutSettings}>
                         <span className="settings-general-link-icon"><Keyboard size={16} /></span>
@@ -966,6 +944,29 @@ export function SettingsView() {
                         <span className="settings-general-link-meta">{Object.keys(shortcuts).length} 项</span>
                         <ChevronRight size={16} />
                       </button>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className={`settings-general-section ${expandedGeneralSection === "other" ? "expanded" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="settings-general-heading settings-general-heading-button"
+                  onClick={() => toggleGeneralSection("other")}
+                  aria-expanded={expandedGeneralSection === "other"}
+                  aria-controls="general-settings-other"
+                >
+                  <span className="settings-general-heading-icon"><SlidersHorizontal size={15} /></span>
+                  <div>
+                    <h4>其他设置</h4>
+                    <p>过滤规则与临时图片缓存</p>
+                  </div>
+                  <ChevronDown className="settings-general-collapse-icon" size={16} />
+                </button>
+                {expandedGeneralSection === "other" && (
+                  <div id="general-settings-other" className="settings-general-section-body">
+                    <div className="settings-general-links">
                       <button type="button" className="settings-general-link" onClick={openFilterSettings}>
                         <span className="settings-general-link-icon"><ListFilter size={16} /></span>
                         <span className="settings-general-row-main">
@@ -976,31 +977,10 @@ export function SettingsView() {
                         <ChevronRight size={16} />
                       </button>
                     </div>
-                  </div>
-                )}
-              </section>
-
-              <section className={`settings-general-section ${expandedGeneralSection === "images" ? "expanded" : "collapsed"}`}>
-                <button
-                  type="button"
-                  className="settings-general-heading settings-general-heading-button"
-                  onClick={() => toggleGeneralSection("images")}
-                  aria-expanded={expandedGeneralSection === "images"}
-                  aria-controls="general-settings-images"
-                >
-                  <span className="settings-general-heading-icon"><ImageIcon size={15} /></span>
-                  <div>
-                    <h4>图片与缓存</h4>
-                    <p>临时图片将在 12 小时后自动清理</p>
-                  </div>
-                  <ChevronDown className="settings-general-collapse-icon" size={16} />
-                </button>
-                {expandedGeneralSection === "images" && (
-                  <div id="general-settings-images" className="settings-general-section-body">
                     <div className="settings-general-row settings-general-path-row">
                       <span className="settings-general-row-main">
                         <strong>临时图片存储路径</strong>
-                        <span>留空时使用 Hpp 默认缓存目录</span>
+                        <span>留空时使用 Hpp 默认缓存目录，临时图片 12 小时后自动清理</span>
                       </span>
                       <div className="settings-general-path-control">
                         <input

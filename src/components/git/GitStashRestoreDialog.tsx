@@ -62,9 +62,6 @@ export function GitStashRestoreDialog({ busy, stashLabel, onCancel, onConfirm }:
             />
             覆盖本地文件
           </label>
-          <span className="git-stash-restore-hint">
-            勾选后先丢弃这些文件在当前工作区的改动，再应用储藏内容；不勾选则与本地改动做合并，冲突时储藏保留。
-          </span>
           <label className="git-amend">
             <input
               type="checkbox"
@@ -74,9 +71,6 @@ export function GitStashRestoreDialog({ busy, stashLabel, onCancel, onConfirm }:
             />
             恢复后删除该储藏
           </label>
-          <span className="git-stash-restore-hint">
-            不勾选时恢复成功后储藏仍保留在列表里（git stash apply）。
-          </span>
         </div>
 
         <div className="git-rebase-footer git-restore-footer">

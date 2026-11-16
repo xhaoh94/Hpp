@@ -23,8 +23,12 @@ describe("desktop general settings layout", () => {
     expect(generalSettings).toContain("openShortcutSettings");
     expect(generalSettings).toContain("openFilterSettings");
     expect(generalSettings).not.toContain("上下文压缩");
-    expect(generalSettings).toContain("编辑与文件");
-    expect(generalSettings).toContain("图片与缓存");
+    // 快捷键跟窗口行为放一起；过滤规则和临时图片路径合并成「其他设置」。
+    expect(generalSettings).toContain("应用行为");
+    expect(generalSettings).toContain("其他设置");
+    expect(generalSettings).not.toContain("编辑与文件");
+    expect(generalSettings).not.toContain('expandedGeneralSection === "editing"');
+    expect(generalSettings).not.toContain('expandedGeneralSection === "images"');
     expect(generalSettings).toContain("存储");
     expect(generalSettings).toContain('aria-controls="general-settings-storage"');
     expect(source).toContain("getDiskUsage");
@@ -32,7 +36,7 @@ describe("desktop general settings layout", () => {
     expect(generalSettings).toContain("清理无用数据");
     expect(generalSettings).toContain("settings-storage-list");
     expect(generalSettings).toContain('expandedGeneralSection === "appearance"');
-    expect(generalSettings).toContain('aria-controls="general-settings-editing"');
+    expect(generalSettings).toContain('aria-controls="general-settings-other"');
     expect(generalSettings).toContain("settings-general-collapse-icon");
     expect(source).toContain('useState<GeneralSectionId | null>("appearance")');
     expect(source).toContain('setExpandedGeneralSection("appearance")');
@@ -43,6 +47,25 @@ describe("desktop general settings layout", () => {
     expect(source).toContain("SHORTCUTS_UPDATED_EVENT");
     const styles = readWorkspaceFile("src/components/sidebar/Settings.css");
     expect(styles).toContain("grid-template-columns: repeat(3, minmax(108px, 138px))");
+  });
+
+  it("groups shortcut under app behavior and filters under other settings", () => {
+    const source = readWorkspaceFile("src/components/sidebar/SettingsView.tsx");
+    const generalSettings = source.slice(source.indexOf("{ showGeneralModal"));
+    const behaviorSection = generalSettings.slice(
+      generalSettings.indexOf('expandedGeneralSection === "behavior"'),
+      generalSettings.indexOf('expandedGeneralSection === "other"'),
+    );
+    const otherSection = generalSettings.slice(
+      generalSettings.indexOf('expandedGeneralSection === "other"'),
+      generalSettings.indexOf('expandedGeneralSection === "storage"'),
+    );
+
+    expect(behaviorSection).toContain("openShortcutSettings");
+    expect(behaviorSection).not.toContain("openFilterSettings");
+    expect(otherSection).toContain("openFilterSettings");
+    expect(otherSection).toContain("临时图片存储路径");
+    expect(otherSection).not.toContain("openShortcutSettings");
   });
 
   it("offers an output detail level picker defaulting to detailed", () => {

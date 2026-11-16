@@ -9,7 +9,7 @@ import type {
 } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
-import { CornerDownRight } from "lucide-react";
+import { ChevronDown, CornerDownRight, ListTree } from "lucide-react";
 import {
   composerDocumentHasContent,
   getComposerImageNodes,
@@ -361,22 +361,45 @@ function SubagentEntryRow({
   entry,
   now,
   projectPath,
+  onPreserveScroll,
 }: {
   messageId: string;
   entry: AgentProcessEntry;
   now: number;
   projectPath?: string;
+  onPreserveScroll: PreserveScroll;
 }) {
   const subagents = getEffectiveProcessSubagents(entry.subagents, entry.state);
   const progress = getSubagentProgressLabel(subagents);
   const elapsed = typeof entry.startedAt === "number"
-    ? `已运行 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
+    ? `运行时间 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
     : "";
   // 一次只展开一个：点哪个子任务就只看哪个，再点一次收起。
+  // 两级展开：点胶囊先看任务摘要，摘要卡里再点「查看详细流程」才铺开完整输出。
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const expanded = expandedId ? subagents.find((subagent) => subagent.id === expandedId) : undefined;
   const expandedUsage = formatSubagentUsage(expanded?.usage);
   const expandedText = expanded?.message?.trim() || "";
+  // 简易描述取派发给子任务的任务说明；没有 then 退回详细流程的第一行，避免卡片空白。
+  const summaryText = (expanded?.prompt?.trim()
+    || expandedText.split(/\r?\n/).find((line) => line.trim())?.trim()
+    || "");
+
+  const selectSubagent = (id: string, canExpand: boolean, anchor: HTMLElement | null) => {
+    if (!canExpand) return;
+    // 和展开思考一样锁住锚点，避免内容变高后虚拟列表把视口推到底部。
+    onPreserveScroll(() => {
+      if (expandedId === id) {
+        // 同一条再点一次：两级一起收起。
+        setExpandedId(null);
+        setDetailOpen(false);
+      } else {
+        setExpandedId(id);
+        setDetailOpen(false);
+      }
+    }, anchor);
+  };
 
   return (
     <div className={`chat-subagent-entry ${entry.state || ""}`}>
@@ -384,8 +407,7 @@ function SubagentEntryRow({
         <span className="chat-subagent-chips">
           {subagents.map((subagent) => {
             const monitorable = subagent.status === "running" || subagent.status === "pending";
-            const usage = formatSubagentUsage(subagent.usage);
-            const expandable = !!subagent.message?.trim() || !!usage;
+            const expandable = !!(subagent.prompt?.trim() || subagent.message?.trim() || formatSubagentUsage(subagent.usage));
             const open = expandedId === subagent.id;
             return (
               <button
@@ -398,7 +420,7 @@ function SubagentEntryRow({
                 onClick={
                   monitorable
                     ? () => openSubagentMonitor(subagent.id)
-                    : expandable ? () => setExpandedId(open ? null : subagent.id) : undefined
+                    : (event) => selectSubagent(subagent.id, expandable, event.currentTarget)
                 }
                 disabled={!monitorable && !expandable}
               >
@@ -415,17 +437,41 @@ function SubagentEntryRow({
           {elapsed && <span className="chat-subagent-event-meta">{elapsed}</span>}
         </span>
       </div>
-      {expanded && (expandedText || expandedUsage) && (
+      {expanded && (summaryText || expandedUsage || expandedText) && (
         <div className="chat-subagent-detail">
-          {expandedUsage && (
-            <div className="chat-subagent-usage">
-              <div className="chat-subagent-usage-row">
-                <span className="chat-subagent-usage-label">{expanded.label}</span>
-                <span className="chat-subagent-usage-value">{expandedUsage}</span>
-              </div>
+          {/* 第一级：任务摘要 —— 派给子任务的任务说明 + 状态 + 用量，一屏看全。 */}
+          <div className="chat-subagent-summary">
+            <div className="chat-subagent-summary-head">
+              <span className={`chat-subagent-status status-${expanded?.status || "unknown"}`}>
+                {getSubagentStatusLabel(expanded?.status) || expanded?.label}
+              </span>
+              {expandedUsage && <span className="chat-subagent-usage-inline">{expandedUsage}</span>}
+            </div>
+            {summaryText && (
+              <p className={`chat-subagent-summary-text${detailOpen ? " collapsed" : ""}`}>{summaryText}</p>
+            )}
+            {expandedText && (
+              <button
+                type="button"
+                className="chat-subagent-detail-toggle"
+                aria-expanded={detailOpen}
+                onClick={(event) => onPreserveScroll(
+                  () => setDetailOpen((open) => !open),
+                  event.currentTarget,
+                )}
+              >
+                <ListTree size={13} strokeWidth={2} />
+                <span>{detailOpen ? "收起详细流程" : "查看详细流程"}</span>
+                <ChevronDown size={13} strokeWidth={2} className={detailOpen ? "rotated" : ""} />
+              </button>
+            )}
+          </div>
+          {/* 第二级：完整流程，点上面按钮才展开。 */}
+          {detailOpen && expandedText && (
+            <div className="chat-subagent-flow">
+              <MarkdownRenderer content={expandedText} projectPath={projectPath} />
             </div>
           )}
-          {expandedText && <MarkdownRenderer content={expandedText} projectPath={projectPath} />}
         </div>
       )}
     </div>
@@ -595,6 +641,7 @@ function ProcessEntryRow({
         entry={entry}
         now={now}
         projectPath={projectPath}
+        onPreserveScroll={onPreserveScroll}
       />
     );
   }

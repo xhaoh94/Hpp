@@ -68,6 +68,12 @@ import { isValidElement, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+// 图片缩略图分散在消息和引导块里，用事件把打开大图的请求汇到 App 根部，避免逐层透传回调。
+const OPEN_IMAGE_PREVIEW_EVENT = "hpp:open-image-preview";
+const openImagePreview = (src: string, name: string) => {
+  window.dispatchEvent(new CustomEvent(OPEN_IMAGE_PREVIEW_EVENT, { detail: { src, name } }));
+};
+
 type MobileRehypeHighlightPlugin = typeof import("rehype-highlight").default;
 let mobileRehypeHighlightPlugin: MobileRehypeHighlightPlugin | null = null;
 let mobileRehypeHighlightPromise: Promise<MobileRehypeHighlightPlugin> | null = null;
@@ -1019,7 +1025,14 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
         <div className="process-guidance-stack">
           {guidanceImages.length > 0 && (
             <div className="process-guidance-images">
-              {guidanceImages.map((image) => <img key={image.id} src={image.src} alt={image.name} />)}
+              {guidanceImages.map((image) => (
+                <img
+                  key={image.id}
+                  src={image.src}
+                  alt={image.name}
+                  onClick={() => openImagePreview(image.src, image.name)}
+                />
+              ))}
             </div>
           )}
           <div className="process-guidance-content">
@@ -1754,7 +1767,14 @@ const MessageItem = memo(function MessageItem({
       )}
       {displayedImages.length > 0 && (
         <div className="message-images">
-          {displayedImages.map((image) => <img key={image.id} src={image.src} alt={image.name} />)}
+          {displayedImages.map((image) => (
+            <img
+              key={image.id}
+              src={image.src}
+              alt={image.name}
+              onClick={() => openImagePreview(image.src, image.name)}
+            />
+          ))}
         </div>
       )}
       {hasUserBubbleContent && (
@@ -2751,6 +2771,7 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
 export default function App() {
   const demoVariant = import.meta.env.DEV ? new URLSearchParams(window.location.search).get("demo") : null;
   const demoMode = demoVariant !== null;
+  const [imagePreview, setImagePreview] = useState<{ src: string; name: string } | null>(null);
   const [hosts, setHosts] = useState<PairedHost[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
   const [hostAvailability, setHostAvailability] = useState<Record<string, HostAvailability>>({});
@@ -2944,6 +2965,15 @@ export default function App() {
     if (loadedDraftKeyRef.current !== identity.key && !draftUserEditedRef.current) return;
     void saveSessionDraft(identity.hostId, identity.sessionId, draftValueRef.current)
       .catch((error) => console.error("[mobile-draft] save failed", error));
+  }, []);
+
+  useEffect(() => {
+    const onOpenImage = (event: Event) => {
+      const detail = (event as CustomEvent<{ src: string; name: string }>).detail;
+      if (detail?.src) setImagePreview({ src: detail.src, name: detail.name || "" });
+    };
+    window.addEventListener(OPEN_IMAGE_PREVIEW_EVENT, onOpenImage);
+    return () => window.removeEventListener(OPEN_IMAGE_PREVIEW_EVENT, onOpenImage);
   }, []);
 
   useEffect(() => {
@@ -5112,6 +5142,20 @@ export default function App() {
         onSelect={selectTheme}
         onClose={() => setThemePickerOpen(false)}
       />
+      {imagePreview && createPortal(
+        <div className="image-preview-overlay" onClick={() => setImagePreview(null)}>
+          <img src={imagePreview.src} alt={imagePreview.name} onClick={(event) => event.stopPropagation()} />
+          <button
+            type="button"
+            className="image-preview-close"
+            aria-label="关闭大图"
+            onClick={() => setImagePreview(null)}
+          >
+            <X size={22} />
+          </button>
+        </div>,
+        document.body,
+      )}
     </>
   );
 

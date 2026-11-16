@@ -33,6 +33,27 @@ const ARTIFACT_EXTENSIONS = new Set([
 ]);
 
 /**
+ * 源码与工程资源文件：它们属于“改了什么”，由 diff 面板负责，永远不是产物。
+ *
+ * 这一层独立于扩展名白名单：模型即使调用 present_files 把改过的 .lua/.prefab
+ * 声明成交付物，也不能混进产物清单——presented 只豁免位置/临时目录限制，
+ * 不豁免“这类文件根本不是交付物”的判断。
+ */
+const SOURCE_EXTENSIONS = new Set([
+  // 编程语言
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "lua", "py", "rb", "php", "swift",
+  "c", "h", "cc", "cpp", "cxx", "hpp", "hxx", "cs", "java", "kt", "kts", "go", "rs", "scala",
+  "dart", "m", "mm", "vue", "svelte", "astro", "sql", "proto", "graphql",
+  // 样式与标记
+  "css", "scss", "sass", "less", "styl", "xml", "xsl", "xsd",
+  // 工程资源 / 配置 / 脚本
+  "prefab", "unity", "asset", "meta", "fbx", "obj", "blend", "psd", "ai",
+  "json", "jsonc", "yaml", "yml", "toml", "ini", "conf", "cfg", "env", "properties",
+  "sh", "bash", "ps1", "bat", "cmd", "gradle", "groovy", "make", "mk", "dockerfile",
+  "gitignore", "gitattributes", "editorconfig", "lock", "log",
+]);
+
+/**
  * 系统临时目录：写在这里的都是中间脚本 / 调试截图，不是交付物。
  * 归一化后按小写匹配，Windows 的 %TEMP% 与 POSIX 的 /tmp 都要盖住。
  */
@@ -77,6 +98,8 @@ const isScratchLocation = (path: string, workspacePath?: string) => {
 const isArtifactPath = (path: string, workspacePath?: string) =>
   ARTIFACT_EXTENSIONS.has(getExtension(path)) && !isScratchLocation(path, workspacePath);
 
+const isSourceFile = (path: string) => SOURCE_EXTENSIONS.has(getExtension(path));
+
 // 只有这些动作算“产出”；read/listed 属于查看，不是产物。
 const PRODUCING_ACTIONS = new Set(["written", "edited", "modified"]);
 const DELETING_ACTIONS = new Set(["deleted", "removed"]);
@@ -115,7 +138,7 @@ const getEntryDeletedPaths = (entry: CollectEntry): string[] => {
   return paths;
 };
 
-/** 产物候选：presented 来自模型的显式声明，不过扩展名/位置过滤。 */
+/** 产物候选：presented 来自模型的显式声明，豁免扩展名/位置过滤，但不豁免源码文件。 */
 type CollectPath = {
   path: string;
   presented: boolean;
@@ -189,8 +212,9 @@ export function collectMessageArtifacts(
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
     for (const item of getEntryArtifactPaths(entry as CollectEntry)) {
-      // 代码文件不算产物：它们属于“改动”，交给 diff 面板。
-      // 模型显式声明的不受这条限制——它说了这是交付物就按交付物算。
+      // 源码 / 工程资源一律不算产物，模型 present_files 声明了也一样 —— 它们归 diff 面板。
+      // presented 的豁免只在位置与扩展名白名单：工作区外的成品、脚本生成的自定义格式照收。
+      if (isSourceFile(item.path)) continue;
       if (!item.presented && !isArtifactPath(item.path, options.workspacePath)) continue;
       const key = normalizePath(item.path);
       if (seen.has(key) || seenKeys.some((existing) => isSamePath(existing, key)) || deleted.has(key)) continue;

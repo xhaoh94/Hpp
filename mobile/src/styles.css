@@ -2039,3 +2039,39 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
   font-weight: 650;
   cursor: pointer;
 }
+
+/* 聊天图片大图预览（对齐桌面端） */
+.message-images img,
+.process-guidance-images img { cursor: zoom-in; }
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.88);
+  padding: 16px;
+}
+.image-preview-overlay > img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  cursor: default;
+}
+.image-preview-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  cursor: pointer;
+}
