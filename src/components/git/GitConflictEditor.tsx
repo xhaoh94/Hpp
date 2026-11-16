@@ -106,7 +106,7 @@ export function GitConflictEditor({ repoPath, file, disabled, onError, onResolve
           <button type="button" onClick={() => applyAll("ours")} disabled={disabled || saving}>全部用当前</button>
           <button type="button" onClick={() => applyAll("theirs")} disabled={disabled || saving}>全部用对方</button>
           <button type="button" className="git-primary-btn" onClick={() => void save()} disabled={disabled || saving}>
-            {saving ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />} 保存并暂存
+            {saving ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />} 保存并加入待提交
           </button>
         </div>
       </div>

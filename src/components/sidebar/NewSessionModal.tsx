@@ -70,7 +70,7 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
     if (probeLoading) return "正在检查 Git 仓库…";
     if (!probe) return "无法检查 Git 仓库。";
     if (!probe.supported) return probe.error || "当前目录不是 Git 仓库，不能创建 worktree。";
-    if (!probe.clean) return "主工作区有未提交改动。先提交或暂存后，才能创建独立工作区。";
+    if (!probe.clean) return "主工作区有未提交改动。先提交或储藏后，才能创建独立工作区。";
     return "主工作区保持干净；Agent 会在独立分支和目录中工作。";
   }, [defaultWorkspace, probe, probeLoading]);
 

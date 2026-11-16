@@ -36,7 +36,7 @@ export function GitChangesMenu({ x, y, count, busy, onDiscard, onStash, onStage,
       <button type="button" role="menuitem" disabled={disabled} onClick={run(onDiscard)}>
         <Undo2 size={14} />放弃 {count} 个文件的更改…
       </button>
-      <button type="button" role="menuitem" disabled={disabled} onClick={run(onStash)} title="git stash push -u，会连同已暂存和未跟踪的改动一起储藏">
+      <button type="button" role="menuitem" disabled={disabled} onClick={run(onStash)} title="git stash push -u，会连同已加入待提交和未跟踪的改动一起储藏">
         <Archive size={14} />储藏全部改动
       </button>
       <button type="button" role="menuitem" disabled={disabled} onClick={run(onStage)}>

@@ -80,7 +80,7 @@ export class WorktreeManager {
       if (status) {
         return {
           success: false,
-          error: "主工作区有未提交改动。独立工作区只能从干净的 HEAD 创建，请先提交或暂存改动，或继续使用共享工作区。",
+          error: "主工作区有未提交改动。独立工作区只能从干净的 HEAD 创建，请先提交或储藏改动，或继续使用共享工作区。",
         };
       }
 

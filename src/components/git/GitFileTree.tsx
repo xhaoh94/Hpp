@@ -6,6 +6,12 @@ import type { FileEntry } from "@/types";
 export interface GitTreeContextTarget {
   entry: FileEntry;
   relativePath: string;
+  /** 来源：目录树（默认）还是变更列表；两者菜单项不同。 */
+  variant?: "tree" | "changes";
+  /** 变更列表里这一行属于「待提交」区还是「变更」区，决定显示移出还是添加。 */
+  stagedView?: boolean;
+  /** 只有「变更」区的行会带：右键菜单里多一个「储藏此文件」。 */
+  stashable?: boolean;
   x: number;
   y: number;
 }

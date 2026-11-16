@@ -70,12 +70,27 @@ export interface GitPushResult extends GitActionResult {
 
 export interface GitStashEntry {
   ref: string;
+  /** 储藏说明；已经去掉 git 自动加的 "On <branch>: " 前缀。 */
   message: string;
+  /** 储藏时所在的分支，解析不出来时为空。 */
+  branch?: string;
 }
 
 export interface GitStashListResult {
   success: boolean;
   stashes?: GitStashEntry[];
+  error?: string;
+}
+
+export interface GitStashFile {
+  /** A / M / D / R；stash 时新加的文件（含未跟踪）是 A。 */
+  status: string;
+  path: string;
+}
+
+export interface GitStashFilesResult {
+  success: boolean;
+  files?: GitStashFile[];
   error?: string;
 }
 

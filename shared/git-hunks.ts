@@ -1,4 +1,4 @@
-/** 从 unified diff 中拆分 hunk，供 hunk 级暂存和 UI 共用。 */
+/** 从 unified diff 中拆分 hunk，供 hunk 级部分提交和 UI 共用。 */
 
 export interface GitPatchHunk {
   index: number;

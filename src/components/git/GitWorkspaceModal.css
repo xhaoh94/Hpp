@@ -694,22 +694,85 @@
   margin-bottom: 14px;
 }
 
-.git-stash-create input {
+.git-stash-create button {
   flex: 1;
-  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+/* 储藏信息弹窗：复用变基对话框的外壳，只收窄宽度。 */
+.git-rebase-dialog.git-stash-dialog {
+  width: min(420px, calc(100vw - 40px));
+}
+
+/* 文件 / 目录的提交历史弹窗 */
+.git-rebase-dialog.git-history-dialog {
+  width: min(640px, calc(100vw - 60px));
+}
+
+.git-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 7px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+}
+
+.git-history-row strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-history-row span {
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.git-stash-dialog .git-rebase-header div {
+  min-width: 0;
+}
+
+.git-stash-dialog .git-rebase-header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-stash-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+
+.git-stash-dialog-body label {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.git-stash-dialog-body input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
   border: 1px solid var(--border-color);
   border-radius: 5px;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 12px;
+  outline: none;
 }
 
-.git-stash-create button {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.git-stash-dialog-body input:focus {
+  border-color: var(--accent-color);
 }
 
 .git-stash-list {
@@ -720,29 +783,56 @@
 
 .git-stash-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 10px;
+  flex-direction: column;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-tertiary);
 }
 
-.git-stash-row div {
+.git-stash-row-head {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.git-stash-toggle {
+  display: grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.git-stash-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-stash-meta {
+  display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
-.git-stash-row strong {
+.git-stash-meta strong {
+  overflow: hidden;
   color: var(--text-primary);
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.git-stash-row span {
+.git-stash-meta span {
   overflow: hidden;
   color: var(--text-secondary);
   font-size: 11px;
@@ -750,18 +840,89 @@
   white-space: nowrap;
 }
 
-.git-stash-row button {
+/* ref 和分支是次要信息，用等宽体跟说明区分开。 */
+.git-stash-ref {
+  font-family: ui-monospace, monospace;
+}
+
+.git-stash-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.git-stash-actions button {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  flex: 0 0 auto;
-  padding: 5px 8px;
+  gap: 4px;
+  padding: 4px 8px;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 11px;
   cursor: pointer;
+}
+
+.git-stash-actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.git-stash-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.git-stash-actions button.danger {
+  border-color: color-mix(in srgb, var(--danger-color, #f44336) 40%, transparent);
+  color: var(--danger-color, #f44336);
+}
+
+.git-stash-files {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  padding: 6px 10px 8px 34px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-color);
+}
+
+.git-stash-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.git-stash-file-status {
+  flex: 0 0 auto;
+  width: 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.git-stash-file-status.M { color: var(--warning-color, #f5a623); }
+.git-stash-file-status.A { color: var(--success-color, #3ecf8e); }
+.git-stash-file-status.D { color: var(--danger-color, #f44336); }
+.git-stash-file-status.R { color: var(--accent-color); }
+
+.git-stash-file-path {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-stash-files-empty {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .git-workspace-modal .spin {

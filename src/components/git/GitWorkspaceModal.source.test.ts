@@ -29,7 +29,7 @@ describe("Git workspace modal", () => {
     expect(source).toContain("<GitTreeMenu");
     expect(tree).toContain("onContextMenu");
     expect(tree).toContain("readDirectory");
-    expect(menu).toContain("添加至「待提交」");
+    expect(menu).toContain("添加到「待提交」");
     // 树里的操作必须走仓库相对路径
     expect(source).toContain("gitDiscard(target.path, [relativePath])");
     expect(source).toContain("<GitBlamePanel");

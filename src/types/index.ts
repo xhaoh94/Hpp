@@ -57,6 +57,7 @@ import type {
   GitRebasePlanResult,
   GitRebaseStep,
   GitRepoProbeResult,
+  GitStashFilesResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeListResult,
@@ -440,9 +441,11 @@ export interface ElectronAPI {
   gitDeleteFiles: (target: string, paths: string[]) => Promise<GitActionResult>;
   gitDiscardHunks: (target: string, path: string, indexes: number[]) => Promise<GitActionResult>;
   gitCommit: (target: string, message: string, amend?: boolean) => Promise<GitCommitResult>;
-  gitStashCreate: (target: string, message?: string) => Promise<GitActionResult>;
+  gitStashCreate: (target: string, message?: string, paths?: string[]) => Promise<GitActionResult>;
   gitStashList: (target: string) => Promise<GitStashListResult>;
   gitStashPop: (target: string, ref?: string) => Promise<GitActionResult>;
+  gitStashDrop: (target: string, ref?: string) => Promise<GitActionResult>;
+  gitStashFiles: (target: string, ref?: string) => Promise<GitStashFilesResult>;
   gitResolveConflict: (target: string, path: string, choice: GitConflictChoice) => Promise<GitActionResult>;
   gitContinueOperation: (target: string) => Promise<GitActionResult>;
   gitAbortOperation: (target: string) => Promise<GitActionResult>;
@@ -452,6 +455,8 @@ export interface ElectronAPI {
   gitDeleteBranch: (target: string, name: string) => Promise<GitActionResult>;
   gitLog: (target: string, limit?: number) => Promise<GitLogResult>;
   gitBlame: (target: string, path: string) => Promise<GitBlameResult>;
+  gitIgnorePath: (target: string, path: string) => Promise<GitActionResult>;
+  gitFileHistory: (target: string, path: string, limit?: number) => Promise<GitLogResult>;
   gitShowCommit: (target: string, hash: string) => Promise<GitCommitDiffResult>;
   gitFetch: (target: string) => Promise<GitActionResult>;
   gitPull: (target: string) => Promise<GitActionResult>;
@@ -556,6 +561,7 @@ export type {
   GitRebasePlanResult,
   GitRebaseStep,
   GitRepoProbeResult,
+  GitStashFilesResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeListResult,

@@ -31,6 +31,7 @@ import type {
   GitRebasePlanResult,
   GitRebaseStep,
   GitRepoProbeResult,
+  GitStashFilesResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeListResult,
@@ -266,12 +267,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:discardHunks", target, path, indexes),
   gitCommit: (target: string, message: string, amend?: boolean): Promise<GitCommitResult> =>
     ipcRenderer.invoke("git:commit", target, message, amend === true),
-  gitStashCreate: (target: string, message?: string): Promise<GitActionResult> =>
-    ipcRenderer.invoke("git:stashCreate", target, message),
+  gitStashCreate: (target: string, message?: string, paths?: string[]): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stashCreate", target, message, paths),
   gitStashList: (target: string): Promise<GitStashListResult> =>
     ipcRenderer.invoke("git:stashList", target),
   gitStashPop: (target: string, ref?: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:stashPop", target, ref),
+  gitStashDrop: (target: string, ref?: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stashDrop", target, ref),
+  gitStashFiles: (target: string, ref?: string): Promise<GitStashFilesResult> =>
+    ipcRenderer.invoke("git:stashFiles", target, ref),
   gitResolveConflict: (target: string, path: string, choice: GitConflictChoice): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:resolveConflict", target, path, choice),
   gitContinueOperation: (target: string): Promise<GitActionResult> =>
@@ -289,6 +294,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:log", target, limit),
   gitBlame: (target: string, path: string): Promise<GitBlameResult> =>
     ipcRenderer.invoke("git:blame", target, path),
+  gitIgnorePath: (target: string, path: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:ignorePath", target, path),
+  gitFileHistory: (target: string, path: string, limit?: number): Promise<GitLogResult> =>
+    ipcRenderer.invoke("git:fileHistory", target, path, limit),
   gitShowCommit: (target: string, hash: string): Promise<GitCommitDiffResult> =>
     ipcRenderer.invoke("git:showCommit", target, hash),
   gitFetch: (target: string): Promise<GitActionResult> => ipcRenderer.invoke("git:fetch", target),

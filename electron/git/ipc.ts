@@ -28,12 +28,16 @@ export function registerGitIpc() {
     gitService.discardHunks(requireTarget(target), path, indexes));
   ipcMain.handle("git:commit", (_event, target: unknown, message: unknown, amend: unknown) =>
     gitService.commit(requireTarget(target), message, amend === true));
-  ipcMain.handle("git:stashCreate", (_event, target: unknown, message: unknown) =>
-    gitService.stashCreate(requireTarget(target), message));
+  ipcMain.handle("git:stashCreate", (_event, target: unknown, message: unknown, paths: unknown) =>
+    gitService.stashCreate(requireTarget(target), message, paths));
   ipcMain.handle("git:stashList", (_event, target: unknown) =>
     gitService.stashList(requireTarget(target)));
   ipcMain.handle("git:stashPop", (_event, target: unknown, ref: unknown) =>
     gitService.stashPop(requireTarget(target), ref));
+  ipcMain.handle("git:stashDrop", (_event, target: unknown, ref: unknown) =>
+    gitService.stashDrop(requireTarget(target), ref));
+  ipcMain.handle("git:stashFiles", (_event, target: unknown, ref: unknown) =>
+    gitService.stashFiles(requireTarget(target), ref));
   ipcMain.handle("git:resolveConflict", (_event, target: unknown, path: unknown, choice: unknown) =>
     gitService.resolveConflict(requireTarget(target), path, choice));
   ipcMain.handle("git:continueOperation", (_event, target: unknown) =>
@@ -52,6 +56,10 @@ export function registerGitIpc() {
     gitService.log(requireTarget(target), Number(limit) || 50));
   ipcMain.handle("git:blame", (_event, target: unknown, path: unknown) =>
     gitService.blame(requireTarget(target), path));
+  ipcMain.handle("git:ignorePath", (_event, target: unknown, path: unknown) =>
+    gitService.ignorePath(requireTarget(target), path));
+  ipcMain.handle("git:fileHistory", (_event, target: unknown, path: unknown, limit: unknown) =>
+    gitService.fileHistory(requireTarget(target), path, limit));
   ipcMain.handle("git:showCommit", (_event, target: unknown, hash: unknown) =>
     gitService.showCommit(requireTarget(target), hash));
   ipcMain.handle("git:fetch", (_event, target: unknown) =>

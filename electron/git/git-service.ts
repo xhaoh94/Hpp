@@ -27,6 +27,7 @@ import type {
   GitRebasePlanResult,
   GitRebaseStep,
   GitRepoProbeResult,
+  GitStashFilesResult,
   GitStashListResult,
   GitStatus,
   GitWorktreeEntry,
@@ -99,7 +100,7 @@ async function runGit(cwd: string, args: string[]) {
 }
 
 /**
- * 不加 trim 的版本：`--porcelain -z` 里未暂存改动的状态码是 " M"，
+ * 不加 trim 的版本：`--porcelain -z` 里工作区改动的状态码是 " M"，
  * trim 会把前导空格吃掉，路径就少一个字符（" M README.md" → "EADME.md"）。
  */
 async function runGitRaw(cwd: string, args: string[]) {
@@ -362,7 +363,7 @@ export class GitService {
     }
   }
 
-  /** 只丢工作区改动，暂存区保持原样（调用方只传「未暂存」的路径）。 */
+  /** 只丢工作区改动，索引保持原样（调用方只传「工作区」的路径）。 */
   async discard(target: string, paths: unknown): Promise<GitActionResult> {
     try {
       const root = await this.repoRoot(target);
@@ -379,7 +380,7 @@ export class GitService {
           rmSync(absolute, { recursive: true, force: true });
           continue;
         }
-        // 不带 --staged：这里只还原成索引里的版本，已暂存的内容不能被顺手抹掉。
+        // 不带 --staged：这里只还原成索引里的版本，已加入待提交的内容不能被顺手抹掉。
         await runGit(root, ["restore", "--worktree", "--", path]);
       }
       return { success: true };
@@ -415,7 +416,7 @@ export class GitService {
       const text = typeof message === "string" ? message.trim() : "";
       if (!text) return { success: false, error: "提交信息不能为空。" };
       const staged = await runGitResult(root, ["diff", "--cached", "--quiet"]);
-      if (staged.code === 0 && amend !== true) return { success: false, error: "没有已暂存的改动。" };
+      if (staged.code === 0 && amend !== true) return { success: false, error: "没有已加入待提交的改动。" };
       const args = ["commit", "-m", text];
       if (amend === true) args.push("--amend");
       await runGit(root, args);
@@ -426,12 +427,21 @@ export class GitService {
     }
   }
 
-  async stashCreate(target: string, message: unknown): Promise<GitActionResult> {
+  async stashCreate(target: string, message: unknown, paths?: unknown): Promise<GitActionResult> {
     try {
       const root = await this.repoRoot(target);
-      const text = typeof message === "string" && message.trim() ? message.trim() : "Hpp: 临时暂存";
-      const output = await runGit(root, ["stash", "push", "-u", "-m", text]);
-      if (/No local changes/i.test(output)) return { success: false, error: "没有可暂存的改动。" };
+      const text = typeof message === "string" && message.trim() ? message.trim() : "Hpp: 临时储藏";
+      // 给了路径就只储藏这些路径（-- 之后是 pathspec，避免把别的改动一起卷走）。
+      const pathList = Array.isArray(paths)
+        ? paths.filter((item): item is string => typeof item === "string" && !!item.trim())
+        : [];
+      const output = await runGit(root, [
+        "stash", "push", "-u", "-m", text,
+        ...(pathList.length > 0 ? ["--", ...pathList] : []),
+      ]);
+      if (/No local changes/i.test(output)) {
+        return { success: false, error: pathList.length > 0 ? "这些路径没有可储藏的改动。" : "没有可储藏的改动。" };
+      }
       return { success: true, output };
     } catch (error) {
       return { success: false, error: errorMessage(error) };
@@ -444,7 +454,13 @@ export class GitService {
       const output = await runGit(root, ["stash", "list", "--format=%gd%x09%s"]);
       const stashes = output.split(/\r?\n/).filter(Boolean).map((line) => {
         const [ref, ...rest] = line.split("\t");
-        return { ref, message: rest.join("\t") };
+        const subject = rest.join("\t");
+        // git 会自己加前缀：`-m` 的是 "On main: 说明"，不带说明的是 "WIP on main: <hash> <subject>"。
+        const onMatch = subject.match(/^On ([^:]+): (.*)$/);
+        if (onMatch) return { ref, branch: onMatch[1], message: onMatch[2] };
+        const wipMatch = subject.match(/^WIP on ([^:]+): [0-9a-f]+ (.*)$/);
+        if (wipMatch) return { ref, branch: wipMatch[1], message: wipMatch[2] };
+        return { ref, message: subject };
       });
       return { success: true, stashes };
     } catch (error) {
@@ -458,6 +474,35 @@ export class GitService {
       const stashRef = typeof ref === "string" && /^stash@\{\d+\}$/.test(ref) ? ref : undefined;
       const output = await runGit(root, ["stash", "pop", ...(stashRef ? [stashRef] : [])]);
       return { success: true, output };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }
+
+  async stashDrop(target: string, ref: unknown): Promise<GitActionResult> {
+    try {
+      const root = await this.repoRoot(target);
+      const stashRef = typeof ref === "string" && /^stash@\{\d+\}$/.test(ref) ? ref : undefined;
+      if (!stashRef) throw new Error("stash 引用无效。");
+      const output = await runGit(root, ["stash", "drop", stashRef]);
+      return { success: true, output };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }
+
+  async stashFiles(target: string, ref: unknown): Promise<GitStashFilesResult> {
+    try {
+      const root = await this.repoRoot(target);
+      const stashRef = typeof ref === "string" && /^stash@\{\d+\}$/.test(ref) ? ref : undefined;
+      if (!stashRef) throw new Error("stash 引用无效。");
+      // 不带 --include-untracked 时，-u 存进去的新文件不会出现在列表里。
+      const output = await runGit(root, ["stash", "show", "--name-status", "--include-untracked", stashRef]);
+      const files = output.split(/\r?\n/).filter(Boolean).map((line) => {
+        const [status, ...rest] = line.split("\t");
+        return { status: status.trim(), path: rest.join("\t").trim() };
+      }).filter((file) => !!file.path);
+      return { success: true, files };
     } catch (error) {
       return { success: false, error: errorMessage(error) };
     }
@@ -598,6 +643,55 @@ export class GitService {
       const root = await this.repoRoot(target);
       const count = Math.min(Math.max(Math.floor(Number(limit) || 50), 1), 200);
       const output = await runGit(root, ["log", `--max-count=${count}`, "--date=iso-strict", "--pretty=format:%H%x00%h%x00%an%x00%ad%x00%s"]);
+      const entries: GitLogEntry[] = output.split(/\r?\n/).filter(Boolean).map((line) => {
+        const [hash, shortHash, author, date, subject] = line.split("\0");
+        return { hash, shortHash, author, date, subject };
+      });
+      return { success: true, entries };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }
+
+  /** 把路径写进 .gitignore；已经被跟踪的路径写进去不会生效，直接报错。 */
+  async ignorePath(target: string, path: unknown): Promise<GitActionResult> {
+    try {
+      const root = await this.repoRoot(target);
+      const rel = safePath(path);
+      const tracked = await runGitResult(root, ["ls-files", "--", rel]);
+      if (tracked.code === 0 && tracked.stdout.trim()) {
+        return {
+          success: false,
+          error: `${rel} 已经被 Git 跟踪，写进 .gitignore 不会生效；需要先从版本库移除（git rm --cached）再忽略。`,
+        };
+      }
+      const file = join(root, ".gitignore");
+      const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+      const lines = existing.split(/\r?\n/).map((line) => line.trim());
+      if (lines.some((line) => line === rel || line === `/${rel}` || line === `${rel}/`)) {
+        return { success: false, error: `${rel} 已经在 .gitignore 里了。` };
+      }
+      writeFileSync(file, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${rel}\n`, "utf8");
+      return { success: true, output: `已忽略 ${rel}` };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }
+
+  /** 单个文件 / 目录的提交历史。 */
+  async fileHistory(target: string, path: unknown, limit?: unknown): Promise<GitLogResult> {
+    try {
+      const root = await this.repoRoot(target);
+      const rel = safePath(path);
+      const count = Math.min(Math.max(Math.floor(Number(limit) || 50), 1), 200);
+      const output = await runGit(root, [
+        "log",
+        `--max-count=${count}`,
+        "--date=short",
+        "--pretty=format:%H%x00%h%x00%an%x00%ad%x00%s",
+        "--",
+        rel,
+      ]);
       const entries: GitLogEntry[] = output.split(/\r?\n/).filter(Boolean).map((line) => {
         const [hash, shortHash, author, date, subject] = line.split("\0");
         return { hash, shortHash, author, date, subject };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertTriangle,
@@ -7,6 +7,7 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
+  ChevronRight,
   CloudDownload,
   ExternalLink,
   FileDiff,
@@ -21,7 +22,6 @@ import {
   X,
 } from "lucide-react";
 
-import type { FileEntry } from "@/types";
 import { parseGitPatch } from "@shared/git-hunks";
 import { parseConflictFile } from "@shared/git-conflicts";
 import type {
@@ -30,6 +30,7 @@ import type {
   GitFileChange,
   GitLogEntry,
   GitStashEntry,
+  GitStashFile,
   GitStatus,
   GitWorktreeEntry,
 } from "@shared/git-types";
@@ -39,9 +40,11 @@ import { readCommitHistory, rememberCommitMessage } from "@/lib/git-commit-histo
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import { GitConflictEditor } from "./GitConflictEditor";
 import { GitRebaseDialog } from "./GitRebaseDialog";
+import { GitStashDialog } from "./GitStashDialog";
+import { GitFileHistoryDialog } from "./GitFileHistoryDialog";
 import { GitBlamePanel } from "./GitBlamePanel";
 import { GitChangesMenu } from "./GitChangesMenu";
-import { GitFileTree } from "./GitFileTree";
+import { GitFileTree, type GitTreeContextTarget } from "./GitFileTree";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
 import { GitTreeMenu } from "./GitTreeMenu";
 import { useMenuDismiss } from "./useMenuDismiss";
@@ -172,7 +175,11 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const [pushAfterCommit, setPushAfterCommit] = useState(true);
   const [tab, setTab] = useState<"changes" | "history" | "branches" | "worktrees" | "stash">("changes");
   const [stashes, setStashes] = useState<GitStashEntry[]>([]);
-  const [stashMessage, setStashMessage] = useState("Hpp: 临时暂存");
+  // 所有储藏入口都先弹窗填说明；paths 为空表示储藏全部改动。
+  const [stashDialog, setStashDialog] = useState<{ paths?: string[] } | null>(null);
+  const [expandedStashRef, setExpandedStashRef] = useState<string | null>(null);
+  const [stashFiles, setStashFiles] = useState<Record<string, GitStashFile[]>>({});
+  const [stashFilesLoading, setStashFilesLoading] = useState("");
   const [search, setSearch] = useState("");
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
   const [newBranch, setNewBranch] = useState("");
@@ -184,8 +191,9 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const [rebaseBase, setRebaseBase] = useState<GitLogEntry | null>(null);
   const [changesMenu, setChangesMenu] = useState<{ x: number; y: number } | null>(null);
   const [pullMenu, setPullMenu] = useState<{ left: number; top: number } | null>(null);
-  const [treeMenu, setTreeMenu] = useState<{ entry: FileEntry; relativePath: string; x: number; y: number } | null>(null);
+  const [treeMenu, setTreeMenu] = useState<GitTreeContextTarget | null>(null);
   const [blamePath, setBlamePath] = useState<string | null>(null);
+  const [historyPath, setHistoryPath] = useState<string | null>(null);
   const [paneRatio, setPaneRatio] = useState<PaneRatio>(DEFAULT_PANE_RATIO);
   const [paneDrag, setPaneDrag] = useState<{
     kind: "changes" | "commit";
@@ -251,10 +259,20 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const selected = items.find((item) => changeKey(item) === selectedKey);
   const selectedConflict = conflictedItems.find((file) => `${file.path}:conflict` === selectedKey);
   const parsedDiff = useMemo(() => parseGitPatch(diff), [diff]);
+  // diff 跟随选中项的身份（path + stagedView），而不是对象引用：自动刷新重建 items 时
+  // 同一个文件的 diff 不该被清空重载。
+  const diffSelectionKey = selected ? changeKey(selected) : "";
+  const selectedKeyRef = useRef(selectedKey);
+  selectedKeyRef.current = selectedKey;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
-  const loadStatus = useCallback(async (preferredKey?: string) => {
-    setBusy("refresh");
-    setError("");
+  // silent 用于定时 / 窗口聚焦的自动刷新：不动 busy、不清错误提示，避免界面闪。
+  const loadStatus = useCallback(async (preferredKey?: string, silent = false) => {
+    if (!silent) {
+      setBusy("refresh");
+      setError("");
+    }
     try {
       const next = await window.electronAPI.gitStatus(target.path);
       if (!next.success) {
@@ -270,7 +288,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
         : conflictKeys[0] || itemKeys[0] || "";
       setSelectedKey(key);
     } finally {
-      setBusy("");
+      if (!silent) setBusy("");
     }
   }, [target.path]);
 
@@ -320,7 +338,9 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
 
   useEffect(() => {
     void loadStatus();
-  }, [loadStatus]);
+    // Stash 页签的角标要打开工作台就有，不能等切过去才加载；页面内容仍然按需渲染。
+    void loadStashes();
+  }, [loadStashes, loadStatus]);
 
   useEffect(() => {
     if (selectedConflict) {
@@ -328,7 +348,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       return;
     }
     void loadDiff(selected);
-  }, [loadDiff, selected, selectedConflict]);
+  }, [diffSelectionKey, loadDiff, selectedConflict]);
 
   // 换选中文件就离开追溯视图，避免看着 A 的追溯在 B 的行上操作。
   useEffect(() => {
@@ -341,6 +361,24 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     else if (tab === "history") void loadLog();
     else if (tab === "worktrees") void loadWorktrees();
   }, [loadBranches, loadLog, loadStashes, loadWorktrees, tab]);
+
+  // 自动刷新：外部改了文件 / 切回窗口时状态能跟上；操作进行中跳过，避免和 stage/commit 打架。
+  useEffect(() => {
+    const silentRefresh = () => {
+      if (document.hidden || busyRef.current) return;
+      void loadStatus(selectedKeyRef.current, true);
+      if (tab === "stash") void loadStashes();
+      else if (tab === "branches") void loadBranches();
+      else if (tab === "history") void loadLog();
+      else if (tab === "worktrees") void loadWorktrees();
+    };
+    const timer = window.setInterval(silentRefresh, 8000);
+    window.addEventListener("focus", silentRefresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", silentRefresh);
+    };
+  }, [loadBranches, loadLog, loadStashes, loadStatus, loadWorktrees, tab]);
 
   useEffect(() => {
     if (!selectedCommit) {
@@ -370,7 +408,8 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
 
   const refresh = async (preferredKey?: string) => {
     await loadStatus(preferredKey || selectedKey);
-    if (tab === "stash") await loadStashes();
+    // stash 列表也一起拉：储藏 / 恢复之后不管当前在哪个 tab，切过去都是最新的。
+    await loadStashes();
     onChanged?.();
   };
 
@@ -379,7 +418,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setBusy("stage");
     setError("");
     const result = await window.electronAPI.gitStage(target.path, paths);
-    if (!result.success) setError(result.error || "暂存失败。");
+    if (!result.success) setError(result.error || "添加到待提交失败。");
     else await refresh();
     setBusy("");
   };
@@ -389,7 +428,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setBusy("unstage");
     setError("");
     const result = await window.electronAPI.gitUnstage(target.path, paths);
-    if (!result.success) setError(result.error || "取消暂存失败。");
+    if (!result.success) setError(result.error || "移出待提交失败。");
     else await refresh();
     setBusy("");
   };
@@ -398,7 +437,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     const confirmed = await showAppConfirm(
       item.untracked
         ? `丢弃「${item.path}」？未跟踪文件会被直接删除，此操作不可撤销。`
-        : `丢弃「${item.path}」中未暂存的改动？已暂存的内容会保留，但工作区的改动不可恢复。`,
+        : `丢弃「${item.path}」的工作区改动？已加入待提交的内容会保留，但工作区的改动不可恢复。`,
       { title: "丢弃改动", confirmLabel: "丢弃" },
     );
     if (!confirmed) return;
@@ -413,7 +452,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const discardAllChanges = async () => {
     if (allUnstagedPaths.length === 0) return;
     const confirmed = await showAppConfirm(
-      `放弃这 ${allUnstagedPaths.length} 个文件的未暂存改动？已暂存的内容会保留，工作区的改动不可恢复。`,
+      `放弃这 ${allUnstagedPaths.length} 个文件的工作区改动？已加入待提交的内容会保留，工作区的改动不可恢复。`,
       { title: "放弃全部更改", confirmLabel: "放弃" },
     );
     if (!confirmed) return;
@@ -453,7 +492,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       indexes,
       selected.stagedView ? "unstage" : "stage",
     );
-    if (!result.success) setError(result.error || "按块暂存失败。");
+    if (!result.success) setError(result.error || "按块添加待提交失败。");
     else await refresh();
     setBusy("");
   };
@@ -544,16 +583,22 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setBusy("");
   };
 
-  const createStash = async () => {
+  const createStash = async (description: string, paths?: string[]) => {
     setBusy("stash");
     setError("");
-    const result = await window.electronAPI.gitStashCreate(target.path, stashMessage);
-    if (!result.success) setError(result.error || "创建 stash 失败。");
-    else {
-      showFloatingToastMessage("已创建 stash");
-      await refresh();
-    }
+    const result = await window.electronAPI.gitStashCreate(target.path, description, paths);
     setBusy("");
+    if (!result.success) {
+      setError(result.error || "创建储藏失败。");
+      return;
+    }
+    showFloatingToastMessage(paths?.length ? "已储藏所选文件" : "已储藏全部改动");
+    setStashDialog(null);
+    // 储藏完直接跳到储藏页，免得用户还要自己找刚存进去的那条。
+    setTab("stash");
+    setStashFiles({});
+    setExpandedStashRef(null);
+    await refresh();
   };
 
   const popStash = async (entry: GitStashEntry) => {
@@ -568,12 +613,52 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     if (!result.success) setError(result.error || "恢复 stash 失败。");
     else {
       showFloatingToastMessage("stash 已恢复");
+      // pop 之后 stash@{n} 会整体前移，缓存的文件列表不能复用。
+      setStashFiles({});
+      setExpandedStashRef(null);
       await refresh();
     }
     setBusy("");
   };
 
-  // 搜索只影响列表展示；全部暂存/取消暂存仍作用于全部改动。
+  const dropStash = async (entry: GitStashEntry) => {
+    const confirmed = await showAppConfirm(
+      `删除 ${entry.ref}？\n\n${entry.message}\n\n删除后这个 stash 找不回来，未提交的改动也会一起丢掉。`,
+      { title: "删除 Stash", confirmLabel: "删除" },
+    );
+    if (!confirmed) return;
+    setBusy("stashDrop");
+    setError("");
+    const result = await window.electronAPI.gitStashDrop(target.path, entry.ref);
+    if (!result.success) setError(result.error || "删除 stash 失败。");
+    else {
+      showFloatingToastMessage("stash 已删除");
+      setStashFiles({});
+      setExpandedStashRef(null);
+      await loadStashes();
+    }
+    setBusy("");
+  };
+
+  const toggleStashFiles = async (entry: GitStashEntry) => {
+    if (expandedStashRef === entry.ref) {
+      setExpandedStashRef(null);
+      return;
+    }
+    setExpandedStashRef(entry.ref);
+    if (stashFiles[entry.ref]) return;
+    setStashFilesLoading(entry.ref);
+    const result = await window.electronAPI.gitStashFiles(target.path, entry.ref);
+    if (result.success) {
+      const files = result.files || [];
+      setStashFiles((current) => ({ ...current, [entry.ref]: files }));
+    } else {
+      setError(result.error || "读取 stash 文件失败。");
+    }
+    setStashFilesLoading("");
+  };
+
+  // 搜索只影响列表展示；全部加入/移出待提交仍作用于全部改动。
   const remoteAction = async (kind: "fetch" | "pull" | "push") => {
     if (kind !== "fetch") {
       const confirmed = await showAppConfirm(
@@ -729,7 +814,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   };
 
   const continueOperation = async () => {
-    const confirmed = await showAppConfirm("继续当前合并 / rebase？请确认所有冲突已解决并已暂存。", {
+    const confirmed = await showAppConfirm("继续当前合并 / rebase？请确认所有冲突已解决并已加入待提交。", {
       title: "继续操作",
       confirmLabel: "继续",
     });
@@ -790,6 +875,43 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setCommitHistoryOpen(true);
   };
 
+  /** 变更列表的右键菜单复用目录树那份，需要先把仓库相对路径拼成绝对路径。 */
+  const openFileContextMenu = (item: ChangeItem, event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const repoRoot = (status?.repoRoot || target.path).replace(/[\\/]+$/, "");
+    const separator = repoRoot.includes("\\") ? "\\" : "/";
+    const absolute = `${repoRoot}${separator}${item.path.replace(/\//g, separator)}`;
+    setTreeMenu({
+      entry: { name: item.path.split("/").pop() || item.path, path: absolute, type: "file" },
+      relativePath: item.path,
+      variant: "changes",
+      stagedView: item.stagedView,
+      stashable: !item.stagedView,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
+  const ignoreTreePath = async (relativePath: string) => {
+    const confirmed = await showAppConfirm(
+      `把「${relativePath}」写进 .gitignore？\n\n已经提交过的文件写进去不会生效，需要先从版本库移除。`,
+      { title: "忽略路径", confirmLabel: "忽略" },
+    );
+    if (!confirmed) return;
+    setBusy("ignore");
+    setError("");
+    const result = await window.electronAPI.gitIgnorePath(target.path, relativePath);
+    setBusy("");
+    if (!result.success) {
+      setError(result.error || "忽略失败。");
+      return;
+    }
+    showFloatingToastMessage(result.output || "已忽略");
+    await loadStatus(selectedKey);
+    onChanged?.();
+  };
+
   const copyTreePath = async (relativePath: string) => {
     try {
       await navigator.clipboard.writeText(relativePath);
@@ -814,7 +936,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     const confirmed = await showAppConfirm(
       untracked
         ? `删除未跟踪文件「${relativePath}」？删除后无法恢复。`
-        : `放弃「${relativePath}」未暂存的改动？已暂存的内容会保留。`,
+        : `放弃「${relativePath}」的工作区改动？已加入待提交的内容会保留。`,
       { title: untracked ? "删除文件" : "放弃改动", confirmLabel: untracked ? "删除" : "放弃" },
     );
     if (!confirmed) return;
@@ -840,10 +962,13 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     for (const file of status?.files || []) map.set(file.path, file.status);
     return map;
   }, [status?.files]);
-  const stagedPathSet = useMemo(
-    () => new Set(items.filter((item) => item.stagedView).map((item) => item.path)),
-    [items],
-  );
+  // 目录树右键只对真有改动的路径显示「放弃更改」。
+  const treeMenuHasChanges = useMemo(() => {
+    if (!treeMenu) return false;
+    if (treeMenu.entry.type !== "folder") return changeMap.has(treeMenu.relativePath);
+    const prefix = `${treeMenu.relativePath}/`;
+    return [...changeMap.keys()].some((path) => path === treeMenu.relativePath || path.startsWith(prefix));
+  }, [changeMap, treeMenu]);
 
   useMenuDismiss(!!pullMenu, () => setPullMenu(null), ".git-sync-menu, .git-sync-more");
   useMenuDismiss(commitHistoryOpen, () => setCommitHistoryOpen(false), ".git-commit-history-popover, .git-commit-history-trigger");
@@ -1093,6 +1218,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                         key={changeKey(item)}
                         className={`git-file-row ${selectedKey === changeKey(item) ? "active" : ""}`}
                         onClick={() => setSelectedKey(changeKey(item))}
+                        onContextMenu={(event) => openFileContextMenu(item, event)}
                       >
                         <span className={`git-status-dot ${item.untracked ? "untracked" : item.status.trim().charAt(1) || "M"}`} />
                         <span className="git-file-path" title={item.path}>{item.path}</span>
@@ -1100,7 +1226,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                           type="button"
                           className="git-file-action"
                           title="下移到待提交"
-                          aria-label={`暂存 ${item.path}`}
+                          aria-label={`添加到待提交 ${item.path}`}
                           disabled={!!busy}
                           onClick={(event) => { event.stopPropagation(); void stage([item.path]); }}
                         >
@@ -1109,7 +1235,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                         <button
                           type="button"
                           className="git-file-action danger"
-                          title={item.untracked ? "删除未跟踪文件" : "丢弃未暂存的改动"}
+                          title={item.untracked ? "删除未跟踪文件" : "丢弃工作区的改动"}
                           disabled={!!busy}
                           onClick={(event) => { event.stopPropagation(); void discard(item); }}
                         >
@@ -1140,7 +1266,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                       type="button"
                       className="git-file-section-action"
                       title="全部上移回变更"
-                      aria-label="全部取消暂存"
+                      aria-label="全部移出待提交"
                       disabled={!!busy || allStagedPaths.length === 0}
                       onClick={() => void unstage(allStagedPaths)}
                     >
@@ -1148,19 +1274,20 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                     </button>
                   </div>
                   <div className="git-file-lines persistent-scroll">
-                    {stagedItems.length === 0 ? <div className="git-file-empty">暂存变更后会出现在这里</div> : stagedItems.map((item) => (
+                    {stagedItems.length === 0 ? <div className="git-file-empty">加入待提交的变更会出现在这里</div> : stagedItems.map((item) => (
                       <div
                         key={changeKey(item)}
                         className={`git-file-row ${selectedKey === changeKey(item) ? "active" : ""}`}
                         onClick={() => setSelectedKey(changeKey(item))}
+                        onContextMenu={(event) => openFileContextMenu(item, event)}
                       >
                         <span className={`git-status-dot ${item.status.trim().charAt(0) || "M"}`} />
                         <span className="git-file-path" title={item.path}>{item.path}</span>
                         <button
                           type="button"
                           className="git-file-action"
-                          title="上移回变更（取消暂存）"
-                          aria-label={`取消暂存 ${item.path}`}
+                          title="上移回变更（移出待提交）"
+                          aria-label={`移出待提交 ${item.path}`}
                           disabled={!!busy}
                           onClick={(event) => { event.stopPropagation(); void unstage([item.path]); }}
                         >
@@ -1221,7 +1348,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                       className="git-primary-btn"
                       onClick={() => void commit()}
                       disabled={!!busy || !message.trim() || (!hasStaged && !amend)}
-                      title={hasStaged ? `提交到 ${status?.branch || "当前分支"}` : "先暂存变更后再提交"}
+                      title={hasStaged ? `提交到 ${status?.branch || "当前分支"}` : "先把变更加入待提交再提交"}
                     >
                       {busy === "commit" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
                       提交到 {status?.branch || "当前分支"}
@@ -1239,7 +1366,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                     : selectedConflict ? <span>冲突 · 三方合并</span>
                       : selected ? (
                         <span className="git-diff-header-actions">
-                          <span>{statusLabel(selected.status)} · {selected.stagedView ? "已暂存" : "工作区"}</span>
+                          <span>{statusLabel(selected.status)} · {selected.stagedView ? "待提交" : "工作区"}</span>
                           {!selected.untracked && (
                             <button
                               type="button"
@@ -1267,7 +1394,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                       disabled={!!busy}
                       onError={setError}
                       onResolved={async () => {
-                        showFloatingToastMessage("冲突已解决并暂存");
+                        showFloatingToastMessage("冲突已解决并已加入待提交");
                         await refresh();
                       }}
                     />
@@ -1284,7 +1411,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                                   onClick={() => void applyHunks([hunk.index])}
                                   disabled={!!busy}
                                 >
-                                  {selected?.stagedView ? "取消此块" : "暂存此块"}
+                                  {selected?.stagedView ? "移除此块" : "添加此块至待提交"}
                                 </button>
                                 {!selected?.stagedView && (
                                   <button
@@ -1416,20 +1543,74 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
         ) : (
           <div className="git-stash-pane persistent-scroll">
             <div className="git-stash-create">
-              <input value={stashMessage} onChange={(event) => setStashMessage(event.target.value)} placeholder="Stash 说明" disabled={!!busy} />
-              <button type="button" onClick={() => void createStash()} disabled={!!busy}>
-                <Archive size={14} /> 暂存当前改动
+              <button
+                type="button"
+                className="git-stash-create-button"
+                onClick={() => setStashDialog({})}
+                disabled={!!busy}
+              >
+                <Archive size={14} /> 储藏当前改动
               </button>
             </div>
             <div className="git-stash-list">
-              {stashes.length === 0 ? <div className="git-diff-empty">没有 stash。</div> : stashes.map((entry) => (
-                <div className="git-stash-row" key={entry.ref}>
-                  <div><strong>{entry.ref}</strong><span>{entry.message}</span></div>
-                  <button type="button" onClick={() => void popStash(entry)} disabled={!!busy}>
-                    <Undo2 size={14} /> 恢复
-                  </button>
-                </div>
-              ))}
+              {stashes.length === 0 ? <div className="git-diff-empty">没有 stash。</div> : stashes.map((entry) => {
+                const files = stashFiles[entry.ref];
+                const expanded = expandedStashRef === entry.ref;
+                return (
+                  <div className={`git-stash-row ${expanded ? "expanded" : ""}`} key={entry.ref}>
+                    <div className="git-stash-row-head">
+                      <button
+                        type="button"
+                        className="git-stash-toggle"
+                        onClick={() => void toggleStashFiles(entry)}
+                        title={expanded ? "收起文件列表" : "查看这个 stash 里的文件"}
+                        aria-expanded={expanded}
+                      >
+                        {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      </button>
+                      <div className="git-stash-meta">
+                        <strong title={entry.message || entry.ref}>{entry.message || "（无说明）"}</strong>
+                        <span className="git-stash-ref">
+                          {entry.ref}
+                          {entry.branch ? ` · ${entry.branch}` : ""}
+                        </span>
+                      </div>
+                      <div className="git-stash-actions">
+                        <button type="button" onClick={() => void popStash(entry)} disabled={!!busy}>
+                          <Undo2 size={14} /> 恢复
+                        </button>
+                        <button type="button" className="danger" onClick={() => void dropStash(entry)} disabled={!!busy}>
+                          <Trash2 size={14} /> 删除
+                        </button>
+                      </div>
+                    </div>
+                    {expanded && (
+                      <div className="git-stash-files">
+                        {stashFilesLoading === entry.ref ? (
+                          <div className="git-stash-files-empty">
+                            <LoaderCircle className="spin" size={12} /> 读取中…
+                          </div>
+                        ) : !files || files.length === 0 ? (
+                          <div className="git-stash-files-empty">没有文件记录</div>
+                        ) : files.map((file) => (
+                          <div className="git-stash-file" key={`${file.status}:${file.path}`} title={file.path}>
+                            <span
+                              className={`git-stash-file-status ${
+                                file.status.startsWith("D") ? "D"
+                                  : file.status.startsWith("A") || file.status.startsWith("?") ? "A"
+                                    : file.status.startsWith("R") ? "R" : "M"
+                              }`}
+                            >
+                              {file.status.startsWith("?") ? "U" : file.status.slice(0, 1)}
+                            </span>
+                            <span className="git-stash-file-path">{file.path}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -1492,10 +1673,17 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             relativePath={treeMenu.relativePath}
             x={treeMenu.x}
             y={treeMenu.y}
-            staged={stagedPathSet.has(treeMenu.relativePath)}
+            variant={treeMenu.variant || "tree"}
+            hasChanges={treeMenuHasChanges}
+            stagedView={treeMenu.stagedView}
             busy={!!busy}
+            onIgnore={() => void ignoreTreePath(treeMenu.relativePath)}
+            onHistory={() => setHistoryPath(treeMenu.relativePath)}
             onStage={() => void stage([treeMenu.relativePath])}
             onUnstage={() => void unstage([treeMenu.relativePath])}
+            onStash={treeMenu.stashable
+              ? () => setStashDialog({ paths: [treeMenu.relativePath] })
+              : undefined}
             onDiscard={() => void discardTreeEntry(treeMenu.relativePath)}
             onBlame={() => setBlamePath(treeMenu.relativePath)}
             onCopyPath={() => void copyTreePath(treeMenu.relativePath)}
@@ -1512,7 +1700,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             count={allUnstagedPaths.length}
             busy={!!busy}
             onDiscard={() => void discardAllChanges()}
-            onStash={() => void createStash()}
+            onStash={() => setStashDialog({})}
             onStage={() => void stage(allUnstagedPaths)}
             onDelete={() => void deleteAllChanges()}
             onClose={() => setChangesMenu(null)}
@@ -1538,6 +1726,23 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
               await loadLog();
               onChanged?.();
             }}
+          />
+        )}
+
+        {historyPath && (
+          <GitFileHistoryDialog
+            repoPath={status?.repoRoot || target.path}
+            path={historyPath}
+            onClose={() => setHistoryPath(null)}
+          />
+        )}
+
+        {stashDialog && (
+          <GitStashDialog
+            busy={busy === "stash"}
+            scope={stashDialog.paths}
+            onCancel={() => setStashDialog(null)}
+            onConfirm={(description) => void createStash(description, stashDialog.paths)}
           />
         )}
 
