@@ -79,7 +79,7 @@ npm run dist
 Hpp 启动后在本机回环地址提供桥接服务，默认监听 `127.0.0.1:47832`；端口被占用时会自动换用系统分配的端口。端口和一次性令牌写在：
 
 ```text
-<userData>/hpp-data/editor-bridge.json
+<userData>/hpp-data/editor-bridge.json 
 ```
 
 默认位置：

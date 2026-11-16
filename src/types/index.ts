@@ -446,6 +446,7 @@ export interface ElectronAPI {
   gitStashPop: (target: string, ref?: string) => Promise<GitActionResult>;
   gitStashDrop: (target: string, ref?: string) => Promise<GitActionResult>;
   gitStashFiles: (target: string, ref?: string) => Promise<GitStashFilesResult>;
+  gitStashMerge: (target: string, ref: string) => Promise<GitActionResult>;
   gitResolveConflict: (target: string, path: string, choice: GitConflictChoice) => Promise<GitActionResult>;
   gitContinueOperation: (target: string) => Promise<GitActionResult>;
   gitAbortOperation: (target: string) => Promise<GitActionResult>;

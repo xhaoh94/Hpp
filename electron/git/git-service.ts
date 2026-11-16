@@ -472,8 +472,13 @@ export class GitService {
     try {
       const root = await this.repoRoot(target);
       const stashRef = typeof ref === "string" && /^stash@\{\d+\}$/.test(ref) ? ref : undefined;
-      const output = await runGit(root, ["stash", "pop", ...(stashRef ? [stashRef] : [])]);
-      return { success: true, output };
+      const result = await runGitResult(root, ["stash", "pop", ...(stashRef ? [stashRef] : [])]);
+      if (result.code !== 0) {
+        // 冲突提示可能落在 stderr 或 stdout，合并起来，渲染层才能判断是不是冲突。
+        const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+        return { success: false, error: detail || `git stash pop 退出码 ${result.code}` };
+      }
+      return { success: true, output: result.stdout.trim() };
     } catch (error) {
       return { success: false, error: errorMessage(error) };
     }
@@ -648,6 +653,42 @@ export class GitService {
         return { hash, shortHash, author, date, subject };
       });
       return { success: true, entries };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }
+
+  /**
+   * 工作区还有改动时，普通 stash pop 会拒绝合并。这里先把储藏涉及的路径加入 index，
+   * 再用 --3way 把储藏的 patch 打进来，冲突标记留在工作区由冲突编辑器处理。
+   */
+  async stashMerge(target: string, ref: unknown): Promise<GitActionResult> {
+    try {
+      const root = await this.repoRoot(target);
+      const stashRef = typeof ref === "string" && /^stash@\{\d+\}$/.test(ref) ? ref : undefined;
+      if (!stashRef) throw new Error("stash 引用无效。");
+      const listed = await runGit(root, ["stash", "show", "--name-only", "--include-untracked", stashRef]);
+      const paths = [...new Set(listed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+      if (paths.length > 0) await runGit(root, ["add", "-A", "--", ...paths]);
+      const patch = await runGitRaw(root, ["stash", "show", "-p", "--binary", "--include-untracked", stashRef]);
+      const dir = mkdtempSync(join(tmpdir(), "hpp-stash-"));
+      try {
+        const patchFile = join(dir, "stash.patch");
+        writeFileSync(patchFile, patch);
+        const applied = await runGitResult(root, ["apply", "--3way", patchFile]);
+        const detail = [applied.stdout, applied.stderr].filter(Boolean).join("\n").trim();
+        if (applied.code !== 0 && !/conflict/i.test(detail)) {
+          throw new Error(detail || `git apply --3way 退出码 ${applied.code}`);
+        }
+        return {
+          success: true,
+          output: /conflict/i.test(detail)
+            ? `已应用 ${stashRef}，部分文件有冲突，需要解决后加入待提交。\n${detail}`
+            : `已合并 ${stashRef} 的改动${detail ? `\n${detail}` : ""}`,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     } catch (error) {
       return { success: false, error: errorMessage(error) };
     }

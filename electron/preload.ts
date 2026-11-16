@@ -277,6 +277,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:stashDrop", target, ref),
   gitStashFiles: (target: string, ref?: string): Promise<GitStashFilesResult> =>
     ipcRenderer.invoke("git:stashFiles", target, ref),
+  gitStashMerge: (target: string, ref: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:stashMerge", target, ref),
   gitResolveConflict: (target: string, path: string, choice: GitConflictChoice): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:resolveConflict", target, path, choice),
   gitContinueOperation: (target: string): Promise<GitActionResult> =>

@@ -42,6 +42,7 @@ import { GitConflictEditor } from "./GitConflictEditor";
 import { GitRebaseDialog } from "./GitRebaseDialog";
 import { GitStashDialog } from "./GitStashDialog";
 import { GitFileHistoryDialog } from "./GitFileHistoryDialog";
+import { GitFloatingNotice } from "./GitFloatingNotice";
 import { GitBlamePanel } from "./GitBlamePanel";
 import { GitChangesMenu } from "./GitChangesMenu";
 import { GitFileTree, type GitTreeContextTarget } from "./GitFileTree";
@@ -194,6 +195,10 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const [treeMenu, setTreeMenu] = useState<GitTreeContextTarget | null>(null);
   const [blamePath, setBlamePath] = useState<string | null>(null);
   const [historyPath, setHistoryPath] = useState<string | null>(null);
+  // 恢复储藏时发生冲突：pop 不会删掉这条 stash，记下来等冲突解决后引导删除。
+  const [conflictStashRef, setConflictStashRef] = useState<string | null>(null);
+  // 工作区还有改动导致 pop 被拒绝：提供「合并恢复」入口。
+  const [mergeStashRef, setMergeStashRef] = useState<string | null>(null);
   const [paneRatio, setPaneRatio] = useState<PaneRatio>(DEFAULT_PANE_RATIO);
   const [paneDrag, setPaneDrag] = useState<{
     kind: "changes" | "commit";
@@ -287,6 +292,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
         ? preferredKey
         : conflictKeys[0] || itemKeys[0] || "";
       setSelectedKey(key);
+      return { conflictKeys };
     } finally {
       if (!silent) setBusy("");
     }
@@ -406,11 +412,12 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [busy, changesMenu, onClose, pullMenu, rebaseBase, treeMenu]);
 
-  const refresh = async (preferredKey?: string) => {
-    await loadStatus(preferredKey || selectedKey);
+  const refresh = async (preferredKey?: string, silent = false) => {
+    const outcome = await loadStatus(preferredKey || selectedKey, silent);
     // stash 列表也一起拉：储藏 / 恢复之后不管当前在哪个 tab，切过去都是最新的。
     await loadStashes();
     onChanged?.();
+    return outcome;
   };
 
   const stage = async (paths: string[]) => {
@@ -594,6 +601,13 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     }
     showFloatingToastMessage(paths?.length ? "已储藏所选文件" : "已储藏全部改动");
     setStashDialog(null);
+    // 新建 stash 会插到 stash@{0}，旧记录的 ref 要整体后移一位。
+    const shiftRef = (current: string | null) => {
+      const match = current?.match(/^stash@\{(\d+)\}$/);
+      return match ? `stash@{${Number(match[1]) + 1}}` : null;
+    };
+    setConflictStashRef(shiftRef);
+    setMergeStashRef(shiftRef);
     // 储藏完直接跳到储藏页，免得用户还要自己找刚存进去的那条。
     setTab("stash");
     setStashFiles({});
@@ -610,9 +624,27 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setBusy("stashPop");
     setError("");
     const result = await window.electronAPI.gitStashPop(target.path, entry.ref);
-    if (!result.success) setError(result.error || "恢复 stash 失败。");
-    else {
+    if (!result.success) {
+      const text = result.error || "恢复 stash 失败。";
+      const conflicted = /CONFLICT|Merge conflict/i.test(text);
+      // 工作区还有未提交改动时 git 连合并都不会开始，直接拒绝；此时什么都没 apply，不能引导删 stash。
+      const blocked = /would be overwritten by merge|Please commit your changes or stash them/i.test(text);
+      if (conflicted) {
+        setConflictStashRef(entry.ref);
+        setTab("changes");
+        setError(`恢复时发生冲突，${entry.ref} 仍保留在储藏列表里。\n解决冲突并加入待提交后，可用上方提示删除这条储藏。\n\n${text}`);
+      } else if (blocked) {
+        setMergeStashRef(entry.ref);
+        setError(`恢复被拒绝：当前工作区还有未提交改动，git 不会覆盖它们。\n可以点上方「合并恢复」，把这些改动加入待提交后走三方合并；或先提交它们再恢复。这条储藏已保留。\n\n${text}`);
+      } else {
+        setError(text);
+      }
+      // 静默刷新：非静默的 loadStatus 会 setError("")，把刚写的失败原因冲掉。
+      const outcome = await refresh(undefined, true);
+      if (conflicted && outcome?.conflictKeys.length) setSelectedKey(outcome.conflictKeys[0]);
+    } else {
       showFloatingToastMessage("stash 已恢复");
+      setConflictStashRef(null);
       // pop 之后 stash@{n} 会整体前移，缓存的文件列表不能复用。
       setStashFiles({});
       setExpandedStashRef(null);
@@ -633,11 +665,44 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     if (!result.success) setError(result.error || "删除 stash 失败。");
     else {
       showFloatingToastMessage("stash 已删除");
+      setConflictStashRef((current) => (current === entry.ref ? null : current));
+      setMergeStashRef((current) => (current === entry.ref ? null : current));
       setStashFiles({});
       setExpandedStashRef(null);
       await loadStashes();
     }
     setBusy("");
+  };
+
+  const dropConflictStash = async () => {
+    const ref = conflictStashRef;
+    if (!ref) return;
+    const entry = stashes.find((item) => item.ref === ref) || { ref, message: "引发冲突的储藏" };
+    await dropStash(entry);
+  };
+
+  const mergeStash = async () => {
+    const ref = mergeStashRef;
+    if (!ref) return;
+    const confirmed = await showAppConfirm(
+      `把 ${ref} 的改动合并进当前工作区？\n\n先把相关改动加入「待提交」，再做三方合并；改到同一处会留下冲突标记，可在冲突编辑器里解决。储藏会保留，确认结果后再删除。`,
+      { title: "合并恢复储藏", confirmLabel: "合并恢复" },
+    );
+    if (!confirmed) return;
+    setBusy("stashMerge");
+    setError("");
+    const result = await window.electronAPI.gitStashMerge(target.path, ref);
+    setBusy("");
+    if (!result.success) {
+      setError(result.error || "合并恢复失败。");
+      return;
+    }
+    showFloatingToastMessage("已合并储藏内容");
+    setMergeStashRef(null);
+    setConflictStashRef(ref);
+    setTab("changes");
+    const outcome = await refresh();
+    if (outcome?.conflictKeys.length) setSelectedKey(outcome.conflictKeys[0]);
   };
 
   const toggleStashFiles = async (entry: GitStashEntry) => {
@@ -1066,6 +1131,31 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
         </div>
 
         {error && <div className="git-workspace-error">{error}</div>}
+
+        <GitFloatingNotice
+          notices={[
+            ...(mergeStashRef ? [{
+              id: "merge-stash",
+              title: "无法直接恢复储藏",
+              message: `工作区还有改动，${mergeStashRef} 无法直接恢复。可以走冲突合并，把两边改动合起来。`,
+              actions: [
+                { label: "合并恢复", onClick: () => void mergeStash(), disabled: !!busy },
+                { label: "知道了", onClick: () => setMergeStashRef(null), disabled: !!busy },
+              ],
+              onClose: () => setMergeStashRef(null),
+            }] : []),
+            ...(conflictStashRef ? [{
+              id: "conflict-stash",
+              title: "恢复储藏时发生冲突",
+              message: `${conflictStashRef} 仍保留在储藏列表里。解决冲突并加入待提交后，可以删除这条储藏。`,
+              actions: [
+                { label: "删除该储藏", onClick: () => void dropConflictStash(), danger: true, disabled: !!busy },
+                { label: "知道了", onClick: () => setConflictStashRef(null), disabled: !!busy },
+              ],
+              onClose: () => setConflictStashRef(null),
+            }] : []),
+          ]}
+        />
 
         {status?.operation && status.operation !== "none" && (
           <div className="git-conflict-banner">

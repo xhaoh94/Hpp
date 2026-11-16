@@ -38,6 +38,8 @@ export function registerGitIpc() {
     gitService.stashDrop(requireTarget(target), ref));
   ipcMain.handle("git:stashFiles", (_event, target: unknown, ref: unknown) =>
     gitService.stashFiles(requireTarget(target), ref));
+  ipcMain.handle("git:stashMerge", (_event, target: unknown, ref: unknown) =>
+    gitService.stashMerge(requireTarget(target), ref));
   ipcMain.handle("git:resolveConflict", (_event, target: unknown, path: unknown, choice: unknown) =>
     gitService.resolveConflict(requireTarget(target), path, choice));
   ipcMain.handle("git:continueOperation", (_event, target: unknown) =>

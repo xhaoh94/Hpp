@@ -19,6 +19,15 @@ const replaceAt = (list: string[], index: number, value: string) => {
   return next;
 };
 
+/** 标出当前合并结果取的哪一侧，改完能立刻看出每块的状态。 */
+const choiceLabel = (value: string | undefined, ours: string, theirs: string) => {
+  if (value === undefined) return "未选择";
+  if (value === ours) return "已选当前";
+  if (value === theirs) return "已选对方";
+  if (value === `${ours}${theirs}`) return "已选两者";
+  return "已手动修改";
+};
+
 export function GitConflictEditor({ repoPath, file, disabled, onError, onResolved }: Props) {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<GitConflictFileResult | null>(null);
@@ -115,7 +124,10 @@ export function GitConflictEditor({ repoPath, file, disabled, onError, onResolve
         {parsed.blocks.map((block, index) => (
           <div className="git-conflict-block" key={`${file}-${index}`}>
             <div className="git-conflict-block-head">
-              <span>冲突 #{index + 1}</span>
+              <span className="git-conflict-block-title">
+                冲突 #{index + 1}
+                <em className="git-conflict-choice">{choiceLabel(values[index], block.ours, block.theirs)}</em>
+              </span>
               <div className="git-conflict-block-actions">
                 <button type="button" onClick={() => setValues((current) => replaceAt(current, index, block.ours))} disabled={disabled || saving}>用当前</button>
                 <button type="button" onClick={() => setValues((current) => replaceAt(current, index, `${block.ours}${block.theirs}`))} disabled={disabled || saving}>两边都要</button>
