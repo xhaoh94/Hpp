@@ -290,8 +290,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:createBranch", target, name),
   gitSwitchBranch: (target: string, name: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:switchBranch", target, name),
-  gitDeleteBranch: (target: string, name: string): Promise<GitActionResult> =>
-    ipcRenderer.invoke("git:deleteBranch", target, name),
+  gitDeleteBranch: (target: string, name: string, force?: boolean): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:deleteBranch", target, name, force),
   gitLog: (target: string, limit?: number): Promise<GitLogResult> =>
     ipcRenderer.invoke("git:log", target, limit),
   gitBlame: (target: string, path: string): Promise<GitBlameResult> =>

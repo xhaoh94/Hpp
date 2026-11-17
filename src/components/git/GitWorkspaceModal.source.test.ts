@@ -64,4 +64,14 @@ describe("Git workspace modal", () => {
     expect(modal).not.toContain("min(");
     expect(rule(".git-workspace-body")).toContain("grid-template-columns: clamp(");
   });
+
+  it("offers a confirmed force-delete when Git refuses to delete an unmerged branch", () => {
+    const source = read("src/components/git/GitWorkspaceModal.tsx");
+    expect(source).toContain("gitDeleteBranch(target.path, branch.name, force)");
+    expect(source).toMatch(/not fully merged|not merged|未合并/);
+    expect(source).toContain('label: "强制删除"');
+    // 强制删除必须二次确认，且提示会丢未合并改动。
+    expect(source).toContain("未合并的改动会丢失");
+    expect(source).toContain('title: force ? "强制删除分支" : "删除分支"');
+  });
 });

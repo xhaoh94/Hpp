@@ -104,6 +104,28 @@ describe("GitService", { timeout: 20_000 }, () => {
     expect(commit.patch).toContain("README.md");
   });
 
+  it("refuses to safely delete an unmerged branch but force deletes it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hpp-git-force-branch-"));
+    temps.push(root);
+    createRepo(root);
+    const initial = await service.branches(root);
+    const currentName = initial.branches?.find((branch) => branch.current)!.name;
+
+    expect((await service.createBranch(root, "draft/unmerged")).success).toBe(true);
+    expect((await service.switchBranch(root, "draft/unmerged")).success).toBe(true);
+    writeFileSync(join(root, "draft.txt"), "only on this branch\n", "utf8");
+    git(root, ["add", "."]);
+    git(root, ["commit", "-m", "unmerged work"]);
+    expect((await service.switchBranch(root, currentName)).success).toBe(true);
+
+    const safe = await service.deleteBranch(root, "draft/unmerged");
+    expect(safe.success).toBe(false);
+    expect(safe.error).toMatch(/not fully merged/i);
+
+    expect((await service.deleteBranch(root, "draft/unmerged", true)).success).toBe(true);
+    expect((await service.branches(root)).branches?.some((branch) => branch.name === "draft/unmerged")).toBe(false);
+  });
+
   it("lists worktrees and removes a non-current worktree", async () => {
     const base = mkdtempSync(join(tmpdir(), "hpp-git-worktrees-"));
     temps.push(base);

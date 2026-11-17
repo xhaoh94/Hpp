@@ -52,8 +52,8 @@ export function registerGitIpc() {
     gitService.createBranch(requireTarget(target), name));
   ipcMain.handle("git:switchBranch", (_event, target: unknown, name: unknown) =>
     gitService.switchBranch(requireTarget(target), name));
-  ipcMain.handle("git:deleteBranch", (_event, target: unknown, name: unknown) =>
-    gitService.deleteBranch(requireTarget(target), name));
+  ipcMain.handle("git:deleteBranch", (_event, target: unknown, name: unknown, force?: unknown) =>
+    gitService.deleteBranch(requireTarget(target), name, force === true));
   ipcMain.handle("git:log", (_event, target: unknown, limit: unknown) =>
     gitService.log(requireTarget(target), Number(limit) || 50));
   ipcMain.handle("git:blame", (_event, target: unknown, path: unknown) =>

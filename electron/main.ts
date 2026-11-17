@@ -413,7 +413,9 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
-      spellcheck: true,
+      // 全局关掉拼写检查：英文技术词、路径、commit id 在普通输入框里也会被画红波浪线。
+      // 逐个输入框加 spellCheck={false} 只能覆盖 renderer 里写到的那些，漏一个就露馅。
+      spellcheck: false,
     },
   });
   if (process.platform === "win32") {

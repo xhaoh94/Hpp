@@ -1,7 +1,7 @@
 import type { ChatMessage } from "@/stores/chat-store";
 
 export interface SessionStats {
-  /** 有 token 记录的助手回合数。 */
+  /** 有 token 记录的回合数。 */
   turns: number;
   /** 工具调用次数（过程条目里的 tool）。 */
   steps: number;

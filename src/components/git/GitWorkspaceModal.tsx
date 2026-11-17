@@ -963,18 +963,36 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setBusy("");
   };
 
-  const deleteBranch = async (branch: GitBranchInfo) => {
+  const deleteBranch = async (branch: GitBranchInfo, force = false) => {
     if (branch.current) return;
-    const confirmed = await showAppConfirm(`删除本地分支 ${branch.name}？只允许删除已合并的分支。`, {
-      title: "删除分支",
-      confirmLabel: "删除",
-    });
+    const confirmed = await showAppConfirm(
+      force
+        ? `强制删除本地分支 ${branch.name}？该分支尚未合并，未合并的改动会丢失。`
+        : `删除本地分支 ${branch.name}？只允许删除已合并的分支。`,
+      { title: force ? "强制删除分支" : "删除分支", confirmLabel: "删除" },
+    );
     if (!confirmed) return;
     setBusy("branch");
     setError("");
-    const result = await window.electronAPI.gitDeleteBranch(target.path, branch.name);
-    if (!result.success) setError(result.error || "删除分支失败。");
-    else {
+    const result = await window.electronAPI.gitDeleteBranch(target.path, branch.name, force);
+    if (!result.success) {
+      const message = result.error || "删除分支失败。";
+      // 安全删除被拒（典型是 stash 残留 / 未合并分支）：在日志里给出「强制删除」出口，
+      // 默认仍走安全删除，不会不经确认就丢掉未合并的提交。
+      if (!force && /not fully merged|not merged|未合并/i.test(message)) {
+        pushOpLog({
+          title: `删除 ${branch.name} 失败`,
+          tone: "warning",
+          message: "分支尚未合并，安全删除被 Git 拒绝",
+          detail: message,
+          action: { label: "强制删除", run: () => void deleteBranch(branch, true) },
+        });
+        setLogDialogOpen(true);
+      } else {
+        setError(message);
+      }
+    } else {
+      pushOpLog({ title: `已删除分支 ${branch.name}`, tone: "success", message: force ? "强制删除" : "" });
       showFloatingToastMessage(`已删除 ${branch.name}`);
       await loadBranches();
     }
@@ -1318,6 +1336,18 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             <button
               type="button"
               role="tab"
+              aria-selected={tab === "stash"}
+              aria-label="Stash"
+              data-label={`Stash${stashes.length > 0 ? ` (${stashes.length})` : ""}`}
+              className={`git-nav-item ${tab === "stash" ? "active" : ""}`}
+              onClick={() => setTab("stash")}
+            >
+              <Archive size={16} strokeWidth={1.8} />
+              {stashes.length > 0 && <span className="git-nav-badge">{stashes.length}</span>}
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={tab === "history"}
               aria-label="历史"
               data-label="历史"
@@ -1348,493 +1378,480 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             >
               <FolderGit2 size={16} strokeWidth={1.8} />
             </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "stash"}
-              aria-label="Stash"
-              data-label={`Stash${stashes.length > 0 ? ` (${stashes.length})` : ""}`}
-              className={`git-nav-item ${tab === "stash" ? "active" : ""}`}
-              onClick={() => setTab("stash")}
-            >
-              <Archive size={16} strokeWidth={1.8} />
-              {stashes.length > 0 && <span className="git-nav-badge">{stashes.length}</span>}
-            </button>
           </nav>
 
           <div className="git-workspace-content">
-        {tab === "changes" ? (
-          <>
-            <div className="git-workspace-body with-tree">
-              <GitFileTree
-                repoRoot={status?.repoRoot || target.path}
-                changes={changeMap}
-                selectedPath={selected?.path}
-                onSelectFile={selectTreeFile}
-                onPreviewFile={setPreviewFile}
-                onContextMenu={setTreeMenu}
-              />
-              <aside className="git-files-pane">
-                <label className="git-file-search">
-                  <span>搜索</span>
-                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="筛选文件…" />
-                </label>
-                {conflictedItems.length > 0 && (
-                  <section className="git-file-block conflicts">
-                    <div className="git-file-section-title conflict">
-                      <AlertTriangle size={12} />
-                      <span className="git-file-section-label">冲突</span>
-                      <span className="git-file-section-count">{conflictedItems.length}</span>
-                    </div>
-                    <div className="git-file-lines persistent-scroll">
-                      {conflictedItems.map((file) => (
-                        <div
-                          className={`git-conflict-row ${selectedKey === `${file.path}:conflict` ? "active" : ""}`}
-                          key={file.path}
-                          onClick={() => setSelectedKey(`${file.path}:conflict`)}
-                        >
-                          <AlertTriangle size={13} />
-                          <span className="git-file-path" title={file.path}>{file.path}</span>
-                          <button type="button" onClick={(event) => { event.stopPropagation(); void resolveConflict(file, "ours"); }} disabled={!!busy} title="使用当前分支版本">当前</button>
-                          <button type="button" onClick={(event) => { event.stopPropagation(); void resolveConflict(file, "theirs"); }} disabled={!!busy} title="使用对方分支版本">对方</button>
-                          <button type="button" onClick={(event) => { event.stopPropagation(); void resolveConflict(file, "mark"); }} disabled={!!busy} title="已手动解决，标记为已解决">已解决</button>
-                          <button type="button" className="git-file-action" onClick={(event) => { event.stopPropagation(); void openConflictFile(file); }} disabled={!!busy} title="在外部应用打开">
-                            <ExternalLink size={12} />
-                          </button>
+            {tab === "changes" ? (
+              <>
+                <div className="git-workspace-body with-tree">
+                  <GitFileTree
+                    repoRoot={status?.repoRoot || target.path}
+                    changes={changeMap}
+                    selectedPath={selected?.path}
+                    onSelectFile={selectTreeFile}
+                    onPreviewFile={setPreviewFile}
+                    onContextMenu={setTreeMenu}
+                  />
+                  <aside className="git-files-pane">
+                    <label className="git-file-search">
+                      <span>搜索</span>
+                      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="筛选文件…" />
+                    </label>
+                    {conflictedItems.length > 0 && (
+                      <section className="git-file-block conflicts">
+                        <div className="git-file-section-title conflict">
+                          <AlertTriangle size={12} />
+                          <span className="git-file-section-label">冲突</span>
+                          <span className="git-file-section-count">{conflictedItems.length}</span>
                         </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
+                        <div className="git-file-lines persistent-scroll">
+                          {conflictedItems.map((file) => (
+                            <div
+                              className={`git-conflict-row ${selectedKey === `${file.path}:conflict` ? "active" : ""}`}
+                              key={file.path}
+                              onClick={() => setSelectedKey(`${file.path}:conflict`)}
+                            >
+                              <AlertTriangle size={13} />
+                              <span className="git-file-path" title={file.path}>{file.path}</span>
+                              <button type="button" onClick={(event) => { event.stopPropagation(); void resolveConflict(file, "ours"); }} disabled={!!busy} title="使用当前分支版本">当前</button>
+                              <button type="button" onClick={(event) => { event.stopPropagation(); void resolveConflict(file, "theirs"); }} disabled={!!busy} title="使用对方分支版本">对方</button>
+                              <button type="button" onClick={(event) => { event.stopPropagation(); void resolveConflict(file, "mark"); }} disabled={!!busy} title="已手动解决，标记为已解决">已解决</button>
+                              <button type="button" className="git-file-action" onClick={(event) => { event.stopPropagation(); void openConflictFile(file); }} disabled={!!busy} title="在外部应用打开">
+                                <ExternalLink size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
 
-                <section
-                  className="git-file-block changes"
-                  ref={(element) => { paneRefs.current.changes = element; }}
-                  style={{ flexGrow: paneRatio.changes }}
-                >
-                  <div
-                    className="git-file-section-title"
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      setChangesMenu({ x: event.clientX, y: event.clientY });
-                    }}
-                  >
-                    <span className="git-file-section-label">变更</span>
-                    <span className="git-file-section-count">{unstagedItems.length}</span>
-                    <button
-                      type="button"
-                      className="git-file-section-action"
-                      title="全部下移到待提交"
-                      aria-label="全部下移到待提交"
-                      disabled={!!busy || allUnstagedPaths.length === 0}
-                      onClick={() => void stage(allUnstagedPaths)}
+                    <section
+                      className="git-file-block changes"
+                      ref={(element) => { paneRefs.current.changes = element; }}
+                      style={{ flexGrow: paneRatio.changes }}
                     >
-                      <ArrowDown size={13} />
-                    </button>
-                  </div>
-                  <div className="git-file-lines persistent-scroll">
-                    {unstagedItems.length === 0 ? <div className="git-file-empty">暂无</div> : unstagedItems.map((item) => (
                       <div
-                        key={changeKey(item)}
-                        className={`git-file-row ${selectedKey === changeKey(item) ? "active" : ""}`}
-                        onClick={() => setSelectedKey(changeKey(item))}
-                        onContextMenu={(event) => openFileContextMenu(item, event)}
+                        className="git-file-section-title"
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          setChangesMenu({ x: event.clientX, y: event.clientY });
+                        }}
                       >
-                        <span className={`git-status-dot ${item.untracked ? "untracked" : item.status.trim().charAt(1) || "M"}`} />
-                        <span className="git-file-path" title={item.path}>{item.path}</span>
+                        <span className="git-file-section-label">变更</span>
+                        <span className="git-file-section-count">{unstagedItems.length}</span>
                         <button
                           type="button"
-                          className="git-file-action"
-                          title="下移到待提交"
-                          aria-label={`添加到待提交 ${item.path}`}
-                          disabled={!!busy}
-                          onClick={(event) => { event.stopPropagation(); void stage([item.path]); }}
+                          className="git-file-section-action"
+                          title="全部下移到待提交"
+                          aria-label="全部下移到待提交"
+                          disabled={!!busy || allUnstagedPaths.length === 0}
+                          onClick={() => void stage(allUnstagedPaths)}
                         >
                           <ArrowDown size={13} />
                         </button>
-                        <button
-                          type="button"
-                          className="git-file-action danger"
-                          title={item.untracked ? "删除未跟踪文件" : "丢弃工作区的改动"}
-                          disabled={!!busy}
-                          onClick={(event) => { event.stopPropagation(); void discard(item); }}
-                        >
-                          <Trash2 size={13} />
-                        </button>
                       </div>
-                    ))}
-                  </div>
-                </section>
+                      <div className="git-file-lines persistent-scroll">
+                        {unstagedItems.length === 0 ? <div className="git-file-empty">暂无</div> : unstagedItems.map((item) => (
+                          <div
+                            key={changeKey(item)}
+                            className={`git-file-row ${selectedKey === changeKey(item) ? "active" : ""}`}
+                            onClick={() => setSelectedKey(changeKey(item))}
+                            onContextMenu={(event) => openFileContextMenu(item, event)}
+                          >
+                            <span className={`git-status-dot ${item.untracked ? "untracked" : item.status.trim().charAt(1) || "M"}`} />
+                            <span className="git-file-path" title={item.path}>{item.path}</span>
+                            <button
+                              type="button"
+                              className="git-file-action"
+                              title="下移到待提交"
+                              aria-label={`添加到待提交 ${item.path}`}
+                              disabled={!!busy}
+                              onClick={(event) => { event.stopPropagation(); void stage([item.path]); }}
+                            >
+                              <ArrowDown size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              className="git-file-action danger"
+                              title={item.untracked ? "删除未跟踪文件" : "丢弃工作区的改动"}
+                              disabled={!!busy}
+                              onClick={(event) => { event.stopPropagation(); void discard(item); }}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
 
-                <div
-                  className="git-pane-resizer"
-                  role="separator"
-                  aria-orientation="horizontal"
-                  aria-label="拖动调整变更列表高度"
-                  onPointerDown={beginPaneResize("changes")}
-                />
+                    <div
+                      className="git-pane-resizer"
+                      role="separator"
+                      aria-orientation="horizontal"
+                      aria-label="拖动调整变更列表高度"
+                      onPointerDown={beginPaneResize("changes")}
+                    />
 
-                <section
-                  className="git-file-block staged"
-                  ref={(element) => { paneRefs.current.staged = element; }}
-                  style={{ flexGrow: paneRatio.staged }}
-                >
-                  <div className="git-file-section-title">
-                    <span className="git-file-section-label">待提交</span>
-                    <span className="git-file-section-count">{stagedItems.length}</span>
-                    <button
-                      type="button"
-                      className="git-file-section-action"
-                      title="全部上移回变更"
-                      aria-label="全部移出待提交"
-                      disabled={!!busy || allStagedPaths.length === 0}
-                      onClick={() => void unstage(allStagedPaths)}
+                    <section
+                      className="git-file-block staged"
+                      ref={(element) => { paneRefs.current.staged = element; }}
+                      style={{ flexGrow: paneRatio.staged }}
                     >
-                      <ArrowUp size={13} />
-                    </button>
-                  </div>
-                  <div className="git-file-lines persistent-scroll">
-                    {stagedItems.length === 0 ? <div className="git-file-empty">加入待提交的变更会出现在这里</div> : stagedItems.map((item) => (
-                      <div
-                        key={changeKey(item)}
-                        className={`git-file-row ${selectedKey === changeKey(item) ? "active" : ""}`}
-                        onClick={() => setSelectedKey(changeKey(item))}
-                        onContextMenu={(event) => openFileContextMenu(item, event)}
-                      >
-                        <span className={`git-status-dot ${item.status.trim().charAt(0) || "M"}`} />
-                        <span className="git-file-path" title={item.path}>{item.path}</span>
+                      <div className="git-file-section-title">
+                        <span className="git-file-section-label">待提交</span>
+                        <span className="git-file-section-count">{stagedItems.length}</span>
                         <button
                           type="button"
-                          className="git-file-action"
-                          title="上移回变更（移出待提交）"
-                          aria-label={`移出待提交 ${item.path}`}
-                          disabled={!!busy}
-                          onClick={(event) => { event.stopPropagation(); void unstage([item.path]); }}
+                          className="git-file-section-action"
+                          title="全部上移回变更"
+                          aria-label="全部移出待提交"
+                          disabled={!!busy || allStagedPaths.length === 0}
+                          onClick={() => void unstage(allStagedPaths)}
                         >
                           <ArrowUp size={13} />
                         </button>
                       </div>
-                    ))}
-                  </div>
-                </section>
-
-                <div
-                  className="git-pane-resizer"
-                  role="separator"
-                  aria-orientation="horizontal"
-                  aria-label="拖动调整待提交列表与提交区高度"
-                  onPointerDown={beginPaneResize("commit")}
-                />
-
-                <div
-                  className="git-commit-pane"
-                  ref={(element) => { paneRefs.current.commit = element; }}
-                  style={{ flexGrow: paneRatio.commit }}
-                >
-                  <div className="git-commit-label">
-                    <span>提交信息</span>
-                    <button
-                      type="button"
-                      ref={commitHistoryBtnRef}
-                      className="git-commit-history-trigger"
-                      onClick={() => void openCommitHistory()}
-                      disabled={!!busy}
-                      title="从历史提交信息里选一条填入"
-                    >
-                      <History size={12} />
-                      历史
-                    </button>
-                  </div>
-                  <textarea
-                    value={message}
-                    rows={2}
-                    placeholder="输入提交信息（必填）"
-                    onChange={(event) => setMessage(event.target.value)}
-                    disabled={!!busy}
-                  />
-                  <div className="git-commit-actions">
-                    <div className="git-commit-switches">
-                      <label className="git-amend" title="git commit --amend：改写上一次提交，只在本地生效，不会推送">
-                        <input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} disabled={!!busy} />
-                        修改上次提交
-                      </label>
-                      <label className="git-amend" title="提交成功后自动 git push；没有 upstream 时会自动设置">
-                        <input type="checkbox" checked={pushAfterCommit} onChange={(event) => setPushAfterCommit(event.target.checked)} disabled={!!busy} />
-                        提交后推送
-                      </label>
-                    </div>
-                    <button
-                      type="button"
-                      className="git-primary-btn"
-                      onClick={() => void commit()}
-                      disabled={!!busy || !message.trim() || (!hasStaged && !amend)}
-                      title={hasStaged ? `提交到 ${status?.branch || "当前分支"}` : "先把变更加入待提交再提交"}
-                    >
-                      {busy === "commit" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
-                      提交到 {status?.branch || "当前分支"}
-                    </button>
-                  </div>
-                </div>
-              </aside>
-
-              <section className="git-diff-pane">
-                <div className="git-diff-header">
-                  <span title={blamePath || selectedConflict?.path || selected?.path}>
-                    {blamePath || selectedConflict?.path || selected?.path || "选择一个文件查看 diff"}
-                  </span>
-                  {blamePath ? null
-                    : selectedConflict ? <span>冲突 · 三方合并</span>
-                      : selected ? (
-                        <span className="git-diff-header-actions">
-                          <span>{statusLabel(selected.status)} · {selected.stagedView ? "待提交" : "工作区"}</span>
-                          {!selected.untracked && (
+                      <div className="git-file-lines persistent-scroll">
+                        {stagedItems.length === 0 ? <div className="git-file-empty">加入待提交的变更会出现在这里</div> : stagedItems.map((item) => (
+                          <div
+                            key={changeKey(item)}
+                            className={`git-file-row ${selectedKey === changeKey(item) ? "active" : ""}`}
+                            onClick={() => setSelectedKey(changeKey(item))}
+                            onContextMenu={(event) => openFileContextMenu(item, event)}
+                          >
+                            <span className={`git-status-dot ${item.status.trim().charAt(0) || "M"}`} />
+                            <span className="git-file-path" title={item.path}>{item.path}</span>
                             <button
                               type="button"
-                              className="git-diff-blame-btn"
-                              title="逐行追溯这个文件的历史"
-                              onClick={() => setBlamePath(selected.path)}
+                              className="git-file-action"
+                              title="上移回变更（移出待提交）"
+                              aria-label={`移出待提交 ${item.path}`}
+                              disabled={!!busy}
+                              onClick={(event) => { event.stopPropagation(); void unstage([item.path]); }}
                             >
-                              追溯
+                              <ArrowUp size={13} />
                             </button>
-                          )}
-                        </span>
-                      ) : null}
-                </div>
-                <div className="git-diff-content persistent-scroll">
-                  {blamePath ? (
-                    <GitBlamePanel
-                      repoPath={status?.repoRoot || target.path}
-                      file={blamePath}
-                      onClose={() => setBlamePath(null)}
-                    />
-                  ) : selectedConflict ? (
-                    <GitConflictEditor
-                      repoPath={target.path}
-                      file={selectedConflict.path}
-                      disabled={!!busy}
-                      onError={setError}
-                      onResolved={async () => {
-                        showFloatingToastMessage("冲突已解决并已加入待提交");
-                        await refresh();
-                      }}
-                    />
-                  ) : diffLoading ? <div className="git-diff-empty"><LoaderCircle className="spin" size={16} /> 读取中…</div>
-                    : diff && parsedDiff.hunks.length > 0 && !selected?.untracked ? (
-                      <div className="git-hunks">
-                        {parsedDiff.hunks.map((hunk) => (
-                          <div className="git-hunk-block" key={hunk.index}>
-                            <div className="git-hunk-header">
-                              <code>{hunk.header}</code>
-                              <div className="git-hunk-actions">
-                                <button
-                                  type="button"
-                                  onClick={() => void applyHunks([hunk.index])}
-                                  disabled={!!busy}
-                                >
-                                  {selected?.stagedView ? "移除此块" : "添加此块至待提交"}
-                                </button>
-                                {!selected?.stagedView && (
-                                  <button
-                                    type="button"
-                                    className="danger"
-                                    onClick={() => void discardHunks([hunk.index])}
-                                    disabled={!!busy}
-                                  >
-                                    丢弃此块
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                            <div className="git-hunk-lines">
-                              {hunk.lines.map((line, index) => (
-                                <div
-                                  className={`git-hunk-line ${line.startsWith("+") ? "add" : line.startsWith("-") ? "remove" : ""}`}
-                                  key={`${hunk.index}-${index}`}
-                                >{line || " "}</div>
-                              ))}
-                            </div>
                           </div>
                         ))}
                       </div>
-                    ) : diff ? <pre>{diff}</pre>
-                      : <div className="git-diff-empty">{selected ? "没有可显示的 diff。" : hasChanges || conflictedItems.length > 0 ? "选择一个文件查看 diff" : "工作区干净，没有待处理改动。"}</div>}
-                </div>
-              </section>
-            </div>
-          </>
-        ) : tab === "history" ? (
-          <div className="git-workspace-body">
-            <aside className="git-files-pane">
-              <label className="git-file-search">
-                <span>提交</span>
-                <input value={logSearch} onChange={(event) => setLogSearch(event.target.value)} placeholder="搜索提交…" />
-              </label>
-              <div className="git-files-toolbar">
-                <button
-                  type="button"
-                  disabled={!!busy || !canRebase}
-                  title={canRebase ? `把 ${selectedLogEntry?.shortHash} 之后的提交做交互式变基（不含该提交）` : "选中一个更早的提交作为变基基点"}
-                  onClick={() => { if (selectedLogEntry) setRebaseBase(selectedLogEntry); }}
-                >
-                  交互式变基
-                </button>
-              </div>
-              <div className="git-file-sections persistent-scroll">
-                {logEntries.filter((entry) => {
-                  const query = logSearch.trim().toLowerCase();
-                  return !query || entry.subject.toLowerCase().includes(query) || entry.author.toLowerCase().includes(query) || entry.shortHash.toLowerCase().includes(query);
-                }).map((entry) => (
-                  <div
-                    key={entry.hash}
-                    className={`git-commit-row ${selectedCommit === entry.hash ? "active" : ""}`}
-                    onClick={() => setSelectedCommit(entry.hash)}
-                    title={entry.hash}
-                  >
-                    <strong>{entry.subject}</strong>
-                    <span>{entry.shortHash} · {entry.author} · {formatGitDate(entry.date)}</span>
-                  </div>
-                ))}
-                {logEntries.length === 0 && <div className="git-file-empty">暂无提交记录</div>}
-              </div>
-            </aside>
-            <section className="git-diff-pane">
-              <div className="git-diff-header">
-                <span>{logEntries.find((entry) => entry.hash === selectedCommit)?.subject || "选择提交查看详情"}</span>
-                {selectedCommit && <span>{selectedCommit.slice(0, 8)}</span>}
-              </div>
-              <div className="git-diff-content persistent-scroll">
-                {commitDiff ? <pre>{commitDiff}</pre> : <div className="git-diff-empty">{selectedCommit ? "读取中…" : "选择一个提交查看详情"}</div>}
-              </div>
-            </section>
-          </div>
-        ) : tab === "branches" ? (
-          <div className="git-simple-pane persistent-scroll">
-            <div className="git-stash-create">
-              <input value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="新分支名" disabled={!!busy} />
-              <button type="button" onClick={() => void createBranch()} disabled={!!busy || !newBranch.trim()}>
-                <GitBranch size={14} /> 创建分支
-              </button>
-            </div>
-            <div className="git-branch-list">
-              {branches.map((branch) => (
-                <div className="git-simple-row" key={branch.name}>
-                  <GitBranch size={14} />
-                  <div>
-                    <strong>{branch.name}{branch.current ? " · 当前分支" : ""}</strong>
-                    <span>{branch.upstream || "没有 upstream"}</span>
-                  </div>
-                  <button type="button" onClick={() => void switchBranch(branch)} disabled={!!busy || branch.current}>
-                    切换
-                  </button>
-                  <button type="button" onClick={() => void mergeBranch(branch)} disabled={!!busy || branch.current} title="git merge 此分支">
-                    合并
-                  </button>
-                  <button type="button" onClick={() => void rebaseBranch(branch)} disabled={!!busy || branch.current} title="git rebase 此分支">
-                    变基
-                  </button>
-                  <button type="button" className="danger" onClick={() => void deleteBranch(branch)} disabled={!!busy || branch.current}>
-                    删除
-                  </button>
-                </div>
-              ))}
-              {branches.length === 0 && <div className="git-diff-empty">没有本地分支。</div>}
-            </div>
-            <p className="git-simple-note">切换分支前请确认工作区干净；删除只允许已合并的本地分支。</p>
-          </div>
-        ) : tab === "worktrees" ? (
-          <div className="git-simple-pane persistent-scroll">
-            <div className="git-branch-list">
-              {worktrees.map((entry) => (
-                <div className="git-simple-row" key={entry.path}>
-                  <FolderGit2 size={14} />
-                  <div>
-                    <strong>{entry.branch || (entry.detached ? "(detached)" : "(unknown)")}{entry.current ? " · 当前" : ""}</strong>
-                    <span>{entry.path}{entry.head ? ` · ${entry.head.slice(0, 8)}` : ""}</span>
-                  </div>
-                  <button type="button" className="danger" onClick={() => void deleteWorktree(entry)} disabled={!!busy || entry.current} title="强制删除 worktree">
-                    删除
-                  </button>
-                </div>
-              ))}
-              {worktrees.length === 0 && <div className="git-diff-empty">没有 worktree。</div>}
-            </div>
-            <p className="git-simple-note">删除 worktree 会同时丢弃其中未提交的改动，请先确认。</p>
-          </div>
-        ) : (
-          <div className="git-stash-pane persistent-scroll">
-            <div className="git-stash-create">
-              <button
-                type="button"
-                className="git-stash-create-button"
-                onClick={() => setStashDialog({})}
-                disabled={!!busy}
-              >
-                <Archive size={14} /> 储藏当前改动
-              </button>
-            </div>
-            <div className="git-stash-list">
-              {stashes.length === 0 ? <div className="git-diff-empty">没有 stash。</div> : stashes.map((entry) => {
-                const files = stashFiles[entry.ref];
-                const expanded = expandedStashRef === entry.ref;
-                return (
-                  <div className={`git-stash-row ${expanded ? "expanded" : ""}`} key={entry.ref}>
-                    <div className="git-stash-row-head">
-                      <button
-                        type="button"
-                        className="git-stash-toggle"
-                        onClick={() => void toggleStashFiles(entry)}
-                        title={expanded ? "收起文件列表" : "查看这个 stash 里的文件"}
-                        aria-expanded={expanded}
-                      >
-                        {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                      </button>
-                      <div className="git-stash-meta">
-                        <strong title={entry.message || entry.ref}>{entry.message || "（无说明）"}</strong>
-                        <span className="git-stash-ref">
-                          {entry.ref}
-                          {entry.branch ? ` · ${entry.branch}` : ""}
-                        </span>
-                      </div>
-                      <div className="git-stash-actions">
-                        <button type="button" onClick={() => setRestoreStash(entry)} disabled={!!busy}>
-                          <Undo2 size={14} /> 恢复
+                    </section>
+
+                    <div
+                      className="git-pane-resizer"
+                      role="separator"
+                      aria-orientation="horizontal"
+                      aria-label="拖动调整待提交列表与提交区高度"
+                      onPointerDown={beginPaneResize("commit")}
+                    />
+
+                    <div
+                      className="git-commit-pane"
+                      ref={(element) => { paneRefs.current.commit = element; }}
+                      style={{ flexGrow: paneRatio.commit }}
+                    >
+                      <div className="git-commit-label">
+                        <span>提交信息</span>
+                        <button
+                          type="button"
+                          ref={commitHistoryBtnRef}
+                          className="git-commit-history-trigger"
+                          onClick={() => void openCommitHistory()}
+                          disabled={!!busy}
+                          title="从历史提交信息里选一条填入"
+                        >
+                          <History size={12} />
+                          历史
                         </button>
-                        <button type="button" className="danger" onClick={() => void dropStash(entry)} disabled={!!busy}>
-                          <Trash2 size={14} /> 删除
+                      </div>
+                      <textarea
+                        value={message}
+                        rows={2}
+                        placeholder="输入提交信息（必填）"
+                        onChange={(event) => setMessage(event.target.value)}
+                        disabled={!!busy}
+                      />
+                      <div className="git-commit-actions">
+                        <div className="git-commit-switches">
+                          <label className="git-amend" title="git commit --amend：改写上一次提交，只在本地生效，不会推送">
+                            <input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} disabled={!!busy} />
+                            修改上次提交
+                          </label>
+                          <label className="git-amend" title="提交成功后自动 git push；没有 upstream 时会自动设置">
+                            <input type="checkbox" checked={pushAfterCommit} onChange={(event) => setPushAfterCommit(event.target.checked)} disabled={!!busy} />
+                            提交后推送
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          className="git-primary-btn"
+                          onClick={() => void commit()}
+                          disabled={!!busy || !message.trim() || (!hasStaged && !amend)}
+                          title={hasStaged ? `提交到 ${status?.branch || "当前分支"}` : "先把变更加入待提交再提交"}
+                        >
+                          {busy === "commit" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
+                          提交到 {status?.branch || "当前分支"}
                         </button>
                       </div>
                     </div>
-                    {expanded && (
-                      <div className="git-stash-files">
-                        {stashFilesLoading === entry.ref ? (
-                          <div className="git-stash-files-empty">
-                            <LoaderCircle className="spin" size={12} /> 读取中…
-                          </div>
-                        ) : !files || files.length === 0 ? (
-                          <div className="git-stash-files-empty">没有文件记录</div>
-                        ) : files.map((file) => (
-                          <div className="git-stash-file" key={`${file.status}:${file.path}`} title={file.path}>
-                            <span
-                              className={`git-stash-file-status ${
-                                file.status.startsWith("D") ? "D"
-                                  : file.status.startsWith("A") || file.status.startsWith("?") ? "A"
-                                    : file.status.startsWith("R") ? "R" : "M"
-                              }`}
-                            >
-                              {file.status.startsWith("?") ? "U" : file.status.slice(0, 1)}
+                  </aside>
+
+                  <section className="git-diff-pane">
+                    <div className="git-diff-header">
+                      <span title={blamePath || selectedConflict?.path || selected?.path}>
+                        {blamePath || selectedConflict?.path || selected?.path || "选择一个文件查看 diff"}
+                      </span>
+                      {blamePath ? null
+                        : selectedConflict ? <span>冲突 · 三方合并</span>
+                          : selected ? (
+                            <span className="git-diff-header-actions">
+                              <span>{statusLabel(selected.status)} · {selected.stagedView ? "待提交" : "工作区"}</span>
+                              {!selected.untracked && (
+                                <button
+                                  type="button"
+                                  className="git-diff-blame-btn"
+                                  title="逐行追溯这个文件的历史"
+                                  onClick={() => setBlamePath(selected.path)}
+                                >
+                                  追溯
+                                </button>
+                              )}
                             </span>
-                            <span className="git-stash-file-path">{file.path}</span>
+                          ) : null}
+                    </div>
+                    <div className="git-diff-content persistent-scroll">
+                      {blamePath ? (
+                        <GitBlamePanel
+                          repoPath={status?.repoRoot || target.path}
+                          file={blamePath}
+                          onClose={() => setBlamePath(null)}
+                        />
+                      ) : selectedConflict ? (
+                        <GitConflictEditor
+                          repoPath={target.path}
+                          file={selectedConflict.path}
+                          disabled={!!busy}
+                          onError={setError}
+                          onResolved={async () => {
+                            showFloatingToastMessage("冲突已解决并已加入待提交");
+                            await refresh();
+                          }}
+                        />
+                      ) : diffLoading ? <div className="git-diff-empty"><LoaderCircle className="spin" size={16} /> 读取中…</div>
+                        : diff && parsedDiff.hunks.length > 0 && !selected?.untracked ? (
+                          <div className="git-hunks">
+                            {parsedDiff.hunks.map((hunk) => (
+                              <div className="git-hunk-block" key={hunk.index}>
+                                <div className="git-hunk-header">
+                                  <code>{hunk.header}</code>
+                                  <div className="git-hunk-actions">
+                                    <button
+                                      type="button"
+                                      onClick={() => void applyHunks([hunk.index])}
+                                      disabled={!!busy}
+                                    >
+                                      {selected?.stagedView ? "移除此块" : "添加此块至待提交"}
+                                    </button>
+                                    {!selected?.stagedView && (
+                                      <button
+                                        type="button"
+                                        className="danger"
+                                        onClick={() => void discardHunks([hunk.index])}
+                                        disabled={!!busy}
+                                      >
+                                        丢弃此块
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="git-hunk-lines">
+                                  {hunk.lines.map((line, index) => (
+                                    <div
+                                      className={`git-hunk-line ${line.startsWith("+") ? "add" : line.startsWith("-") ? "remove" : ""}`}
+                                      key={`${hunk.index}-${index}`}
+                                    >{line || " "}</div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        ) : diff ? <pre>{diff}</pre>
+                          : <div className="git-diff-empty">{selected ? "没有可显示的 diff。" : hasChanges || conflictedItems.length > 0 ? "选择一个文件查看 diff" : "工作区干净，没有待处理改动。"}</div>}
+                    </div>
+                  </section>
+                </div>
+              </>
+            ) : tab === "history" ? (
+              <div className="git-workspace-body">
+                <aside className="git-files-pane">
+                  <label className="git-file-search">
+                    <span>提交</span>
+                    <input value={logSearch} onChange={(event) => setLogSearch(event.target.value)} placeholder="搜索提交…" />
+                  </label>
+                  <div className="git-files-toolbar">
+                    <button
+                      type="button"
+                      disabled={!!busy || !canRebase}
+                      title={canRebase ? `把 ${selectedLogEntry?.shortHash} 之后的提交做交互式变基（不含该提交）` : "选中一个更早的提交作为变基基点"}
+                      onClick={() => { if (selectedLogEntry) setRebaseBase(selectedLogEntry); }}
+                    >
+                      交互式变基
+                    </button>
                   </div>
-                );
-              })}
-            </div>
+                  <div className="git-file-sections persistent-scroll">
+                    {logEntries.filter((entry) => {
+                      const query = logSearch.trim().toLowerCase();
+                      return !query || entry.subject.toLowerCase().includes(query) || entry.author.toLowerCase().includes(query) || entry.shortHash.toLowerCase().includes(query);
+                    }).map((entry) => (
+                      <div
+                        key={entry.hash}
+                        className={`git-commit-row ${selectedCommit === entry.hash ? "active" : ""}`}
+                        onClick={() => setSelectedCommit(entry.hash)}
+                        title={entry.hash}
+                      >
+                        <strong>{entry.subject}</strong>
+                        <span>{entry.shortHash} · {entry.author} · {formatGitDate(entry.date)}</span>
+                      </div>
+                    ))}
+                    {logEntries.length === 0 && <div className="git-file-empty">暂无提交记录</div>}
+                  </div>
+                </aside>
+                <section className="git-diff-pane">
+                  <div className="git-diff-header">
+                    <span>{logEntries.find((entry) => entry.hash === selectedCommit)?.subject || "选择提交查看详情"}</span>
+                    {selectedCommit && <span>{selectedCommit.slice(0, 8)}</span>}
+                  </div>
+                  <div className="git-diff-content persistent-scroll">
+                    {commitDiff ? <pre>{commitDiff}</pre> : <div className="git-diff-empty">{selectedCommit ? "读取中…" : "选择一个提交查看详情"}</div>}
+                  </div>
+                </section>
+              </div>
+            ) : tab === "branches" ? (
+              <div className="git-simple-pane persistent-scroll">
+                <div className="git-stash-create">
+                  <input value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="新分支名" disabled={!!busy} />
+                  <button type="button" onClick={() => void createBranch()} disabled={!!busy || !newBranch.trim()}>
+                    <GitBranch size={14} /> 创建分支
+                  </button>
+                </div>
+                <div className="git-branch-list">
+                  {branches.map((branch) => (
+                    <div className="git-simple-row" key={branch.name}>
+                      <GitBranch size={14} />
+                      <div>
+                        <strong>{branch.name}{branch.current ? " · 当前分支" : ""}</strong>
+                        <span>{branch.upstream || "没有 upstream"}</span>
+                      </div>
+                      <button type="button" onClick={() => void switchBranch(branch)} disabled={!!busy || branch.current}>
+                        切换
+                      </button>
+                      <button type="button" onClick={() => void mergeBranch(branch)} disabled={!!busy || branch.current} title="git merge 此分支">
+                        合并
+                      </button>
+                      <button type="button" onClick={() => void rebaseBranch(branch)} disabled={!!busy || branch.current} title="git rebase 此分支">
+                        变基
+                      </button>
+                      <button type="button" className="danger" onClick={() => void deleteBranch(branch)} disabled={!!busy || branch.current}>
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                  {branches.length === 0 && <div className="git-diff-empty">没有本地分支。</div>}
+                </div>
+                <p className="git-simple-note">切换分支前请确认工作区干净；删除只允许已合并的本地分支。</p>
+              </div>
+            ) : tab === "worktrees" ? (
+              <div className="git-simple-pane persistent-scroll">
+                <div className="git-branch-list">
+                  {worktrees.map((entry) => (
+                    <div className="git-simple-row" key={entry.path}>
+                      <FolderGit2 size={14} />
+                      <div>
+                        <strong>{entry.branch || (entry.detached ? "(detached)" : "(unknown)")}{entry.current ? " · 当前" : ""}</strong>
+                        <span>{entry.path}{entry.head ? ` · ${entry.head.slice(0, 8)}` : ""}</span>
+                      </div>
+                      <button type="button" className="danger" onClick={() => void deleteWorktree(entry)} disabled={!!busy || entry.current} title="强制删除 worktree">
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                  {worktrees.length === 0 && <div className="git-diff-empty">没有 worktree。</div>}
+                </div>
+                <p className="git-simple-note">删除 worktree 会同时丢弃其中未提交的改动，请先确认。</p>
+              </div>
+            ) : (
+              <div className="git-stash-pane persistent-scroll">
+                <div className="git-stash-create">
+                  <button
+                    type="button"
+                    className="git-stash-create-button"
+                    onClick={() => setStashDialog({})}
+                    disabled={!!busy}
+                  >
+                    <Archive size={14} /> 储藏当前改动
+                  </button>
+                </div>
+                <div className="git-stash-list">
+                  {stashes.length === 0 ? <div className="git-diff-empty">没有 stash。</div> : stashes.map((entry) => {
+                    const files = stashFiles[entry.ref];
+                    const expanded = expandedStashRef === entry.ref;
+                    return (
+                      <div className={`git-stash-row ${expanded ? "expanded" : ""}`} key={entry.ref}>
+                        <div className="git-stash-row-head">
+                          <button
+                            type="button"
+                            className="git-stash-toggle"
+                            onClick={() => void toggleStashFiles(entry)}
+                            title={expanded ? "收起文件列表" : "查看这个 stash 里的文件"}
+                            aria-expanded={expanded}
+                          >
+                            {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                          </button>
+                          <div className="git-stash-meta">
+                            <strong title={entry.message || entry.ref}>{entry.message || "（无说明）"}</strong>
+                            <span className="git-stash-ref">
+                              {entry.ref}
+                              {entry.branch ? ` · ${entry.branch}` : ""}
+                            </span>
+                          </div>
+                          <div className="git-stash-actions">
+                            <button type="button" onClick={() => setRestoreStash(entry)} disabled={!!busy}>
+                              <Undo2 size={14} /> 恢复
+                            </button>
+                            <button type="button" className="danger" onClick={() => void dropStash(entry)} disabled={!!busy}>
+                              <Trash2 size={14} /> 删除
+                            </button>
+                          </div>
+                        </div>
+                        {expanded && (
+                          <div className="git-stash-files">
+                            {stashFilesLoading === entry.ref ? (
+                              <div className="git-stash-files-empty">
+                                <LoaderCircle className="spin" size={12} /> 读取中…
+                              </div>
+                            ) : !files || files.length === 0 ? (
+                              <div className="git-stash-files-empty">没有文件记录</div>
+                            ) : files.map((file) => (
+                              <div className="git-stash-file" key={`${file.status}:${file.path}`} title={file.path}>
+                                <span
+                                  className={`git-stash-file-status ${file.status.startsWith("D") ? "D"
+                                      : file.status.startsWith("A") || file.status.startsWith("?") ? "A"
+                                        : file.status.startsWith("R") ? "R" : "M"
+                                    }`}
+                                >
+                                  {file.status.startsWith("?") ? "U" : file.status.slice(0, 1)}
+                                </span>
+                                <span className="git-stash-file-path">{file.path}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
-        )}
-        </div>
         </div>
 
         {pullMenu && createPortal(

@@ -651,11 +651,13 @@ export class GitService {
     }
   }
 
-  async deleteBranch(target: string, name: unknown): Promise<GitActionResult> {
+  async deleteBranch(target: string, name: unknown, force = false): Promise<GitActionResult> {
     try {
       const root = await this.repoRoot(target);
       const branch = await this.validBranchName(root, name);
-      const output = await runGit(root, ["branch", "-d", "--", branch]);
+      // -d 只删已合并分支；stash 残留、已废弃的功能分支会被 Git 拒绝。
+      // force 走 -D，由 UI 在明确确认后才传，避免误删未合并的正常工作。
+      const output = await runGit(root, ["branch", force ? "-D" : "-d", "--", branch]);
       return { success: true, output };
     } catch (error) {
       return { success: false, error: errorMessage(error) };

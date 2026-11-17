@@ -25,7 +25,7 @@ export interface TokenUsageGroup extends TokenUsageTotals {
 export interface SessionTokenUsageSummary {
   totals: TokenUsageTotals;
   byModel: TokenUsageGroup[];
-  /** 参与统计的助手回合数。 */
+  /** 参与统计的回合数。 */
   messageCount: number;
 }
 

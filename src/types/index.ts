@@ -453,7 +453,7 @@ export interface ElectronAPI {
   gitBranches: (target: string) => Promise<GitBranchListResult>;
   gitCreateBranch: (target: string, name: string) => Promise<GitActionResult>;
   gitSwitchBranch: (target: string, name: string) => Promise<GitActionResult>;
-  gitDeleteBranch: (target: string, name: string) => Promise<GitActionResult>;
+  gitDeleteBranch: (target: string, name: string, force?: boolean) => Promise<GitActionResult>;
   gitLog: (target: string, limit?: number) => Promise<GitLogResult>;
   gitBlame: (target: string, path: string) => Promise<GitBlameResult>;
   gitIgnorePath: (target: string, path: string) => Promise<GitActionResult>;
