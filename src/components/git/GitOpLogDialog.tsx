@@ -23,9 +23,10 @@ export interface GitOpLogItem {
   action?: { label: string; run: () => void };
 }
 
+/** 统一用秒 + 固定 3 位小数：ms/s 混用会让日志右侧的耗时列参差不齐。 */
 export const formatOpDuration = (ms: number | undefined) => {
   if (ms === undefined) return "";
-  return ms >= 1000 ? `${(ms / 1000).toFixed(3)}s` : `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(3)}s`;
 };
 
 interface Props {
@@ -141,8 +142,10 @@ export function GitOpLogDialog({ entries, busy = false, onClear, onClose }: Prop
                     </button>
                   )}
                   <span className="git-log-meta">
-                    {entry.time}
-                    {entry.durationMs !== undefined ? ` · ${formatOpDuration(entry.durationMs)}` : ""}
+                    <span className="git-log-time">{entry.time}</span>
+                    {entry.durationMs !== undefined && (
+                      <span className="git-log-duration"> · {formatOpDuration(entry.durationMs)}</span>
+                    )}
                   </span>
                 </div>
                 {expanded === entry.id && entry.detail && (

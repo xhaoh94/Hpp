@@ -45,7 +45,8 @@ import { GitRebaseDialog } from "./GitRebaseDialog";
 import { GitStashDialog } from "./GitStashDialog";
 import { GitStashRestoreDialog } from "./GitStashRestoreDialog";
 import { GitFileHistoryDialog } from "./GitFileHistoryDialog";
-import { GitOpLogDialog, type GitOpLogItem } from "./GitOpLogDialog";
+import { GitOpLogDialog } from "./GitOpLogDialog";
+import { clearOpLog, pushOpLog, useGitOpLog } from "./git-op-log-store";
 import { GitBlamePanel } from "./GitBlamePanel";
 import { GitDiffView } from "./GitDiffView";
 import { GitChangesMenu } from "./GitChangesMenu";
@@ -83,8 +84,6 @@ type PaneRatio = { changes: number; staged: number; commit: number };
 
 const DEFAULT_PANE_RATIO: PaneRatio = { changes: 5, staged: 2, commit: 2 };
 const MIN_PANE_PX = 56;
-// 操作日志长时间使用会一直累积，截住上限避免越滚越卡。
-const MAX_OP_LOG_ENTRIES = 200;
 
 const statusLabel = (code: string) => {
   if (code === "??") return "未跟踪";
@@ -207,8 +206,8 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const [pendingConflictKey, setPendingConflictKey] = useState<string | null>(null);
   // 正在确认恢复的储藏（弹窗）。
   const [restoreStash, setRestoreStash] = useState<GitStashEntry | null>(null);
-  // 操作日志：提交 / 推送 / 储藏等动作与错误都记在这里，底部状态条显示最新一条。
-  const [opLog, setOpLog] = useState<GitOpLogItem[]>([]);
+  // 操作日志由进程级 store 持有：关掉工作台不丢，底部状态条显示最新一条。
+  const opLog = useGitOpLog();
   const [logDialogOpen, setLogDialogOpen] = useState(false);
   const [paneRatio, setPaneRatio] = useState<PaneRatio>(DEFAULT_PANE_RATIO);
   const [paneDrag, setPaneDrag] = useState<{
@@ -284,15 +283,6 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   busyRef.current = busy;
 
   // 报错统一进操作日志：error 写入后立刻转存并清空，同文案的下一次错误也能再次触发。
-  const opLogSeqRef = useRef(0);
-  const pushOpLog = useCallback((entry: Omit<GitOpLogItem, "id" | "time">) => {
-    opLogSeqRef.current += 1;
-    setOpLog((log) => [
-      ...log,
-      { ...entry, id: opLogSeqRef.current, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) },
-    ].slice(-MAX_OP_LOG_ENTRIES));
-  }, []);
-
   useEffect(() => {
     if (!error) return;
     pushOpLog({
@@ -1991,7 +1981,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
           <GitOpLogDialog
             entries={opLog}
             busy={!!busy}
-            onClear={() => setOpLog([])}
+            onClear={clearOpLog}
             onClose={() => setLogDialogOpen(false)}
           />
         )}

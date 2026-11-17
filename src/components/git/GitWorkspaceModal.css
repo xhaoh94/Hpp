@@ -1498,10 +1498,21 @@
 }
 
 .git-log-meta {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
   color: var(--text-secondary);
   font-family: ui-monospace, monospace;
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.git-log-meta .git-log-time {
+  flex: 0 0 8ch;
+}
+.git-log-meta .git-log-duration {
+  flex: 0 0 12ch;
+  text-align: right;
+  white-space: pre;
 }
 
 /* 行内引导按钮（如「合并恢复」）：随警告条出现在复制按钮左侧。 */

@@ -39,7 +39,9 @@ describe("Git workspace performance guards", () => {
     expect(modal).toContain("window.setTimeout(silentRefresh, 300)");
     expect(modal).toContain("Promise.all([");
     expect(modal).toContain("diffRequestRef");
-    expect(modal).toContain("MAX_OP_LOG_ENTRIES");
+    const store = read("src/components/git/git-op-log-store.ts");
+    expect(store).toContain("MAX_ENTRIES = 200");
+    expect(modal).toContain("useGitOpLog()");
   });
 
   it("virtualizes diff rows instead of mounting every line", () => {
