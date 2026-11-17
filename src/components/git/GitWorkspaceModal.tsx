@@ -47,6 +47,7 @@ import { GitStashRestoreDialog } from "./GitStashRestoreDialog";
 import { GitFileHistoryDialog } from "./GitFileHistoryDialog";
 import { GitOpLogDialog, type GitOpLogItem } from "./GitOpLogDialog";
 import { GitBlamePanel } from "./GitBlamePanel";
+import { GitDiffView } from "./GitDiffView";
 import { GitChangesMenu } from "./GitChangesMenu";
 import { GitFileTree, type GitTreeContextTarget } from "./GitFileTree";
 import { LazyFilePreview } from "@/components/shared/LazyFilePreview";
@@ -82,6 +83,8 @@ type PaneRatio = { changes: number; staged: number; commit: number };
 
 const DEFAULT_PANE_RATIO: PaneRatio = { changes: 5, staged: 2, commit: 2 };
 const MIN_PANE_PX = 56;
+// 操作日志长时间使用会一直累积，截住上限避免越滚越卡。
+const MAX_OP_LOG_ENTRIES = 200;
 
 const statusLabel = (code: string) => {
   if (code === "??") return "未跟踪";
@@ -266,9 +269,9 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     const query = search.trim().toLowerCase();
     return query ? items.filter((item) => item.path.toLowerCase().includes(query)) : items;
   }, [items, search]);
-  const stagedItems = filteredItems.filter((item) => item.stagedView);
-  const unstagedItems = filteredItems.filter((item) => !item.stagedView);
-  const conflictedItems = (status?.files || []).filter((file) => file.conflicted);
+  const stagedItems = useMemo(() => filteredItems.filter((item) => item.stagedView), [filteredItems]);
+  const unstagedItems = useMemo(() => filteredItems.filter((item) => !item.stagedView), [filteredItems]);
+  const conflictedItems = useMemo(() => (status?.files || []).filter((file) => file.conflicted), [status?.files]);
   const selected = items.find((item) => changeKey(item) === selectedKey);
   const selectedConflict = conflictedItems.find((file) => `${file.path}:conflict` === selectedKey);
   const parsedDiff = useMemo(() => parseGitPatch(diff), [diff]);
@@ -287,7 +290,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setOpLog((log) => [
       ...log,
       { ...entry, id: opLogSeqRef.current, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) },
-    ]);
+    ].slice(-MAX_OP_LOG_ENTRIES));
   }, []);
 
   useEffect(() => {
@@ -336,7 +339,9 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     }
   }, [target.path]);
 
+  const diffRequestRef = useRef(0);
   const loadDiff = useCallback(async (item: ChangeItem | undefined) => {
+    const requestId = ++diffRequestRef.current;
     if (!item) {
       setDiff("");
       return;
@@ -345,11 +350,13 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     setDiff("");
     try {
       const result = await window.electronAPI.gitDiff(target.path, item.path, item.stagedView);
+      // 快速切换文件时旧请求可能后到，别让它覆盖最新选中项的 diff。
+      if (requestId !== diffRequestRef.current) return;
       setDiff(result.success
         ? (result.patch || (result.binary ? "二进制文件，无法显示文本 diff。" : "没有可显示的 diff。"))
         : (result.error || "读取 diff 失败。"));
     } finally {
-      setDiffLoading(false);
+      if (requestId === diffRequestRef.current) setDiffLoading(false);
     }
   }, [target.path]);
 
@@ -417,10 +424,17 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
       else if (tab === "worktrees") void loadWorktrees();
     };
     const timer = window.setInterval(silentRefresh, 8000);
-    window.addEventListener("focus", silentRefresh);
+    // Alt+Tab 来回切会连发 focus，debounce 一下，避免每次都跑一整套 git 命令。
+    let focusTimer = 0;
+    const onFocus = () => {
+      window.clearTimeout(focusTimer);
+      focusTimer = window.setTimeout(silentRefresh, 300);
+    };
+    window.addEventListener("focus", onFocus);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", silentRefresh);
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("focus", onFocus);
     };
   }, [loadBranches, loadLog, loadStashes, loadStatus, loadWorktrees, tab]);
 
@@ -451,9 +465,11 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   }, [busy, changesMenu, logDialogOpen, onClose, pullMenu, rebaseBase, restoreStash, treeMenu]);
 
   const refresh = async (preferredKey?: string, silent = false) => {
-    const outcome = await loadStatus(preferredKey || selectedKey, silent);
-    // stash 列表也一起拉：储藏 / 恢复之后不管当前在哪个 tab，切过去都是最新的。
-    await loadStashes();
+    // stash 角标也要刷新，和 status 无依赖 —— 并行发，少等一个 IPC 往返。
+    const [outcome] = await Promise.all([
+      loadStatus(preferredKey || selectedKey, silent),
+      loadStashes(),
+    ]);
     onChanged?.();
     return outcome;
   };
@@ -1190,6 +1206,15 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
   const hasStaged = items.some((item) => item.stagedView);
   const hasChanges = items.length > 0;
   const selectedLogEntry = logEntries.find((entry) => entry.hash === selectedCommit);
+  const filteredLogEntries = useMemo(() => {
+    const query = logSearch.trim().toLowerCase();
+    if (!query) return logEntries;
+    return logEntries.filter((entry) => (
+      entry.subject.toLowerCase().includes(query)
+      || entry.author.toLowerCase().includes(query)
+      || entry.shortHash.toLowerCase().includes(query)
+    ));
+  }, [logEntries, logSearch]);
   // 选中的是 HEAD 时它后面没有提交，变基没有意义。
   const canRebase = !!selectedLogEntry && logEntries[0]?.hash !== selectedLogEntry.hash;
   const remoteName = status?.upstream ? status.upstream.split("/")[0] : "";
@@ -1638,42 +1663,13 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                         />
                       ) : diffLoading ? <div className="git-diff-empty"><LoaderCircle className="spin" size={16} /> 读取中…</div>
                         : diff && parsedDiff.hunks.length > 0 && !selected?.untracked ? (
-                          <div className="git-hunks">
-                            {parsedDiff.hunks.map((hunk) => (
-                              <div className="git-hunk-block" key={hunk.index}>
-                                <div className="git-hunk-header">
-                                  <code>{hunk.header}</code>
-                                  <div className="git-hunk-actions">
-                                    <button
-                                      type="button"
-                                      onClick={() => void applyHunks([hunk.index])}
-                                      disabled={!!busy}
-                                    >
-                                      {selected?.stagedView ? "移除此块" : "添加此块至待提交"}
-                                    </button>
-                                    {!selected?.stagedView && (
-                                      <button
-                                        type="button"
-                                        className="danger"
-                                        onClick={() => void discardHunks([hunk.index])}
-                                        disabled={!!busy}
-                                      >
-                                        丢弃此块
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="git-hunk-lines">
-                                  {hunk.lines.map((line, index) => (
-                                    <div
-                                      className={`git-hunk-line ${line.startsWith("+") ? "add" : line.startsWith("-") ? "remove" : ""}`}
-                                      key={`${hunk.index}-${index}`}
-                                    >{line || " "}</div>
-                                  ))}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
+                          <GitDiffView
+                            parsed={parsedDiff}
+                            stagedView={selected?.stagedView}
+                            disabled={!!busy}
+                            onApplyHunk={(index) => void applyHunks([index])}
+                            onDiscardHunk={(index) => void discardHunks([index])}
+                          />
                         ) : diff ? <pre>{diff}</pre>
                           : <div className="git-diff-empty">{selected ? "没有可显示的 diff。" : hasChanges || conflictedItems.length > 0 ? "选择一个文件查看 diff" : "工作区干净，没有待处理改动。"}</div>}
                     </div>
@@ -1698,10 +1694,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
                     </button>
                   </div>
                   <div className="git-file-sections persistent-scroll">
-                    {logEntries.filter((entry) => {
-                      const query = logSearch.trim().toLowerCase();
-                      return !query || entry.subject.toLowerCase().includes(query) || entry.author.toLowerCase().includes(query) || entry.shortHash.toLowerCase().includes(query);
-                    }).map((entry) => (
+                    {filteredLogEntries.map((entry) => (
                       <div
                         key={entry.hash}
                         className={`git-commit-row ${selectedCommit === entry.hash ? "active" : ""}`}

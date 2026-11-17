@@ -2538,9 +2538,8 @@
 }
 
 .git-blame-rows {
-  flex: 1;
+  /* 滚动交给外层 .git-diff-content，这里不另起滚动容器。 */
   min-height: 0;
-  overflow: auto;
 }
 
 .git-blame-row {
@@ -2586,4 +2585,21 @@
 .git-blame-text {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 虚拟滚动的 diff：行按绝对定位 + translateY 排布，容器高度由虚拟器给出。
+   滚动交给外层 .git-diff-content，这里不再套滚动容器，避免双滚动条。 */
+.git-diff-virtual {
+  position: relative;
+}
+.git-diff-virtual .git-hunk-header-virtual,
+.git-diff-virtual .git-hunk-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.git-diff-virtual .git-hunk-header-virtual {
+  min-width: max-content;
 }

@@ -755,6 +755,38 @@ describe("GitService", { timeout: 20_000 }, () => {
     expect((await service.status(root)).behind).toBe(1);
   });
 
+  it("reports ahead and behind together from the porcelain branch header", async () => {
+    const base = mkdtempSync(join(tmpdir(), "hpp-git-diverged-status-"));
+    temps.push(base);
+    const root = join(base, "repo");
+    createRepo(root);
+    const remote = join(base, "remote.git");
+    execFileSync("git", ["init", "--bare", remote], { cwd: base, encoding: "utf8" });
+    git(root, ["remote", "add", "origin", remote]);
+    expect((await service.push(root)).success).toBe(true);
+
+    const other = join(base, "other");
+    execFileSync("git", ["clone", remote, other], { cwd: base, encoding: "utf8" });
+    git(other, ["config", "user.email", "hpp-test@example.com"]);
+    git(other, ["config", "user.name", "Hpp Test"]);
+    writeFileSync(join(other, "remote.txt"), "remote\n", "utf8");
+    git(other, ["add", "."]);
+    git(other, ["commit", "-m", "remote commit"]);
+    git(other, ["push"]);
+
+    // 本地领先 1 个提交，同时远端也多 1 个。
+    writeFileSync(join(root, "local.txt"), "local\n", "utf8");
+    git(root, ["add", "."]);
+    git(root, ["commit", "-m", "local commit"]);
+    expect((await service.fetch(root)).success).toBe(true);
+
+    const status = await service.status(root);
+    expect(status.success).toBe(true);
+    expect(status.ahead).toBe(1);
+    expect(status.behind).toBe(1);
+    expect(status.upstream).toMatch(/^origin\//);
+  });
+
   it("probes git projects and clones from a local source", async () => {
     const base = mkdtempSync(join(tmpdir(), "hpp-git-clone-"));
     temps.push(base);

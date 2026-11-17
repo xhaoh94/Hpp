@@ -150,6 +150,31 @@ const parseStatus = (output: string): GitFileChange[] => {
   return files;
 };
 
+/**
+ * 解析 `status --porcelain --branch` 的 `##` 头：
+ *   `main...origin/main [ahead 1, behind 2]` / `master` / `HEAD (no branch)`。
+ * --branch 让分支与追踪信息跟着 porcelain 一起返回，省掉三条独立 git 命令。
+ */
+const parseStatusBranch = (header: string) => {
+  const detached = !header || /^HEAD \(.*no branch.*\)$/i.test(header);
+  const sep = header.indexOf("...");
+  const branchPart = sep >= 0 ? header.slice(0, sep) : header;
+  const rest = sep >= 0 ? header.slice(sep + 3) : "";
+  // upstream 后面可能跟 ` [ahead 1, behind 2]`，按第一个空格切开。
+  const bracket = rest.indexOf(" [");
+  const upstreamPart = bracket >= 0 ? rest.slice(0, bracket) : rest;
+  const counts = bracket >= 0 ? rest.slice(bracket + 2).replace(/\]$/, "") : "";
+  const ahead = /ahead (\d+)/.exec(counts)?.[1];
+  const behind = /behind (\d+)/.exec(counts)?.[1];
+  return {
+    branch: branchPart,
+    upstream: upstreamPart || undefined,
+    ahead: Number(ahead) || 0,
+    behind: Number(behind) || 0,
+    detached,
+  };
+};
+
 /** 从 clone 地址推目录名：foo/bar.git → bar，git@host:foo/bar.git → bar。 */
 export function repoNameFromCloneUrl(url: string): string {
   const cleaned = url.trim().replace(/[/\\]+$/, "").replace(/\.git$/i, "");
@@ -166,11 +191,32 @@ const isCloneSource = (url: string) => {
   return existsSync(url);
 };
 
+/** repoRoot 缓存：一次工作台刷新里 39 处调用不必各起一个 rev-parse 进程。 */
+const REPO_ROOT_TTL_MS = 10_000;
+const repoRootCache = new Map<string, { root: string; at: number }>();
+
 export class GitService {
   async repoRoot(target: string): Promise<string> {
     const path = resolve(target);
     if (!existsSync(path)) throw new Error(`目录不存在：${path}`);
-    return resolve(await runGit(path, ["rev-parse", "--show-toplevel"]));
+    const key = path.toLowerCase().replace(/\\/g, "/");
+    const cached = repoRootCache.get(key);
+    // 目录还在且缓存新鲜才复用；工作区被删重建 / 换仓库时下次会重算。
+    if (cached && Date.now() - cached.at < REPO_ROOT_TTL_MS && existsSync(cached.root)) return cached.root;
+    const root = resolve(await runGit(path, ["rev-parse", "--show-toplevel"]));
+    repoRootCache.set(key, { root, at: Date.now() });
+    return root;
+  }
+
+  /** 只查指定文件的状态：比整套 status 少一个 branch 头和 upstream 计数，扫描范围也限在 pathspec。 */
+  private async filesStatus(root: string, paths: string[]): Promise<GitFileChange[]> {
+    if (paths.length === 0) return [];
+    const raw = await runGitRaw(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...paths]);
+    return parseStatus(raw);
+  }
+
+  private async fileStatus(root: string, path: string): Promise<GitFileChange | undefined> {
+    return (await this.filesStatus(root, [path]))[0];
   }
 
   /** 给「项目卡片是否显示 Git 入口」和仓库页签用，不跑 status。 */
@@ -217,34 +263,26 @@ export class GitService {
   async status(target: string): Promise<GitStatus> {
     try {
       const root = await this.repoRoot(target);
-      let branch = "";
-      let detached = false;
-      try {
-        branch = await runGit(root, ["symbolic-ref", "-q", "--short", "HEAD"]);
-      } catch {
-        detached = true;
-        branch = `(detached) ${await runGit(root, ["rev-parse", "--short", "HEAD"]).catch(() => "HEAD")}`;
-      }
-      const raw = await runGitRaw(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-      const files = parseStatus(raw);
-
-      let upstream: string | undefined;
-      let ahead = 0;
-      let behind = 0;
-      try {
-        upstream = await runGit(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-        const counts = await runGit(root, ["rev-list", "--left-right", "--count", `@{u}...HEAD`]);
-        const [left, right] = counts.split(/\s+/).map((value) => Number(value) || 0);
-        behind = left;
-        ahead = right;
-      } catch {
-        // 没有 upstream 的本地仓库
-      }
+      // --branch 把分支、upstream、ahead/behind 一次带进 porcelain 流，
+      // 原来要 symbolic-ref + rev-parse @{u} + rev-list 三条命令，现在一条都不多。
+      const raw = await runGitRaw(root, ["status", "--porcelain=v1", "-z", "--branch", "--untracked-files=all"]);
+      const parts = raw.split("\0");
+      const header = parts[0]?.startsWith("## ") ? parts[0].slice(3) : "";
+      const { branch: parsedBranch, upstream, ahead, behind, detached } = parseStatusBranch(header);
+      // files 解析要跳过开头的 ## 行。
+      const files = parseStatus(parts.slice(parts[0]?.startsWith("## ") ? 1 : 0).join("\0"));
 
       const operation = await this.operation(root);
       // 变基期间 HEAD 分离，这里还原成真实分支名，否则界面会显示成 (detached) <hash>
-      if (detached && operation === "rebase") {
-        branch = (await this.rebaseBranchName(root)) ?? branch;
+      let branch = parsedBranch;
+      if (detached) {
+        // --branch 的 detached 头是 `HEAD (no branch)`，补一次短 hash 保持原有展示。
+        if (operation === "rebase") {
+          branch = (await this.rebaseBranchName(root)) ?? branch;
+        } else {
+          const hash = await runGit(root, ["rev-parse", "--short", "HEAD"]).catch(() => "");
+          branch = `(detached) ${hash || "HEAD"}`;
+        }
       }
       return {
         success: true,
@@ -267,8 +305,7 @@ export class GitService {
     try {
       const root = await this.repoRoot(target);
       const path = safePath(filePath);
-      const status = await this.status(target);
-      const file = status.files?.find((item) => item.path === path);
+      const file = await this.fileStatus(root, path);
       if (file?.untracked) {
         const result = await runGitResult(root, ["diff", "--no-index", "--no-color", "--no-ext-diff", "--", process.platform === "win32" ? "NUL" : "/dev/null", path]);
         return { success: true, patch: result.stdout, untracked: true };
@@ -368,9 +405,9 @@ export class GitService {
     try {
       const root = await this.repoRoot(target);
       const files = safePaths(paths);
-      const status = await this.status(target);
+      const fileChanges = await this.filesStatus(root, files);
       for (const path of files) {
-        const file = status.files?.find((item) => item.path === path);
+        const file = fileChanges.find((item) => item.path === path);
         if (file?.untracked) {
           const absolute = resolve(root, path);
           const relativePath = relative(root, absolute);
@@ -394,9 +431,9 @@ export class GitService {
     try {
       const root = await this.repoRoot(target);
       const files = safePaths(paths);
-      const status = await this.status(target);
+      const fileChanges = await this.filesStatus(root, files);
       for (const path of files) {
-        if (!status.files?.some((item) => item.path === path)) throw new Error(`文件不在变更列表里：${path}`);
+        if (!fileChanges.some((item) => item.path === path)) throw new Error(`文件不在变更列表里：${path}`);
         const absolute = resolve(root, path);
         const relativePath = relative(root, absolute);
         if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
@@ -550,18 +587,19 @@ export class GitService {
   }
 
   private async operation(root: string): Promise<GitOperation> {
-    const has = async (name: string) => {
-      try {
-        const path = await runGit(root, ["rev-parse", "--git-path", name]);
-        return existsSync(resolve(root, path));
-      } catch {
-        return false;
-      }
-    };
-    if (await has("rebase-merge") || await has("rebase-apply")) return "rebase";
-    if (await has("MERGE_HEAD")) return "merge";
-    if (await has("CHERRY_PICK_HEAD")) return "cherry-pick";
-    if (await has("REVERT_HEAD")) return "revert";
+    // 原来每个候选状态各跑一次 `git rev-parse --git-path`（最多 5 个进程）只为 existsSync。
+    // git dir 一次拿到，剩下纯文件判断；worktree 下 --absolute-git-dir 也指向正确目录。
+    let gitDir = "";
+    try {
+      gitDir = await runGit(root, ["rev-parse", "--absolute-git-dir"]);
+    } catch {
+      gitDir = join(root, ".git");
+    }
+    const has = (name: string) => existsSync(resolve(gitDir, name));
+    if (has("rebase-merge") || has("rebase-apply")) return "rebase";
+    if (has("MERGE_HEAD")) return "merge";
+    if (has("CHERRY_PICK_HEAD")) return "cherry-pick";
+    if (has("REVERT_HEAD")) return "revert";
     return "none";
   }
 
@@ -569,8 +607,7 @@ export class GitService {
     try {
       const root = await this.repoRoot(target);
       const path = safePath(filePath);
-      const status = await this.status(target);
-      const file = status.files?.find((item) => item.path === path);
+      const file = await this.fileStatus(root, path);
       if (!file?.conflicted) throw new Error("该文件当前没有冲突。");
       const action = choice === "ours" || choice === "theirs" || choice === "mark" ? choice : null;
       if (!action) throw new Error("未知的冲突处理方式。");
@@ -1005,8 +1042,8 @@ export class GitService {
     try {
       const root = await this.repoRoot(target);
       const path = safePath(filePath);
-      const status = await this.status(target);
-      if (!status.files?.find((item) => item.path === path)?.conflicted) throw new Error("该文件当前没有冲突。");
+      const file = await this.fileStatus(root, path);
+      if (!file?.conflicted) throw new Error("该文件当前没有冲突。");
       const stages = await this.conflictStages(root, path);
       const absolute = resolve(root, path);
       if (!existsSync(absolute)) return { success: true, path, content: "", missing: true, binary: stages.binary, stages: stages.text };
@@ -1030,8 +1067,8 @@ export class GitService {
       const path = safePath(filePath);
       if (typeof content !== "string") throw new Error("内容无效。");
       if (content.length > GIT_MAX_BUFFER) throw new Error("内容过大，无法写入。");
-      const status = await this.status(target);
-      if (!status.files?.find((item) => item.path === path)?.conflicted) throw new Error("该文件当前没有冲突。");
+      const file = await this.fileStatus(root, path);
+      if (!file?.conflicted) throw new Error("该文件当前没有冲突。");
       const absolute = resolve(root, path);
       const relativePath = relative(root, absolute);
       if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {

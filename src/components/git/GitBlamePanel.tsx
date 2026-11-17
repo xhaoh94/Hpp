@@ -18,7 +18,12 @@ export function GitBlamePanel({ repoPath, file, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [truncated, setTruncated] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
+  // 复用外层 .git-diff-content 的滚动条，避免内外两条滚动条叠在一起。
+  useEffect(() => {
+    setScrollElement(rootRef.current?.parentElement ?? null);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,7 +78,7 @@ export function GitBlamePanel({ repoPath, file, onClose }: Props) {
 
   const virtualizer = useVirtualizer({
     count: lines.length,
-    getScrollElement: () => scrollRef.current,
+    getScrollElement: () => scrollElement,
     estimateSize: () => 18,
     overscan: 24,
   });
@@ -93,7 +98,7 @@ export function GitBlamePanel({ repoPath, file, onClose }: Props) {
       ) : error ? (
         <div className="git-diff-empty">{error}</div>
       ) : (
-        <div className="git-blame-rows persistent-scroll" ref={scrollRef}>
+        <div className="git-blame-rows" ref={rootRef}>
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((item) => {
               const line = lines[item.index];
