@@ -64,7 +64,10 @@ jobs:
           VERSION="${TAG#v}"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Automated Windows installer build"
+          # latest.yml 必须随 exe 一起上传：它含 exe 的 sha512/size，
+          # 用本机生成的旧 yml 配 CI 构建的 exe 会让自动更新校验失败。
           gh release upload "$TAG" \
             "windows-release/hpp-Setup-${VERSION}.exe" \
             "windows-release/hpp-Setup-${VERSION}.exe.blockmap" \
+            "windows-release/latest.yml" \
             --clobber --repo "$GITHUB_REPOSITORY"
