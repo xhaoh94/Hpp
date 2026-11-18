@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentSubagent, ChatMessage } from "@/stores/chat-store";
 import {
   collectRunningSubagents,
   formatIdleAgo,
+  formatSubagentModel,
   formatSubagentUsage,
   getSubagentCacheRate,
   getSubagentElapsedMs,
@@ -133,5 +136,103 @@ describe("子任务消耗摘要", () => {
     expect(getSubagentCacheRate({ inputTokens: 4, cacheReadTokens: 1 })).toBe(0.25);
     expect(getSubagentCacheRate({ outputTokens: 10 })).toBeUndefined();
     expect(getSubagentCacheRate(undefined)).toBeUndefined();
+  });
+
+  it("模型名原样展示，不加方括号，空值不占位", () => {
+    expect(formatSubagentModel("codebuddy/gpt-5")).toBe("codebuddy/gpt-5");
+    expect(formatSubagentModel("gpt-5")).toBe("gpt-5");
+    expect(formatSubagentModel("  ")).toBe("");
+    expect(formatSubagentModel(undefined)).toBe("");
+  });
+});
+
+describe("subagent monitor panel layout", () => {
+  const css = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.css"), "utf8");
+  const rule = (selector: string) => css.slice(css.indexOf(selector), css.indexOf("}", css.indexOf(selector)));
+
+  it("pins the task list above the scrolling detail so long output cannot hide it", () => {
+    expect(rule(".subagent-monitor-body")).toContain("flex: 1");
+    expect(rule(".subagent-monitor-body")).toContain("min-height: 0");
+    // 列表固定、详情吃掉剩余空间；滚动交给 detail-scroll 子元素。
+    expect(rule(".subagent-monitor-list")).toContain("flex: 0 0 auto");
+    expect(rule(".subagent-monitor-detail")).toContain("flex: 1");
+    expect(rule(".subagent-monitor-detail-scroll")).toContain("overflow-y: auto");
+  });
+
+  it("keeps list rows single-line with only label and elapsed time", () => {
+    const monitor = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.tsx"), "utf8");
+    // 列表项不再渲染 token 统计（详情区仍有）。
+    const listBlock = monitor.slice(monitor.indexOf("<ul className=\"subagent-monitor-list\">"), monitor.indexOf("</ul>"));
+    expect(listBlock).not.toContain("subagent-monitor-item-main");
+    expect(listBlock).not.toContain("subagent-monitor-item-usage");
+    expect(listBlock).toContain("subagent-monitor-item-label");
+    expect(listBlock).not.toContain("subagent-monitor-item-time");
+    // 页签自动换行、所有子任务可见，不横向滚动（滚动条时隐时现会抖）。
+    expect(rule(".subagent-monitor-list")).toContain("flex-wrap: wrap");
+    expect(rule(".subagent-monitor-list")).not.toContain("overflow-x");
+    expect(rule(".subagent-monitor-item")).toContain("width: auto");
+    expect(css).not.toContain(".subagent-monitor-item-main");
+    expect(css).not.toContain(".subagent-monitor-item-usage");
+  });
+
+  it("keeps a dynamic panel height but pins meta above the detail body", () => {
+    // 动态高度（内容少时不留空白），max-height 封顶；抖动靠各行固定高度解决。
+    expect(rule(".subagent-monitor-panel")).toContain("max-height: min(");
+    expect(rule(".subagent-monitor-panel")).not.toContain("\n  height: min(");
+    // 固定 meta（消耗/最后活动）不随内容滚。
+    const monitor = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.tsx"), "utf8");
+    expect(monitor).toContain('className="subagent-monitor-detail-meta"');
+    expect(monitor).toContain('className="subagent-monitor-detail-scroll"');
+    const metaBlock = monitor.slice(monitor.indexOf('<div className="subagent-monitor-detail-meta">'), monitor.indexOf('className="subagent-monitor-detail-scroll"'));
+    expect(metaBlock).toContain("最后活动");
+    expect(rule(".subagent-monitor-detail-meta")).toContain("flex: 0 0 auto");
+    // 滚动职责只在 scroll 子元素，detail 自身不滚。
+    expect(rule(".subagent-monitor-detail")).not.toContain("overflow-y");
+  });
+
+  it("pins activity and output to single lines, drops tab time, and marks completed green", () => {
+    const monitor = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.tsx"), "utf8");
+    // 页签不再显示运行时间（CSS 里可能留着旧规则，查 JSX 列表块即可）。
+    const listBlock = monitor.slice(monitor.indexOf("<ul className=\"subagent-monitor-list\">"), monitor.indexOf("</ul>"));
+    expect(listBlock).not.toContain("subagent-monitor-item-time");
+    // activity 固定单行、取最后一行非空文字。
+    expect(rule(".subagent-monitor-activity")).toContain("white-space: nowrap");
+    expect(monitor).toContain("activityLines[activityLines.length - 1]");
+    // 输出默认单行预览，点击展开渲染 Markdown。
+    expect(monitor).toContain('import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer"');
+    expect(monitor).toContain('className={`subagent-monitor-output ${outputExpanded ? "expanded" : ""}`}');
+    expect(monitor).toContain("setOutputExpanded((v) => !v)");
+    expect(monitor).toContain("<MarkdownRenderer content={selected.liveOutput} deferHighlight />");
+    expect(monitor).toContain("subagent-monitor-output-line");
+    expect(rule(".subagent-monitor-output-line")).toContain("white-space: nowrap");
+    expect(rule(".subagent-monitor-output.expanded")).toContain("max-height: 220px");
+    // md 样式在输出区内 scoped 压小，不动全局 .md-content。
+    expect(rule(".subagent-monitor-output .md-content")).toContain("font-size: 11px");
+    // 已完成的圆点是绿色。
+    expect(rule(".subagent-monitor-dot.completed")).toContain("#22c55e");
+  });
+
+  it("shows the concrete task title instead of the fixed agent label", () => {
+    const monitor = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.tsx"), "utf8");
+    const block = readFileSync(resolve(process.cwd(), "src/components/layout/ProcessBlock.tsx"), "utf8");
+    // 页签 + 详情头 + 聊天胶囊三处都用 prompt 派生的标题，label 退到 title 提示。
+    expect(monitor).toContain('className="subagent-monitor-item-label" title={subagent.label}');
+    expect(monitor).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
+    expect(monitor).toContain("{selected.title || getSubagentTitle(selected.prompt, selected.label)}");
+    expect(block).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
+    expect(block).toContain("subagent.label,\n  getSubagentStatusLabel");
+  });
+
+  it("closes on outside click without treating panel scroll as outside", () => {
+    const monitor = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.tsx"), "utf8");
+    // 两个 ref 覆盖胶囊与浮层；只在 open 时挂 mousedown，点两者之外才关。
+    expect(monitor).toContain("const pillRef = useRef<HTMLButtonElement | null>(null)");
+    expect(monitor).toContain("const panelRef = useRef<HTMLDivElement | null>(null)");
+    expect(monitor).toContain('document.addEventListener("mousedown", handleMouseDown)');
+    expect(monitor).toContain("pillRef.current?.contains(target) || panelRef.current?.contains(target)");
+    expect(monitor).toContain("if (!open) return;");
+    // 没有 scroll/resize 关闭逻辑（详情区要能滚）。
+    expect(monitor).not.toContain('window.addEventListener("scroll"');
+    expect(monitor).not.toContain('window.addEventListener("resize"');
   });
 });

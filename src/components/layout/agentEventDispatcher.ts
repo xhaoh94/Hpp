@@ -748,6 +748,8 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         files: processFiles,
         toolKind: processToolKind,
         command: eventCommand,
+        // 模型写的命令意图（部分后端直接放在 process_event 上），优先于按命令推断。
+        ...(typeof event.description === "string" ? { description: event.description } : {}),
         state: eventType === "question" ? eventState || "running" : eventState,
         expanded: false,
       });

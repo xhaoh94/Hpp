@@ -610,8 +610,8 @@ export function SettingsView() {
                       value={shortcuts.sendKey}
                       onChange={(e) => saveShortcuts({ ...shortcuts, sendKey: e.target.value })}
                     >
-                      <option value="normal">Enter 普通发送 / Ctrl+Enter 引导</option>
-                      <option value="guide">Enter 引导发送 / Ctrl+Enter 普通</option>
+                      <option value="normal">Enter 普通发送 / Ctrl+Enter 插话</option>
+                      <option value="guide">Enter 插话 / Ctrl+Enter 普通发送</option>
                     </select>
                   </div>
                 </div>
@@ -939,7 +939,7 @@ export function SettingsView() {
                         <span className="settings-general-link-icon"><Keyboard size={16} /></span>
                         <span className="settings-general-row-main">
                           <strong>快捷键</strong>
-                          <span>{shortcuts.sendKey === "guide" ? "Enter 引导发送" : "Enter 普通发送"}，支持文件搜索与模型切换</span>
+                          <span>{shortcuts.sendKey === "guide" ? "Enter 插话" : "Enter 普通发送"}，支持文件搜索与模型切换</span>
                         </span>
                         <span className="settings-general-link-meta">{Object.keys(shortcuts).length} 项</span>
                         <ChevronRight size={16} />

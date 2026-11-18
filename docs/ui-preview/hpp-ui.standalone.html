@@ -3248,6 +3248,131 @@ body {
   margin-bottom: 0;
 }
 
+/* 子任务两级展开：摘要卡 → 详细流程 */
+.chat-subagent-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chat-subagent-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-subagent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+  color: var(--accent-color);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.chat-subagent-status.status-completed {
+  border-color: color-mix(in srgb, var(--success-color, #34d399) 32%, transparent);
+  background: color-mix(in srgb, var(--success-color, #34d399) 10%, transparent);
+  color: var(--success-color, #34d399);
+}
+
+.chat-subagent-status.status-error,
+.chat-subagent-status.status-interrupted {
+  border-color: color-mix(in srgb, var(--danger-color) 32%, transparent);
+  background: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  color: var(--danger-color);
+}
+
+.chat-subagent-usage-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* 模型名是 token 那行文本的一部分，不单独戴胶囊帽子。 */
+.chat-subagent-model {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-subagent-usage-inline {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 一级展开比胶囊标题多一句上下文：最多三行，多了截断，全文走 title 悬停。 */
+.chat-subagent-summary-text {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.chat-subagent-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-subagent-detail-toggle:hover {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+  color: var(--accent-color);
+}
+
+.chat-subagent-detail-toggle .rotated {
+  transform: rotate(180deg);
+}
+
+.chat-subagent-flow {
+  margin-top: 9px;
+  padding: 10px 12px;
+  border-left: 2px solid color-mix(in srgb, var(--accent-color) 45%, transparent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--bg-secondary, var(--bg-tertiary)) 55%, transparent);
+  max-height: min(420px, 55vh);
+  overflow: auto;
+}
+
+.chat-subagent-flow .md-content > :first-child {
+  margin-top: 0;
+}
+
+.chat-subagent-flow .md-content > :last-child {
+  margin-bottom: 0;
+}
+
 @keyframes chat-subagent-pulse {
   0%, 100% { transform: scale(0.9); opacity: 0.62; }
   50% { transform: scale(1); opacity: 1; }
@@ -4513,6 +4638,14 @@ body.chat-questionnaire-resizing {
   color: #f87171;
   font-size: 11px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 引导已送出、还没被注入时的状态标注；旁边是可点的「撤回」。 */
+.chat-queue-state {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -7774,7 +7907,8 @@ body.chat-questionnaire-resizing .chat-bubble {
   display: flex;
   flex-direction: column;
   width: min(440px, calc(100vw - 40px));
-  max-height: min(420px, 60vh);
+  /* 动态高度：各内容块固定单行后不再抖动，面板按内容自然收放，不留空白。 */
+  max-height: min(460px, 70vh);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   background: var(--bg-secondary);
@@ -7785,6 +7919,7 @@ body.chat-questionnaire-resizing .chat-bubble {
 
 .subagent-monitor-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -7821,19 +7956,20 @@ body.chat-questionnaire-resizing .chat-bubble {
 
 .subagent-monitor-body {
   display: flex;
+  flex: 1;
   min-height: 0;
   flex-direction: column;
 }
 
-/* 每个子任务一行（第二行显示消耗），子任务多时列表自己滚 */
+/* 页签自动换行：所有子任务一屏可见，不横向滚动（滚动条时隐时现会引起抖动）。 */
 .subagent-monitor-list {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex: 0 0 auto;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
   margin: 0;
   padding: 8px 10px;
-  max-height: 190px;
-  overflow-y: auto;
   list-style: none;
   border-bottom: 1px solid var(--border-color);
 }
@@ -7842,12 +7978,12 @@ body.chat-questionnaire-resizing .chat-bubble {
   flex: 0 0 auto;
 }
 
-/* 从胶囊改成两行行块：第二行放 token / 缓存命中 */
+/* 单行横向：圆点 · 任务名 · 运行时间。token 统计只放详情区，列表不重复。 */
 .subagent-monitor-item {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: auto;
   min-height: 30px;
   padding: 4px 9px;
   border: 1px solid var(--border-color);
@@ -7859,24 +7995,6 @@ body.chat-questionnaire-resizing .chat-bubble {
   cursor: pointer;
 }
 
-.subagent-monitor-item-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.subagent-monitor-item-usage {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.8;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .subagent-monitor-item.active {
   border-color: var(--accent-color);
   color: var(--text-primary);
@@ -7884,6 +8002,8 @@ body.chat-questionnaire-resizing .chat-bubble {
 }
 
 .subagent-monitor-item-label {
+  flex: 0 1 auto;
+  max-width: 96px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7913,6 +8033,11 @@ body.chat-questionnaire-resizing .chat-bubble {
   background: color-mix(in srgb, var(--text-secondary) 60%, transparent);
 }
 
+.subagent-monitor-dot.completed {
+  background: #22c55e;
+  animation: none;
+}
+
 .subagent-monitor-dot.stalled {
   background: #fbbf24;
   animation: none;
@@ -7925,11 +8050,32 @@ body.chat-questionnaire-resizing .chat-bubble {
 
 .subagent-monitor-detail {
   display: flex;
+  flex: 1;
   min-height: 0;
   flex-direction: column;
   gap: 6px;
   padding: 10px;
+}
+
+/* 固定元信息：消耗 + 最后活动，不随正文滚动被顶走。 */
+.subagent-monitor-detail-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 16px;
+}
+
+/* 只有正文和输出滚动。 */
+.subagent-monitor-detail-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
   overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .subagent-monitor-detail-head {
@@ -7959,11 +8105,14 @@ body.chat-questionnaire-resizing .chat-bubble {
   font-variant-numeric: tabular-nums;
 }
 
+/* 活动固定单行：只显示最后一行进展，行高恒定不抖；全文走 title 悬停。 */
 .subagent-monitor-activity {
+  overflow: hidden;
   color: var(--text-primary);
   font-size: 12px;
   line-height: 1.5;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .subagent-monitor-idle {
@@ -7975,25 +8124,732 @@ body.chat-questionnaire-resizing .chat-bubble {
   color: #fbbf24;
 }
 
+/* 输出默认单行，点一下展开（限高独立滚动），行高变化由用户主动触发、不是实时抖。 */
 .subagent-monitor-output {
-  max-height: 150px;
+  display: block;
+  width: 100%;
+  max-height: 30px;
   margin: 0;
-  padding: 8px;
-  overflow-y: auto;
+  padding: 6px 8px;
+  overflow: hidden;
+  border: 0;
   border-radius: 6px;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-monitor-output:hover {
+  background: var(--bg-hover);
+}
+
+/* 收起态：最后一行纯文本预览，单行省略。 */
+.subagent-monitor-output-line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 展开态：Markdown 渲染，限高独立滚。 */
+.subagent-monitor-output.expanded {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* 监视窗里把 md 全局样式压小，否则 14px + 大 margin 在小灰底框里太占地。 */
+.subagent-monitor-output .md-content {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.subagent-monitor-output .md-content h1,
+.subagent-monitor-output .md-content h2,
+.subagent-monitor-output .md-content h3 {
+  margin: 4px 0;
+  padding: 0;
+  border: 0;
+  font-size: 12px;
+}
+
+.subagent-monitor-output .md-content p,
+.subagent-monitor-output .md-content ul,
+.subagent-monitor-output .md-content ol,
+.subagent-monitor-output .md-content pre {
+  margin: 3px 0;
+}
+
+.subagent-monitor-output .md-content li {
+  margin: 1px 0;
 }
 
 @media (max-width: 640px) {
   .subagent-monitor-panel {
     width: calc(100vw - 24px);
   }
+}
+
+/* src/components/shared/MarkdownRenderer.css */
+/* ============================================================
+   Markdown Renderer Styles
+   ============================================================ */
+
+/* --- Base container --- */
+.md-content {
+  min-width: 0;
+  max-width: 100%;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  line-height: 1.65;
+  font-size: 14px;
+}
+
+/* --- Headings --- */
+.md-content h1 {
+  font-size: 1.5em;
+  font-weight: 700;
+  margin: 1em 0 0.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.md-content h2 {
+  font-size: 1.3em;
+  font-weight: 700;
+  margin: 0.9em 0 0.45em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.md-content h3 {
+  font-size: 1.15em;
+  font-weight: 600;
+  margin: 0.8em 0 0.4em;
+}
+
+.md-content h4,
+.md-content h5,
+.md-content h6 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0.7em 0 0.35em;
+}
+
+/* --- Paragraphs & spacing --- */
+.md-content p {
+  margin: 0.5em 0;
+}
+
+.md-content p:first-child {
+  margin-top: 0;
+}
+
+.md-content p:last-child {
+  margin-bottom: 0;
+}
+
+/* --- Inline code --- */
+.md-content .md-inline-code {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  font-size: 0.9em;
+  color: #61afef;
+}
+
+.md-content .md-inline-code.md-path-reference { cursor: pointer; }
+.md-content .md-inline-code.md-path-reference:hover {
+  border-color: rgba(91, 156, 246, 0.55);
+  background: rgba(91, 156, 246, 0.13);
+}
+
+/* --- Code blocks --- */
+.md-content .md-code-block {
+  position: relative;
+  width: fit-content;
+  min-width: min(240px, 100%);
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0.7em 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--user-bubble-bg);
+  border: 1px solid var(--user-bubble-border);
+}
+
+/* 顶部工具栏：左语言标签 / 右复制按钮 */
+.md-content .md-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px 0 12px;
+}
+
+.md-content .md-code-block pre {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  background: transparent !important;
+}
+
+.md-content .md-code-block pre code {
+  display: block;
+  white-space: pre;
+  padding: 0;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  background: transparent !important;
+}
+
+.md-content .md-code-block--with-lang pre code {
+  padding: 0;
+  background: transparent !important;
+}
+
+.md-content .md-code-lang {
+  position: static;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  pointer-events: none;
+  z-index: auto;
+}
+
+.md-content .md-code-copy-btn {
+  position: static;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  z-index: auto;
+}
+
+.md-content .md-code-block:hover .md-code-copy-btn {
+  opacity: 1;
+}
+
+.md-content .md-code-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.md-content .md-code-copy-btn:active {
+  transform: scale(0.95);
+}
+
+/* 代码块 header 右侧的动作区（运行 + 复制） */
+.md-content .md-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 可运行代码块（html/svg）的本地运行按钮，交互与复制按钮一致 */
+.md-content .md-code-run-btn {
+  position: static;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  z-index: auto;
+}
+
+.md-content .md-code-block:hover .md-code-run-btn {
+  opacity: 1;
+}
+
+.md-content .md-code-run-btn:hover {
+  background: rgba(91, 156, 246, 0.18);
+  color: #6cb2ff;
+}
+
+.md-content .md-code-run-btn:active {
+  transform: scale(0.95);
+}
+
+.md-content .md-code-run-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* 运行成功/失败给一点颜色反馈，失败时 hover 看 title 里的原因 */
+.md-content .md-code-run-btn svg {
+  pointer-events: none;
+}
+
+/* Fallback code block styling when highlight.js doesn't apply */
+.md-content .md-code-block pre code {
+  color: #d4d4d4;
+}
+
+/* --- Lists --- */
+.md-content ul,
+.md-content ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.md-content li {
+  margin: 0.2em 0;
+}
+
+.md-content li > ul,
+.md-content li > ol {
+  margin: 0.1em 0;
+}
+
+/* Task list items */
+.md-content li:has(.md-task-checkbox) {
+  list-style: none;
+  margin-left: -1.5em;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.md-content .md-task-checkbox {
+  margin-top: 4px;
+  accent-color: var(--accent-color, #5b9cf6);
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* --- Blockquotes --- */
+.md-content blockquote {
+  margin: 0.6em 0;
+  padding: 0.4em 0.8em;
+  border-left: 3px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 0 6px 6px 0;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.md-content blockquote p {
+  margin: 0.2em 0;
+}
+
+/* --- Tables --- */
+.md-content .md-table-wrap {
+  overflow-x: auto;
+  margin: 0.7em 0;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.md-content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+.md-content th,
+.md-content td {
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+
+.md-content th {
+  background: rgba(255, 255, 255, 0.05);
+  font-weight: 600;
+}
+
+.md-content tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+/* --- Links --- */
+.md-content .md-link {
+  color: #5b9cf6;
+  text-decoration: none;
+}
+
+.md-content .md-link:hover {
+  text-decoration: underline;
+}
+
+/* --- 链接右键菜单（portal 到 body，fixed 定位） --- */
+.md-link-menu {
+  position: fixed;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--shadow-color);
+  z-index: 1200;
+  min-width: 168px;
+  padding: 4px 0;
+  overflow: hidden;
+}
+
+.md-link-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 14px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.md-link-menu-item:hover {
+  background: var(--bg-hover);
+}
+
+/* --- Horizontal rule --- */
+.md-content hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin: 1em 0;
+}
+
+/* --- Strong & em --- */
+.md-content strong {
+  font-weight: 650;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.md-content em {
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* --- Strikethrough (GFM) --- */
+.md-content del {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* ============================================================
+   highlight.js theme — VSCode Dark+ (dark) / Light+ (light)
+   ============================================================ */
+
+.md-content .hljs {
+  background: transparent !important;
+  color: #d4d4d4;
+}
+
+.md-content .hljs-comment,
+.md-content .hljs-quote {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.md-content .hljs-keyword,
+.md-content .hljs-selector-tag {
+  color: #569cd6;
+}
+
+.md-content .hljs-literal {
+  color: #569cd6;
+}
+
+.md-content .hljs-number {
+  color: #b5cea8;
+}
+
+.md-content .hljs-string,
+.md-content .hljs-addition {
+  color: #ce9178;
+}
+
+.md-content .hljs-built_in,
+.md-content .hljs-type {
+  color: #4ec9b0;
+}
+
+.md-content .hljs-function,
+.md-content .hljs-title,
+.md-content .hljs-section {
+  color: #dcdcaa;
+}
+
+.md-content .hljs-variable,
+.md-content .hljs-template-variable {
+  color: #9cdcfe;
+}
+
+.md-content .hljs-attr,
+.md-content .hljs-attribute {
+  color: #9cdcfe;
+}
+
+.md-content .hljs-symbol,
+.md-content .hljs-bullet {
+  color: #b5cea8;
+}
+
+.md-content .hljs-name {
+  color: #569cd6;
+}
+
+.md-content .hljs-meta {
+  color: #c586c0;
+}
+
+.md-content .hljs-tag {
+  color: #808080;
+}
+
+.md-content .hljs-regexp {
+  color: #d16969;
+}
+
+.md-content .hljs-link {
+  color: #3794ff;
+  text-decoration: underline;
+}
+
+.md-content .hljs-selector-id,
+.md-content .hljs-selector-class {
+  color: #9cdcfe;
+}
+
+.md-content .hljs-params {
+  color: #9cdcfe;
+}
+
+.md-content .hljs-formula {
+  color: #ce9178;
+}
+
+.md-content .hljs-deletion {
+  color: #f44747;
+}
+
+.md-content .hljs-emphasis {
+  font-style: italic;
+  color: #9cdcfe;
+}
+
+.md-content .hljs-strong {
+  font-weight: 700;
+  color: #569cd6;
+}
+
+/* Diff syntax */
+.md-content .hljs-addition {
+  background: rgba(46, 160, 67, 0.15);
+}
+
+.md-content .hljs-deletion {
+  background: rgba(248, 81, 73, 0.15);
+}
+
+.md-content .hljs-deletion,
+.md-content .hljs-addition {
+  display: inline;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+/* ============================================================
+   Scrollbar for code blocks
+   ============================================================ */
+.md-content .md-code-block pre::-webkit-scrollbar {
+  height: 6px;
+}
+
+.md-content .md-code-block pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.md-content .md-code-block pre::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.md-content .md-code-block pre::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+:root[data-theme="light"] .md-content h1,
+:root[data-theme="light"] .md-content h2,
+:root[data-theme="light"] .md-content hr,
+:root[data-theme="light"] .md-content .md-table-wrap,
+:root[data-theme="light"] .md-content th,
+:root[data-theme="light"] .md-content td {
+  border-color: var(--border-color);
+}
+
+:root[data-theme="light"] .md-content .md-inline-code {
+  border-color: var(--border-color);
+  background: var(--surface-muted);
+  color: #0550ae;
+}
+
+:root[data-theme="light"] .md-content .md-code-block {
+  border-color: var(--user-bubble-border);
+  background: var(--user-bubble-bg);
+}
+
+:root[data-theme="light"] .md-content .md-code-lang,
+:root[data-theme="light"] .md-content .md-code-copy-btn,
+:root[data-theme="light"] .md-content del {
+  color: var(--text-secondary);
+}
+
+:root[data-theme="light"] .md-content .md-code-copy-btn {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="light"] .md-content .md-code-copy-btn:hover {
+  background: var(--surface-strong);
+  color: var(--text-primary);
+}
+
+:root[data-theme="light"] .md-content blockquote {
+  border-left-color: #afb8c1;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+
+:root[data-theme="light"] .md-content th {
+  background: var(--surface-muted);
+}
+
+:root[data-theme="light"] .md-content tr:nth-child(even) td {
+  background: var(--surface-subtle);
+}
+
+:root[data-theme="light"] .md-content strong,
+:root[data-theme="light"] .md-content em {
+  color: var(--text-primary);
+}
+
+:root[data-theme="light"] .md-content .hljs,
+:root[data-theme="light"] .md-content .md-code-block pre code,
+:root[data-theme="light"] .md-content .hljs-params {
+  color: var(--code-text);
+}
+
+:root[data-theme="light"] .md-content .hljs-comment,
+:root[data-theme="light"] .md-content .hljs-quote {
+  color: #008000;
+}
+
+:root[data-theme="light"] .md-content .hljs-keyword,
+:root[data-theme="light"] .md-content .hljs-selector-tag {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .md-content .hljs-literal {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .md-content .hljs-number {
+  color: #098658;
+}
+
+:root[data-theme="light"] .md-content .hljs-string,
+:root[data-theme="light"] .md-content .hljs-addition {
+  color: #a31515;
+}
+
+:root[data-theme="light"] .md-content .hljs-built_in,
+:root[data-theme="light"] .md-content .hljs-type {
+  color: #267f99;
+}
+
+:root[data-theme="light"] .md-content .hljs-function,
+:root[data-theme="light"] .md-content .hljs-title,
+:root[data-theme="light"] .md-content .hljs-section {
+  color: #795e26;
+}
+
+:root[data-theme="light"] .md-content .hljs-variable,
+:root[data-theme="light"] .md-content .hljs-template-variable {
+  color: #001080;
+}
+
+:root[data-theme="light"] .md-content .hljs-attr,
+:root[data-theme="light"] .md-content .hljs-attribute {
+  color: #001080;
+}
+
+:root[data-theme="light"] .md-content .hljs-symbol,
+:root[data-theme="light"] .md-content .hljs-bullet {
+  color: #098658;
+}
+
+:root[data-theme="light"] .md-content .hljs-name {
+  color: #800000;
+}
+
+:root[data-theme="light"] .md-content .hljs-meta {
+  color: #af00db;
+}
+
+:root[data-theme="light"] .md-content .hljs-tag {
+  color: #800000;
+}
+
+:root[data-theme="light"] .md-content .hljs-regexp {
+  color: #811f3f;
+}
+
+:root[data-theme="light"] .md-content .hljs-link {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .md-content .hljs-selector-id,
+:root[data-theme="light"] .md-content .hljs-selector-class {
+  color: #ff0000;
+}
+
+:root[data-theme="light"] .md-content .hljs-formula {
+  color: #a31515;
+}
+
+:root[data-theme="light"] .md-content .hljs-deletion {
+  color: #ad3222;
+}
+
+:root[data-theme="light"] .md-content .hljs-emphasis {
+  color: #001080;
+}
+
+:root[data-theme="light"] .md-content .hljs-strong {
+  color: #0000ff;
+}
+
+:root[data-theme="light"] .md-content .md-code-block pre::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+
+:root[data-theme="light"] .md-content .md-code-block pre::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 /* src/components/git/GitWorkspaceModal.css */
@@ -8693,22 +9549,117 @@ body.chat-questionnaire-resizing .chat-bubble {
   margin-bottom: 14px;
 }
 
-.git-stash-create input {
+.git-stash-create button {
   flex: 1;
-  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+/* 储藏信息弹窗：复用变基对话框的外壳，只收窄宽度。 */
+.git-rebase-dialog.git-stash-dialog {
+  width: min(420px, calc(100vw - 40px));
+}
+
+/* 文件 / 目录的提交历史弹窗 */
+.git-rebase-dialog.git-history-dialog {
+  width: min(640px, calc(100vw - 60px));
+}
+
+.git-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 7px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+}
+
+.git-history-row strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-history-row span {
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.git-stash-dialog .git-rebase-header div {
+  min-width: 0;
+}
+
+.git-stash-dialog .git-rebase-header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-stash-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+
+.git-stash-dialog-body label {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.git-stash-dialog-body input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
   border: 1px solid var(--border-color);
   border-radius: 5px;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 12px;
+  outline: none;
 }
 
-.git-stash-create button {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.git-stash-dialog-body input:focus {
+  border-color: var(--accent-color);
+}
+
+/* 恢复储藏弹窗：说明 + 两个勾选项，勾选下带一行灰字说明。 */
+.git-stash-restore-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+}
+
+.git-stash-restore-body p {
+  margin: 0 0 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.git-stash-restore-body .git-amend {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.git-stash-restore-hint {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 按钮组居中，确定（主色）在前，与恢复确认的设计一致。 */
+.git-rebase-footer.git-restore-footer > div {
+  justify-content: center;
+  flex: 1;
+  gap: 8px;
 }
 
 .git-stash-list {
@@ -8719,29 +9670,56 @@ body.chat-questionnaire-resizing .chat-bubble {
 
 .git-stash-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 10px;
+  flex-direction: column;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-tertiary);
 }
 
-.git-stash-row div {
+.git-stash-row-head {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.git-stash-toggle {
+  display: grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.git-stash-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-stash-meta {
+  display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
-.git-stash-row strong {
+.git-stash-meta strong {
+  overflow: hidden;
   color: var(--text-primary);
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.git-stash-row span {
+.git-stash-meta span {
   overflow: hidden;
   color: var(--text-secondary);
   font-size: 11px;
@@ -8749,18 +9727,89 @@ body.chat-questionnaire-resizing .chat-bubble {
   white-space: nowrap;
 }
 
-.git-stash-row button {
+/* ref 和分支是次要信息，用等宽体跟说明区分开。 */
+.git-stash-ref {
+  font-family: ui-monospace, monospace;
+}
+
+.git-stash-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.git-stash-actions button {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  flex: 0 0 auto;
-  padding: 5px 8px;
+  gap: 4px;
+  padding: 4px 8px;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 11px;
   cursor: pointer;
+}
+
+.git-stash-actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.git-stash-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.git-stash-actions button.danger {
+  border-color: color-mix(in srgb, var(--danger-color, #f44336) 40%, transparent);
+  color: var(--danger-color, #f44336);
+}
+
+.git-stash-files {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  padding: 6px 10px 8px 34px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-color);
+}
+
+.git-stash-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.git-stash-file-status {
+  flex: 0 0 auto;
+  width: 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.git-stash-file-status.M { color: var(--warning-color, #f5a623); }
+.git-stash-file-status.A { color: var(--success-color, #3ecf8e); }
+.git-stash-file-status.D { color: var(--danger-color, #f44336); }
+.git-stash-file-status.R { color: var(--accent-color); }
+
+.git-stash-file-path {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-stash-files-empty {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .git-workspace-modal .spin {
@@ -8800,11 +9849,119 @@ body.chat-questionnaire-resizing .chat-bubble {
 }
 
 .git-commit-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   color: var(--text-secondary);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.git-commit-history-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.git-commit-history-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-commit-history-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 浮层走 portal + fixed：提交区是 overflow: hidden，放在里面会被裁掉。 */
+.git-commit-history-popover {
+  z-index: 1320;
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  max-height: 260px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 32px var(--shadow-color, rgba(0, 0, 0, 0.32));
+  overflow: hidden;
+}
+
+.git-commit-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.git-commit-history-head button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.git-commit-history-head button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-commit-history-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+}
+
+.git-commit-history-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.git-commit-history-item:hover {
+  background: var(--bg-hover);
+}
+
+.git-commit-history-empty {
+  padding: 12px 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .git-commit-actions .git-primary-btn {
@@ -8977,6 +10134,7 @@ body.chat-questionnaire-resizing .chat-bubble {
 .git-conflict-actions button:hover:not(:disabled),
 .git-conflict-row button:hover:not(:disabled) {
   background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .git-conflict-actions button:disabled,
@@ -8988,6 +10146,357 @@ body.chat-questionnaire-resizing .chat-bubble {
 .git-conflict-actions button.danger {
   color: #ff8a80;
   border-color: rgba(244, 67, 54, 0.35);
+}
+
+/* 日志弹窗头部的「清除」按钮沿用通知工具按钮样式。 */
+.git-notice-console-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-notice-console-tool:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-notice-console-tool:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 工作台最底部的日志状态条：显示最新一条操作 / 错误，点开完整日志。 */
+.git-log-bar {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  min-height: 28px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.git-log-bar-main {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.git-log-bar-main:hover {
+  background: var(--bg-hover);
+}
+
+.git-log-bar-main strong {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.git-log-bar-message {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-log-bar.error .git-log-bar-main {
+  color: #ef5350;
+}
+
+.git-log-bar.warning .git-log-bar-main {
+  color: #d99a2b;
+}
+
+.git-log-tone.ok {
+  color: #3fb950;
+}
+
+.git-log-tone.warn {
+  color: #d99a2b;
+}
+
+.git-log-tone.err {
+  color: #ef5350;
+}
+
+:root[data-theme="light"] .git-log-tone.ok {
+  color: #1a7f37;
+}
+
+:root[data-theme="light"] .git-log-tone.warn {
+  color: #9a6700;
+}
+
+:root[data-theme="light"] .git-log-tone.err {
+  color: #cf222e;
+}
+
+/* 操作日志弹窗：居中宽幅。 */
+.git-rebase-dialog.git-log-dialog {
+  width: min(860px, calc(100vw - 80px));
+  height: min(560px, calc(100vh - 120px));
+}
+
+.git-rebase-header .git-notice-console-tool {
+  margin-right: 4px;
+}
+
+/* 日志弹窗头部的按钮组：贴右侧成组，别被 space-between 拆到中间。 */
+.git-rebase-header .git-log-dialog-actions {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.git-log-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 12px;
+}
+
+.git-log-item {
+  border-radius: 5px;
+}
+
+.git-log-item.expanded {
+  background: var(--bg-tertiary);
+}
+
+.git-log-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.git-log-row.expandable {
+  cursor: pointer;
+}
+
+.git-log-row.expandable:hover {
+  background: var(--bg-hover);
+}
+
+.git-log-chevron-slot {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 13px;
+}
+
+.git-log-chevron {
+  color: var(--text-secondary);
+  transition: transform 0.12s ease;
+}
+
+.git-log-chevron.open {
+  transform: rotate(90deg);
+}
+
+.git-log-row strong {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.git-log-message {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 复制按钮悬浮行时才出现；用 visibility 占位，避免出现/消失时布局跳动。 */
+.git-log-copy {
+  visibility: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.git-log-copy:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-log-row:hover .git-log-copy,
+.git-log-copy:focus-visible {
+  visibility: visible;
+}
+
+.git-log-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.git-log-meta .git-log-time {
+  flex: 0 0 8ch;
+}
+.git-log-meta .git-log-duration {
+  flex: 0 0 12ch;
+  text-align: right;
+  white-space: pre;
+}
+
+/* 行内引导按钮（如「合并恢复」）：随警告条出现在复制按钮左侧。 */
+.git-log-action {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid rgba(232, 168, 56, 0.55);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: #d99a2b;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.git-log-action:hover:not(:disabled) {
+  background: rgba(232, 168, 56, 0.12);
+  color: var(--text-primary);
+}
+
+.git-log-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.git-log-detail {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px 10px 8px 30px;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.git-floating-notice {
+  border: 1px solid rgba(232, 168, 56, 0.5);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 10px 32px var(--shadow-color);
+  padding: 10px 12px;
+}
+
+.git-floating-notice.error {
+  border-color: rgba(244, 67, 54, 0.5);
+}
+
+.git-floating-notice.error .git-floating-notice-head {
+  color: #ef5350;
+}
+
+.git-floating-notice-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #d99a2b;
+  font-size: 12px;
+}
+
+.git-floating-notice-head strong {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-floating-notice-close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.git-floating-notice-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-floating-notice-body {
+  margin-top: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.git-floating-notice-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.git-floating-notice-actions button {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-floating-notice-actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-floating-notice-actions button.danger {
+  color: #ff8a80;
+  border-color: rgba(244, 67, 54, 0.35);
+}
+
+.git-floating-notice-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+:root[data-theme="light"] .git-floating-notice-actions button.danger,
+:root[data-theme="light"] .git-conflict-actions button.danger {
+  color: #c62828;
 }
 
 .git-file-section-title.conflict {
@@ -9191,9 +10700,17 @@ body.chat-questionnaire-resizing .chat-bubble {
   cursor: pointer;
 }
 
-.git-conflict-editor-actions button:hover:not(:disabled),
-.git-conflict-block-actions button:hover:not(:disabled) {
+/* :not(.git-primary-btn) 必须保留：否则下面那条 hover 的特异性会盖过主按钮的蓝底，
+   白字落在浅色主题的浅灰 hover 底上就看不见了。 */
+.git-conflict-editor-actions button:not(.git-primary-btn):hover:not(:disabled),
+.git-conflict-block-actions button:not(.git-primary-btn):hover:not(:disabled) {
   background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-conflict-editor-actions button.git-primary-btn:hover:not(:disabled) {
+  background: var(--accent-color);
+  filter: brightness(1.08);
 }
 
 .git-conflict-editor-actions button:disabled,
@@ -9247,6 +10764,23 @@ body.chat-questionnaire-resizing .chat-bubble {
   font-size: 11px;
 }
 
+.git-conflict-block-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.git-conflict-choice {
+  padding: 1px 7px;
+  border: 1px solid rgba(232, 168, 56, 0.4);
+  border-radius: 999px;
+  color: #d99a2b;
+  font-size: 10px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .git-conflict-block-actions {
   display: flex;
   gap: 5px;
@@ -9268,6 +10802,14 @@ body.chat-questionnaire-resizing .chat-bubble {
   border-right: 0;
 }
 
+.git-conflict-side.ours {
+  background: rgba(63, 185, 80, 0.07);
+}
+
+.git-conflict-side.theirs {
+  background: rgba(56, 139, 253, 0.07);
+}
+
 .git-conflict-side > span {
   display: block;
   margin-bottom: 4px;
@@ -9275,11 +10817,20 @@ body.chat-questionnaire-resizing .chat-bubble {
   font-size: 10px;
 }
 
+/* dark 主题下默认的深绿/深蓝几乎看不清，默认用亮色，浅色主题再压回深色。 */
 .git-conflict-side.ours > span {
-  color: #2e7d32;
+  color: #81c995;
 }
 
 .git-conflict-side.theirs > span {
+  color: #8ab4f8;
+}
+
+:root[data-theme="light"] .git-conflict-side.ours > span {
+  color: #2e7d32;
+}
+
+:root[data-theme="light"] .git-conflict-side.theirs > span {
   color: #1565c0;
 }
 
@@ -9337,6 +10888,11 @@ body.chat-questionnaire-resizing .chat-bubble {
   font-size: 11px;
   line-height: 1.5;
   resize: vertical;
+}
+
+.git-conflict-result textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent-color);
 }
 
 .git-conflict-plain {
@@ -9848,9 +11404,8 @@ body.chat-questionnaire-resizing .chat-bubble {
 }
 
 .git-blame-rows {
-  flex: 1;
+  /* 滚动交给外层 .git-diff-content，这里不另起滚动容器。 */
   min-height: 0;
-  overflow: auto;
 }
 
 .git-blame-row {
@@ -9896,6 +11451,23 @@ body.chat-questionnaire-resizing .chat-bubble {
 .git-blame-text {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 虚拟滚动的 diff：行按绝对定位 + translateY 排布，容器高度由虚拟器给出。
+   滚动交给外层 .git-diff-content，这里不再套滚动容器，避免双滚动条。 */
+.git-diff-virtual {
+  position: relative;
+}
+.git-diff-virtual .git-hunk-header-virtual,
+.git-diff-virtual .git-hunk-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.git-diff-virtual .git-hunk-header-virtual {
+  min-width: max-content;
 }
 
 </style>
@@ -10039,8 +11611,7 @@ body.chat-questionnaire-resizing .chat-bubble {
       </div>
 
       <div class="session-stats-popover preview-stats-popover" role="dialog" aria-label="会话统计" hidden>
-        <div class="session-stats-header">
-          <span>会话统计</span>
+        <div class="session-stats-header">          
           <button type="button" data-action="toggle-stats" aria-label="关闭">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>
           </button>
@@ -10079,35 +11650,41 @@ body.chat-questionnaire-resizing .chat-bubble {
               <li>
                 <button type="button" class="subagent-monitor-item active">
                   <span class="subagent-monitor-dot running"></span>
-                  <span class="subagent-monitor-item-main">
-                    <span class="subagent-monitor-item-label">Scout</span>
-                    <span class="subagent-monitor-item-usage">9.2k token · 缓存 90% · 2 轮</span>
-                  </span>
-                  <span class="subagent-monitor-item-time">42s</span>
+                  <span class="subagent-monitor-item-label" title="Scout">编写测试</span>
                 </button>
               </li>
               <li>
                 <button type="button" class="subagent-monitor-item">
-                  <span class="subagent-monitor-dot running"></span>
-                  <span class="subagent-monitor-item-main">
-                    <span class="subagent-monitor-item-label">Reviewer</span>
-                    <span class="subagent-monitor-item-usage">6.4k token · 缓存 84% · 1 轮</span>
-                  </span>
-                  <span class="subagent-monitor-item-time">31s</span>
+                  <span class="subagent-monitor-dot completed"></span>
+                  <span class="subagent-monitor-item-label" title="Reviewer">审查风险</span>
                 </button>
               </li>
             </ul>
 
             <div class="subagent-monitor-detail">
               <div class="subagent-monitor-detail-head">
-                <strong>Scout</strong>
+                <strong title="Scout">编写测试</strong>
                 <span>运行中</span>
                 <span class="subagent-monitor-model">deepseek-chat</span>
               </div>
-              <div class="subagent-monitor-usage">9.2k token · 缓存 90% · 2 轮</div>
-              <div class="subagent-monitor-activity">正在读取 src/lib/foo.ts</div>
-              <div class="subagent-monitor-idle">最后活动 3 秒前</div>
-              <pre class="subagent-monitor-output">src/lib/foo.ts:42  export const foo = () =&gt; bar();</pre>
+              <div class="subagent-monitor-detail-meta">
+                <span class="subagent-monitor-usage">9.2k token · 缓存 90% · 2 轮</span>
+                <span class="subagent-monitor-idle">最后活动 3 秒前</span>
+              </div>
+              <div class="subagent-monitor-detail-scroll">
+                <div class="subagent-monitor-activity" title="我会先定位 subagent 工具的定义位置。">我会先定位 subagent 工具的定义位置。</div>
+                <div class="subagent-monitor-output" title="点击收起">
+                  <div class="md-content">
+                    <h3>Files</h3>
+                    <ul>
+                      <li><strong>190</strong> 常量：<code>MAX_PARALLEL_TASKS = 8</code>、<code>MAX_CONCURRENCY = 4</code></li>
+                      <li><code>DEFAULT_TASK_TIMEOUT_MS = 30*60*1000</code>、<code>MAX_TASK_OUTPUT_BYTES</code></li>
+                      <li><code>getTaskItems</code> <code>L1008–1018</code>、<code>getChainItems</code> <code>L1020–1030</code></li>
+                      <li><code>resolveConfiguredModel</code> <code>L1088</code>、<code>getPoolEntry</code> <code>L1078</code></li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -10197,6 +11774,10 @@ body.chat-questionnaire-resizing .chat-bubble {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h8l4 4v14H6z"/><path d="M9 13h6M9 17h4"/></svg>
               <span class="git-nav-badge">3</span>
             </button>
+            <button type="button" class="git-nav-item" data-label="Stash (2)" data-action="nav">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="5" rx="1.4"/><path d="M5 9v9h14V9M10 13h4"/></svg>
+              <span class="git-nav-badge">2</span>
+            </button>
             <button type="button" class="git-nav-item" data-label="历史" data-action="nav">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12a8 8 0 1 0 2.3-5.6" stroke-linecap="round"/><path d="M12 8v4l3 2" stroke-linecap="round"/></svg>
             </button>
@@ -10205,10 +11786,6 @@ body.chat-questionnaire-resizing .chat-bubble {
             </button>
             <button type="button" class="git-nav-item" data-label="工作区" data-action="nav">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h6l2 2h10v9H3z"/></svg>
-            </button>
-            <button type="button" class="git-nav-item" data-label="Stash (2)" data-action="nav">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="5" rx="1.4"/><path d="M5 9v9h14V9M10 13h4"/></svg>
-              <span class="git-nav-badge">2</span>
             </button>
           </nav>
 

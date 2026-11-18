@@ -1,4 +1,5 @@
 import { countPatchChanges, patchDescribesChange } from "./unified-patch";
+import { fallbackCommandDescription } from "../../shared/command-description";
 import type { ComputedFileDiff } from "./turn-file-diff";
 
 export type NormalizedToolKind =
@@ -409,18 +410,32 @@ const getPatch = (data: unknown, args: unknown, result: unknown): string => {
   }).join("\n");
 };
 
-const getCommand = (args: unknown, data: unknown): string =>
-  findFirstString(
-    { args, data },
-    [
-      ["args", "command"],
-      ["args", "cmd"],
-      ["args", "script"],
-      ["data", "command"],
-      ["data", "cmd"],
-      ["data", "script"],
-    ]
-  );
+/**
+ * 命令字段有两种形态：字符串（Claude/Pi/OpenCode）或 argv 数组（Codex 的
+ * shell 调用是 `["bash", "-lc", "…"]`）。数组只拼成一行用于展示，不参与执行。
+ */
+const coerceCommandText = (value: unknown): string => {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+  }
+  return "";
+};
+
+const getCommand = (args: unknown, data: unknown): string => {
+  const argsRecord = asRecord(args);
+  const dataRecord = asRecord(data);
+  return coerceCommandText(argsRecord.command)
+    || coerceCommandText(argsRecord.cmd)
+    || coerceCommandText(argsRecord.script)
+    || coerceCommandText(dataRecord.command)
+    || coerceCommandText(dataRecord.cmd)
+    || coerceCommandText(dataRecord.script);
+};
 
 const getPattern = (args: unknown, data: unknown): string =>
   findFirstString(
@@ -568,9 +583,13 @@ export const normalizeToolEvent = (
   const argsObject = asRecord(args);
   // 工具参数里的 description 是模型写给用户看的意图（pi 的 bash 由 Hpp 补了这个参数，
   // Claude Code 一类后端原生就有），后面会被当成命令条目标题。
-  const description = typeof argsObject.description === "string"
+  const writtenDescription = typeof argsObject.description === "string"
     ? argsObject.description.trim().replace(/\s+/g, " ")
     : "";
+  // 其他后端不带 description 时按命令推断，避免命令明细全部退化成「命令」。
+  const description = writtenDescription || (
+    toolKind === "run_command" ? fallbackCommandDescription(command, toolName) : ""
+  );
   const patchFilePath = patch ? extractFilePathFromPatch(patch) : "";
   const filePath = getToolPath(toolKind, data, args || {}, result || {}, patchFilePath);
   const changes = patch ? countPatchChanges(patch) : { additions: undefined, deletions: undefined };

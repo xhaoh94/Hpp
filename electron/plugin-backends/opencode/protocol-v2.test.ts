@@ -13,6 +13,7 @@ type Internals = {
   sseBuffer: string;
   processSSEBuffer: () => void;
   pendingUIRequests: Map<string, { kind: "question" | "permission"; sessionId?: string }>;
+  handleSSEEvent: (eventType: string, props: Record<string, unknown>) => void;
   respondToUIRequest: (response: Record<string, unknown>) => Promise<void>;
   activeOpenCodeUserMessageIds: Set<string>;
   guidancePendingResponse: boolean;
@@ -108,6 +109,65 @@ describe("OpenCode V2 protocol wiring", () => {
     expect(events).toContainEqual(expect.objectContaining({
       type: "stream_delta",
       delta: "hello from v2",
+    }));
+  });
+
+  it("compacts through /api/session/:id/compact and finishes on the SSE event", async () => {
+    let compactPath = "";
+    let compactBody: Record<string, unknown> | null = null;
+    const port = await startServer((request, response) => {
+      if (request.url === "/api/session/ses_compact/compact") {
+        compactPath = request.url;
+        let body = "";
+        request.on("data", (chunk) => (body += chunk));
+        request.on("end", () => {
+          compactBody = JSON.parse(body);
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({
+            data: {
+              id: "msg_compact",
+              sessionID: "ses_compact",
+              time: { created: Date.now() },
+              type: "compaction",
+              payload: {},
+              delivery: "steer",
+            },
+          }));
+        });
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = asInternals(agent);
+    internals.protocol = getOpenCodeProtocol("v2");
+    internals.sessionId = "ses_compact";
+    internals.host = "127.0.0.1";
+    internals.port = port;
+    // compact() 只要求进程已启动；isIdle 对新的 agent 实例默认为 true。
+    (agent as unknown as { process: unknown }).process = {};
+
+    await agent.compact();
+    await waitFor(() => events.some((event) => event.type === "context_compaction"));
+
+    expect(compactPath).toBe("/api/session/ses_compact/compact");
+    // 2.x 的 compact 不接受 model 字段。
+    expect(compactBody).toEqual({});
+    const started = events.find((event) => event.type === "context_compaction" && event.phase === "started");
+    expect(started).toBeTruthy();
+    // POST 只是受理，不能提前报完成；完成由 SSE 的 session.compacted 驱动。
+    expect(events.some((event) => event.type === "context_compaction" && event.phase === "completed")).toBe(false);
+
+    internals.handleSSEEvent("session.compacted", { sessionID: "ses_compact" });
+    await waitFor(() => events.some((event) => event.type === "context_compaction" && event.phase === "completed"));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "context_compaction",
+      id: started?.id,
+      phase: "completed",
     }));
   });
 

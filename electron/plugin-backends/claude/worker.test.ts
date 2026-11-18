@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { createServer } from "http";
 import { createInterface } from "readline";
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -13,6 +14,9 @@ let subagentReadCount = 0;
 
 class FakeQuery {
   constructor(prompt, options) {
+    if (options.model === "invalid-model") {
+      throw new Error("Unable to validate model: undefined is not an object (evaluating 'Js.usage.input_tokens')");
+    }
     if (options.resume && !persistedSessions.has(options.resume)) {
       throw new Error(\`No conversation found with session ID: \${options.resume}\`);
     }
@@ -51,6 +55,9 @@ class FakeQuery {
       const imageCount = content.filter((part) => part.type === "image").length;
       if (text === "disconnect") {
         this.close();
+        continue;
+      } else if (text === "model-validation-failed") {
+        this.enqueue({ type: "result", subtype: "error_during_execution", is_error: true, uuid: "result-" + commandUuid, session_id: this.sessionId, usage: {}, total_cost_usd: 0, result: "Unable to validate model: undefined is not an object (evaluating 'Js.usage.input_tokens')" });
         continue;
       } else if (text === "ask") {
         const input = { questions: [{ question: "Which agent?", header: "Agent", multiSelect: false, options: [{ label: "Pi", description: "Pi" }, { label: "Claude", description: "Claude" }] }] };
@@ -110,7 +117,10 @@ class FakeQuery {
     }
   }
   async interrupt() {}
-  async setModel(model) { this.model = model; }
+  async setModel(model) {
+    if (model === "invalid-model") throw new Error("Unable to validate model: undefined is not an object (evaluating 'Js.usage.input_tokens')");
+    this.model = model;
+  }
   async setPermissionMode(mode) {
     if (!this.transportReady) throw new Error("ProcessTransport is not ready for writing");
     this.permissionMode = mode;
@@ -305,6 +315,57 @@ describe("Claude Agent SDK worker", () => {
     expect(usage.precision).toBe("exact");
     // free/buffer 不是"已占用"，不能算进明细（否则色条会假性占满）。
     expect((usage.breakdown as Array<{ label: string }>).map((entry) => entry.label)).toEqual(["detail:full"]);
+  });
+
+  it("surfaces the channel's own error when the SDK only reports a model-validation failure", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "此密钥总token已耗尽" }));
+    });
+    await new Promise<void>((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    try {
+      const config = {
+        providers: [{
+          providerId: "gateway",
+          displayName: "Gateway",
+          baseUrl: `http://127.0.0.1:${port}/v1`,
+          apiKey: "secret-key",
+          authMode: "x-api-key",
+          endpoint: "anthropic-messages",
+          models: [{ id: "claude-test", name: "Claude Test", reasoning: true, imageInput: true }],
+        }],
+      };
+      const worker = await initialize("new-session", true, config);
+      worker.send({ id: "prompt-channel-error", type: "prompt", message: "model-validation-failed", permissionMode: "auto" });
+
+      // CLI 只留下一句 "Unable to validate model ..."，但实情是渠道额度耗尽：
+      // 错误里必须带上渠道自己的文案，而不是让用户去看 usage.input_tokens。
+      const error = await worker.waitFor(
+        (message) => message.type === "error" && message.id === "prompt-channel-error",
+        8000,
+      );
+      expect(error.error).toContain("渠道返回：此密钥总token已耗尽");
+      expect(error.error).not.toContain("usage.input_tokens");
+
+      // 切模型必须纯本地：只回 model_changed，不发请求、不报错。
+      worker.send({ id: "set-model-lazy", type: "setModel", provider: "gateway", modelId: "invalid-model", config });
+      await expect(worker.waitFor((message) => message.type === "model_changed" && message.id === "set-model-lazy"))
+        .resolves.toMatchObject({ type: "model_changed" });
+      expect(worker.messages.some((message) => message.type === "error" && message.id === "set-model-lazy")).toBe(false);
+
+      // 真正发消息时才应用新模型，并把渠道原文报在聊天里。
+      worker.send({ id: "prompt-after-switch", type: "prompt", message: "hello", permissionMode: "auto" });
+      const switchError = await worker.waitFor(
+        (message) => message.type === "error" && message.id === "prompt-after-switch",
+        8000,
+      );
+      expect(switchError.error).toContain("渠道返回：此密钥总token已耗尽");
+      expect(switchError.error).not.toContain("usage.input_tokens");
+    } finally {
+      await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+    }
   });
 
   it("falls back to summary with an estimated precision, and stays silent without the API", async () => {
@@ -509,11 +570,14 @@ describe("Claude Agent SDK worker", () => {
 
     const message = await worker.waitFor((item) =>
       item.type === "message_end" && item.nativeTurnId === "assistant-system-prompt");
-    expect(JSON.parse(String(message.text))).toEqual({
+    const systemPrompt = JSON.parse(String(message.text));
+    expect(systemPrompt).toMatchObject({
       type: "preset",
       preset: "claude_code",
-      append: "[HPP] 始终使用简体中文",
     });
+    // host 策略照常注入，后面追加 Task 标题引导；两条都在。
+    expect(String(systemPrompt.append)).toContain("[HPP] 始终使用简体中文");
+    expect(String(systemPrompt.append)).toContain("description 填 2~6 字的极简中文标题");
     await expect(worker.waitFor((item) => item.type === "prompt_done" && item.id === "prompt-system"))
       .resolves.toMatchObject({ type: "prompt_done" });
   });

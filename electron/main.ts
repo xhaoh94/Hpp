@@ -64,6 +64,10 @@ app.setName("hpp");
 if (!String(process.env.HPP_DATA_DIR || "").trim()) {
   process.env.HPP_DATA_DIR = join(app.getPath("userData"), "hpp-data");
 }
+// 供子进程（如 Claude SDK worker）上报客户端版本，避免硬编码。
+if (!String(process.env.HPP_APP_VERSION || "").trim()) {
+  process.env.HPP_APP_VERSION = app.getVersion();
+}
 if (process.platform === "win32") {
   app.setAppUserModelId(WINDOWS_APP_ID);
 }

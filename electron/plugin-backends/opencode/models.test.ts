@@ -85,6 +85,26 @@ describe("OpenCode models", () => {
     ]);
   });
 
+  it("dedupes concurrent model discovery requests", async () => {
+    const agent = new OpenCodeAgent();
+    const internals = agent as unknown as OpenCodeInternals;
+    let calls = 0;
+    internals.httpGet = vi.fn(async () => {
+      calls += 1;
+      // 两个调用都落在在途窗口内：应该共用同一次请求。
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return {
+        providers: [{ id: "custom", models: [{ id: "only", name: "Only" }] }],
+      };
+    });
+
+    const [first, second] = await Promise.all([agent.getModels(), agent.getModels()]);
+
+    expect(calls).toBe(1);
+    expect(first).toEqual(second);
+    expect(first).toEqual([expect.objectContaining({ id: "only", provider: "custom" })]);
+  });
+
   it("uses only an actual model variant and normalizes its protocol alias", async () => {
     const events: AgentEvent[] = [];
     const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event));

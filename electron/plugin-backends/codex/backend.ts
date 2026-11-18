@@ -439,6 +439,16 @@ export class CodexAgent {
     });
   }
 
+  /** 手动压缩：走 codex app-server 的 thread/compact/start。 */
+  async compact(): Promise<void> {
+    if (!this.process) throw new Error("Codex worker is not running");
+    if (!this.isIdle()) throw new Error("SESSION_BUSY");
+    const data = await this.requestWorkerCommand({ type: "compact" }, 180_000);
+    if (data.type !== "compacted") {
+      throw new Error(optionalString(data.error) || "Codex compact failed");
+    }
+  }
+
   async setThinkingLevel(level: string): Promise<void> {
     this.sendWorkerCommand({ type: "setThinkingLevel", level }, (data) => {
       if (data.type === "thinking_level_changed") this.emitEvent({ type: "thinking_level_changed", level: data.level });

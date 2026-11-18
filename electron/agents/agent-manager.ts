@@ -111,6 +111,9 @@ const AGENT_BACKEND_CALL_TIMEOUT_MS = 15_000;
 // 才真正改 session.model。用 15s 会先判「切换模型超时」，而后端随后仍把模型
 // 切掉，前端不落盘、不对齐思考等级 —— UI 与运行时模型直接分叉。
 const AGENT_MODEL_SWITCH_TIMEOUT_MS = 120_000;
+// 手动压缩要跑完整段摘要生成，常态十几秒到一分钟；用普通调用的 15s 会把
+// 正常压缩误判为超时，但后端其实还在继续跑，界面就停在“压缩中”。
+const AGENT_COMPACT_TIMEOUT_MS = 180_000;
 // A host UI request that stays untouched for this long while the backend
 // itself reports idle is stale residue from a finished turn. Reuse the
 // session instead of reporting busy forever.
@@ -121,8 +124,11 @@ async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined,
   if (!agentId) return models;
   const capabilities = await agentRegistry.getCapabilities(agentId);
   if (capabilities.configuration === "none") return models;
-  const configuredModels = await getConfiguredAgentModels(agentId).catch(() => []);
-  const backendModelsVisible = await shouldShowAgentBackendModels(agentId);
+  // 两次读取互不依赖（渠道配置、设置里的模型来源开关），串行会多等一次磁盘。
+  const [configuredModels, backendModelsVisible] = await Promise.all([
+    getConfiguredAgentModels(agentId).catch(() => []),
+    shouldShowAgentBackendModels(agentId),
+  ]);
   return combineAgentModels(
     models,
     configuredModels,
@@ -714,18 +720,29 @@ export class AgentManager {
     }
   }
 
-  async sendGuidance(sessionId: string | undefined, message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
+  async sendGuidance(sessionId: string | undefined, message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<{ guidanceId?: string }> {
     const agent = sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
     if (!agent) throw new Error("No active agent");
     const agentType = sessionId ? this.getSessionAgentType(sessionId) : this.getActiveAgentType();
     if (!(await supportsGuidance(agentType)) || typeof agent.sendGuidance !== "function") {
       throw new Error("Guidance is not supported by this agent");
     }
-    await agent.sendGuidance(message, images, {
+    const result = await agent.sendGuidance(message, images, {
       ...options,
       displayMessage: options?.displayMessage || message,
       hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
     });
+    return result && typeof result === "object" ? result : {};
+  }
+
+  /** 撤回一条还没交付的引导；后端不支持时抛错，让渲染层保持原状。 */
+  async cancelGuidance(sessionId: string | undefined, guidanceId: string): Promise<{ cancelled: boolean; reason?: string }> {
+    const agent = sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
+    if (!agent) throw new Error("No active agent");
+    if (typeof agent.cancelGuidance !== "function") {
+      throw new Error("Guidance cancel is not supported by this agent");
+    }
+    return agent.cancelGuidance(guidanceId);
   }
 
   async forkSession(sessionId: string, target: AgentForkTarget): Promise<AgentForkResult> {
@@ -2009,8 +2026,17 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
 
   ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
     try {
-      await agentManager.sendGuidance(sessionId, message, images, options);
-      return { success: true };
+      const result = await agentManager.sendGuidance(sessionId, message, images, options);
+      return { success: true, ...(result.guidanceId ? { guidanceId: result.guidanceId } : {}) };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
+  });
+
+  ipcMain.handle("agent:cancelGuidance", async (_event, sessionId: string | undefined, guidanceId: string) => {
+    try {
+      const result = await agentManager.cancelGuidance(sessionId, guidanceId);
+      return { success: true, ...result };
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err) };
     }
@@ -2109,6 +2135,25 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         agent.setThinkingLevel(level),
         AGENT_BACKEND_CALL_TIMEOUT_MS,
         "设置思考等级超时，插件未响应，请重试。",
+      );
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
+  });
+
+  ipcMain.handle("agent:compactSession", async (_event, sessionId?: string) => {
+    const agent = agentManager.getAgentForSession(sessionId);
+    if (!agent) return { success: false, error: "No active agent" };
+    if (typeof agent.compact !== "function") {
+      return { success: false, error: "当前 Agent 不支持手动压缩上下文。" };
+    }
+    if (!agent.isIdle()) return { success: false, error: "当前回合仍在运行，请等待完成后再压缩。" };
+    try {
+      await withTimeout(
+        agent.compact(),
+        AGENT_COMPACT_TIMEOUT_MS,
+        "压缩上下文超时，插件未响应，请重试。",
       );
       return { success: true };
     } catch (err: unknown) {

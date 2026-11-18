@@ -188,6 +188,7 @@ const getPiSubagentTaskItems = (
     return [{
       id: `task-${index + 1}`,
       label: humanizeSubagentLabel(agent || `subagent-${index + 1}`),
+      ...(typeof item.title === "string" && item.title.trim() ? { title: item.title.trim() } : {}),
       status: fallbackStatus,
       model: typeof item.model === "string" ? item.model : undefined,
       message: undefined,
@@ -308,6 +309,8 @@ const buildPiSubagentEvent = (
     return {
       id: `${toolCallId}:${index + 1}`,
       label: humanizeSubagentLabel(agent),
+      // 调度方给的极简展示标题（插件 1.4.1+），透传给界面胶囊/页签。
+      ...(typeof result.title === "string" && result.title.trim() ? { title: result.title.trim() } : {}),
       status,
       model: formatSubagentModel(result.model),
       message: getPiSubagentResultText(result),
@@ -399,7 +402,13 @@ export class PiSDKAgent {
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
   private subagentConfig: AgentSubagentConfig | undefined;
   private builtinExtensionConfig: AgentBuiltinExtensionConfig = normalizeAgentBuiltinExtensionConfig(undefined);
-  private guidancePendingResponse = false;
+  /**
+   * 已入队、还没交付的引导条数。
+   *
+   * 用计数而不是布尔：同时有两条引导在途时，布尔会让第一条交付把信号吃掉，
+   * 第二条的 `guidance_response_started` 永远不发，渲染层那条引导就卡在等待。
+   */
+  private guidancePendingResponses = 0;
   private piSubagentStarts = new Map<string, PiSubagentStart>();
   private piSubagentTerminalStates = new Map<string, NativeSubagentStatus>();
   // Ordinary tool end notifications can be replayed by an adapter after a
@@ -662,7 +671,7 @@ export class PiSDKAgent {
     );
   }
 
-  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
+  async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<{ guidanceId: string }> {
     if (!this.process) throw new Error("Pi SDK worker is not running");
     if (this.isAborting) this.finishAbortState();
 
@@ -676,13 +685,14 @@ export class PiSDKAgent {
         this.sendWorkerCommand({
           id: guidanceId,
           type: "guidance",
+          guidanceId,
           message,
           images,
           hostSystemPrompt: options?.hostSystemPrompt,
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "accepted" || data.type === "guidance_done") {
-            if (data.type === "guidance_done") this.guidancePendingResponse = true;
+            if (data.type === "guidance_done") this.guidancePendingResponses += 1;
             resolve();
           } else {
             reject(new Error(optionalString(data.error) || "Pi SDK guidance failed"));
@@ -691,6 +701,39 @@ export class PiSDKAgent {
       } catch (error) {
         clearTimeout(timeout);
         reject(error);
+      }
+    });
+    return { guidanceId };
+  }
+
+  /**
+   * 撤回一条还没交付的引导。
+   *
+   * Pi 只有 clearQueue()，所以 worker 那边是「清空 + 把剩下的重新压回去」；
+   * 已交付的撤不回来，会明确回 false 让渲染层别假装成功。
+   */
+  async cancelGuidance(guidanceId: string): Promise<{ cancelled: boolean; reason?: string }> {
+    if (!this.process) return { cancelled: false, reason: "not running" };
+    const commandId = this.createCommandId();
+    return await new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(commandId);
+        resolve({ cancelled: false, reason: "timeout" });
+      }, 8000);
+      try {
+        this.sendWorkerCommand({ id: commandId, type: "cancelGuidance", guidanceId }, (data) => {
+          clearTimeout(timeout);
+          const cancelled = data.type === "guidance_cancelled" && data.cancelled === true;
+          // 撤回成功就不会再有这条的交付事件，计数要同步减掉，否则后面会多冒
+          // 一个 guidance_response_started 出来。
+          if (cancelled) {
+            this.guidancePendingResponses = Math.max(0, this.guidancePendingResponses - 1);
+          }
+          resolve({ cancelled, reason: optionalString(data.reason) });
+        });
+      } catch {
+        clearTimeout(timeout);
+        resolve({ cancelled: false, reason: "failed" });
       }
     });
   }
@@ -877,6 +920,16 @@ export class PiSDKAgent {
         reject(error);
       }
     });
+  }
+
+  /** 手动压缩一次上下文；实现与 slash 命令的 compact 完全一致。 */
+  async compact(): Promise<void> {
+    if (!this.process) throw new Error("Pi SDK worker is not running");
+    if (!this.isIdle()) throw new Error("SESSION_BUSY");
+    const data = await this.requestWorkerCommand({ type: "compact" }, 180_000);
+    if (data.type !== "compacted") {
+      throw new Error(optionalString(data.error) || "Pi SDK compact failed");
+    }
   }
 
   async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
@@ -1116,8 +1169,8 @@ export class PiSDKAgent {
       // Emitting the response start only then keeps the guidance bubble from
       // landing in the middle of pre-guidance output.
       case "guidance_delivered":
-        if (this.guidancePendingResponse) {
-          this.guidancePendingResponse = false;
+        if (this.guidancePendingResponses > 0) {
+          this.guidancePendingResponses -= 1;
           this.emitEvent({ type: "guidance_response_started" });
         }
         break;
@@ -1320,6 +1373,9 @@ export class PiSDKAgent {
         break;
       case "agent_end":
         this.agentEndObserved = true;
+        // worker 在回合结束时也清零了计数；这里同步一下，免得没交付的引导把
+        // 计数漏到下一轮，凭空多发一个 guidance_response_started。
+        this.guidancePendingResponses = 0;
         if (this.pendingUIRequestIds.size === 0) this.scheduleTurnFallback(4000, true);
         break;
       case "error":

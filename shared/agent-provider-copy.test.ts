@@ -8,6 +8,18 @@ describe("agent provider copy rules", () => {
     expect(resolveCompatibleProviderEndpoint("openai-completions", [{ id: "chat-completions" }]))
       .toBe("chat-completions");
     expect(resolveCompatibleProviderEndpoint("responses", ["chat-completions"]))
+      .toBe("chat-completions");
+  });
+
+  it("switches unsupported endpoints to a chat-compatible or default endpoint", () => {
+    expect(resolveCompatibleProviderEndpoint(
+      "responses",
+      [{ id: "anthropic-messages" }, { id: "chat-completions" }],
+      "anthropic-messages",
+    )).toBe("chat-completions");
+    expect(resolveCompatibleProviderEndpoint("responses", ["anthropic-messages"], "anthropic-messages"))
+      .toBe("anthropic-messages");
+    expect(resolveCompatibleProviderEndpoint("responses", ["anthropic-messages"]))
       .toBeUndefined();
   });
 

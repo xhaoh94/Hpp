@@ -1,5 +1,5 @@
-import { useEffect, useRef, type RefObject } from "react";
-import { X } from "lucide-react";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { ListCollapse, X } from "lucide-react";
 import type { SessionContextUsage } from "@/stores/chat-store";
 import { formatContextTokenAmount } from "@shared/models";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
@@ -21,11 +21,47 @@ type ContextUsageModalProps = {
   /** 标题栏的上下文圆环：弹窗锚定在它旁边，而不是贴在窗口左上角。 */
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
+  /** 手动压缩一次上下文；所有 Agent 共用同一个命令，能力差异由后端决定。返回 false 表示未进入压缩。 */
+  onCompact?: () => boolean | void | Promise<boolean | void>;
+  /** 压缩进行中（含刚发出、事件尚未回来的短暂窗口）。 */
+  compacting?: boolean;
+  /** 不能压缩的原因（回合运行中／缺少会话）；有值时按钮置灰。 */
+  compactDisabledReason?: string;
 };
 
-export function ContextUsageModal({ usage, anchorRef, onClose }: ContextUsageModalProps) {
+export function ContextUsageModal({
+  usage,
+  anchorRef,
+  onClose,
+  onCompact,
+  compacting = false,
+  compactDisabledReason,
+}: ContextUsageModalProps) {
   const modalRef = useRef<HTMLDivElement>(null);
   const overlayStyle = useAnchoredOverlay(true, anchorRef, modalRef, { gap: 8 });
+  const [compactRequested, setCompactRequested] = useState(false);
+
+  useEffect(() => {
+    if (compacting) setCompactRequested(false);
+  }, [compacting]);
+
+  const isCompacting = compacting || compactRequested;
+  const compactDisabled = isCompacting || !!compactDisabledReason || !onCompact;
+  const compactTitle = isCompacting
+    ? "正在压缩上下文"
+    : compactDisabledReason || "手动压缩上下文（对话太长时可先压缩再继续）";
+
+  const handleCompact = () => {
+    if (compactDisabled) return;
+    setCompactRequested(true);
+    void Promise.resolve(onCompact?.()).then(
+      (started) => {
+        // 压缩没启动（后端报错/会话忙）时立刻把按钮恢复，不让它卡在「压缩中」。
+        if (started === false) setCompactRequested(false);
+      },
+      () => setCompactRequested(false),
+    );
+  };
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -63,7 +99,20 @@ export function ContextUsageModal({ usage, anchorRef, onClose }: ContextUsageMod
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="context-usage-header">
-          <h3>上下文用量</h3>
+          <div className="context-usage-title-group">
+            <h3>上下文用量</h3>
+            <button
+              type="button"
+              className={`context-usage-compact${isCompacting ? " is-compacting" : ""}`}
+              onClick={handleCompact}
+              disabled={compactDisabled}
+              title={compactTitle}
+              aria-label={isCompacting ? "正在压缩上下文" : "压缩上下文"}
+            >
+              <ListCollapse size={13} />
+              <span>{isCompacting ? "压缩中" : "压缩"}</span>
+            </button>
+          </div>
           <button type="button" className="context-usage-close" onClick={onClose} aria-label="关闭">
             <X size={15} />
           </button>

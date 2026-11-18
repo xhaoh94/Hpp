@@ -46,6 +46,20 @@ describe("chat history never waits for the agent backend", () => {
 });
 
 describe("chat panel worktree workspace", () => {
+  it("shows a fixed placeholder in an empty session on both desktop and mobile", () => {
+    const desktop = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
+    const mobile = readWorkspaceFile("mobile/src/App.tsx");
+
+    // 桌面：空会话显示固定文案，非空才渲染真实统计。
+    expect(desktop).toContain('messages.length === 0 ? (');
+    expect(desktop).toContain('className="chat-status-bar chat-status-bar-empty"');
+    expect(desktop).toContain("暂无统计数据");
+    // 手机：同样口径，selected 存在但无消息时显示占位。
+    expect(mobile).toContain("selectedMessages.length === 0");
+    expect(mobile).toContain('className="composer-status composer-status-empty"');
+    expect(mobile).toContain("暂无统计数据");
+  });
+
   it("routes file and diff paths through the active session workspace", () => {
     const source = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
     const explorer = readWorkspaceFile("src/components/sidebar/FileExplorer.tsx");
@@ -56,5 +70,23 @@ describe("chat panel worktree workspace", () => {
     expect(source).toContain("<WorktreeControl");
     expect(explorer).toContain("const activeWorkspacePath = activeSession?.workspace?.rootPath || activeProject?.path || \"\"");
     expect(composer).toContain("const activeProjectPath = activeSession?.workspace?.rootPath || activeProject?.path || \"\"");
+  });
+});
+
+describe("manual context compaction entry", () => {
+  it("puts a compaction button in the context usage modal header for every agent", () => {
+    const modal = readWorkspaceFile("src/components/layout/ContextUsageModal.tsx");
+    const panel = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
+    const styles = readWorkspaceFile("src/components/layout/ContextUsageModal.css");
+
+    // 按钮在「上下文用量」标题右侧，压缩中把文案就地换成「压缩中」。
+    expect(modal).toContain("context-usage-compact");
+    expect(modal).toContain("压缩中");
+    expect(styles).toContain(".context-usage-compact");
+    // 所有 Agent 都走同一条命令，不在前端按 agent 类型隐藏入口。
+    expect(panel).toContain("handleCompactContext");
+    expect(panel).toContain("onCompact={handleCompactContext}");
+    expect(panel).toContain("window.electronAPI.agentCompactSession(activeSessionId)");
+    expect(panel).not.toContain("supportsManualCompaction");
   });
 });

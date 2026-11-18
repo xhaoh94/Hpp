@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bot, ChevronDown, ChevronRight, X } from "lucide-react";
+import { ArrowUp, Bot, ChevronDown, ChevronRight, Plus, X } from "lucide-react";
 import {
+  MAX_AGENT_SUBAGENT_POOL_ENTRIES,
   normalizeAgentSubagentConfig,
   type AgentSubagentCapabilities,
   type AgentSubagentConfig,
+  type AgentSubagentPoolEntry,
 } from "@shared/agent-subagent";
 import { groupModelsByProvider } from "@shared/models";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
@@ -45,10 +47,9 @@ function withStoredModels(
   options: AgentSubagentModelOption[],
   config: AgentSubagentConfig,
 ): AgentSubagentModelOption[] {
-  const values = [
-    config.defaultModel,
-    ...Object.values(config.profiles).map((profile) => profile.model),
-  ].filter((value): value is string => !!value);
+  const values = (config.pool || [])
+    .map((entry) => entry.model)
+    .filter((value): value is string => !!value);
   const map = new Map(options.map((option) => [option.value, option]));
   for (const value of values) {
     if (map.has(value)) continue;
@@ -203,9 +204,9 @@ export function AgentSubagentModal({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const canInheritModel = capabilities.modelSelection !== "custom";
-  const canSelectModel = capabilities.modelSelection !== "inherit";
-  const profiles = capabilities.profiles || [];
+  const [addingPoolModel, setAddingPoolModel] = useState(false);
+  const supportsModelPool = capabilities.modelPool === true;
+  const pool = config.pool || [];
   const availableModels = useMemo(
     () => withStoredModels(modelOptions, config),
     [config, modelOptions],
@@ -247,38 +248,36 @@ export function AgentSubagentModal({
     setStatus(null);
   };
 
-  const handleDefaultModelChange = (model: string) => {
-    updateConfig({
-      ...config,
-      defaultModelMode: model ? "custom" : "inherit",
-      defaultModel: model || undefined,
-    });
+  const handlePoolChange = (nextPool: AgentSubagentPoolEntry[]) => {
+    updateConfig({ ...config, pool: nextPool });
   };
 
-  const handleProfileModelChange = (profileName: string, model: string) => {
-    updateConfig({
-      ...config,
-      profiles: {
-        ...config.profiles,
-        [profileName]: model
-          ? { modelMode: "custom", model }
-          : { modelMode: "inherit" },
-      },
-    });
+  const handlePoolAdd = (model: string) => {
+    if (!model || pool.some((entry) => entry.model === model)) return;
+    const option = availableModels.find((item) => item.value === model);
+    handlePoolChange([
+      ...pool,
+      { model, ...(option?.name ? { label: option.name } : {}) },
+    ]);
+  };
+
+  const handlePoolUpdate = (model: string, patch: Partial<AgentSubagentPoolEntry>) => {
+    handlePoolChange(pool.map((entry) => (entry.model === model ? { ...entry, ...patch } : entry)));
+  };
+
+  const handlePoolRemove = (model: string) => {
+    handlePoolChange(pool.filter((entry) => entry.model !== model));
+  };
+
+  /** 首项即默认起点，所以「置顶」比上下移动更贴近意图。 */
+  const handlePoolPromote = (model: string) => {
+    const target = pool.find((entry) => entry.model === model);
+    if (!target || pool[0]?.model === model) return;
+    handlePoolChange([target, ...pool.filter((entry) => entry.model !== model)]);
   };
 
   const handleSave = async (): Promise<boolean> => {
     const normalized = normalizeAgentSubagentConfig(config);
-    if (normalized.defaultModelMode === "custom" && !normalized.defaultModel) {
-      setStatus({ type: "error", text: "请选择默认 subagent 模型" });
-      return false;
-    }
-    for (const [name, profile] of Object.entries(normalized.profiles)) {
-      if (profile.modelMode === "custom" && !profile.model) {
-        setStatus({ type: "error", text: `请为 ${name} 选择模型` });
-        return false;
-      }
-    }
 
     setSaving(true);
     setStatus(null);
@@ -289,11 +288,16 @@ export function AgentSubagentModal({
       if (!saved.success) throw new Error(saved.error || "保存 SubAgent 设置失败");
 
       // 模型、profile 模型和热禁用可以直接热更新到运行中的会话：下一次
-      // subagent 调用即使用新配置，无需重载会话。只有从禁用切换为启用
-      // 需要重新注册 subagent 工具，仍走会话重载（空闲时生效）。
+      // subagent 调用即使用新配置，无需重载会话。
+      //
+      // 模型池是例外：它会写进 subagent 工具的说明里，而工具说明是注册时
+      // 的快照 —— 热更新只会改校验用的配置，模型看不到新加的候选，等于白配。
+      // 开关也算在内：关掉后说明里还挂着候选，派发方会照旧传 model。
       const enablingFromDisabled = !config.enabled && normalized.enabled;
+      const poolConfigChanged = JSON.stringify({ on: config.poolEnabled, pool: config.pool || [] })
+        !== JSON.stringify({ on: normalized.poolEnabled, pool: normalized.pool });
       const applyConfig = window.electronAPI.agentSetAgentSubagentConfig;
-      if (!enablingFromDisabled && typeof applyConfig === "function") {
+      if (!enablingFromDisabled && !poolConfigChanged && typeof applyConfig === "function") {
         const applied = await applyConfig(agentId, normalized);
         if (!applied.success) throw new Error(applied.error || "SubAgent 设置热更新失败");
         if (applied.appliedSessionIds?.length) {
@@ -317,7 +321,10 @@ export function AgentSubagentModal({
           type: "success",
           text: reloadResult.reloadedSessionIds?.length
             ? `已保存并应用到 ${reloadResult.reloadedSessionIds.length} 个 ${agentName} 会话`
-            : `已保存，将在 ${agentName} 下次初始化时应用`,
+            : poolConfigChanged
+              // 池子变了模型才能看见新候选，必须重建；没有空闲会话时只能等下次初始化。
+              ? `已保存；模型池变更随 ${agentName} 会话下次初始化生效`
+              : `已保存，将在 ${agentName} 下次初始化时应用`,
         });
       } else {
         setStatus({
@@ -397,57 +404,127 @@ export function AgentSubagentModal({
                 />
               </label>
 
-              <div className="settings-general-row settings-subagent-row">
-                <span className="settings-general-row-main">
-                  <strong>默认 subagent 模型</strong>
-                  <span>未单独配置的 Agent 使用此模型</span>
-                </span>
-                {canSelectModel ? (
-                  <AgentSubagentModelPicker
-                    value={config.defaultModelMode === "custom" ? config.defaultModel || "" : ""}
-                    options={availableModels}
+              {supportsModelPool && (
+                <label className="settings-general-row settings-general-toggle settings-subagent-row settings-subagent-pool-switch">
+                  <span className="settings-general-row-main">
+                    <strong>启用模型池</strong>
+                    <span>
+                      {config.poolEnabled
+                        ? "派发任务时主 Agent 按每个任务的难度在池内挑模型；未指定时用第一项"
+                        : "已关闭：所有 subagent 跟随主 Agent 当前模型，池内配置保留"}
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={config.poolEnabled}
                     disabled={!config.enabled}
-                    emptyLabel={canInheritModel ? "跟随主 Agent 当前模型" : "请选择模型"}
-                    onChange={handleDefaultModelChange}
-                    ariaLabel="默认 subagent 模型"
+                    onChange={(event) => updateConfig({ ...config, poolEnabled: event.target.checked })}
+                    aria-label="启用模型池"
                   />
-                ) : (
-                  <span className="agent-compaction-native-value">跟随主 Agent</span>
-                )}
-              </div>
+                </label>
+              )}
 
-              {profiles.length > 0 && (
-                <div className="settings-subagent-profiles">
-                  <div className="settings-subagent-section-title">Agent 模型覆盖</div>
-                  {profiles.map((profile) => {
-                    const profileConfig = config.profiles[profile.name];
-                    const selectedModel = profileConfig?.modelMode === "custom" ? profileConfig.model || "" : "";
-                    return (
-                      <div key={profile.name} className="settings-general-row settings-subagent-row settings-subagent-profile-row">
-                        <span className="settings-general-row-main">
-                          <strong>{profile.label || profile.name}</strong>
-                          <span>{profile.description || profile.name}</span>
-                        </span>
-                        {canSelectModel ? (
-                          <AgentSubagentModelPicker
-                            value={selectedModel}
-                            options={availableModels}
-                            disabled={!config.enabled}
-                            emptyLabel="跟随默认设置"
-                            onChange={(model) => handleProfileModelChange(profile.name, model)}
-                            ariaLabel={`${profile.label || profile.name} 模型`}
-                          />
-                        ) : (
-                          <span className="agent-compaction-native-value">跟随默认设置</span>
-                        )}
-                      </div>
-                    );
-                  })}
+              {supportsModelPool && (
+                <div className="settings-subagent-pool">
+                  <div className="settings-subagent-section-header">
+                    <span className="settings-subagent-section-title">模型池</span>
+                    <span className="settings-subagent-pool-hint">
+                      第一项是默认起点；上下文窗口、推理/视觉能力、价格会自动带上，不用手填
+                    </span>
+                  </div>
+
+                  {pool.map((entry, index) => (
+                    <div className="settings-subagent-pool-row" key={entry.model}>
+                      <span className="settings-subagent-pool-index" title={index === 0 ? "默认起点" : undefined}>
+                        {index + 1}
+                      </span>
+                      <AgentSubagentModelPicker
+                        value={entry.model}
+                        options={availableModels}
+                        disabled={!config.enabled}
+                        emptyLabel="选择模型"
+                        onChange={(model) => {
+                          if (!model) handlePoolRemove(entry.model);
+                          else if (!pool.some((item) => item.model === model)) {
+                            handlePoolUpdate(entry.model, {
+                              model,
+                              label: availableModels.find((item) => item.value === model)?.name,
+                            });
+                          }
+                        }}
+                        ariaLabel={`模型池第 ${index + 1} 项`}
+                      />
+                      {index > 0 ? (
+                        <button
+                          type="button"
+                          className="settings-subagent-pool-action"
+                          onClick={() => handlePoolPromote(entry.model)}
+                          disabled={!config.enabled}
+                          title="设为默认起点"
+                          aria-label={`把 ${entry.model} 设为默认起点`}
+                        >
+                          <ArrowUp size={13} />
+                        </button>
+                      ) : (
+                        <span className="settings-subagent-pool-action placeholder" aria-hidden="true" />
+                      )}
+                      <button
+                        type="button"
+                        className="settings-subagent-pool-action"
+                        onClick={() => handlePoolRemove(entry.model)}
+                        disabled={!config.enabled}
+                        title="从模型池移除"
+                        aria-label={`从模型池移除 ${entry.model}`}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  ))}
+
+                  {addingPoolModel && (
+                    <div className="settings-subagent-pool-row pending">
+                      <span className="settings-subagent-pool-index">+</span>
+                      <AgentSubagentModelPicker
+                        value=""
+                        options={availableModels}
+                        disabled={!config.enabled}
+                        emptyLabel="选择要加入的模型"
+                        onChange={(model) => {
+                          setAddingPoolModel(false);
+                          handlePoolAdd(model);
+                        }}
+                        ariaLabel="添加模型到模型池"
+                      />
+                      <span className="settings-subagent-pool-pending">选择后自动加入；再次点击可取消</span>
+                    </div>
+                  )}
+
+                  {pool.length < MAX_AGENT_SUBAGENT_POOL_ENTRIES && !addingPoolModel && (
+                    <button
+                      type="button"
+                      className="settings-subagent-pool-add"
+                      onClick={() => setAddingPoolModel(true)}
+                      disabled={!config.enabled}
+                    >
+                      <Plus size={13} />
+                      添加模型
+                    </button>
+                  )}
                 </div>
               )}
 
+              {supportsModelPool && pool.length < 2 && (
+                <p className="settings-compaction-note">
+                  {pool.length === 0
+                    ? "池是空的：subagent 会跟随主 Agent 当前模型，和关掉开关没区别。"
+                    : "池里只有一个模型时没有可挑的空间：派发方只有一个选择，「按难度挑」不会发生。至少放两个模型才有意义。"}
+                </p>
+              )}
+
               <p className="settings-compaction-note">
-                Agent markdown profile 中显式声明的 model 优先于这里的设置；未配置时才继承此处或主 Agent 当前模型。
+                模型在派发时确定、整个子任务不变。派发方会看到每个模型的上下文窗口、推理/视觉能力和价格，
+                由它自己按任务轻重挑；不指定则用池内第一项，关掉模型池则全部跟随主 Agent。
+                markdown 里钉死的 model 固定不可改。
               </p>
               <div className="settings-compaction-actions">
                 {status && (

@@ -177,6 +177,43 @@ describe("AgentPluginRegistry", () => {
     ]);
   });
 
+  it("forwards guidance send and cancel calls to plugin backends", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "guidance-agent",
+      "1.0.0",
+      { planMode: "prompt", guidance: true, configuration: providerConfiguration },
+      `
+export function createAgentBackend() {
+  return {
+    setWindow() {},
+    async init() {},
+    isIdle() { return true; },
+    async sendMessage() {},
+    async sendGuidance() { return { guidanceId: "guidance-1" }; },
+    async cancelGuidance(guidanceId) {
+      return { cancelled: guidanceId === "guidance-1", reason: guidanceId === "guidance-1" ? "cancelled" : "unknown" };
+    },
+    async abort() {},
+    async getModels() { return []; },
+    async setModel() {},
+    async setThinkingLevel() {},
+    sendUIResponse() {},
+    dispose() {},
+  };
+}
+`,
+    );
+    await expect(registry.installFromPath(source)).resolves.toMatchObject({ success: true });
+
+    const backend = await registry.createBackend("guidance-agent", "session-1");
+    await expect(backend.sendGuidance?.("hello")).resolves.toEqual({ guidanceId: "guidance-1" });
+    await expect(backend.cancelGuidance?.("guidance-1")).resolves.toEqual({
+      cancelled: true,
+      reason: "cancelled",
+    });
+  });
+
   it("normalizes plugin-declared subagent capabilities for dynamic UI", async () => {
     const source = await createPluginSource(tempRoot, "subagent-agent", "1.0.0", {
       planMode: "native",
@@ -185,10 +222,10 @@ describe("AgentPluginRegistry", () => {
         supported: true,
         configurable: true,
         modelSelection: "inherit-or-custom",
-        profiles: [
-          { name: "scout", label: "Scout", description: "只读检索" },
-          { name: "worker", label: "Worker" },
-        ],
+        // 旧的 profiles 声明已经不认了：模型池取代了按 agent 固定模型，
+        // 残留字段读出来必须被丢掉，不能有幽灵设置留在 UI 上。
+        profiles: [{ name: "scout", label: "Scout" }],
+        modelPool: true,
       },
     });
     const result = await registry.installFromPath(source);
@@ -196,10 +233,7 @@ describe("AgentPluginRegistry", () => {
     expect(result.agent?.capabilities.subagent).toEqual({
       configurable: true,
       modelSelection: "inherit-or-custom",
-      profiles: [
-        { name: "scout", label: "Scout", description: "只读检索" },
-        { name: "worker", label: "Worker", description: undefined },
-      ],
+      modelPool: true,
     });
   });
 
@@ -919,6 +953,87 @@ export function createAgentBackend(context) {
     const agentEnd = send.mock.calls.find((call) => call[1].type === "agent_end")?.[1];
     const backendIdle = send.mock.calls.find((call) => call[1].type === "backend_idle")?.[1];
     expect(backendIdle.lifecycleRevision).toBe(agentEnd.lifecycleRevision);
+  });
+
+  it("exposes manual compaction only when the plugin backend implements compact()", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "manual-compact-agent",
+      "1.0.0",
+      undefined,
+      `
+export function createAgentBackend(context) {
+  let idle = true;
+  return {
+    setWindow() {},
+    async init() {},
+    isIdle() { return idle; },
+    async sendMessage() {},
+    async compact() {
+      idle = false;
+      context.sendEvent({ type: "context_compaction", id: "manual-1", phase: "started" });
+      setTimeout(() => {
+        idle = true;
+        context.sendEvent({ type: "context_compaction", id: "manual-1", phase: "completed" });
+      }, 10);
+    },
+    async abort() {},
+    async getModels() { return []; },
+    async setModel() {},
+    async setThinkingLevel() {},
+    sendUIResponse() {},
+    dispose() {},
+    get sessionFilePath() { return null; },
+  };
+}
+`,
+    );
+    await registry.installFromPath(source);
+    const send = vi.fn();
+    const backend = await registry.createBackend("manual-compact-agent", "session-1", {
+      window: { webContents: { send } } as never,
+    });
+    await backend.init(tempRoot);
+
+    expect(typeof backend.compact).toBe("function");
+    await backend.compact?.();
+    expect(send).toHaveBeenCalledWith(
+      "agent:event",
+      expect.objectContaining({ type: "context_compaction", id: "manual-1", phase: "started" }),
+    );
+  });
+
+  it("does not expose manual compaction for backends without compact()", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "no-manual-compact-agent",
+      "1.0.0",
+      undefined,
+      `
+export function createAgentBackend() {
+  return {
+    setWindow() {},
+    async init() {},
+    isIdle() { return true; },
+    async sendMessage() {},
+    async abort() {},
+    async getModels() { return []; },
+    async setModel() {},
+    async setThinkingLevel() {},
+    sendUIResponse() {},
+    dispose() {},
+    get sessionFilePath() { return null; },
+  };
+}
+`,
+    );
+    await registry.installFromPath(source);
+    const backend = await registry.createBackend("no-manual-compact-agent", "session-1", {
+      window: { webContents: { send: vi.fn() } } as never,
+    });
+    await backend.init(tempRoot);
+
+    expect(backend.compact).toBeUndefined();
   });
 
   it("gives an independent post-turn compaction a lifecycle that backend_idle can close", async () => {

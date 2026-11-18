@@ -293,7 +293,11 @@ export function formatProcessDuration(ms: number) {
 }
 
 export const isCommandProcessEntry = (entry: ProcessEntryView) =>
-  entry.toolKind === "run_command" || (
+  entry.toolKind === "run_command" ||
+  // claude 的命令条目可能 toolKind 不是 run_command，但带命令文本。
+  // 这里只用于「连续命令」分组；摘要明细与计数的口径见 countsAsOperationCommand
+  // （否则 web 搜索这类无文件、无命令的工具会被计数却不进明细）。
+  Boolean(entry.command?.trim()) || (
     entry.type === "tool" && /^(?:已运行|正在运行)\s+/.test(entry.title)
   );
 
@@ -496,6 +500,8 @@ export type ProcessOperationCommandItem = {
   id: string;
   description?: string;
   command?: string;
+  /** 既没有 description 也没有 command 时的兜底标题（如 web 搜索的工具名）。 */
+  title?: string;
 };
 
 type OperationSummary = {
@@ -503,6 +509,14 @@ type OperationSummary = {
   changedFiles: string[];
   viewedFiles: string[];
 };
+
+/**
+ * 「算作一条命令」的口径：有命令文本，或不涉及任何文件的工具调用。
+ * 必须与 commandItems 的筛选使用同一个判断，否则会出现「运行 N 条命令」
+ * 却一条明细都没有（web 搜索、失败的读取等无文件工具最容易触发）。
+ */
+const countsAsOperationCommand = (entry: ProcessEntryView) =>
+  entry.type !== "diff" && (!!entry.command?.trim() || getOperationFileRefs(entry).length === 0);
 
 const summarizeOperations = (operations: ProcessEntryView[]): OperationSummary => {
   let commandCount = 0;
@@ -513,10 +527,9 @@ const summarizeOperations = (operations: ProcessEntryView[]): OperationSummary =
     if (entry.type === "diff") {
       // diff 条目本身就是“改了这些文件”。
       changedFiles.push(...files.map((file) => file.name));
-      if (files.length === 0) commandCount += 0;
       continue;
     }
-    if (entry.command?.trim() || files.length === 0) commandCount += 1;
+    if (countsAsOperationCommand(entry)) commandCount += 1;
     for (const file of files) {
       if (isWriteFileAction(file.action)) changedFiles.push(file.name);
       else viewedFiles.push(file.name);
@@ -552,11 +565,13 @@ const buildOperationSummaryEntry = <T extends ProcessEntryView>(
     changedFiles: uniqueNames(summary.changedFiles),
     viewedFiles: uniqueNames(summary.viewedFiles),
     commandItems: operations
-      .filter(isCommandProcessEntry)
+      .filter(countsAsOperationCommand)
       .map((entry) => ({
         id: entry.id,
         ...(entry.description ? { description: entry.description } : {}),
         ...(entry.command ? { command: entry.command } : {}),
+        // 只有前两者都缺时才退回条目标题，避免给正常命令多加字段。
+        ...(!entry.description && !entry.command && entry.title ? { title: entry.title } : {}),
       })),
   },
   detail: undefined,

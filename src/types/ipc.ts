@@ -12,9 +12,7 @@ export type { AgentCompactionConfig } from "@shared/agent-compaction";
 export type {
   AgentSubagentCapabilities,
   AgentSubagentConfig,
-  AgentSubagentModelMode,
-  AgentSubagentProfileConfig,
-  AgentSubagentProfileDescriptor,
+  AgentSubagentPoolEntry,
 } from "@shared/agent-subagent";
 export type { AgentPermissionMode } from "@shared/agent-permissions";
 export type {

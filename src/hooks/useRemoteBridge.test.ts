@@ -164,7 +164,7 @@ describe("remote renderer serialization", () => {
           type: "info",
           kind: "user_guidance",
           toolKind: "guidance_message",
-          title: "引导",
+          title: "插话",
           detail: "继续检查 [file: README.md]",
           timestamp: 2,
           state: "completed",

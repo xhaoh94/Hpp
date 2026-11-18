@@ -143,6 +143,9 @@ export function TokenUsageModal({ sessionId, messages, anchorRef, onClose }: Tok
 
         <div className="token-usage-footnote">
           共 {summary.messageCount} 个回合 · 缓存率为输入中命中缓存的比例
+          {summary.subagentCount > 0
+            ? ` · 含子 Agent ${summary.subagentCount} 个（${formatContextTokenAmount(summary.subagentTotals.total)} tokens）`
+            : ""}
           {mergedHistory ? " · 已合并完整历史消息" : ""}
         </div>
       </div>

@@ -34,6 +34,21 @@ describe("OpenCode protocol selection", () => {
 describe("OpenCode V2 protocol adapter", () => {
   const v2 = getOpenCodeProtocol("v2");
 
+  it("compacts through the V2 /compact endpoint with an empty body", () => {
+    // 2.x 没有 /summarize（POST 会 405），手动压缩走 /compact。
+    expect(v2.summarizePaths("ses_1")).toEqual([
+      "/api/session/ses_1/compact",
+      "/session/ses_1/summarize",
+    ]);
+    // compact 的 schema 是 additionalProperties:false，带 model 会被 400；
+    // 压缩模型由会话级 agent.compaction 决定。
+    expect(v2.summarizeBody("openai", "gpt-5")).toEqual({});
+
+    const v1 = getOpenCodeProtocol("v1");
+    expect(v1.summarizePaths("ses_1")).toBe("/session/ses_1/summarize");
+    expect(v1.summarizeBody("openai", "gpt-5")).toEqual({ providerID: "openai", modelID: "gpt-5" });
+  });
+
   it("marks V2 as having an explicit execution lifecycle", () => {
     // 2.x 用 session.execution.* 收尾，不能再靠「空闲 800ms」判定 turn 结束。
     expect(v2.executionLifecycle).toBe(true);
@@ -217,8 +232,9 @@ describe("OpenCode V2 protocol adapter", () => {
           sessionID: "ses_1",
           title: "需要你的选择",
           fields: [
-            { key: "plan", type: "select", title: "选哪个方案", options: [{ label: "A" }, { label: "B" }] },
+            { key: "plan", type: "string", title: "选哪个方案", options: [{ label: "A" }, { label: "B" }] },
             { key: "notes", type: "multiselect", title: "补充", options: [{ label: "x" }, { label: "y" }] },
+            { key: "count", type: "number", title: "数量" },
           ],
         },
       },
@@ -230,16 +246,38 @@ describe("OpenCode V2 protocol adapter", () => {
         sessionID: "ses_1",
         title: "需要你的选择",
         questions: [
-          { id: "plan", question: "选哪个方案", header: "选哪个方案", multiSelect: false, options: [{ label: "A", value: "A" }, { label: "B", value: "B" }] },
-          { id: "notes", question: "补充", header: "补充", multiSelect: true, options: [{ label: "x", value: "x" }, { label: "y", value: "y" }] },
+          { id: "plan", question: "选哪个方案", header: "选哪个方案", multiSelect: false, allowCustom: false, options: [{ label: "A", value: "A" }, { label: "B", value: "B" }] },
+          { id: "notes", question: "补充", header: "补充", multiSelect: true, allowCustom: false, options: [{ label: "x", value: "x" }, { label: "y", value: "y" }] },
+          { id: "count", question: "数量", header: "数量", multiSelect: false, allowCustom: true, options: [] },
         ],
       },
     });
 
     // 回复体按 form 字段 key 组装（2.x 要 { answer: { key: value } }）。
-    expect(v2.questionReplyBody("ses_1", "frm_1", [["A"], ["x", "y"]])).toEqual({
-      answer: { plan: "A", notes: ["x", "y"] },
+    // number 字段必须发数字，否则服务端会以 Expected number 拒收。
+    expect(v2.questionReplyBody("ses_1", "frm_1", [["A"], ["x", "y"], ["3"]])).toEqual({
+      answer: { plan: "A", notes: ["x", "y"], count: 3 },
     });
+
+    // 未回答的字段要省略，不能发空串（required 会报 Missing required）。
+    v2.normalizeEvent({
+      type: "form.created",
+      data: { form: { id: "frm_2", sessionID: "ses_1", title: "补填", fields: [
+        { key: "name", type: "string", title: "姓名" },
+        { key: "tags", type: "multiselect", title: "标签", options: [{ label: "a" }] },
+      ] } },
+    });
+    expect(v2.questionReplyBody("ses_1", "frm_2", [[""], []])).toEqual({ answer: {} });
+
+    // 字段声明 custom:true 时才允许自定义文本；否则前端不展示自定义输入框。
+    const custom = v2.normalizeEvent({
+      type: "form.created",
+      data: { form: { id: "frm_3", sessionID: "ses_1", title: "自定义", fields: [
+        { key: "why", type: "string", title: "原因", options: [{ label: "A" }], custom: true },
+      ] } },
+    });
+    expect((custom as { properties: { questions: Array<{ allowCustom: boolean }> } })
+      .properties.questions[0].allowCustom).toBe(true);
 
     expect(v2.normalizeEvent({ type: "form.replied", data: { id: "frm_1", sessionID: "ses_1" } }))
       .toEqual({ type: "question.replied", properties: { id: "frm_1", sessionID: "ses_1" } });

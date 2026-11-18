@@ -279,7 +279,11 @@ export function handleToolEndEvent(
     ...(typeof effectiveEvent.command === "string" && effectiveEvent.command
       ? { command: effectiveEvent.command }
       : {}),
-    description: runtime.activeToolDescription[key] || undefined,
+    // claude 流式 tool_start 的 input 为空，description 只在 end 事件里才到；
+    // 只认 start 缓存会把它丢掉，导致展开明细退化为裸命令。用 end 自带的先兜底。
+    description: (typeof effectiveEvent.description === "string" && effectiveEvent.description.trim()
+      ? effectiveEvent.description
+      : undefined) || runtime.activeToolDescription[key] || undefined,
     exitCode: typeof effectiveEvent.exitCode === "number" ? effectiveEvent.exitCode : undefined,
     state: toolWarning || commandExitWarning ? "warning" : "completed",
     type: entryType,

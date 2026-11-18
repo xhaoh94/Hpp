@@ -46,6 +46,8 @@ export type AgentSubagentAction =
 export interface AgentSubagent {
   id: string;
   label: string;
+  /** 调度方给的极简标题（插件 1.4.1+）；有值时胶囊/页签优先用它。 */
+  title?: string;
   status?: AgentSubagentStatus;
   model?: string;
   path?: string;

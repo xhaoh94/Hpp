@@ -24,7 +24,8 @@ import {
   createProcessEntryMerger,
   mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
-import { formatSubagentUsage } from "./subagentMonitorModel";
+import { formatSubagentModel, formatSubagentUsage } from "./subagentMonitorModel";
+import { getSubagentSummaryText, getSubagentTitle } from "./processBlockUtils";
 import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
 import { relativeRemotePath, resolveProjectFilePath } from "@/lib/project-file-path";
 import { SUBAGENT_MONITOR_OPEN_EVENT } from "@/lib/app-events";
@@ -340,6 +341,7 @@ const openSubagentMonitor = (subagentId: string) => {
 };
 
 const getSubagentTooltip = (subagent: AgentSubagent) => [
+  subagent.label,
   getSubagentStatusLabel(subagent.status),
   subagent.model,
   formatSubagentUsage(subagent.usage),
@@ -381,10 +383,9 @@ function SubagentEntryRow({
   const expanded = expandedId ? subagents.find((subagent) => subagent.id === expandedId) : undefined;
   const expandedUsage = formatSubagentUsage(expanded?.usage);
   const expandedText = expanded?.message?.trim() || "";
-  // 简易描述取派发给子任务的任务说明；没有 then 退回详细流程的第一行，避免卡片空白。
-  const summaryText = (expanded?.prompt?.trim()
-    || expandedText.split(/\r?\n/).find((line) => line.trim())?.trim()
-    || "");
+  // 胶囊/面板用极简标题；一级展开多给一句上下文，完整说明走 title 悬停、细节在二级。
+  const fullPrompt = expanded?.prompt?.trim() || "";
+  const summaryText = getSubagentSummaryText(fullPrompt, expandedText);
 
   const selectSubagent = (id: string, canExpand: boolean, anchor: HTMLElement | null) => {
     if (!canExpand) return;
@@ -427,7 +428,7 @@ function SubagentEntryRow({
                 <span className={`chat-subagent-avatar tone-${getSubagentTone(subagent.id)}`}>
                   <SubagentGlyph />
                 </span>
-                <span className="chat-subagent-label">{subagent.label}</span>
+                <span className="chat-subagent-label">{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}</span>
               </button>
             );
           })}
@@ -445,10 +446,13 @@ function SubagentEntryRow({
               <span className={`chat-subagent-status status-${expanded?.status || "unknown"}`}>
                 {getSubagentStatusLabel(expanded?.status) || expanded?.label}
               </span>
-              {expandedUsage && <span className="chat-subagent-usage-inline">{expandedUsage}</span>}
+              <span className="chat-subagent-usage-meta">
+                {expanded?.model && <span className="chat-subagent-model" title={`运行模型：${expanded.model}`}>{formatSubagentModel(expanded.model)}</span>}
+                {expandedUsage && <span className="chat-subagent-usage-inline">{expandedUsage}</span>}
+              </span>
             </div>
             {summaryText && (
-              <p className={`chat-subagent-summary-text${detailOpen ? " collapsed" : ""}`}>{summaryText}</p>
+              <p className="chat-subagent-summary-text" title={fullPrompt || undefined}>{summaryText}</p>
             )}
             {expandedText && (
               <button
@@ -604,9 +608,9 @@ function ProcessEntryRow({
                   </span>
                   <span
                     className="chat-process-operation-command-title"
-                    title={item.command || item.description || ""}
+                    title={item.command || item.description || item.title || ""}
                   >
-                    {item.description || item.command || "命令"}
+                    {item.description || item.command || item.title || "命令"}
                   </span>
                 </div>
               ))
@@ -673,7 +677,7 @@ function ProcessEntryRow({
             </div>
           )}
           <div className="chat-process-guidance-content">
-            <span className="chat-process-guidance-label" title="引导">
+            <span className="chat-process-guidance-label" title="插话">
               <CornerDownRight size={14} strokeWidth={2} />
             </span>
             <div className="chat-bubble user chat-process-guidance-bubble">

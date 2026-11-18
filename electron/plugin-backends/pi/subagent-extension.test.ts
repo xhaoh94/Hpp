@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 // The project currently has no declarations for worker-side .mjs modules.
 // @ts-expect-error Hpp worker extension is intentionally shipped as ESM.
-import { createHppSubagentExtension, normalizeTaskTimeout } from "./subagent-extension.mjs";
+import { createHppSubagentExtension, normalizeHppSubagentConfig, normalizeTaskTimeout } from "./subagent-extension.mjs";
 // @ts-expect-error Hpp child bridge is intentionally shipped as ESM.
 import createHppSubagentBridgeExtension from "./subagent-bridge-extension.mjs";
 
@@ -14,6 +14,31 @@ describe("Pi built-in subagent extension", () => {
     expect(normalizeTaskTimeout(undefined)).toBe(30 * 60 * 1000);
     expect(normalizeTaskTimeout(300_000)).toBe(300_000);
     expect(normalizeTaskTimeout(60 * 60 * 1000)).toBe(30 * 60 * 1000);
+  });
+
+  it("exposes a display-only title in the tool schema and passes it through results", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-title-"));
+    try {
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir: join(root, "agent") });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const tool = tools[0];
+      const props = tool.parameters.properties;
+      expect(props.title).toMatchObject({ type: "string" });
+      expect(props.tasks.items.properties.title).toMatchObject({ type: "string" });
+      expect(props.chain.items.properties.title).toMatchObject({ type: "string" });
+      // 未知 agent 的早退分支也要带 title，界面失败时仍能显示短标题。
+      const result = await tool.execute(
+        "call-title",
+        { agent: "no-such-agent", task: "做事", title: "补齐静态红点" },
+        new AbortController().signal,
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(result.details.results[0]).toMatchObject({ title: "补齐静态红点" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("does not give subagents any question tool", async () => {
@@ -127,7 +152,24 @@ describe("Pi built-in subagent extension", () => {
     expect(tools).toEqual([]);
   });
 
-  it("uses a configured profile model before inheriting the parent model", async () => {
+  it("工具说明里写清可用 agent 与什么时候该并行", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-policy-test-"));
+    try {
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir: join(root, "agent") });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      const description = String(tools[0].description);
+      // 只说「支持并行」不够：不给拆分的判据，模型会一路单任务。
+      expect(description).toContain("tasks 并行");
+      expect(description).toContain("chain：");
+      expect(description).toContain("scout（只读检索）");
+      expect(description).toContain("worker（改代码）");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("关闭模型池后跟随主 Agent 当前模型", async () => {
     const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-model-test-"));
     try {
       const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
@@ -140,8 +182,8 @@ describe("Pi built-in subagent extension", () => {
         agentDir: join(root, "agent"),
         subagentConfig: {
           enabled: true,
-          defaultModelMode: "inherit",
-          profiles: { scout: { modelMode: "custom", model: "configured/scout" } },
+          poolEnabled: false,
+          pool: [{ model: "pool/first" }],
         },
       });
       const tools: Array<Record<string, any>> = [];
@@ -153,7 +195,7 @@ describe("Pi built-in subagent extension", () => {
         undefined,
         { cwd: root, model: { provider: "parent", id: "model" }, hasUI: false },
       );
-      expect(result.content[0].text).toContain("--model|configured/scout");
+      expect(String(result.content[0].text)).toContain("--model|parent/model");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -169,9 +211,7 @@ describe("Pi built-in subagent extension", () => {
       ].join("\\n"), "utf8");
       let current: Record<string, unknown> = {
         enabled: true,
-        defaultModelMode: "custom",
-        defaultModel: "provider/first",
-        profiles: {},
+        pool: [{ model: "provider/first" }],
       };
       const factory = createHppSubagentExtension({
         packageRoot: root,
@@ -189,7 +229,7 @@ describe("Pi built-in subagent extension", () => {
       );
       expect(first.content[0].text).toContain("--model|provider/first");
 
-      current = { ...current, defaultModel: "provider/second" };
+      current = { ...current, pool: [{ model: "provider/second" }] };
       const second = await tools[0].execute(
         "call-hot-2",
         { agent: "scout", task: "第二次检查" },
@@ -212,6 +252,225 @@ describe("Pi built-in subagent extension", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  describe("模型池", () => {
+    const CLI_ECHO_ARGS = [
+      "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'test/child'}})+'\\n');",
+    ].join("\\n");
+
+    const createHarness = async (
+      subagentConfig: Record<string, unknown>,
+      options: Record<string, unknown> = {},
+    ) => {
+      const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-pool-test-"));
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), CLI_ECHO_ARGS, "utf8");
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir: join(root, "agent"),
+        subagentConfig,
+        ...options,
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      return { root, tools };
+    };
+
+    it("去重、丢弃空值，并把池限制在 8 条以内", () => {
+      const normalized = normalizeHppSubagentConfig({
+        pool: [
+          { model: "p/a" },
+          { model: "p/a" },
+          { model: "  " },
+          { model: 42 },
+          ...Array.from({ length: 10 }, (_, index) => ({ model: `p/x${index}` })),
+        ],
+      });
+      expect(normalized.pool).toHaveLength(8);
+      expect(normalized.pool[0]).toMatchObject({ model: "p/a" });
+      expect(normalized.pool.filter((entry) => entry.model === "p/a")).toHaveLength(1);
+    });
+
+    it("未单独配置时从池首项起步", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }, { model: "pool/deep" }],
+      });
+      try {
+        const result = await tools[0].execute(
+          "call-pool-start",
+          { agent: "scout", task: "看下项目结构" },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, model: { provider: "parent", id: "current" }, hasUI: false },
+        );
+        expect(String(result.content[0].text)).toContain("--model|pool/fast");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("工具说明里带模型目录的能力摘要", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }, { model: "pool/deep" }],
+      }, {
+        // 模型 id 本身说明不了强弱，能力摘要必须来自目录里的真值。
+        getModelMeta: (provider: string, id: string) => (id === "fast"
+          ? { contextWindow: 128000, reasoning: false, images: false, cost: { input: 0.1, output: 0.4 } }
+          : { contextWindow: 1_000_000, reasoning: true, thinkingLevels: ["high", "max"], images: true, cost: { input: 3, output: 15 } }),
+      });
+      try {
+        const description = String(tools[0].description);
+        expect(description).toContain("- pool/fast｜ctx 128k｜$0.10/$0.40 每 M");
+        expect(description).toContain("- pool/deep｜ctx 1M｜思考 high/max｜视觉｜$3/$15 每 M");
+        expect(description).toContain("为每个任务单独挑模型");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("查不到模型目录时只列 id，不编造能力", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }],
+      });
+      try {
+        expect(String(tools[0].description)).toContain("- pool/fast");
+        expect(String(tools[0].description)).not.toContain("ctx ");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("委派时指定的池内模型优先于池首项", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }, { model: "pool/deep" }],
+      });
+      try {
+        const result = await tools[0].execute(
+          "call-pool-pick",
+          { agent: "scout", task: "设计一下改法", model: "pool/deep" },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, hasUI: false },
+        );
+        expect(String(result.content[0].text)).toContain("--model|pool/deep");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("并行任务可以各用不同模型", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }, { model: "pool/deep" }],
+      });
+      try {
+        const result = await tools[0].execute(
+          "call-pool-parallel",
+          {
+            tasks: [
+              { agent: "scout", task: "找一下路由入口", model: "pool/fast" },
+              { agent: "planner", task: "设计分层改法", model: "pool/deep" },
+            ],
+          },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, hasUI: false },
+        );
+        const text = String(result.content[0].text);
+        expect(text).toContain("--model|pool/fast");
+        expect(text).toContain("--model|pool/deep");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("池外模型直接拒绝，并列出当前可用的池", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }],
+      });
+      try {
+        const result = await tools[0].execute(
+          "call-pool-outside",
+          { agent: "scout", task: "用个不存在的模型", model: "other/model" },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, hasUI: false },
+        );
+        expect(result.isError).toBe(true);
+        expect(String(result.content[0].text)).toContain("不在模型池内");
+        expect(result.details.results[0]).toMatchObject({ stopReason: "error" });
+        expect(String(result.details.results[0].errorMessage)).toContain("pool/fast");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("关闭模型池后不列候选、也拒绝按任务指定模型", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        poolEnabled: false,
+        pool: [{ model: "pool/fast" }],
+      });
+      try {
+        // 说明里挂着候选、实际却被拒绝，比干脆不写更糟。
+        expect(String(tools[0].description)).not.toContain("模型池（派发时按任务难度");
+        const result = await tools[0].execute(
+          "call-pool-off",
+          { agent: "scout", task: "指定模型", model: "pool/fast" },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, hasUI: false },
+        );
+        expect(result.isError).toBe(true);
+        expect(String(result.content[0].text)).toContain("模型池已在设置中关闭");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("markdown 里钉死 model 的 Agent 沿用钉死的模型", async () => {
+      const { root, tools } = await createHarness({
+        enabled: true,
+        pool: [{ model: "pool/fast" }, { model: "pool/deep" }],
+      });
+      try {
+        const agentsDir = join(root, "agent", "agents");
+        await mkdir(agentsDir, { recursive: true });
+        await writeFile(
+          join(agentsDir, "pinned.md"),
+          "---\nname: pinned\ndescription: 钉死模型的 agent\nmodel: pinned/model\n---\n只做一件事\n",
+          "utf8",
+        );
+        const noParam = await tools[0].execute(
+          "call-pool-pinned",
+          { agent: "pinned", task: "干活" },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, hasUI: false },
+        );
+        expect(String(noParam.content[0].text)).toContain("--model|pinned/model");
+
+        // 钉死就是钉死：按任务另指一个模型要明确报错，不能悄悄忽略。
+        const override = await tools[0].execute(
+          "call-pool-pinned-override",
+          { agent: "pinned", task: "干活", model: "pool/deep" },
+          new AbortController().signal,
+          undefined,
+          { cwd: root, hasUI: false },
+        );
+        expect(override.isError).toBe(true);
+        expect(String(override.content[0].text)).toContain("不接受按任务指定");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 
   it("loads the installed pi-fff package only for read-only built-in agents", async () => {

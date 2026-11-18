@@ -258,11 +258,15 @@ const dismissSubagentUIRequests = (ownerId, reason = "dismissed") => {
   }
 };
 
-// Set after a guidance command resolves (steer is only queued at that point).
-// Cleared when the steer message actually enters the agent message flow
-// (message_start with a user message), which happens right before the agent
-// starts the output that responds to the guidance.
-let pendingGuidanceDelivered = false;
+// 缓存了「已入队、还没真正交付给 agent」的引导。
+//
+// 用计数而不是布尔：两条引导连着进来时，布尔会被第一条交付吃掉信号，第二条的
+// 引导气泡就永远等不到确认、队列项一直卡在「等待调度」。Pi 自己的 steer 队列
+// 支持多条，所以这里按条数一一对上。
+let pendingGuidanceDeliveries = 0;
+// 每条引导的入队记录，撤回时要靠它把「剩下的」重新压回 steer 队列。
+// Pi 只提供 clearQueue()（清空全部），没有按条撤回的公开接口。
+let queuedGuidances = [];
 let fullAccessToolNames = [];
 let planModeToolNames = [];
 let shellWarning = "";
@@ -905,6 +909,7 @@ const planModeToolBlockReason = (event) => {
 };
 
 // 模型偶尔漏填 description；给一句基于命令的中文兜底，标题才不会退化成「命令」。
+// 动词表与 shared/command-description.ts 保持一致（worker 直接拷贝进产物，不能 import TS）。
 const COMMAND_DESCRIPTION_VERBS = {
   grep: "检索内容", rg: "检索内容", find: "查找文件", fd: "查找文件",
   ls: "列出目录", dir: "列出目录", cat: "查看文件", head: "查看文件开头",
@@ -1631,6 +1636,26 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     // Read through a getter so setSubagentConfig hot updates reach the
     // already-registered subagent tool without restarting this worker.
     getSubagentConfig: () => activeSubagentConfig,
+    // 模型池的「能力摘要」来源：模型 id 本身说明不了强弱（自建渠道的别名尤其
+    // 没有信息量），这里把 pi 目录里的真值交给 subagent 工具说明。
+    //
+    // 注意用 createdModelRegistry 而不是模块级的 modelRegistry：工具在
+    // resourceLoader.reload() 期间就注册了，那时 modelRegistry 还没赋值，
+    // 只有这个在扩展创建之前就 refresh 完的实例才拿得到模型。
+    getModelMeta: (provider, modelId) => {
+      const registry = createdModelRegistry || modelRegistry;
+      const model = registry?.find?.(provider, modelId);
+      if (!model) return undefined;
+      const thinkingLevelMap = isRecord(model.thinkingLevelMap) ? model.thinkingLevelMap : {};
+      return {
+        name: typeof model.name === "string" ? model.name : undefined,
+        contextWindow: Number(model.contextWindow) || 0,
+        reasoning: model.reasoning === true,
+        thinkingLevels: Object.keys(thinkingLevelMap),
+        images: Array.isArray(model.input) && model.input.includes("image"),
+        cost: model.cost,
+      };
+    },
   });
   activeHppSubagentExtension = hppSubagentExtension;
   // 产物声明工具：相对路径按会话工作目录解析，和 pi 的其它工具保持一致。
@@ -1948,14 +1973,20 @@ const handleSessionEvent = (event) => {
       // before its next assistant output and emits message_start (user) at
       // that point. Signal the backend so the guidance bubble is placed at
       // the start of the guidance response, not earlier.
-      if (pendingGuidanceDelivered && isRecord(event.message) && event.message.role === "user") {
-        pendingGuidanceDelivered = false;
+      if (pendingGuidanceDeliveries > 0 && isRecord(event.message) && event.message.role === "user") {
+        pendingGuidanceDeliveries -= 1;
+        // 交付按入队顺序发生，队首就是刚被消费的那条。
+        queuedGuidances.shift();
         send({ type: "guidance_delivered" });
       }
       break;
     }
     case "agent_end":
       agentRunActive = false;
+      // 回合结束了，没被消费的引导不会再有交付事件：清零，别把计数漏到下一轮
+      // 去骗出一个凭空多出来的 guidance_delivered。
+      pendingGuidanceDeliveries = 0;
+      queuedGuidances = [];
       send({ type: "agent_end" });
       break;
     case "agent_settled":
@@ -2369,9 +2400,46 @@ const handleCommand = async (command) => {
           throw new Error("当前对话本轮已结束，无法作为引导注入，请直接发送消息");
         }
         await session.steer(command.message, command.images);
+        queuedGuidances.push({
+          id: typeof command.guidanceId === "string" ? command.guidanceId : command.id,
+          message: command.message,
+          images: command.images,
+        });
         send({ type: "guidance_done", id: command.id });
-        pendingGuidanceDelivered = true;
+        pendingGuidanceDeliveries += 1;
         break;
+      case "cancelGuidance": {
+        if (!session) throw new Error("Pi SDK session is not initialized");
+        const record = queuedGuidances.find((entry) => entry.id === command.guidanceId);
+        if (!record) {
+          send({ type: "guidance_cancelled", id: command.id, cancelled: false, reason: "unknown" });
+          break;
+        }
+        if (typeof session.clearQueue !== "function") {
+          send({ type: "guidance_cancelled", id: command.id, cancelled: false, reason: "unsupported" });
+          break;
+        }
+        // Pi 没有「按条撤回」的接口，只能全部清空再把剩下的按原顺序压回去。
+        session.clearQueue();
+        const remaining = queuedGuidances.filter((entry) => entry.id !== command.guidanceId);
+        queuedGuidances = [];
+        for (const entry of remaining) {
+          try {
+            await session.steer(entry.message, entry.images);
+            queuedGuidances.push(entry);
+          } catch {
+            // 单条恢复失败就丢掉它：让整批卡在半清理状态更难解释。
+          }
+        }
+        pendingGuidanceDeliveries = queuedGuidances.length;
+        send({
+          type: "guidance_cancelled",
+          id: command.id,
+          cancelled: true,
+          restored: queuedGuidances.length,
+        });
+        break;
+      }
       case "forkSession": {
         const result = await forkSessionAtMessage(command);
         send({ type: "fork_session_result", id: command.id, ...result });
@@ -2430,6 +2498,18 @@ const handleCommand = async (command) => {
         session?.setThinkingLevel(command.level);
         send({ type: "thinking_level_changed", id: command.id, level: session?.thinkingLevel || command.level });
         break;
+      case "compact": {
+        // 手动压缩：与 slash 命令共用同一条 session.compact 路径，SDK 会自己发
+        // compaction_start/end，前端据此显示「压缩中」并刷新用量。
+        if (!session) throw new Error("Pi SDK session is not initialized");
+        if (activePromptId) throw new Error("SESSION_BUSY");
+        if (typeof session.compact !== "function") {
+          throw new Error("ACTION_NOT_SUPPORTED: 当前 Pi SDK 不支持手动压缩");
+        }
+        await session.compact();
+        send({ type: "compacted", id: command.id });
+        break;
+      }
       case "setCompactionConfig":
         activeCompactionConfig = normalizeAgentCompactionConfig(command.config);
         // 用户改完压缩配置视为重新开始：恢复自动压缩，允许再试一次。

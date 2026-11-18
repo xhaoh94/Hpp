@@ -630,6 +630,48 @@ describe("collapseStandardProcessEntries", () => {
     ]);
   });
 
+  it("lists command items even when toolKind is not run_command (claude Bash)", () => {
+    // claude 的 Bash 命令条目可能 toolKind 为空/unknown、标题不带「已运行」前缀，
+    // 但有 command + description。判定口径要和 summarizeOperations 对齐，
+    // 否则 commandItems 为空、展开只显示「已运行 N 条命令」。
+    const [summary] = collapseStandardProcessEntries([
+      view({
+        id: "c1",
+        type: "tool",
+        title: "查找 Claude 插件源码位置",
+        description: "查找 Claude 插件源码位置",
+        command: "grep -rn claude electron/plugin-backends",
+      }),
+      view({
+        id: "c2",
+        type: "tool",
+        title: "读取核心文件",
+        description: "读取核心文件",
+        command: "sed -n 1,80p backend.ts",
+      }),
+    ]);
+
+    expect(summary.operationSummary?.commandItems).toEqual([
+      { id: "c1", description: "查找 Claude 插件源码位置", command: "grep -rn claude electron/plugin-backends" },
+      { id: "c2", description: "读取核心文件", command: "sed -n 1,80p backend.ts" },
+    ]);
+  });
+
+  it("lists no-file tool calls without command as title-only items", () => {
+    // web 搜索 / 无文件工具没有 command 和 description，但会被算进「运行 N 条命令」。
+    // 明细必须用标题兜底，否则展开只剩「已运行 N 条命令」这一行。
+    const [summary] = collapseStandardProcessEntries([
+      view({ id: "w1", type: "tool", toolKind: "web_fetch", title: "正在执行: web_search" }),
+      view({ id: "w2", type: "tool", toolKind: "search_text", title: "正在执行: grep" }),
+    ]);
+
+    expect(summary.title).toBe("运行 2 条命令");
+    expect(summary.operationSummary?.commandItems).toEqual([
+      { id: "w1", title: "正在执行: web_search" },
+      { id: "w2", title: "正在执行: grep" },
+    ]);
+  });
+
   it("keeps the first-seen category order inside a segment", () => {
     const collapsed = collapseStandardProcessEntries([
       view({ id: "c1", type: "tool", toolKind: "run_command", title: "跑命令", command: "npm test" }),

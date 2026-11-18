@@ -123,4 +123,75 @@ describe("token usage stats", () => {
     expect(summary.totals.cachedInput).toBe(100);
     expect(getTokenCacheRate(summary.totals)).toBe(1);
   });
+
+  it("把子 Agent 的用量并进统计，并按它实际用的模型分组", () => {
+    const summary = summarizeTokenUsage([
+      {
+        role: "assistant",
+        modelProvider: "main-chan",
+        modelId: "main-model",
+        tokenUsage: { input: 1000, output: 100, cacheInput: 0 },
+        process: {
+          startedAt: 1,
+          entries: [{
+            id: "call-1",
+            type: "tool",
+            title: "subagent",
+            timestamp: 1,
+            subagents: [
+              { id: "s1", model: "other/cheap", usage: { inputTokens: 300, outputTokens: 30, cacheReadTokens: 150 } },
+            ],
+          }],
+        },
+      },
+    ]);
+
+    // 子 Agent 换了模型就该出现一行自己的记录，而不是凭空消失。
+    expect(summary.byModel.map((group) => group.name)).toEqual(["main-model", "cheap"]);
+    expect(summary.byModel[1]).toMatchObject({ input: 300, output: 30, cachedInput: 150, detail: "other" });
+    expect(summary.totals.total).toBe(1100 + 330);
+    expect(summary.subagentTotals.total).toBe(330);
+    expect(summary.subagentCount).toBe(1);
+    // 子 Agent 不是「回合」，不能把回合数冲高。
+    expect(summary.messageCount).toBe(1);
+  });
+
+  it("同一个子任务反复入账时只取最后一份累计值", () => {
+    // subagent 的 usage 是累计值，会随进度反复写进过程条目；直接求和多算好几倍。
+    const summary = summarizeTokenUsage([
+      {
+        role: "assistant",
+        modelId: "main-model",
+        tokenUsage: { input: 10, output: 1 },
+        process: {
+          startedAt: 1,
+          entries: [{
+            id: "call-1",
+            type: "tool",
+            title: "subagent",
+            timestamp: 1,
+            subagents: [{ id: "s1", model: "other/cheap", usage: { inputTokens: 100, outputTokens: 10 } }],
+          }],
+        },
+      },
+      {
+        role: "assistant",
+        modelId: "main-model",
+        tokenUsage: { input: 10, output: 1 },
+        process: {
+          startedAt: 1,
+          entries: [{
+            id: "call-1",
+            type: "tool",
+            title: "subagent",
+            timestamp: 2,
+            subagents: [{ id: "s1", model: "other/cheap", usage: { inputTokens: 300, outputTokens: 30 } }],
+          }],
+        },
+      },
+    ]);
+
+    expect(summary.subagentTotals.total).toBe(330);
+    expect(summary.subagentCount).toBe(1);
+  });
 });

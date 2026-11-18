@@ -6,11 +6,26 @@ import { useShallow } from "zustand/react/shallow";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
 import { useDragAutoScroll } from "@/hooks/useDragAutoScroll";
 import { isDefaultWorkspaceProject } from "@/lib/default-workspace";
+import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { GitWorkspaceModal, type GitWorkspaceRepo } from "@/components/git/GitWorkspaceModal";
 import { ProjectCard } from "./ProjectCard";
 import "./Sidebar.css";
 
 type RepoState = { isRepo: boolean; branch?: string };
+
+/**
+ * git clone 的 stderr 混着大量 `remote: Compressing objects: N%` 进度，
+ * 整段塞进弹窗会撑爆界面。挑出真正说明失败原因的一行做摘要，全文仍可从 title 看。
+ */
+export function summarizeCloneError(error: string): string {
+  const lines = error.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return "克隆失败。";
+  const fatal = [...lines].reverse().find((line) => /^(fatal|error):/i.test(line));
+  if (fatal) return fatal;
+  // 没有 fatal 行时取最后一条非进度输出；全是进度就给个固定短句。
+  const meaningful = [...lines].reverse().find((line) => !/^remote:\s+(Compressing|Counting|Receiving|Resolving)/i.test(line));
+  return meaningful ? meaningful.slice(0, 160) : "克隆失败，请检查仓库地址与网络。";
+}
 
 export function ProjectView() {
   const { projects, activeSessionId, projectDataHydrated, addProject, reorderProjects } = useProjectStore(
@@ -149,7 +164,9 @@ export function ProjectView() {
     try {
       const result = await window.electronAPI.gitClone(url, cloneParent.trim() || undefined, cloneName.trim() || undefined);
       if (!result.success || !result.path) {
-        setAddError(result.error || "克隆失败。");
+        const error = result.error || "克隆失败。";
+        setAddError(error);
+        showFloatingToastMessage(summarizeCloneError(error), "error");
         return;
       }
       const folderName = result.path.split(/[/\\]/).filter(Boolean).pop() || cloneName.trim() || "repo";
@@ -308,7 +325,11 @@ export function ProjectView() {
                   />
                 </>
               )}
-              {addError && <div className="add-project-error">{addError}</div>}
+              {addError && (
+                <div className="add-project-error" title={addError}>
+                  {summarizeCloneError(addError)}
+                </div>
+              )}
               <div className="form-actions">
                 <button type="button" onClick={() => setShowAdd(false)} className="btn btn-cancel" disabled={addBusy}>取消</button>
                 <button

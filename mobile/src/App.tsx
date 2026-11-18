@@ -1036,7 +1036,7 @@ const ProcessEntryRow = memo(function ProcessEntryRow({
             </div>
           )}
           <div className="process-guidance-content">
-            <span className="process-guidance-label" title="引导">
+            <span className="process-guidance-label" title="插话">
               <CornerDownRight size={14} strokeWidth={2} />
             </span>
             <div className="message-user-bubble process-guidance-bubble">
@@ -2753,10 +2753,10 @@ function QueuePanel({ items, disabled, canGuide, currentSessionRunning, onEdit, 
                   className="queue-guide"
                   disabled={disabled || !currentSessionRunning || item.status === "sending"}
                   onClick={() => onGuide(item)}
-                  title={item.status === "sending" ? "等待调度" : currentSessionRunning ? "立即作为引导发送" : "Agent 运行中才能引导"}
+                  title={item.status === "sending" ? "等待插入" : currentSessionRunning ? "立即插进当前回合" : "Agent 运行中才能插话"}
                 >
                   {item.status === "sending" ? <LoaderCircle className="spin" size={13} /> : <CornerDownRight size={13} />}
-                  <span>{item.status === "sending" ? "发送中" : "引导"}</span>
+                  <span>{item.status === "sending" ? "发送中" : "插话"}</span>
                 </button>
               )}
               <button type="button" className="queue-icon-button queue-remove" disabled={disabled || item.status === "sending"} onClick={() => onRemove(item)} title="移出队列" aria-label="移出队列"><Trash2 size={14} /></button>
@@ -4721,7 +4721,7 @@ export default function App() {
         ...current,
         [selected.session.id]: (current[selected.session.id] || []).filter((queued) => queued.id !== item.id),
       }));
-      showFloatingToast("已转为引导");
+      showFloatingToast("已转为插话");
       return;
     }
 
@@ -4737,7 +4737,7 @@ export default function App() {
       });
       // 命令成功只代表引导已被接收；与桌面端一致，保留 sending 状态，
       // 等 Agent 真正开始响应后由 session.queue.updated 事件移除队列项。
-      showFloatingToast("已转为引导");
+      showFloatingToast("已转为插话");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setQueues((current) => ({
@@ -5995,7 +5995,10 @@ export default function App() {
               />
             </div>
 
-            {selected && (
+            {/* 空会话没有真实统计，显示固定占位文案；发第一条消息后换成真实统计。 */}
+            {selected && (selectedMessages.length === 0
+              ? <div className="composer-status composer-status-empty">暂无统计数据</div>
+              : (
               <div className="composer-status">
                 <button
                   type="button"
@@ -6038,7 +6041,7 @@ export default function App() {
                   生成摘要
                 </button>
               </div>
-            )}
+              ))}
           </footer>
         </section>
       )}

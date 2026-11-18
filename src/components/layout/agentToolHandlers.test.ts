@@ -134,6 +134,37 @@ describe("handleToolEndEvent", () => {
     update.mockRestore();
   });
 
+  // claude 流式 tool_start 的 input 为空，模型写的 description 只到 tool_end 才有。
+  // 不能因为 start 没缓存就丢掉，否则摘要明细退化成裸命令。
+  it("keeps a description that only arrives on the end event (claude Bash)", () => {
+    const runtime = createSessionRuntime();
+    const { context } = createContext();
+
+    handleToolStartEvent({
+      type: "tool_start",
+      toolKind: "run_command",
+      toolName: "bash",
+      toolCallId: "call-claude-desc",
+    } as AgentEvent, "session-1", runtime, context);
+
+    expect(runtime.activeToolDescription["call-claude-desc"]).toBeUndefined();
+
+    const update = vi.spyOn(useChatStore.getState(), "updateLastAssistantProcessEntry");
+    handleToolEndEvent({
+      type: "tool_end",
+      toolKind: "run_command",
+      toolName: "bash",
+      toolCallId: "call-claude-desc",
+      command: "grep -rn claude electron/plugin-backends",
+      description: "查找 Claude 插件源码位置",
+    } as AgentEvent, "session-1", runtime, context);
+
+    const patch = update.mock.calls.at(-1)?.[1] as { title?: string; description?: string } | undefined;
+    expect(patch?.description).toBe("查找 Claude 插件源码位置");
+    expect(patch?.title).toBe("查找 Claude 插件源码位置");
+    update.mockRestore();
+  });
+
   // pi 的 tool_execution_end 不带 args：结束时不能下发 command: undefined，
   // 否则会把工具开始时存下的原始命令覆盖掉，摘要明细只剩「命令」。
   it("keeps the start command when the end event has no args", () => {

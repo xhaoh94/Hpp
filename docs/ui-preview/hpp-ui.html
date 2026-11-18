@@ -219,35 +219,41 @@
               <li>
                 <button type="button" class="subagent-monitor-item active">
                   <span class="subagent-monitor-dot running"></span>
-                  <span class="subagent-monitor-item-main">
-                    <span class="subagent-monitor-item-label">Scout</span>
-                    <span class="subagent-monitor-item-usage">9.2k token · 缓存 90% · 2 轮</span>
-                  </span>
-                  <span class="subagent-monitor-item-time">42s</span>
+                  <span class="subagent-monitor-item-label" title="Scout">编写测试</span>
                 </button>
               </li>
               <li>
                 <button type="button" class="subagent-monitor-item">
-                  <span class="subagent-monitor-dot running"></span>
-                  <span class="subagent-monitor-item-main">
-                    <span class="subagent-monitor-item-label">Reviewer</span>
-                    <span class="subagent-monitor-item-usage">6.4k token · 缓存 84% · 1 轮</span>
-                  </span>
-                  <span class="subagent-monitor-item-time">31s</span>
+                  <span class="subagent-monitor-dot completed"></span>
+                  <span class="subagent-monitor-item-label" title="Reviewer">审查风险</span>
                 </button>
               </li>
             </ul>
 
             <div class="subagent-monitor-detail">
               <div class="subagent-monitor-detail-head">
-                <strong>Scout</strong>
+                <strong title="Scout">编写测试</strong>
                 <span>运行中</span>
                 <span class="subagent-monitor-model">deepseek-chat</span>
               </div>
-              <div class="subagent-monitor-usage">9.2k token · 缓存 90% · 2 轮</div>
-              <div class="subagent-monitor-activity">正在读取 src/lib/foo.ts</div>
-              <div class="subagent-monitor-idle">最后活动 3 秒前</div>
-              <pre class="subagent-monitor-output">src/lib/foo.ts:42  export const foo = () =&gt; bar();</pre>
+              <div class="subagent-monitor-detail-meta">
+                <span class="subagent-monitor-usage">9.2k token · 缓存 90% · 2 轮</span>
+                <span class="subagent-monitor-idle">最后活动 3 秒前</span>
+              </div>
+              <div class="subagent-monitor-detail-scroll">
+                <div class="subagent-monitor-activity" title="我会先定位 subagent 工具的定义位置。">我会先定位 subagent 工具的定义位置。</div>
+                <div class="subagent-monitor-output" title="点击收起">
+                  <div class="md-content">
+                    <h3>Files</h3>
+                    <ul>
+                      <li><strong>190</strong> 常量：<code>MAX_PARALLEL_TASKS = 8</code>、<code>MAX_CONCURRENCY = 4</code></li>
+                      <li><code>DEFAULT_TASK_TIMEOUT_MS = 30*60*1000</code>、<code>MAX_TASK_OUTPUT_BYTES</code></li>
+                      <li><code>getTaskItems</code> <code>L1008–1018</code>、<code>getChainItems</code> <code>L1020–1030</code></li>
+                      <li><code>resolveConfiguredModel</code> <code>L1088</code>、<code>getPoolEntry</code> <code>L1078</code></li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

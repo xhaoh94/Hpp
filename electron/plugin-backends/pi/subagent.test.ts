@@ -296,5 +296,50 @@ describe("Pi subagent lifecycle", () => {
     }));
     expect(agent.isIdle()).toBe(true);
   });
+
+  it("passes the dispatch-provided title through to subagent events", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const handle = createToolMessage(agent);
+
+    handle({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "pi-subagent-title",
+      args: {
+        tasks: [
+          { agent: "scout", task: "在 C:/Project/Hpp 里只读检索：找出 subagent 工具定义", title: "查工具定义" },
+          { agent: "reviewer", task: "检查相关测试", title: "查测试覆盖" },
+        ],
+      },
+    });
+    handle({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "pi-subagent-title",
+      result: {
+        content: [{ type: "text", text: "完成" }],
+        details: {
+          mode: "parallel",
+          results: [
+            { agent: "scout", task: "在 C:/Project/Hpp 里只读检索：找出 subagent 工具定义", title: "查工具定义", exitCode: 0, output: "backend.ts" },
+            { agent: "reviewer", task: "检查相关测试", title: "查测试覆盖", exitCode: 0, output: "tests" },
+          ],
+        },
+      },
+      isError: false,
+    });
+
+    const subagentEvents = events.filter((event) => event.type === "subagent_event");
+    expect(subagentEvents.length).toBeGreaterThan(0);
+    // 起点占位（args.title）与终态结果（details.results[].title）都要带标题。
+    expect(subagentEvents[0]).toMatchObject({
+      subagents: [expect.objectContaining({ title: "查工具定义" }), expect.objectContaining({ title: "查测试覆盖" })],
+    });
+    const terminal = subagentEvents[subagentEvents.length - 1];
+    expect(terminal).toMatchObject({
+      subagents: [expect.objectContaining({ title: "查工具定义" }), expect.objectContaining({ title: "查测试覆盖" })],
+    });
+  });
 });
 

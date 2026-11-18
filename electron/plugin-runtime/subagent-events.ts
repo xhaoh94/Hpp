@@ -23,6 +23,8 @@ export interface NativeSubagentSnapshot {
   model?: string;
   detail?: string;
   prompt?: string;
+  /** 调度方给的极简展示标题（claude Task 的 description），优先用于界面胶囊。 */
+  title?: string;
   message?: string;
   stopReason?: NativeSubagentStopReason;
   startedAt?: number;
@@ -131,6 +133,7 @@ export function buildNativeSubagentEvent(
       model: snapshot.model,
       message: snapshot.message,
       prompt: snapshot.prompt,
+      ...(snapshot.title ? { title: snapshot.title } : {}),
       stopReason: snapshot.stopReason,
       ...(snapshot.usage ? { usage: snapshot.usage } : {}),
     }],

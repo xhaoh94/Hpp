@@ -1,3 +1,4 @@
+import type { ProcessEntryView } from "@shared/process-view";
 import type { ChatMessage } from "@/stores/chat-store";
 
 export const UNKNOWN_TOKEN_MODEL = "未记录模型";
@@ -27,12 +28,18 @@ export interface SessionTokenUsageSummary {
   byModel: TokenUsageGroup[];
   /** 参与统计的回合数。 */
   messageCount: number;
+  /** 其中来自子 Agent 的部分（已计入 totals 与 byModel，单独留一份用于标注）。 */
+  subagentTotals: TokenUsageTotals;
+  /** 有用量记录的子任务个数。 */
+  subagentCount: number;
 }
 
 type TokenUsageMessage = Pick<
   ChatMessage,
-  "role" | "tokenUsage" | "modelProvider" | "modelId" | "modelLabel"
+  "role" | "tokenUsage" | "modelProvider" | "modelId" | "modelLabel" | "process"
 >;
+
+type SubagentUsageView = NonNullable<ProcessEntryView["subagents"]>[number];
 
 type TotalsAccumulator = TokenUsageTotals & { messageCount: number };
 
@@ -49,12 +56,14 @@ const addUsage = (
   input: number,
   output: number,
   cachedInput: number,
+  /** 子 Agent 的用量不是「回合」，只累加数字、不占回合数。 */
+  countsAsTurn = true,
 ) => {
   totals.input += input;
   totals.output += output;
   totals.cachedInput += cachedInput;
   totals.total += input + output;
-  totals.messageCount += 1;
+  if (countsAsTurn) totals.messageCount += 1;
 };
 
 const toTotals = (totals: TotalsAccumulator): TokenUsageTotals => ({
@@ -94,6 +103,48 @@ const getMessageUsage = (message: TokenUsageMessage) => {
   const output = Math.max(0, Number(message.tokenUsage.output) || 0);
   if (input === 0 && output === 0) return null;
   const cachedInput = Math.min(input, Math.max(0, Number(message.tokenUsage.cacheInput) || 0));
+  return { input, output, cachedInput };
+};
+
+/**
+ * 收集子任务用量。
+ *
+ * 子 Agent 跑在独立进程里，它的 token 不会进主会话的 assistant 消息，只挂在
+ * 过程条目的 subagents[].usage 上——不单独捞一遍，这部分消耗就是隐形的。
+ *
+ * 同一个子任务的 usage 是**累计值**、会随进度反复入账，所以按 id 只保留最后
+ * 一份；直接求和会把同一批 token 加很多遍。
+ */
+const collectSubagentUsages = (messages: ReadonlyArray<TokenUsageMessage>): SubagentUsageView[] => {
+  const byId = new Map<string, SubagentUsageView>();
+  let anonymous = 0;
+  for (const message of messages) {
+    for (const entry of message.process?.entries ?? []) {
+      for (const subagent of entry.subagents ?? []) {
+        if (!subagent?.usage) continue;
+        const id = subagent.id?.trim() || `#${anonymous++}`;
+        byId.set(id, subagent);
+      }
+    }
+  }
+  return [...byId.values()];
+};
+
+/** 子任务的 model 是 `provider/modelId`；模型 id 本身可能带 `/`，只切第一段。 */
+const splitSubagentModel = (value?: string) => {
+  const raw = value?.trim() || "";
+  const index = raw.indexOf("/");
+  if (index <= 0) return { modelId: raw, provider: "" };
+  return { provider: raw.slice(0, index), modelId: raw.slice(index + 1) };
+};
+
+const getSubagentUsage = (subagent: SubagentUsageView) => {
+  const usage = subagent.usage;
+  if (!usage) return null;
+  const input = Math.max(0, Number(usage.inputTokens) || 0);
+  const output = Math.max(0, Number(usage.outputTokens) || 0);
+  if (input === 0 && output === 0) return null;
+  const cachedInput = Math.min(input, Math.max(0, Number(usage.cacheReadTokens) || 0));
   return { input, output, cachedInput };
 };
 
@@ -144,6 +195,35 @@ export function summarizeTokenUsage(
     }
   }
 
+  // 子 Agent 的消耗单独算一遍再并入：它们跑在独立进程里，从来没有 assistant
+  // 消息承载用量，不补这一步，换了模型的子任务就用「查无此账」的方式消失。
+  const subagentTotals = createAccumulator();
+  let subagentCount = 0;
+  for (const subagent of collectSubagentUsages(messages)) {
+    const usage = getSubagentUsage(subagent);
+    if (!usage) continue;
+    subagentCount += 1;
+    addUsage(subagentTotals, usage.input, usage.output, usage.cachedInput, false);
+    addUsage(totals, usage.input, usage.output, usage.cachedInput, false);
+
+    const { modelId, provider } = splitSubagentModel(subagent.model);
+    const modelName = modelId || UNKNOWN_TOKEN_MODEL;
+    const model = models.get(modelName);
+    if (model) {
+      if (provider) model.providers.add(provider);
+      addUsage(model.usage, usage.input, usage.output, usage.cachedInput);
+    } else {
+      const created = {
+        name: modelName,
+        providers: new Set(provider ? [provider] : []),
+        labels: new Set<string>(),
+        usage: createAccumulator(),
+      };
+      addUsage(created.usage, usage.input, usage.output, usage.cachedInput);
+      models.set(modelName, created);
+    }
+  }
+
   const byModel = [...models.entries()]
     .map(([key, group]): TokenUsageGroup => ({
       key,
@@ -157,6 +237,8 @@ export function summarizeTokenUsage(
 
   return {
     totals: toTotals(totals),
+    subagentTotals: toTotals(subagentTotals),
+    subagentCount,
     byModel,
     messageCount: totals.messageCount,
   };

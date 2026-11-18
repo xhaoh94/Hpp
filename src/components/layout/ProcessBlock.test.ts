@@ -302,7 +302,7 @@ describe("ProcessBlock", () => {
         type: "info",
         kind: "user_guidance",
         toolKind: "guidance_message",
-        title: "引导",
+        title: "插话",
         detail: "继续检查",
         guidanceDocument: createComposerDocument([
           { id: "text-1", type: "text", text: "继续检查 " },
@@ -334,8 +334,8 @@ describe("ProcessBlock", () => {
     const guidanceLabelEnd = expanded.indexOf("</span>", guidanceLabelIndex);
     const guidanceLabelMarkup = expanded.slice(guidanceLabelIndex, guidanceLabelEnd);
     expect(guidanceLabelMarkup).toContain("<svg");
-    expect(guidanceLabelMarkup).not.toContain(">引导<");
-    expect(expanded).not.toContain(">引导<");
+    expect(guidanceLabelMarkup).not.toContain(">插话<");
+    expect(expanded).not.toContain(">插话<");
     expect(expanded).toContain("继续检查");
     expect(expanded).toContain("README.md");
     expect(expanded).not.toContain("收到引导");
@@ -1148,7 +1148,7 @@ describe("concise level keeps user-authored and interactive entries (regression)
         type: "info",
         kind: "user_guidance",
         toolKind: "guidance_message",
-        title: "引导",
+        title: "插话",
         detail: "改成用缓存",
         state: "completed",
         timestamp: 20,

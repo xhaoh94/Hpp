@@ -81,6 +81,7 @@ describe("AgentPluginProcess pending UI capture", () => {
     };
     internals.request = vi.fn().mockResolvedValue({
       sendGuidance: false,
+      cancelGuidance: false,
       forkSession: false,
       listActions: false,
     });

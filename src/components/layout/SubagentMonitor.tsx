@@ -7,11 +7,12 @@ import {
   collectRunningSubagents,
   formatIdleAgo,
   formatSubagentUsage,
-  getSubagentElapsedMs,
   getSubagentIdleMs,
   isSubagentStalled,
   type MonitoredSubagent,
 } from "./subagentMonitorModel";
+import { getSubagentTitle } from "./processBlockUtils";
+import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import "./SubagentMonitor.css";
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -45,12 +46,34 @@ export function SubagentMonitorView({
   onSelect,
 }: SubagentMonitorViewProps) {
   const selected = subagents.find((subagent) => subagent.id === selectedId) || subagents[0];
-  const outputRef = useRef<HTMLPreElement | null>(null);
+  const outputRef = useRef<HTMLDivElement | null>(null);
+  const pillRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [outputExpanded, setOutputExpanded] = useState(false);
+
+  // activity 固定一行，显示最后一行非空文字（实时进展总在末尾，且行高恒定不抖）。
+  const activityLines = (selected?.message || "").split(/\r?\n/).filter((line) => line.trim());
+  const activityLine = activityLines.length > 0 ? activityLines[activityLines.length - 1] : "正在等待第一段输出…";
+  // 切换子任务时收起上一条的展开输出。
+  useEffect(() => setOutputExpanded(false), [selected?.id]);
 
   useEffect(() => {
     const node = outputRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [selected?.liveOutput, selected?.id]);
+    if (node && outputExpanded) node.scrollTop = node.scrollHeight;
+  }, [selected?.liveOutput, selected?.id, outputExpanded]);
+
+  // 点面板和胶囊之外（页面空白处）关掉浮层。只认 mousedown，不碰滚动/resize，
+  // 详情区本来就滚，不能像菜单那样一滚就关。
+  useEffect(() => {
+    if (!open) return;
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (pillRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, [open, onClose]);
 
   if (subagents.length === 0 || !selected) return null;
 
@@ -64,6 +87,7 @@ export function SubagentMonitorView({
   return (
     <>
       <button
+        ref={pillRef}
         type="button"
         className={`subagent-monitor-pill ${open ? "open" : ""}`}
         onClick={onToggle}
@@ -78,7 +102,7 @@ export function SubagentMonitorView({
       </button>
 
       {open && (
-        <div className="subagent-monitor-panel" role="dialog" aria-label="Subagent 运行状态">
+        <div ref={panelRef} className="subagent-monitor-panel" role="dialog" aria-label="Subagent 运行状态">
           <div className="subagent-monitor-header">
             <span className="subagent-monitor-title">
               <Activity size={14} /> Subagent 监视
@@ -97,7 +121,6 @@ export function SubagentMonitorView({
           <div className="subagent-monitor-body">
             <ul className="subagent-monitor-list">
               {subagents.map((subagent) => {
-                const elapsed = getSubagentElapsedMs(subagent, now);
                 const itemStalled = isSubagentStalled(subagent, now);
                 return (
                   <li key={subagent.id}>
@@ -107,14 +130,9 @@ export function SubagentMonitorView({
                       onClick={() => onSelect(subagent.id)}
                     >
                       <span className={`subagent-monitor-dot ${itemStalled ? "stalled" : subagent.status || ""}`} />
-                      <span className="subagent-monitor-item-main">
-                        <span className="subagent-monitor-item-label">{subagent.label}</span>
-                        {formatSubagentUsage(subagent.usage) && (
-                          <span className="subagent-monitor-item-usage">{formatSubagentUsage(subagent.usage)}</span>
-                        )}
-                      </span>
-                      <span className="subagent-monitor-item-time">
-                        {elapsed !== undefined ? formatProcessDuration(elapsed) : "—"}
+                      {/* 页签显示任务标题（prompt 首句），身份标签 Scout/Worker 放 tooltip。 */}
+                      <span className="subagent-monitor-item-label" title={subagent.label}>
+                        {subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}
                       </span>
                     </button>
                   </li>
@@ -123,28 +141,49 @@ export function SubagentMonitorView({
             </ul>
 
             <div className="subagent-monitor-detail">
+              {/* 固定头：标题 / 状态 / 模型 / 消耗 / 最后活动。内容再长也不滚出视野。 */}
               <div className="subagent-monitor-detail-head">
-                <strong>{selected.label}</strong>
+                <strong title={selected.label}>{selected.title || getSubagentTitle(selected.prompt, selected.label)}</strong>
                 <span>{STATUS_TEXT[selected.status || ""] || selected.status}</span>
                 {selected.model && <span className="subagent-monitor-model">{selected.model}</span>}
               </div>
-              {formatSubagentUsage(selected.usage) && (
-                <div className="subagent-monitor-usage">{formatSubagentUsage(selected.usage)}</div>
-              )}
-              <div className="subagent-monitor-activity">
-                {selected.message || "正在等待第一段输出…"}
+              <div className="subagent-monitor-detail-meta">
+                {formatSubagentUsage(selected.usage) && (
+                  <span className="subagent-monitor-usage">{formatSubagentUsage(selected.usage)}</span>
+                )}
+                {idle !== undefined && (
+                  <span className={`subagent-monitor-idle ${stalled ? "stalled" : ""}`}>
+                    最后活动 {formatIdleAgo(idle)}{stalled ? "（可能已卡住）" : ""}
+                  </span>
+                )}
               </div>
-              {idle !== undefined && (
-                <div className={`subagent-monitor-idle ${stalled ? "stalled" : ""}`}>
-                  最后活动 {formatIdleAgo(idle)}
-                  {stalled ? "（可能已卡住）" : ""}
+              {/* 活动固定一行；输出固定一行、点一下展开全文。高度恒定，面板不抖。 */}
+              <div className="subagent-monitor-detail-scroll">
+                <div className="subagent-monitor-activity" title={selected.message || undefined}>
+                  {activityLine}
                 </div>
-              )}
-              {selected.liveOutput && (
-                <pre className="subagent-monitor-output" ref={outputRef}>
-                  {selected.liveOutput}
-                </pre>
-              )}
+                {selected.liveOutput && (
+                  <div
+                    className={`subagent-monitor-output ${outputExpanded ? "expanded" : ""}`}
+                    ref={outputRef}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setOutputExpanded((v) => !v)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setOutputExpanded((v) => !v);
+                      }
+                    }}
+                    title={outputExpanded ? "点击收起" : "点击展开完整输出（Markdown）"}
+                    aria-expanded={outputExpanded}
+                  >
+                    {outputExpanded
+                      ? <MarkdownRenderer content={selected.liveOutput} deferHighlight />
+                      : <span className="subagent-monitor-output-line">{selected.liveOutput.split(/\r?\n/).filter((line) => line.trim()).slice(-1)[0] || "展开查看输出"}</span>}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>

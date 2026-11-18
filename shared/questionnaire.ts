@@ -11,6 +11,11 @@ export type QuestionnaireQuestion = {
   question: string;
   header?: string;
   multiSelect?: boolean;
+  /**
+   * 是否允许输入选项之外的自定义答案。undefined 表示旧行为（允许），
+   * false 表示只接受选项（OpenCode 的字段未声明 custom 时服务端会拒收自由文本）。
+   */
+  allowCustom?: boolean;
   options?: QuestionnaireOption[];
 };
 

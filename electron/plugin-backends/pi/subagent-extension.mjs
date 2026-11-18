@@ -21,6 +21,8 @@ const MAX_JSON_TASK_BYTES = 24 * 1024;
 // tool_execution_end 带整个文件内容，很容易超过几百 KB。上限只用于
 // 防御「一直没有换行符的失控输出」，不能低到误杀合法事件。
 const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
+/** 模型池上限：并行任务最多 8 个，池子再长也只是让模型挑花眼。 */
+const MAX_MODEL_POOL_ENTRIES = 8;
 const SUBAGENT_BRIDGE_EXTENSION_PATH = join(dirname(fileURLToPath(import.meta.url)), "subagent-bridge-extension.mjs");
 /** RPC 模式下会阻塞等待响应的对话框方法；其余（setStatus/setWidget/setTitle/…）是单向指令。 */
 const RPC_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
@@ -505,6 +507,7 @@ const toPublicResult = (result) => ({
   agent: result.agent,
   agentSource: result.agentSource,
   task: truncateText(result.task, MAX_TASK_OUTPUT_BYTES),
+  ...(result.title ? { title: result.title } : {}),
   exitCode: result.exitCode,
   output: truncateText(getFinalOutput(result), MAX_TASK_OUTPUT_BYTES),
   // `message` doubles as the live activity while a child is running. Once the
@@ -559,6 +562,7 @@ const runSingleAgent = async ({
   dispatchDefaults,
   agent,
   task,
+  title,
   cwd,
   step,
   signal,
@@ -579,6 +583,8 @@ const runSingleAgent = async ({
     agent: agent.name,
     agentSource: agent.source,
     task,
+    // 调度方给的极简标题，只供界面展示，不参与派发。
+    ...(title ? { title } : {}),
     exitCode: -1,
     messages: [],
     output: "",
@@ -1004,7 +1010,9 @@ const getTaskItems = (params) => {
   return params.tasks.filter(isRecord).map((item) => ({
     agent: nonEmptyString(item.agent) || "",
     task: nonEmptyString(item.task) || "",
+    title: nonEmptyString(item.title),
     cwd: nonEmptyString(item.cwd),
+    model: nonEmptyString(item.model),
     timeoutMs: item.timeoutMs === undefined ? undefined : normalizeTaskTimeout(item.timeoutMs),
   }));
 };
@@ -1014,7 +1022,9 @@ const getChainItems = (params) => {
   return params.chain.filter(isRecord).map((item) => ({
     agent: nonEmptyString(item.agent) || "",
     task: nonEmptyString(item.task) || "",
+    title: nonEmptyString(item.title),
     cwd: nonEmptyString(item.cwd),
+    model: nonEmptyString(item.model),
     timeoutMs: item.timeoutMs === undefined ? undefined : normalizeTaskTimeout(item.timeoutMs),
   }));
 };
@@ -1028,35 +1038,166 @@ const requestedAgentNames = (params) => {
   return new Set(names);
 };
 
+/**
+ * 模型池归一化。
+ *
+ * 与 `shared/agent-subagent.ts` 的 `normalizeAgentSubagentPool` 保持同一口径：
+ * 重复模型合并、空值/超长丢弃、上限 8 条。worker 侧这份副本不能引用 shared
+ * 的 TS 模块（.mjs 在打包后单独运行），两边由测试钉住。
+ */
+const normalizeModelPool = (value) => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const entries = [];
+  for (const rawEntry of value) {
+    if (!isRecord(rawEntry)) continue;
+    const model = nonEmptyString(rawEntry.model);
+    if (!model || model.length > 200 || seen.has(model)) continue;
+    seen.add(model);
+    const label = nonEmptyString(rawEntry.label)?.slice(0, 80);
+    entries.push({
+      model,
+      ...(label ? { label } : {}),
+    });
+    if (entries.length >= MAX_MODEL_POOL_ENTRIES) break;
+  }
+  return entries;
+};
+
 export const normalizeHppSubagentConfig = (value) => {
   const input = isRecord(value) ? value : {};
-  const rawProfiles = isRecord(input.profiles) ? input.profiles : {};
-  const profiles = {};
-  for (const [name, rawProfile] of Object.entries(rawProfiles)) {
-    if (!/^[A-Za-z0-9._:-]+$/.test(name) || !isRecord(rawProfile)) continue;
-    const modelMode = rawProfile.modelMode === "custom" ? "custom" : "inherit";
-    const model = nonEmptyString(rawProfile.model);
-    profiles[name] = {
-      modelMode,
-      ...(modelMode === "custom" && model ? { model } : {}),
-    };
-  }
-  const defaultModelMode = input.defaultModelMode === "custom" ? "custom" : "inherit";
-  const defaultModel = nonEmptyString(input.defaultModel);
   return {
     enabled: input.enabled !== false,
-    defaultModelMode,
-    ...(defaultModelMode === "custom" && defaultModel ? { defaultModel } : {}),
-    profiles,
+    // 总开关：关掉后 subagent 一律跟随主 Agent，池内容保留。
+    poolEnabled: input.poolEnabled !== false,
+    pool: normalizeModelPool(input.pool),
   };
 };
 
-const resolveConfiguredModel = (config, agentName, inheritedModel) => {
-  const profile = config.profiles?.[agentName];
-  if (profile?.modelMode === "custom" && profile.model) return profile.model;
-  if (config.defaultModelMode === "custom" && config.defaultModel) return config.defaultModel;
+/** 池内某一项；不在池里返回 undefined。 */
+const getPoolEntry = (config, model) => (
+  model ? (config.pool || []).find((entry) => entry.model === model) : undefined
+);
+
+/**
+ * 子 Agent 的起始模型。
+ *
+ * 走池子（首项）或跟随主 Agent，二选一。agent markdown 里声明的 model
+ * 在这一层之外优先，由调用方处理。
+ */
+const resolveConfiguredModel = (config, inheritedModel) => {
+  if (config.poolEnabled !== false) {
+    const poolStart = config.pool?.[0]?.model;
+    if (poolStart) return poolStart;
+  }
   return inheritedModel;
 };
+
+/**
+ * 模型池逐行列出，给委派方按难度挑模型时读。
+ *
+ * 光给 id 不够：自建渠道的 id（`tanwan/gpt-5.6-sol`、本地别名）对模型来说就是
+ * 陌生字符串，它没法据此判断强弱。所以这里补上模型目录里的真值 —— 上下文窗口、
+ * 推理/思考档位、视觉、价格 —— 让「挑哪个」有据可依，也省掉用户手写场景说明。
+ *
+ * 一行一项而不是挤成一句话：并行任务之间要横向比能力，竖排更容易对齐着看。
+ *
+ * 这里只给事实、不给「什么任务用什么模型」的映射：轻重由派发方自己判断，
+ * 写死一套档位规则等于把它该做的判断提前替它做掉。
+ */
+const formatContextWindow = (value) => {
+  const tokens = Number(value) || 0;
+  if (tokens <= 0) return "";
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+  }
+  if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`;
+  return String(tokens);
+};
+
+/** 每百万 token 的输入/输出价；两边都是 0 视为未知（免费额度也常是 0，不硬说成免费）。 */
+const formatModelPrice = (cost) => {
+  const input = Number(cost?.input) || 0;
+  const output = Number(cost?.output) || 0;
+  if (!input && !output) return "";
+  const trim = (value) => value.toFixed(value < 1 ? 2 : 1).replace(/\.0+$/, "");
+  return `$${trim(input)}/$${trim(output)} 每 M`;
+};
+
+const describeModelFacts = (meta) => {
+  if (!meta) return [];
+  const facts = [];
+  const contextWindow = formatContextWindow(meta.contextWindow);
+  if (contextWindow) facts.push(`ctx ${contextWindow}`);
+  if (meta.reasoning === true) {
+    const levels = Array.isArray(meta.thinkingLevels)
+      ? meta.thinkingLevels.filter((level) => level && level !== "off")
+      : [];
+    facts.push(levels.length > 0 ? `思考 ${levels.join("/")}` : "推理");
+  }
+  if (meta.images === true) facts.push("视觉");
+  const price = formatModelPrice(meta.cost);
+  if (price) facts.push(price);
+  return facts;
+};
+
+const listModelPool = (pool, getModelMeta) => pool.map((entry) => {
+  const separator = entry.model.indexOf("/");
+  const provider = separator > 0 ? entry.model.slice(0, separator) : entry.model;
+  const modelId = separator > 0 ? entry.model.slice(separator + 1) : "";
+  let meta;
+  if (modelId && typeof getModelMeta === "function") {
+    // 目录查询失败不能让整份工具说明挂掉：最差就是退回「只有 id」。
+    try {
+      meta = getModelMeta(provider, modelId);
+    } catch {
+      meta = undefined;
+    }
+  }
+  return `- ${[entry.model, ...describeModelFacts(meta)].filter(Boolean).join("｜")}`;
+}).join("\n");
+
+/**
+ * 派发侧的选型口径。
+ *
+ * 模型只在派发时定一次、整个子任务不变：同一段上下文里换模型会让 prompt 缓存
+ * 全废，也会让一个任务的产出无法归因到某个模型。所以难度判断放在拆任务的时刻做，
+ * 而不是让子 Agent 跑到一半自己改主意。
+ */
+const MODEL_POOL_DISPATCH_GUIDANCE = [
+  "为每个任务单独挑模型，不要所有任务都用同一个。",
+  "每行后面的信息来自模型目录：上下文窗口、推理/思考档位、视觉能力、每百万 token 的价格。",
+  "按任务难度自己权衡——量大的简单活优先便宜快的，需要长链路推理或跨模块设计的活优先能力强的。",
+  "model 填具体的 provider/modelId；不填时用池内第一项。",
+].join("\n");
+
+/**
+ * 派发方式的选择策略。
+ *
+ * 不写这一段，模型会稳定地只用单任务：单任务永远「跑得通」，并行则要它先判断
+ * 能不能拆、拆错了还要收拾。但一个要读五个目录的调研，用一个 subagent 串行读完
+ * 就是白等；反过来，一处小改动拆成四个并行任务，只是把同一份 token 花四遍。
+ * 所以这里只讲「什么时候值得并行」，不讲「尽量并行」。
+ */
+const SUBAGENT_DISPATCH_POLICY = [
+  "怎么派：",
+  "· 单任务（默认）：只有一件事要查或要改，改动集中在一处。",
+  "· tasks 并行：能拆成 2~4 个互不依赖的部分（不同目录 / 不同子系统 / 不同问题），且每部分都要各自读一批文件。",
+  "· chain：后一步必须拿到前一步的产出（先定位 → 再设计 → 再动手）。",
+  "拆不出独立部分就别并行——并行会把上下文和成本成倍放大，却不会让单点任务更快。",
+].join("\n");
+
+/** 内置 agent 的一句话定位；名字从 DEFAULT_AGENTS 取，改了定义就不会漏改说明。 */
+const BUILTIN_AGENT_LABELS = {
+  scout: "只读检索",
+  planner: "出实施计划",
+  reviewer: "审查问题",
+  worker: "改代码",
+};
+const builtinAgentRoster = DEFAULT_AGENTS
+  .map((agent) => `${agent.name}（${BUILTIN_AGENT_LABELS[agent.name] || "自定义"}）`)
+  .join("、");
 
 export const createHppSubagentExtension = ({
   packageRoot = process.env.PI_SDK_PACKAGE_ROOT || "",
@@ -1069,6 +1210,12 @@ export const createHppSubagentExtension = ({
   bridgeExtensionPath = SUBAGENT_BRIDGE_EXTENSION_PATH,
   subagentConfig,
   getSubagentConfig,
+  /**
+   * 模型目录查询：`(provider, modelId) => { name?, contextWindow?, reasoning?,
+   * thinkingLevels?, images?, cost? }`。由 worker 用 pi 的 modelRegistry 提供，
+   * 只用于把能力摘要写进工具说明；查不到就退回「只有 id」。
+   */
+  getModelMeta,
   // 仅测试注入口：真实间隔是 15s / 45s，跑测试要能调小。
   retryDelaysMs = SUBAGENT_RETRY_DELAYS_MS,
 } = {}) => (pi) => {
@@ -1083,24 +1230,36 @@ export const createHppSubagentExtension = ({
       : (typeof subagentConfig === "function" ? subagentConfig() : subagentConfig)
   );
   if (!readSubagentConfig().enabled) return;
+  // 池子写进工具说明，模型才知道「可以按任务挑」。注册时的快照就够：改池子后
+  // 校验仍读实时配置，选到已移除的模型会拿到一份「当前可用」的报错并自我纠正。
+  // 开关关掉时不要列池：说明里挂着候选、实际却被拒绝，比不写更糟。
+  const registeredConfig = readSubagentConfig();
+  const registeredPool = registeredConfig.poolEnabled === false ? [] : (registeredConfig.pool || []);
+  const poolHint = registeredPool.length > 0
+    ? `\n\n模型池（派发时按任务难度为每个任务指定 model）：\n${listModelPool(registeredPool, getModelMeta)}\n${MODEL_POOL_DISPATCH_GUIDANCE}`
+    : "";
 
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "在隔离上下文中委派任务给专用 subagent。支持单任务、并行 tasks 和带 {previous} 占位符的 chain。默认提供 scout、planner、reviewer、worker，也会读取 Pi 用户级和项目级 agent 配置。用户已安装的同名 Pi 扩展优先于此内置 fallback。",
+    description: `在隔离上下文中委派任务给专用 subagent。可用：${builtinAgentRoster}；也会读取 Pi 用户级和项目级 agent 配置。用户已安装的同名 Pi 扩展优先于此内置 fallback。\n\n${SUBAGENT_DISPATCH_POLICY}${poolHint}\n\n标题：每个任务都填 title，用 2~6 字的极简动宾短语概括它（如「补齐静态红点」「审查风险」「迁移红点C组」），只用于界面展示。`,
     parameters: {
       type: "object",
       properties: {
         agent: { type: "string", description: "单任务模式的 agent 名称" },
         task: { type: "string", description: "单任务模式的委派任务" },
+        title: { type: "string", description: "给这个子任务的极简标题（如「补齐静态红点」「审查风险」），只用于界面展示，不传给子 Agent。不填则由界面从任务内容推断。" },
+        model: { type: "string", description: "按这个任务的难度从池内挑一个模型（provider/modelId）；不填用池内第一项。" },
         tasks: {
           type: "array",
-          description: "并行任务列表；除非用户明确要求更短时间，否则不要填写 timeoutMs，未填写时默认 30 分钟",
+          description: "并行任务列表；每个任务按自己的难度带上 model；除非用户明确要求更短时间，否则不要填写 timeoutMs，未填写时默认 30 分钟",
           items: {
             type: "object",
             properties: {
               agent: { type: "string" },
               task: { type: "string" },
+              title: { type: "string", description: "极简标题（如「补齐静态红点」），只用于界面展示，不传给子 Agent。不填则界面自行推断。" },
+              model: { type: "string", description: "按该任务难度从池内挑一个模型（provider/modelId）；并行任务可以各用不同模型" },
               cwd: { type: "string" },
               timeoutMs: { type: "number", default: 1800000, description: "可选；仅按用户明确要求设置，未填写默认 30 分钟，最长 30 分钟；单位为毫秒" },
             },
@@ -1110,12 +1269,14 @@ export const createHppSubagentExtension = ({
         },
         chain: {
           type: "array",
-          description: "串行任务列表；后续任务可使用 {previous} 引用上一环输出；除非用户明确要求更短时间，否则不要填写 timeoutMs，未填写时默认 30 分钟",
+          description: "串行任务列表；后续任务可使用 {previous} 引用上一环输出；各环节可按难度分别指定 model；除非用户明确要求更短时间，否则不要填写 timeoutMs，未填写时默认 30 分钟",
           items: {
             type: "object",
             properties: {
               agent: { type: "string" },
               task: { type: "string" },
+              title: { type: "string", description: "极简标题（如「补齐静态红点」），只用于界面展示，不传给子 Agent。不填则界面自行推断。" },
+              model: { type: "string", description: "按该环节难度从池内挑一个模型（provider/modelId）；不同环节可以各用不同模型" },
               cwd: { type: "string" },
               timeoutMs: { type: "number", default: 1800000, description: "可选；仅按用户明确要求设置，未填写默认 30 分钟，最长 30 分钟；单位为毫秒" },
             },
@@ -1200,6 +1361,7 @@ export const createHppSubagentExtension = ({
             agent: item.agent,
             agentSource: "unknown",
             task: item.task,
+            ...(item.title ? { title: item.title } : {}),
             exitCode: 1,
             messages: [],
             output: "",
@@ -1212,12 +1374,73 @@ export const createHppSubagentExtension = ({
           update?.(result);
           return Promise.resolve(result);
         }
-        const configuredModel = resolveConfiguredModel(
-          effectiveSubagentConfig,
-          agent.name,
-          dispatchDefaults.model,
-        );
-        const effectiveAgent = agent.model || !configuredModel
+        const pool = effectiveSubagentConfig.pool || [];
+        const poolActive = effectiveSubagentConfig.poolEnabled !== false;
+        const requestedModel = item.model;
+        // 池关着却收到 model：说明调度方看的是旧说明，或它在替用户做主张。
+        // 明确拒绝，别让它以为换了模型其实没换。
+        if (requestedModel && !poolActive) {
+          const result = {
+            agent: item.agent,
+            agentSource: agent.source,
+            task: item.task,
+            ...(item.title ? { title: item.title } : {}),
+            exitCode: 1,
+            messages: [],
+            output: "",
+            stderr: "",
+            usage: createUsage(),
+            errorMessage: "模型池已在设置中关闭，不接受按任务指定模型。去掉 model 参数即可（子 Agent 会跟随主 Agent 当前模型）。",
+            stopReason: "error",
+            step,
+          };
+          update?.(result);
+          return Promise.resolve(result);
+        }
+        // 池外模型直接拒绝，而不是悄悄退回默认：调度方会以为换了模型，
+        // 结果和预期对不上却查不出原因。
+        if (requestedModel && poolActive && !getPoolEntry(effectiveSubagentConfig, requestedModel)) {
+          const result = {
+            agent: item.agent,
+            agentSource: agent.source,
+            task: item.task,
+            ...(item.title ? { title: item.title } : {}),
+            exitCode: 1,
+            messages: [],
+            output: "",
+            stderr: "",
+            usage: createUsage(),
+            errorMessage: `模型 ${requestedModel} 不在模型池内。当前可用：${pool.map((entry) => entry.model).join("、") || "（未配置模型池）"}`,
+            stopReason: "error",
+            step,
+          };
+          update?.(result);
+          return Promise.resolve(result);
+        }
+        // agent markdown 里钉死的 model 优先，且不接受按任务改：这类 agent 往往是
+        // 专精用途（视觉、特定渠道），让调度方随手覆盖反而会把它弄坏。
+        if (agent.model && requestedModel && requestedModel !== agent.model) {
+          const result = {
+            agent: item.agent,
+            agentSource: agent.source,
+            task: item.task,
+            ...(item.title ? { title: item.title } : {}),
+            exitCode: 1,
+            messages: [],
+            output: "",
+            stderr: "",
+            usage: createUsage(),
+            errorMessage: `agent ${agent.name} 的 markdown 里钉死了 model（${agent.model}），不接受按任务指定。去掉 model 参数即可，或改这个 agent 的定义。`,
+            stopReason: "error",
+            step,
+          };
+          update?.(result);
+          return Promise.resolve(result);
+        }
+        const configuredModel = agent.model
+          || requestedModel
+          || resolveConfiguredModel(effectiveSubagentConfig, dispatchDefaults.model);
+        const effectiveAgent = !configuredModel || configuredModel === agent.model
           ? agent
           : { ...agent, model: configuredModel };
         return runSingleAgent({
@@ -1225,6 +1448,7 @@ export const createHppSubagentExtension = ({
           dispatchDefaults,
           agent: effectiveAgent,
           task: item.task,
+          title: item.title,
           cwd: item.cwd || (step === undefined ? nonEmptyString(params.cwd) : undefined),
           step,
           signal,
@@ -1319,6 +1543,7 @@ export const createHppSubagentExtension = ({
           agent: item.agent,
           agentSource: "unknown",
           task: item.task,
+          ...(item.title ? { title: item.title } : {}),
           exitCode: -1,
           messages: [],
           output: "",
@@ -1355,7 +1580,13 @@ export const createHppSubagentExtension = ({
         };
       }
 
-      const item = { agent: nonEmptyString(params.agent) || "", task: nonEmptyString(params.task) || "", cwd: nonEmptyString(params.cwd) };
+      const item = {
+        agent: nonEmptyString(params.agent) || "",
+        task: nonEmptyString(params.task) || "",
+        title: nonEmptyString(params.title),
+        cwd: nonEmptyString(params.cwd),
+        model: nonEmptyString(params.model),
+      };
       const result = await runWithRetry(item, undefined, onUpdate ? (partial) => {
         const partialResult = getPartialResultFromUpdate(partial) || partial;
         onUpdate({

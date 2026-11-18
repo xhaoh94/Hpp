@@ -1953,6 +1953,11 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
   overflow: hidden;
 }
 
+/* 空会话占位：保持状态栏位置，只放一行固定文案。 */
+.composer-status-empty {
+  opacity: 0.7;
+}
+
 .composer-status-item {
   display: inline-flex;
   align-items: center;

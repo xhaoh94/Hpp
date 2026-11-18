@@ -10,6 +10,7 @@ import {
 import { createComposerDocument } from "@shared/composer-document";
 import {
   cancelPendingGuidance,
+  clearPendingGuidanceConfirmation,
   confirmGuidanceResponse,
   SessionCommandCoordinator,
   classifyBackendSessionState,
@@ -36,6 +37,7 @@ const electronAPI = {
   agentSendMessage: vi.fn(async (): Promise<{ success: boolean; error?: string }> => ({ success: true })),
   agentRemoveSession: vi.fn(async () => ({ success: true })),
   agentSendGuidance: vi.fn(async () => ({ success: true })),
+  agentCancelGuidance: vi.fn(async () => ({ success: true, cancelled: true })),
   agentForkSession: vi.fn(async () => ({ supported: false, success: false })),
   agentReloadConfig: vi.fn(async () => ({ success: true, models: [], reloadedSessionIds: [] })),
   agentListActions: vi.fn(async () => [{ kind: "skill" as const, name: "review" }]),
@@ -331,6 +333,76 @@ describe("SessionCommandCoordinator", () => {
     expect(electronAPI.agentSendMessage).not.toHaveBeenCalled();
   });
 
+  it("撤回等待中的引导：后端撤掉后队列项回到普通排队", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.getState().addMessage({
+      id: "assistant-guidance-cancel",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      isStreaming: true,
+      process: { startedAt: 1, expanded: true, entries: [] },
+    }, "session-one");
+    useChatStore.getState().upsertQueuedMessage({
+      id: "guidance-to-cancel",
+      sessionId: "session-one",
+      displayContent: "先别改这个",
+      sendContent: "先别改这个",
+      createdAt: 2,
+      status: "queued",
+    });
+    electronAPI.agentSendGuidance.mockResolvedValueOnce({ success: true, guidanceId: "g-1" });
+
+    await SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-to-cancel");
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({ id: "guidance-to-cancel", status: "sending" }),
+    ]);
+
+    await SessionCommandCoordinator.cancelQueuedGuidance("session-one", "guidance-to-cancel");
+
+    expect(electronAPI.agentCancelGuidance).toHaveBeenCalledWith("session-one", "g-1");
+    // 回到普通排队，可以当普通消息发下一轮，也可以再点一次引导。
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({ id: "guidance-to-cancel", status: "queued" }),
+    ]);
+    // 撤回之后不该再落出引导气泡。
+    confirmGuidanceResponse("session-one");
+    expect(useChatStore.getState().sessionMessages["session-one"]
+      .find((item) => item.id === "assistant-guidance-cancel")?.process?.entries).toEqual([]);
+  });
+
+  it("已送达的引导撤回失败，队列项保持等待状态", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.getState().addMessage({
+      id: "assistant-guidance-delivered",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      isStreaming: true,
+      process: { startedAt: 1, expanded: true, entries: [] },
+    }, "session-one");
+    useChatStore.getState().upsertQueuedMessage({
+      id: "guidance-delivered",
+      sessionId: "session-one",
+      displayContent: "已经发出去了",
+      sendContent: "已经发出去了",
+      createdAt: 2,
+      status: "queued",
+    });
+    electronAPI.agentSendGuidance.mockResolvedValueOnce({ success: true, guidanceId: "g-2" });
+    electronAPI.agentCancelGuidance.mockResolvedValueOnce({ success: true, cancelled: false, reason: "delivered" });
+
+    await SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-delivered");
+    await expect(SessionCommandCoordinator.cancelQueuedGuidance("session-one", "guidance-delivered"))
+      .rejects.toThrow("已送达模型");
+
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
+      expect.objectContaining({ id: "guidance-delivered", status: "sending" }),
+    ]);
+    // 在途状态是模块级缓存，不清掉会串到下一条用例里。
+    clearPendingGuidanceConfirmation("session-one");
+  });
+
   it("records a queued guidance message as a user-style process entry", async () => {
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     useChatStore.getState().addMessage({
@@ -386,7 +458,7 @@ describe("SessionCommandCoordinator", () => {
       id: "guidance-queued-guidance",
       kind: "user_guidance",
       toolKind: "guidance_messages",
-      title: "引导",
+      title: "插话",
       detail: "继续检查 [file: README.md]",
       state: "completed",
       guidanceDocument: document,
@@ -395,10 +467,10 @@ describe("SessionCommandCoordinator", () => {
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
   });
 
-  it("keeps the first pending guidance when another queue item is guided", async () => {
+  it("允许多条引导同时在途，并按到达顺序确认", async () => {
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     useChatStore.getState().addMessage({
-      id: "assistant-guidance-busy",
+      id: "assistant-guidance-queue",
       role: "assistant",
       content: "",
       timestamp: 1,
@@ -417,19 +489,33 @@ describe("SessionCommandCoordinator", () => {
     }
 
     await SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-first");
-    await expect(SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-second"))
-      .rejects.toThrow("GUIDANCE_BUSY");
+    await SessionCommandCoordinator.guideQueuedMessage("session-one", "guidance-second");
 
-    expect(electronAPI.agentSendGuidance).toHaveBeenCalledTimes(1);
+    // 两条都真的发出去了：引导排队由后端按顺序注入，不该在前面就拦住。
+    expect(electronAPI.agentSendGuidance).toHaveBeenCalledTimes(2);
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "guidance-first", status: "sending" }),
-      expect.objectContaining({ id: "guidance-second", status: "queued" }),
+      expect.objectContaining({ id: "guidance-second", status: "sending" }),
     ]));
 
+    // 每次确认对应最老的一条：先第一条。
     confirmGuidanceResponse("session-one");
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
-      expect.objectContaining({ id: "guidance-second", status: "queued" }),
+      expect.objectContaining({ id: "guidance-second", status: "sending" }),
     ]);
+    expect(useChatStore.getState().sessionMessages["session-one"]
+      .find((item) => item.id === "assistant-guidance-queue")?.process?.entries)
+      .toEqual([expect.objectContaining({ id: "guidance-guidance-first" })]);
+
+    // 第二次确认落下第二条，队列清空。
+    confirmGuidanceResponse("session-one");
+    expect(useChatStore.getState().messageQueues["session-one"]).toEqual([]);
+    expect(useChatStore.getState().sessionMessages["session-one"]
+      .find((item) => item.id === "assistant-guidance-queue")?.process?.entries)
+      .toEqual([
+        expect.objectContaining({ id: "guidance-guidance-first" }),
+        expect.objectContaining({ id: "guidance-guidance-second" }),
+      ]);
   });
 
   it("keeps an OpenCode response-start event that arrives before guidance IPC resolves", async () => {

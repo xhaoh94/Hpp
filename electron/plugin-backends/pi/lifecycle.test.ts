@@ -163,6 +163,34 @@ describe("Pi lifecycle", () => {
     (agent as unknown as { process: unknown }).process = null;
   });
 
+  it("emits one guidance_response_started per delivered guidance", async () => {
+    const child = new FakePiProcess();
+    respondToInit(child, "C:\\sessions\\pi.jsonl");
+    spawnMock.mockReturnValue(child);
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    await agent.init("C:\\project");
+    internals.handleWorkerMessage({ type: "agent_start" });
+
+    // 两条引导连着进：Pi 的 steer 队列本来就支持多条，确认必须一条对一条。
+    await agent.sendGuidance("第一条引导");
+    await agent.sendGuidance("第二条引导");
+
+    internals.handleWorkerMessage({ type: "guidance_delivered" });
+    expect(events.filter((event) => event.type === "guidance_response_started")).toHaveLength(1);
+
+    internals.handleWorkerMessage({ type: "guidance_delivered" });
+    expect(events.filter((event) => event.type === "guidance_response_started")).toHaveLength(2);
+
+    // 多出来的交付信号不该凭空造事件。
+    internals.handleWorkerMessage({ type: "guidance_delivered" });
+    expect(events.filter((event) => event.type === "guidance_response_started")).toHaveLength(2);
+    (agent as unknown as { process: unknown }).process = null;
+  });
+
   it("forwards and hot-updates the generic Agent compaction config", async () => {
     const child = new FakePiProcess();
     const commands: Record<string, unknown>[] = [];

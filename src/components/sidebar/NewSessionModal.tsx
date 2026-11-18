@@ -21,19 +21,17 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
   const [probe, setProbe] = useState<WorktreeProbeResult | null>(null);
   const [probeLoading, setProbeLoading] = useState(!defaultWorkspace);
   const [useWorktree, setUseWorktree] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || busy) return;
+      if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
+  }, [onClose]);
 
   useEffect(() => {
     if (defaultWorkspace) {
@@ -74,18 +72,12 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
     return "主工作区保持干净；Agent 会在独立分支和目录中工作。";
   }, [defaultWorkspace, probe, probeLoading]);
 
-  const submit = async (event: FormEvent) => {
+  const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await onConfirm({ workspaceMode: useWorktree && canUseWorktree ? "worktree" : "shared" });
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
+    // 会话页签会立刻建好，弹窗不必等 agent 启动：点创建就关闭。
+    // 创建/启动的失败由 onConfirm 侧自己上报（showAppAlert），不再堵在这里。
+    onClose();
+    void onConfirm({ workspaceMode: useWorktree && canUseWorktree ? "worktree" : "shared" });
   };
 
   return createPortal(
@@ -93,7 +85,7 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
       className="project-modal-overlay"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose();
+        if (event.target === event.currentTarget) onClose();
       }}
     >
       <form
@@ -115,7 +107,6 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
             className="project-modal-close"
             aria-label="关闭新建会话弹窗"
             title="关闭"
-            disabled={busy}
           >
             <X size={16} />
           </button>
@@ -127,7 +118,7 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
                 type="checkbox"
                 checked={useWorktree && canUseWorktree}
                 onChange={(event) => setUseWorktree(event.target.checked)}
-                disabled={!canUseWorktree || busy}
+                disabled={!canUseWorktree}
               />
               <GitBranch size={14} />
               <span>
@@ -140,17 +131,14 @@ export function NewSessionModal({ project, agent, onClose, onConfirm, onOpenGit,
           {!defaultWorkspace && probe?.supported && !probe.clean && (
             <div className="new-session-git-hint">
               <span>需要先让主工作区变干净，才能创建独立工作区。</span>
-              <button type="button" className="btn btn-secondary" onClick={onOpenGit} disabled={busy}>
+              <button type="button" className="btn btn-secondary" onClick={onOpenGit}>
                 打开 Git 工作台
               </button>
             </div>
           )}
-          {error && <div className="new-session-error">{error}</div>}
           <div className="form-actions">
-            <button type="button" onClick={onClose} className="btn btn-cancel" disabled={busy}>取消</button>
-            <button type="submit" className="btn btn-primary" disabled={busy}>
-              {busy ? "创建中…" : "创建会话"}
-            </button>
+            <button type="button" onClick={onClose} className="btn btn-cancel">取消</button>
+            <button type="submit" className="btn btn-primary">创建会话</button>
           </div>
         </div>
       </form>

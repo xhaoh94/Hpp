@@ -25,6 +25,7 @@ describe("subagent events", () => {
       subagents: [{
         id: "thread-1",
         label: "Backend commentary",
+        title: "检查后端",
         status: "running",
         prompt: "检查后端实现",
         model: "gpt-5",
@@ -48,6 +49,7 @@ describe("subagent events", () => {
       subagents: [expect.objectContaining({
         id: "thread-1",
         label: "Backend commentary",
+        title: "检查后端",
         status: "running",
         prompt: "检查后端实现",
       })],

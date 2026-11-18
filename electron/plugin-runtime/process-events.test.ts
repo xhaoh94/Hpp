@@ -77,11 +77,27 @@ describe("process event normalization", () => {
       description: "查看空闲时长的渲染位置",
     });
 
-    // 没有 description 时不下发该字段，渲染层自然退回「已运行 bash」。
+    // 没有 description 时按命令推断一句中文描述，命令明细不再只显示「命令」。
     expect(normalizeToolEvent("tool_start", {
       toolName: "bash",
       args: { command: "ls" },
-    })).not.toHaveProperty("description");
+    })).toMatchObject({
+      command: "ls",
+      description: "列出目录",
+    });
+  });
+
+  it("joins argv-style commands and infers the verb behind a shell wrapper", () => {
+    // Codex 的 shell 调用是数组；展示时要拼成一行，描述要跳过 bash/-lc 取真正的命令。
+    expect(normalizeToolEvent("tool_start", {
+      toolName: "shell",
+      toolCallId: "call-argv",
+      args: { command: ["bash", "-lc", "grep -rn idleDuration src"] },
+    })).toMatchObject({
+      toolKind: "run_command",
+      command: "bash -lc grep -rn idleDuration src",
+      description: "检索内容",
+    });
   });
 
   it("preserves Pi file-read errors from the tool result", () => {

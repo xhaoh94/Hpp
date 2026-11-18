@@ -393,6 +393,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:importRead"),
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) =>
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
+  agentCancelGuidance: (sessionId: string | undefined, guidanceId: string) =>
+    ipcRenderer.invoke("agent:cancelGuidance", sessionId, guidanceId),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
   agentGetModels: (sessionId?: string, agentId?: string) =>
     ipcRenderer.invoke("agent:getModels", sessionId, agentId),
@@ -402,6 +404,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:setModel", provider, modelId, sessionId),
   agentSetThinkingLevel: (level: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:setThinkingLevel", level, sessionId),
+  agentCompactSession: (sessionId?: string) =>
+    ipcRenderer.invoke("agent:compactSession", sessionId),
   agentSendUIResponse: (response: AgentUIResponse) =>
     ipcRenderer.invoke("agent:sendUIResponse", response),
 

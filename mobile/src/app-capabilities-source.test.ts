@@ -197,7 +197,7 @@ describe("mobile capability source constraints", () => {
       guideSource.indexOf("} catch (error)", guideSource.indexOf("try {")),
     );
     expect(successBranch).toContain('await runCommand("session.queue.guide"');
-    expect(successBranch).toContain("showFloatingToast(\"已转为引导\")");
+    expect(successBranch).toContain("showFloatingToast(\"已转为插话\")");
     expect(successBranch).not.toContain("filter((queued) => queued.id !== item.id)");
     expect(appSource).toContain('name === "session.queue.updated" && Array.isArray(data.queue)');
   });

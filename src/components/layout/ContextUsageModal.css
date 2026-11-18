@@ -30,6 +30,57 @@
   font-weight: 600;
 }
 
+/* 标题与压缩按钮成一组，按钮紧贴标题而不是被推到最右。 */
+.context-usage-title-group {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 压缩按钮：跟标题同一行，颜色比正文弱，悬停才提到主色。 */
+.context-usage-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.context-usage-compact:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-color) 55%, var(--border-color));
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.context-usage-compact:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.context-usage-compact.is-compacting {
+  color: var(--accent-color);
+  opacity: 1;
+}
+
+.context-usage-compact.is-compacting svg {
+  animation: context-usage-compact-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes context-usage-compact-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
 .context-usage-close {
   display: grid;
   width: 22px;

@@ -154,6 +154,13 @@
   margin-bottom: 14px;
 }
 
+/* 浏览按钮和左边的路径输入框等高，避免一行里两个高度。 */
+.project-modal .path-input-row > .path-input,
+.project-modal .path-input-row > .btn-browse {
+  height: 34px;
+  box-sizing: border-box;
+}
+
 .project-modal .form-actions {
   gap: 8px;
 }
@@ -995,13 +1002,10 @@
 
 .add-project-error {
   margin: -2px 0 10px;
-  padding: 7px 9px;
-  border: 1px solid rgba(244, 67, 54, 0.4);
-  border-radius: 5px;
-  background: rgba(244, 67, 54, 0.08);
   color: #d9363e;
   font-size: 11px;
   line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

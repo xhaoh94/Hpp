@@ -61,6 +61,8 @@ const getDefaultThinkingLevel = () => {
 
 let projectPath = "";
 let threadId = null;
+// 手动压缩在等 thread/compacted；thread/compact/start 的应答只代表请求已受理。
+let manualCompactionSettle = null;
 let appServer = null;
 // stdout/stdin 断管不等于 app-server 已退出；保留最近 child 供 disposeSession 回收。
 let appServerForCleanup = null;
@@ -2178,6 +2180,9 @@ const handleServerNotification = (method, params) => {
         contextCompactionEmitted = true;
         send({ type: "context_compaction", id: compactionId });
       }
+      const settle = manualCompactionSettle;
+      manualCompactionSettle = null;
+      settle?.();
       break;
     }
     case "warning":
@@ -2515,6 +2520,33 @@ const handleCommand = async (command) => {
             : null;
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
+      case "compact": {
+        if (promptRunning) throw new Error("SESSION_BUSY");
+        await startAppServer();
+        const compactThreadId = await ensureThread();
+        const compactionId = `codex-compact-${command.id}`;
+        send({ type: "context_compaction", id: compactionId, phase: "started" });
+        const settled = new Promise((resolve) => { manualCompactionSettle = resolve; });
+        try {
+          // 新版 app-server 用 thread/compact/start；旧版没有该路由时
+          // 会回 -32601，直接如实报错而不是默默什么都没做。
+          await rpcRequest("thread/compact/start", { threadId: compactThreadId }, 180_000);
+        } catch (error) {
+          manualCompactionSettle = null;
+          send({
+            type: "context_compaction",
+            id: compactionId,
+            phase: "failed",
+            detail: error?.message || String(error),
+          });
+          throw error;
+        }
+        // 等真实的 thread/compacted；超时也放行，避免界面一直卡住。
+        await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 180_000))]);
+        send({ type: "context_compaction", id: compactionId, phase: "completed" });
+        send({ type: "compacted", id: command.id });
+        break;
+      }
       case "setThinkingLevel":
         thinkingLevel = String(command.level || "medium");
         send({ type: "thinking_level_changed", id: command.id, level: thinkingLevel });

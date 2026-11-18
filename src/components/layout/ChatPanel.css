@@ -3081,27 +3081,43 @@
   color: var(--danger-color);
 }
 
+.chat-subagent-usage-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* 模型名是 token 那行文本的一部分，不单独戴胶囊帽子。 */
+.chat-subagent-model {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-subagent-usage-inline {
   color: var(--text-secondary);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
+/* 一级展开比胶囊标题多一句上下文：最多三行，多了截断，全文走 title 悬停。 */
 .chat-subagent-summary-text {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* 展开详情后摘要收敛到最多三行，避免摘要与流程重复占满屏。 */
-.chat-subagent-summary-text.collapsed {
   display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 .chat-subagent-detail-toggle {
@@ -4413,6 +4429,14 @@ body.chat-questionnaire-resizing {
   color: #f87171;
   font-size: 11px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 引导已送出、还没被注入时的状态标注；旁边是图标形式的「撤回」。 */
+.chat-queue-state {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -7474,6 +7498,12 @@ body.chat-questionnaire-resizing .chat-bubble {
   background: var(--border-color);
 }
 
+/* 空会话占位：保持状态栏的位置与高度，只放一行固定文案。 */
+.chat-status-bar-empty span {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
 .chat-status-bar .chat-context-ring,
 .chat-status-bar .chat-header-token-usage,
 .chat-status-bar .chat-header-handoff,
@@ -7517,6 +7547,13 @@ body.chat-questionnaire-resizing .chat-bubble {
   inset: auto;
   flex: 0 0 auto;
 }
+
+/* 状态条里的上下文图标按占比变色：上面的 .chat-status-bar 规则会覆盖
+   .chat-context-ring.warning 等基础颜色，所以这里用更高权重重新声明。 */
+.chat-status-bar .chat-context-ring.warning { color: var(--warning, #d9a441); }
+.chat-status-bar .chat-context-ring.danger { color: #e07a3f; }
+.chat-status-bar .chat-context-ring.critical { color: var(--error-color, #ef4444); }
+.chat-status-bar .chat-context-ring.unknown { color: var(--text-tertiary, var(--text-secondary)); }
 
 /* 子任务结束后展开的消耗摘要 */
 .chat-subagent-usage {

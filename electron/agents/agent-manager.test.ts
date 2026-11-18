@@ -545,9 +545,7 @@ describe("AgentManager plugin removal", () => {
 
     const config = {
       enabled: true,
-      defaultModelMode: "custom",
-      defaultModel: "provider/default",
-      profiles: { scout: { modelMode: "custom", model: "provider/scout" } },
+      pool: [{ model: "provider/scout", tier: "fast" }],
     };
     await expect(getHandler("agent:setAgentSubagentConfig")({}, "pi", config)).resolves.toEqual({
       success: true,
@@ -556,9 +554,8 @@ describe("AgentManager plugin removal", () => {
     // 热更新直接下发到运行中的会话，无需重载；未声明能力的 agent 不受影响。
     expect(piBackend.setSubagentConfig).toHaveBeenCalledWith({
       enabled: true,
-      defaultModelMode: "custom",
-      defaultModel: "provider/default",
-      profiles: { scout: { modelMode: "custom", model: "provider/scout" } },
+      poolEnabled: true,
+      pool: [{ model: "provider/scout" }],
     });
     expect(otherBackend.setSubagentConfig).not.toHaveBeenCalled();
   });

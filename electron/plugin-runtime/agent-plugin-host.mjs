@@ -183,8 +183,10 @@ const methods = {
     backends.set(backendId, backend);
     return {
       sendGuidance: typeof backend.sendGuidance === "function",
+      cancelGuidance: typeof backend.cancelGuidance === "function",
       forkSession: typeof backend.forkSession === "function",
       listActions: typeof backend.listActions === "function",
+      compact: typeof backend.compact === "function",
     };
   },
   async backendCall({ backendId, method, args = [] }) {

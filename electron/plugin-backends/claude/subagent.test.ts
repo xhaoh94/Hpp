@@ -95,6 +95,8 @@ describe("Claude subagent bridge", () => {
       subagents: [expect.objectContaining({
         id: "agent-explore-1",
         label: "Explore",
+        // Task 没有 title 参数，description 简述被当界面标题透传。
+        title: "Inspect the backend",
         status: "completed",
         model: "claude-sonnet-4-6",
         message: "Backend inspection complete.",
@@ -146,6 +148,31 @@ describe("Claude subagent bridge", () => {
         id: "task-background-1",
         label: "Research",
         status: "running",
+      })],
+    }));
+  });
+
+  it("prefers the worker-forwarded title over the Task description", () => {
+    const events: AgentEvent[] = [];
+    const agent = new ClaudeSDKAgent("session-title", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as ClaudeInternals;
+    internals.turnActive = true;
+
+    internals.handleWorkerMessage({
+      type: "subagent_started",
+      toolUseId: "tool-title-1",
+      taskId: "agent-title-1",
+      taskType: "worker",
+      description: "Run Claude plugin related tests to verify the changes",
+      title: "审查风险",
+      prompt: "运行测试并验证插件改动",
+      status: "running",
+    });
+
+    expect(getSubagentEvents(events).at(-1)).toEqual(expect.objectContaining({
+      subagents: [expect.objectContaining({
+        id: "agent-title-1",
+        title: "审查风险",
       })],
     }));
   });

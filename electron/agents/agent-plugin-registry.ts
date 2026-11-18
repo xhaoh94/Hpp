@@ -271,22 +271,11 @@ function normalizeSubagentCapabilities(value: unknown): AgentCapabilities["subag
     || value.modelSelection === "inherit-or-custom"
     ? value.modelSelection
     : "inherit-or-custom";
-  const profiles = Array.isArray(value.profiles)
-    ? value.profiles.flatMap((rawProfile) => {
-        if (!isRecord(rawProfile)) return [];
-        const name = asString(rawProfile.name);
-        if (!name || !/^[A-Za-z0-9._:-]+$/.test(name)) return [];
-        return [{
-          name,
-          label: asString(rawProfile.label) || undefined,
-          description: asString(rawProfile.description) || undefined,
-        }];
-      })
-    : undefined;
   return {
     configurable: value.configurable === true,
     modelSelection,
-    ...(profiles && profiles.length > 0 ? { profiles } : {}),
+    // 模型池要后端真的能按池调模型才亮出来，缺省 false：老插件不该凭空多出一块设置。
+    ...(value.modelPool === true ? { modelPool: true } : {}),
   };
 }
 
@@ -342,10 +331,7 @@ function cloneCapabilities(capabilities: AgentCapabilities): AgentCapabilities {
       ? { ...capabilities.compaction }
       : "none",
     subagent: capabilities.subagent && capabilities.subagent !== "none"
-      ? {
-          ...capabilities.subagent,
-          profiles: capabilities.subagent.profiles?.map((profile) => ({ ...profile })),
-        }
+      ? { ...capabilities.subagent }
       : "none",
     builtinExtensions: capabilities.builtinExtensions && capabilities.builtinExtensions !== "none"
       ? {
@@ -2377,7 +2363,30 @@ export class AgentPluginRegistry {
     };
 
     if (capabilities.sendGuidance) {
-      wrapped.sendGuidance = (message, images, sendOptions) => pluginProcess.backendCall(backendId, "sendGuidance", [message, images, sendOptions]) as Promise<void>;
+      wrapped.sendGuidance = (message, images, sendOptions) => pluginProcess.backendCall(backendId, "sendGuidance", [message, images, sendOptions]) as Promise<{ guidanceId?: string } | void>;
+    }
+    if (capabilities.cancelGuidance) {
+      wrapped.cancelGuidance = (guidanceId) => pluginProcess.backendCall(
+        backendId,
+        "cancelGuidance",
+        [guidanceId],
+      ) as Promise<{ cancelled: boolean; reason?: string }>;
+    }
+    if (capabilities.compact) {
+      wrapped.compact = async () => {
+        // 手动压缩本身是一段独立生命周期：它不属于当前回合，也不能让
+        // 渲染层误以为用户又发了一轮消息。只把后端从空闲推进到压缩态。
+        setAuthoritativeIdle(false);
+        try {
+          await pluginProcess.backendCall(backendId, "compact");
+        } finally {
+          try {
+            await refreshIdleFromBackend();
+          } catch {
+            // 空闲查询失败不覆盖压缩本身的错误；渲染层会按压缩事件收尾。
+          }
+        }
+      };
     }
     if (capabilities.forkSession) {
       wrapped.forkSession = async (target) => {

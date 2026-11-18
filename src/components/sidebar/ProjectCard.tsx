@@ -252,20 +252,31 @@ export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRe
     setNewSessionAgent(agent);
   };
 
-  const createSessionWith = async (agent: AgentDescriptor, workspaceMode: "shared" | "worktree") => {
+  const createSessionWith = async (
+    agent: AgentDescriptor,
+    workspaceMode: "shared" | "worktree",
+    deferRuntime = false,
+  ) => {
     await SessionCommandCoordinator.createSession({
       projectId: project.id,
       agentId: agent.id,
       activate: true,
       verifyInstalled: false,
       workspaceMode,
+      deferRuntime,
     });
     setNewSessionAgent(null);
   };
 
   const handleConfirmNewSession = async ({ workspaceMode }: { workspaceMode: "shared" | "worktree" }) => {
     if (!newSessionAgent) return;
-    await createSessionWith(newSessionAgent, workspaceMode);
+    // deferRuntime：会话页签建好就关弹窗，不让用户干等 agent 启动。
+    // 弹窗已经关了，这里失败只能弹全局提示，不能靠弹窗内的 error 状态。
+    try {
+      await createSessionWith(newSessionAgent, workspaceMode, true);
+    } catch (error) {
+      showAppAlert(`创建会话失败：${getErrorMessage(error)}`);
+    }
   };
 
   const handleSelectSession = (session: ProjectSession) => {

@@ -214,4 +214,17 @@ describe("ProjectCard worktree session option", () => {
     expect(newSessionSource).toContain("onOpenGit");
     expect(newSessionSource).toContain("打开 Git 工作台");
   });
+
+  it("closes the new-session modal immediately without waiting for agent startup", () => {
+    // 点创建就关窗：不再 await onConfirm，也没有 busy「创建中…」状态。
+    expect(newSessionSource).toContain("    onClose();");
+    expect(newSessionSource).toContain("    void onConfirm(");
+    expect(newSessionSource).not.toContain("await onConfirm");
+    expect(newSessionSource).not.toContain("创建中");
+    expect(newSessionSource).not.toContain("setBusy");
+    // 会话记录建好就返回，后端初始化放后台。
+    expect(projectCardSource).toContain("createSessionWith(newSessionAgent, workspaceMode, true)");
+    expect(projectCardSource).toContain("      deferRuntime,");
+    expect(projectCardSource).toContain("创建会话失败：");
+  });
 });

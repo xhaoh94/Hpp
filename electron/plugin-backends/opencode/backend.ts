@@ -740,6 +740,12 @@ export class OpenCodeAgent {
   private projectPath = "";
   private sessionId: string | null = null;
   private models: AgentModel[] = [];
+  /**
+   * 在途的模型目录请求。init 之后 agent-manager 和渲染进程常会同时要目录，
+   * 共用一次 HTTP 请求；killProcess 会把它置空并递增 generation 丢掉旧结果。
+   */
+  private modelsRequest: Promise<AgentModel[]> | null = null;
+  private modelsGeneration = 0;
   private currentModelId: string | null = null;
   private currentProviderId: string | null = null;
   private currentThinkingLevel = "medium";
@@ -950,13 +956,18 @@ export class OpenCodeAgent {
   }
 
   private async waitForReady(childProcess: ChildProcess): Promise<void> {
-    const maxAttempts = 60;
-    for (let i = 0; i < maxAttempts; i++) {
+    // 自适应轮询：冷启动通常 300–800ms，500ms 的固定粒度平均会白等 ~250ms。
+    // 前 1.5 秒用 100ms 粒度尽快命中，之后退到 300ms 减少无谓请求。
+    const readyDeadline = Date.now() + 30_000;
+    let attempt = 0;
+    while (Date.now() < readyDeadline) {
       if (this.process !== childProcess) {
         throw this.processError || new Error("OpenCode exited before becoming ready");
       }
       try {
-        const result = asRecord(await this.httpGet(this.protocol.healthPaths()));
+        // 健康探测必须是短超时：serve 尚未监听时是立即 ECONNREFUSED，
+        // 但端口已开却卡在初始化时，默认 10s 超时会吃掉整个启动预算。
+        const result = asRecord(await this.httpGet(this.protocol.healthPaths(), 2000));
         // V1: { healthy: true }；V2: /api/info 返回 { version, pid, urls }。
         if (result.healthy || typeof result.version === "string") {
           this.emitEvent({ type: "agent_ready", agentId: "opencode", mock: false });
@@ -974,7 +985,8 @@ export class OpenCodeAgent {
           console.log("[opencode] V1 health endpoint missing, switching to protocol=v2");
         }
       }
-      await new Promise((r) => setTimeout(r, 500));
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, attempt <= 15 ? 100 : 300));
     }
     await this.killProcess();
     throw new Error("OpenCode server did not become ready within 30 seconds");
@@ -1216,9 +1228,11 @@ export class OpenCodeAgent {
   }
 
   async listActions(_options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]> {
+    // 动作目录只用于填充命令/技能面板和校验一次调用；端点挂起时不该让 UI
+    // 等到默认的 10s，5s 足够本地服务返回。
     const [skillsResult, commandsResult] = await Promise.allSettled([
-      this.httpGet(this.protocol.skillsPaths()),
-      this.httpGet(this.protocol.commandsPaths()),
+      this.httpGet(this.protocol.skillsPaths(), 5000),
+      this.httpGet(this.protocol.commandsPaths(), 5000),
     ]);
     const actions = [
       ...(skillsResult.status === "fulfilled" ? normalizeOpenCodeCatalog(skillsResult.value, "skill") : []),
@@ -1239,8 +1253,12 @@ export class OpenCodeAgent {
     const name = String(action.name || "").trim().replace(/^\//, "");
     if (!kind || !name) throw new Error("ACTION_NOT_SUPPORTED: Invalid OpenCode action");
     const key = `${kind}:${name}`;
-    await this.listActions();
-    if (!this.actionKeys.has(key)) throw new Error(`ACTION_NOT_FOUND: ${name}`);
+    // 命令面板通常刚拉过目录，缓存命中时不必为每条命令再走两次 HTTP。
+    // 缓存由 listActions 填充（面板刷新/重载配置都会更新），命中即可信。
+    if (!this.actionKeys.has(key)) {
+      await this.listActions();
+      if (!this.actionKeys.has(key)) throw new Error(`ACTION_NOT_FOUND: ${name}`);
+    }
     return { kind, name };
   }
 
@@ -1407,7 +1425,11 @@ export class OpenCodeAgent {
     this.emitEvent({ type: "context_compaction", id, phase: "started" });
   }
 
-  private emitCompactionFinished(value: unknown, phase: "completed" | "interrupted" = "completed", detail?: unknown) {
+  private emitCompactionFinished(
+    value: unknown,
+    phase: "completed" | "interrupted" | "failed" = "completed",
+    detail?: unknown,
+  ) {
     const id = this.normalizeCompactionMessageId(value) || this.activeCompactionId;
     if (!id || this.settledCompactionIds.has(id)) return;
     this.settledCompactionIds.add(id);
@@ -2366,8 +2388,9 @@ export class OpenCodeAgent {
     let errorMessage = "";
     if (this.sessionId) {
       try {
-        // 2.x 没有 abort，只有 POST /api/session/:id/interrupt。
-        await this.httpPost(this.protocol.abortPaths(this.sessionId), {});
+        // 2.x 没有 abort，只有 POST /api/session/:id/interrupt。停止按钮的
+        // 反馈不该被卡住的 interrupt 请求拖到 30s，5s 足够本地服务应答。
+        await this.httpPost(this.protocol.abortPaths(this.sessionId), {}, 5000);
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);
       }
@@ -2431,9 +2454,18 @@ export class OpenCodeAgent {
 
   /** Get available models from providers */
   async getModels(): Promise<AgentModel[]> {
-    console.log("[opencode] getModels called, cached:", this.models.length, "port:", this.port);
     if (this.models.length > 0) return this.models;
+    if (this.modelsRequest) return this.modelsRequest;
+    const generation = this.modelsGeneration;
+    let request: Promise<AgentModel[]>;
+    request = this.fetchModels(generation).finally(() => {
+      if (this.modelsRequest === request) this.modelsRequest = null;
+    });
+    this.modelsRequest = request;
+    return request;
+  }
 
+  private async fetchModels(generation: number): Promise<AgentModel[]> {
     this.modelVariants.clear();
     this.actionKeys.clear();
     try {
@@ -2474,7 +2506,7 @@ export class OpenCodeAgent {
           });
         }
         if (flatModels.length > 0) {
-          this.models = flatModels;
+          if (generation === this.modelsGeneration) this.models = flatModels;
           return this.models;
         }
       }
@@ -2538,7 +2570,7 @@ export class OpenCodeAgent {
           }
         }
         if (models.length > 0) {
-          this.models = models;
+          if (generation === this.modelsGeneration) this.models = models;
           return this.models;
         }
       }
@@ -2562,6 +2594,34 @@ export class OpenCodeAgent {
       await this.restartRuntimeForCompaction();
     }
     this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
+  }
+
+  /** 手动压缩：调用 OpenCode 的 summarize / compact 端点，进度由 SSE 的 compaction 事件驱动。 */
+  async compact(): Promise<void> {
+    if (!this.process || !this.sessionId) throw new Error("OpenCode is not running");
+    if (!this.isIdle()) throw new Error("SESSION_BUSY");
+    const compactionId = `opencode-compact-${Date.now()}`;
+    // 走统一入口：2.x 的完成通知来自 SSE 的 session.compacted，
+    // 只有记下 activeCompactionId 才能把本地这条 divider 收掉。
+    this.emitCompactionStarted(compactionId);
+    try {
+      await this.httpPost(
+        this.protocol.summarizePaths(this.sessionId),
+        this.protocol.summarizeBody(this.currentProviderId, this.currentModelId),
+        180_000,
+      );
+    } catch (error) {
+      this.emitCompactionFinished(
+        compactionId,
+        "failed",
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    }
+    // 1.x 的 summarize 是同步的：HTTP 返回即压缩完成。
+    // 2.x 的 /compact 只是「受理」（durably admit），真正执行在下一个 step
+    // 边界，完成事件由 SSE 的 session.compacted 驱动，这里不能提前收尾。
+    if (this.protocol.id !== "v2") this.emitCompactionFinished(compactionId);
   }
 
   async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
@@ -2610,6 +2670,8 @@ export class OpenCodeAgent {
     this.resetSessionRuntimeSync();
     this.activeCompactionSignature = "";
     this.models = [];
+    this.modelsRequest = null;
+    this.modelsGeneration += 1;
     this.modelVariants.clear();
     if (childProcess) await this.killProcessTree(childProcess);
     const runtimeConfigPath = this.runtimeConfigPath;
@@ -2628,12 +2690,40 @@ export class OpenCodeAgent {
   private async restartRuntimeForCompaction(): Promise<void> {
     if (!this.process || !this.projectPath) return;
     if (!this.isIdle()) throw new Error("OpenCode 会话正在运行，无法立即重载上下文压缩设置");
+    // 2.x 的 POST /api/location/reload 会原地重建配置，改压缩模型/思考等级
+    // 不必杀掉 serve 再冷启动；只有 1.x（无该端点）或热重载失败时才重启。
+    if (await this.reloadRuntimeConfig()) return;
     const sessionId = this.sessionId || undefined;
     await this.init(this.projectPath, sessionId, {
       hostSystemPrompt: this.hostSystemPrompt,
       compaction: this.compactionConfig,
     });
     await this.getModels();
+  }
+
+  /**
+   * 把新的 runtime config 写盘后让 OpenCode 热重载，成功返回 true。
+   * 端点缺失（1.x）或服务端拒绝时返回 false，由调用方回退到进程重启。
+   */
+  private async reloadRuntimeConfig(): Promise<boolean> {
+    const paths = this.protocol.reloadPaths();
+    if (!paths) return false;
+    const startedAt = Date.now();
+    try {
+      // 与重启路径保持一致：用户可能在 HPP 外改过 opencode.json，
+      // 热重载前重新读取，否则新加的 provider 要等下次完整重启才生效。
+      this.openCodeConfigSource = readOpenCodeConfigContent();
+      await this.writeRuntimeConfig();
+      await this.httpSend("POST", paths);
+    } catch (error) {
+      console.warn("[opencode] config reload failed, restarting runtime:", error);
+      return false;
+    }
+    // reload 会重建 location，会话级 agent/model/instructions 需要重新下发。
+    this.resetSessionRuntimeSync();
+    this.activeCompactionSignature = this.getCompactionSignature(this.compactionConfig);
+    console.log(`[opencode] config reloaded in ${Date.now() - startedAt}ms`);
+    return true;
   }
 
   private async writeRuntimeConfig(): Promise<void> {
@@ -2655,7 +2745,8 @@ export class OpenCodeAgent {
       return;
     }
     await new Promise<void>((resolve) => {
-      execFile("taskkill", ["/pid", String(childProcess.pid), "/t", "/f"], { windowsHide: true }, () => resolve());
+      // taskkill 自己也可能挂住；5s 后无论如何继续，避免阻塞重启流程。
+      execFile("taskkill", ["/pid", String(childProcess.pid), "/t", "/f"], { windowsHide: true, timeout: 5000 }, () => resolve());
     });
   }
 
@@ -2695,8 +2786,11 @@ export class OpenCodeAgent {
         `http://${this.host}:${this.port}${path}`,
         { timeout: timeoutMs, headers: this.authHeaders() },
         (res) => {
+          // 不设编码时每个 chunk 会各自 Buffer.toString()，UTF-8 多字节字符
+          // 恰好跨 chunk 边界时会被截成乱码（中文模型名/回复内容都会中招）。
+          res.setEncoding("utf-8");
           let body = "";
-          res.on("data", (chunk) => (body += chunk));
+          res.on("data", (chunk: string) => (body += chunk));
           res.on("end", () => {
             const statusCode = res.statusCode || 0;
             if (statusCode < 200 || statusCode >= 300) {
@@ -2712,25 +2806,30 @@ export class OpenCodeAgent {
     });
   }
 
-  private async httpPost(paths: string | string[], data: unknown): Promise<unknown> {
-    return this.httpSend("POST", paths, data);
+  private async httpPost(paths: string | string[], data: unknown, timeoutMs = 30000): Promise<unknown> {
+    return this.httpSend("POST", paths, data, timeoutMs);
   }
 
-  private async httpDelete(paths: string | string[], data?: unknown): Promise<unknown> {
-    return this.httpSend("DELETE", paths, data);
+  private async httpDelete(paths: string | string[], data?: unknown, timeoutMs = 30000): Promise<unknown> {
+    return this.httpSend("DELETE", paths, data, timeoutMs);
   }
 
-  private async httpPut(paths: string | string[], data?: unknown): Promise<unknown> {
-    return this.httpSend("PUT", paths, data);
+  private async httpPut(paths: string | string[], data?: unknown, timeoutMs = 30000): Promise<unknown> {
+    return this.httpSend("PUT", paths, data, timeoutMs);
   }
 
-  private async httpSend(method: HttpMethod, paths: string | string[], data?: unknown): Promise<unknown> {
+  private async httpSend(
+    method: HttpMethod,
+    paths: string | string[],
+    data?: unknown,
+    timeoutMs = 30000,
+  ): Promise<unknown> {
     const candidates = Array.isArray(paths) ? paths : [paths];
     let lastError: unknown = new Error(`OpenCode ${method} failed`);
     for (let index = 0; index < candidates.length; index += 1) {
       const path = candidates[index];
       try {
-        return await this.httpSendOnce(method, path, data);
+        return await this.httpSendOnce(method, path, data, timeoutMs);
       } catch (error) {
         lastError = error;
         if (index >= candidates.length - 1 || !isMissingEndpointError(error)) break;
@@ -2739,7 +2838,12 @@ export class OpenCodeAgent {
     throw lastError;
   }
 
-  private httpSendOnce(method: HttpMethod, path: string, data?: unknown): Promise<unknown> {
+  private httpSendOnce(
+    method: HttpMethod,
+    path: string,
+    data?: unknown,
+    timeoutMs = 30000,
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const hasBody = data !== undefined;
       const body = hasBody ? JSON.stringify(data) : "";
@@ -2753,11 +2857,13 @@ export class OpenCodeAgent {
               : {}),
             ...this.authHeaders(),
           },
-          timeout: 30000,
+          timeout: timeoutMs,
         },
         (res) => {
+          // 同 httpGetOnce：先锁定 UTF-8，避免多字节字符被 chunk 边界截坏。
+          res.setEncoding("utf-8");
           let resBody = "";
-          res.on("data", (chunk) => (resBody += chunk));
+          res.on("data", (chunk: string) => (resBody += chunk));
           res.on("end", () => {
             const statusCode = res.statusCode || 0;
             if (statusCode < 200 || statusCode >= 300) {

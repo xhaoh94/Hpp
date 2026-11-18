@@ -19,14 +19,15 @@ import { useAgentCatalogStore } from "./stores/agent-catalog-store";
 import { useChatStore } from "./stores/chat-store";
 import { useProjectStore } from "./stores/project-store";
 import {
-  getFloatingToastText,
+  getFloatingToastDetail,
+  type FloatingToastTone,
   getModelSwitchToastText,
   HPP_FLOATING_TOAST_EVENT,
   showFloatingToastMessage,
 } from "./lib/floating-toast";
 import TitleBar from "./components/layout/TitleBar";
 import { AppDialogHost } from "./components/shared/AppDialogHost";
-import { CheckCircle2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { isSameModel } from "@shared/models";
 import { SessionCommandCoordinator } from "./lib/session-command-coordinator";
 import {
@@ -59,7 +60,7 @@ export default function App() {
       .then((status) => setGlobalQuickAskReady(status.supported))
       .catch(() => setGlobalQuickAskReady(false));
   }, []);
-  const [floatingToast, setFloatingToast] = useState<{ id: number; text: string } | null>(null);
+  const [floatingToast, setFloatingToast] = useState<{ id: number; text: string; tone: FloatingToastTone } | null>(null);
   const layoutContentRef = useRef<HTMLDivElement>(null);
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const floatingToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -91,22 +92,24 @@ export default function App() {
     return () => window.removeEventListener(SHORTCUTS_UPDATED_EVENT, handleShortcutsUpdated);
   }, []);
 
-  const showFloatingToast = useCallback((text: string) => {
+  const showFloatingToast = useCallback((text: string, tone: FloatingToastTone = "success") => {
     if (floatingToastTimerRef.current) {
       clearTimeout(floatingToastTimerRef.current);
       floatingToastTimerRef.current = null;
     }
-    setFloatingToast({ id: Date.now(), text });
+    setFloatingToast({ id: Date.now(), text, tone });
+    // 错误要留够阅读时间；成功提示 2.6s 就够。
+    const duration = tone === "success" ? 2600 : 5200;
     floatingToastTimerRef.current = setTimeout(() => {
       setFloatingToast(null);
       floatingToastTimerRef.current = null;
-    }, 2600);
+    }, duration);
   }, []);
 
   useEffect(() => {
     const handleFloatingToast = (event: Event) => {
-      const text = getFloatingToastText(event);
-      if (text) showFloatingToast(text);
+      const { text, tone } = getFloatingToastDetail(event);
+      if (text) showFloatingToast(text, tone);
     };
 
     window.addEventListener(HPP_FLOATING_TOAST_EVENT, handleFloatingToast);
@@ -382,11 +385,16 @@ export default function App() {
       {floatingToast && (
         <div
           key={floatingToast.id}
-          className="app-floating-toast"
-          role="status"
-          aria-live="polite"
+          className={`app-floating-toast tone-${floatingToast.tone}`}
+          role={floatingToast.tone === "success" ? "status" : "alert"}
+          aria-live={floatingToast.tone === "success" ? "polite" : "assertive"}
+          title={floatingToast.text}
         >
-          <CheckCircle2 size={17} strokeWidth={2.2} />
+          {floatingToast.tone === "error"
+            ? <AlertCircle size={17} strokeWidth={2.2} />
+            : floatingToast.tone === "warning"
+              ? <AlertTriangle size={17} strokeWidth={2.2} />
+              : <CheckCircle2 size={17} strokeWidth={2.2} />}
           <span>{floatingToast.text}</span>
         </div>
       )}

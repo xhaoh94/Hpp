@@ -288,23 +288,30 @@ export function usePendingUIResponseActions({
     payload: AgentUIResponse,
     failureMessage?: string,
   ) => {
+    let failureDetail = "";
     try {
       const result = await window.electronAPI.agentSendUIResponse(payload);
-      if (result.success) {
+      if (result?.success) {
         // The question process has already been closed so continuation output
         // can appear after the user's answer. Keep terminal reconciliation
         // alive in case the backend accepts the answer but emits nothing else.
         refreshSessionWatchdog(targetSessionId);
         return true;
       }
+      if (typeof result?.error === "string" && result.error.trim()) {
+        failureDetail = result.error.trim();
+      }
     } catch (error) {
       console.error("[agent] send UI response failed:", error);
+      failureDetail = error instanceof Error ? error.message : String(error);
     }
     if (failureMessage) {
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
-        content: failureMessage,
+        // 后端（如 OpenCode）会返回具体校验错误（Invalid option / Missing required），
+        // 只显示「发送问卷回答失败」会让用户不知道该怎么改。
+        content: failureDetail ? `${failureMessage}：${failureDetail}` : failureMessage,
         timestamp: Date.now(),
       }, targetSessionId);
     }

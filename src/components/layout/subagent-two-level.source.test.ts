@@ -7,12 +7,20 @@ const readWorkspaceFile = (path: string) => readFileSync(resolve(process.cwd(), 
 describe("chat subagent two-level expansion", () => {
   const block = readWorkspaceFile("src/components/layout/ProcessBlock.tsx");
 
-  it("uses the task prompt as the first-level summary and keeps message for the detailed flow", () => {
-    // 一级摘要读 prompt，退回 message 首行；二级详情才用完整 message。
-    expect(block).toContain("expanded?.prompt?.trim()");
-    expect(block).toContain("expandedText.split(/\\r?\\n/)");
+  it("shows a one-line task title at the first level and keeps message for the detailed flow", () => {
+    // 胶囊/面板用极简标题；一级展开用多一句摘要，两者刻意不同。
+    expect(block).toContain("getSubagentSummaryText(fullPrompt, expandedText)");
+    // 胶囊仍用极简标题，和一级摘要刻意不同——两个 import 都要在。
+    expect(block).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
+    expect(block).toContain("getSubagentSummaryText, getSubagentTitle");
+    expect(block).toContain('title={fullPrompt || undefined}');
     expect(block).toContain("chat-subagent-summary-text");
     expect(block).toContain("chat-subagent-flow");
+    const css = readWorkspaceFile("src/components/layout/ChatPanel.css");
+    const summaryRule = css.slice(css.indexOf(".chat-subagent-summary-text {"), css.indexOf("}", css.indexOf(".chat-subagent-summary-text {")));
+    expect(summaryRule).toContain("-webkit-line-clamp: 3");
+    expect(summaryRule).not.toContain("white-space: nowrap");
+    expect(css).not.toContain("chat-subagent-summary-text.collapsed");
   });
 
   it("keeps two independent levels: selecting a chip resets the detail level", () => {
@@ -39,6 +47,19 @@ describe("chat subagent two-level expansion", () => {
   it("labels the subagent elapsed time as 运行时间, not 已运行", () => {
     expect(block).toContain("`运行时间 ${formatProcessDuration(");
     expect(block).not.toContain("`已运行 ${formatProcessDuration(");
+  });
+
+  it("shows the running model next to token usage in the first-level card", () => {
+    expect(block).toContain('{formatSubagentModel(expanded.model)}');
+    expect(block).toContain("chat-subagent-usage-meta");
+    const css = readWorkspaceFile("src/components/layout/ChatPanel.css");
+    expect(css).toContain(".chat-subagent-model {");
+    expect(css).toContain(".chat-subagent-usage-meta {");
+    // 模型名是 token 行的纯文本，不套胶囊（无边框/背景/圆角）。
+    const modelRule = css.slice(css.indexOf(".chat-subagent-model {"), css.indexOf("}", css.indexOf(".chat-subagent-model {")));
+    expect(modelRule).not.toContain("border");
+    expect(modelRule).not.toContain("background");
+    expect(modelRule).not.toContain("border-radius");
   });
 
   it("styles the summary card, status badge and detail toggle", () => {

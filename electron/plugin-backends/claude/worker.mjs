@@ -14,6 +14,10 @@ let actualSessionId = "";
 let isNewSession = true;
 let deferredFork = null;
 let activeProvider = null;
+// 切模型只记录、不立即重建 query：切换瞬间不发任何请求（否则 CLI 会在
+// setModel 里探测模型，渠道额度耗尽时直接报 Model switch failed）。
+// 下一次发消息前才真正应用，失败也就报在聊天里。
+let pendingModelRestart = false;
 let currentModelId = "";
 let thinkingLevel = "medium";
 let permissionMode = "auto";
@@ -24,6 +28,21 @@ let activeQueryPermissionMode = null;
 let queryGeneration = 0;
 let inputQueue = null;
 let activePromptId = null;
+// 手动压缩：Claude SDK 没有 compact 控制接口，只能把 `/compact` 当一条命令
+// 推送；这里记住它的 uuid，好把 compact_boundary/结果收尾到同一个压缩事件上。
+let manualCompactId = null;
+let manualCompactSettle = null;
+const finishManualCompaction = (phase = "completed", detail) => {
+  if (!manualCompactId) return;
+  const id = manualCompactId;
+  manualCompactId = null;
+  send({ type: "context_compaction", uuid: id, phase, ...(detail ? { detail } : {}) });
+  // compact 命令要等压缩真正结束再回，否则宿主会提前把后端判为空闲、
+  // 界面在摘要还在生成时就把“压缩中”收掉。
+  const settle = manualCompactSettle;
+  manualCompactSettle = null;
+  settle?.(phase, detail);
+};
 let lastSettledPromptId = null;
 let subagentPromptScopes = new Map();
 let retiredSubagentKeys = new Set();
@@ -46,7 +65,16 @@ let activeAdapter = null;
 let activeAdapterKey = "";
 let actionNames = new Set();
 
-const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+// Redact the API key from every outbound message, not only error text. The
+// check runs on the serialized line so nested fields (text deltas, tool output)
+// are covered too, including the JSON-escaped form of the key.
+const redactOutbound = (text) => {
+  const secret = activeProvider?.apiKey;
+  if (!secret) return text;
+  const escaped = JSON.stringify(secret).slice(1, -1);
+  return text.split(secret).join("[REDACTED]").split(escaped).join("[REDACTED]");
+};
+const send = (message) => process.stdout.write(`${redactOutbound(JSON.stringify(message))}\n`);
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const asRecord = (value) => isRecord(value) ? value : {};
 const stringValue = (value) => typeof value === "string" ? value : "";
@@ -202,7 +230,19 @@ const getModels = (provider) => provider.models.map((model) => {
 }).filter((model) => model.id);
 
 const buildSDKEnv = (provider) => {
-  const env = { ...process.env };
+  // 只把 SDK 运行所需的基础变量与代理/证书变量传给子进程，
+  // 避免把用户机器上其他服务的令牌、云凭证等密钥一并透传出去。
+  const ALLOWED_ENV = new Set([
+    "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES",
+    "USER", "USERNAME", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_GIT_BASH_PATH",
+  ]);
+  const env = Object.fromEntries(Object.entries(process.env)
+    .filter(([name, value]) => value !== undefined && ALLOWED_ENV.has(name.toUpperCase())));
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
   env.ANTHROPIC_BASE_URL = provider.baseUrl;
@@ -215,7 +255,7 @@ const buildSDKEnv = (provider) => {
   env.DISABLE_AUTOUPDATER = "1";
   env.DISABLE_ERROR_REPORTING = "1";
   env.DISABLE_TELEMETRY = "1";
-  env.CLAUDE_AGENT_SDK_CLIENT_APP = "hpp/0.1.5";
+  env.CLAUDE_AGENT_SDK_CLIENT_APP = `hpp/${process.env.HPP_APP_VERSION || "unknown"}`;
   return env;
 };
 
@@ -577,6 +617,7 @@ const emitSubagentResultWhenAvailable = async (
     toolUseId: message.tool_use_id || message.toolUseId,
     agentId: message.agent_id || message.agentId,
     description: message.description,
+    title: message.title || message.description,
     prompt: message.prompt,
     taskType: message.task_type || message.taskType,
     status,
@@ -649,6 +690,53 @@ const recordResultUsage = (message) => {
   if (Number.isFinite(cost)) accumulatedResultCostUsd += cost;
 };
 
+const describeChannelRejection = async (detail) => {
+  // Claude CLI 对部分渠道失败只抛一句 "Unable to validate model: ..."，把渠道
+  // 真正返回的错误（额度耗尽、模型不存在等）吞掉了。这里在失败后主动问一次
+  // 渠道，把原文带回聊天；探测失败时保持原有错误不变。
+  const text = String(detail || "");
+  if (!/unable to validate model|usage\.input_tokens/i.test(text)) return null;
+  const provider = activeProvider;
+  if (!provider || provider.endpoint === "chat-completions" || !provider.baseUrl) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await fetch(`${provider.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        ...(provider.authMode === "x-api-key"
+          ? { "x-api-key": provider.apiKey }
+          : { authorization: `Bearer ${provider.apiKey}` }),
+      },
+      body: JSON.stringify({
+        model: provider.modelId,
+        max_tokens: 16,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    let body = null;
+    try { body = JSON.parse(raw); } catch { /* 非 JSON 响应没有可读的错误字段 */ }
+    const error = isRecord(body) ? body.error : null;
+    const message = typeof error === "string"
+      ? error
+      : isRecord(error)
+        ? stringValue(error.message) || stringValue(error.type)
+        : stringValue(asRecord(body).message);
+    const trimmed = message.trim();
+    if (!trimmed) return null;
+    console.log(`[claude-channel] ${provider.providerId}/${provider.modelId} rejected probe: ${response.status} ${trimmed}`);
+    return `渠道返回：${trimmed}`;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 const finishSDKPromptFromResult = () => {
   if (!activePromptId || !deferredSDKResult) return;
   const promptId = activePromptId;
@@ -656,8 +744,16 @@ const finishSDKPromptFromResult = () => {
   const result = deferredSDKResult;
   if (result.subtype !== "success" || result.is_error) {
     const detail = Array.isArray(result.errors) ? result.errors.join("\n") : result.result || result.stop_reason;
-    send({ type: "error", id: promptId, error: redact(detail || "Claude Code request failed") });
+    finishManualCompaction("failed", detail);
+    const detailText = detail || "Claude Code request failed";
+    // 探测渠道可能需要几秒，先把错误发出去会显示成模糊的 SDK 文案，所以这里
+    // 等探测（最多 4s）后只发一条最终错误，避免聊天里出现两条重复报错。
+    void (async () => {
+      const channelError = await describeChannelRejection(detailText);
+      send({ type: "error", id: promptId, error: redact(channelError || detailText) });
+    })();
   } else {
+    finishManualCompaction("completed");
     send({
       type: "prompt_done",
       id: promptId,
@@ -792,6 +888,8 @@ const handleSDKMessage = async (message, generation = queryGeneration) => {
       toolUseId: message.tool_use_id || message.toolUseId,
       agentId: message.agent_id || message.agentId,
       description: message.description,
+      // Task 工具没有 title 参数；把 agent 写的简述转发出去当界面标题来源。
+      title: message.title || message.description,
       prompt: message.prompt,
       taskType: message.task_type || message.taskType,
       status,
@@ -823,13 +921,18 @@ const handleSDKMessage = async (message, generation = queryGeneration) => {
   } else if (message.type === "system" && message.subtype === "compact_boundary") {
     // Claude Agent SDK exposes the completed compact boundary, but no matching
     // compaction-start notification. Mark it explicitly as a completed event.
-    send({ type: "context_compaction", uuid: message.uuid, phase: "completed" });
+    if (manualCompactId) finishManualCompaction("completed");
+    else send({ type: "context_compaction", uuid: message.uuid, phase: "completed" });
   } else if (message.type === "system" && message.subtype === "local_command_output") {
     send({ type: "text_delta", delta: String(message.content || "") });
   } else if (message.type === "result") {
     await handleSDKResult(message, generation);
   }
 };
+
+// 引导调度 agent 给子任务写极简标题：claude 的 Task 工具没有独立 title 参数，
+// description 既做简述也做 Hpp 界面胶囊标题，所以要明确格式。
+const SUBAGENT_TITLE_HINT = "调用 Task（子 Agent）工具时，description 填 2~6 字的极简中文标题（如「补齐静态红点」「审查风险」「迁移红点C组」），prompt 填完整任务指令。";
 
 const createQueryOptions = (sdkProvider, queryPermissionMode, queryPlanModeEnabled, queryHostSystemPrompt) => {
   const sdkPermissionMode = queryPlanModeEnabled
@@ -843,7 +946,11 @@ const createQueryOptions = (sdkProvider, queryPermissionMode, queryPlanModeEnabl
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      ...(queryHostSystemPrompt ? { append: queryHostSystemPrompt } : {}),
+      // Task 工具没有 title 参数：引导 agent 把 description 写成极简中文标题，
+      // Hpp 用它当子任务胶囊标题（完整指令仍放 prompt）。
+      ...({
+        append: [queryHostSystemPrompt, SUBAGENT_TITLE_HINT].filter(Boolean).join("\n\n"),
+      }),
     },
     tools: { type: "preset", preset: "claude_code" },
     settingSources: ["user", "project", "local"],
@@ -936,10 +1043,11 @@ const startQuery = async () => {
     queue?.close();
     dismissPermissions("Claude Agent SDK 连接已断开");
     if (promptId) {
+      const channelError = await describeChannelRejection(terminalError);
       send({
         type: "error",
         id: promptId,
-        error: redact(terminalError || "Claude Agent SDK query ended unexpectedly"),
+        error: redact(channelError || terminalError || "Claude Agent SDK query ended unexpectedly"),
       });
     }
     process.exitCode = 1;
@@ -1093,6 +1201,7 @@ const init = async (command) => {
   isNewSession = !deferredFork && !canResume;
   activeProvider = normalizeConfig(command.config);
   currentModelId = activeProvider.modelId;
+  pendingModelRestart = false;
   hostSystemPrompt = String(command.hostSystemPrompt || "").trim();
   subagentPromptScopes.clear();
   retiredSubagentKeys.clear();
@@ -1111,7 +1220,6 @@ const handleCommand = async (command) => {
         await init(command);
         break;
       case "prompt":
-        if (!activeQuery || !inputQueue) throw new Error("Claude Agent SDK session is not initialized");
         if (activePromptId) throw new Error("SESSION_BUSY");
         permissionMode = ["ask", "auto", "full-access"].includes(command.permissionMode)
           ? command.permissionMode
@@ -1120,6 +1228,13 @@ const handleCommand = async (command) => {
         if (typeof command.hostSystemPrompt === "string") {
           hostSystemPrompt = command.hostSystemPrompt.trim();
         }
+        // 切过模型的话，到这里才重建 query：重建失败就走下面统一的 error
+        // 出口，前端会把它显示成「模型请求失败」。pending 保留，下次再试。
+        if (pendingModelRestart) {
+          await restartQuery();
+          pendingModelRestart = false;
+        }
+        if (!activeQuery || !inputQueue) throw new Error("Claude Agent SDK session is not initialized");
         const queryModeKey = JSON.stringify([
           permissionMode,
           planModeEnabled ? "plan" : "default",
@@ -1180,15 +1295,14 @@ const handleCommand = async (command) => {
       case "setModel": {
         if (activePromptId) throw new Error("SESSION_BUSY");
         const nextProvider = normalizeConfig(command.config, command.provider, command.modelId);
-        if (nextProvider.providerId === activeProvider.providerId && nextProvider.endpoint !== "chat-completions") {
-          await activeQuery?.setModel(command.modelId);
-          activeProvider = nextProvider;
-          currentModelId = command.modelId;
-        } else {
-          activeProvider = nextProvider;
-          currentModelId = command.modelId;
-          await restartQuery();
-        }
+        const changed = nextProvider.providerId !== activeProvider.providerId
+          || nextProvider.baseUrl !== activeProvider.baseUrl
+          || nextProvider.endpoint !== activeProvider.endpoint
+          || command.modelId !== currentModelId;
+        activeProvider = nextProvider;
+        currentModelId = command.modelId;
+        // 只记录，不调 SDK setModel、也不重建 query：切模型瞬间保持完全本地。
+        if (changed) pendingModelRestart = true;
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
       }
@@ -1199,6 +1313,60 @@ const handleCommand = async (command) => {
         await restartQuery();
         send({ type: "thinking_level_changed", id: command.id, level: thinkingLevel });
         break;
+      case "compact": {
+        // SDK 没有压缩控制接口，只能发一条 `/compact` 命令；它走正常命令
+        // 生命周期，所以必须占用 activePromptId，避免和真实提问交错。
+        if (activePromptId) throw new Error("SESSION_BUSY");
+        // 切过模型就先应用，压缩必须用用户当前选中的模型。
+        if (pendingModelRestart) {
+          await restartQuery();
+          pendingModelRestart = false;
+        }
+        if (!activeQuery || !inputQueue) throw new Error("Claude Agent SDK session is not initialized");
+        const compactId = command.id;
+        manualCompactId = compactId;
+        resetCommandTracking();
+        lastSettledPromptId = null;
+        activePromptId = compactId;
+        send({ type: "context_compaction", uuid: compactId, phase: "started" });
+        let settledPhase = "completed";
+        let settledDetail;
+        const settled = new Promise((resolve) => {
+          manualCompactSettle = (phase, detail) => {
+            settledPhase = phase;
+            settledDetail = detail;
+            resolve();
+          };
+        });
+        try {
+          inputQueue.push({
+            type: "user",
+            message: { role: "user", content: "/compact" },
+            parent_tool_use_id: null,
+            session_id: actualSessionId,
+            uuid: compactId,
+            origin: { kind: "human" },
+          });
+        } catch (error) {
+          manualCompactId = null;
+          manualCompactSettle = null;
+          activePromptId = null;
+          throw error;
+        }
+        await Promise.race([
+          settled,
+          // 兜底：极端情况下 SDK 不发 boundary/result，不能让命令和界面无限挂着。
+          new Promise((resolve) => setTimeout(resolve, 5 * 60 * 1000)),
+        ]);
+        if (manualCompactSettle) {
+          finishManualCompaction("completed");
+        }
+        if (settledPhase === "failed") {
+          throw new Error(settledDetail || "Claude Code 压缩上下文失败");
+        }
+        send({ type: "compacted", id: compactId });
+        break;
+      }
       case "uiResponse":
         resolveUIResponse(command.response);
         send({ type: "ui_response_done", id: command.id });
@@ -1217,7 +1385,11 @@ const handleCommand = async (command) => {
         break;
     }
   } catch (error) {
-    send({ type: "error", id: command.id, error: redact(error?.message || String(error)) });
+    const message = error?.message || String(error);
+    // 切模型/思考档位也会撞上同一类渠道失败：CLI 只抛 "Model switch failed"
+    // 或模型校验异常，这里同样把渠道原文带回来。
+    const channelError = await describeChannelRejection(message);
+    send({ type: "error", id: command.id, error: redact(channelError || message) });
   }
 };
 

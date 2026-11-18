@@ -6,6 +6,7 @@ import { markdownToPlainText } from "@/lib/notification-text";
 import {
   ASSISTANT_NARRATION_PROCESS_KIND,
 } from "@shared/process-view";
+import { fallbackCommandDescription } from "@shared/command-description";
 import {
   hasOpenAssistantProcessState,
   useChatStore,
@@ -293,6 +294,13 @@ export function createAgentEventController({
   const appendProcessEntry = (sessionId: string, entry: Omit<AgentProcessEntry, "id" | "timestamp"> & { id?: string; timestamp?: number }) => {
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
+    // 命令条目的标题优先用模型写的意图；没有时按命令推断。
+    // 各后端（Claude/Codex/Droid/OpenCode）不保证带 description，这里统一兜底，
+    // 否则「运行 N 条命令」展开后每一行都只有一个「命令」。
+    const description = entry.description?.trim()
+      || (entry.toolKind === "run_command" || entry.command?.trim()
+        ? fallbackCommandDescription(entry.command, entry.tool)
+        : "");
     if (entry.id && hasLastAssistantProcessEntry(sessionId, entry.id)) {
       useChatStore.getState().updateLastAssistantProcessEntry(entry.id, {
         type: entry.type,
@@ -303,6 +311,7 @@ export function createAgentEventController({
         ...(entry.files !== undefined ? { files: entry.files } : {}),
         ...(entry.toolKind !== undefined ? { toolKind: entry.toolKind } : {}),
         ...(entry.command !== undefined ? { command: entry.command } : {}),
+        ...(description ? { description } : {}),
         ...(entry.state !== undefined ? { state: entry.state } : {}),
         ...(entry.subagents !== undefined ? { subagents: entry.subagents } : {}),
         ...(entry.phase !== undefined ? { phase: entry.phase } : {}),
@@ -327,6 +336,7 @@ export function createAgentEventController({
       files: entry.files,
       toolKind: entry.toolKind,
       command: entry.command,
+      description: description || entry.description,
       state: entry.state,
       expanded: entry.expanded,
       subagents: entry.subagents,

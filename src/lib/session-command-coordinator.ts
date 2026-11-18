@@ -461,6 +461,11 @@ export async function createSession(input: {
   activate?: boolean;
   verifyInstalled?: boolean;
   workspaceMode?: "shared" | "worktree";
+  /**
+   * 新建会话弹窗用：会话记录写好就返回，后端启动放后台跑。
+   * 用户在页签出现后立即关窗，不必等 agent 唤醒。失败仍由 recordFailure 记到启动错误。
+   */
+  deferRuntime?: boolean;
 }) {
   const sessionId = input.sessionId || crypto.randomUUID();
   const projectState = useProjectStore.getState();
@@ -515,7 +520,13 @@ export async function createSession(input: {
     saveSessionModel(sessionId, currentModel);
   }
   useProjectStore.getState().addSession(project.id, session, input.activate === true);
-  return initializeSession(sessionId, { activate: input.activate, recordFailure: true });
+  const initOptions = { activate: input.activate, recordFailure: true };
+  if (input.deferRuntime) {
+    // 页签已经建好，让调用方立刻关窗；后端唤醒在后台进行，失败会记到会话启动错误。
+    void initializeSession(sessionId, initOptions);
+    return { project, session };
+  }
+  return initializeSession(sessionId, initOptions);
 }
 
 export async function closeSession(
@@ -1312,6 +1323,8 @@ export async function prepareSessionReferenceContext(
 interface PendingGuidanceData {
   guidanceEntryId: string;
   queueItemId: string;
+  /** 后端给的引导 id，撤回时用它点名；不支持撤回的后端为 undefined。 */
+  guidanceId?: string;
   displayContent: string;
   composerDocument: ComposerDocument | null;
   messageImages: Array<{ id: string; src: string; name: string }> | undefined;
@@ -1320,20 +1333,43 @@ interface PendingGuidanceData {
   fallbackTimer: ReturnType<typeof setTimeout> | null;
 }
 
-const pendingGuidanceConfirmations = new Map<string, PendingGuidanceData>();
+/**
+ * 同一会话里可能有**多条**引导同时在途。
+ *
+ * 最初这里只允许一条，因为确认状态是按会话存的：第二条会覆盖第一条，
+ * 于是第一条的队列项永远等不到自己的交付事件、卡在「等待调度」。
+ * 现在改成按到达顺序排队的数组 —— 后端按同样顺序交付，确认时取最老的那条。
+ */
+const pendingGuidanceConfirmations = new Map<string, PendingGuidanceData[]>();
+
+/** 同时在途的引导上限。再多说明用户在刷屏，先让队列消化掉一些。 */
+const MAX_PENDING_GUIDANCE = 8;
+
+const listPendingGuidance = (sessionId: string): PendingGuidanceData[] =>
+  pendingGuidanceConfirmations.get(sessionId) || [];
+
+/** 从在途列表里摘掉一条；返回它是否还在（不在说明已被取消或已确认）。 */
+function dropPendingGuidance(sessionId: string, pending: PendingGuidanceData): boolean {
+  const queue = pendingGuidanceConfirmations.get(sessionId);
+  if (!queue) return false;
+  const next = queue.filter((entry) => entry !== pending);
+  if (next.length === queue.length) return false;
+  if (next.length > 0) pendingGuidanceConfirmations.set(sessionId, next);
+  else pendingGuidanceConfirmations.delete(sessionId);
+  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+  return true;
+}
 
 function commitPendingGuidanceResponse(sessionId: string, pending: PendingGuidanceData) {
   if (!pending.sendAccepted || !pending.responseStarted) return;
-  if (pendingGuidanceConfirmations.get(sessionId) !== pending) return;
-  pendingGuidanceConfirmations.delete(sessionId);
-  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+  if (!dropPendingGuidance(sessionId, pending)) return;
   if (!sessionIsOpen(sessionId)) return;
   useChatStore.getState().appendLastAssistantProcessEntry({
     id: pending.guidanceEntryId,
     type: "info",
     kind: USER_GUIDANCE_PROCESS_KIND,
     toolKind: "guidance_messages",
-    title: "引导",
+    title: "插话",
     detail: pending.displayContent || undefined,
     timestamp: Date.now(),
     state: "completed",
@@ -1347,25 +1383,31 @@ function commitPendingGuidanceResponse(sessionId: string, pending: PendingGuidan
 }
 
 export function confirmGuidanceResponse(sessionId: string) {
-  const pending = pendingGuidanceConfirmations.get(sessionId);
+  // 后端按发送顺序交付引导，所以每次确认对应**最老**的那条在途记录。
+  const pending = listPendingGuidance(sessionId)[0];
   if (!pending) return;
   pending.responseStarted = true;
   commitPendingGuidanceResponse(sessionId, pending);
 }
 
 export function clearPendingGuidanceConfirmation(sessionId: string) {
-  const pending = pendingGuidanceConfirmations.get(sessionId);
-  if (!pending) return;
+  const queue = pendingGuidanceConfirmations.get(sessionId);
+  if (!queue) return;
   pendingGuidanceConfirmations.delete(sessionId);
-  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+  for (const pending of queue) {
+    if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+  }
 }
 
 export function cancelPendingGuidance(sessionId: string) {
-  const pending = pendingGuidanceConfirmations.get(sessionId);
-  if (!pending) return;
+  const queue = pendingGuidanceConfirmations.get(sessionId);
+  if (!queue) return;
   pendingGuidanceConfirmations.delete(sessionId);
-  if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
-  useChatStore.getState().removeQueuedMessage(sessionId, pending.queueItemId);
+  const chat = useChatStore.getState();
+  for (const pending of queue) {
+    if (pending.fallbackTimer) clearTimeout(pending.fallbackTimer);
+    chat.removeQueuedMessage(sessionId, pending.queueItemId);
+  }
 }
 
 const GUIDANCE_CONFIRM_TIMEOUT_MS = 120_000;
@@ -1381,10 +1423,10 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
     if (!item) throw new Error("QUEUE_ITEM_NOT_FOUND");
     if (item.status === "sending") throw new Error("QUEUE_ITEM_BUSY");
     if (item.action) throw new Error("GUIDANCE_NOT_SUPPORTED_FOR_ACTION");
-    // The renderer confirmation state is session-scoped, so a second
-    // outstanding guidance would overwrite the first and strand its sending
-    // queue item when the first delivery event arrives.
-    if (pendingGuidanceConfirmations.has(sessionId)) throw new Error("GUIDANCE_BUSY");
+    const pendingQueue = listPendingGuidance(sessionId);
+    if (pendingQueue.length >= MAX_PENDING_GUIDANCE) {
+      throw new Error(`插话排队过多（上限 ${MAX_PENDING_GUIDANCE} 条），等前面的注入完再发`);
+    }
     const pending: PendingGuidanceData = {
       guidanceEntryId: `guidance-${item.id}`,
       queueItemId,
@@ -1396,7 +1438,7 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
       fallbackTimer: null,
     };
     chat.markQueuedMessageSending(sessionId, queueItemId);
-    pendingGuidanceConfirmations.set(sessionId, pending);
+    pendingGuidanceConfirmations.set(sessionId, [...pendingQueue, pending]);
     try {
       const result = await window.electronAPI.agentSendGuidance(
         item.sendContent,
@@ -1405,18 +1447,19 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
         { planModeEnabled: !!item.planModeEnabled, permissionMode: item.permissionMode },
       );
       if (!result.success) throw new Error(result.error || "GUIDANCE_FAILED");
+      if (result.guidanceId) pending.guidanceId = result.guidanceId;
       // The turn may have been interrupted while the guidance request was in
-      // flight. In that case the queued message can no longer be steered into
-      // a running turn, so drop it instead of leaving it sitting in the queue
-      // until the confirmation timeout.
+      // flight. In that case none of the in-flight guidances can be steered
+      // into a running turn, so drop them all instead of leaving them sitting
+      // in the queue until the confirmation timeout.
       if (!isRunning(sessionId)) {
-        clearPendingGuidanceConfirmation(sessionId);
+        cancelPendingGuidance(sessionId);
         useChatStore.getState().removeQueuedMessage(sessionId, queueItemId);
         return { success: true, queueItemId };
       }
       // An abort/disconnect handler may already have cancelled this guidance
       // while the IPC request was in flight. Never recreate it afterward.
-      if (pendingGuidanceConfirmations.get(sessionId) !== pending) {
+      if (!listPendingGuidance(sessionId).includes(pending)) {
         return { success: true, queueItemId };
       }
       pending.sendAccepted = true;
@@ -1427,14 +1470,15 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
         // enters the agent message flow. The fallback prevents a permanently
         // stuck queue item if an adapter loses that event.
         pending.fallbackTimer = setTimeout(() => {
-          confirmGuidanceResponse(sessionId);
+          // 确认的是「这一条」，不是队首：多条在途时按序超时，不能让后一条
+          // 提前把前一条确认掉。
+          pending.responseStarted = true;
+          commitPendingGuidanceResponse(sessionId, pending);
         }, GUIDANCE_CONFIRM_TIMEOUT_MS);
       }
       return { success: true, queueItemId };
     } catch (error) {
-      if (pendingGuidanceConfirmations.get(sessionId) === pending) {
-        clearPendingGuidanceConfirmation(sessionId);
-      }
+      dropPendingGuidance(sessionId, pending);
       if (sessionIsOpen(sessionId)) {
         if (!isRunning(sessionId)) {
           useChatStore.getState().removeQueuedMessage(sessionId, queueItemId);
@@ -1444,6 +1488,35 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
       }
       throw error;
     }
+  });
+}
+
+/**
+ * 撤回一条还在「等待调度」的引导：后端把它从 steer 队列里摘掉，队列项回到普通排队。
+ *
+ * 必须真的撤回、而不是只改本地状态：Pi 的 steer 早就进了队列，只删本地记录会让
+ * 模型收到一条界面上不存在的指令（幽灵引导）。撤不回来（已交付、后端不支持）就
+ * 明确失败，交回调用方提示，不假装成功。
+ */
+export async function cancelQueuedGuidance(sessionId: string, queueItemId: string) {
+  return withSessionSendLock(sessionId, async () => {
+    const pending = listPendingGuidance(sessionId).find((entry) => entry.queueItemId === queueItemId);
+    if (!pending) throw new Error("QUEUE_ITEM_NOT_FOUND");
+    const cancel = window.electronAPI.agentCancelGuidance;
+    if (!pending.guidanceId || typeof cancel !== "function") {
+      throw new Error("这条插话无法撤回：当前 Agent 不支持");
+    }
+    const result = await cancel(sessionId, pending.guidanceId);
+    if (!result.success) throw new Error(result.error || "撤回插话失败");
+    if (!result.cancelled) {
+      throw new Error(result.reason === "delivered"
+        ? "插话已送达模型，无法撤回"
+        : "撤回插话失败，请稍后重试");
+    }
+    dropPendingGuidance(sessionId, pending);
+    // 回到普通排队：下一轮当普通消息发出，也可以再点一次「引导」。
+    useChatStore.getState().clearQueuedMessageError(sessionId, queueItemId);
+    return { success: true, queueItemId };
   });
 }
 
@@ -1646,6 +1719,7 @@ export const SessionCommandCoordinator = {
   getAllSessionCommandIds,
   prepareSessionReferenceContext,
   guideQueuedMessage,
+  cancelQueuedGuidance,
   editQueuedMessage,
   reorderQueuedMessage,
   removeQueuedMessage,

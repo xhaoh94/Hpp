@@ -45,7 +45,8 @@
   display: flex;
   flex-direction: column;
   width: min(440px, calc(100vw - 40px));
-  max-height: min(420px, 60vh);
+  /* 动态高度：各内容块固定单行后不再抖动，面板按内容自然收放，不留空白。 */
+  max-height: min(460px, 70vh);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   background: var(--bg-secondary);
@@ -56,6 +57,7 @@
 
 .subagent-monitor-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -92,19 +94,20 @@
 
 .subagent-monitor-body {
   display: flex;
+  flex: 1;
   min-height: 0;
   flex-direction: column;
 }
 
-/* 每个子任务一行（第二行显示消耗），子任务多时列表自己滚 */
+/* 页签自动换行：所有子任务一屏可见，不横向滚动（滚动条时隐时现会引起抖动）。 */
 .subagent-monitor-list {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex: 0 0 auto;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
   margin: 0;
   padding: 8px 10px;
-  max-height: 190px;
-  overflow-y: auto;
   list-style: none;
   border-bottom: 1px solid var(--border-color);
 }
@@ -113,12 +116,12 @@
   flex: 0 0 auto;
 }
 
-/* 从胶囊改成两行行块：第二行放 token / 缓存命中 */
+/* 单行横向：圆点 · 任务名 · 运行时间。token 统计只放详情区，列表不重复。 */
 .subagent-monitor-item {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: auto;
   min-height: 30px;
   padding: 4px 9px;
   border: 1px solid var(--border-color);
@@ -130,24 +133,6 @@
   cursor: pointer;
 }
 
-.subagent-monitor-item-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.subagent-monitor-item-usage {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.8;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .subagent-monitor-item.active {
   border-color: var(--accent-color);
   color: var(--text-primary);
@@ -155,6 +140,8 @@
 }
 
 .subagent-monitor-item-label {
+  flex: 0 1 auto;
+  max-width: 96px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -184,6 +171,11 @@
   background: color-mix(in srgb, var(--text-secondary) 60%, transparent);
 }
 
+.subagent-monitor-dot.completed {
+  background: #22c55e;
+  animation: none;
+}
+
 .subagent-monitor-dot.stalled {
   background: #fbbf24;
   animation: none;
@@ -196,11 +188,32 @@
 
 .subagent-monitor-detail {
   display: flex;
+  flex: 1;
   min-height: 0;
   flex-direction: column;
   gap: 6px;
   padding: 10px;
+}
+
+/* 固定元信息：消耗 + 最后活动，不随正文滚动被顶走。 */
+.subagent-monitor-detail-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 16px;
+}
+
+/* 只有正文和输出滚动。 */
+.subagent-monitor-detail-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
   overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .subagent-monitor-detail-head {
@@ -230,11 +243,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 活动固定单行：只显示最后一行进展，行高恒定不抖；全文走 title 悬停。 */
 .subagent-monitor-activity {
+  overflow: hidden;
   color: var(--text-primary);
   font-size: 12px;
   line-height: 1.5;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .subagent-monitor-idle {
@@ -246,19 +262,67 @@
   color: #fbbf24;
 }
 
+/* 输出默认单行，点一下展开（限高独立滚动），行高变化由用户主动触发、不是实时抖。 */
 .subagent-monitor-output {
-  max-height: 150px;
+  display: block;
+  width: 100%;
+  max-height: 30px;
   margin: 0;
-  padding: 8px;
-  overflow-y: auto;
+  padding: 6px 8px;
+  overflow: hidden;
+  border: 0;
   border-radius: 6px;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-monitor-output:hover {
+  background: var(--bg-hover);
+}
+
+/* 收起态：最后一行纯文本预览，单行省略。 */
+.subagent-monitor-output-line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 展开态：Markdown 渲染，限高独立滚。 */
+.subagent-monitor-output.expanded {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* 监视窗里把 md 全局样式压小，否则 14px + 大 margin 在小灰底框里太占地。 */
+.subagent-monitor-output .md-content {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.subagent-monitor-output .md-content h1,
+.subagent-monitor-output .md-content h2,
+.subagent-monitor-output .md-content h3 {
+  margin: 4px 0;
+  padding: 0;
+  border: 0;
+  font-size: 12px;
+}
+
+.subagent-monitor-output .md-content p,
+.subagent-monitor-output .md-content ul,
+.subagent-monitor-output .md-content ol,
+.subagent-monitor-output .md-content pre {
+  margin: 3px 0;
+}
+
+.subagent-monitor-output .md-content li {
+  margin: 1px 0;
 }
 
 @media (max-width: 640px) {

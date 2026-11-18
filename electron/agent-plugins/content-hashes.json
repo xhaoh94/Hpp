@@ -1,7 +1,7 @@
 {
   "claude": {
-    "version": "1.0.3",
-    "hash": "f2b24d9ad66b28ad38d3de0b854d409a8f98e33f6d86a9e9d65935a3a24c4dff"
+    "version": "1.0.4",
+    "hash": "12105f5ade3621563f97fb073facc89e53f6d9640521a37cd27f4e71e3d927eb"
   },
   "codex": {
     "version": "1.1.3",
@@ -16,7 +16,7 @@
     "hash": "9e7917cc16e8ca67f8099ebafde3a0a57476d1d22526c2322186d0c6d807680e"
   },
   "pi": {
-    "version": "1.3.9",
-    "hash": "24bad73e86df3781dc2b3b983e30b61f6ae0e2759427d667ddcef32268b73009"
+    "version": "1.4.1",
+    "hash": "042f7caeae1bf753c7d285bfc6bb178b6d41612ff752345ec8de605554cf22a6"
   }
 }

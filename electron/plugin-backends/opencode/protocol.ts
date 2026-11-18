@@ -44,8 +44,24 @@ export interface OpenCodeProtocol {
   abortPaths(sessionId: string): string | string[];
   diffPaths(sessionId: string, messageId: string): string | string[];
   forkPaths(sessionId: string): string | string[];
+  /**
+   * 手动压缩：1.x 是 `/session/:id/summarize`（同步完成），2.x 是
+   * `POST /api/session/:id/compact`（只受理，完成事件走 SSE）。
+   */
+  summarizePaths(sessionId: string): string | string[];
+  /**
+   * 手动压缩的载荷：1.x 平铺 providerID/modelID；2.x 的 compact 不接受 model
+   * （schema 是 additionalProperties:false，压缩模型由会话级 agent.compaction 决定）。
+   */
+  summarizeBody(providerId: string | null, modelId: string | null): UnknownRecord;
   /** 模型目录：V1 从 providers 元数据推导，V2 有独立的 /api/model。 */
   modelsPaths(): string | string[];
+  /**
+   * 配置热重载：2.x 的 `POST /api/location/reload` 会原地重建已加载的配置
+   * （包括 agent.compaction 的 model/variant），运行中的会话在下一个 step
+   * 边界继续。1.x 没有该端点，返回 null 表示只能重启进程。
+   */
+  reloadPaths(): string | string[] | null;
   skillsPaths(): string | string[];
   commandsPaths(): string | string[];
   permissionReplyPaths(sessionId: string, requestId: string): string | string[];
@@ -142,7 +158,13 @@ const v1Protocol: OpenCodeProtocol = {
     `/session/${encodeURIComponent(sessionId)}/diff?messageID=${encodeURIComponent(messageId)}`
   ),
   forkPaths: (sessionId) => `/session/${sessionId}/fork`,
+  summarizePaths: (sessionId) => `/session/${sessionId}/summarize`,
+  summarizeBody: (providerId, modelId) => ({
+    ...(providerId ? { providerID: providerId } : {}),
+    ...(modelId ? { modelID: modelId } : {}),
+  }),
   modelsPaths: () => "/config/providers",
+  reloadPaths: () => null,
   skillsPaths: () => "/skill",
   commandsPaths: () => "/command",
   permissionReplyPaths: (_sessionId, requestId) => `/permission/${encodeURIComponent(requestId)}/reply`,
@@ -170,7 +192,17 @@ const v1Protocol: OpenCodeProtocol = {
 };
 
 /** 2.x 的问卷是 session form；回复体需要 field key，按 form id 缓存顺序。 */
-const pendingFormFields = new Map<string, Array<{ key: string; multi: boolean }>>();
+type PendingFormField = { key: string; multi: boolean; type: string };
+const pendingFormFields = new Map<string, PendingFormField[]>();
+
+/** 表单字段只用于把答案映射回字段名；请求若从未被回答也不能无限积累。 */
+const rememberFormFields = (formId: string, fields: PendingFormField[]) => {
+  pendingFormFields.set(formId, fields);
+  if (pendingFormFields.size > 200) {
+    const oldest = pendingFormFields.keys().next();
+    if (!oldest.done) pendingFormFields.delete(oldest.value);
+  }
+};
 
 /**
  * 2.x 没有 prompt.system 字段，宿主的 system prompt 通过官方 instructions
@@ -184,27 +216,49 @@ const translateV2Form = (data: UnknownRecord): NormalizedOpenCodeEvent | null =>
   const formId = typeof form.id === "string" ? form.id : "";
   const fields = Array.isArray(form.fields) ? form.fields.map((field) => asRecord(field)) : [];
   if (!formId) return null;
-  pendingFormFields.set(formId, fields.map((field) => ({
-    key: typeof field.key === "string" ? field.key : "",
-    multi: String(field.type || "").toLowerCase() === "multiselect",
-  })));
-  const questions = fields.map((field) => ({
-    id: field.key,
-    question: String(field.title || field.key || ""),
-    header: field.title,
-    multiSelect: String(field.type || "").toLowerCase() === "multiselect",
-    options: (Array.isArray(field.options) ? field.options : []).map((option) => {
-      const record = asRecord(option);
-      const label = String(record.label ?? record.value ?? "");
-      // 2.x 的 Form.Answer 要的是 option.value，不是展示用的 label。
-      const value = record.value ?? record.label;
-      return {
-        label,
-        ...(value === undefined || value === null ? {} : { value: String(value) }),
-        ...(typeof record.description === "string" ? { description: record.description } : {}),
-      };
-    }),
+  // external 字段需要在原生界面确认，Hpp 没有对应控件。把它从字段缓存里也去掉，
+  // 否则 questions 与缓存索引错位，后面的答案会整体串位。
+  const answerableFields = fields.filter((field) => String(field.type || "").toLowerCase() !== "external");
+  rememberFormFields(formId, answerableFields.map((field) => {
+    const type = String(field.type || "").toLowerCase();
+    return {
+      key: typeof field.key === "string" ? field.key : "",
+      multi: type === "multiselect",
+      type,
+    };
   }));
+  const questions = answerableFields.flatMap((field) => {
+    const type = String(field.type || "").toLowerCase();
+    const rawOptions = Array.isArray(field.options) ? field.options : [];
+    const isBoolean = type === "boolean";
+    // 2.x 的 string 字段只有带 options 时才是选择题；只有字段声明 custom 才允许
+    // 输入选项之外的值，否则服务端会以 Invalid option 拒收（这是自定义回答失败的原因）。
+    const allowCustom = isBoolean
+      ? false
+      : type === "multiselect"
+        ? field.custom === true
+        : rawOptions.length === 0 || field.custom === true;
+    return [{
+      id: field.key,
+      question: String(field.title || field.key || ""),
+      header: field.title,
+      multiSelect: type === "multiselect",
+      allowCustom,
+      // boolean 没有 options，原生界面也是是/否两个按钮；后端提交时会转成布尔值。
+      options: isBoolean
+        ? [{ label: "是", value: "true" }, { label: "否", value: "false" }]
+        : rawOptions.map((option) => {
+        const record = asRecord(option);
+        const label = String(record.label ?? record.value ?? "");
+        // 2.x 的 Form.Answer 要的是 option.value，不是展示用的 label。
+        const value = record.value ?? record.label;
+        return {
+          label,
+          ...(value === undefined || value === null ? {} : { value: String(value) }),
+          ...(typeof record.description === "string" ? { description: record.description } : {}),
+        };
+      }),
+    }];  });
   return {
     type: "question.asked",
     properties: {
@@ -475,9 +529,19 @@ const v2Protocol: OpenCodeProtocol = {
     ];
   },
   forkPaths: (sessionId) => withFallback(`/api/session/${sessionId}/fork`, `/session/${sessionId}/fork`),
+  summarizePaths: (sessionId) => withFallback(
+    `/api/session/${sessionId}/compact`,
+    `/session/${sessionId}/summarize`,
+  ),
+  // compact 的请求体字段只有 id / delivery，且 additionalProperties:false；
+  // 带 model 会被 400。回退到 1.x 时空对象也是合法载荷（model 本来就是可选的）。
+  summarizeBody: () => ({}),
   // 2.x 的 fork 载荷是 { before: messageId }，1.x 是 { messageID }。
   forkBody: (messageId) => ({ before: messageId }),
   modelsPaths: () => withFallback("/api/model", "/config/providers"),
+  // 2.x 支持不重启进程重载配置；改 agent.compaction 的 model/variant 后
+  // 调它即可，省掉整轮 kill + spawn + 健康检查。
+  reloadPaths: () => "/api/location/reload",
   skillsPaths: () => withFallback("/api/skill", "/skill"),
   commandsPaths: () => withFallback("/api/command", "/command"),
   // 2.x 把回复挂在 session 下：/api/session/:sessionID/permission/:requestID/reply
@@ -593,12 +657,30 @@ const v2Protocol: OpenCodeProtocol = {
     const answer: UnknownRecord = {};
     if (fields && fields.length > 0) {
       fields.forEach((field, index) => {
-        const values = answers[index] || [];
-        answer[field.key] = field.multi ? values : (values[0] ?? "");
+        if (field.type === "external") return;
+        const values = (answers[index] || [])
+          .map((value) => String(value))
+          .filter((value) => value.trim() !== "");
+        // 未回答的字段必须省略：提交空串会被服务端当成「已填写但不合法」
+        //（required 报 Missing required，number 报 Expected number）。
+        if (values.length === 0) return;
+        if (field.type === "number" || field.type === "integer") {
+          const number = Number(values[0]);
+          if (Number.isFinite(number)) answer[field.key] = number;
+          return;
+        }
+        if (field.type === "boolean") {
+          const value = values[0].toLowerCase();
+          answer[field.key] = value === "true" || value === "yes" || value === "1";
+          return;
+        }
+        answer[field.key] = field.multi ? values : values[0];
       });
     } else {
       answers.forEach((values, index) => {
-        answer[`field-${index + 1}`] = values.length > 1 ? values : (values[0] ?? "");
+        const nonEmpty = values.map((value) => String(value)).filter((value) => value.trim() !== "");
+        if (nonEmpty.length === 0) return;
+        answer[`field-${index + 1}`] = nonEmpty.length > 1 ? nonEmpty : nonEmpty[0];
       });
     }
     return { answer };

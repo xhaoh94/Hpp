@@ -1230,6 +1230,40 @@ describe("agent event terminal reconciliation", () => {
     harness.controller.clearAllStreamWatchdogs();
   });
 
+  it("fills a command description when the backend does not send one", () => {
+    const harness = createHarness();
+    startRunningProcess(harness);
+
+    dispatchAgentEvent({
+      type: "process_event",
+      entryType: "tool",
+      toolKind: "run_command",
+      title: "运行 ls",
+      command: "ls",
+      state: "completed",
+    }, harness.controller);
+
+    const entries = getMessages().flatMap((message) => message.process?.entries || []);
+    const commandEntry = entries.find((entry) => entry.command === "ls");
+    expect(commandEntry?.description).toBe("列出目录");
+
+    // 后端自己写了意图时优先用它，不能被兜底覆盖。
+    dispatchAgentEvent({
+      type: "process_event",
+      entryType: "tool",
+      toolKind: "run_command",
+      title: "运行 grep",
+      command: "grep -rn idle src",
+      description: "查看空闲时长的渲染位置",
+      state: "completed",
+    }, harness.controller);
+    const writtenEntry = getMessages()
+      .flatMap((message) => message.process?.entries || [])
+      .find((entry) => entry.command === "grep -rn idle src");
+    expect(writtenEntry?.description).toBe("查看空闲时长的渲染位置");
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   // 「Pi 仍在运行，暂时没有新输出」提示已下线：即使 watchdog 判定后端仍在跑、
   // 且一个字节的新输出都没有，也不允许往处理过程里插状态条目。
   it("does not insert an idle notice when the watchdog sees no new output", async () => {

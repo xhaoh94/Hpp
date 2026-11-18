@@ -131,9 +131,7 @@ export type {
   AgentSubagentSupport,
   AgentSubagentCapabilities,
   AgentSubagentConfig,
-  AgentSubagentModelMode,
-  AgentSubagentProfileConfig,
-  AgentSubagentProfileDescriptor,
+  AgentSubagentPoolEntry,
   AgentConfigurationSupport,
   AgentDescriptor,
   AgentImagePayload,
@@ -518,12 +516,15 @@ export interface ElectronAPI {
   agentConfigReorder: (agentId: string, providerIds: string[]) => Promise<AgentConfigResult>;
   agentConfigExport: (data: unknown) => Promise<{ success: boolean; error?: string; canceled?: boolean; filePath?: string }>;
   agentConfigImportRead: () => Promise<{ success: boolean; error?: string; canceled?: boolean; data?: AgentConfigExportData }>;
-  agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string }>;
+  agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string; guidanceId?: string }>;
+  agentCancelGuidance?: (sessionId: string | undefined, guidanceId: string) => Promise<{ success: boolean; cancelled?: boolean; reason?: string; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
   agentGetModels: (sessionId?: string, agentId?: string) => Promise<AgentModel[]>;
   agentListActions: (sessionId?: string, options?: AgentActionListOptions) => Promise<AgentActionCatalogEntry[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;
   agentSetThinkingLevel: (level: string, sessionId?: string) => Promise<{ success: boolean }>;
+  /** 手动触发一次上下文压缩；由各 Agent 自己的压缩流程完成。 */
+  agentCompactSession: (sessionId?: string) => Promise<{ success: boolean; error?: string }>;
   agentSendUIResponse: (response: AgentUIResponse) => Promise<{
     success: boolean;
     error?: string;

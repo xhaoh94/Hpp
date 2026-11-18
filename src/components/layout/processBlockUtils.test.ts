@@ -6,6 +6,8 @@ import type {
 } from "@/stores/chat-store";
 import {
   getStepProgressText,
+  getSubagentSummaryText,
+  getSubagentTitle,
   normalizeInferredStepsForDisplay,
   summarizeProcessEntries,
 } from "./processBlockUtils";
@@ -122,5 +124,61 @@ describe("processBlockUtils", () => {
     expect(summarizeProcessEntries([
       entry({ id: "stop", type: "tool", state: "interrupted" }),
     ])).toBe("已中断");
+  });
+});
+
+describe("getSubagentTitle", () => {
+  it("shrinks a task description to verb + core object", () => {
+    const prompt = "请独立编写行为测试，仅新增 Tools/Tests/RedPointDisplayBindingTest.lua，不改生产文件。背景：即将新增 prefab";
+    expect(getSubagentTitle(prompt)).toBe("编写测试");
+    expect(getSubagentTitle("请审查迁移回归风险")).toBe("审查风险");
+    expect(getSubagentTitle("请排查登录接口的异常")).toBe("排查异常");
+  });
+
+  it("drops adverbials, polite prefixes and trailing punctuation", () => {
+    expect(getSubagentTitle("请你帮我审查这段逻辑：")).toBe("审查逻辑");
+    expect(getSubagentTitle("麻烦看一下这个 bug。")).toBe("看bug");
+    expect(getSubagentTitle("正在修复支付回调问题")).toBe("修复问题");
+  });
+
+  it("peels scope prefixes off noun-style task names", () => {
+    // 截图真实数据：一级保留全名，胶囊剥掉「全项目剩余动态」前缀。
+    expect(getSubagentTitle("全项目剩余动态红点迁移C组")).toBe("红点迁移C组");
+    expect(getSubagentTitle("全项目剩余动态红点迁移A组")).toBe("红点迁移A组");
+    expect(getSubagentSummaryText("全项目剩余动态红点迁移C组")).toBe("全项目剩余动态红点迁移C组");
+  });
+
+  it("keeps titles it cannot safely shorten instead of mangling them", () => {
+    expect(getSubagentTitle("", "修复完成\n下一步：验证")).toBe("修复完成");
+    expect(getSubagentTitle("随便聊聊这件事")).toBe("随便聊聊这件事");
+    expect(getSubagentTitle()).toBe("");
+  });
+
+  it("caps very long single clauses", () => {
+    const title = getSubagentTitle(`请${"做一件事".repeat(20)}`);
+    expect(title.length).toBe(41);
+    expect(title.endsWith("…")).toBe(true);
+  });
+});
+
+describe("getSubagentSummaryText", () => {
+  it("keeps the unshortened first clause, unlike the verb-object title", () => {
+    const prompt = "请独立编写行为测试，仅新增 Tools/Tests/RedPointDisplayBindingTest.lua，不改生产文件。背景：即将新增 prefab";
+    expect(getSubagentTitle(prompt)).toBe("编写测试");
+    // 一级保留原始分句，不做动宾压缩，也不带后面的路径/约束。
+    expect(getSubagentSummaryText(prompt)).toBe("独立编写行为测试");
+  });
+
+  it("cuts at the first comma/semicolon and caps very long clauses", () => {
+    expect(getSubagentSummaryText("审查迁移回归风险，不改生产文件")).toBe("审查迁移回归风险");
+    expect(getSubagentSummaryText("第一句；第二句。第三句")).toBe("第一句");
+    const long = getSubagentSummaryText(`请${"做一件事".repeat(30)}，后面还有`);
+    expect(long.length).toBe(41);
+    expect(long.endsWith("…")).toBe(true);
+  });
+
+  it("falls back to detailed output and handles empty input", () => {
+    expect(getSubagentSummaryText("", "修复完成\n下一步：验证")).toBe("修复完成");
+    expect(getSubagentSummaryText()).toBe("");
   });
 });

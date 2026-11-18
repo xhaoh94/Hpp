@@ -150,6 +150,10 @@ describe("desktop general settings layout", () => {
     expect(subagentModal).toContain("agentSetAgentSubagentConfig");
     expect(subagentModal).toContain("enablingFromDisabled");
     expect(subagentModal).toContain("agentReloadConfig");
+    // 模型池会写进 subagent 工具的说明，而工具说明是注册时的快照：只热更新配置的话
+    // 模型看不到新加的候选，所以池子（含开关）一变必须走会话重载。
+    expect(subagentModal).toContain("poolConfigChanged");
+    expect(subagentModal).toContain("!enablingFromDisabled && !poolConfigChanged");
     // 关闭时若还没保存，同样要自动应用而不是静默丢弃。
     expect(subagentModal).toContain("requestCloseRef");
     expect(subagentModal).toContain("if (dirtyRef.current && !(await saveRef.current())) return;");
@@ -166,6 +170,11 @@ describe("desktop general settings layout", () => {
     const worker = readWorkspaceFile("electron/plugin-backends/pi/worker.mjs");
     expect(worker).toContain('case "setSubagentConfig"');
     expect(worker).toContain("getSubagentConfig: () => activeSubagentConfig");
+    // 模型池的能力摘要靠 pi 的模型目录，不能用模块级的 modelRegistry：
+    // subagent 工具在 resourceLoader.reload() 期间就注册了，那时它还是 null，
+    // 摘要会静默退化成「只有 id」，等于白做。
+    expect(worker).toContain("getModelMeta:");
+    expect(worker).toContain("createdModelRegistry || modelRegistry");
   });
 });
 

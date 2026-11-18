@@ -264,7 +264,7 @@ export function QuestionnairePanel({
                 })}
               </div>
             )}
-            {!question.multiSelect && (
+            {!question.multiSelect && question.allowCustom !== false && (
               <textarea
                 className="chat-questionnaire-custom"
                 rows={2}

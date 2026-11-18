@@ -45,6 +45,13 @@ export const getSubagentCacheRate = (usage?: ProcessSubagentUsage): number | und
 };
 
 /**
+ * 一级卡片的模型名，原样放进 token 那行文本。
+ * 后端 model 通常已是 `provider/modelId`（见 subagent-extension 的 getModelName），
+ * 这里只做 trim，不加方括号 / 胶囊；老数据没有渠道也不编造。
+ */
+export const formatSubagentModel = (model?: string): string => model?.trim() || "";
+
+/**
  * 子任务消耗摘要：`12.3k token · 缓存 87% · 3 轮`。
  * 没有 totalTokens 的后端（pi 只报 input/output）自己加一下，否则只会显示轮次。
  */

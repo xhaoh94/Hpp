@@ -562,3 +562,13 @@ describe("chat interaction regression constraints", () => {
     expect(chatPanelStyles).toContain("text-overflow: ellipsis;");
   });
 });
+
+describe("questionnaire custom answers", () => {
+  it("only shows the custom box when the field allows it", () => {
+    // OpenCode 2.x 的字段没声明 custom 时，服务端会拒收选项之外的自由文本；
+    // 前端不能无条件展示「自定义回答」输入框。
+    expect(questionnaireSource).toContain("question.allowCustom !== false");
+    // 提交失败时要把后端的具体校验错误（Invalid option / Missing required）带回聊天。
+    expect(pendingUIResponseSource).toContain("failureDetail ? `${failureMessage}：${failureDetail}` : failureMessage");
+  });
+});

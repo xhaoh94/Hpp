@@ -585,7 +585,11 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
         ? undefined
         : agent.capabilities.configuration;
       const endpoint = configuration
-        ? resolveCompatibleProviderEndpoint(copySourceProvider.endpoint, configuration.endpoints)
+        ? resolveCompatibleProviderEndpoint(
+            copySourceProvider.endpoint,
+            configuration.endpoints,
+            configuration.defaultEndpoint,
+          )
         : undefined;
       return { agent, configuration, endpoint };
     });
@@ -894,6 +898,16 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       const copiedProviderId = result.copiedProviderId || copySourceProvider.providerId;
       const needsActivation = targetAgent?.capabilities.providerActivation === "single-active";
       const copiedProvider = result.config.providers.find((provider) => provider.providerId === copiedProviderId);
+      // 目标 Agent 不支持原端点时后端会自动切换，这里把切换结果告诉用户。
+      const copyTarget = providerCopyTargets.find((item) => item.agent.id === targetAgentId);
+      const switchedEndpoint = copyTarget?.endpoint && copyTarget.endpoint !== copySourceProvider.endpoint
+        ? copyTarget.endpoint
+        : "";
+      const switchedEndpointLabel = switchedEndpoint
+        ? copyTarget?.configuration?.endpoints.find((option) => option.id === switchedEndpoint)?.label || switchedEndpoint
+        : "";
+      const endpointNote = switchedEndpointLabel ? `，Endpoint 已自动切换为 ${switchedEndpointLabel}` : "";
+      const copySummary = `渠道已复制到 ${targetName}（${copiedProviderId}）${endpointNote}`;
       if (targetAgentId === agentId) {
         setConfig(result.config);
         if (copiedProvider) {
@@ -909,17 +923,17 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
       setStatus({
         type: result.error ? "error" : "success",
         text: result.error
-          ? `渠道已复制到 ${targetName}（${copiedProviderId}），但${result.error}`
+          ? `${copySummary}，但${result.error}`
           : needsActivation
-            ? `渠道已复制到 ${targetName}（${copiedProviderId}），需要在目标 Agent 中启用`
-            : `渠道已复制到 ${targetName}（${copiedProviderId}）`,
+            ? `${copySummary}，需要在目标 Agent 中启用`
+            : copySummary,
       });
     } catch (error) {
       setCopyProviderError(error instanceof Error ? error.message : String(error));
     } finally {
       setCopyingTargetAgentId("");
     }
-  }, [agentId, changeAgent, configurableAgentList, copyingTargetAgentId, copySourceProvider, handleEditProvider, onModelsUpdated]);
+  }, [agentId, changeAgent, configurableAgentList, copyingTargetAgentId, copySourceProvider, handleEditProvider, onModelsUpdated, providerCopyTargets]);
 
   const updateDraft = useCallback((patch: Partial<AgentProviderConfig>) => {
     setDraft((current) => current ? { ...current, ...patch } : current);
@@ -2205,6 +2219,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                 {providerCopyTargets.length === 0 ? (
                   <div className="agent-config-empty">没有可用的复制目标</div>
                 ) : providerCopyTargets.map(({ agent, configuration, endpoint }) => {
+                  const endpointSwitched = !!endpoint && endpoint !== copySourceProvider.endpoint;
                   const endpointLabel = endpoint
                     ? configuration?.endpoints.find((option) => option.id === endpoint)?.label || endpoint
                     : `不支持 ${copySourceProvider.endpoint}`;
@@ -2218,7 +2233,7 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                           <strong>{agent.name}</strong>
                           {isCurrentAgent && <span className="agent-provider-copy-current">当前</span>}
                         </div>
-                        <span>{endpointLabel}</span>
+                        <span>{endpointLabel}{endpointSwitched ? "（自动切换）" : ""}</span>
                       </div>
                       <button
                         type="button"

@@ -53,6 +53,9 @@ const shouldRequestPermission = (event) => {
  * 只能把问题写进结构化结果，由主 agent 转述给用户——与 Claude Code 的 Task
  * 子 agent 一致（AskUserQuestion 在子 agent 里不可用）。
  *
+ * 模型也不在这里选：子 Agent 拿到的模型由调度方在派发时按任务难度定好，
+ * 运行中不提供切换入口，避免一个任务跑出两段不同模型的上下文。
+ *
  * 注意：这里也不再需要跳过 question 类工具的权限判断，因为这些工具已经不存在；
  * 若自定义扩展仍注册了同名工具，会被当作“未知工具”要求确认，属安全侧行为。
  */

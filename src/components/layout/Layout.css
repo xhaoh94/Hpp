@@ -206,7 +206,26 @@ body.layout-sidebar-resizing * {
 }
 
 .app-floating-toast > svg { flex: 0 0 auto; color: #4ade80; }
-.app-floating-toast > span { min-width: 0; overflow-wrap: anywhere; }
+.app-floating-toast > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 错误 / 警告用红色侧条和图标，并留更长的阅读时间。 */
+.app-floating-toast.tone-error,
+.app-floating-toast.tone-warning {
+  border-color: rgba(244, 67, 54, 0.6);
+  box-shadow: inset 3px 0 0 var(--danger-color), 0 14px 36px var(--shadow-color);
+  animation-duration: 5.2s;
+}
+.app-floating-toast.tone-error > svg,
+.app-floating-toast.tone-warning > svg { color: var(--danger-color); }
+.app-floating-toast.tone-warning { border-color: rgba(232, 168, 56, 0.6); }
+.app-floating-toast.tone-warning > svg { color: #e8a838; }
 
 @keyframes app-floating-toast {
   0% {

@@ -1525,20 +1525,24 @@ describe("Pi SDK worker protocol", () => {
       id: "init",
       type: "init",
       projectPath: tempRoot,
-      subagentConfig: { enabled: true, defaultModelMode: "custom", defaultModel: "provider/first" },
+      subagentConfig: { enabled: true, pool: [{ model: "provider/first", tier: "fast" }] },
     });
     await worker.waitFor((message) => message.type === "ready");
-    // 弹窗「应用 SubAgent 设置」走的路径：模型/profile 热更新后
+    // 弹窗「应用 SubAgent 设置」走的路径：模型池热更新后
     // 下一次 subagent 调用即使用新配置。
     worker.send({
       id: "subagent-cfg",
       type: "setSubagentConfig",
-      config: { enabled: true, defaultModelMode: "custom", defaultModel: "provider/second" },
+      config: { enabled: true, pool: [{ model: "provider/second", tier: "deep" }] },
     });
     await expect(worker.waitFor((message) => message.id === "subagent-cfg"))
       .resolves.toMatchObject({
         type: "subagent_config_changed",
-        config: { enabled: true, defaultModelMode: "custom", defaultModel: "provider/second" },
+        config: {
+          enabled: true,
+          poolEnabled: true,
+          pool: [{ model: "provider/second" }],
+        },
       });
   });
 

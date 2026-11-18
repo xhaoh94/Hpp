@@ -485,6 +485,16 @@ export class ClaudeSDKAgent {
     this.emitEvent({ type: "thinking_level_changed", level: optionalString(data.level) || level });
   }
 
+  /** 手动压缩：向 worker 发一条 `/compact` 命令，进度由 context_compaction 事件驱动。 */
+  async compact() {
+    if (!this.process || !this.isReady) throw new Error("Claude Agent SDK worker is not running");
+    if (!this.isIdle()) throw new Error("SESSION_BUSY");
+    const data = await this.request({ type: "compact" }, 180_000);
+    if (data.type !== "compacted") {
+      throw new Error(optionalString(data.error) || "Claude Code 压缩上下文失败");
+    }
+  }
+
   async sendUIResponse(response: AgentUIResponse): Promise<void> {
     const id = optionalString(response.id) || optionalString(response.requestId);
     const data = await this.request({
@@ -828,6 +838,13 @@ export class ClaudeSDKAgent {
     const detail = getFirstNonEmptyString(input, ["description", "prompt", "assignment", "task"])
       || getFirstNonEmptyString(data, ["description", "prompt", "assignment"])
       || previous?.detail;
+    // claude 的 Task 工具没有 title 参数，用 worker 转发的 title 或 agent 写的
+    // description 简述做界面标题（前端已有 title 通道，缺的只是这里填值）。
+    const title = getFirstNonEmptyString(data, ["title"])
+      || getFirstNonEmptyString(input, ["title"])
+      || getFirstNonEmptyString(data, ["description"])
+      || getFirstNonEmptyString(input, ["description"])
+      || previous?.title;
     const subagentId = getFirstNonEmptyString(data, ["agentId", "agent_id", "sessionId", "session_id", "taskId", "task_id"])
       || getFirstNonEmptyString(metadata, ["agentId", "agent_id", "sessionId", "session_id", "taskId", "task_id"])
       || previous?.subagentId
@@ -858,6 +875,7 @@ export class ClaudeSDKAgent {
       model,
       detail,
       prompt,
+      ...(title ? { title } : {}),
       message,
       stopReason,
       startedAt: previous?.startedAt

@@ -361,6 +361,8 @@ export class DroidAgent {
   private actionKeys = new Set<string>();
   private hostSystemPrompt = "";
   private compactionConfig = normalizeAgentCompactionConfig(undefined);
+  /** 手动压缩正在等 session_compacted 通知。 */
+  private manualCompactionSettle: (() => void) | null = null;
   private activeCompactionSignature = "";
   private runtimeSettingsPath: string | null = null;
   private eventBuffer: AgentEventBuffer;
@@ -808,6 +810,32 @@ export class DroidAgent {
     });
   }
 
+  /**
+   * 手动压缩：Droid 把 `/compact` 当一条客户端命令，压缩完成由
+   * session_compacted 通知收尾；这里只负责触发并开一个 started 阶段。
+   */
+  async compact(): Promise<void> {
+    if (!this.process || !this.isReady) throw new Error("Droid is not ready");
+    if (!this.isIdle()) throw new Error("SESSION_BUSY");
+    const compactionId = `droid-compact-${Date.now()}`;
+    this.emitEvent({ type: "context_compaction", id: compactionId, phase: "started" });
+    const settled = new Promise<void>((resolve) => { this.manualCompactionSettle = resolve; });
+    try {
+      await this.sendRpcAsync("droid.add_user_message", { text: "/compact" }, 30_000);
+    } catch (error) {
+      this.manualCompactionSettle = null;
+      this.emitEvent({
+        type: "context_compaction",
+        id: compactionId,
+        phase: "failed",
+        detail: getErrorMessage(error),
+      });
+      throw error;
+    }
+    // 等 session_compacted；超时也放行，避免界面一直卡在压缩中（事件到了仍会收尾）。
+    await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 180_000))]);
+  }
+
   /** Set reasoning effort */
   async setThinkingLevel(level: string) {
     const effortMap: Record<string, string> = {
@@ -1153,6 +1181,11 @@ export class DroidAgent {
 
     if (notifType === "session_compacted") {
       this.emitEvent({ type: "context_compaction", id: notifData.summaryId || notification.id || paramsRecord.id });
+      // 手动压缩的 compact() 在等这个通知；droid 不会在 add_user_message 的
+      // RPC 应答里告诉我们摘要什么时候真正生成完。
+      const settle = this.manualCompactionSettle;
+      this.manualCompactionSettle = null;
+      settle?.();
       return;
     }
 

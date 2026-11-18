@@ -66,13 +66,17 @@ export interface AgentBackend {
   isIdle(): boolean;
   refreshIdle?(): Promise<boolean>;
   sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
-  sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void>;
+  sendGuidance?(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<{ guidanceId?: string } | void>;
+  /** 撤回一条还没交付的引导；不支持的后端不实现，渲染层据此禁用取消。 */
+  cancelGuidance?(guidanceId: string): Promise<{ cancelled: boolean; reason?: string }>;
   forkSession?(target: AgentForkTarget): Promise<AgentForkResult>;
   abort(): Promise<void>;
   getModels(): Promise<AgentModel[]>;
   listActions(options?: AgentActionListOptions): Promise<AgentActionCatalogEntry[]>;
   setModel(provider: string, modelId: string): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
+  /** 手动触发一次上下文压缩；未实现的后端会返回不支持的错误。 */
+  compact?(): Promise<void>;
   /** 热更新通用压缩策略；未实现时在下次初始化读取。 */
   setCompactionConfig?(config: AgentCompactionConfig): Promise<void>;
   /** 热更新内置 SubAgent 配置；未实现时在下次初始化读取。 */

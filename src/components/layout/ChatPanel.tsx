@@ -14,7 +14,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, WandSparkles, X } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, Copy, CornerDownRight, FileText, Folder, GitBranch, GripVertical, Image as ImageIcon, ImagePlus, Link2, ListCollapse, MessageCircle, Pencil, Plus, RefreshCw, RotateCcw, Trash2, Undo2, WandSparkles, X } from "lucide-react";
 import {
   useChatStore,
   type AgentProcess,
@@ -267,6 +267,8 @@ type QueuePanelProps = {
   /** 收尾型压缩进行中（本轮对话已结束）：压缩期间无法再把队列消息作为引导注入。 */
   compactionBlocksGuidance: boolean;
   onGuide: (item: QueuedMessage) => void;
+  /** 撤回一条还在等待注入的引导，队列项回到普通排队。 */
+  onCancelGuidance: (item: QueuedMessage) => void;
   onEdit: (item: QueuedMessage) => void;
   onReorder: (itemId: string, toIndex: number) => void;
   onRemove: (itemId: string) => void;
@@ -287,6 +289,7 @@ function MessageQueuePanel({
   currentSessionRunning,
   compactionBlocksGuidance,
   onGuide,
+  onCancelGuidance,
   onEdit,
   onReorder,
   onRemove,
@@ -395,26 +398,40 @@ function MessageQueuePanel({
               {item.error && <div className="chat-queue-error">{item.error}</div>}
             </div>
             <div className="chat-queue-controls">
-              <button type="button" className="chat-queue-icon-btn" onClick={() => onEdit(item)} disabled={item.status === "sending"} title="编辑">
-                <Pencil size={14} />
-              </button>
-              {canGuide && !compactionBlocksGuidance && !item.action && (
+              {item.status === "sending" && <span className="chat-queue-state">等待插入</span>}
+              {item.status !== "sending" && (
+                <button type="button" className="chat-queue-icon-btn" onClick={() => onEdit(item)} title="编辑">
+                  <Pencil size={14} />
+                </button>
+              )}
+              {canGuide && !compactionBlocksGuidance && !item.action && item.status === "sending" && (
+                <button
+                  type="button"
+                  className="chat-queue-icon-btn"
+                  onClick={() => onCancelGuidance(item)}
+                  title="撤回这条插话，回到普通排队"
+                  aria-label="撤回这条插话，回到普通排队"
+                >
+                  <Undo2 size={14} />
+                </button>
+              )}
+              {canGuide && !compactionBlocksGuidance && !item.action && item.status !== "sending" && (
                 <button
                   type="button"
                   className="chat-queue-action"
                   onClick={() => onGuide(item)}
-                  disabled={!currentSessionRunning || item.status === "sending"}
-                  title={item.status === "sending"
-                    ? "等待调度"
-                    : currentSessionRunning ? "作为引导发送到当前运行的对话" : "Agent 运行中才能引导"}
+                  disabled={!currentSessionRunning}
+                  title={currentSessionRunning ? "插进当前回合，Agent 下一步前会看到" : "Agent 运行中才能插话"}
                 >
                   <CornerDownRight size={14} />
-                  <span>{item.status === "sending" ? "等待调度" : "引导"}</span>
+                  <span>插话</span>
                 </button>
               )}
-              <button type="button" className="chat-queue-icon-btn" onClick={() => onRemove(item.id)} disabled={item.status === "sending"} title="移除">
-                <Trash2 size={14} />
-              </button>
+              {item.status !== "sending" && (
+                <button type="button" className="chat-queue-icon-btn" onClick={() => onRemove(item.id)} title="移除">
+                  <Trash2 size={14} />
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -3807,6 +3824,14 @@ export function ChatPanel({
     activeSessionSupportsGuidance,
   ]);
 
+  const handleCancelQueuedGuidance = useCallback(async (item: QueuedMessage) => {
+    try {
+      await SessionCommandCoordinator.cancelQueuedGuidance(item.sessionId, item.id);
+    } catch (error) {
+      showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
   const handleEditQueuedMessage = useCallback(async (item: QueuedMessage, draft: QueuedMessageEditableDraft) => {
     try {
       const payload = await buildSessionMessagePayload({
@@ -3922,7 +3947,7 @@ export function ChatPanel({
       addMessage({
         id: crypto.randomUUID(),
         role: "system",
-        content: `Model switch failed: ${error instanceof Error ? error.message : String(error)}`,
+        content: `切换模型失败：${error instanceof Error ? error.message : String(error)}`,
         timestamp: Date.now(),
       }, sessionId);
       return;
@@ -4014,6 +4039,29 @@ export function ChatPanel({
         showAppAlert("调整思考级别需要等当前运行结束后再操作。");
       }
     }
+  };
+
+  // 手动压缩：各 Agent 走自己的压缩流程，进度由已有的 context_compaction 事件驱动，
+  // 弹窗只需把结果错误反馈出来。按钮对所有 Agent 都开放，能力差异由后端回答。
+  const handleCompactContext = async () => {
+    if (!activeSessionId) {
+      showFloatingToastMessage("先打开一个会话再压缩上下文。");
+      return false;
+    }
+    if (currentSessionRunning) {
+      showFloatingToastMessage("当前回合仍在运行，等结束后再压缩。");
+      return false;
+    }
+    if (typeof window.electronAPI.agentCompactSession !== "function") {
+      showFloatingToastMessage("当前版本不支持手动压缩上下文，请重启客户端后重试。");
+      return false;
+    }
+    const result = await window.electronAPI.agentCompactSession(activeSessionId);
+    if (!result?.success) {
+      showFloatingToastMessage(result?.error || "压缩上下文失败");
+      return false;
+    }
+    return true;
   };
 
   const contextWindow = activeSessionContextUsage?.contextWindow || currentModel?.contextWindow;
@@ -4202,6 +4250,7 @@ export function ChatPanel({
         currentSessionRunning={currentSessionRunning}
         compactionBlocksGuidance={activeSessionCompactionBlocksGuidance}
         onGuide={handleGuideQueuedMessage}
+        onCancelGuidance={handleCancelQueuedGuidance}
         onEdit={(item) => setQueueEditingId(item.id)}
         onReorder={handleReorderQueuedMessage}
         onRemove={(itemId) => {
@@ -4361,7 +4410,10 @@ export function ChatPanel({
         />
         </div>
 
-        <div className="chat-status-bar">
+        {/* 空会话没有真实统计，显示固定占位文案；发第一条消息后换成真实统计。 */}
+        {messages.length === 0 ? (
+          <div className="chat-status-bar chat-status-bar-empty"><span>暂无统计数据</span></div>
+        ) : <div className="chat-status-bar">
           {activeSessionId && <ChatSessionStatsItem sessionId={activeSessionId} />}
           <span className="chat-status-divider" aria-hidden="true" />
           {activeSessionId && (
@@ -4415,7 +4467,7 @@ export function ChatPanel({
             <ArrowRightLeft size={12} strokeWidth={2} />
             <span>生成摘要</span>
           </button>
-        </div>
+        </div>}
       </div>
 
       {isForkingSession && (
@@ -4515,6 +4567,13 @@ export function ChatPanel({
           usage={activeSessionContextUsage}
           anchorRef={contextRingRef}
           onClose={() => setContextUsageOpen(false)}
+          onCompact={handleCompactContext}
+          compacting={activeSessionCompacting}
+          compactDisabledReason={!activeSessionId
+            ? "先打开一个会话"
+            : currentSessionRunning
+              ? "当前回合仍在运行，结束后再压缩"
+              : undefined}
         />
       )}
       {tokenUsageOpen && activeSessionId && (

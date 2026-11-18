@@ -15,6 +15,7 @@ const cssFiles = [
   "src/styles/global.css",
   "src/components/layout/ChatPanel.css",
   "src/components/layout/SubagentMonitor.css",
+  "src/components/shared/MarkdownRenderer.css",
   "src/components/git/GitWorkspaceModal.css",
 ];
 

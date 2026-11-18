@@ -104,6 +104,8 @@ const parseSubagent = (
     label,
     status,
     model: getFirstString(value, ["model", "modelName", "model_name"]),
+    // 调度方给的极简标题（插件 1.4.1+），优先用于胶囊/页签展示。
+    title: getFirstString(value, ["title"]),
     path,
     message: getFirstString(value, ["message", "detail", "summary"]),
     prompt: getFirstString(value, ["prompt", "task", "request"]),
@@ -169,6 +171,7 @@ export const parseSubagentsFromEvent = (
       path: event.agentPath,
       status: event.status || event.state,
       model: event.model,
+      title: event.title,
       message: event.message,
       prompt: event.prompt,
       usage: event.usage,

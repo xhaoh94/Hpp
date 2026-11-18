@@ -162,7 +162,10 @@ const getCurrentVersion = async (context) => {
 
 const getLatestVersion = async () => {
   try {
-    const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`);
+    const response = await fetch(
+      `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`,
+      { signal: AbortSignal.timeout(8000) },
+    );
     if (!response.ok) return undefined;
     const value = await response.json();
     return typeof value.version === "string" ? value.version : undefined;
@@ -228,13 +231,19 @@ export const getStatus = async (context) => {
   };
 };
 
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
 export const update = async (context, options = {}) => {
   if (updateInProgress) return { success: false, error: "Claude Agent SDK 正在安装中。" };
-  updateInProgress = true;
-  const runtimeRoot = getRuntimeRoot(context);
   const requestedVersion = typeof options.versionSpec === "string" && options.versionSpec.trim()
     ? options.versionSpec.trim()
     : undefined;
+  // Validate before taking the update lock so a rejected request cannot leave updateInProgress stuck.
+  if (requestedVersion && requestedVersion !== "latest" && !VERSION_PATTERN.test(requestedVersion)) {
+    return { success: false, error: `无效的 Claude Agent SDK 版本号：${requestedVersion}` };
+  }
+  updateInProgress = true;
+  const runtimeRoot = getRuntimeRoot(context);
   let targetVersion = requestedVersion;
   try {
     const currentStatus = await getStatus(context);

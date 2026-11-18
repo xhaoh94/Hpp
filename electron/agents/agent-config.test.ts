@@ -128,14 +128,12 @@ describe("agent provider config", () => {
     await Promise.all([
       saveAgentSubagentConfig("test-agent", {
         enabled: true,
-        defaultModelMode: "custom",
-        defaultModel: "provider/model",
-        profiles: {},
+        pool: [{ model: "provider/model", tier: "deep" }],
       }),
       setAgentBuiltinExtensions("test-agent", ["mcp"]),
     ]);
     const settings = JSON.parse(await readFile(join(tempRoot, "hpp-data", "settings.json"), "utf8"));
-    expect(settings.subagentConfigs["test-agent"].defaultModel).toBe("provider/model");
+    expect(settings.subagentConfigs["test-agent"].pool[0].model).toBe("provider/model");
     expect(settings.agentBuiltinExtensions["test-agent"]).toEqual(["mcp"]);
   });
 
@@ -147,15 +145,15 @@ describe("agent provider config", () => {
 
     await expect(saveAgentSubagentConfig("test-agent", {
       enabled: true,
-      defaultModelMode: "custom",
-      defaultModel: "provider/model",
-      profiles: {},
+      pool: [{ model: "provider/model", tier: "balanced" }],
     })).resolves.toMatchObject({ success: true });
 
     const settings = JSON.parse(await readFile(settingsPath, "utf8"));
     expect(settings.theme).toBe("dark");
     expect(settings.agentConfigs["test-agent"]).toBeDefined();
-    expect(settings.subagentConfigs["test-agent"]).toMatchObject({ defaultModel: "provider/model" });
+    expect(settings.subagentConfigs["test-agent"]).toMatchObject({
+      pool: [{ model: "provider/model" }],
+    });
   });
 
   it("persists the requested provider order and keeps the active provider", async () => {
@@ -452,7 +450,7 @@ describe("agent provider config", () => {
     });
   });
 
-  it("rejects cross-agent copies when the target has no compatible endpoint", async () => {
+  it("falls back to the target default endpoint when the source is unsupported", async () => {
     testState.capabilitiesByAgent["target-agent"] = {
       configuration: {
         ...providerConfiguration("hpp"),
@@ -463,8 +461,39 @@ describe("agent provider config", () => {
     };
 
     await expect(copyAgentProviderConfig("test-agent", "provider-a", "target-agent")).resolves.toMatchObject({
-      success: false,
-      error: "目标 Agent 不支持 Endpoint：responses",
+      success: true,
+      copiedProviderId: "provider-a",
+      config: {
+        providers: expect.arrayContaining([expect.objectContaining({
+          providerId: "provider-a",
+          endpoint: "anthropic-messages",
+        })]),
+      },
+    });
+  });
+
+  it("switches responses to chat-completions when the target only supports OpenAI chat", async () => {
+    testState.capabilitiesByAgent["target-agent"] = {
+      configuration: {
+        ...providerConfiguration("hpp"),
+        endpoints: [
+          { id: "anthropic-messages", label: "Anthropic Messages" },
+          { id: "chat-completions", label: "Chat Completions" },
+        ],
+        defaultEndpoint: "anthropic-messages",
+      },
+      providerActivation: "none",
+    };
+
+    await expect(copyAgentProviderConfig("test-agent", "provider-a", "target-agent")).resolves.toMatchObject({
+      success: true,
+      copiedProviderId: "provider-a",
+      config: {
+        providers: expect.arrayContaining([expect.objectContaining({
+          providerId: "provider-a",
+          endpoint: "chat-completions",
+        })]),
+      },
     });
   });
 

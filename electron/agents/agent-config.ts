@@ -644,7 +644,11 @@ export async function copyAgentProviderConfig(
       : await readCurrentAgentConfigState(targetAgentId, targetConfiguration);
     const sourceProvider = sourceState.providers.find((provider) => provider.providerId === sourceProviderId);
     if (!sourceProvider) throw new Error(`未找到要复制的渠道：${sourceProviderId}`);
-    const endpoint = resolveCompatibleProviderEndpoint(sourceProvider.endpoint, targetConfiguration.endpoints);
+    const endpoint = resolveCompatibleProviderEndpoint(
+      sourceProvider.endpoint,
+      targetConfiguration.endpoints,
+      targetConfiguration.defaultEndpoint,
+    );
     if (!endpoint) {
       throw new Error(`目标 Agent 不支持 Endpoint：${sourceProvider.endpoint}`);
     }
