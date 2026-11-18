@@ -1,0 +1,70 @@
+name: Build & Publish Windows Installer
+
+# 大文件（99MB exe）从本机上传到 GitHub 常被代理/链路中断（408/EOF/TLS timeout）。
+# 在 GitHub Actions 里构建并上传走内网，不受本地网络影响。
+# 由 release-all 在发布后自动触发，也可手动触发补传。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "目标 Release 标签，例如 v0.1.11"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Determine release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          lfs: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build application
+        env:
+          HPP_SKIP_PLUGIN_DRIFT_CHECK: "1"
+        run: npm run build
+
+      - name: Build Windows installer
+        env:
+          HPP_SKIP_PLUGIN_DRIFT_CHECK: "1"
+        run: npx electron-builder --win nsis --x64 --publish never --config.directories.output=windows-release
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${TAG#v}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Automated Windows installer build"
+          gh release upload "$TAG" \
+            "windows-release/hpp-Setup-${VERSION}.exe" \
+            "windows-release/hpp-Setup-${VERSION}.exe.blockmap" \
+            --clobber --repo "$GITHUB_REPOSITORY"
