@@ -47,8 +47,8 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest 已预装完整 Android SDK（ANDROID_HOME 已设），
+      # 不要再加 android-actions/setup-android：它会跑已废弃的 `sdkmanager tools` 而失败。
 
       - name: Install dependencies
         run: npm install --ignore-scripts
