@@ -91,7 +91,8 @@ jobs:
 
       - name: Build release APK
         working-directory: mobile/android
-        run: ./gradlew assembleRelease --no-daemon --max-workers=2
+        # gradlew 在 Windows 提交时没带执行位，用 bash 调用绕过 Permission denied。
+        run: bash ./gradlew assembleRelease --no-daemon --max-workers=2
 
       - name: Verify and stage APK
         id: apk
