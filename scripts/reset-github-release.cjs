@@ -131,6 +131,13 @@ async function main() {
     ...pluginAssets,
   ];
 
+  // 全平台云端构建模式：Release 创建/说明更新后，产物由各平台 workflow 自行上传。
+  if (process.env.RG_NOTES_ONLY === "1") {
+    console.log(`\nNotes-only mode: skipping local asset upload (platform workflows will upload).`);
+    console.log(`\nPublished: ${release.html_url}`);
+    return;
+  }
+
   const preparedAssets = localAssets
     .filter(([p]) => existsSync(p))
     .map(([p, ct, label]) => ({ filePath: resolve(p), contentType: ct, label, size: statSync(resolve(p)).size }));

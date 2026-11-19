@@ -2,10 +2,10 @@ name: Build & Publish Windows Installer
 
 # 大文件（99MB exe）从本机上传到 GitHub 常被代理/链路中断（408/EOF/TLS timeout）。
 # 在 GitHub Actions 里构建并上传走内网，不受本地网络影响。
-# 由 release-all 在发布后自动触发，也可手动触发补传。
+# 只由 release-all.cjs 在脚本里显式触发（或手动补传）。
+# 不加 release:published 自动触发——否则新建 Release 时会自动+手动双跑，
+# 两次构建的 exe 哈希不同、互相覆盖 latest.yml，导致自动更新校验失败。
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -66,8 +66,12 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Automated Windows installer build"
           # latest.yml 必须随 exe 一起上传：它含 exe 的 sha512/size，
           # 用本机生成的旧 yml 配 CI 构建的 exe 会让自动更新校验失败。
+          # 插件包由 npm run build 生成（release/vX/agent-plugins/），一并上传。
+          # 放 Windows workflow 上传，避免三个 workflow 同时 clobber 同一批文件。
           gh release upload "$TAG" \
             "windows-release/hpp-Setup-${VERSION}.exe" \
             "windows-release/hpp-Setup-${VERSION}.exe.blockmap" \
             "windows-release/latest.yml" \
+            release/v*/agent-plugins/*.zip \
+            release/v*/agent-plugins/agent-plugins.json \
             --clobber --repo "$GITHUB_REPOSITORY"

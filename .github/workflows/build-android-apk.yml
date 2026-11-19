@@ -1,0 +1,130 @@
+name: Build & Publish Android APK
+
+# 发布签名密钥只在 GitHub Secrets 里保存，CI 临时还原后构建。
+# 只由 release-all.cjs 显式触发（或手动补传）。四个 Secret 需先在仓库配置。
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "目标 Release 标签，例如 v0.1.11"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          lfs: true
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Restore release signing key
+        # 需要四个 repository Secrets（Settings → Secrets and variables → Actions）：
+        #   ANDROID_KEYSTORE_BASE64  : hpp-release.jks 的 base64（certutil -encode 或 base64 命令生成）
+        #   ANDROID_KEYSTORE_PASSWORD: 密钥库密码
+        #   ANDROID_KEY_ALIAS        : hpp-release
+        #   ANDROID_KEY_PASSWORD     : 私钥密码（本机与库密码相同）
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Missing Android signing Secrets. Configure ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD."
+            exit 1
+          fi
+          SIGN_DIR="$RUNNER_TEMP/hpp-android-signing"
+          mkdir -p "$SIGN_DIR"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$SIGN_DIR/hpp-release.jks"
+          # storeFile 写绝对路径；gradle 通过 HPP_ANDROID_SIGNING_PROPERTIES 读这个文件。
+          cat > "$SIGN_DIR/release.properties" <<EOF
+          storeFile=$SIGN_DIR/hpp-release.jks
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          chmod 600 "$SIGN_DIR/release.properties"
+          echo "HPP_ANDROID_SIGNING_PROPERTIES=$SIGN_DIR/release.properties" >> "$GITHUB_ENV"
+          echo "Restored signing key to $SIGN_DIR"
+
+      - name: Build application
+        env:
+          HPP_SKIP_PLUGIN_DRIFT_CHECK: "1"
+        run: npm run build
+
+      - name: Build release APK
+        working-directory: mobile/android
+        run: ./gradlew assembleRelease --no-daemon --max-workers=2
+
+      - name: Verify and stage APK
+        id: apk
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          SRC="mobile/android/app/build/outputs/apk/release/app-release.apk"
+          test -f "$SRC"
+          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --print-certs "$SRC"
+          mkdir -p release
+          cp "$SRC" "release/Hpp-Android.apk"
+          SHA256=$(sha256sum "release/Hpp-Android.apk" | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          cat > "release/android-latest.json" <<EOF
+          {
+              "version":  "$VERSION",
+              "versionCode":  $(grep -oE 'versionCode [0-9]+' mobile/android/app/build.gradle | awk '{print $2}'),
+              "url":  "https://github.com/xhaoh94/Hpp/releases/latest/download/Hpp-Android.apk",
+              "sha256":  "$SHA256",
+              "publishedAt":  "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat "release/android-latest.json"
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Automated Android build"
+          gh release upload "$TAG" \
+            release/Hpp-Android.apk \
+            release/android-latest.json \
+            --clobber --repo "$GITHUB_REPOSITORY"

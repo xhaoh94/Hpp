@@ -1,10 +1,8 @@
 name: Build & Publish Linux AppImage
 
-# 自动触发：release:github 创建 Release 时自动构建 AppImage 并上传。
-# 也可手动触发（workflow_dispatch），填入目标 Release 标签。
+# 只由 release-all.cjs 显式触发（或手动补传）。
+# 去掉 release:published 自动触发，避免与脚本手动触发双跑、互相覆盖产物。
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:

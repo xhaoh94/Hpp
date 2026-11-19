@@ -1,10 +1,13 @@
 const { spawnSync } = require("child_process");
-const { existsSync, mkdirSync, copyFileSync, readdirSync, statSync } = require("fs");
-const { join, resolve, basename } = require("path");
+const { resolve } = require("path");
 
 const version = require("../package.json").version;
 const tag = `v${version}`;
-const releaseDir = resolve("release", tag);
+const WORKFLOWS = [
+  { file: "build-windows-release.yml", label: "Windows installer" },
+  { file: "build-android-apk.yml", label: "Android APK" },
+  { file: "build-linux-appimage.yml", label: "Linux AppImage" },
+];
 
 function run(cmd, args, opts = {}) {
   console.log(`\n> ${cmd} ${args.join(" ")}`);
@@ -19,99 +22,83 @@ function run(cmd, args, opts = {}) {
   return result;
 }
 
-function copyIfExists(src, dest) {
-  if (existsSync(src)) {
-    copyFileSync(src, dest);
-    console.log(`  Copied: ${basename(dest)} (${statSync(dest).size.toLocaleString()} bytes)`);
-    return true;
-  }
-  console.warn(`  Missing: ${src}`);
-  return false;
+function runCapture(cmd, args) {
+  return spawnSync(cmd, args, {
+    encoding: "utf8",
+    cwd: resolve(__dirname, ".."),
+  });
 }
 
 async function main() {
-  const forceBuild = process.argv.includes("--build"); // Force rebuild even if exists
-  const skipBuild = process.argv.includes("--skip-build"); // Skip build, just use existing files
-  const skipLinux = process.argv.includes("--skip-linux"); // Don't trigger Linux AppImage
+  const skipTrigger = process.argv.includes("--skip-trigger");
 
-  console.log(`=== Hpp Release ${tag} ===`);
+  console.log(`=== Hpp Release ${tag} (cloud builds) ===`);
+  console.log("所有平台产物由 GitHub Actions 在云端构建并上传到 Release。\n");
 
-  // ---- Step 1: Build (unless --skip-build) ----
-  if (!skipBuild) {
-    console.log("\n--- Step 1: Building Windows + Android ---");
-    run("npm", ["run", "dist"]);
-    run("npm", ["run", "mobile:release"]);
-  } else {
-    console.log("\n--- Step 1: SKIPPED (--skip-build) ---");
+  // Step 1: 创建/更新 Release（仅说明，不上传本地产物）。
+  // 三个平台 workflow 监听 published 事件，所以必须先有 Release。
+  console.log("--- Step 1: Creating/updating GitHub Release (notes only) ---");
+  run("node", ["scripts/reset-github-release.cjs"], { env: { ...process.env, RG_NOTES_ONLY: "1" } });
+
+  if (skipTrigger) {
+    console.log("\n--- Skipping workflow triggers (--skip-trigger) ---");
+    return;
   }
 
-  // ---- Step 2: Archive ----
-  console.log(`\n--- Step 2: Archiving to ${releaseDir} ---`);
-  mkdirSync(releaseDir, { recursive: true });
-
-  const srcRelease = resolve("release");
-  copyIfExists(
-    join(srcRelease, `hpp-Setup-${version}.exe`),
-    join(releaseDir, `hpp-Setup-${version}.exe`)
-  );
-  copyIfExists(
-    join(srcRelease, `hpp-Setup-${version}.exe.blockmap`),
-    join(releaseDir, `hpp-Setup-${version}.exe.blockmap`)
-  );
-  copyIfExists(
-    join(srcRelease, "latest.yml"),
-    join(releaseDir, "latest.yml")
-  );
-  copyIfExists(
-    join(srcRelease, "Hpp-Android.apk"),
-    join(releaseDir, "Hpp-Android.apk")
-  );
-  copyIfExists(
-    join(srcRelease, "android-latest.json"),
-    join(releaseDir, "android-latest.json")
-  );
-
-  // Copy agent plugins if available
-  const pluginDir = join(srcRelease, "agent-plugins");
-  const destPluginDir = join(releaseDir, "agent-plugins");
-  if (existsSync(pluginDir)) {
-    mkdirSync(destPluginDir, { recursive: true });
-    const files = readdirSync(pluginDir);
-    for (const f of files) {
-      if (f.endsWith(".zip") || f === "agent-plugins.json") {
-        copyIfExists(join(pluginDir, f), join(destPluginDir, f));
-      }
+  // Step 2: 触发三个平台云端构建。
+  console.log("\n--- Step 2: Triggering cloud build workflows ---");
+  for (const { file, label } of WORKFLOWS) {
+    const result = runCapture("gh", ["workflow", "run", file, "--ref", "main", "-f", `release_tag=${tag}`]);
+    if (result.status === 0) console.log(`  ✓ ${label}: ${file}`);
+    else {
+      console.warn(`  ✗ ${label} trigger failed: ${(result.stderr || result.stdout || "").trim()}`);
+      console.warn(`    手动补发: gh workflow run ${file} --ref main -f release_tag=${tag}`);
     }
   }
 
-  // ---- Step 3: Upload to GitHub ----
-  console.log("\n--- Step 3: Uploading to GitHub Release ---");
-  run("node", ["scripts/reset-github-release.cjs"]);
-
-  // ---- Step 4: Trigger Linux AppImage ----
-  if (!skipLinux) {
-    console.log("\n--- Step 4: Triggering Linux AppImage workflow ---");
-    // Use gh CLI to trigger the workflow
-    const result = spawnSync("gh", [
-      "workflow", "run", "build-linux-appimage.yml",
-      "--ref", "main",
-      "-f", `release_tag=${tag}`,
-    ], { stdio: "pipe", encoding: "utf8" });
-
-    if (result.status === 0) {
-      console.log("Linux AppImage workflow triggered successfully.");
-      console.log("Check status: https://github.com/xhaoh94/Hpp/actions/workflows/build-linux-appimage.yml");
-    } else {
-      console.warn("Failed to trigger Linux workflow:", result.stderr || result.stdout);
-      console.warn("You may need to manually trigger it from GitHub Actions page.");
+  // Step 3: 等待各 workflow 结束（gh run watch 偶发 EOF，失败只提示不中断）。
+  console.log("\n--- Waiting for workflows ---");
+  for (const { file, label } of WORKFLOWS) {
+    const list = runCapture("gh", ["run", "list", "--workflow", file, "--limit", "1", "--json", "databaseId,status"]);
+    if (list.status !== 0) {
+      console.warn(`  ? ${label}: 无法查询运行状态，请到 Actions 页面确认`);
+      continue;
     }
-  } else {
-    console.log("\n--- Step 4: SKIPPED (--skip-linux) ---");
+    let runId;
+    try { runId = JSON.parse(list.stdout)[0]?.databaseId; } catch { /* ignore */ }
+    if (!runId) {
+      console.warn(`  ? ${label}: 没有找到运行记录`);
+      continue;
+    }
+    const watch = runCapture("gh", ["run", "watch", String(runId), "--exit-status", "--interval", "15"]);
+    if (watch.status === 0) console.log(`  ✓ ${label}: 构建与上传完成`);
+    else console.warn(`  ✗ ${label}: 构建失败或监控中断（run ${runId}），请检查 Actions 日志`);
   }
 
-  console.log(`\n=== Release ${tag} done ===`);
-  console.log(`Release URL: https://github.com/xhaoh94/Hpp/releases/tag/${tag}`);
-  console.log(`Local archive: ${releaseDir}`);
+  // Step 4: 验收关键产物。
+  console.log("\n--- Step 4: Verifying release assets ---");
+  const assets = runCapture("gh", ["release", "view", tag, "--json", "assets", "-q", ".assets[].name"]);
+  const names = (assets.stdout || "").split(/\r?\n/).filter(Boolean);
+  const expected = [
+    `hpp-Setup-${version}.exe`,
+    "Hpp-Android.apk",
+    `Hpp-Linux-${version}-x86_64.AppImage`,
+    "latest.yml",
+    "agent-plugins.json",
+  ];
+  let missing = false;
+  for (const name of expected) {
+    const ok = names.includes(name);
+    console.log(`  ${ok ? "✓" : "✗"} ${name}`);
+    if (!ok) missing = true;
+  }
+
+  if (missing) {
+    console.warn("\n部分产物缺失，请检查上方 workflow 日志或手动触发。");
+    process.exitCode = 1;
+  } else {
+    console.log(`\n=== Release ${tag} published: https://github.com/xhaoh94/Hpp/releases/tag/${tag} ===`);
+  }
 }
 
 main().catch((e) => {
