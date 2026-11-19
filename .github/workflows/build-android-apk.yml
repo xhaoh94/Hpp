@@ -89,6 +89,11 @@ jobs:
           HPP_SKIP_PLUGIN_DRIFT_CHECK: "1"
         run: npm run build
 
+      - name: Capacitor sync
+        # 生成 capacitor-cordova-android-plugins/ 等 gradle 依赖目录（本机 mobile:sync 也做这步）。
+        working-directory: mobile
+        run: npx cap sync android
+
       - name: Build release APK
         working-directory: mobile/android
         # gradlew 在 Windows 提交时没带执行位，用 bash 调用绕过 Permission denied。
