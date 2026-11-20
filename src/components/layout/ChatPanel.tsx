@@ -103,6 +103,7 @@ import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { resolvePreviousUserTargetIndex } from "./previousUserTarget";
 import { useAgentEvents } from "./useAgentEvents";
+import { useAutoCompaction } from "./useAutoCompaction";
 import { isSupportedImageAttachment, usePendingImages } from "./usePendingImages";
 import {
   preparePendingQuestionContinuation,
@@ -2729,6 +2730,8 @@ export function ChatPanel({
   } = usePendingUIResponse(activeSessionId, openSessionIds);
   const activeInteraction = activeConfirmation || activePermissionChoice || activeQuestionnaire;
   const currentSessionRunning = activeSessionId ? activeSessionAgentStatus === "running" : isStreaming;
+  // 智能压缩：用量越过档位、回合结束后自动压缩（档位在上下文弹窗里调）。
+  useAutoCompaction(activeSessionId);
   const permissionModeSupported = supportsPermissionModes(activeSession?.agentId || activeAgentId);
   useEffect(() => {
     if (!permissionModeSupported) setPermissionOpen(false);
