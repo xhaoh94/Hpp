@@ -6,7 +6,7 @@ import { basename, dirname, extname, join } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { commandExists, getCommandEnv, getExecFileInvocation } from "../utils/command-utils";
-import { resolveEditorCli } from "../editor-bridge/installers";
+import { listEditorTargets } from "../editor-bridge/installers";
 import { ReviewUndoService } from "./rebuild-file";
 import type {
   PrepareReviewUndoRequest,
@@ -105,18 +105,24 @@ export function registerFileHandlers() {
     }
   });
 
-  // 「在 VSCode 中打开项目」：走 VSCode CLI（code <dir>），复用 editor-bridge 的
-  // CLI 探测逻辑（绝对路径优先、再 PATH，Windows 处理 code.cmd 垫片）。
-  ipcMain.handle("fs:openProjectInEditor", async (_event, targetPath: string, editorId = "vscode") => {
+  // 「用指定外部编辑器打开项目」：editorId 对应 editor-bridge 的目标 id，
+  // cliPath 从 editorBridgeListTargets 拿（已探测好的绝对路径），这里直接用它打开目录。
+  ipcMain.handle("fs:openProjectInEditor", async (_event, targetPath: string, editorId: string) => {
     if (typeof targetPath !== "string" || !targetPath.trim()) {
       return { success: false, error: "项目路径不能为空" };
+    }
+    if (typeof editorId !== "string" || !editorId.trim()) {
+      return { success: false, error: "未指定编辑器" };
     }
     try {
       const info = await stat(targetPath).catch(() => null);
       if (!info?.isDirectory()) return { success: false, error: "项目目录不存在" };
-      const cli = await resolveEditorCli(editorId);
-      if (!cli) return { success: false, error: "未找到 Visual Studio Code 命令行工具（code），请确认已安装 VSCode" };
-      const invocation = getExecFileInvocation(cli, [targetPath], getCommandEnv());
+      const targets = await listEditorTargets();
+      const target = targets.find((item) => item.id === editorId);
+      if (!target?.cliPath) {
+        return { success: false, error: `${target?.label || editorId} 的命令行工具不可用` };
+      }
+      const invocation = getExecFileInvocation(target.cliPath, [targetPath], getCommandEnv());
       await new Promise<void>((resolvePromise, reject) => {
         const child = execFile(
           invocation.command,
@@ -127,7 +133,7 @@ export function registerFileHandlers() {
             else resolvePromise();
           }
         );
-        // CLI 只需把目录交给已开的 VSCode 窗口，别让子进程的 stdio 挂住 Hpp。
+        // 编辑器 CLI 只是把目录交给已开的窗口，unref 让 Hpp 不等它退出。
         child.unref?.();
       });
       return { success: true };

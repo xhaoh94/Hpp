@@ -124,11 +124,15 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("已复制名字");
   });
 
-  it("offers a header button to open the whole project in VSCode", () => {
+  it("offers a header menu to open the whole project in a detected editor", () => {
     const source = readSource();
 
-    expect(source).toContain("在 VSCode 中打开项目");
-    expect(source).toContain("openProjectInEditor(activeWorkspacePath)");
-    expect(source).toContain("<Code2");
+    expect(source).toContain("在编辑器中打开项目");
+    expect(source).toContain("editorBridgeListTargets()");
+    expect(source).toContain("target.appInstalled && target.cliPath");
+    expect(source).toContain("openProjectInEditor(activeWorkspacePath, editorId)");
+    expect(source).toContain("在 {target.label} 中打开");
+    expect(source).toContain("<ExternalLink");
+    expect(source).not.toContain("VSCode 中打开项目");
   });
 });

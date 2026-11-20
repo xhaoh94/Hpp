@@ -25,14 +25,15 @@ import { replaceEmojiWithImages } from "@/lib/emoji";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { showAppAlert } from "@/lib/app-dialog";
 import { getFileFilterKey, isFileEntryExcluded, type FileFilterConfig } from "@shared/file-filters";
+import type { EditorBridgeTargetInfo } from "@shared/editor-bridge-protocol";
 import type { FileEntry } from "@/types";
 import {
   ChevronDown,
   ChevronRight,
   Clipboard,
-  Code2,
   Copy,
   CopyMinus,
+  ExternalLink,
   FolderOpen,
   MessageCirclePlus,
   RefreshCw,
@@ -321,6 +322,11 @@ export function FileExplorer() {
   const [treeCommand, setTreeCommand] = useState<FileTreeCommand | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [contextMenu, setContextMenu] = useState<FileExplorerContextMenu | null>(null);
+  const [editorMenu, setEditorMenu] = useState<{
+    x: number;
+    y: number;
+    targets: EditorBridgeTargetInfo[];
+  } | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Map<string, FileEntry>>(() => new Map());
   const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
   const rootRequestRef = useRef(0);
@@ -431,11 +437,26 @@ export function FileExplorer() {
     closeContextMenu();
   }, [closeContextMenu]);
 
-  const openProjectInVscode = useCallback(async () => {
+  const openEditorMenu = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const all = await window.electronAPI.editorBridgeListTargets().catch(() => []);
+    // 只列真正装了、且 CLI 可用的编辑器；config 类（如纯配置集成）没有 CLI，排掉。
+    const targets = all.filter((target) => target.appInstalled && target.cliPath);
+    if (targets.length === 0) {
+      showAppAlert("没有检测到已安装的编辑器（VSCode / VSCodium / Cursor / Zed 等）。");
+      return;
+    }
+    setEditorMenu({ x: rect.left, y: rect.bottom + 4, targets });
+  }, []);
+
+  const openProjectInEditor = useCallback(async (editorId: string) => {
+    setEditorMenu(null);
     if (!activeWorkspacePath) return;
-    const result = await window.electronAPI.openProjectInEditor(activeWorkspacePath);
-    if (result.success) showFloatingToastMessage("已在 VSCode 中打开项目");
-    else showAppAlert(result.error || "无法在 VSCode 中打开项目");
+    const result = await window.electronAPI.openProjectInEditor(activeWorkspacePath, editorId).catch(() => ({
+      success: false,
+      error: "打开编辑器失败",
+    }));
+    if (!result.success) showAppAlert(result.error || "无法在编辑器中打开项目");
   }, [activeWorkspacePath]);
 
   useEffect(() => {
@@ -448,6 +469,17 @@ export function FileExplorer() {
       window.removeEventListener("resize", close);
     };
   }, [closeContextMenu, contextMenu]);
+
+  useEffect(() => {
+    if (!editorMenu) return;
+    const close = () => setEditorMenu(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("resize", close);
+    };
+  }, [editorMenu]);
 
   const claimRevealCenter = useCallback((requestId: number) => {
     if (centeredRevealRequestIdRef.current === requestId) return false;
@@ -623,12 +655,12 @@ export function FileExplorer() {
           <div className="file-tree-header-actions">
             <button
               type="button"
-              onClick={() => void openProjectInVscode()}
+              onClick={(event) => void openEditorMenu(event)}
               className="file-tree-header-btn"
-              title="在 VSCode 中打开项目"
-              aria-label="在 VSCode 中打开项目"
+              title="在编辑器中打开项目"
+              aria-label="在编辑器中打开项目"
             >
-              <Code2 size={14} strokeWidth={1.9} />
+              <ExternalLink size={14} strokeWidth={1.9} />
             </button>
             <button
               type="button"
@@ -728,6 +760,27 @@ export function FileExplorer() {
           <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => entry.path).join("\n"))}><Clipboard size={15} />复制路径</button>
           <button type="button" onClick={() => void copyPath(contextMenu.entries.map((entry) => getRelativeFilePath(entry.path, activeWorkspacePath)).join("\n"))}><Clipboard size={15} />复制相对路径</button>
           <button type="button" onClick={() => void copyName(contextMenu.entries.map((entry) => entry.name).join("\n"))}><Copy size={15} />复制名字</button>
+        </div>,
+        document.body,
+      )}
+      {editorMenu && createPortal(
+        <div
+          className="file-tree-context-menu"
+          style={{
+            left: Math.min(editorMenu.x, window.innerWidth - 210),
+            top: Math.min(editorMenu.y, window.innerHeight - 40 - editorMenu.targets.length * 32),
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {editorMenu.targets.map((target) => (
+            <button
+              key={target.id}
+              type="button"
+              onClick={() => void openProjectInEditor(target.id)}
+            >
+              <ExternalLink size={15} />在 {target.label} 中打开
+            </button>
+          ))}
         </div>,
         document.body,
       )}
