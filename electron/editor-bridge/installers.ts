@@ -11,7 +11,7 @@ import type {
   EditorBridgeTargetId,
   EditorBridgeTargetInfo,
 } from "../../shared/editor-bridge-protocol";
-import { isZedConfigured, isZedInstalled } from "./zed";
+import { isZedConfigured, isZedInstalled, zedExecutableCandidates } from "./zed";
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -109,6 +109,9 @@ const EDITOR_TARGETS: EditorTarget[] = [
  * 这些路径列表与 listEditorTargets 的 appInstalled 判定共用同一份 appCandidates。
  */
 export function resolveEditorAppPath(targetId: string): string | null {
+  if (targetId === "zed") {
+    return zedExecutableCandidates().find((candidate) => existsSync(candidate)) || null;
+  }
   const target = EDITOR_TARGETS.find((item) => item.id === targetId);
   if (!target) return null;
   return target.appCandidates().find((candidate) => existsSync(candidate)) || null;
@@ -248,7 +251,26 @@ export async function listInstalledEditors(): Promise<Array<{ id: string; label:
     const cliPath = await resolveCliPath(target);
     if (cliPath) result.push({ id: target.id, label: target.label, cliPath });
   }));
+  // Zed 不在 EDITOR_TARGETS（它是 config 类，cliPath 恒 null），但「打开项目」
+  // 只需要能启动 zed CLI，与扩展接入无关，所以单独探一次；Wayland 上尤其常见。
+  const zedCli = await resolveZedCliForLaunch();
+  if (zedCli) result.push({ id: "zed", label: "Zed", cliPath: zedCli });
   return result;
+}
+
+/** 找可执行的 zed CLI：先看已知安装路径，再查 PATH。找不到返回 null。 */
+async function resolveZedCliForLaunch(): Promise<string | null> {
+  for (const candidate of zedExecutableCandidates()) {
+    if (existsSync(candidate)) return preferExecutableShim(candidate);
+  }
+  try {
+    const lookup = isWindows() ? "where" : "which";
+    const { stdout } = await execFileAsync(lookup, ["zed"], { windowsHide: true, timeout: 5000 });
+    const first = stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line && existsSync(line));
+    return first ? preferExecutableShim(first) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function listEditorTargets(): Promise<EditorBridgeTargetInfo[]> {

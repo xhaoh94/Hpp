@@ -22,10 +22,19 @@ describe("从外部编辑器打开项目", () => {
   });
 
   it("imports runCli and icon resolver from the editor bridge installers", () => {
-    expect(source).toContain('import { listEditorTargets, listInstalledEditors, resolveEditorAppPath, runCli } from "../editor-bridge/installers"');
+    expect(source).toContain('import { listInstalledEditors, resolveEditorAppPath, runCli } from "../editor-bridge/installers"');
+    expect(source).toContain('import { findDesktopIconPath } from "../editor-bridge/desktop-icon"');
   });
 
-  it("uses the lightweight probe that skips slow extension-version lookup", () => {
+  it("open handler uses the same lightweight probe as the menu (no slow version lookup)", () => {
+    const start = source.indexOf('ipcMain.handle("fs:openProjectInEditor"');
+    const end = source.indexOf("ipcMain.handle(", start + 10);
+    const handler = source.slice(start, end > 0 ? end : undefined);
+    expect(handler).toContain("listInstalledEditors()");
+    expect(handler).not.toContain("listEditorTargets()");
+  });
+
+  it("uses the lightweight probe that skips slow extension-version lookup and includes Zed", () => {
     const installers = readFileSync(new URL("../editor-bridge/installers.ts", import.meta.url), "utf8");
     const start = installers.indexOf("export async function listInstalledEditors");
     expect(start).toBeGreaterThan(-1);
@@ -33,5 +42,16 @@ describe("从外部编辑器打开项目", () => {
     const fn = installers.slice(start, end);
     expect(fn).toContain("resolveCliPath(target)");
     expect(fn).not.toContain("readInstalledVersion");
+    // Zed 不在 EDITOR_TARGETS（config 类），要单独探一次才能出现在菜单里。
+    expect(fn).toContain("resolveZedCliForLaunch()");
+  });
+
+  it("falls back to .desktop icon lookup on Linux", () => {
+    const start = source.indexOf('ipcMain.handle("fs:getEditorIcon"');
+    const end = source.indexOf("ipcMain.handle(", start + 10);
+    const handler = source.slice(start, end > 0 ? end : undefined);
+    expect(handler).toContain('process.platform === "linux"');
+    expect(handler).toContain("findDesktopIconPath(editorId)");
+    expect(handler).toContain("nativeImage.createFromPath");
   });
 });

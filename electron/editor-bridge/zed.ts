@@ -25,7 +25,7 @@ export function getZedKeymapPath() {
   return join(resolveZedConfigDir(), "keymap.json");
 }
 
-function zedExecutableCandidates(): string[] {
+export function zedExecutableCandidates(): string[] {
   if (process.platform === "win32") {
     const local = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
     return [

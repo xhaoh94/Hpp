@@ -1,11 +1,12 @@
-import { ipcMain, dialog, BrowserWindow, shell, app } from "electron";
+import { ipcMain, dialog, BrowserWindow, shell, app, nativeImage } from "electron";
 import { readdir, readFile, access, stat, open, writeFile, mkdir } from "fs/promises";
 import { writeTextFile } from "./write-text-file";
 import { basename, dirname, extname, join } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { commandExists } from "../utils/command-utils";
-import { listEditorTargets, listInstalledEditors, resolveEditorAppPath, runCli } from "../editor-bridge/installers";
+import { listInstalledEditors, resolveEditorAppPath, runCli } from "../editor-bridge/installers";
+import { findDesktopIconPath } from "../editor-bridge/desktop-icon";
 import { ReviewUndoService } from "./rebuild-file";
 import type {
   PrepareReviewUndoRequest,
@@ -111,6 +112,15 @@ export function registerFileHandlers() {
   // 从 exe/.app 提取，拿不到时返回 null 让渲染层退回内置占位图标。
   ipcMain.handle("fs:getEditorIcon", async (_event, editorId: string) => {
     try {
+      // Linux 下 /usr/bin/code 是脚本，getFileIcon 只会拿到通用文件图标；
+      // 先走 .desktop 的 Icon= 字段找应用图标（Wayland/X11 都能用）。
+      if (process.platform === "linux") {
+        const desktopIcon = findDesktopIconPath(editorId);
+        if (desktopIcon) {
+          const image = nativeImage.createFromPath(desktopIcon);
+          if (!image.isEmpty()) return { iconDataUrl: image.toDataURL() };
+        }
+      }
       const appPath = resolveEditorAppPath(editorId);
       if (!appPath) return { iconDataUrl: null };
       const icon = await app.getFileIcon(appPath, { size: "small" });
@@ -132,7 +142,8 @@ export function registerFileHandlers() {
     try {
       const info = await stat(targetPath).catch(() => null);
       if (!info?.isDirectory()) return { success: false, error: "项目目录不存在" };
-      const targets = await listEditorTargets();
+      // 用轻量探测（跟菜单同一套），既避免慢的扩展版本查询，也覆盖 Zed。
+      const targets = await listInstalledEditors();
       const target = targets.find((item) => item.id === editorId);
       if (!target?.cliPath) {
         return { success: false, error: `${target?.label || editorId} 的命令行工具不可用` };
