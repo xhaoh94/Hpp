@@ -1,12 +1,11 @@
 import { ipcMain, dialog, BrowserWindow, shell, app } from "electron";
-import { execFile } from "child_process";
 import { readdir, readFile, access, stat, open, writeFile, mkdir } from "fs/promises";
 import { writeTextFile } from "./write-text-file";
 import { basename, dirname, extname, join } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
-import { commandExists, getCommandEnv, getExecFileInvocation } from "../utils/command-utils";
-import { listEditorTargets } from "../editor-bridge/installers";
+import { commandExists } from "../utils/command-utils";
+import { listEditorTargets, runCli } from "../editor-bridge/installers";
 import { ReviewUndoService } from "./rebuild-file";
 import type {
   PrepareReviewUndoRequest,
@@ -122,20 +121,9 @@ export function registerFileHandlers() {
       if (!target?.cliPath) {
         return { success: false, error: `${target?.label || editorId} 的命令行工具不可用` };
       }
-      const invocation = getExecFileInvocation(target.cliPath, [targetPath], getCommandEnv());
-      await new Promise<void>((resolvePromise, reject) => {
-        const child = execFile(
-          invocation.command,
-          invocation.args,
-          { windowsHide: true, timeout: 15000, env: getCommandEnv() },
-          (error) => {
-            if (error) reject(error);
-            else resolvePromise();
-          }
-        );
-        // 编辑器 CLI 只是把目录交给已开的窗口，unref 让 Hpp 不等它退出。
-        child.unref?.();
-      });
+      // 用 installers 里验证过的 runCli：Windows 的 code.cmd 走 exec 逐段引用，
+      // 避免手动拼 cmd 包装把路径二次引用引坏（见 open-editor.source.test.ts）。
+      await runCli(target.cliPath, [targetPath], 15000);
       return { success: true };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };

@@ -113,8 +113,12 @@ export function cliNeedsCmdWrapper(command: string, platform = process.platform)
   return platform === "win32" && !/\.exe$/i.test(command);
 }
 
-/** 路径含空格时逐段加引号，外层引号由 exec 自己补，别用 shell: true。 */
-async function runCli(command: string, args: string[], timeout: number) {
+/**
+ * 路径含空格时逐段加引号，外层引号由 exec 自己补，别用 shell: true。
+ * 导出供「用外部编辑器打开项目」等场景复用：Windows 的 code.cmd 必须走这条
+ * exec 路径，用 execFile + getExecFileInvocation 会双重引用导致命令被引坏。
+ */
+export async function runCli(command: string, args: string[], timeout: number) {
   if (!cliNeedsCmdWrapper(command)) {
     return execFileAsync(command, args, { windowsHide: true, timeout, maxBuffer: 1024 * 1024 });
   }
