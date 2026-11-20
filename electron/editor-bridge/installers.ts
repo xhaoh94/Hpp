@@ -185,6 +185,15 @@ async function resolveCliPath(target: EditorTarget): Promise<string | null> {
   return null;
 }
 
+/**
+ * 解析某个编辑器目标的 CLI 路径（先绝对路径、再 PATH），供「用外部编辑器打开」这类
+ * 功能复用；找不到时返回 null。与 listEditorTargets 共用同一套探测逻辑。
+ */
+export async function resolveEditorCli(targetId: string): Promise<string | null> {
+  const target = EDITOR_TARGETS.find((item) => item.id === targetId);
+  return target ? resolveCliPath(target) : null;
+}
+
 async function readInstalledVersion(cliPath: string, extensionId: string): Promise<string | null> {
   try {
     const { stdout } = await runCli(cliPath, ["--list-extensions", "--show-versions"], 15000);

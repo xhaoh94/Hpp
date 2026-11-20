@@ -123,4 +123,12 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("<Copy");
     expect(source).toContain("已复制名字");
   });
+
+  it("offers a header button to open the whole project in VSCode", () => {
+    const source = readSource();
+
+    expect(source).toContain("在 VSCode 中打开项目");
+    expect(source).toContain("openProjectInEditor(activeWorkspacePath)");
+    expect(source).toContain("<Code2");
+  });
 });

@@ -7,7 +7,7 @@ vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getAppPath: () => process.cwd(), isPackaged: false },
 }));
 
-import { cliNeedsCmdWrapper, preferExecutableShim } from "./installers";
+import { cliNeedsCmdWrapper, preferExecutableShim, resolveEditorCli } from "./installers";
 
 /**
  * 回归：Windows 的 `where code` 会把无扩展名的 bin/code（bash 垫片）排在前面，
@@ -50,5 +50,12 @@ describe("CLI 调用方式分派", () => {
   it("非 Windows 一律直接 execFile", () => {
     expect(cliNeedsCmdWrapper("/usr/bin/code", "linux")).toBe(false);
     expect(cliNeedsCmdWrapper("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code", "darwin")).toBe(false);
+  });
+});
+
+/** 「用外部编辑器打开项目」复用这套 CLI 探测。 */
+describe("resolveEditorCli", () => {
+  it("未知编辑器 id 返回 null，不去探测系统", async () => {
+    await expect(resolveEditorCli("not-an-editor")).resolves.toBeNull();
   });
 });

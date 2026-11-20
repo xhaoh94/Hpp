@@ -30,6 +30,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clipboard,
+  Code2,
   Copy,
   CopyMinus,
   FolderOpen,
@@ -430,6 +431,13 @@ export function FileExplorer() {
     closeContextMenu();
   }, [closeContextMenu]);
 
+  const openProjectInVscode = useCallback(async () => {
+    if (!activeWorkspacePath) return;
+    const result = await window.electronAPI.openProjectInEditor(activeWorkspacePath);
+    if (result.success) showFloatingToastMessage("已在 VSCode 中打开项目");
+    else showAppAlert(result.error || "无法在 VSCode 中打开项目");
+  }, [activeWorkspacePath]);
+
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => closeContextMenu();
@@ -613,6 +621,15 @@ export function FileExplorer() {
         <span>资源管理器</span>
         {activeProject && (
           <div className="file-tree-header-actions">
+            <button
+              type="button"
+              onClick={() => void openProjectInVscode()}
+              className="file-tree-header-btn"
+              title="在 VSCode 中打开项目"
+              aria-label="在 VSCode 中打开项目"
+            >
+              <Code2 size={14} strokeWidth={1.9} />
+            </button>
             <button
               type="button"
               onClick={collapseAllFolders}

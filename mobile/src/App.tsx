@@ -1761,7 +1761,7 @@ const MessageItem = memo(function MessageItem({
         <div className="message-content">
           <p>{messagePresentation.text}</p>
           {message.modelChange?.performanceHint && (
-            <p className="message-system-divider-hint">对话中途更改模型可能会降低性能</p>
+            <p className="message-system-divider-hint">对话中途更改模型可能会降低质量</p>
           )}
         </div>
       )}

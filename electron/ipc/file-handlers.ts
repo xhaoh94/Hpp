@@ -1,10 +1,12 @@
 import { ipcMain, dialog, BrowserWindow, shell, app } from "electron";
+import { execFile } from "child_process";
 import { readdir, readFile, access, stat, open, writeFile, mkdir } from "fs/promises";
 import { writeTextFile } from "./write-text-file";
 import { basename, dirname, extname, join } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
-import { commandExists } from "../utils/command-utils";
+import { commandExists, getCommandEnv, getExecFileInvocation } from "../utils/command-utils";
+import { resolveEditorCli } from "../editor-bridge/installers";
 import { ReviewUndoService } from "./rebuild-file";
 import type {
   PrepareReviewUndoRequest,
@@ -98,6 +100,37 @@ export function registerFileHandlers() {
       if (!info?.isFile()) return { success: false, error: "文件不存在" };
       const error = await shell.openPath(targetPath);
       return error ? { success: false, error } : { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // 「在 VSCode 中打开项目」：走 VSCode CLI（code <dir>），复用 editor-bridge 的
+  // CLI 探测逻辑（绝对路径优先、再 PATH，Windows 处理 code.cmd 垫片）。
+  ipcMain.handle("fs:openProjectInEditor", async (_event, targetPath: string, editorId = "vscode") => {
+    if (typeof targetPath !== "string" || !targetPath.trim()) {
+      return { success: false, error: "项目路径不能为空" };
+    }
+    try {
+      const info = await stat(targetPath).catch(() => null);
+      if (!info?.isDirectory()) return { success: false, error: "项目目录不存在" };
+      const cli = await resolveEditorCli(editorId);
+      if (!cli) return { success: false, error: "未找到 Visual Studio Code 命令行工具（code），请确认已安装 VSCode" };
+      const invocation = getExecFileInvocation(cli, [targetPath], getCommandEnv());
+      await new Promise<void>((resolvePromise, reject) => {
+        const child = execFile(
+          invocation.command,
+          invocation.args,
+          { windowsHide: true, timeout: 15000, env: getCommandEnv() },
+          (error) => {
+            if (error) reject(error);
+            else resolvePromise();
+          }
+        );
+        // CLI 只需把目录交给已开的 VSCode 窗口，别让子进程的 stdio 挂住 Hpp。
+        child.unref?.();
+      });
+      return { success: true };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }

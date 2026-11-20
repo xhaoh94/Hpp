@@ -1201,7 +1201,7 @@ const ChatMessageItem = memo(function ChatMessageItem({
         </span>
         <span className="chat-context-divider-line" />
         {msg.modelChange?.performanceHint ? (
-          <span className="chat-model-change-hint">对话中途更改模型可能会降低性能</span>
+          <span className="chat-model-change-hint">对话中途更改模型可能会降低质量</span>
         ) : null}
       </div>
     );
