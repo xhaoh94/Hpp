@@ -111,6 +111,13 @@ const MANIFEST_FILE = "hpp-agent-plugin.json";
 const DEFAULT_THINKING_LEVEL = "medium";
 const MAX_PLUGIN_EVENT_BYTES = 1024 * 1024;
 const AGENT_STATUS_CACHE_TTL_MS = 30_000;
+const RETIRED_DROID_PLUGIN = {
+  id: "droid",
+  name: "Droid",
+  runtime: "cli",
+  command: "droid",
+  packageName: "droid",
+} as const;
 /**
  * CLI 安装的超时。OpenCode 2.x 的 npm 包下载约 100MB、解压后约 200MB，
  * 实测国内网络单是下载就要 5 分钟左右，180s 必然超时。给到 15 分钟，
@@ -159,6 +166,11 @@ function normalizeVersionSpec(value: unknown): string | undefined {
   const spec = String(value || "").trim();
   if (!spec || spec.length > 120 || /[\r\n\\/]/.test(spec)) return undefined;
   return spec;
+}
+
+function isRetiredOfficialDroidPlugin(manifest: RawAgentPluginManifest): boolean {
+  return Object.entries(RETIRED_DROID_PLUGIN).every(([key, value]) =>
+    manifest[key as keyof RawAgentPluginManifest] === value);
 }
 
 function normalizePluginEvent(event: unknown): Record<string, unknown> {
@@ -1188,6 +1200,23 @@ export class AgentPluginRegistry {
     this.invalidateStatus();
     await mkdir(getPluginInstallDir(), { recursive: true });
 
+    const retiredDroidDir = join(getPluginInstallDir(), "droid");
+    let retiredDroidManifest: RawAgentPluginManifest | undefined;
+    try {
+      retiredDroidManifest = await this.readManifestFromDirectory(retiredDroidDir);
+    } catch {
+      // 插件不存在或清单不可读时无需迁移。
+    }
+    const isRetiredDroidInstalled = !!retiredDroidManifest && isRetiredOfficialDroidPlugin(retiredDroidManifest);
+    if (isRetiredDroidInstalled) {
+      try {
+        await rm(retiredDroidDir, { recursive: true, force: true });
+        console.info("[agent-plugin-registry] 已清理旧版官方 Droid 插件");
+      } catch (error) {
+        console.warn("[agent-plugin-registry] 无法清理旧版官方 Droid 插件", getErrorMessage(error));
+      }
+    }
+
     let entries: string[] = [];
     try {
       entries = await readdir(getPluginInstallDir());
@@ -1196,6 +1225,7 @@ export class AgentPluginRegistry {
     }
 
     for (const entry of entries) {
+      if (entry === "droid" && isRetiredDroidInstalled) continue;
       const pluginDir = join(getPluginInstallDir(), entry);
       try {
         const info = await stat(pluginDir);

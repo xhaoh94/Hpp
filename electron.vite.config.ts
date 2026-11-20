@@ -57,6 +57,17 @@ const copyAgentWorkerPlugin = () => ({
         .filter((entry) => entry.isDirectory() && existsSync(resolve(backendRoot, entry.name, "entry.ts")))
         .map((entry) => [`plugin-backend-${entry.name}`, resolve(backendRoot, entry.name, "entry.ts")]),
     );
+    const backendBundleNames = new Set(Object.keys(backendEntryPoints).map((name) => `${name}.mjs`));
+    for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
+      if (
+        entry.isFile()
+        && entry.name.startsWith("plugin-backend-")
+        && entry.name.endsWith(".mjs")
+        && !backendBundleNames.has(entry.name)
+      ) {
+        rmSync(resolve(targetDir, entry.name), { force: true });
+      }
+    }
     buildSync({
       entryPoints: backendEntryPoints,
       outdir: targetDir,

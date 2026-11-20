@@ -93,7 +93,10 @@ export function DiffHoverCard({ file, anchorRect, onOpenFile, onClose }: DiffHov
             key={`${file.file}-${index}`}
             className={`chat-diff-line ${LINE_CLASS[line.kind] || ""}`.trim()}
           >
-            {line.text || " "}
+            <span className="chat-diff-line-number" aria-hidden="true">
+              {line.lineNumber ?? ""}
+            </span>
+            <span className="chat-diff-line-text">{line.text || " "}</span>
           </span>
         ))}
       </pre>

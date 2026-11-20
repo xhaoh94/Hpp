@@ -19,6 +19,7 @@ Hpp 是一个基于 Electron、React 和 TypeScript 的本地 Agent 项目管理
 - 内置编辑器桥接：VSCode 系扩展、Zed 任务和通用 CLI 可以把选区、文件或文件夹直接送进当前会话的输入框。
 - 提供子 Agent 运行监视、本轮产物清单、HTML/SVG 预览和粘贴文本折叠。
 - 会话历史支持全文搜索、导出 Markdown，以及生成交接摘要供新会话接续。
+- 渠道配置支持导出 / 导入 JSON；可在 Hpp 里把同步服务部署到多台服务器，并手动备份 / 拉取。
 - 聊天底部显示本轮 token 用量，按模型分组统计输入、缓存命中和输出，可查看明细。
 - 会话可选独立 Git worktree，支持并行任务隔离、检查点和合并回主工作区。
 - 内置独立 Git 工作台弹窗：查看状态、暂存/取消暂存、diff、提交、stash、分支、rebase、冲突解决和文件追溯。
@@ -160,6 +161,26 @@ release/v<version>/agent-plugins/agent-plugins.json
 
 官方插件目录使用独立的架构版本。发布需要更高 Hpp 版本的插件时，旧版 Hpp 会拒绝新目录；新版 Hpp 会显示最低版本要求，并禁止安装或更新不兼容的插件。
 
+## 渠道配置同步（服务器）
+
+渠道（Provider）配置默认只存在本机 `hpp-data/settings.json`。想让多台机器共用同一份渠道配置时，可以在一台服务器上跑一个极小的同步服务（`docker/channel-sync`）。Hpp 可以管理**多台渠道配置服务器**：填地址和 SSH 账号就能把服务部署上去，再手动备份 / 拉取。
+
+入口是 Agent 配置标题栏的「同步」按钮：
+
+- **添加服务器**：填地址、SSH 端口、账号、密码和服务端口。点「测试连接」会显示主机指纹、Docker 版本、sudo 是否可用、容器状态；确认环境没问题后点「保存并部署」。
+- **部署**：Hpp 通过 SSH 建目录、上传服务文件、生成 Token、启动容器，最后用 `GET /health` 验证。重复部署是幂等的——容器重建，`data/` 里的历史备份保留。
+- **检查状态**：先请求 `/health`，不通再走 SSH 看容器和 Docker，据此区分「未部署 / 已部署未运行 / 运行中 / 无 Docker / 无 sudo / 不可达」。
+- **备份到 NAS**：收集当前所有 Agent 的全部渠道（含 API Key）上传，NAS 上的 revision 加一。上传前会显示 Agent / 渠道数量并要求确认。
+- **从 NAS 拉取**：下载最新备份，然后走与「导入 JSON」相同的冲突确认界面（同名渠道可选覆盖 / 跳过 / 另存为新 ID），确认后才写本地配置。
+
+同一时间只有一个目标处于「当前目标」，备份和拉取都针对它。不做后台自动推送、定时拉取或文件监听：点一次才发生一次网络请求。
+
+连接信息存在 `hpp-data/channel-sync.json`（权限 0600）。SSH 密码和 Token 用 Electron `safeStorage`（Windows 上是 DPAPI）加密落盘，界面上只显示 Token 掩码；没有可用加密后端时会拒绝保存密码，而不是写明文。首次连接会记录服务器的 SSH 主机指纹，之后指纹变化会中止连接并提示，避免在组网里连到冒充的主机。
+
+服务端是零依赖的 Node 单文件，只监听一个端口，最新快照和最近 20 份历史都放在容器的 `/data` 卷里。手动部署、比扬云组网地址和恢复方式见 [docker/channel-sync/README.md](./docker/channel-sync/README.md)。
+
+安全边界：同步包里的 API Key 是明文（个人自用场景），服务只应暴露在组网 / 内网里，不要映射到公网。部署用的 SSH 账号需要能执行 `docker`（root 或 Administrators 组 + sudo）。
+
 ## 项目结构
 
 ```text
@@ -170,11 +191,13 @@ electron/agent-plugins/    官方插件清单、入口和原生配置适配器
 electron/plugin-backends/  官方后端实现
 electron/plugin-runtime/   插件宿主和后端运行时
 electron/editor-bridge/    编辑器桥接服务、安装器和 Zed 配置
+electron/sync/             渠道配置同步（NAS）客户端与协议测试
 electron/worktree/         会话级 Git worktree 管理
 electron/git/              Git 工作台主进程服务
 editors/vscode/            VSCode 系编辑器扩展源码
 bin/hpp-send.cjs           通用编辑器发送 CLI
 mobile/                    Android / Web 远程访问客户端
+docker/channel-sync/       NAS 端同步服务、Dockerfile 与部署说明
 scripts/                   构建、打包和发布辅助脚本
 ```
 
@@ -187,6 +210,32 @@ Agent 插件是受信任的本机代码。插件不在 Electron 主进程中执�
 聊天框中的权限档位会映射到官方 Agent 的原生审批与沙箱机制。Pi 通过 SDK 的 `tool_call` 执行前钩子接入 Hpp 审批，并与用户本地安装的 Pi 扩展共同加载。第三方 Hpp Agent 插件只有在清单中声明并实现审批能力时才会显示权限入口；Hpp 不会把插件宿主进程包装成不可绕过的系统级安全边界。
 
 编辑器桥接同样不是额外的信任边界。它只绑定回环地址，用一次性令牌校验请求，且不返回 CORS 头；能读到 `editor-bridge.json` 的本机程序就可以调用它。发送内容由编辑器客户端决定，Hpp 只负责把引用插入当前会话。
+
+## Linux 安装
+
+除了从 Releases 下载 AppImage，也可以一行命令安装（自动取最新版本、建桌面入口、装运行依赖）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xhaoh94/Hpp/main/scripts/install-linux.sh | bash
+```
+
+- 默认装到 `~/.local/opt/hpp`，启动器是 `~/.local/bin/hpp`，不需要 sudo（系统依赖除外）。
+- 重复执行等于升级，旧 AppImage 会被替换，不会堆多份。
+- 系统没有 FUSE 时启动器自动用解包模式运行，新版 Ubuntu 不用再折腾 `libfuse2`。
+- 以 root 运行时自动补 `--no-sandbox`。
+
+常用参数：
+
+```bash
+# 装指定版本
+curl -fsSL .../install-linux.sh | bash -s -- --version v0.1.11
+# 装到系统目录（需要 sudo）
+curl -fsSL .../install-linux.sh | bash -s -- --system
+# 卸载
+curl -fsSL .../install-linux.sh | bash -s -- --uninstall
+```
+
+只发布了 x86_64；ARM 设备从源码构建（`npm run dist:linux`）。
 
 ## Linux、Wayland 与 niri
 

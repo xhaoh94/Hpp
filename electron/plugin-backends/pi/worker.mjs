@@ -912,8 +912,14 @@ const planModeToolBlockReason = (event) => {
 // 动词表与 shared/command-description.ts 保持一致（worker 直接拷贝进产物，不能 import TS）。
 const COMMAND_DESCRIPTION_VERBS = {
   grep: "检索内容", rg: "检索内容", find: "查找文件", fd: "查找文件",
-  ls: "列出目录", dir: "列出目录", cat: "查看文件", head: "查看文件开头",
-  tail: "查看文件末尾", wc: "统计行数", git: "执行 Git 操作",
+  ls: "列出目录", dir: "列出目录", cat: "查看文件",
+  "get-content": "读取项目文件", "get-childitem": "列出项目文件",
+  "select-string": "搜索文件内容", "test-path": "检查文件路径",
+  "get-location": "查看当前目录", "set-content": "写入项目文件",
+  "add-content": "追加项目文件内容", "new-item": "创建文件或目录",
+  "remove-item": "删除文件或目录", "copy-item": "复制文件", "move-item": "移动文件",
+  head: "查看文件开头",
+  tail: "查看文件末尾", wc: "统计行数", git: "查看 Git 信息",
   npm: "运行 npm 命令", pnpm: "运行 pnpm 命令", yarn: "运行 yarn 命令",
   node: "运行 Node 脚本", curl: "发起网络请求", sed: "处理文本",
 };

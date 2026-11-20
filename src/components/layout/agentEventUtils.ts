@@ -6,6 +6,7 @@ import type {
   AgentProcessStep,
   AgentProcessStepStatus,
 } from "@/stores/chat-store";
+import { fallbackCommandDescription } from "@shared/command-description";
 import {
   getCommandNonZeroSummary,
   getPlanStepFallbackTitle,
@@ -644,13 +645,27 @@ export const getToolDetail = (event: AgentEvent) => {
 
 /**
  * 命令条目标题优先用模型写的一句话意图（`description`）。
- * 没有就退回「已运行 bash」这类通用文案；过长截断，完整命令仍在展开明细里。
+ * 没有时按实际命令推断动作；过长截断，完整命令仍在展开明细里。
  */
 const COMMAND_DESCRIPTION_TITLE_MAX = 48;
 const getCommandDescriptionTitle = (event: AgentEvent): string => {
   const raw = (event as { description?: unknown }).description;
-  const value = typeof raw === "string" ? raw.trim() : "";
-  if (!value) return "";
+  const record = event as unknown as { command?: unknown; args?: unknown };
+  const args = record.args && typeof record.args === "object"
+    ? record.args as Record<string, unknown>
+    : undefined;
+  const modelWritten = typeof raw === "string" && raw.trim() ? raw.trim() : "";
+  // fallback 描述是纯动作（「运行 npm 命令」/「执行 bash」），时态由展示层补；
+  // 模型写的 description 自带完整语义，原样返回不要再拼「已运行」。
+  const base = modelWritten || fallbackCommandDescription(record.command || args?.command, getToolName(event));
+  if (!base) return "";
+  const value = modelWritten
+    ? base
+    : base.startsWith("执行 ")
+      ? `已运行 ${base.slice(3)}`                    // 「执行 bash」→「已运行 bash」
+      : /^(?:已运行|正在运行)\s/.test(base)
+        ? base
+        : `已运行 ${base}`;
   return value.length <= COMMAND_DESCRIPTION_TITLE_MAX
     ? value
     : `${value.slice(0, COMMAND_DESCRIPTION_TITLE_MAX)}…`;

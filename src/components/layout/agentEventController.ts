@@ -24,7 +24,6 @@ import {
   createProcessEntryId,
   createSessionRuntime,
   getRepeatedThinkingPattern,
-  getContextCompactionPresentation,
   getThinkingPreview,
   isModelRequestFailureTitle,
   markSessionRuntimeTurnSettled,
@@ -295,7 +294,7 @@ export function createAgentEventController({
     const runtime = getRuntime(sessionId);
     if (!runtime.processActive) return;
     // 命令条目的标题优先用模型写的意图；没有时按命令推断。
-    // 各后端（Claude/Codex/Droid/OpenCode）不保证带 description，这里统一兜底，
+    // 各后端不保证带 description，这里统一兜底，
     // 否则「运行 N 条命令」展开后每一行都只有一个「命令」。
     const description = entry.description?.trim()
       || (entry.toolKind === "run_command" || entry.command?.trim()
@@ -784,6 +783,10 @@ export function createAgentEventController({
     if (finalContent.trim()) {
       runtime.streamBuffer = finalContent;
       const finalizeVisibleResponse = () => {
+        // 有些后端压缩后直接给最终正文，没有 delta；也要把它放到分隔线下方。
+        if (getSessionMessages(currentSessionId).at(-1)?.systemType === "context_compaction") {
+          useChatStore.getState().startAssistantProcess(Date.now(), currentSessionId);
+        }
         useChatStore.getState().updateLastAssistant(finalContent, currentSessionId);
         moveFinalAssistantProcessTextToBubble(currentSessionId, finalContent);
         useChatStore.getState().collapseLastAssistantProcess(currentSessionId);
@@ -1079,39 +1082,33 @@ export function createAgentEventController({
       if (runtime.activeCompactionId && runtime.activeCompactionId !== normalizedEventId) {
         stopContextCompaction(currentSessionId);
       }
-      const presentation = getContextCompactionPresentation(
-        phase,
-        runtime.processActive,
-        runtime.activeCompactionPresentation,
-      );
+      // 压缩是消息边界，始终独立成分隔线；不混进上方的处理过程。
+      const presentation = "divider" as const;
       runtime.activeCompactionId = normalizedEventId;
       runtime.activeCompactionPresentation = presentation;
       useChatStore.getState().setSessionCompacting(currentSessionId, true);
       // 收尾型压缩没有后续对话，压缩期间不能再注入引导；运行中压缩结束后 Pi 会继续对话并消费引导。
       // postTurn 缺省表示后端未上报压缩阶段（保持“压缩期间不引导”的旧行为）。
       useChatStore.getState().setSessionCompactionPostTurn(currentSessionId, postTurn);
-        finishAssistantProcessText(currentSessionId);
+      finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
-      if (presentation === "process") {
-        appendProcessEntry(currentSessionId, {
-          id: normalizedEventId,
-          type: "status",
-          title: "上下文压缩中",
-          state: "running",
-          expanded: false,
-        });
-      } else {
-        useChatStore.getState().appendContextCompactionDivider(
-          normalizedEventId,
-          currentSessionId,
-          compactionState,
-        );
-      }
+      useChatStore.getState().sealLastAssistantForCompaction(currentSessionId);
+      useChatStore.getState().appendContextCompactionDivider(
+        normalizedEventId,
+        currentSessionId,
+        compactionState,
+      );
       if (currentSessionId === useProjectStore.getState().activeSessionId) setStreamingState(true);
       useProjectStore.getState().setAgentStatus(currentSessionId, "running");
       refreshStreamWatchdog(currentSessionId);
       return;
     }
+
+    // 压缩把同一轮回复切成两段：先封口分隔线上方的消息并结束当前正文段落，
+    // 之后的事件会在分隔线下方新建一条消息继续输出（不合并回旧消息）。
+    finishAssistantProcessText(currentSessionId);
+    finishThinkingEntry(currentSessionId);
+    useChatStore.getState().sealLastAssistantForCompaction(currentSessionId);
 
     if (runtime.activeCompactionPresentation === "process") {
       useChatStore.getState().updateLastAssistantProcessEntry(normalizedEventId, {

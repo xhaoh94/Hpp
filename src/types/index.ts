@@ -26,6 +26,21 @@ import type {
   FileSystemChange,
 } from "./ipc";
 import type { AgentConfigExportData } from "../../shared/agent-config-io";
+import type {
+  ChannelSyncActionResult,
+  ChannelSyncBackupResult,
+  ChannelSyncCheckResult,
+  ChannelSyncDeployEvent,
+  ChannelSyncDeployResult,
+  ChannelSyncProbeResult,
+  ChannelSyncPullResult,
+  ChannelSyncStatus,
+  ChannelSyncTargetActionResult,
+  ChannelSyncTargetInput,
+  ChannelSyncTargetView,
+  ChannelSyncTestResult,
+  ChannelSyncUndeployOptions,
+} from "../../shared/channel-sync";
 // 供本文件的接口字段引用（下面 export type 块只是再导出，不提供本地绑定）。
 import type {
   AgentCodemodeConfig,
@@ -117,6 +132,25 @@ export type {
   AgentConfigExportData,
   AgentConfigExportAgentEntry,
 } from "../../shared/agent-config-io";
+
+export type {
+  ChannelSyncActionResult,
+  ChannelSyncBackupResult,
+  ChannelSyncCheckResult,
+  ChannelSyncConfig,
+  ChannelSyncDeployEvent,
+  ChannelSyncDeployResult,
+  ChannelSyncProbeResult,
+  ChannelSyncPullResult,
+  ChannelSyncStatus,
+  ChannelSyncTarget,
+  ChannelSyncTargetActionResult,
+  ChannelSyncTargetInput,
+  ChannelSyncTargetStatus,
+  ChannelSyncTargetView,
+  ChannelSyncTestResult,
+  ChannelSyncUndeployOptions,
+} from "../../shared/channel-sync";
 
 export type {
   AgentEvent,
@@ -516,6 +550,25 @@ export interface ElectronAPI {
   agentConfigReorder: (agentId: string, providerIds: string[]) => Promise<AgentConfigResult>;
   agentConfigExport: (data: unknown) => Promise<{ success: boolean; error?: string; canceled?: boolean; filePath?: string }>;
   agentConfigImportRead: () => Promise<{ success: boolean; error?: string; canceled?: boolean; data?: AgentConfigExportData }>;
+  channelSyncGetStatus: () => Promise<ChannelSyncStatus>;
+  channelSyncListTargets: () => Promise<ChannelSyncTargetView[] | undefined>;
+  channelSyncSaveTarget: (input: ChannelSyncTargetInput) => Promise<ChannelSyncTargetActionResult>;
+  channelSyncRemoveTarget: (targetId: string) => Promise<ChannelSyncTargetActionResult>;
+  channelSyncSetActiveTarget: (targetId: string) => Promise<ChannelSyncTargetActionResult>;
+  channelSyncClearFingerprint: (targetId: string) => Promise<ChannelSyncTargetActionResult>;
+  channelSyncTest: () => Promise<ChannelSyncTestResult>;
+  channelSyncProbeTarget: (targetId: string, password?: string) => Promise<ChannelSyncProbeResult>;
+  channelSyncCheckTarget: (targetId: string, password?: string) => Promise<ChannelSyncCheckResult>;
+  channelSyncDeployTarget: (targetId: string, password?: string) => Promise<ChannelSyncDeployResult>;
+  channelSyncUndeployTarget: (
+    targetId: string,
+    options?: ChannelSyncUndeployOptions,
+  ) => Promise<ChannelSyncTargetActionResult>;
+  channelSyncBackup: (data: unknown) => Promise<ChannelSyncBackupResult>;
+  channelSyncPull: () => Promise<ChannelSyncPullResult>;
+  onChannelSyncDeployProgress: (
+    callback: (event: { targetId: string } & ChannelSyncDeployEvent) => void,
+  ) => () => void;
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string; guidanceId?: string }>;
   agentCancelGuidance?: (sessionId: string | undefined, guidanceId: string) => Promise<{ success: boolean; cancelled?: boolean; reason?: string; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;

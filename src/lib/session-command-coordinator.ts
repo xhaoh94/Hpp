@@ -514,8 +514,7 @@ export async function createSession(input: {
       .flatMap((candidate) => candidate.sessions)
       .find((candidate) => candidate.id === projectState.activeSessionId)
     : undefined;
-  // 新建不同 Agent 的会话不能继承当前模型；没有渠道的 Droid
-  // 不应因为创建前的全局 currentModel 而得到上一会话的模型目录。
+  // 新建不同 Agent 的会话不能继承当前模型，避免拿到上一会话的模型目录。
   if (activeSession?.agentId === input.agentId && currentModel) {
     saveSessionModel(sessionId, currentModel);
   }
@@ -1101,10 +1100,8 @@ async function setModelInternal(
   model: Pick<ModelInfo, "id" | "provider">,
   options: { models?: ModelInfo[]; isProcessActive?: (sessionId: string) => boolean } = {},
 ) {
-  // Switching the model only updates session-level parameters: all backends
-  // (droid/pi/codex/opencode) apply it to subsequent requests without
-  // restarting the process or interrupting the currently-streaming turn, so it
-  // is safe to switch while the agent is running.
+  // 切换模型只更新会话级参数；Pi、Codex 和 OpenCode 会将它用于后续请求，
+  // 无需重启进程或打断当前响应，因此运行期间也可以切换。
   const { session } = await initializeSession(sessionId);
   const models = options.models || await window.electronAPI.agentGetModels(sessionId) as ModelInfo[];
   const selected = models.find((candidate) => candidate.provider === model.provider && candidate.id === model.id);

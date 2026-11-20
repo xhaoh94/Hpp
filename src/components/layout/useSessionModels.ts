@@ -225,9 +225,7 @@ export function useSessionModels({
         .flatMap((candidate) => candidate.sessions)
         .find((candidate) => candidate.id === projectState.activeSessionId)
       : undefined;
-    // 只在同一 Agent 内继承模型。跨 Agent 继承会把旧 Agent 的模型/渠道
-    // 写入新会话；目标 Agent（尤其是尚未注册渠道的 Droid）随后会错误地
-    // 把这份旧目录当成自己的可用模型。
+    // 只在同一 Agent 内继承模型，避免把旧 Agent 的模型/渠道目录写入新会话。
     if (
       currentSession?.agentId === session.agentId &&
       !getSessionModel(session.id) &&

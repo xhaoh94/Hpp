@@ -3,13 +3,17 @@ import { createPortal } from "react-dom";
 import {
   AppWindow,
   Bot,
+  Brain,
   ChevronDown,
   ChevronRight,
   Eraser,
+  FileText,
   FolderOpen,
   HardDrive,
+  Image,
   Keyboard,
   ListFilter,
+  Minimize2,
   Palette,
   RotateCcw,
   RefreshCw,
@@ -538,6 +542,16 @@ export function SettingsView() {
     setShowGeneralModal(true);
   };
 
+  const openEditorIntegrationSettings = () => {
+    setShowGeneralModal(false);
+    setShowEditorIntegrationModal(true);
+  };
+
+  const closeEditorIntegrationSettings = () => {
+    setShowEditorIntegrationModal(false);
+    setShowGeneralModal(true);
+  };
+
   const openGeneralSettings = () => {
     setExpandedGeneralSection("appearance");
     setShowGeneralModal(true);
@@ -573,13 +587,6 @@ export function SettingsView() {
             >
               <Smartphone size={16} strokeWidth={1.8} />
               远程访问
-            </button>
-            <button
-              onClick={() => setShowEditorIntegrationModal(true)}
-              className="btn-quick-setting"
-            >
-              <SquareCode size={16} strokeWidth={1.8} />
-              编辑器集成
             </button>
             <button
               onClick={openGeneralSettings}
@@ -800,7 +807,7 @@ export function SettingsView() {
         document.body,
       )}
       {showEditorIntegrationModal && createPortal(
-        <EditorIntegrationSettings onClose={() => setShowEditorIntegrationModal(false)} />,
+        <EditorIntegrationSettings onClose={closeEditorIntegrationSettings} />,
         document.body,
       )}
       {configAgent && (
@@ -885,7 +892,8 @@ export function SettingsView() {
                 </button>
                 {expandedGeneralSection === "behavior" && (
                   <div id="general-settings-behavior" className="settings-general-section-body">
-                    <label className="settings-general-row settings-general-toggle">
+                    <label className="settings-general-row settings-general-row-with-icon settings-general-toggle">
+                      <span className="settings-general-row-icon"><Minimize2 size={16} /></span>
                       <span className="settings-general-row-main">
                         <strong>关闭时最小化到托盘</strong>
                         <span>关闭主窗口后保持 Hpp 在后台运行，可从系统托盘重新打开</span>
@@ -897,7 +905,8 @@ export function SettingsView() {
                         aria-label="关闭时最小化到托盘"
                       />
                     </label>
-                    <label className="settings-general-row settings-general-toggle">
+                    <label className="settings-general-row settings-general-row-with-icon settings-general-toggle">
+                      <span className="settings-general-row-icon"><Brain size={16} /></span>
                       <span className="settings-general-row-main">
                         <strong>处理中自动展开思考</strong>
                         <span>思考过程在处理中时自动展开显示，结束后恢复折叠；关闭后思考默认收起（处理中与结束后均折叠，可手动展开单条）</span>
@@ -909,7 +918,8 @@ export function SettingsView() {
                         aria-label="处理中自动展开思考"
                       />
                     </label>
-                    <div className="settings-general-row">
+                    <div className="settings-general-row settings-general-row-with-icon">
+                      <span className="settings-general-row-icon"><FileText size={16} /></span>
                       <span className="settings-general-row-main">
                         <strong>输出内容</strong>
                         <span>{OUTPUT_DETAIL_LEVEL_DESCRIPTIONS[outputDetailLevel]}</span>
@@ -960,7 +970,7 @@ export function SettingsView() {
                   <span className="settings-general-heading-icon"><SlidersHorizontal size={15} /></span>
                   <div>
                     <h4>其他设置</h4>
-                    <p>过滤规则与临时图片缓存</p>
+                    <p>编辑器集成、过滤规则与临时图片缓存</p>
                   </div>
                   <ChevronDown className="settings-general-collapse-icon" size={16} />
                 </button>
@@ -976,8 +986,17 @@ export function SettingsView() {
                         <span className="settings-general-link-meta">{filterRuleCount} 条</span>
                         <ChevronRight size={16} />
                       </button>
+                      <button type="button" className="settings-general-link settings-general-link-no-meta" onClick={openEditorIntegrationSettings}>
+                        <span className="settings-general-link-icon"><SquareCode size={16} /></span>
+                        <span className="settings-general-row-main">
+                          <strong>编辑器集成</strong>
+                          <span>在编辑器里把手上的代码直接送进聊天输入框</span>
+                        </span>
+                        <ChevronRight size={16} />
+                      </button>
                     </div>
-                    <div className="settings-general-row settings-general-path-row">
+                    <div className="settings-general-row settings-general-row-with-icon settings-general-path-row">
+                      <span className="settings-general-row-icon"><Image size={16} /></span>
                       <span className="settings-general-row-main">
                         <strong>临时图片存储路径</strong>
                         <span>留空时使用 Hpp 默认缓存目录，临时图片 12 小时后自动清理</span>

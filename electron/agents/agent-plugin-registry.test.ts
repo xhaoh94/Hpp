@@ -121,12 +121,12 @@ describe("agent CLI package lines", () => {
   });
 
   it("falls back to the single packageName declaration", () => {
-    expect(getCliPackageForVersion({ id: "droid", packageName: "droid-cli" }, "1.2.3")?.name).toBe("droid-cli");
-    expect(getCliPackageForVersion({ id: "droid", packageName: "droid-cli" })).toEqual({
+    expect(getCliPackageForVersion({ id: "custom-agent", packageName: "custom-agent-cli" }, "1.2.3")?.name).toBe("custom-agent-cli");
+    expect(getCliPackageForVersion({ id: "custom-agent", packageName: "custom-agent-cli" })).toEqual({
       line: "v1",
-      name: "droid-cli",
+      name: "custom-agent-cli",
     });
-    expect(getCliPackageForVersion({ id: "droid" })).toBeUndefined();
+    expect(getCliPackageForVersion({ id: "custom-agent" })).toBeUndefined();
   });
 
   it("knows the OpenCode package lines even for older plugins without packages", () => {

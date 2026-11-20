@@ -83,7 +83,7 @@ describe("process event normalization", () => {
       args: { command: "ls" },
     })).toMatchObject({
       command: "ls",
-      description: "列出目录",
+      description: "列出项目文件",
     });
   });
 
@@ -96,7 +96,7 @@ describe("process event normalization", () => {
     })).toMatchObject({
       toolKind: "run_command",
       command: "bash -lc grep -rn idleDuration src",
-      description: "检索内容",
+      description: "搜索项目代码",
     });
   });
 
@@ -197,7 +197,7 @@ describe("process event normalization", () => {
   });
 
   it("unescapes JSON-escaped newlines in single-string provider patches", () => {
-    // droid 的结构化 tool_result 可能携带字面 \n 的补丁；不反转义的话
+    // 结构化 tool_result 可能携带字面 \n 的补丁；不反转义的话
     // 补丁解析不出 hunk，审核弹窗拿不到可用差异，局部撤销会静默失效。
     expect(normalizeToolEvent("tool_end", {
       name: "Edit",

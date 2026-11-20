@@ -164,7 +164,7 @@ export interface ContextUsageBreakdownEntry {
  * 上下文用量的精度，描述的是数据来源而不是数字好坏：
  * - exact：读数由后端逐项数出来（claude 的 getContextUsage(full)、pi 的精确分支）；
  * - official：没有专用接口，取的是官方 CLI 自己上报的 token 计数（codex 的 tokenUsage.last、opencode 的 part.tokens）；
- * - estimated：按分类求和或本地估算借位成上下文占用，只保证量级正确（claude summary、droid 的 context stats、pi 的回落值）。
+ * - estimated：按分类求和或本地估算借位成上下文占用，只保证量级正确（claude summary、pi 的回落值）。
  */
 export type ContextUsagePrecision = "exact" | "official" | "estimated";
 

@@ -320,6 +320,11 @@ interface ChatState {
   appendLastAssistantProcessEntry: (entry: AgentProcessEntry, sessionId?: string | null) => void;
   updateLastAssistantProcessEntry: (entryId: string, patch: Partial<Omit<AgentProcessEntry, "id">>, sessionId?: string | null) => void;
   removeLastAssistantProcessEntries: (entryIds: string[], sessionId?: string | null) => void;
+  /**
+   * 压缩把同一轮回复切成两段：把当前这条助手消息封口（结束计时、停止 streaming），
+   * 之后的事件就会在压缩分隔线下方新建一条消息继续输出。
+   */
+  sealLastAssistantForCompaction: (sessionId?: string | null) => void;
   updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
   addAssistantTokenUsage: (
     inputTokens: number,
@@ -433,16 +438,9 @@ const ensureAssistantProcess = (
       modelId: turnModel?.modelId,
       thinkingLevel: turnModel?.thinkingLevel,
     };
-    // A provider may resume the same turn after compacting its context. Keep
-    // that continuation before the trailing divider so the divider remains
-    // after all body output instead of splitting the response in two.
-    if (last?.systemType === "context_compaction") {
-      msgs.splice(msgs.length - 1, 0, assistantMessage);
-      index = msgs.length - 2;
-    } else {
-      msgs.push(assistantMessage);
-      index = msgs.length - 1;
-    }
+    // 压缩后的续写留在分隔线下方；此后的增量复用这条尾部助手消息。
+    msgs.push(assistantMessage);
+    index = msgs.length - 1;
   } else if (index >= 0) {
     const msg = msgs[index];
     msgs[index] = {
@@ -1115,6 +1113,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return msgs;
       });
     }),
+
+  sealLastAssistantForCompaction: (sessionId) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => {
+      const index = findLastAssistantIndex(messages);
+      if (index < 0) return messages;
+      const message = messages[index];
+      if (!message.process) return messages;
+      if (message.isStreaming !== true && isFiniteTimestamp(message.process.endedAt)) return messages;
+      const next = [...messages];
+      next[index] = normalizeAssistantProcessTerminalState(message, {
+        endedAt: Date.now(),
+        finalState: "completed",
+      });
+      return next;
+    })),
 
   removeLastAssistantProcessEntries: (entryIds, sessionId) =>
     set((s) => {

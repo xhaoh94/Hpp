@@ -7,7 +7,6 @@ describe("official plugin config providers", () => {
   let tempRoot = "";
   const originalEnv = {
     CODEX_HOME: process.env.CODEX_HOME,
-    DROID_CONFIG_PATH: process.env.DROID_CONFIG_PATH,
     OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
     PI_CONFIG_PATH: process.env.PI_CONFIG_PATH,
   };
@@ -15,7 +14,6 @@ describe("official plugin config providers", () => {
   beforeEach(async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "hpp-plugin-config-"));
     process.env.CODEX_HOME = join(tempRoot, "codex");
-    process.env.DROID_CONFIG_PATH = join(tempRoot, "droid.json");
     process.env.OPENCODE_CONFIG = join(tempRoot, "opencode.json");
     process.env.PI_CONFIG_PATH = join(tempRoot, "pi.json");
   });
@@ -46,29 +44,13 @@ describe("official plugin config providers", () => {
     expect(manifest.capabilities.configuration.modelListMode).toBe("configured");
   });
 
-  it("lets Droid users hide the backend model catalog without core hardcoding", async () => {
-    const manifest = JSON.parse(await readFile(
-      join(process.cwd(), "electron", "agent-plugins", "droid", "hpp-agent-plugin.json"),
-      "utf8",
-    ));
-
-    expect(manifest.capabilities.configuration).toMatchObject({
-      modelListMode: "merge",
-      backendModelVisibility: {
-        userConfigurable: true,
-        defaultVisible: false,
-        label: "显示 Droid 官方模型",
-      },
-    });
-  });
-
   it("declares context compaction support in plugin manifests", async () => {
     const readManifest = async (agentId: string) => JSON.parse(await readFile(
       join(process.cwd(), "electron", "agent-plugins", agentId, "hpp-agent-plugin.json"),
       "utf8",
     ));
-    const [pi, opencode, droid, codex, claude] = await Promise.all(
-      ["pi", "opencode", "droid", "codex", "claude"].map(readManifest),
+    const [pi, opencode, codex, claude] = await Promise.all(
+      ["pi", "opencode", "codex", "claude"].map(readManifest),
     );
 
     // 压缩模型不可配置（走 pi 自己的模型），清单里不再声明 channelModel。
@@ -77,8 +59,6 @@ describe("official plugin config providers", () => {
       toggle: true,
     });
     expect(opencode.capabilities.compaction).toEqual({ thinkingLevel: true });
-    // Droid 只剩「同模型压缩」，没有任何可配置项，能力声明整块移除。
-    expect(droid.capabilities.compaction).toBeUndefined();
     expect(codex.capabilities.compaction).toBeUndefined();
     expect(claude.capabilities.compaction).toBeUndefined();
   });
@@ -91,12 +71,11 @@ describe("official plugin config providers", () => {
       ));
       return manifest.capabilities.configuration;
     };
-    const configurations = await Promise.all(["pi", "droid", "opencode", "codex", "claude"].map(readConfiguration));
+    const configurations = await Promise.all(["pi", "opencode", "codex", "claude"].map(readConfiguration));
 
     expect(configurations[0].modelEndpointOverrides).toBe(true);
-    expect(configurations[1].modelEndpointOverrides).toBe(true);
-    // 这三个的端点写在进程级 env / 单份 config 里，做不到按模型切换。
-    expect(configurations.slice(2).every((configuration) => configuration.modelEndpointOverrides === undefined)).toBe(true);
+    // 其余后端的端点写在进程级 env / 单份 config 里，做不到按模型切换。
+    expect(configurations.slice(1).every((configuration) => configuration.modelEndpointOverrides === undefined)).toBe(true);
   });
 
   it("maps Pi endpoints through the plugin adapter", async () => {
@@ -369,63 +348,6 @@ describe("official plugin config providers", () => {
     await expect(lookupModel("unknown-model")).resolves.toBeNull();
   });
 
-  it("maps all Droid endpoint protocols through the plugin adapter", async () => {
-    const { getProviderEndpoint, getProviderType } = await import("./droid/config.mjs");
-    expect(getProviderType("chat-completions")).toBe("generic-chat-completion-api");
-    expect(getProviderType("responses")).toBe("openai");
-    expect(getProviderType("anthropic-messages")).toBe("anthropic");
-    expect(getProviderEndpoint("generic-chat-completion-api")).toBe("chat-completions");
-    expect(getProviderEndpoint("openai")).toBe("responses");
-    expect(getProviderEndpoint("anthropic")).toBe("anthropic-messages");
-  });
-
-  it("keeps per-model Droid endpoints inside one channel", async () => {
-    const droid = await import("./droid/config.mjs");
-    await droid.writeProviderConfig({
-      providers: [{
-        ...provider("chat-completions"),
-        models: [
-          { id: "gpt-model", name: "GPT", reasoning: true, imageInput: true },
-          {
-            id: "claude-model",
-            name: "Claude",
-            reasoning: true,
-            imageInput: true,
-            endpoint: "anthropic-messages",
-            baseUrl: "https://relay.example/claude/v1",
-          },
-        ],
-      }],
-    });
-
-    const saved = JSON.parse(await readFile(process.env.DROID_CONFIG_PATH!, "utf8"));
-    // 渠道级取值单独落盘：模型条目上的 baseUrl/provider 可以安全地承载覆盖。
-    expect(saved.customModels[0]).toMatchObject({
-      model: "gpt-model",
-      provider: "generic-chat-completion-api",
-      baseUrl: "https://api.example/v1",
-      hppProviderBaseUrl: "https://api.example/v1",
-      hppProviderEndpoint: "chat-completions",
-    });
-    expect(saved.customModels[1]).toMatchObject({
-      model: "claude-model",
-      provider: "anthropic",
-      baseUrl: "https://relay.example/claude/v1",
-    });
-
-    await expect(droid.readProviderConfig()).resolves.toMatchObject({
-      providers: [{
-        providerId: "custom",
-        endpoint: "chat-completions",
-        baseUrl: "https://api.example/v1",
-        models: [
-          { id: "gpt-model" },
-          { id: "claude-model", endpoint: "anthropic-messages", baseUrl: "https://relay.example/claude/v1" },
-        ],
-      }],
-    });
-  });
-
   it("maps and detects OpenCode endpoint packages", async () => {
     const { readProviderConfig, toProviderConfig } = await import("./opencode/config.mjs");
     expect(toProviderConfig(provider("responses"))).toMatchObject({ npm: "@ai-sdk/openai" });
@@ -551,23 +473,12 @@ describe("official plugin config providers", () => {
     await expect(readFile(process.env.OPENCODE_CONFIG!, "utf8")).resolves.toBe(invalid);
   });
 
-  it("writes plugin-owned Pi and Droid configuration files", async () => {
+  it("writes plugin-owned Pi configuration files", async () => {
     const pi = await import("./pi/config.mjs");
-    const droid = await import("./droid/config.mjs");
     await pi.writeProviderConfig({ providers: [provider("responses")] });
-    await droid.writeProviderConfig({ providers: [provider("anthropic-messages")] });
 
     const piConfig = JSON.parse(await readFile(process.env.PI_CONFIG_PATH!, "utf8"));
-    const droidConfig = JSON.parse(await readFile(process.env.DROID_CONFIG_PATH!, "utf8"));
     expect(piConfig.providers.custom.api).toBe("openai-responses");
-    expect(droidConfig.customModels[0].provider).toBe("anthropic");
-    await expect(droid.readProviderConfig()).resolves.toMatchObject({
-      providers: [{
-        providerId: "custom",
-        displayName: "Custom",
-        endpoint: "anthropic-messages",
-      }],
-    });
   });
 
   it("preserves native Pi JSONC providers and advanced model fields", async () => {
@@ -624,63 +535,6 @@ describe("official plugin config providers", () => {
 
     await expect(pi.writeProviderConfig({ providers: [provider("responses")] })).rejects.toThrow("Failed to parse Pi config");
     await expect(readFile(process.env.PI_CONFIG_PATH!, "utf8")).resolves.toBe(invalid);
-  });
-
-  it("preserves unmanaged Droid models and managed advanced fields", async () => {
-    await writeFile(process.env.DROID_CONFIG_PATH!, JSON.stringify({
-      keepMe: true,
-      customModels: [{
-        model: "native-model",
-        displayName: "Native model",
-        provider: "generic-chat-completion-api",
-        baseUrl: "https://native.example/v1",
-        apiKey: "native-key",
-        extraArgs: { temperature: 0.2 },
-      }, {
-        hppManaged: true,
-        hppProviderId: "custom",
-        hppProviderDisplayName: "Old name",
-        provider: "generic-chat-completion-api",
-        model: "model",
-        id: "custom:existing-model",
-        displayName: "Old model",
-        baseUrl: "https://old.example/v1",
-        apiKey: "old-key",
-        maxOutputTokens: 4096,
-        extraArgs: { top_p: 0.9 },
-      }],
-    }, null, 2), "utf8");
-    const droid = await import("./droid/config.mjs");
-
-    await droid.writeProviderConfig({ providers: [provider("responses")] });
-
-    const saved = JSON.parse(await readFile(process.env.DROID_CONFIG_PATH!, "utf8"));
-    expect(saved.keepMe).toBe(true);
-    expect(saved.customModels[0]).toMatchObject({
-      model: "native-model",
-      extraArgs: { temperature: 0.2 },
-    });
-    expect(saved.customModels[1]).toMatchObject({
-      hppProviderId: "custom",
-      hppProviderDisplayName: "Custom",
-      provider: "openai",
-      model: "model",
-      id: "custom:existing-model",
-      maxOutputTokens: 4096,
-      extraArgs: { top_p: 0.9 },
-    });
-    await expect(droid.readProviderConfig()).resolves.toMatchObject({
-      providers: [{ providerId: "custom", displayName: "Custom", endpoint: "responses" }],
-    });
-  });
-
-  it("refuses to overwrite an invalid Droid config", async () => {
-    const invalid = "{ invalid json";
-    await writeFile(process.env.DROID_CONFIG_PATH!, invalid, "utf8");
-    const droid = await import("./droid/config.mjs");
-
-    await expect(droid.writeProviderConfig({ providers: [provider("responses")] })).rejects.toThrow("Failed to parse");
-    await expect(readFile(process.env.DROID_CONFIG_PATH!, "utf8")).resolves.toBe(invalid);
   });
 
   it("writes Codex endpoint activation through the plugin adapter", async () => {

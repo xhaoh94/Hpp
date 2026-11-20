@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "../../src/types/ipc";
 import { ClaudeSDKAgent } from "./claude/backend";
-import { DroidAgent } from "./droid/backend";
 import { OpenCodeAgent } from "./opencode/backend";
 import { PiSDKAgent } from "./pi/backend";
 
@@ -172,101 +171,6 @@ const scenarios: Scenario[] = [
           status: "error",
           stopReason: "timeout",
           error: "Claude 子 Agent 超时",
-        },
-      });
-    },
-  },
-  {
-    name: "Droid delegate_task progress",
-    feedCompleted: (events) => {
-      const agent = new DroidAgent("matrix-droid", (event) => events.push(event as AgentEvent));
-      const internals = agent as unknown as {
-        turnActive: boolean;
-        handleNotification: (method: string, params: unknown) => void;
-      };
-      internals.turnActive = true;
-      internals.handleNotification("droid.session_notification", {
-        notification: {
-          type: "create_message",
-          message: {
-            id: "matrix-droid-message",
-            role: "assistant",
-            content: [{
-              type: "tool_use",
-              id: "matrix-droid-call",
-              name: "delegate_task",
-              input: {
-                description: "检查发布流程",
-                prompt: "检查发布流程并返回风险。",
-                subagent_type: "reviewer",
-              },
-            }],
-          },
-        },
-      });
-      internals.handleNotification("droid.session_notification", {
-        notification: {
-          type: "tool_progress_update",
-          toolUseId: "matrix-droid-call",
-          toolName: "delegate_task",
-          update: {
-            status: "completed",
-            parameters: {
-              description: "检查发布流程",
-              prompt: "检查发布流程并返回风险。",
-              subagent_type: "reviewer",
-            },
-            result: {
-              sessionId: "matrix-droid-child",
-              status: "completed",
-              summary: "检查完成",
-              usage: { input_tokens: 100, output_tokens: 20 },
-            },
-          },
-        },
-      });
-    },
-    feedTimeout: (events) => {
-      const agent = new DroidAgent("matrix-droid-timeout", (event) => events.push(event as AgentEvent));
-      const internals = agent as unknown as {
-        turnActive: boolean;
-        handleNotification: (method: string, params: unknown) => void;
-      };
-      internals.turnActive = true;
-      internals.handleNotification("droid.session_notification", {
-        notification: {
-          type: "create_message",
-          message: {
-            id: "matrix-droid-timeout-message",
-            role: "assistant",
-            content: [{
-              type: "tool_use",
-              id: "matrix-droid-timeout-call",
-              name: "delegate_task",
-              input: { description: "超时任务", prompt: "执行超时任务。", subagent_type: "worker" },
-            }],
-          },
-        },
-      });
-      internals.handleNotification("droid.session_notification", {
-        notification: {
-          type: "tool_progress_update",
-          toolUseId: "matrix-droid-timeout-call",
-          toolName: "delegate_task",
-          update: {
-            status: "completed",
-            parameters: {
-              description: "超时任务",
-              prompt: "执行超时任务。",
-              subagent_type: "worker",
-            },
-            result: {
-              sessionId: "matrix-droid-timeout-child",
-              status: "error",
-              stopReason: "timeout",
-              error: "Droid 子 Agent 超时",
-            },
-          },
         },
       });
     },

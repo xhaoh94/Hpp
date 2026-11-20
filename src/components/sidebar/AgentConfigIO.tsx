@@ -15,6 +15,7 @@ import type {
 import { getAgentName } from "@/lib/agents";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { useAgentCatalogStore } from "@/stores/agent-catalog-store";
+import { ChannelSyncEntry } from "./ChannelSyncEntry";
 import { createCopiedProviderId } from "@shared/agent-provider-copy";
 import {
   createAgentConfigExportData,
@@ -140,6 +141,39 @@ export function AgentConfigIO({ onImported }: AgentConfigIOProps) {
     setImportExpanded(expanded);
     setImportData(data);
   }, [configurableAgents]);
+
+  /** 收集所有 Agent 的全部渠道，供「备份到 NAS」使用。 */
+  const collectAllAgentConfigs = useCallback(async (): Promise<AgentConfigExportData> => {
+    const collected: Record<string, { activeProviderId?: string; providers: AgentProviderConfig[] }> = {};
+    for (const agent of configurableAgents) {
+      try {
+        const result = await window.electronAPI.agentConfigList(agent.id);
+        if (!result.success || !result.config || result.config.providers.length === 0) continue;
+        collected[agent.id] = {
+          activeProviderId: result.config.activeProviderId,
+          providers: result.config.providers.map(cloneProvider),
+        };
+      } catch {
+        // 单个 Agent 读取失败不影响其它 Agent 的备份。
+      }
+    }
+    return createAgentConfigExportData(collected, true);
+  }, [configurableAgents]);
+
+  /** NAS 拉回的数据走与「导入 JSON」完全相同的冲突确认界面。 */
+  const handlePulledFromNas = useCallback(async (data: AgentConfigExportData) => {
+    setImportError("");
+    setImportDecisions({});
+    setImportOpen(true);
+    setImportLoading(true);
+    try {
+      await prepareImportData(data);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImportLoading(false);
+    }
+  }, [prepareImportData]);
 
   const handleImportFileChange = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -366,6 +400,7 @@ export function AgentConfigIO({ onImported }: AgentConfigIOProps) {
           <Download size={14} />
           导入
         </button>
+        <ChannelSyncEntry collectPayload={collectAllAgentConfigs} onPulled={handlePulledFromNas} />
       </div>
 
       {exportOpen && (

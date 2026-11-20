@@ -17,18 +17,18 @@ describe("AgentRuntimeOperationQueue", () => {
       return "codex";
     });
     const secondOperation = vi.fn(async () => {
-      events.push("droid:start");
-      events.push("droid:end");
-      return "droid";
+      events.push("other-agent:start");
+      events.push("other-agent:end");
+      return "other-agent";
     });
-    const second = queue.run("droid", "update", secondOperation);
+    const second = queue.run("other-agent", "update", secondOperation);
 
     await vi.waitFor(() => expect(queue.active).toEqual({ agentId: "codex", kind: "update" }));
     expect(secondOperation).not.toHaveBeenCalled();
     releaseFirst();
 
-    await expect(Promise.all([first, second])).resolves.toEqual(["codex", "droid"]);
-    expect(events).toEqual(["codex:start", "codex:end", "droid:start", "droid:end"]);
+    await expect(Promise.all([first, second])).resolves.toEqual(["codex", "other-agent"]);
+    expect(events).toEqual(["codex:start", "codex:end", "other-agent:start", "other-agent:end"]);
     expect(queue.active).toBeNull();
   });
 

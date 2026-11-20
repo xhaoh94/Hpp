@@ -116,7 +116,7 @@ export interface AgentEvent {
   contextPrecision?: "exact" | "official" | "estimated";
   /** 旧版精度标记（false 即精确）：只为历史事件保留，新代码一律发 contextPrecision。 */
   contextEstimated?: boolean;
-  /** 上下文构成明细；pi / claude / droid 能提供。 */
+  /** 上下文构成明细；pi / claude 能提供。 */
   contextBreakdown?: Array<{ id: string; label: string; tokens: number }>;
   pendingUIRevision?: unknown;
   clientUserMessageId?: unknown;

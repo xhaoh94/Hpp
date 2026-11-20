@@ -6,7 +6,7 @@ const { pathToFileURL } = require("node:url");
 
 const projectRoot = resolve(__dirname, "..");
 const mainDir = join(projectRoot, "out", "main");
-const supportedBackends = ["pi", "claude", "droid", "opencode"];
+const supportedBackends = ["pi", "claude", "opencode"];
 const initTimeoutMs = Math.max(10_000, Number(process.env.HPP_SUBAGENT_PREFLIGHT_TIMEOUT_MS) || 120_000);
 
 const requestedBackends = (() => {

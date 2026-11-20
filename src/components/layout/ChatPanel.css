@@ -3590,11 +3590,30 @@
 }
 
 .chat-diff-line {
-  display: block;
+  display: flex;
+  align-items: stretch;
   min-width: max-content;
-  padding: 0 14px;
+  padding: 0;
   white-space: pre;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+
+.chat-diff-line-number {
+  box-sizing: border-box;
+  flex: 0 0 5em;
+  margin-right: 10px;
+  padding: 0 10px 0 8px;
+  border-right: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  text-align: right;
+  user-select: none;
+}
+
+.chat-diff-line-text {
+  display: inline-block;
+  min-width: max-content;
+  padding-right: 14px;
+  white-space: pre;
 }
 
 .chat-diff-popover-backdrop {

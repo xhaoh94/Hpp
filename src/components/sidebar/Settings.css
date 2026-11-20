@@ -1192,7 +1192,8 @@
 
 .settings-general-title-icon,
 .settings-general-heading-icon,
-.settings-general-link-icon {
+.settings-general-link-icon,
+.settings-general-row-icon {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
@@ -1335,6 +1336,25 @@
   background: var(--bg-primary);
 }
 
+/* 带图标的设置行：与「快捷键 / 过滤规则」链接行共用 30px 图标列，左侧文字对齐。 */
+.settings-general-row-with-icon {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.settings-general-row.settings-general-path-row.settings-general-row-with-icon {
+  grid-template-columns: 30px minmax(0, 1fr) minmax(0, 310px);
+}
+
+.settings-general-row.settings-general-path-row.settings-general-row-with-icon .settings-general-path-control {
+  width: 100%;
+}
+
+.settings-general-toggle:hover .settings-general-row-icon {
+  color: var(--accent-color);
+}
+
 .settings-general-row-main {
   display: flex;
   flex: 1;
@@ -1464,6 +1484,11 @@
   text-align: left;
 }
 
+/* 没有右侧计数文字的链接行（编辑器集成）：三列即可，箭头靠右。 */
+.settings-general-link-no-meta {
+  grid-template-columns: 30px minmax(0, 1fr) 16px;
+}
+
 .settings-general-link:last-child {
   border-bottom: 0;
 }
@@ -1480,7 +1505,8 @@
   outline-offset: -1px;
 }
 
-.settings-general-link-icon {
+.settings-general-link-icon,
+.settings-general-row-icon {
   width: 30px;
   height: 30px;
   border-radius: 5px;
@@ -2168,6 +2194,15 @@
   .settings-general-row.settings-general-path-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .settings-general-row.settings-general-path-row.settings-general-row-with-icon {
+    grid-template-columns: 30px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .settings-general-row.settings-general-path-row.settings-general-row-with-icon .settings-general-path-control {
+    grid-column: 1 / -1;
   }
 
   .settings-general-path-control {
@@ -5644,4 +5679,600 @@
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
+}
+
+/* ---- 渠道配置同步（NAS） ---- */
+
+.channel-sync-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+}
+
+.channel-sync-status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.channel-sync-status-row > span {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.channel-sync-status-row > strong {
+  font-weight: 500;
+  text-align: right;
+  word-break: break-all;
+}
+
+.channel-sync-hint {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.channel-sync-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.channel-sync-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.channel-sync-action:hover:not(:disabled) {
+  border-color: var(--accent-color);
+  background: var(--bg-hover);
+}
+
+.channel-sync-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.channel-sync-action > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.channel-sync-action strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.channel-sync-action small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.channel-sync-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.channel-sync-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.channel-sync-settings {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 12px;
+}
+
+.channel-sync-settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.channel-sync-settings-toggle:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.channel-sync-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.channel-sync-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.channel-sync-field > span {
+  color: var(--text-secondary);
+}
+
+.channel-sync-field input {
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.channel-sync-field input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.channel-sync-field small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.channel-sync-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.channel-sync-clear {
+  margin-left: auto;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.channel-sync-clear:hover:not(:disabled) {
+  color: var(--danger-color);
+}
+
+/* ---- 多目标部署 ---- */
+
+.channel-sync-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 0 10px;
+  font-size: 12px;
+}
+
+.channel-sync-section-head:first-child {
+  margin-top: 0;
+}
+
+.channel-sync-section-hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.channel-sync-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.channel-sync-add:hover:not(:disabled) {
+  border-color: var(--accent-color);
+  color: var(--text-primary);
+}
+
+.channel-sync-targets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.channel-sync-target {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.channel-sync-target:hover:not(.active) {
+  border-color: var(--text-tertiary);
+}
+
+.channel-sync-target:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+/* 当前目标：描边 + 极淡底色 + 换成对勾图标，不再额外占一行文字位。 */
+.channel-sync-target.active {
+  border-color: var(--accent-color);
+  background: var(--bg-hover);
+  cursor: default;
+}
+
+.channel-sync-target-active-icon {
+  flex-shrink: 0;
+  color: var(--accent-color);
+}
+
+.channel-sync-target-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.channel-sync-target-title .channel-sync-badge {
+  flex-shrink: 0;
+}
+
+/* 名称吃掉剩余宽度并截断，保证状态徽章永远在同一行右侧。 */
+.channel-sync-target-title strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 第二行放操作按钮，铺满整行，与上面的标题行左右对齐。 */
+.channel-sync-target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.channel-sync-target-host {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channel-sync-target-error {
+  color: var(--danger-color);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.channel-sync-target-actions {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* 卡片变窄后只保留图标，文案放在 title 提示里。 */
+/* 等分整行宽度：按钮数量和卡片宽度变化时仍保持两端对齐。 */
+.channel-sync-icon-btn {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 24px;
+  padding: 0;
+}
+
+.channel-sync-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.channel-sync-badge.running {
+  border-color: var(--success-color);
+  color: var(--success-color);
+}
+
+.channel-sync-badge.warning {
+  border-color: #d99a2b;
+  color: #d99a2b;
+}
+
+.channel-sync-badge.error {
+  border-color: var(--danger-color);
+  color: var(--danger-color);
+}
+
+.channel-sync-badge.active {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.channel-sync-danger:hover:not(:disabled) {
+  color: var(--danger-color);
+  border-color: var(--danger-color);
+}
+
+.channel-sync-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.channel-sync-link:hover:not(:disabled) {
+  color: var(--accent-color);
+}
+
+.channel-sync-log {
+  margin-top: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+}
+
+.channel-sync-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+}
+
+.channel-sync-log pre {
+  max-height: 180px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.channel-sync-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.channel-sync-field-wide {
+  grid-column: 1 / -1;
+}
+
+.channel-sync-probe {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  font-size: 11px;
+}
+
+.channel-sync-probe > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.channel-sync-probe span {
+  color: var(--text-tertiary);
+}
+
+.channel-sync-probe strong {
+  font-weight: 500;
+  text-align: right;
+}
+
+.channel-sync-fingerprint {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.channel-sync-editor-error {
+  margin-top: 12px;
+}
+
+@media (max-width: 860px) {
+  .channel-sync-targets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .channel-sync-targets {
+    grid-template-columns: 1fr;
+  }
+
+  .channel-sync-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- 同步弹窗：内容滚动、底部操作固定 ---- */
+
+/* .agent-config-io-modal 把高度写死成 78vh，这里改成随内容自适应；
+   内容超过上限时才滚动，避免短内容下面留一大片空白。 */
+.channel-sync-modal {
+  width: min(700px, calc(100vw - 32px));
+  height: auto;
+  max-height: min(88vh, 820px);
+}
+
+/* .agent-config-io-content 默认 overflow:hidden 交给内部列表滚动；
+   同步弹窗没有内部列表，改为整体滚动，避免长表单把底部按钮顶出可视区。 */
+.channel-sync-modal .channel-sync-scroll {
+  overflow-y: auto;
+  /* 底部没有操作栏，留出和顶部一致的呼吸空间，避免最后一个区块贴边。 */
+  padding-bottom: 20px;
+}
+
+.channel-sync-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  border-radius: 0 0 8px 8px;
+}
+
+.channel-sync-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.channel-sync-checkbox input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.channel-sync-checkbox code,
+.channel-sync-hint code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* ---- 同步弹窗：列表内部滚动，避免主弹窗被撑长 ---- */
+
+.channel-sync-log-modal {
+  width: min(640px, calc(100vw - 32px));
+  height: auto;
+  max-height: min(88vh, 720px);
+}
+
+.channel-sync-log-body {
+  min-height: 120px;
+  max-height: 46vh;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.channel-sync-confirm-modal {
+  width: min(460px, calc(100vw - 32px));
+  height: auto;
+}
+
+.channel-sync-confirm-text {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-primary);
+}
+
+/* 密码输入框右侧的眼睛按钮 */
+.channel-sync-password {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.channel-sync-password input {
+  flex: 1;
+  padding-right: 34px;
+}
+
+.channel-sync-eye {
+  position: absolute;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.channel-sync-eye:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
 }

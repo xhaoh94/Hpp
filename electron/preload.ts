@@ -45,6 +45,19 @@ import type {
 } from "../shared/session-workspace";
 import type { AgentSubagentConfig } from "../shared/agent-subagent";
 import type {
+  ChannelSyncBackupResult,
+  ChannelSyncCheckResult,
+  ChannelSyncDeployEvent,
+  ChannelSyncDeployResult,
+  ChannelSyncProbeResult,
+  ChannelSyncPullResult,
+  ChannelSyncStatus,
+  ChannelSyncTargetActionResult,
+  ChannelSyncTargetInput,
+  ChannelSyncTestResult,
+  ChannelSyncUndeployOptions,
+} from "../shared/channel-sync";
+import type {
   PrepareReviewUndoRequest,
   ReviewUndoTarget,
 } from "../shared/review-undo";
@@ -391,6 +404,44 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:export", data),
   agentConfigImportRead: () =>
     ipcRenderer.invoke("agentConfig:importRead"),
+  // 渠道配置同步（NAS）：目标管理 + 手动部署/检查/备份/拉取。
+  channelSyncGetStatus: (): Promise<ChannelSyncStatus> =>
+    ipcRenderer.invoke("channelSync:getStatus"),
+  channelSyncListTargets: (): Promise<ChannelSyncTargetActionResult["targets"]> =>
+    ipcRenderer.invoke("channelSync:listTargets"),
+  channelSyncSaveTarget: (input: ChannelSyncTargetInput): Promise<ChannelSyncTargetActionResult> =>
+    ipcRenderer.invoke("channelSync:saveTarget", input),
+  channelSyncRemoveTarget: (targetId: string): Promise<ChannelSyncTargetActionResult> =>
+    ipcRenderer.invoke("channelSync:removeTarget", targetId),
+  channelSyncSetActiveTarget: (targetId: string): Promise<ChannelSyncTargetActionResult> =>
+    ipcRenderer.invoke("channelSync:setActiveTarget", targetId),
+  channelSyncClearFingerprint: (targetId: string): Promise<ChannelSyncTargetActionResult> =>
+    ipcRenderer.invoke("channelSync:clearFingerprint", targetId),
+  channelSyncTest: (): Promise<ChannelSyncTestResult> =>
+    ipcRenderer.invoke("channelSync:test"),
+  channelSyncProbeTarget: (targetId: string, password?: string): Promise<ChannelSyncProbeResult> =>
+    ipcRenderer.invoke("channelSync:probeTarget", targetId, password),
+  channelSyncCheckTarget: (targetId: string, password?: string): Promise<ChannelSyncCheckResult> =>
+    ipcRenderer.invoke("channelSync:checkTarget", targetId, password),
+  channelSyncDeployTarget: (targetId: string, password?: string): Promise<ChannelSyncDeployResult> =>
+    ipcRenderer.invoke("channelSync:deployTarget", targetId, password),
+  channelSyncUndeployTarget: (
+    targetId: string,
+    options?: ChannelSyncUndeployOptions,
+  ): Promise<ChannelSyncTargetActionResult> =>
+    ipcRenderer.invoke("channelSync:undeployTarget", targetId, options),
+  channelSyncBackup: (data: unknown): Promise<ChannelSyncBackupResult> =>
+    ipcRenderer.invoke("channelSync:backup", data),
+  channelSyncPull: (): Promise<ChannelSyncPullResult> =>
+    ipcRenderer.invoke("channelSync:pull"),
+  onChannelSyncDeployProgress: (
+    callback: (event: { targetId: string } & ChannelSyncDeployEvent) => void,
+  ) => {
+    const handler = (_event: unknown, payload: { targetId: string } & ChannelSyncDeployEvent) =>
+      callback(payload);
+    ipcRenderer.on("channelSync:deployProgress", handler);
+    return () => ipcRenderer.removeListener("channelSync:deployProgress", handler);
+  },
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) =>
     ipcRenderer.invoke("agent:sendGuidance", message, images, sessionId, options),
   agentCancelGuidance: (sessionId: string | undefined, guidanceId: string) =>

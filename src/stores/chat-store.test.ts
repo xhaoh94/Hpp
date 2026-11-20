@@ -680,7 +680,44 @@ describe("chat process entry defaults", () => {
     expect(useChatStore.getState().sessionMessages["session-compaction-interrupt"]).toEqual(dividers);
   });
 
-  it("keeps a post-compaction assistant continuation before the divider", () => {
+  it.each([1, 2])("压缩后在 %i 条分隔线下方续写且只创建一条新消息", (dividerCount) => {
+    const sid = "compaction-stream";
+    const store = useChatStore.getState();
+    store.switchSession(sid);
+    store.startAssistantProcess(100, sid);
+    const originalId = useChatStore.getState().messages[0].id;
+    for (let i = 0; i < dividerCount; i++) {
+      store.appendContextCompactionDivider(`compact-${i}`, sid);
+    }
+    for (let i = 0; i < 20; i++) {
+      store.appendLastAssistantCommentaryDelta("commentary", "续写", 200 + i, sid);
+      store.startAssistantProcess(200 + i, sid);
+    }
+    store.finishLastAssistantCommentary("commentary", "完整续写", 250, sid);
+    store.appendLastAssistantProcessEntry({
+      id: "tool-after", timestamp: 300, type: "tool", title: "读取文件", state: "completed",
+    }, sid);
+    store.addAssistantTokenUsage(10, 20, 0, sid);
+    store.updateLastAssistant("最终回答", sid);
+    store.finishLastAssistantProcess(500, "completed", sid);
+    const messages = useChatStore.getState().messages;
+    expect(messages).toHaveLength(2 + dividerCount);
+    expect(messages[0].id).toBe(originalId);
+    expect(messages.at(-1)?.id).not.toBe(originalId);
+    expect(messages.at(-1)).toMatchObject({
+      content: "最终回答", isStreaming: false,
+      process: { startedAt: 200, endedAt: 500, entries: [{ id: "tool-after" }] },
+      commentary: [{ id: "commentary", content: "完整续写" }],
+      tokenUsage: { input: 10, output: 20 },
+    });
+    expect(messages.slice(1, -1).every((message) => message.systemType === "context_compaction")).toBe(true);
+    // 新的用户消息必须开启新回复，不能跨越用户消息复用旧 process。
+    store.addMessage({ id: "next-user", role: "user", content: "继续", timestamp: 600 }, sid);
+    store.startAssistantProcess(700, sid);
+    expect(useChatStore.getState().messages.at(-1)?.id).not.toBe(originalId);
+  });
+
+  it("keeps a post-compaction assistant continuation after the divider", () => {
     useChatStore.getState().switchSession("session-compaction-order");
     useChatStore.getState().addMessage({
       id: "assistant-before",
@@ -699,9 +736,9 @@ describe("chat process entry defaults", () => {
     useChatStore.getState().updateLastAssistant("压缩后续写正文", "session-compaction-order");
 
     const messages = useChatStore.getState().sessionMessages["session-compaction-order"];
-    expect(messages.map((message) => message.role)).toEqual(["assistant", "assistant", "system"]);
-    expect(messages[1].content).toBe("压缩后续写正文");
-    expect(messages[2]).toMatchObject({
+    expect(messages.map((message) => message.role)).toEqual(["assistant", "system", "assistant"]);
+    expect(messages[2].content).toBe("压缩后续写正文");
+    expect(messages[1]).toMatchObject({
       systemType: "context_compaction",
       compactionState: "running",
     });

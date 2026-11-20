@@ -1322,6 +1322,10 @@ const emitCommandItem = (item, phase) => {
   const terminal = phase === "completed" || item.status === "completed" || item.status === "failed";
   const outputText = item.aggregatedOutput || commandOutputByItemId.get(item.id) || "";
   const command = item.command || "";
+  // 如果命令事件带有意图字段就保留供 Hpp 优先展示，
+  // 没有该字段时由界面从命令（包括 PowerShell 包装）生成中文动作标题。
+  const description = [item.description, item.commandDescription, item.reason]
+    .find((value) => typeof value === "string" && value.trim());
   send({
     type: terminal ? "tool_end" : "tool_start",
     toolName: "shell",
@@ -1329,6 +1333,7 @@ const emitCommandItem = (item, phase) => {
     toolKind: "run_command",
     args: { command, cwd: item.cwd },
     command,
+    ...(description ? { description: description.trim().replace(/\s+/g, " ") } : {}),
     result: terminal ? { output: outputText, exit_code: item.exitCode, status: item.status } : undefined,
     outputText,
     detail: truncate([command ? `$ ${command}` : "", outputText].filter(Boolean).join("\n")),

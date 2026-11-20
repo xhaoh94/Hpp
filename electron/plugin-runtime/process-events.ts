@@ -191,7 +191,6 @@ const TOOL_KIND_ALIASES: Record<Exclude<NormalizedToolKind, "unknown">, string[]
     "request_user",
     "request_user_input",
     "request_user_selection",
-    "droid.ask_user",
   ],
 };
 
@@ -387,7 +386,7 @@ const getPatch = (data: unknown, args: unknown, result: unknown): string => {
     ]
   );
   if (directPatch) {
-    // 部分 provider（如 droid 的结构化 tool_result）会把补丁按 JSON 字符串再编码
+    // 部分 provider 的结构化 tool_result 会把补丁按 JSON 字符串再编码
     // 一层，换行以字面 \n 传入。真正可 git apply 的补丁必然含真实换行，
     // 因此仅在「没有任何真实换行却含字面 \n」时才反转义，避免破坏
     // 内容里恰好包含反斜杠+n 文本的多行补丁。

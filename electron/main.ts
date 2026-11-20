@@ -13,6 +13,7 @@ import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
 import { registerWorktreeIpc } from "./worktree/ipc";
 import { registerGitIpc } from "./git/ipc";
+import { registerChannelSyncHandlers } from "./sync/channel-sync";
 import { remoteAccessServer } from "./remote/remote-server";
 import { editorBridgeServer } from "./editor-bridge/server";
 import type { AppUpdateState, AppUpdateStatus } from "../src/types/ipc";
@@ -506,6 +507,7 @@ if (singleInstanceLock) {
     registerAgentHandlers(() => mainWindow);
     registerWorktreeIpc();
     registerGitIpc();
+    registerChannelSyncHandlers();
     registerQuickAskIpc();
     // 冷启动也带 --quick-ask：合成器绑定在 Hpp 还没运行时按下就是这条路。
     if (process.argv.includes("--quick-ask")) showQuickAsk({ forceQuickAsk: true });

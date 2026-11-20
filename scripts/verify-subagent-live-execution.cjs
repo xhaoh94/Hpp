@@ -6,7 +6,7 @@ const { pathToFileURL } = require("node:url");
 
 const projectRoot = resolve(__dirname, "..");
 const mainDir = join(projectRoot, "out", "main");
-const supportedBackends = new Set(["pi", "claude", "droid", "opencode"]);
+const supportedBackends = new Set(["pi", "claude", "opencode"]);
 const timeoutMs = Math.max(30_000, Number(process.env.HPP_SUBAGENT_LIVE_TIMEOUT_MS) || 5 * 60_000);
 const marker = "HPP_SUBAGENT_LIVE_OK";
 
@@ -21,7 +21,7 @@ const configAgentId = (readArgument("config-agent") || backendId).toLowerCase();
 const configProviderId = readArgument("config-provider") || "";
 const configEndpoint = readArgument("config-endpoint") || "";
 if (!supportedBackends.has(backendId)) {
-  throw new Error("请通过 --backend=pi|claude|droid|opencode 指定真实 backend。");
+  throw new Error("请通过 --backend=pi|claude|opencode 指定真实 backend。");
 }
 if (!requestedModel) {
   throw new Error("请通过 --model=<provider/model 或 model id> 显式指定测试模型，避免意外使用付费默认模型。");
@@ -30,7 +30,6 @@ if (!requestedModel) {
 const prompts = {
   pi: `必须调用 subagent 工具，agent 使用 scout。子 Agent 任务：不要读取或修改任何文件，只返回精确文本 ${marker}。主 Agent 在工具完成后只报告成功或失败。`,
   claude: `必须使用原生 Task/subagent 委派工具启动一个只读子 Agent。子 Agent 不要读取或修改文件，只返回精确文本 ${marker}。工具完成后只报告成功或失败。`,
-  droid: `必须使用原生 Task/task 或 delegate_task 委派工具启动一个只读子 Agent。子 Agent 不要读取或修改文件，只返回精确文本 ${marker}。工具完成后只报告成功或失败。`,
   opencode: `必须使用原生 task 或 delegate_task 工具启动一个只读子 Agent。子 Agent 不要读取或修改文件，只返回精确文本 ${marker}。工具完成后只报告成功或失败。`,
 };
 

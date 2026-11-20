@@ -1,6 +1,6 @@
 {
   "name": "hpp",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
@@ -54,6 +54,7 @@
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/ssh2": "^1.15.6",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.7.0",
     "diff": "^8.0.4",
@@ -80,6 +81,7 @@
     "adm-zip": "^0.5.18",
     "electron-updater": "^6.8.9",
     "qrcode": "^1.5.4",
+    "ssh2": "^1.17.0",
     "ws": "^8.21.1",
     "zod": "^4.3.6"
   },
@@ -107,6 +109,10 @@
       {
         "from": "resources/editors",
         "to": "editors"
+      },
+      {
+        "from": "docker/channel-sync",
+        "to": "channel-sync"
       }
     ],
     "asar": false,

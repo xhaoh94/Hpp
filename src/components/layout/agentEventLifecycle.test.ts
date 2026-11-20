@@ -114,6 +114,53 @@ afterEach(() => {
 });
 
 describe("agent event terminal reconciliation", () => {
+  it.each(["completed-only", "started-completed"])(
+    "压缩事件 %s 后的连续 commentary 和工具输出不拆成空过程消息",
+    (mode) => {
+      const harness = createHarness();
+      dispatchAgentEvent({ type: "stream_start", sessionId: SESSION_ID }, harness.controller);
+      const originalId = getMessages()[0].id;
+      dispatchAgentEvent({ type: "commentary_delta", itemId: "note-before", delta: "压缩前说明", sessionId: SESSION_ID }, harness.controller);
+      dispatchAgentEvent({ type: "stream_delta", delta: "压缩前正文", sessionId: SESSION_ID }, harness.controller);
+      if (mode === "started-completed") {
+        dispatchAgentEvent({ type: "context_compaction", id: "compact-mid", phase: "started", sessionId: SESSION_ID }, harness.controller);
+      }
+      // Codex 和 Claude 可以只上报完成通知；Pi/OpenCode 通常提供起止阶段。
+      dispatchAgentEvent({ type: "context_compaction", id: "compact-mid", sessionId: SESSION_ID }, harness.controller);
+      for (let i = 0; i < 20; i++) {
+        dispatchAgentEvent({ type: "commentary_delta", itemId: "note-after", delta: "继续", sessionId: SESSION_ID }, harness.controller);
+      }
+      dispatchAgentEvent({ type: "commentary_end", itemId: "note-after", content: "继续".repeat(20), sessionId: SESSION_ID }, harness.controller);
+      dispatchAgentEvent({ type: "tool_start", toolCallId: "after-tool", toolKind: "run_command", command: "git status", sessionId: SESSION_ID }, harness.controller);
+      dispatchAgentEvent({ type: "tool_end", toolCallId: "after-tool", toolKind: "run_command", sessionId: SESSION_ID }, harness.controller);
+      dispatchAgentEvent({ type: "stream_end", content: "任务完成", sessionId: SESSION_ID }, harness.controller);
+      const assistants = getMessages().filter((message) => message.role === "assistant");
+      expect(getMessages().map((message) => message.role)).toEqual(["assistant", "system", "assistant"]);
+      expect(assistants).toHaveLength(2);
+      expect(assistants[0]).toMatchObject({
+        id: originalId, isStreaming: false,
+        commentary: [{ id: "note-before", content: "压缩前说明", isStreaming: false }],
+      });
+      expect(assistants[0].process?.entries.some((entry) => entry.detail === "压缩前正文")).toBe(true);
+      expect(assistants[1].id).not.toBe(originalId);
+      expect(assistants[1]).toMatchObject({
+        content: "任务完成", isStreaming: false,
+        commentary: [{ id: "note-after", content: "继续".repeat(20) }],
+      });
+      expect(assistants[1].process?.entries.filter((entry) => entry.type === "tool")).toHaveLength(1);
+      harness.controller.clearAllStreamWatchdogs();
+    },
+  );
+  it("压缩后仅收到最终正文时仍在分隔线下方显示", () => {
+    const harness = createHarness();
+    dispatchAgentEvent({ type: "stream_start", sessionId: SESSION_ID }, harness.controller);
+    dispatchAgentEvent({ type: "context_compaction", id: "compact-final", sessionId: SESSION_ID }, harness.controller);
+    dispatchAgentEvent({ type: "stream_end", content: "最终正文", sessionId: SESSION_ID }, harness.controller);
+    expect(getMessages().map((message) => message.role)).toEqual(["assistant", "system", "assistant"]);
+    expect(getMessages().at(-1)?.content).toBe("最终正文");
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it("tracks context usage and clears it after compaction settles", () => {
     const harness = createHarness();
     useChatStore.getState().setCurrentModel({
@@ -1245,7 +1292,7 @@ describe("agent event terminal reconciliation", () => {
 
     const entries = getMessages().flatMap((message) => message.process?.entries || []);
     const commandEntry = entries.find((entry) => entry.command === "ls");
-    expect(commandEntry?.description).toBe("列出目录");
+    expect(commandEntry?.description).toBe("列出项目文件");
 
     // 后端自己写了意图时优先用它，不能被兜底覆盖。
     dispatchAgentEvent({

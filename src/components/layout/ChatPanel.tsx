@@ -3095,14 +3095,10 @@ export function ChatPanel({
     if (!imageSrc) return;
     const result = await window.electronAPI.writeImageToClipboard(imageSrc);
     if (!result.success) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `复制图片失败: ${result.error || "未知错误"}`,
-        timestamp: Date.now(),
-      }, activeSessionId);
+      // 复制失败只是当前操作的反馈，不该在回复中途插入系统消息把消息拆成两段。
+      showFloatingToastMessage(`复制图片失败: ${result.error || "未知错误"}`);
     }
-  }, [activeSessionId, addMessage, imageContextMenu]);
+  }, [imageContextMenu, showFloatingToastMessage]);
 
   const handleOpenImage = useCallback((src: string) => {
     setZoomImage(src);
@@ -3120,12 +3116,7 @@ export function ChatPanel({
     if (!targetPath) return;
     const result = await window.electronAPI.writeFileToClipboard(targetPath);
     if (!result.success) {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `复制视频失败: ${result.error || "未知错误"}`,
-        timestamp: Date.now(),
-      }, activeSessionId);
+      showFloatingToastMessage(`复制视频失败: ${result.error || "未知错误"}`);
       return;
     }
     if (result.mode === "path") {
@@ -3133,7 +3124,7 @@ export function ChatPanel({
       // 明确告诉用户复制到的是什么，避免粘贴时才发现不对。
       showFloatingToastMessage("文件剪贴板不可用，已复制视频路径");
     }
-  }, [activeSessionId, addMessage, showFloatingToastMessage, videoContextMenu]);
+  }, [showFloatingToastMessage, videoContextMenu]);
 
   const handleCopyVideoPath = useCallback(() => {
     const targetPath = videoContextMenu?.path;

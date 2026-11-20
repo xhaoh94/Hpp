@@ -272,8 +272,8 @@ describe("AgentManager runtime updates", () => {
     testState.createBackend.mockResolvedValueOnce(runningBackend);
     const manager = new AgentManager();
 
-    await manager.createSession("session-2", "droid", "C:\\project");
-    const suspension = await manager.suspendAgentSessionsForRuntimeUpdate("droid");
+    await manager.createSession("session-2", "custom-agent", "C:\\project");
+    const suspension = await manager.suspendAgentSessionsForRuntimeUpdate("custom-agent");
 
     expect(suspension).toEqual({
       success: false,
@@ -1234,8 +1234,8 @@ describe("AgentManager plugin removal", () => {
   });
 
   it("coalesces concurrent session creation instead of failing the retry instantly", async () => {
-    // 慢后端（droid 实测 10~40s）初始化期间，渲染层的重复触发会各自撞上
-    // 「正在初始化」：谁都没拿到结果，重试全部瞬间失败且刷屏。并发调用必须
+    // 慢后端初始化期间，渲染层的重复触发会各自撞上「正在初始化」：谁都没拿到结果，
+    // 重试全部瞬间失败且刷屏。并发调用必须
     // 等同一次尝试，而不是各自报错。
     const init = createDeferred<void>();
     const backend = createBackend(true);

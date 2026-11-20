@@ -20,8 +20,11 @@ describe("desktop general settings layout", () => {
     expect(quickActions).not.toContain("快速操作");
     expect(quickActions).not.toContain("快捷键设置");
     expect(quickActions).not.toContain("过滤规则");
+    expect(quickActions).not.toContain("编辑器集成");
     expect(generalSettings).toContain("openShortcutSettings");
     expect(generalSettings).toContain("openFilterSettings");
+    expect(generalSettings).toContain("编辑器集成");
+    expect(generalSettings).toContain("openEditorIntegrationSettings");
     expect(generalSettings).not.toContain("上下文压缩");
     // 快捷键跟窗口行为放一起；过滤规则和临时图片路径合并成「其他设置」。
     expect(generalSettings).toContain("应用行为");
