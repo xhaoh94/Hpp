@@ -128,8 +128,12 @@ describe("file explorer tree commands", () => {
     const source = readSource();
 
     expect(source).toContain("在编辑器中打开项目");
-    expect(source).toContain("editorBridgeListTargets()");
-    expect(source).toContain("target.appInstalled && target.cliPath");
+    // 用轻量探测，不跑慢的扩展版本查询。
+    expect(source).toContain("listInstalledEditors()");
+    expect(source).not.toContain("editorBridgeListTargets()");
+    // 菜单先弹、图标后补，不阻塞。
+    expect(source).toContain("setEditorMenu({ x, y, targets, icons: {} })");
+    expect(source).toContain("void Promise.all(");
     expect(source).toContain("openProjectInEditor(activeWorkspacePath, editorId)");
     expect(source).toContain('className="editor-app-menu"');
     expect(source).toContain("getEditorIcon(target.id)");

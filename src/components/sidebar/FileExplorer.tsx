@@ -25,7 +25,6 @@ import { replaceEmojiWithImages } from "@/lib/emoji";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
 import { showAppAlert } from "@/lib/app-dialog";
 import { getFileFilterKey, isFileEntryExcluded, type FileFilterConfig } from "@shared/file-filters";
-import type { EditorBridgeTargetInfo } from "@shared/editor-bridge-protocol";
 import type { FileEntry } from "@/types";
 import {
   ChevronDown,
@@ -42,6 +41,8 @@ import "./FileTree.css";
 
 const FilePreview = LazyFilePreview;
 const FILE_EXPLORER_SEARCH_DEBOUNCE_MS = 100;
+
+type InstalledEditor = { id: string; label: string; cliPath: string };
 
 /**
  * 系统「打开方式」菜单风格的应用图标：优先显示从 exe 提取的真实图标，
@@ -355,7 +356,7 @@ export function FileExplorer() {
   const [editorMenu, setEditorMenu] = useState<{
     x: number;
     y: number;
-    targets: EditorBridgeTargetInfo[];
+    targets: InstalledEditor[];
     icons: Record<string, string>;
   } | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Map<string, FileEntry>>(() => new Map());
@@ -470,19 +471,24 @@ export function FileExplorer() {
 
   const openEditorMenu = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    const all = await window.electronAPI.editorBridgeListTargets().catch(() => []);
-    // 只列真正装了、且 CLI 可用的编辑器；config 类（如纯配置集成）没有 CLI，排掉。
-    const targets = all.filter((target) => target.appInstalled && target.cliPath);
+    const x = rect.left;
+    const y = rect.bottom + 4;
+    const targets = await window.electronAPI.listInstalledEditors().catch(() => []);
     if (targets.length === 0) {
       showAppAlert("没有检测到已安装的编辑器（VSCode / VSCodium / Cursor / Zed 等）。");
       return;
     }
-    // 从各编辑器 exe 提取真实应用图标（跟系统「打开方式」菜单一致）。
-    const iconEntries = await Promise.all(targets.map(async (target) => {
+    // 先把菜单弹出来（图标先用 SVG 兜底），图标异步补齐，不阻塞菜单出现。
+    setEditorMenu({ x, y, targets, icons: {} });
+    void Promise.all(targets.map(async (target) => {
       const result = await window.electronAPI.getEditorIcon(target.id).catch(() => ({ iconDataUrl: null }));
       return [target.id, result.iconDataUrl || ""] as const;
-    }));
-    setEditorMenu({ x: rect.left, y: rect.bottom + 4, targets, icons: Object.fromEntries(iconEntries) });
+    })).then((entries) => {
+      // 只更新仍然开着的这个菜单，避免用户已关闭后又回填。
+      setEditorMenu((prev) => prev && prev.x === x && prev.y === y
+        ? { ...prev, icons: Object.fromEntries(entries) }
+        : prev);
+    });
   }, []);
 
   const openProjectInEditor = useCallback(async (editorId: string) => {

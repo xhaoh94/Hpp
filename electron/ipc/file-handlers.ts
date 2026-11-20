@@ -5,7 +5,7 @@ import { basename, dirname, extname, join } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { commandExists } from "../utils/command-utils";
-import { listEditorTargets, resolveEditorAppPath, runCli } from "../editor-bridge/installers";
+import { listEditorTargets, listInstalledEditors, resolveEditorAppPath, runCli } from "../editor-bridge/installers";
 import { ReviewUndoService } from "./rebuild-file";
 import type {
   PrepareReviewUndoRequest,
@@ -103,6 +103,9 @@ export function registerFileHandlers() {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
+
+  // 轻量探测已安装编辑器（不拉扩展版本），给「外部打开」菜单用，避免点按钮发卡。
+  ipcMain.handle("editor:listInstalled", () => listInstalledEditors());
 
   // 取编辑器应用的真实图标（跟系统「打开方式」菜单里显示的一致）。
   // 从 exe/.app 提取，拿不到时返回 null 让渲染层退回内置占位图标。

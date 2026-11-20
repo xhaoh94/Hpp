@@ -384,6 +384,7 @@ export interface ElectronAPI {
   openPathInShell: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   openProjectInEditor: (projectPath: string, editorId: string) => Promise<{ success: boolean; error?: string }>;
   getEditorIcon: (editorId: string) => Promise<{ iconDataUrl: string | null }>;
+  listInstalledEditors: () => Promise<Array<{ id: string; label: string; cliPath: string }>>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
   findProjectFile: (relativePath: string, projectPath: string) => Promise<string | null>;

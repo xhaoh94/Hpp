@@ -237,6 +237,20 @@ export function getBundledExtensionVersion(): string | null {
   }
 }
 
+/**
+ * 只探测「装了哪些编辑器 + CLI 路径」，不跑 `code --list-extensions` 拉扩展版本。
+ * 给「用外部编辑器打开项目」菜单专用——那个场景只关心能不能启动编辑器，
+ * 扩展版本跟它无关，却要为每个编辑器跑一次慢 CLI，是点菜单发卡的主因。
+ */
+export async function listInstalledEditors(): Promise<Array<{ id: string; label: string; cliPath: string }>> {
+  const result: Array<{ id: string; label: string; cliPath: string }> = [];
+  await Promise.all(EDITOR_TARGETS.map(async (target) => {
+    const cliPath = await resolveCliPath(target);
+    if (cliPath) result.push({ id: target.id, label: target.label, cliPath });
+  }));
+  return result;
+}
+
 export async function listEditorTargets(): Promise<EditorBridgeTargetInfo[]> {
   const bundledVersion = getBundledExtensionVersion();
   const editors: EditorBridgeTargetInfo[] = await Promise.all(EDITOR_TARGETS.map(async (target) => {

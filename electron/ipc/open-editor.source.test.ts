@@ -22,6 +22,16 @@ describe("从外部编辑器打开项目", () => {
   });
 
   it("imports runCli and icon resolver from the editor bridge installers", () => {
-    expect(source).toContain('import { listEditorTargets, resolveEditorAppPath, runCli } from "../editor-bridge/installers"');
+    expect(source).toContain('import { listEditorTargets, listInstalledEditors, resolveEditorAppPath, runCli } from "../editor-bridge/installers"');
+  });
+
+  it("uses the lightweight probe that skips slow extension-version lookup", () => {
+    const installers = readFileSync(new URL("../editor-bridge/installers.ts", import.meta.url), "utf8");
+    const start = installers.indexOf("export async function listInstalledEditors");
+    expect(start).toBeGreaterThan(-1);
+    const end = installers.indexOf("export async function listEditorTargets", start);
+    const fn = installers.slice(start, end);
+    expect(fn).toContain("resolveCliPath(target)");
+    expect(fn).not.toContain("readInstalledVersion");
   });
 });
