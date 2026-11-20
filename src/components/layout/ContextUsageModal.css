@@ -119,52 +119,64 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 智能压缩阈值：进度条上叠一个可拖动的标记。 */
-.context-threshold-track {
-  position: relative;
-  padding: 7px 0;
-  cursor: pointer;
+/* 智能压缩阈值：整条进度条就是拖拽区，右侧同行显示百分比。 */
+.context-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
+.context-threshold-track {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+  cursor: pointer;
+  /* 触摸/触控笔下去就锁定为拖拽，避免被当成滚动或长按菜单吞掉。 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.context-threshold-track:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* 纯视觉标记：不接收指针事件，整条轨道统一处理点击/拖动。 */
 .context-threshold-handle {
   position: absolute;
-  top: 2px;
+  top: 50%;
   width: 10px;
-  height: 14px;
-  margin-left: -5px;
-  padding: 0;
-  border: 1px solid var(--text-secondary);
+  height: 16px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--bg-secondary);
   border-radius: 3px;
-  background: var(--bg-primary);
-  cursor: ew-resize;
-  touch-action: none;
+  background: var(--text-secondary);
+  pointer-events: none;
   z-index: 2;
 }
 
-.context-threshold-handle:hover,
-.context-threshold-handle.is-dragging {
-  border-color: var(--accent-color);
+.context-threshold-track:hover .context-threshold-handle,
+.context-threshold-track.is-dragging .context-threshold-handle {
   background: var(--accent-color);
 }
 
-.context-threshold-editor {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
 .context-threshold-value {
+  flex: none;
+  min-width: 34px;
   color: var(--text-primary);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .context-threshold-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
   line-height: 1.5;
+  color: var(--text-secondary);
 }
 
 .context-usage-bar {

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("./useAutoCompaction.ts", import.meta.url), "utf8");
 const modal = readFileSync(new URL("./ContextUsageModal.tsx", import.meta.url), "utf8");
+const styles = readFileSync(new URL("./ContextUsageModal.css", import.meta.url), "utf8");
 
 /**
  * 智能压缩（单阈值）的几条硬约束：
@@ -38,8 +39,20 @@ describe("智能压缩自动触发", () => {
   it("exposes a single draggable threshold marker on the context bar", () => {
     expect(modal).toContain("context-threshold-handle");
     expect(modal).toContain("setPointerCapture");
-    expect(modal).toContain("percentFromPointer");
+    expect(modal).toContain("percentFromTrack");
     expect(modal).toContain("saveContextCompactionThreshold");
     expect(modal).not.toContain("context-tier-chip");
+  });
+
+  it("lets the whole bar handle the drag so the marker is easy to grab", () => {
+    // 标记只是视觉元素，指针事件全部落在整条轨道上——否则 10px 的手柄很难点中。
+    expect(styles).toContain(".context-threshold-track {");
+    expect(styles).toContain("touch-action: none");
+    expect(styles).toContain("pointer-events: none");
+  });
+
+  it("puts the percentage on the same row, right after the bar", () => {
+    expect(modal).toContain('className="context-threshold-row"');
+    expect(modal).toContain('className="context-threshold-value">{threshold}%');
   });
 });

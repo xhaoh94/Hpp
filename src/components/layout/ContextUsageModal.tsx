@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+} from "react";
 import { ListCollapse, X } from "lucide-react";
 import type { SessionContextUsage } from "@/stores/chat-store";
 import { formatContextTokenAmount } from "@shared/models";
@@ -27,56 +34,12 @@ const SOURCE_NOTES: Record<SessionContextUsage["source"], string> = {
   unknown: "用量来源未知",
 };
 
-/** 进度条上的自动压缩阈值标记。拖动时只更新自己的位置，松手才提交。 */
-function ThresholdHandle({
-  percent,
-  percentFromPointer,
-  onCommit,
-}: {
-  percent: number;
-  percentFromPointer: (clientX: number) => number;
-  onCommit: (next: number) => void;
-}) {
-  const draggingRef = useRef(false);
-  const [dragValue, setDragValue] = useState<number | null>(null);
-  const shown = dragValue ?? percent;
-
-  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    // 阻止冒泡到 track 的「点击跳转阈值」。
-    event.stopPropagation();
-    draggingRef.current = true;
-    setDragValue(percent);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-
-  const handlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!draggingRef.current) return;
-    event.stopPropagation();
-    setDragValue(percentFromPointer(event.clientX));
-  };
-
-  const handlePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!draggingRef.current) return;
-    event.stopPropagation();
-    draggingRef.current = false;
-    event.currentTarget.releasePointerCapture(event.pointerId);
-    if (dragValue !== null && dragValue !== percent) onCommit(dragValue);
-    setDragValue(null);
-  };
-
-  return (
-    <button
-      type="button"
-      className={`context-threshold-handle${draggingRef.current ? " is-dragging" : ""}`}
-      style={{ left: `${shown}%` }}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      title={`上下文用到 ${percent}% 时自动压缩（拖动调整）`}
-      aria-label={`自动压缩阈值 ${percent}%`}
-    />
-  );
+/** 阈值标记的落点：按指针的 clientX 换算成轨道内的百分比。 */
+function percentFromTrack(track: HTMLElement | null, clientX: number): number {
+  const rect = track?.getBoundingClientRect();
+  if (!rect || rect.width <= 0) return CONTEXT_THRESHOLD_MIN;
+  const percent = ((clientX - rect.left) / rect.width) * 100;
+  return Math.round(Math.min(CONTEXT_THRESHOLD_MAX, Math.max(CONTEXT_THRESHOLD_MIN, percent)));
 }
 
 type ContextUsageModalProps = {
@@ -104,7 +67,14 @@ export function ContextUsageModal({
   const overlayStyle = useAnchoredOverlay(true, anchorRef, modalRef, { gap: 8 });
   const [compactRequested, setCompactRequested] = useState(false);
   const [threshold, setThreshold] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
+  const [draggingThreshold, setDraggingThreshold] = useState(false);
   const trackRef = useRef<HTMLDivElement>(null);
+  /** 拖动中的临时值：松手才落盘，避免拖动过程反复写 settings.json。 */
+  const dragRef = useRef<{ active: boolean; value: number; start: number }>({
+    active: false,
+    value: threshold,
+    start: threshold,
+  });
 
   useEffect(() => {
     let alive = true;
@@ -122,17 +92,61 @@ export function ContextUsageModal({
     window.dispatchEvent(new CustomEvent(GENERAL_SETTINGS_UPDATED_EVENT, { detail: {} }));
   };
 
-  const percentFromPointer = (clientX: number) => {
-    const rect = trackRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return CONTEXT_THRESHOLD_MIN;
-    const percent = ((clientX - rect.left) / rect.width) * 100;
-    return Math.round(Math.min(CONTEXT_THRESHOLD_MAX, Math.max(CONTEXT_THRESHOLD_MIN, percent)));
+  // 整条进度条都是拖拽区：点哪阈值就跳到哪，按住可以直接拖走。
+  // 只把小标记做成纯视觉元素（pointer-events: none），就不会出现「手柄太小抓不住」。
+  const handleThresholdPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const percent = percentFromTrack(trackRef.current, event.clientX);
+    dragRef.current = { active: true, value: percent, start: threshold };
+    setDraggingThreshold(true);
+    setThreshold(percent);
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  // 只有一个阈值：点进度条任意位置直接把它挪过去，比拖小标记更好点。
-  const handleTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if ((event.target as HTMLElement).closest(".context-threshold-handle")) return;
-    applyThreshold(percentFromPointer(event.clientX));
+  const handleThresholdPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current.active) return;
+    const percent = percentFromTrack(trackRef.current, event.clientX);
+    dragRef.current.value = percent;
+    setThreshold(percent);
+  };
+
+  // pointerup / pointercancel / 指针被系统收走（lostpointercapture）都走这里收尾，
+  // 否则拖到窗口外松手后 drag 状态会卡住，表现为「拖动失灵」。
+  const handleThresholdPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current.active) return;
+    dragRef.current.active = false;
+    setDraggingThreshold(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    // 只是点了一下、阈值没变（比如点回原位）就不必写盘。
+    if (dragRef.current.value !== dragRef.current.start) {
+      applyThreshold(dragRef.current.value);
+    }
+  };
+
+  const handleThresholdKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 10 : 5;
+    let next: number;
+    switch (event.key) {
+      case "ArrowLeft":
+      case "ArrowDown":
+        next = threshold - step;
+        break;
+      case "ArrowRight":
+      case "ArrowUp":
+        next = threshold + step;
+        break;
+      case "Home":
+        next = CONTEXT_THRESHOLD_MIN;
+        break;
+      case "End":
+        next = CONTEXT_THRESHOLD_MAX;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    applyThreshold(next);
   };
 
   useEffect(() => {
@@ -220,37 +234,53 @@ export function ContextUsageModal({
           </span>
         </div>
 
-        <div className="context-threshold-track" ref={trackRef} onPointerDown={handleTrackPointerDown}>
-          <div className="context-usage-bar" aria-hidden="true">
-            {segments.length > 0
-              ? segments.map((segment) => (
-                  <span
-                    key={segment.id}
-                    className="context-usage-bar-segment"
-                    style={{ width: `${segment.ratio * 100}%`, backgroundColor: segment.color }}
-                  />
-                ))
-              : usageRatio !== undefined
-                ? <span className="context-usage-bar-segment used" style={{ width: `${usageRatio * 100}%` }} />
-                : null}
+        <div className="context-threshold-row">
+          <div
+            className={`context-threshold-track${draggingThreshold ? " is-dragging" : ""}`}
+            ref={trackRef}
+            role="slider"
+            tabIndex={0}
+            aria-label="自动压缩阈值"
+            aria-valuemin={CONTEXT_THRESHOLD_MIN}
+            aria-valuemax={CONTEXT_THRESHOLD_MAX}
+            aria-valuenow={threshold}
+            aria-valuetext={`${threshold}%`}
+            title="点击或拖动进度条调整自动压缩阈值"
+            onPointerDown={handleThresholdPointerDown}
+            onPointerMove={handleThresholdPointerMove}
+            onPointerUp={handleThresholdPointerUp}
+            onPointerCancel={handleThresholdPointerUp}
+            onLostPointerCapture={handleThresholdPointerUp}
+            onKeyDown={handleThresholdKeyDown}
+          >
+            <div className="context-usage-bar" aria-hidden="true">
+              {segments.length > 0
+                ? segments.map((segment) => (
+                    <span
+                      key={segment.id}
+                      className="context-usage-bar-segment"
+                      style={{ width: `${segment.ratio * 100}%`, backgroundColor: segment.color }}
+                    />
+                  ))
+                : usageRatio !== undefined
+                  ? <span className="context-usage-bar-segment used" style={{ width: `${usageRatio * 100}%` }} />
+                  : null}
+            </div>
+            <span
+              className="context-threshold-handle"
+              style={{ left: `${threshold}%` }}
+              aria-hidden="true"
+            />
           </div>
-          <ThresholdHandle
-            percent={threshold}
-            percentFromPointer={percentFromPointer}
-            onCommit={applyThreshold}
-          />
+          <strong className="context-threshold-value">{threshold}%</strong>
         </div>
 
-        <div className="context-threshold-editor">
-          <span className="context-threshold-title">自动压缩</span>
-          <strong className="context-threshold-value">{threshold}%</strong>
-          <span className="context-threshold-hint">
-            {contextWindow
-              ? `约 ${formatContextTokenAmount(Math.round(contextWindow * threshold / 100))} · `
-              : ""}
-            用量到达后，回合结束时压缩
-          </span>
-        </div>
+        <p className="context-threshold-hint">
+          用量到达后，回合结束时自动压缩
+          {contextWindow
+            ? ` · 阈值约 ${formatContextTokenAmount(Math.round(contextWindow * threshold / 100))}`
+            : ""}
+        </p>
 
         {segments.length > 0 ? (
           <ul className="context-usage-list">
