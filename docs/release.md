@@ -147,6 +147,18 @@ $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 
 看 `gh run view <run-id> --log-failed`，常见原因：四个 Secret 缺失/名字错、JDK 版本不是 21、`versionName` 与 `package.json` 不一致。
 
+### `buildcheck.gypi not found` / `node-gyp failed to rebuild cpu-features`
+
+Windows / Linux 打包时 electron-builder 会重建原生模块。`ssh2`（渠道同步功能引入）依赖 `cpu-features`，它的 install script 负责生成 `buildcheck.gypi` 并编译。**三个 workflow 必须用 `npm install`，不能加 `--ignore-scripts`**，否则这个文件不存在、原生重建必然失败。这条约束已写在各 workflow 的 Install dependencies 步骤注释里。
+
+### 本地构建报 `Missing hpp-agent-plugin.json in .../droid`
+
+某个插件目录被删空但空壳还在时，`package-agent-plugins.cjs` 遍历子目录会报错。git 不跟踪空目录，CI 全新 checkout 不受影响；本地把空目录删掉即可（`rmdir electron/agent-plugins/droid`）。删除插件时记得同步清理 `content-hashes.json` 与后端目录。
+
+### 命令描述测试失败（`已运行 X` → `执行 X`）
+
+`shared/command-description.ts` 的 `fallbackCommandDescription` 只返回**纯动作**描述（「运行 npm 命令」），**时态由展示层 `getCommandDescriptionTitle` 补**（`执行 X` → `已运行 X`）。改动词表时记得同步更新 `shared/command-description.test.ts`、`electron/plugin-runtime/process-events.test.ts`、`src/components/layout/agentEventUtils.test.ts` 的断言，别让模型写的 description 被拼上「已运行」。
+
 ### Release 说明没更新
 
 `npm run release` 会 PATCH 已有 Release 的 body；若只改了本地文档没跑脚本，说明不会同步。
