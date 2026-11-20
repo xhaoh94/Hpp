@@ -22,4 +22,15 @@ describe("Agent settings plugin and runtime actions", () => {
     expect(source).toContain("result.detachedSessionIds?.length");
     expect(source).toContain("个会话已移入历史");
   });
+
+  it("keeps the official plugin modal open after a successful install", () => {
+    const start = source.indexOf("const handleInstallOfficialPlugin");
+    const end = source.indexOf("const handleReloadPlugins", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const handler = source.slice(start, end);
+    // 装完留在弹窗里：按钮随 catalog 刷新变「已安装」，可接着装下一个。
+    expect(handler).not.toContain("setShowOfficialPluginModal(false)");
+    expect(handler).toContain("await applyInstalledPluginResult(result)");
+  });
 });

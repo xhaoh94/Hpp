@@ -397,7 +397,8 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
           return;
         }
         await applyInstalledPluginResult(result);
-        setShowOfficialPluginModal(false);
+        // 装完留在弹窗里：按钮会随 catalog 刷新立刻变成「已安装/更新」，
+        // 用户能接着装下一个，不用关掉再重开。
         setPluginStatus({
           type: "success",
           text: `${result.agent?.name || plugin.name} ${result.replaced ? "已更新" : "已安装"}`,
