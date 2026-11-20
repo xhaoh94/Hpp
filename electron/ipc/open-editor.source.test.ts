@@ -21,7 +21,7 @@ describe("从外部编辑器打开项目", () => {
     expect(handler).not.toContain("getExecFileInvocation");
   });
 
-  it("imports runCli from the editor bridge installers", () => {
-    expect(source).toContain('import { listEditorTargets, runCli } from "../editor-bridge/installers"');
+  it("imports runCli and icon resolver from the editor bridge installers", () => {
+    expect(source).toContain('import { listEditorTargets, resolveEditorAppPath, runCli } from "../editor-bridge/installers"');
   });
 });

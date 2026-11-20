@@ -104,6 +104,16 @@ const EDITOR_TARGETS: EditorTarget[] = [
   },
 ];
 
+/**
+ * 解析编辑器的应用文件（.exe / .app）路径，供 app.getFileIcon 提取真实应用图标。
+ * 这些路径列表与 listEditorTargets 的 appInstalled 判定共用同一份 appCandidates。
+ */
+export function resolveEditorAppPath(targetId: string): string | null {
+  const target = EDITOR_TARGETS.find((item) => item.id === targetId);
+  if (!target) return null;
+  return target.appCandidates().find((candidate) => existsSync(candidate)) || null;
+}
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }

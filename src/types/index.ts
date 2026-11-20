@@ -383,6 +383,7 @@ export interface ElectronAPI {
   /** 用系统默认程序打开文件（HTML/SVG 走默认浏览器渲染）。 */
   openPathInShell: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   openProjectInEditor: (projectPath: string, editorId: string) => Promise<{ success: boolean; error?: string }>;
+  getEditorIcon: (editorId: string) => Promise<{ iconDataUrl: string | null }>;
   getPathForFile: (file: File) => string;
   fileExists: (filePath: string) => Promise<boolean>;
   findProjectFile: (relativePath: string, projectPath: string) => Promise<string | null>;

@@ -43,8 +43,14 @@ import "./FileTree.css";
 const FilePreview = LazyFilePreview;
 const FILE_EXPLORER_SEARCH_DEBOUNCE_MS = 100;
 
-/** 系统「打开方式」菜单风格的应用图标：按编辑器 id 给不同品牌色。 */
-function EditorAppIcon({ editorId }: { editorId: string }) {
+/**
+ * 系统「打开方式」菜单风格的应用图标：优先显示从 exe 提取的真实图标，
+ * 拿不到时退回按编辑器 id 配色的占位 SVG。
+ */
+function EditorAppIcon({ editorId, iconDataUrl }: { editorId: string; iconDataUrl?: string }) {
+  if (iconDataUrl) {
+    return <img className="editor-app-icon" src={iconDataUrl} alt="" aria-hidden="true" />;
+  }
   const palette: Record<string, { bg: string; fg: string }> = {
     vscode: { bg: "#007ACC", fg: "#FFFFFF" },
     vscodium: { bg: "#3AA9D4", fg: "#FFFFFF" },
@@ -350,6 +356,7 @@ export function FileExplorer() {
     x: number;
     y: number;
     targets: EditorBridgeTargetInfo[];
+    icons: Record<string, string>;
   } | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Map<string, FileEntry>>(() => new Map());
   const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
@@ -470,7 +477,12 @@ export function FileExplorer() {
       showAppAlert("没有检测到已安装的编辑器（VSCode / VSCodium / Cursor / Zed 等）。");
       return;
     }
-    setEditorMenu({ x: rect.left, y: rect.bottom + 4, targets });
+    // 从各编辑器 exe 提取真实应用图标（跟系统「打开方式」菜单一致）。
+    const iconEntries = await Promise.all(targets.map(async (target) => {
+      const result = await window.electronAPI.getEditorIcon(target.id).catch(() => ({ iconDataUrl: null }));
+      return [target.id, result.iconDataUrl || ""] as const;
+    }));
+    setEditorMenu({ x: rect.left, y: rect.bottom + 4, targets, icons: Object.fromEntries(iconEntries) });
   }, []);
 
   const openProjectInEditor = useCallback(async (editorId: string) => {
@@ -802,7 +814,7 @@ export function FileExplorer() {
               type="button"
               onClick={() => void openProjectInEditor(target.id)}
             >
-              <EditorAppIcon editorId={target.id} />
+              <EditorAppIcon editorId={target.id} iconDataUrl={editorMenu.icons[target.id]} />
               <span>{target.label}</span>
             </button>
           ))}

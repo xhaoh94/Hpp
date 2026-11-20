@@ -142,6 +142,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openPathInShell: (filePath: string) => ipcRenderer.invoke("fs:openPath", filePath),
   openProjectInEditor: (projectPath: string, editorId: string) =>
     ipcRenderer.invoke("fs:openProjectInEditor", projectPath, editorId),
+  getEditorIcon: (editorId: string) =>
+    ipcRenderer.invoke("fs:getEditorIcon", editorId),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   fileExists: (filePath: string) =>
     ipcRenderer.invoke("fs:fileExists", filePath),
