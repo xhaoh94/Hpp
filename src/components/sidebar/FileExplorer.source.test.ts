@@ -131,8 +131,13 @@ describe("file explorer tree commands", () => {
     expect(source).toContain("editorBridgeListTargets()");
     expect(source).toContain("target.appInstalled && target.cliPath");
     expect(source).toContain("openProjectInEditor(activeWorkspacePath, editorId)");
-    expect(source).toContain("在 {target.label} 中打开");
-    expect(source).toContain("<ExternalLink");
+    expect(source).toContain('className="editor-app-menu"');
+    expect(source).toContain("<EditorAppIcon editorId={target.id} />");
+    expect(source).toContain("<span>{target.label}</span>");
     expect(source).not.toContain("VSCode 中打开项目");
+
+    const styles = readStyles();
+    expect(styles).toContain(".editor-app-menu {");
+    expect(styles).toContain(".editor-app-menu button {");
   });
 });

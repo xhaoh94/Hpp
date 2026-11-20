@@ -43,6 +43,30 @@ import "./FileTree.css";
 const FilePreview = LazyFilePreview;
 const FILE_EXPLORER_SEARCH_DEBOUNCE_MS = 100;
 
+/** 系统「打开方式」菜单风格的应用图标：按编辑器 id 给不同品牌色。 */
+function EditorAppIcon({ editorId }: { editorId: string }) {
+  const palette: Record<string, { bg: string; fg: string }> = {
+    vscode: { bg: "#007ACC", fg: "#FFFFFF" },
+    vscodium: { bg: "#3AA9D4", fg: "#FFFFFF" },
+    cursor: { bg: "#1E1E1E", fg: "#FFFFFF" },
+    zed: { bg: "#7C6CF0", fg: "#FFFFFF" },
+  };
+  const color = palette[editorId] || { bg: "#5B6472", fg: "#FFFFFF" };
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="1" y="1" width="22" height="22" rx="5" fill={color.bg} />
+      <path
+        d="M9.2 7.4 5.8 12l3.4 4.6M14.8 7.4 18.2 12l-3.4 4.6M13.2 6.6l-2.4 10.8"
+        fill="none"
+        stroke={color.fg}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 interface FileTreeCommand {
   requestId: number;
   scopeKey: string;
@@ -765,10 +789,10 @@ export function FileExplorer() {
       )}
       {editorMenu && createPortal(
         <div
-          className="file-tree-context-menu"
+          className="editor-app-menu"
           style={{
-            left: Math.min(editorMenu.x, window.innerWidth - 210),
-            top: Math.min(editorMenu.y, window.innerHeight - 40 - editorMenu.targets.length * 32),
+            left: Math.min(editorMenu.x, window.innerWidth - 220),
+            top: Math.min(editorMenu.y, window.innerHeight - 44 - editorMenu.targets.length * 40),
           }}
           onPointerDown={(event) => event.stopPropagation()}
         >
@@ -778,7 +802,8 @@ export function FileExplorer() {
               type="button"
               onClick={() => void openProjectInEditor(target.id)}
             >
-              <ExternalLink size={15} />在 {target.label} 中打开
+              <EditorAppIcon editorId={target.id} />
+              <span>{target.label}</span>
             </button>
           ))}
         </div>,
