@@ -43,7 +43,10 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install --ignore-scripts
+        # 不能用 --ignore-scripts：ssh2 依赖的 cpu-features 在 install 阶段
+        # 生成 buildcheck.gypi 并编译；跳过会让 electron-builder 的原生重建
+        # 报 "buildcheck.gypi not found"。
+        run: npm install
 
       - name: Build application
         env:

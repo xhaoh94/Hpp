@@ -51,7 +51,9 @@ jobs:
       # 不要再加 android-actions/setup-android：它会跑已废弃的 `sdkmanager tools` 而失败。
 
       - name: Install dependencies
-        run: npm install --ignore-scripts
+        # 与 Windows/Linux 保持一致：让 cpu-features 的 install script 正常生成
+        # buildcheck.gypi（ssh2 依赖，Android 构建虽不重建原生模块，统一流程更稳）。
+        run: npm install
 
       - name: Restore release signing key
         # 需要四个 repository Secrets（Settings → Secrets and variables → Actions）：
