@@ -119,14 +119,14 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 智能压缩档位：进度条上叠可拖动的手柄。 */
-.context-tier-track {
+/* 智能压缩阈值：进度条上叠一个可拖动的标记。 */
+.context-threshold-track {
   position: relative;
   padding: 7px 0;
-  cursor: crosshair;
+  cursor: pointer;
 }
 
-.context-tier-handle {
+.context-threshold-handle {
   position: absolute;
   top: 2px;
   width: 10px;
@@ -141,77 +141,30 @@
   z-index: 2;
 }
 
-.context-tier-handle:hover,
-.context-tier-handle.is-dragging {
+.context-threshold-handle:hover,
+.context-threshold-handle.is-dragging {
   border-color: var(--accent-color);
   background: var(--accent-color);
 }
 
-.context-tier-editor {
-  margin-top: 2px;
-}
-
-.context-tier-editor-head {
+.context-threshold-editor {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.context-tier-add {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.context-tier-add:hover:not(:disabled) {
-  color: var(--accent-color);
-  border-color: var(--accent-color);
-}
-
-.context-tier-add:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.context-tier-chips {
-  display: flex;
+  align-items: baseline;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 6px;
-}
-
-.context-tier-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
-  color: var(--text-primary);
+  gap: 6px;
+  margin-top: 2px;
   font-size: 11px;
-  cursor: pointer;
-}
-
-.context-tier-chip:hover {
-  border-color: var(--accent-color);
-}
-
-.context-tier-empty {
-  margin: 5px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
   color: var(--text-secondary);
+}
+
+.context-threshold-value {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-threshold-hint {
+  line-height: 1.5;
 }
 
 .context-usage-bar {

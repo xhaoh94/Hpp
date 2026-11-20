@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
-import { ListCollapse, Plus, X } from "lucide-react";
+import { ListCollapse, X } from "lucide-react";
 import type { SessionContextUsage } from "@/stores/chat-store";
 import { formatContextTokenAmount } from "@shared/models";
 import { useAnchoredOverlay } from "@shared/anchored-overlay";
 import {
-  CONTEXT_TIER_LIMIT,
-  CONTEXT_TIER_MAX,
-  CONTEXT_TIER_MIN,
-  normalizeContextCompactionTiers,
-} from "@shared/context-compaction-tiers";
-import { loadContextCompactionTiers, saveContextCompactionTiers } from "@/lib/context-compaction-tiers";
+  CONTEXT_THRESHOLD_MAX,
+  CONTEXT_THRESHOLD_MIN,
+  DEFAULT_CONTEXT_COMPACTION_THRESHOLD,
+  normalizeContextCompactionThreshold,
+} from "@shared/context-compaction-threshold";
+import {
+  loadContextCompactionThreshold,
+  saveContextCompactionThreshold,
+} from "@/lib/context-compaction-threshold";
+import { GENERAL_SETTINGS_UPDATED_EVENT } from "@/lib/app-events";
 import "./ContextUsageModal.css";
 
 // 与截图一致的分类配色：蓝、绿、黄、紫、粉、青，按明细顺序取用。
@@ -23,26 +27,25 @@ const SOURCE_NOTES: Record<SessionContextUsage["source"], string> = {
   unknown: "用量来源未知",
 };
 
-/** 进度条上可拖动的档位手柄。拖动时只更新自己的位置，松手才提交（避免排序导致抖动）。 */
-function TierHandle({
-  tier,
+/** 进度条上的自动压缩阈值标记。拖动时只更新自己的位置，松手才提交。 */
+function ThresholdHandle({
+  percent,
   percentFromPointer,
   onCommit,
-  onRemove,
 }: {
-  tier: number;
+  percent: number;
   percentFromPointer: (clientX: number) => number;
   onCommit: (next: number) => void;
-  onRemove: () => void;
 }) {
   const draggingRef = useRef(false);
   const [dragValue, setDragValue] = useState<number | null>(null);
-  const shown = dragValue ?? tier;
+  const shown = dragValue ?? percent;
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    // 阻止冒泡到 track 的「点击跳转阈值」。
     event.stopPropagation();
     draggingRef.current = true;
-    setDragValue(tier);
+    setDragValue(percent);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
@@ -57,22 +60,21 @@ function TierHandle({
     event.stopPropagation();
     draggingRef.current = false;
     event.currentTarget.releasePointerCapture(event.pointerId);
-    if (dragValue !== null && dragValue !== tier) onCommit(dragValue);
+    if (dragValue !== null && dragValue !== percent) onCommit(dragValue);
     setDragValue(null);
   };
 
   return (
     <button
       type="button"
-      className={`context-tier-handle${draggingRef.current ? " is-dragging" : ""}`}
+      className={`context-threshold-handle${draggingRef.current ? " is-dragging" : ""}`}
       style={{ left: `${shown}%` }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      onDoubleClick={onRemove}
-      title={`压缩档位 ${tier}%（拖动调整，双击移除）`}
-      aria-label={`压缩档位 ${tier}%`}
+      title={`上下文用到 ${percent}% 时自动压缩（拖动调整）`}
+      aria-label={`自动压缩阈值 ${percent}%`}
     />
   );
 }
@@ -101,41 +103,37 @@ export function ContextUsageModal({
   const modalRef = useRef<HTMLDivElement>(null);
   const overlayStyle = useAnchoredOverlay(true, anchorRef, modalRef, { gap: 8 });
   const [compactRequested, setCompactRequested] = useState(false);
-  const [tiers, setTiers] = useState<number[]>([]);
+  const [threshold, setThreshold] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
   const trackRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let alive = true;
-    void loadContextCompactionTiers().then((loaded) => {
-      if (alive) setTiers(loaded);
+    void loadContextCompactionThreshold().then((loaded) => {
+      if (alive) setThreshold(loaded);
     });
     return () => { alive = false; };
   }, []);
 
-  const updateTiers = (next: number[]) => {
-    const normalized = normalizeContextCompactionTiers(next);
-    setTiers(normalized);
-    void saveContextCompactionTiers(normalized);
+  const applyThreshold = (next: number) => {
+    const normalized = normalizeContextCompactionThreshold(next);
+    setThreshold(normalized);
+    void saveContextCompactionThreshold(normalized);
+    // 让正在跑的自动压缩监测立刻用上新阈值，不用重开会话。
+    window.dispatchEvent(new CustomEvent(GENERAL_SETTINGS_UPDATED_EVENT, { detail: {} }));
   };
 
   const percentFromPointer = (clientX: number) => {
     const rect = trackRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return CONTEXT_TIER_MIN;
+    if (!rect || rect.width <= 0) return CONTEXT_THRESHOLD_MIN;
     const percent = ((clientX - rect.left) / rect.width) * 100;
-    return Math.round(Math.min(CONTEXT_TIER_MAX, Math.max(CONTEXT_TIER_MIN, percent)));
+    return Math.round(Math.min(CONTEXT_THRESHOLD_MAX, Math.max(CONTEXT_THRESHOLD_MIN, percent)));
   };
 
-  const handleTrackClick = (event: ReactPointerEvent<HTMLDivElement>) => {
-    // 点在 handle 上由 handle 自己处理，不重复添加。
-    if ((event.target as HTMLElement).closest(".context-tier-handle")) return;
-    if (tiers.length >= CONTEXT_TIER_LIMIT) return;
-    const percent = percentFromPointer(event.clientX);
-    if (tiers.includes(percent)) return;
-    updateTiers([...tiers, percent]);
+  // 只有一个阈值：点进度条任意位置直接把它挪过去，比拖小标记更好点。
+  const handleTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest(".context-threshold-handle")) return;
+    applyThreshold(percentFromPointer(event.clientX));
   };
-
-  const tierFromTokenAmount = (tier: number) =>
-    usage?.contextWindow ? formatContextTokenAmount(Math.round(usage.contextWindow * tier / 100)) : `${tier}%`;
 
   useEffect(() => {
     if (compacting) setCompactRequested(false);
@@ -222,7 +220,7 @@ export function ContextUsageModal({
           </span>
         </div>
 
-        <div className="context-tier-track" ref={trackRef} onPointerDown={handleTrackClick}>
+        <div className="context-threshold-track" ref={trackRef} onPointerDown={handleTrackPointerDown}>
           <div className="context-usage-bar" aria-hidden="true">
             {segments.length > 0
               ? segments.map((segment) => (
@@ -236,51 +234,22 @@ export function ContextUsageModal({
                 ? <span className="context-usage-bar-segment used" style={{ width: `${usageRatio * 100}%` }} />
                 : null}
           </div>
-          {tiers.map((tier, index) => (
-            <TierHandle
-              key={index}
-              tier={tier}
-              percentFromPointer={percentFromPointer}
-              onCommit={(next) => updateTiers(tiers.map((t, i) => i === index ? next : t))}
-              onRemove={() => updateTiers(tiers.filter((_, i) => i !== index))}
-            />
-          ))}
+          <ThresholdHandle
+            percent={threshold}
+            percentFromPointer={percentFromPointer}
+            onCommit={applyThreshold}
+          />
         </div>
 
-        <div className="context-tier-editor">
-          <div className="context-tier-editor-head">
-            <span>智能压缩档位</span>
-            <button
-              type="button"
-              className="context-tier-add"
-              onClick={() => {
-                const next = tiers.length ? Math.min(CONTEXT_TIER_MAX, tiers[tiers.length - 1] + 10) : 70;
-                if (tiers.length < CONTEXT_TIER_LIMIT && !tiers.includes(next)) updateTiers([...tiers, next]);
-              }}
-              disabled={tiers.length >= CONTEXT_TIER_LIMIT}
-              title="添加压缩档位"
-              aria-label="添加压缩档位"
-            >
-              <Plus size={13} />
-            </button>
-          </div>
-          {tiers.length > 0 ? (
-            <div className="context-tier-chips">
-              {tiers.map((tier) => (
-                <button
-                  key={tier}
-                  type="button"
-                  className="context-tier-chip"
-                  onClick={() => updateTiers(tiers.filter((t) => t !== tier))}
-                  title={`点击移除 ${tier}% 档位（约 ${tierFromTokenAmount(tier)}）· 拖动进度条上的标记可调整`}
-                >
-                  {tier}% <X size={11} />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="context-tier-empty">点击进度条添加档位；用量接近档位且回合结束时会自动压缩。</p>
-          )}
+        <div className="context-threshold-editor">
+          <span className="context-threshold-title">自动压缩</span>
+          <strong className="context-threshold-value">{threshold}%</strong>
+          <span className="context-threshold-hint">
+            {contextWindow
+              ? `约 ${formatContextTokenAmount(Math.round(contextWindow * threshold / 100))} · `
+              : ""}
+            用量到达后，回合结束时压缩
+          </span>
         </div>
 
         {segments.length > 0 ? (
