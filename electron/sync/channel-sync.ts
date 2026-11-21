@@ -25,6 +25,7 @@ import {
   type ChannelSyncDeployResult,
   type ChannelSyncProbeResult,
   type ChannelSyncPullResult,
+  type ChannelSyncSecretStorageStatus,
   type ChannelSyncStatus,
   type ChannelSyncTarget,
   type ChannelSyncTargetActionResult,
@@ -41,9 +42,10 @@ import {
   deployChannelSyncService,
   probeChannelSyncTarget,
   readNasServerSource,
+  readRemoteChannelSyncToken,
   undeployChannelSyncService,
 } from "./nas-deploy";
-import { decryptSecret, encryptSecret } from "./secret-store";
+import { decryptSecret, encryptSecret, getSecretStorageStatus } from "./secret-store";
 
 /**
  * 渠道配置同步的主进程状态管理。
@@ -186,7 +188,8 @@ function migrateLegacy(parsed: Record<string, unknown>): StoredFile {
   const target: ChannelSyncTarget = {
     id: randomUUID(),
     ...validated.value,
-    encryptedToken: token ? encryptSecret(token) : undefined,
+    // 旧配置迁移同样允许本地密钥兜底，避免无 keyring 时丢掉已有 Token。
+    encryptedToken: token ? encryptSecret(token, { allowLocalFallback: true }) : undefined,
     // 旧版只有一个全局状态，迁移时归到这个目标上。
     lastBackupAt: state.lastBackupAt,
     lastBackupRevision: state.lastBackupRevision,
@@ -396,6 +399,29 @@ export async function listChannelSyncTargets(): Promise<ChannelSyncTargetView[]>
   return buildViews(await readStored());
 }
 
+/** 供界面判断密码能否落盘（Linux 上没有 keyring 时需要走临时密码）。 */
+export function getChannelSyncSecretStorageStatus(): ChannelSyncSecretStorageStatus {
+  return getSecretStorageStatus();
+}
+
+/**
+ * 密码 / Token 无法加密时的提示。
+ *
+ * Linux 上的「安全存储不可用」几乎都是缺少 Secret Service（gnome-keyring /
+ * KWallet）造成的，所以直接把下一步操作写出来，而不是只回一句「不可用」。
+ */
+function secretStorageUnavailableError(what: "SSH 密码" | "服务 Token"): string {
+  const hint =
+    process.platform === "linux"
+      ? "请安装并启动 gnome-keyring 或 KWallet（Secret Service）后重试。"
+      : "请确认系统凭据管理器可用后重试。";
+  const fallback =
+    what === "SSH 密码"
+      ? "可以去掉「仅使用系统密钥环」的限制，或留空密码、部署时临时填写。"
+      : "请检查用户数据目录是否可写。";
+  return `系统安全存储不可用，无法保存${what}。${hint}${fallback}`;
+}
+
 export async function saveChannelSyncTarget(input: unknown): Promise<ChannelSyncTargetActionResult> {
   if (!isRecord(input)) return { success: false, error: "参数无效。" };
 
@@ -415,9 +441,13 @@ export async function saveChannelSyncTarget(input: unknown): Promise<ChannelSync
   const passwordInput = typeof input.password === "string" ? input.password : undefined;
   let encryptedPassword: string | undefined;
   if (passwordInput) {
-    encryptedPassword = encryptSecret(passwordInput);
+    // 默认行为与系统安全存储一致：系统可用就用系统，不可用就用 Hpp 本地密钥。
+    // 只有调用方显式传 passwordStorage: "system" 时才拒绝降级。
+    encryptedPassword = encryptSecret(passwordInput, {
+      allowLocalFallback: input.passwordStorage !== "system",
+    });
     if (!encryptedPassword) {
-      return { success: false, error: "系统安全存储不可用，无法保存 SSH 密码。" };
+      return { success: false, error: secretStorageUnavailableError("SSH 密码") };
     }
   }
 
@@ -426,9 +456,11 @@ export async function saveChannelSyncTarget(input: unknown): Promise<ChannelSync
   const tokenInput = typeof input.token === "string" ? input.token.trim() : undefined;
   let encryptedTokenInput: string | undefined;
   if (tokenInput) {
-    encryptedTokenInput = encryptSecret(tokenInput);
+    // Token 是应用生成的同步服务凭据：没有系统安全存储时允许本地密钥兜底，
+    // 否则部署完成后连备份 / 拉取都无法鉴权。
+    encryptedTokenInput = encryptSecret(tokenInput, { allowLocalFallback: true });
     if (!encryptedTokenInput) {
-      return { success: false, error: "系统安全存储不可用，无法保存服务 Token。" };
+      return { success: false, error: secretStorageUnavailableError("服务 Token") };
     }
   }
 
@@ -671,6 +703,136 @@ export async function checkChannelSyncTargetById(
 
 export type ChannelSyncDeployListener = (event: ChannelSyncDeployEvent) => void;
 
+type ExistingDeploymentInspection =
+  | { kind: "not_deployed" }
+  | { kind: "adopted"; token: string; fingerprint?: string }
+  | { kind: "invalid"; error: string };
+
+/** 保存接管到的 Token：系统安全存储优先，本地密钥兜底。 */
+async function persistAdoptedToken(
+  targetId: string,
+  token: string,
+  fingerprint?: string,
+): Promise<ChannelSyncTargetActionResult> {
+  const encryptedToken = encryptSecret(token, { allowLocalFallback: true });
+  if (!encryptedToken) {
+    return { success: false, error: "系统安全存储和本地密钥都不可用，无法保存 Token。" };
+  }
+  const next = await mutateStored((current) => ({
+    ...current,
+    activeTargetId: current.activeTargetId || targetId,
+    targets: current.targets.map((item) =>
+      item.id === targetId
+        ? {
+            ...item,
+            encryptedToken,
+            // 首次接管时记录指纹；已有指纹且不一致的连接根本到不了这里。
+            hostFingerprint: item.hostFingerprint || fingerprint,
+            lastStatus: "running",
+            lastCheckAt: new Date().toISOString(),
+            lastError: undefined,
+          }
+        : item,
+    ),
+  }));
+  const views = await buildViews(next);
+  return {
+    success: true,
+    target: views.find((view) => view.id === targetId),
+    targets: views,
+  };
+}
+
+/**
+ * 部署前判断远端是不是已经有一份能用的部署。
+ *
+ * - 容器 running + `.env` 有 Token + `/health` 通过：返回 adopted，直接接管；
+ * - 容器没在跑：返回 not_deployed，走正常部署；
+ * - 容器在跑但 Token / 服务校验失败：返回 invalid，宁可停下来也不覆盖。
+ */
+async function inspectExistingDeployment(
+  target: ChannelSyncTarget,
+  password: string,
+): Promise<ExistingDeploymentInspection> {
+  const probe = await probeChannelSyncTarget({
+    credential: credentialOf(target, password),
+    servicePort: target.servicePort,
+    deployPath: target.deployPath,
+    image: target.image,
+    expectedFingerprint: target.hostFingerprint,
+  });
+  if (!probe.success) {
+    return { kind: "invalid", error: probe.error || "无法探测远端部署状态。" };
+  }
+  if (probe.containerStatus !== "running") {
+    return { kind: "not_deployed" };
+  }
+
+  const remote = await readRemoteChannelSyncToken({
+    credential: credentialOf(target, password),
+    deployPath: target.deployPath,
+    expectedFingerprint: target.hostFingerprint,
+  });
+  if (!remote.success || !remote.token) {
+    return {
+      kind: "invalid",
+      error: remote.error || "服务器上已有容器，但没有读到可用的 Token。",
+    };
+  }
+
+  const serviceUrl = buildChannelSyncServiceUrl(target.host, target.servicePort);
+  try {
+    const result = await requestJson({ serviceUrl, token: remote.token }, "/health");
+    requireOk(result);
+    if (!isRecord(result.body) || result.body.ok !== true) {
+      return {
+        kind: "invalid",
+        error: "服务器上已有容器，但 Token 校验失败：请确认服务端口填写正确。",
+      };
+    }
+  } catch (error) {
+    return {
+      kind: "invalid",
+      error: `服务器上已有容器，但服务不可达：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  return { kind: "adopted", token: remote.token, fingerprint: remote.fingerprint };
+}
+
+/**
+ * 接管服务器上已有的部署：从部署目录的 `.env` 读回 Token，用 `/health`
+ * 校验后保存到本机。
+ *
+ * 用于换电脑 / 重装 Hpp：远端容器和 data/ 都还在，不需要重新部署，也不会
+ * 重启服务。读回来的 Token 仍然走系统安全存储（不可用时走本地密钥）。
+ */
+export async function adoptChannelSyncTargetById(
+  targetId: unknown,
+  overridePassword?: unknown,
+): Promise<ChannelSyncTargetActionResult> {
+  if (typeof targetId !== "string" || !targetId) {
+    return { success: false, error: "目标不存在。" };
+  }
+  const file = await readStored();
+  const target = file.targets.find((item) => item.id === targetId);
+  if (!target) return { success: false, error: "目标不存在。" };
+
+  const password = resolvePassword(target, overridePassword);
+  if (!password) return { success: false, error: "请填写 SSH 密码。" };
+
+  const existing = await inspectExistingDeployment(target, password);
+  if (existing.kind === "invalid") return { success: false, error: existing.error };
+  if (existing.kind === "not_deployed") {
+    return { success: false, error: "服务器上没有检测到运行中的部署，请直接部署。" };
+  }
+  try {
+    return await persistAdoptedToken(target.id, existing.token, existing.fingerprint);
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /**
  * 部署或更新服务。幂等：已有容器会重建，`data/` 卷保留。
  * 首次部署生成 Token 并加密保存；后续更新沿用原 Token。
@@ -698,6 +860,27 @@ export async function deployChannelSyncTargetById(
   }
 
   const existingToken = decryptSecret(target.encryptedToken);
+  // 本地没有可用 Token（换机 / 密文解不开）时，先看远端是不是已经部署好了：
+  // 能用就直接接管，绝不为了拿 Token 去重启正在跑的容器。
+  if (!existingToken) {
+    const existing = await inspectExistingDeployment(target, password);
+    if (existing.kind === "invalid") {
+      return { success: false, error: existing.error };
+    }
+    if (existing.kind === "adopted") {
+      try {
+        onEvent?.({
+          kind: "log",
+          phase: "done",
+          message: "检测到服务器上已有部署，直接接管（未重启容器）",
+        });
+        const adopted = await persistAdoptedToken(target.id, existing.token, existing.fingerprint);
+        return { ...adopted, adopted: true };
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  }
   const token = existingToken || createChannelSyncToken();
   const serviceUrl = buildChannelSyncServiceUrl(target.host, target.servicePort);
 
@@ -714,7 +897,7 @@ export async function deployChannelSyncTargetById(
   });
 
   const encryptedToken = outcome.success
-    ? encryptSecret(token) || target.encryptedToken
+    ? encryptSecret(token, { allowLocalFallback: true }) || target.encryptedToken
     : target.encryptedToken;
 
   try {
@@ -965,6 +1148,9 @@ export function registerChannelSyncHandlers(): void {
       listChannelSyncTargets() as never,
     ),
   );
+  ipcMain.handle("channelSync:getSecretStorageStatus", async () =>
+    getChannelSyncSecretStorageStatus(),
+  );
   ipcMain.handle("channelSync:saveTarget", (_event, input: unknown) =>
     guard(
       "saveTarget",
@@ -996,6 +1182,13 @@ export function registerChannelSyncHandlers(): void {
   ipcMain.handle("channelSync:test", () =>
     guard("test", { success: false, error: "连接测试失败。" } as ChannelSyncTestResult, () =>
       testChannelSyncConnection(),
+    ),
+  );
+  ipcMain.handle("channelSync:adoptTarget", (_event, targetId: unknown, password: unknown) =>
+    guard(
+      "adoptTarget",
+      { success: false, error: "接管失败。" } as ChannelSyncTargetActionResult,
+      () => adoptChannelSyncTargetById(targetId, password),
     ),
   );
   ipcMain.handle("channelSync:probeTarget", (_event, targetId: unknown, password: unknown) =>

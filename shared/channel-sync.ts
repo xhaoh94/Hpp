@@ -257,6 +257,13 @@ export interface ChannelSyncTargetInput {
   sshPort?: number;
   sshUser: string;
   password?: string;
+  /**
+   * 密码落盘方式：
+   * - 不传（默认）：系统安全存储优先，不可用时用 Hpp 本地密钥兜底；
+   * - `"local"`：同默认，显式表明允许本地密钥；
+   * - `"system"`：只用系统安全存储，不可用时拒绝保存。
+   */
+  passwordStorage?: "system" | "local";
   /** 服务 Token：undefined 表示沿用原值，空字符串表示清除。 */
   token?: string;
   servicePort?: number;
@@ -315,6 +322,8 @@ export interface ChannelSyncDeployResult {
   success: boolean;
   error?: string;
   target?: ChannelSyncTargetView;
+  /** 本次没有重新部署，而是接管了服务器上已有的容器。 */
+  adopted?: boolean;
 }
 
 export interface ChannelSyncCheckResult {
@@ -424,4 +433,16 @@ export interface ChannelSyncTargetActionResult {
   error?: string;
   target?: ChannelSyncTargetView;
   targets?: ChannelSyncTargetView[];
+}
+
+/**
+ * 系统安全存储（Electron safeStorage）的当前状态。
+ *
+ * 界面据此决定能不能把 SSH 密码落盘：Linux 上没有 Secret Service
+ * （niri / sway 等未启动 gnome-keyring 的会话）时不可用。
+ */
+export interface ChannelSyncSecretStorageStatus {
+  available: boolean;
+  /** Linux 上 Chromium 实际选择的密码后端；其他平台通常为 unknown。 */
+  backend: string;
 }

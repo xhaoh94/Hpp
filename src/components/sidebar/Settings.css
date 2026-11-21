@@ -6139,6 +6139,81 @@
   margin-top: 12px;
 }
 
+.channel-sync-adopt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent-color) 5%, transparent);
+}
+
+.channel-sync-adopt > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.channel-sync-adopt strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.channel-sync-adopt span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.channel-sync-adopt .btn-action {
+  flex: none;
+}
+
+.channel-sync-secret-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-tertiary) 4%, transparent);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.channel-sync-secret-notice svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--text-tertiary);
+}
+
+.channel-sync-secret-notice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.channel-sync-session-password {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.channel-sync-session-password input {
+  margin: 1px 0 0;
+  accent-color: var(--accent-color);
+}
+
 @media (max-width: 860px) {
   .channel-sync-targets {
     grid-template-columns: repeat(2, minmax(0, 1fr));

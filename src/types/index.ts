@@ -34,6 +34,7 @@ import type {
   ChannelSyncDeployResult,
   ChannelSyncProbeResult,
   ChannelSyncPullResult,
+  ChannelSyncSecretStorageStatus,
   ChannelSyncStatus,
   ChannelSyncTargetActionResult,
   ChannelSyncTargetInput,
@@ -142,6 +143,7 @@ export type {
   ChannelSyncDeployResult,
   ChannelSyncProbeResult,
   ChannelSyncPullResult,
+  ChannelSyncSecretStorageStatus,
   ChannelSyncStatus,
   ChannelSyncTarget,
   ChannelSyncTargetActionResult,
@@ -575,6 +577,7 @@ export interface ElectronAPI {
   agentConfigImportRead: () => Promise<{ success: boolean; error?: string; canceled?: boolean; data?: AgentConfigExportData }>;
   channelSyncGetStatus: () => Promise<ChannelSyncStatus>;
   channelSyncListTargets: () => Promise<ChannelSyncTargetView[] | undefined>;
+  channelSyncGetSecretStorageStatus: () => Promise<ChannelSyncSecretStorageStatus>;
   channelSyncSaveTarget: (input: ChannelSyncTargetInput) => Promise<ChannelSyncTargetActionResult>;
   channelSyncRemoveTarget: (targetId: string) => Promise<ChannelSyncTargetActionResult>;
   channelSyncSetActiveTarget: (targetId: string) => Promise<ChannelSyncTargetActionResult>;
@@ -583,6 +586,7 @@ export interface ElectronAPI {
   channelSyncProbeTarget: (targetId: string, password?: string) => Promise<ChannelSyncProbeResult>;
   channelSyncCheckTarget: (targetId: string, password?: string) => Promise<ChannelSyncCheckResult>;
   channelSyncDeployTarget: (targetId: string, password?: string) => Promise<ChannelSyncDeployResult>;
+  channelSyncAdoptTarget: (targetId: string, password?: string) => Promise<ChannelSyncTargetActionResult>;
   channelSyncUndeployTarget: (
     targetId: string,
     options?: ChannelSyncUndeployOptions,

@@ -7,6 +7,7 @@ import {
   describeSshError,
   formatSshFingerprint,
   parseProbeOutput,
+  readRemoteChannelSyncToken,
   shellQuote,
 } from "./nas-deploy";
 import {
@@ -26,6 +27,54 @@ const credential = (port: number, password = "secret") => ({
   port,
   username: "tester",
   password,
+});
+
+describe("读取远端 Token", () => {
+  it("从已有部署的 .env 读回 Token", async () => {
+    const nas = await startFakeNas({
+      exec: (command) =>
+        command.includes(".env")
+          ? { stdout: "HPP_SYNC_TOKEN=abc123\nHPP_SYNC_HISTORY_LIMIT=20\n", code: 0 }
+          : { stdout: "", code: 0 },
+    });
+    const result = await readRemoteChannelSyncToken({
+      credential: credential(nas.port),
+      deployPath: "/opt/hpp-channel-sync",
+    });
+    expect(result.success).toBe(true);
+    expect(result.token).toBe("abc123");
+    expect(result.fingerprint?.startsWith("SHA256:")).toBe(true);
+  });
+
+  it("没有 .env 时提示检查部署目录", async () => {
+    const nas = await startFakeNas({
+      exec: (command) =>
+        command.includes(".env")
+          ? { stdout: "", stderr: "no such file", code: 1 }
+          : { stdout: "", code: 0 },
+    });
+    const result = await readRemoteChannelSyncToken({
+      credential: credential(nas.port),
+      deployPath: "/missing",
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("部署目录");
+  });
+
+  it(".env 缺少 HPP_SYNC_TOKEN 时失败", async () => {
+    const nas = await startFakeNas({
+      exec: (command) =>
+        command.includes(".env")
+          ? { stdout: "HPP_SYNC_HISTORY_LIMIT=20\n", code: 0 }
+          : { stdout: "", code: 0 },
+    });
+    const result = await readRemoteChannelSyncToken({
+      credential: credential(nas.port),
+      deployPath: "/opt/hpp-channel-sync",
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("HPP_SYNC_TOKEN");
+  });
 });
 
 describe("SSH 连接", () => {

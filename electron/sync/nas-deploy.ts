@@ -340,6 +340,63 @@ export async function probeChannelSyncTarget(
   }
 }
 
+export interface RemoteTokenParams {
+  credential: SshCredential;
+  deployPath: string;
+  expectedFingerprint?: string;
+}
+
+export interface RemoteTokenResult {
+  success: boolean;
+  token?: string;
+  fingerprint?: string;
+  error?: string;
+}
+
+/**
+ * 从已有部署的 `.env` 读回 Token。
+ *
+ * 换机 / 重装后远端容器和 data/ 都还在，唯一缺的是本机记忆的 Token。
+ * 这里只读文件，不改远端，也不重启容器；Token 随后由上层校验并加密保存。
+ */
+export async function readRemoteChannelSyncToken(
+  params: RemoteTokenParams,
+): Promise<RemoteTokenResult> {
+  let connected: ConnectedSession;
+  try {
+    connected = await connectSsh(params.credential, {
+      expectedFingerprint: params.expectedFingerprint,
+    });
+  } catch (error) {
+    return { success: false, error: describeSshError(error) };
+  }
+
+  const { session, fingerprint } = connected;
+  try {
+    const envPath = `${params.deployPath}/.env`;
+    const result = await session.exec(`cat ${shellQuote(envPath)}`);
+    if (result.code !== 0) {
+      return {
+        success: false,
+        fingerprint,
+        error: `没有在 ${envPath} 找到 .env：请确认部署目录填写正确，或服务器上还没有部署。`,
+      };
+    }
+    const line = result.stdout
+      .split(/\r?\n/)
+      .find((item) => item.trimStart().startsWith("HPP_SYNC_TOKEN="));
+    const token = line?.trim().slice("HPP_SYNC_TOKEN=".length).trim();
+    if (!token) {
+      return { success: false, fingerprint, error: `${envPath} 里没有 HPP_SYNC_TOKEN。` };
+    }
+    return { success: true, token, fingerprint };
+  } catch (error) {
+    return { success: false, fingerprint, error: describeSshError(error) };
+  } finally {
+    session.close();
+  }
+}
+
 export interface DeployParams {
   credential: SshCredential;
   servicePort: number;

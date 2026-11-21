@@ -27,6 +27,7 @@ import {
 } from "@shared/channel-sync";
 import type {
   ChannelSyncProbeResult,
+  ChannelSyncSecretStorageStatus,
   ChannelSyncStatus,
   ChannelSyncTargetInput,
   ChannelSyncTargetView,
@@ -64,10 +65,14 @@ type EditorState = {
   sshPort: string;
   sshUser: string;
   password: string;
+  /** 勾选后密码不落盘，只在本次测试 / 部署时使用。 */
+  keepPasswordSessionOnly: boolean;
   servicePort: string;
   deployPath: string;
   image: string;
   probe: ChannelSyncProbeResult | null;
+  /** 本地是否已经保存了该目标的服务 Token。 */
+  hasToken: boolean;
   testing: boolean;
   saving: boolean;
   error: string;
@@ -79,10 +84,12 @@ const emptyEditor = (): EditorState => ({
   sshPort: "22",
   sshUser: "root",
   password: "",
+  keepPasswordSessionOnly: false,
   servicePort: String(CHANNEL_SYNC_DEFAULT_PORT),
   deployPath: CHANNEL_SYNC_DEFAULT_DEPLOY_PATH,
   image: CHANNEL_SYNC_DEFAULT_IMAGE,
   probe: null,
+  hasToken: false,
   testing: false,
   saving: false,
   error: "",
@@ -92,6 +99,7 @@ function editorFromTarget(target: ChannelSyncTargetView): EditorState {
   return {
     ...emptyEditor(),
     targetId: target.id,
+    hasToken: !!target.tokenPreview,
     name: target.name,
     host: target.host,
     sshPort: String(target.sshPort),
@@ -133,6 +141,7 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
   const [pendingBackup, setPendingBackup] = useState<PendingBackup | null>(null);
   const [deploySession, setDeploySession] = useState<DeploySession | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [secretStorage, setSecretStorage] = useState<ChannelSyncSecretStorageStatus | null>(null);
   const [undeployTarget, setUndeployTarget] = useState<ChannelSyncTargetView | null>(null);
   const [undeployPassword, setUndeployPassword] = useState("");
   const [undeployRemoveData, setUndeployRemoveData] = useState(false);
@@ -146,12 +155,16 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
   );
 
   const refresh = useCallback(async () => {
-    const [list, nextStatus] = await Promise.all([
+    const [list, nextStatus, storage] = await Promise.all([
       window.electronAPI.channelSyncListTargets(),
       window.electronAPI.channelSyncGetStatus(),
+      typeof window.electronAPI.channelSyncGetSecretStorageStatus === "function"
+        ? window.electronAPI.channelSyncGetSecretStorageStatus()
+        : Promise.resolve(null),
     ]);
     setTargets(list || []);
     setStatus(nextStatus);
+    if (storage) setSecretStorage(storage);
   }, []);
 
   const ensureBridge = useCallback((): boolean => {
@@ -203,7 +216,17 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
         );
         await refresh();
         if (result.success) {
-          showFloatingToastMessage("部署完成，服务已就绪");
+          if (result.adopted) {
+            showFloatingToastMessage("检测到服务器上已有部署，已直接接管（未重启容器）");
+          } else {
+            // Token 默认会落盘（系统或本地密钥）；只有都失败时才提示。
+            const tokenSaved = !!result.target?.tokenPreview;
+            showFloatingToastMessage(
+              tokenSaved
+                ? "部署完成，服务已就绪"
+                : "部署完成；服务 Token 未保存，备份 / 拉取会失败",
+            );
+          }
         } else {
           setNotice({ text: result.error || "部署失败" });
         }
@@ -398,6 +421,9 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
 
   const persistEditor = useCallback(async (): Promise<string | null> => {
     if (!editor) return null;
+    // 默认与系统安全存储行为一致：密码直接交给主进程加密落盘。
+    // 勾选「本次不保存」时才跳过，密码只留在内存里供本次测试 / 部署使用。
+    const includePassword = !!editor.password && !editor.keepPasswordSessionOnly;
     const input: ChannelSyncTargetInput = {
       ...(editor.targetId ? { id: editor.targetId } : {}),
       name: editor.name.trim() || editor.host.trim(),
@@ -407,7 +433,7 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
       servicePort: Number(editor.servicePort),
       deployPath: editor.deployPath.trim(),
       image: editor.image.trim(),
-      ...(editor.password ? { password: editor.password } : {}),
+      ...(includePassword ? { password: editor.password } : {}),
     };
     const result = await window.electronAPI.channelSyncSaveTarget(input);
     if (!result.success || !result.target) {
@@ -417,7 +443,15 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
     const savedId = result.target.id;
     // 新建后立即把 id 写回编辑器：否则「测试连接」创建一条、
     // 随后「保存并部署」又创建一条，列表里会出现两个同名目标。
-    setEditor((current) => (current && !current.targetId ? { ...current, targetId: savedId } : current));
+    setEditor((current) =>
+      current
+        ? {
+            ...current,
+            targetId: current.targetId || savedId,
+            hasToken: current.hasToken || !!result.target?.tokenPreview,
+          }
+        : current,
+    );
     await refresh();
     return savedId;
   }, [editor, refresh]);
@@ -457,14 +491,53 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
   }, [editor, persistEditor, refresh]);
 
   const handleSave = useCallback(async () => {
+    const passwordSessionOnly =
+      !!editor?.password.trim() && !!editor?.keepPasswordSessionOnly;
     setEditor((current) => (current ? { ...current, saving: true, error: "" } : current));
     const targetId = await persistEditor();
     setEditor((current) => (current ? { ...current, saving: false } : current));
     if (targetId) {
       setEditor(null);
-      showFloatingToastMessage("目标已保存");
+      showFloatingToastMessage(
+        passwordSessionOnly ? "目标已保存；密码仅在本次使用" : "目标已保存",
+      );
     }
   }, [persistEditor]);
+
+  const handleAdopt = useCallback(async () => {
+    if (!editor) return;
+    setEditor((current) => (current ? { ...current, saving: true, error: "" } : current));
+    try {
+      const targetId = await persistEditor();
+      if (!targetId) {
+        setEditor((current) => (current ? { ...current, saving: false } : current));
+        return;
+      }
+      const result = await window.electronAPI.channelSyncAdoptTarget(
+        targetId,
+        editor.password || undefined,
+      );
+      if (!result.success) {
+        setEditor((current) =>
+          current ? { ...current, saving: false, error: result.error || "接管失败" } : current,
+        );
+        return;
+      }
+      setEditor(null);
+      await refresh();
+      showFloatingToastMessage("已接管服务器上已有的部署，无需重新部署");
+    } catch (error) {
+      setEditor((current) =>
+        current
+          ? {
+              ...current,
+              saving: false,
+              error: error instanceof Error ? error.message : String(error),
+            }
+          : current,
+      );
+    }
+  }, [editor, persistEditor, refresh]);
 
   const handleSaveAndDeploy = useCallback(async () => {
     setEditor((current) => (current ? { ...current, saving: true, error: "" } : current));
@@ -905,7 +978,13 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
                       {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                     </button>
                   </div>
-                  <small>密码用系统安全存储加密保存，不会写进日志。</small>
+                  <small>
+                    {secretStorage?.available === false
+                      ? editor.keepPasswordSessionOnly
+                        ? "密码只在本次测试 / 部署时使用。"
+                        : "密码用 Hpp 本地密钥加密保存（系统密钥环不可用）。"
+                      : "密码用系统安全存储加密保存，不会写进日志。"}
+                  </small>
                 </label>
                 <label className="channel-sync-field">
                   <span>服务端口</span>
@@ -952,6 +1031,54 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
                   <small>默认 node:22-alpine；服务器拉不动 Docker Hub 时填已有的 node 镜像。</small>
                 </label>
               </div>
+
+              {secretStorage?.available === false && (
+                <div className="channel-sync-secret-notice">
+                  <ShieldAlert size={14} />
+                  <div className="channel-sync-secret-notice-body">
+                    <span>
+                      系统安全存储不可用，使用本地密钥加密保存。
+                    </span>
+                    <label className="channel-sync-session-password">
+                      <input
+                        type="checkbox"
+                        checked={editor.keepPasswordSessionOnly}
+                        onChange={(event) =>
+                          setEditor((current) =>
+                            current
+                              ? { ...current, keepPasswordSessionOnly: event.target.checked }
+                              : current,
+                          )
+                        }
+                        disabled={editor.saving || editor.testing}
+                      />
+                      本次不保存 SSH 密码（仅用于测试 / 部署）
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {!editor.hasToken && editor.probe?.containerStatus === "running" && (
+                <div className="channel-sync-adopt">
+                  <div>
+                    <strong>检测到服务器上已有部署</strong>
+                    <span>直接接管现有容器和 data/，不用重新部署；Token 会从远端 .env 读回并校验。</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-action"
+                    onClick={() => void handleAdopt()}
+                    disabled={editor.saving || editor.testing}
+                  >
+                    {editor.saving ? (
+                      <Loader2 size={13} className="agent-config-spin" />
+                    ) : (
+                      <CloudDownload size={13} />
+                    )}
+                    接管已有部署
+                  </button>
+                </div>
+              )}
 
               {editor.probe && (
                 <div className="channel-sync-probe">
@@ -1008,6 +1135,7 @@ export function ChannelSyncEntry({ collectPayload, onPulled }: ChannelSyncEntryP
                 className="filter-add-btn"
                 onClick={() => void handleSaveAndDeploy()}
                 disabled={editor.saving || editor.testing}
+                title="服务器上已有部署时会自动接管，不会重复部署"
               >
                 {editor.saving ? (
                   <Loader2 size={13} className="agent-config-spin" />

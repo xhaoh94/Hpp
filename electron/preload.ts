@@ -51,6 +51,7 @@ import type {
   ChannelSyncDeployResult,
   ChannelSyncProbeResult,
   ChannelSyncPullResult,
+  ChannelSyncSecretStorageStatus,
   ChannelSyncStatus,
   ChannelSyncTargetActionResult,
   ChannelSyncTargetInput,
@@ -415,6 +416,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("channelSync:getStatus"),
   channelSyncListTargets: (): Promise<ChannelSyncTargetActionResult["targets"]> =>
     ipcRenderer.invoke("channelSync:listTargets"),
+  channelSyncGetSecretStorageStatus: (): Promise<ChannelSyncSecretStorageStatus> =>
+    ipcRenderer.invoke("channelSync:getSecretStorageStatus"),
   channelSyncSaveTarget: (input: ChannelSyncTargetInput): Promise<ChannelSyncTargetActionResult> =>
     ipcRenderer.invoke("channelSync:saveTarget", input),
   channelSyncRemoveTarget: (targetId: string): Promise<ChannelSyncTargetActionResult> =>
@@ -431,6 +434,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("channelSync:checkTarget", targetId, password),
   channelSyncDeployTarget: (targetId: string, password?: string): Promise<ChannelSyncDeployResult> =>
     ipcRenderer.invoke("channelSync:deployTarget", targetId, password),
+  channelSyncAdoptTarget: (
+    targetId: string,
+    password?: string,
+  ): Promise<ChannelSyncTargetActionResult> =>
+    ipcRenderer.invoke("channelSync:adoptTarget", targetId, password),
   channelSyncUndeployTarget: (
     targetId: string,
     options?: ChannelSyncUndeployOptions,

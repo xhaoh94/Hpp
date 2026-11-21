@@ -3,7 +3,11 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const testState = vi.hoisted(() => ({ userDataDir: "" }));
+const testState = vi.hoisted(() => ({
+  userDataDir: "",
+  encryptionAvailable: true,
+  backend: "gnome_libsecret",
+}));
 
 vi.mock("electron", () => ({
   app: {
@@ -12,7 +16,8 @@ vi.mock("electron", () => ({
   },
   ipcMain: { handle: vi.fn() },
   safeStorage: {
-    isEncryptionAvailable: () => true,
+    isEncryptionAvailable: () => testState.encryptionAvailable,
+    getSelectedStorageBackend: () => testState.backend,
     // 测试用可逆编码代替 DPAPI，验证的是「落盘不是明文」而不是加密算法。
     encryptString: (value: string) => Buffer.from(`enc:${value}`, "utf8"),
     decryptString: (buffer: Buffer) => buffer.toString("utf8").replace(/^enc:/, ""),
@@ -20,10 +25,12 @@ vi.mock("electron", () => ({
 }));
 
 import {
+  adoptChannelSyncTargetById,
   backupChannelConfigs,
   checkChannelSyncTargetById,
   clearChannelSyncTargetFingerprint,
   deployChannelSyncTargetById,
+  getChannelSyncSecretStorageStatus,
   getChannelSyncStatus,
   listChannelSyncTargets,
   probeChannelSyncTargetById,
@@ -113,6 +120,8 @@ async function seedTarget(host: string, port: number, token = TOKEN) {
 
 beforeEach(async () => {
   testState.userDataDir = await mkdtemp(join(tmpdir(), "hpp-sync-"));
+  testState.encryptionAvailable = true;
+  testState.backend = "gnome_libsecret";
 });
 
 afterEach(async () => {
@@ -144,6 +153,58 @@ describe("目标管理", () => {
 
     const list = await listChannelSyncTargets();
     expect(list).toHaveLength(1);
+  });
+
+  it("显式要求只用系统安全存储时，不可用就拒绝保存密码", async () => {
+    testState.encryptionAvailable = false;
+    expect(await getChannelSyncSecretStorageStatus()).toEqual({
+      available: false,
+      backend: "gnome_libsecret",
+    });
+
+    const result = await saveChannelSyncTarget({
+      host: "192.168.10.85",
+      sshUser: "admin",
+      password: "secret",
+      passwordStorage: "system",
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("系统安全存储不可用");
+    expect(result.error).toContain("gnome-keyring");
+    // 失败时不能留下半截目标：界面仍能正常读取空列表。
+    expect(await listChannelSyncTargets()).toEqual([]);
+  });
+
+  it("安全存储不可用时仍可保存不含密码的目标（部署时临时填密码）", async () => {
+    testState.encryptionAvailable = false;
+    const result = await saveChannelSyncTarget({ host: "nas.local", sshUser: "root" });
+    expect(result.success).toBe(true);
+    expect(result.target?.hasPassword).toBe(false);
+  });
+
+  it("安全存储不可用时密码与 Token 默认用本地密钥保存", async () => {
+    testState.encryptionAvailable = false;
+    const created = await saveChannelSyncTarget({
+      host: "10.0.0.1",
+      sshUser: "root",
+      password: "local-secret-password",
+      token: TOKEN,
+    });
+    expect(created.success).toBe(true);
+    expect(created.target?.hasPassword).toBe(true);
+    expect(created.target?.tokenPreview).toBeDefined();
+
+    const raw = await readStore();
+    const target = (raw.targets as Array<Record<string, unknown>>)[0];
+    expect(String(target.encryptedPassword)).toContain("hpp-local:v1:");
+    expect(String(target.encryptedToken)).toContain("hpp-local:v1:");
+    expect(JSON.stringify(raw)).not.toContain("local-secret-password");
+    expect(JSON.stringify(raw)).not.toContain(TOKEN);
+
+    // 密钥文件在 hpp-data 下，后续读取（包括重启后）能正常解密。
+    const status = await getChannelSyncStatus();
+    expect(status.configured).toBe(true);
+    expect(status.tokenSet).toBe(true);
   });
 
   it("非法输入被拒绝", async () => {
@@ -621,6 +682,93 @@ describe("探测与部署", () => {
     expect(status.configured).toBe(true);
     expect(status.tokenSet).toBe(true);
     expect(status.tokenPreview).not.toContain(TOKEN);
+  });
+
+  it("换机后可以直接接管已有部署，不重新部署", async () => {
+    const base = defaultExecHandler({ container: "running", deploy_path_exists: "yes" });
+    const nas = await startFakeNas({
+      exec: (command) =>
+        command.includes(".env")
+          ? { stdout: `HPP_SYNC_TOKEN=${TOKEN}\nHPP_SYNC_HISTORY_LIMIT=20\n`, code: 0 }
+          : base(command),
+    });
+    const serviceUrl = await startFakeHealthServer(200);
+    const servicePort = Number(new URL(serviceUrl).port);
+
+    // 模拟换机：本地只有连接信息，没有 Token。
+    const created = await saveChannelSyncTarget({
+      host: "127.0.0.1",
+      sshPort: nas.port,
+      sshUser: "tester",
+      password: "secret",
+      servicePort,
+      deployPath: "/opt/hpp-channel-sync",
+    });
+    expect(created.target?.tokenPreview).toBeUndefined();
+    expect((await getChannelSyncStatus()).tokenSet).toBe(false);
+
+    const adopted = await adoptChannelSyncTargetById(created.target!.id);
+    expect(adopted.success).toBe(true);
+    expect(adopted.target?.tokenPreview).toBeDefined();
+    expect(adopted.target?.lastStatus).toBe("running");
+
+    const status = await getChannelSyncStatus();
+    expect(status.configured).toBe(true);
+    expect(status.tokenSet).toBe(true);
+    expect(status.tokenPreview).not.toContain(TOKEN);
+    // 没有触发部署：远端只有读 .env 的命令。
+    expect(nas.files.size).toBe(0);
+  });
+
+  it("点部署时发现已有部署会自动接管，不重新部署", async () => {
+    const base = defaultExecHandler({ container: "running", deploy_path_exists: "yes" });
+    const nas = await startFakeNas({
+      exec: (command) =>
+        command.includes(".env")
+          ? { stdout: `HPP_SYNC_TOKEN=${TOKEN}\nHPP_SYNC_HISTORY_LIMIT=20\n`, code: 0 }
+          : base(command),
+    });
+    const serviceUrl = await startFakeHealthServer(200);
+    const servicePort = Number(new URL(serviceUrl).port);
+
+    const created = await saveChannelSyncTarget({
+      host: "127.0.0.1",
+      sshPort: nas.port,
+      sshUser: "tester",
+      password: "secret",
+      servicePort,
+      deployPath: "/opt/hpp-channel-sync",
+    });
+
+    const result = await deployChannelSyncTargetById(created.target!.id);
+    expect(result.success).toBe(true);
+    expect(result.adopted).toBe(true);
+    expect(nas.files.size).toBe(0);
+    expect((await getChannelSyncStatus()).tokenSet).toBe(true);
+  });
+
+  it("服务器已有容器但读不到 Token 时停下来，不覆盖部署", async () => {
+    const base = defaultExecHandler({ container: "running", deploy_path_exists: "yes" });
+    const nas = await startFakeNas({
+      exec: (command) =>
+        command.includes(".env")
+          ? { stdout: "", stderr: "missing", code: 1 }
+          : base(command),
+    });
+
+    const created = await saveChannelSyncTarget({
+      host: "127.0.0.1",
+      sshPort: nas.port,
+      sshUser: "tester",
+      password: "secret",
+      servicePort: 18787,
+      deployPath: "/opt/hpp-channel-sync",
+    });
+
+    const result = await deployChannelSyncTargetById(created.target!.id);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(".env");
+    expect(nas.files.size).toBe(0);
   });
 
   it("部署失败时保留原来的 Token", async () => {
